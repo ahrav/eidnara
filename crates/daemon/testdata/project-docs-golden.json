@@ -58,6 +58,37 @@
       ],
       "rendered_block": "<project-docs>\n<file name=\"STRUCTURE.md\">\nsolo struct\n</file>\n</project-docs>",
       "canonical_hash": "a8ad96816cea2f69e6c7c3200803e66662d3b4683119b598959654fb5b2479c6"
+    },
+    {
+      "paths": [
+        "docs/ARCHITECTURE.md"
+      ],
+      "files": [
+        [
+          "docs/ARCHITECTURE.md",
+          "# Nested architecture\n\nOne daemon."
+        ]
+      ],
+      "rendered_block": "<project-docs>\n<file name=\"docs/ARCHITECTURE.md\">\n# Nested architecture\n\nOne daemon.\n</file>\n</project-docs>",
+      "canonical_hash": "63502e6ad7438347a1ea27aa469a65093719c58b6c9922fe8de45aa20b0a482e"
+    },
+    {
+      "paths": [
+        "README.md",
+        "docs/A.md"
+      ],
+      "files": [
+        [
+          "docs/A.md",
+          "# Docs\nsecond"
+        ],
+        [
+          "README.md",
+          "# Readme\nfirst"
+        ]
+      ],
+      "rendered_block": "<project-docs>\n<file name=\"README.md\">\n# Readme\nfirst\n</file>\n\n<file name=\"docs/A.md\">\n# Docs\nsecond\n</file>\n</project-docs>",
+      "canonical_hash": "391ba0879b669fa0e1df196dc58b6713551c3cec8f742e84344a1e952e40f306"
     }
   ]
 }

@@ -118,6 +118,8 @@ pub struct DaemonConfig {
     pub user_profile_budget_tokens: f64,
     /// The m0 baseline option controls whether the frozen m0 baseline includes the canonical project-docs block.
     pub inject_docs: bool,
+    /// The user-tier `project_docs.files` list: the documents the prompt block reads and source capture retains, in order.
+    pub project_doc_files: Vec<crate::project_docs::DocumentPath>,
     /// The overlay option controls temporal gap overlays when the active wire surface supports overlays.
     pub temporal_awareness: bool,
     /// Contains trusted user-tier guidance text resolved during route binding.
@@ -160,6 +162,7 @@ impl Default for DaemonConfig {
             memory_budget_tokens: DEFAULT_MEMORY_BUDGET_TOKENS,
             user_profile_budget_tokens: DEFAULT_USER_PROFILE_BUDGET_TOKENS,
             inject_docs: true,
+            project_doc_files: crate::project_docs::default_document_paths(),
             temporal_awareness: true,
             prompt_surface_guidance_override: None,
             smart_drops: false,
@@ -435,6 +438,7 @@ impl MergedConfig {
             memory_budget_tokens: _,
             user_profile_budget_tokens: _,
             inject_docs: _,
+            project_doc_files,
             temporal_awareness: _,
             prompt_surface_guidance_override,
             smart_drops: _,
@@ -455,6 +459,14 @@ impl MergedConfig {
             + self.guidance.as_ref().map_or(0, identity)
             + strings(&self.warnings)
             + strings(model_chain)
+            + allocation(
+                project_doc_files.capacity()
+                    * std::mem::size_of::<crate::project_docs::DocumentPath>(),
+            )
+            + project_doc_files
+                .iter()
+                .map(|path| allocation(path.as_str().len()))
+                .sum::<usize>()
             + optional(memory_classifier_review_user_memories_schedule)
             + optional(prompt_surface_guidance_override)
             + allocation(cache_ttl.capacity())
@@ -683,10 +695,6 @@ fn read_bounded_config(path: &Path) -> io::Result<(String, FileStamp)> {
     let text = String::from_utf8(bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     Ok((text, stamp))
-}
-
-pub(crate) fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
-    read_bounded_file(path, limit).map(|(bytes, _)| bytes)
 }
 
 /// Reads at most `limit` bytes from `path` and returns them with the stamp of
@@ -926,6 +934,7 @@ pub enum ConfigKey {
     HistorySummarizerContextLimitTokens,
     SmartDrops,
     MemoryClassifierInjectDocs,
+    ProjectDocsFiles,
     TemporalAwareness,
     PromptSurfaceGuidanceOverrideText,
     PromptSurfaceGuidanceOverridePath,
@@ -962,6 +971,7 @@ impl ConfigKey {
         Self::HistorySummarizerContextLimitTokens,
         Self::SmartDrops,
         Self::MemoryClassifierInjectDocs,
+        Self::ProjectDocsFiles,
         Self::TemporalAwareness,
         Self::PromptSurfaceGuidanceOverrideText,
         Self::PromptSurfaceGuidanceOverridePath,
@@ -997,6 +1007,7 @@ impl ConfigKey {
             Self::HistorySummarizerContextLimitTokens => "/history_summarizer/context_limit_tokens",
             Self::SmartDrops => "/smart_drops",
             Self::MemoryClassifierInjectDocs => "/memory_classifier/inject_docs",
+            Self::ProjectDocsFiles => "/project_docs/files",
             Self::TemporalAwareness => "/temporal_awareness",
             Self::PromptSurfaceGuidanceOverrideText => "/prompt_surface/guidance_override_text",
             Self::PromptSurfaceGuidanceOverridePath => "/prompt_surface/guidance_override_path",
@@ -1025,6 +1036,7 @@ impl ConfigKey {
             | Self::MemoryClassifierReviewUserMemoriesSchedule
             | Self::UserMemoriesEnabled
             | Self::MemoryClassifierInjectDocs
+            | Self::ProjectDocsFiles
             | Self::MemoryAutoCapture
             | Self::SourceCaptureEnabled
             | Self::CacheTtl => true,
@@ -1057,6 +1069,7 @@ impl ConfigKey {
             | Self::MemoryClassifierReviewUserMemoriesSchedule
             | Self::HistorySummarizerContextLimitTokens
             | Self::MemoryClassifierInjectDocs
+            | Self::ProjectDocsFiles
             | Self::MemoryAutoCapture
             | Self::SourceCaptureEnabled
             | Self::PromptSurfaceGuidanceOverrideText
@@ -1284,6 +1297,25 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
                 cfg.inject_docs = enabled;
             }
         }
+        ConfigKey::ProjectDocsFiles => {
+            if let Some(value) = tier.pointer(pointer) {
+                // The warning names the pointer and an index only: a configured path is the user's own text and stays out of logs.
+                let entries: Option<Vec<&str>> = value
+                    .as_array()
+                    .and_then(|items| items.iter().map(Value::as_str).collect());
+                match entries {
+                    None => warnings.push(format!(
+                        "ignoring {pointer}: not an array of strings; the default documents are read"
+                    )),
+                    Some(entries) => match crate::project_docs::admit_document_paths(&entries) {
+                        Ok(files) => cfg.project_doc_files = files,
+                        Err(index) => warnings.push(format!(
+                            "ignoring {pointer}: entry {index} is not an admissible document path; the default documents are read"
+                        )),
+                    },
+                }
+            }
+        }
         ConfigKey::TemporalAwareness => {
             if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
                 cfg.temporal_awareness = enabled;
@@ -1344,7 +1376,7 @@ fn literal_chain_model(value: &str) -> Option<&str> {
     (!value.is_empty() && !has_variable_reference(value)).then_some(value)
 }
 
-fn has_variable_reference(text: &str) -> bool {
+pub(crate) fn has_variable_reference(text: &str) -> bool {
     text.contains("{env:") || text.contains("{file:")
 }
 
@@ -2212,6 +2244,7 @@ mod tests {
                 ConfigKey::MemoryClassifierReviewUserMemoriesSchedule,
                 ConfigKey::HistorySummarizerContextLimitTokens,
                 ConfigKey::MemoryClassifierInjectDocs,
+                ConfigKey::ProjectDocsFiles,
                 ConfigKey::CacheTtl,
             ]
         );
@@ -2263,6 +2296,7 @@ mod tests {
             },
             "smart_drops": true,
             "temporal_awareness": true,
+            "project_docs": { "files": ["src/secrets.md"] },
             "prompt_surface": {
                 "guidance_override_text": "## Eidnara\ninjected",
                 "guidance_override_path": "/tmp/injected.md"
@@ -2297,6 +2331,7 @@ mod tests {
             "project tier cannot enable source capture"
         );
         assert_eq!(cfg.inject_docs, user_only.inject_docs);
+        assert_eq!(cfg.project_doc_files, user_only.project_doc_files);
         assert_eq!(
             cfg.user_memory_collection_enabled,
             user_only.user_memory_collection_enabled
@@ -2355,6 +2390,82 @@ mod tests {
         );
     }
 
+    /// AE4 and every refused class: the default list stays in effect with exactly one warning that
+    /// names the pointer and the entry index and holds no byte of any entry.
+    #[test]
+    fn a_refused_document_list_keeps_the_default_with_one_index_only_warning() {
+        let default = crate::project_docs::default_document_paths();
+        let long = "a".repeat(513);
+        let deep = vec!["d"; 17].join("/");
+        let nine: Vec<String> = (0..9).map(|index| format!("d{index}.md")).collect();
+        let mut cases: Vec<(Value, Option<usize>)> = [
+            "../x.md",
+            "/abs.md",
+            "a//b.md",
+            ".git/HEAD",
+            ".eidnara/x",
+            "a\0b",
+            "docs/a\tb.md",
+            "{env:HOME}/x.md",
+            long.as_str(),
+            deep.as_str(),
+        ]
+        .into_iter()
+        .map(|entry| (serde_json::json!([entry]), Some(0)))
+        .collect();
+        cases.push((serde_json::json!(["A.md", "A.md"]), Some(1)));
+        cases.push((serde_json::json!(nine), Some(8)));
+        cases.push((serde_json::json!("ARCHITECTURE.md"), None));
+        cases.push((serde_json::json!(["A.md", 7]), None));
+        for (files, index) in cases {
+            let user = serde_json::json!({ "project_docs": { "files": files } });
+            let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), None);
+            assert_eq!(cfg.project_doc_files, default, "{files}");
+            assert_eq!(warnings.len(), 1, "{files}: {warnings:?}");
+            assert!(warnings[0].contains("/project_docs/files"), "{warnings:?}");
+            if let Some(index) = index {
+                assert!(
+                    warnings[0].contains(&format!("entry {index} ")),
+                    "{warnings:?}"
+                );
+            }
+            for entry in files
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                assert!(!warnings[0].contains(entry), "{warnings:?} leaks {entry:?}");
+            }
+        }
+    }
+
+    /// The user tier sets the list, in order; the project tier is ignored with the user-tier-only
+    /// warning.
+    #[test]
+    fn the_document_list_is_user_tier_only() {
+        let user = serde_json::json!({ "project_docs": { "files": ["docs/ARCHITECTURE.md", "README.md"] } });
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            cfg.project_doc_files
+                .iter()
+                .map(crate::project_docs::DocumentPath::as_str)
+                .collect::<Vec<_>>(),
+            ["docs/ARCHITECTURE.md", "README.md"]
+        );
+        let project = serde_json::json!({ "project_docs": { "files": ["src/secrets.md"] } });
+        let (cfg, warnings) = merge_tiers_with_warnings(None, Some(&project));
+        assert_eq!(
+            cfg.project_doc_files,
+            crate::project_docs::default_document_paths()
+        );
+        assert_eq!(
+            warnings,
+            ["ignoring /project_docs/files from project tier; setting is user-tier only"]
+        );
+    }
+
     /// Every JSON pointer literal the production merge reads is a `ConfigKey`,
     /// and every `ConfigKey` is listed once in `ALL`.
     #[test]
@@ -2392,7 +2503,7 @@ mod tests {
             0,
             "tier values are read through ConfigKey::pointer(), never a raw literal"
         );
-        assert_eq!(ConfigKey::ALL.len(), 27);
+        assert_eq!(ConfigKey::ALL.len(), 28);
     }
 
     /// The user-memory gate's two keys and the budget's two keys resolve the
@@ -3588,5 +3699,67 @@ mod fold_authority_parity {
         ));
         assert_eq!(broken_user.model_chain, vec!["model-a"]);
         assert!(!broken_user.memory_enabled);
+    }
+}
+
+#[cfg(test)]
+mod project_docs_parity {
+    use super::*;
+
+    const FIXTURE: &str = include_str!(
+        "../../../packages/opencode-plugin/src/config/__fixtures__/project-docs-parity.json"
+    );
+
+    fn write_tier(dir: &Path, tier: &Value) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("eidnara.jsonc"), tier.to_string()).unwrap();
+    }
+
+    #[test]
+    fn every_fixture_row_matches_through_the_configuration_cache() {
+        let fixture: Value = serde_json::from_str(FIXTURE).expect("the parity fixture parses");
+        let rows = fixture["rows"].as_array().expect("rows");
+        assert!(!rows.is_empty());
+        for row in rows {
+            let home = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            write_tier(&home.path().join("eidnara"), &row["user"]);
+            write_tier(&project.path().join(".eidnara"), &row["project"]);
+            let (config, warnings) = ConfigCache::default().effective_for_env(
+                home.path().to_str(),
+                None,
+                project.path(),
+            );
+            let expected: Vec<&str> = row["expected_files"]
+                .as_array()
+                .expect("expected_files")
+                .iter()
+                .map(|path| path.as_str().expect("a path"))
+                .collect();
+            assert_eq!(
+                config
+                    .project_doc_files
+                    .iter()
+                    .map(crate::project_docs::DocumentPath::as_str)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{}",
+                row["name"]
+            );
+            let expected_warnings = usize::from(
+                row["expected_project_warning"]
+                    .as_bool()
+                    .expect("expected_project_warning"),
+            );
+            assert_eq!(
+                warnings
+                    .iter()
+                    .filter(|warning| warning.contains("/project_docs/files from project tier"))
+                    .count(),
+                expected_warnings,
+                "{}: {warnings:?}",
+                row["name"]
+            );
+        }
     }
 }

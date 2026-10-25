@@ -61,6 +61,8 @@ pub struct M0ComposeInputs<'a> {
     pub user_profile_budget_tokens: f64,
     /// `inject_docs` matches whether the TypeScript materializer includes the project-docs block.
     pub inject_docs: bool,
+    /// The configured documents the project-docs block reads, in order.
+    pub project_doc_files: &'a [crate::project_docs::DocumentPath],
     /// Where the pass leaves the configured documents it reads, when source capture takes them.
     pub(crate) document_reads: Option<&'a crate::project_docs::DocumentReads>,
     /// `temporal_awareness` gates temporal heading dates at render time, including rows persisted by a prior pass.
@@ -221,7 +223,7 @@ pub fn compose_m0(
         counting(tokens),
     );
     let mut docs = if inputs.inject_docs {
-        read_project_docs_canonical(inputs.project_directory)
+        read_project_docs_canonical(inputs.project_directory, inputs.project_doc_files)
     } else {
         crate::project_docs::ProjectDocs::default()
     };
@@ -390,6 +392,7 @@ mod bounded_read_tests {
             memory_enabled: false,
             user_profile_budget_tokens: 0.0,
             inject_docs: false,
+            project_doc_files: &[],
             document_reads: None,
             temporal_awareness: true,
             legacy_history_segment_seqs: legacy,
@@ -1115,6 +1118,7 @@ mod correction_compose_tests {
                 memory_enabled: false,
                 user_profile_budget_tokens: 0.0,
                 inject_docs: false,
+                project_doc_files: &[],
                 document_reads: None,
                 temporal_awareness: true,
                 legacy_history_segment_seqs: None,

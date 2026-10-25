@@ -1227,3 +1227,38 @@ describe("fold-authority parity fixture", () => {
         expect(mismatches.length).toBeGreaterThan(0);
     });
 });
+
+describe("project-docs parity fixture", () => {
+    interface ProjectDocsRow {
+        name: string;
+        user: Record<string, unknown>;
+        project: Record<string, unknown>;
+        expected_files: string[];
+        expected_project_warning: boolean;
+    }
+    const DEFAULT_FILES = ["ARCHITECTURE.md", "STRUCTURE.md"];
+    const fixture = JSON.parse(
+        readFileSync(join(import.meta.dir, "__fixtures__", "project-docs-parity.json"), "utf-8"),
+    ) as { rows: ProjectDocsRow[] };
+
+    it("every row matches through the production loader", () => {
+        expect(fixture.rows.length).toBeGreaterThan(0);
+        for (const row of fixture.rows) {
+            const result = loadDetailedWithTierFiles(
+                { "eidnara.jsonc": JSON.stringify(row.user) },
+                { "eidnara.jsonc": JSON.stringify(row.project) },
+            );
+            expect({
+                name: row.name,
+                files: result.config.project_docs?.files ?? DEFAULT_FILES,
+                warned: (result.config.configWarnings ?? []).filter((warning) =>
+                    warning.includes("Ignoring project_docs from project config"),
+                ).length,
+            }).toEqual({
+                name: row.name,
+                files: row.expected_files,
+                warned: row.expected_project_warning ? 1 : 0,
+            });
+        }
+    });
+});

@@ -12,7 +12,7 @@ output through the reduced call's `path`, and no record named it.
   the flat block's `file_path` (`wire.rs:568`, the field at `wire.rs:131`).
 - `extract_file_path` is `tool_vocabulary::path_arg` (`wire.rs:646-648`).
 - The transform passes `block.file_path` to `reduced_block`
-  (`crates/daemon/src/transform.rs:11890-11896`).
+  (`crates/daemon/src/transform.rs:11895-11901`).
 - `reduced_block` (`wire.rs:445`) writes `reduced: true`, `summary`, and, when
   a path is present, `path` into the reduced call's input (`wire.rs:484-489`).
 - No test asserts the `path` key against the original input; `wire.rs:1260`
@@ -38,7 +38,7 @@ A `reduced_block` test over a flattened call with an input under each key of
 ### Q: Does the reduced call read the same list as wire extraction?
 
 - Sources examined: `wire.rs:445-489`, `:520-570`, `:646-648`;
-  `transform.rs:11880-11896`.
+  `transform.rs:11885-11901`.
 - Findings: yes; the path is computed once by `path_arg` during flattening and
   carried to the reduction.
 - Missing evidence: none.
@@ -46,16 +46,16 @@ A `reduced_block` test over a flattened call with an input under each key of
   to high.
 
 ### Q: Does the record run under `DaemonConfig::default()`, as the source's label says?
-- Sources examined: `crates/daemon/src/config.rs:147`, `:187-191`;
-  `crates/daemon/src/transform.rs:3350-3351`, `:3364-3370`, `:5196`, `:11890`.
+- Sources examined: `crates/daemon/src/config.rs:149`, `:190-194`;
+  `crates/daemon/src/transform.rs:3352-3353`, `:3366-3372`, `:5201`, `:11895`.
 - Findings: no. The default `model_chain` is empty, so `eidnara_folds()` is
   false and `apply_once` hands the request to `apply_additive_only`, which
-  projects the window (`transform.rs:2852`) and composes m0
-  (`transform.rs:3061`) without selecting, injecting, or rendering a
+  projects the window (`transform.rs:2854`) and composes m0
+  (`transform.rs:3063`) without selecting, injecting, or rendering a
   reduced call. A switched-lineage subagent request passes the gate and
   returns a passthrough. Flattening runs on both paths, so every flat block carries its path,
   but a reduced call renders only in `build_output_with_tags`
-  (`transform.rs:11890`), whose production caller is `apply_once`
-  (`transform.rs:5196`).
+  (`transform.rs:11895`), whose production caller is `apply_once`
+  (`transform.rs:5201`).
 - Missing evidence: none.
 - Conclusion: resolved with answer: `explicit-config-only`.

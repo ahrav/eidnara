@@ -55,11 +55,11 @@ Covered by `tool_vocabulary_tests.rs:66`.
 - Conclusion: needs human input.
 
 ### Q: Which of the three sites run under `DaemonConfig::default()`?
-- Sources examined: `crates/daemon/src/config.rs:147`, `:165`, `:187-191`;
-  `crates/daemon/src/transform.rs:2852`, `:3350-3351`;
+- Sources examined: `crates/daemon/src/config.rs:149`, `:168`, `:190-194`;
+  `crates/daemon/src/transform.rs:2854`, `:3352-3353`;
   `crates/daemon/src/selection.rs:958`, `:980`.
 - Findings: wire extraction only. `apply_additive_only` projects the window
-  (`transform.rs:2852`), which flattens every `ToolCall` through `path_arg`.
+  (`transform.rs:2854`), which flattens every `ToolCall` through `path_arg`.
   Edit supersession runs inside selection, on the fold path, and only with
   `smart_drops` set (default false) and a reclaim batch or ride. The
   summary line needs a model chain.

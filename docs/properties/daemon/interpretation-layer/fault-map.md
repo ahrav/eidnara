@@ -18,10 +18,10 @@ updated for the checks U1 to U4 landed; code references verified at
 | F-b2 OpenCode message with text parts beside a settled tool whose output is not a string | hand-built JSON | il-adapter-refusal-is-per-message | yes at the adapter: `hs-tests:681-686`; not through a capture pass |
 | F-b3 `step-start`, `reasoning`, `file`, `ignored` text, running or pending tool, interrupted tool | frozen OpenCode session; synthetic sessions in `replay` | il-unknown-part-kind-skipped-uncounted | partly: `replay:82`, `:215`, `:338` |
 | F-b4 second pass after the turn completes (unfinished text, interrupted tool) or after a pending or running tool settles | two-pass capture test | il-unknown-part-kind-skipped-uncounted | yes for text: `hs-tests:922`; no for a settled tool or an interrupted tool |
-| F-b5 purged digest re-offered beside a sibling | Kernel purge, then a capture pass | il-readmission-block-ends-batch-unnamed-at-head | yes, by U6: `sc-tests:2514`, `:2561`, `:2607`, `:2631`; `hs-tests:2555`, `:2607`, `:2664` |
-| F-c1 legacy `(P, P, path)` live row, then a derived-identity pass | seeded Kernel row plus a `git init` root | il-repository-id-equals-project-id-at-head | yes, by U7: `sc-tests:2736`, `:2777`, `:2935` |
-| F-c2 two worktrees of one repository | the U1 materializer with a worktree | il-repository-id-equals-project-id-at-head | yes, by U7: `sc-tests:2811` |
-| F-c3 symlinked intermediate directory with and without a target; no `openat2` | U8 fixtures; a mocked syscall | il-doc-read-nofollow-final-component-flat-list | no (U8) |
+| F-b5 purged digest re-offered beside a sibling | Kernel purge, then a capture pass | il-readmission-block-ends-batch-unnamed-at-head | yes, by U6: `sc-tests:2521`, `:2568`, `:2614`, `:2638`; `hs-tests:2555`, `:2607`, `:2664` |
+| F-c1 legacy `(P, P, path)` live row, then a derived-identity pass | seeded Kernel row plus a `git init` root | il-repository-id-equals-project-id-at-head | yes, by U7: `sc-tests:2743`, `:2784`, `:2942` |
+| F-c2 two worktrees of one repository | the U1 materializer with a worktree | il-repository-id-equals-project-id-at-head | yes, by U7: `sc-tests:2818` |
+| F-c3 symlinked intermediate directory with and without a target; no `openat2` | U8 fixtures; a mocked syscall | il-doc-read-nofollow-final-component-flat-list | yes, by U8: `pd.rs:687`, `:734`; `sc-tests:3124` |
 | F-d1 a distinctive literal added to a production file | a scratch tree | il-gate-fails-on-distinctive-literal-outside-module, il-vocabulary-literals-live-in-one-module | yes: `scripts/forbid-tool-literals.test.ts` |
 | F-d2 a golden diff in a move-only change | the PR base | il-dedup-removal-leaves-goldens-byte-identical | once, for U4: `git diff a91dbc2b6 97afdaff1 -- crates/daemon/testdata` is empty; no recurring check |
 | F-d3 a new literal with no table row | a code change | il-literal-classified-contract-or-vocabulary | by review of [`literals.md`](literals.md) only |
@@ -59,4 +59,4 @@ Each marker asserts preconditions, never the violation.
    synthetic pair, so a selection-only input cannot construct it.
 6. A Pi session whose tool output passes the harness's own limit: gives
    il-truncated-flag-read-per-harness a harness-produced witness.
-7. The U8 fixtures (F-c3): owned by that unit.
+7. A mount crossing inside the root (F-c3): needs privileges a test host lacks.

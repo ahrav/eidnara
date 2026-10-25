@@ -19,9 +19,9 @@ every sibling unit of its message.
 - Budget stop: `Kept::keep` (`harness_sources.rs:463-482`) returns `false`
   when the copy budget refuses; the adapter returns `Ok(None)` at `:321`,
   `:354`, `:435`, `:443`, or `:454`.
-- Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1158-1188`)
-  counts each `Err` once (`:1180`) and adds the count to `adapter_refused`
-  (`:1183-1186`), also when a later record stops the pass (`:1176-1179`).
+- Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1166-1196`)
+  counts each `Err` once (`:1188`) and adds the count to `adapter_refused`
+  (`:1191-1194`), also when a later record stops the pass (`:1184-1187`).
 - Pi shape: `crates/daemon/tests/harness_sources.rs:757-762` sets the second
   content item of a `toolResult` whose first item is text (`TOOL_BYTES`,
   `harness_sources.rs:433`) to an `image` item and asserts the whole record

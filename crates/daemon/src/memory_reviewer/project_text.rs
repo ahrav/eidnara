@@ -17,7 +17,7 @@ use kernel::{
     LocalFileCaptureRequest, MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS, MemoryReviewerHoldBinding,
     ProviderEgress, Sensitivity,
 };
-use rustix::fs::{Mode, OFlags, ResolveFlags};
+use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 
@@ -26,21 +26,16 @@ use super::broker::{
     RenderedBuffer, check_render, check_whole_artifact, hold_refusal,
 };
 use super::{Completeness, excerpt_window};
+use crate::confined_path::{PathRefusal, is_protected_component};
 
 pub const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
 pub const MAX_SCAN_BYTES: u64 = 16 * 1024 * 1024;
 /// Directory entries one search may list; a hit is a disclosed capture, so the broker's batch and inspection bounds cap hits well below this.
 pub const MAX_VISITED_ENTRIES: usize = 4096;
-pub const MAX_DEPTH: usize = 16;
+pub const MAX_DEPTH: usize = crate::confined_path::MAX_COMPONENTS;
 /// Longest relative path, in bytes. The path is stored as the capture's artifact source id, and the Kernel refuses a longer one; bounding it here reports a long path as a path property rather than as a store failure.
 pub const MAX_PATH_BYTES: usize = kernel::MAX_TEXT_FIELD_BYTES;
 pub const MAX_QUERY_BYTES: usize = 256;
-/// Path components refused wherever they appear: the project's own configuration and its Git store.
-const REFUSED_COMPONENTS: [&str; 2] = [".eidnara", ".git"];
-const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
-    .union(ResolveFlags::NO_SYMLINKS)
-    .union(ResolveFlags::NO_MAGICLINKS)
-    .union(ResolveFlags::NO_XDEV);
 const SOURCE_KIND: &str = kernel::LOCAL_FILE_SOURCE_KIND;
 const MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 
@@ -151,9 +146,10 @@ impl ProjectText {
             return Err(refusal(RefusalCode::Unavailable));
         }
         // A root that is, or lies beneath, a refused component would let every relative path skip the component check.
-        if canonical.components().any(|component| {
-            REFUSED_COMPONENTS.contains(&component.as_os_str().to_str().unwrap_or(""))
-        }) {
+        if canonical
+            .components()
+            .any(|component| is_protected_component(component.as_os_str().to_str().unwrap_or("")))
+        {
             return Err(refusal(RefusalCode::Protected));
         }
         let root = rustix::fs::open(
@@ -350,7 +346,7 @@ impl ProjectText {
                 outcome.withheld = true;
                 continue;
             };
-            if REFUSED_COMPONENTS.contains(&name) {
+            if is_protected_component(name) {
                 outcome.withheld = true;
                 continue;
             }
@@ -419,12 +415,10 @@ impl ProjectText {
     /// Resolves `relative` beneath the root with every resolve restriction; the result's identity is checked against the protected locations.
     fn open_beneath(&self, relative: &str, flags: OFlags) -> Result<OwnedFd, Refusal> {
         validate_relative(relative)?;
-        let handle = rustix::fs::openat2(
+        let handle = crate::confined_path::open_beneath(
             self.root.as_fd(),
             relative,
             flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-            RESOLVE,
         )
         .map_err(|errno| refusal(open_refusal(errno)))?;
         let metadata = metadata(&handle)?;
@@ -632,27 +626,15 @@ fn admit(
 
 /// A relative path of at most [`MAX_PATH_BYTES`] bytes and [`MAX_DEPTH`] ordinary components: no root, no `.` or `..`, no empty component, no NUL, and no refused component.
 fn validate_relative(relative: &str) -> Result<(), Refusal> {
-    if relative.is_empty()
-        || relative.len() > MAX_PATH_BYTES
-        || relative.starts_with('/')
-        || relative.contains('\0')
-    {
+    if relative.len() > MAX_PATH_BYTES {
         return Err(refusal(RefusalCode::InvalidPath));
     }
-    let mut depth = 0;
-    for component in relative.split('/') {
-        if component.is_empty() || component == "." || component == ".." {
-            return Err(refusal(RefusalCode::InvalidPath));
-        }
-        if REFUSED_COMPONENTS.contains(&component) {
-            return Err(refusal(RefusalCode::Protected));
-        }
-        depth += 1;
-    }
-    if depth > MAX_DEPTH {
-        return Err(refusal(RefusalCode::InvalidPath));
-    }
-    Ok(())
+    crate::confined_path::check(relative).map_err(|path_refusal| {
+        refusal(match path_refusal {
+            PathRefusal::Invalid => RefusalCode::InvalidPath,
+            PathRefusal::Protected => RefusalCode::Protected,
+        })
+    })
 }
 
 /// Maps an `openat2` failure to a bounded code. A kernel that lacks the call or one of its resolve flags fails closed; only a missing entry is `NotFound`, so a host failure is never reported as absence.
@@ -708,6 +690,8 @@ mod tests {
             ("a\0b", RefusalCode::InvalidPath),
             (".git/config", RefusalCode::Protected),
             ("src/.eidnara/eidnara.jsonc", RefusalCode::Protected),
+            (".GIT/config", RefusalCode::Protected),
+            ("src/.Eidnara/eidnara.jsonc", RefusalCode::Protected),
         ] {
             assert_eq!(
                 validate_relative(rejected).unwrap_err().code,

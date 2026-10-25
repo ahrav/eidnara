@@ -43,7 +43,7 @@ or whose check U4 deleted says so.
 | --- | --- | --- |
 | `history_summarizer_chunk.rs:3251` `repeated_call_ids_render_each_call_with_its_own_arguments` | `TC: read(one.rs)` from `filePath` | unaudited |
 | `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` | the description arm and a `filePath` key argument on separate inputs, with newlines collapsed | unaudited |
-| `crates/daemon/src/lib.rs:19639` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:19925-19930`, `:26289`) | unaudited |
+| `crates/daemon/src/lib.rs:19641` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:19927-19932`, `:26292`) | unaudited |
 | `crates/daemon/testdata/history_summarizer-chunk-golden.json` | `TC:` lines from short arguments | unaudited |
 
 ## Wire and injection
@@ -53,7 +53,7 @@ or whose check U4 deleted says so.
 | `crates/daemon/testdata/wire-golden.json` | the flatten step, including `path` inputs | unaudited |
 | `wire.rs:1260` (inside a reduction test) | a reduced tool result keeps its output variant; no path | unaudited |
 | `injection.rs:553` `constants_match_ts_golden`, `:1047`, `:1052`, and `crates/daemon/testdata/injection-golden.json` | the synthetic `todowrite` round trip under `TODO_TOOL` | unaudited |
-| `crates/daemon/src/transform.rs:29645` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` | the echoed synthetic pair beside a native `todowrite` call produces no duplicate tool-use id | unaudited |
+| `crates/daemon/src/transform.rs:29651` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` | the echoed synthetic pair beside a native `todowrite` call produces no duplicate tool-use id | unaudited |
 
 ## Capture adapters and outcome records
 
@@ -90,10 +90,10 @@ or whose check U4 deleted says so.
 
 | Check | Covers | Status |
 | --- | --- | --- |
-| `pd.rs:244`, `:267`, `:304`, `:318` | final-component symlink, a sparse file already past the cap and a FIFO, `Missing` versus `Unreadable`, oversize; no test grows a file during the read | unaudited |
-| `pd.rs:387`, `:398` (proptests), `pd.rs:429` golden | canonical form, escape, rendered block, and hash | unaudited |
-| `sc-tests:1964`, `:2137`, `:2202`, `:2276`, `:2315` | document lineage, retirement, renames, project isolation, unreadable reads, with rows selected by `relative_path` (`sc-tests:1903-1909`); none asserts the identity values capture writes | unaudited |
-| `sc-tests:2736`, `:2777`, `:2811`, `:2860`, `:2935` | U7: the derived identity, stale-row retirement before publication, worktrees, a failed derivation, a shallow checkout; `document_identities` (`sc-tests:2721`) reads the `repository_id` capture writes | unaudited |
+| `pd.rs:391`, `:417`, `:457`, `:471` | final-component symlink, a sparse file already past the cap and a FIFO, `Missing` versus `Unreadable`, oversize; no test grows a file during the read | unaudited |
+| `pd.rs:543`, `:554` (proptests), `pd.rs:588` golden | canonical form, escape, rendered block, and hash | unaudited |
+| `sc-tests:1964`, `:2144`, `:2209`, `:2283`, `:2322` | document lineage, retirement, renames, project isolation, unreadable reads, with rows selected by `relative_path` (`sc-tests:1903-1909`); none asserts the identity values capture writes | unaudited |
+| `sc-tests:2743`, `:2784`, `:2818`, `:2867`, `:2942` | U7: the derived identity, stale-row retirement before publication, worktrees, a failed derivation, a shallow checkout; `document_identities` (`sc-tests:2728`) reads the `repository_id` capture writes | unaudited |
 | `crates/daemon/src/repository_identity_tests.rs` | U7: the derivation against the plugin's rendering, two roots, a subdirectory, the fallbacks, the failures, the unchanged encoding | unaudited |
 | symlinked intermediate directory | none found; unreachable at HEAD because no name holds a separator | none |
 
@@ -101,10 +101,10 @@ or whose check U4 deleted says so.
 
 | Check | Covers | Status |
 | --- | --- | --- |
-| `sc-tests:2514` `a_blocked_digest_is_refused_alone_and_its_sibling_publishes` | AE5 for a tombstoned and a pending-unlink digest, and the pre-screen digest equal to the stored artifact digest | unaudited |
-| `sc-tests:2561` `a_purge_between_screen_and_commit_fails_one_pass_then_converges` | one `kernel_error` pass, then AE5 | unaudited |
-| `sc-tests:2607` `a_purged_unit_with_a_stored_receipt_replays` | receipt replay precedes the pre-screen | unaudited |
-| `sc-tests:2631` `a_reclaiming_digest_stays_pending_and_publishes_after_reclamation` | a reclaiming-only digest is never terminal | unaudited |
+| `sc-tests:2521` `a_blocked_digest_is_refused_alone_and_its_sibling_publishes` | AE5 for a tombstoned and a pending-unlink digest, and the pre-screen digest equal to the stored artifact digest | unaudited |
+| `sc-tests:2568` `a_purge_between_screen_and_commit_fails_one_pass_then_converges` | one `kernel_error` pass, then AE5 | unaudited |
+| `sc-tests:2614` `a_purged_unit_with_a_stored_receipt_replays` | receipt replay precedes the pre-screen | unaudited |
+| `sc-tests:2638` `a_reclaiming_digest_stays_pending_and_publishes_after_reclamation` | a reclaiming-only digest is never terminal | unaudited |
 | `hs-tests:2555` `a_purged_digest_is_refused_before_the_batch_and_takes_no_admission_slot` | two refused units take no admission slot, and screening resumes after each | unaudited |
 | `hs-tests:2607` `a_purged_revision_leaves_its_lineage_to_a_later_revision` | a refused revision leaves its lineage to a later revision in the same batch | unaudited |
 | `hs-tests:2664` `an_evidence_receipt_conflict_takes_precedence_over_a_purged_digest` | an evidence-receipt request conflict is an identity conflict before and after the purge | unaudited |
@@ -114,7 +114,7 @@ or whose check U4 deleted says so.
 
 - No test asserts that keep-one and the read-back act on the native
   `todowrite` call alone when the echoed synthetic pair is present; selection
-  never sees the pair (`transform.rs:3467-3471`).
+  never sees the pair (`transform.rs:3469-3473`).
 - No test asserts a reduced `ToolCall` input's `path` against the original
   input's `path_arg`.
 - No harness-produced fixture holds a Pi `details.truncation.truncated` value.

@@ -2057,11 +2057,18 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
     drop(stale);
 
     // A whitespace-only edit: new raw bytes, same canonical prompt hash.
-    let hash =
-        crate::project_docs::read_project_docs_canonical(project.to_str().unwrap()).canonical_hash;
+    let hash = crate::project_docs::read_project_docs_canonical(
+        project.to_str().unwrap(),
+        crate::project_docs::default_document_paths_for_test(),
+    )
+    .canonical_hash;
     std::fs::write(&doc, "# Architecture  \n\nTwo daemons.\n\n").unwrap();
     assert_eq!(
-        crate::project_docs::read_project_docs_canonical(project.to_str().unwrap()).canonical_hash,
+        crate::project_docs::read_project_docs_canonical(
+            project.to_str().unwrap(),
+            crate::project_docs::default_document_paths_for_test(),
+        )
+        .canonical_hash,
         hash
     );
     document_pass(&handler, "base-4").await;
@@ -3016,6 +3023,127 @@ async fn every_stale_lineage_of_a_path_retires_before_the_current_one_publishes(
         document_identities(&store, "ARCHITECTURE.md"),
         [(repository, "1".to_owned())]
     );
+}
+
+fn docs_config(paths: &[&str]) -> DaemonConfig {
+    let mut config = capture_config(true);
+    config.project_doc_files = crate::project_docs::admit_document_paths(paths).unwrap();
+    config
+}
+
+/// A configured list of three present files, one changed, publishes one revision and counts two unchanged, each row under its configured path; a path that leaves the list is neither read nor retired.
+#[tokio::test]
+async fn a_configured_document_list_captures_each_entry_under_its_configured_path() {
+    let paths = ["docs/ARCHITECTURE.md", "notes/design/plan.md", "README.md"];
+    let (handler, _dir, project) = capture_handler(docs_config(&paths), true).await;
+    rebind(&handler, &project, docs_config(&paths));
+    for path in paths {
+        let file = project.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, format!("# {path}\n")).unwrap();
+    }
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    let mut captured: Vec<String> = live(&store, OccurrenceClass::RepositoryDocuments)
+        .iter()
+        .map(|row| identity_of(row)[2].1.to_owned())
+        .collect();
+    captured.sort_unstable();
+    assert_eq!(
+        captured,
+        ["README.md", "docs/ARCHITECTURE.md", "notes/design/plan.md"]
+    );
+
+    std::fs::write(project.join("README.md"), "# README\n\nChanged.\n").unwrap();
+    let (published, unchanged) = (
+        count(&handler, "units_published"),
+        count(&handler, "documents_unchanged"),
+    );
+    document_pass(&handler, "base-2").await;
+    assert_eq!(count(&handler, "units_published") - published, 1);
+    assert_eq!(count(&handler, "documents_unchanged") - unchanged, 2);
+    assert_eq!(
+        document_identities(&store, "README.md")
+            .into_iter()
+            .map(|(_, revision)| revision)
+            .collect::<Vec<_>>(),
+        ["2"]
+    );
+
+    rebind(&handler, &project, docs_config(&paths[..2]));
+    std::fs::remove_file(project.join("README.md")).unwrap();
+    let (retired, missing, tip) = (
+        count(&handler, "documents_retired"),
+        count(&handler, "documents_missing"),
+        store.tip().unwrap(),
+    );
+    document_pass(&handler, "base-3").await;
+    assert_eq!(count(&handler, "documents_retired"), retired);
+    assert_eq!(count(&handler, "documents_missing"), missing);
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(document_identities(&store, "README.md").len(), 1);
+}
+
+fn nested_path_of(bytes: usize) -> String {
+    let mut path = String::new();
+    while path.len() + 201 < bytes {
+        path.push_str(&"d".repeat(200));
+        path.push('/');
+    }
+    path.push_str(&"f".repeat(bytes - path.len() - 3));
+    path.push_str(".md");
+    path
+}
+
+#[tokio::test]
+async fn the_longest_admissible_path_captures_beside_a_sibling() {
+    let long = nested_path_of(kernel::source_identity::MAX_IDENTITY_VALUE_BYTES);
+    assert_eq!(
+        long.len(),
+        kernel::source_identity::MAX_IDENTITY_VALUE_BYTES
+    );
+    let paths = ["ARCHITECTURE.md", long.as_str()];
+    let (handler, _dir, project) = capture_handler(docs_config(&paths), true).await;
+    rebind(&handler, &project, docs_config(&paths));
+    for path in paths {
+        let file = project.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "# document\n").unwrap();
+    }
+    let refused = count(&handler, "documents_refused");
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    assert_eq!(count(&handler, "documents_refused"), refused);
+    assert_eq!(document_identities(&store, "ARCHITECTURE.md").len(), 1);
+    assert_eq!(document_identities(&store, &long).len(), 1);
+}
+
+/// A configured path whose parent is a symlink out of the root is unreadable and captures nothing; a nested parent that vanishes is unreadable and leaves the live row live.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_nested_document_through_a_symlink_or_an_absent_parent_is_unreadable() {
+    let paths = ["docs/A.md", "notes/B.md"];
+    let (handler, dir, project) = capture_handler(docs_config(&paths), true).await;
+    rebind(&handler, &project, docs_config(&paths));
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("A.md"), "OUTSIDE").unwrap();
+    std::os::unix::fs::symlink(&outside, project.join("docs")).unwrap();
+    std::fs::create_dir_all(project.join("notes")).unwrap();
+    std::fs::write(project.join("notes/B.md"), "# B\n").unwrap();
+    let unreadable = count(&handler, "documents_unreadable");
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    assert_eq!(count(&handler, "documents_unreadable") - unreadable, 1);
+    assert_eq!(document_identities(&store, "docs/A.md"), []);
+    assert_eq!(document_identities(&store, "notes/B.md").len(), 1);
+
+    std::fs::remove_dir_all(project.join("notes")).unwrap();
+    let retired = count(&handler, "documents_retired");
+    document_pass(&handler, "base-2").await;
+    assert_eq!(count(&handler, "documents_unreadable") - unreadable, 3);
+    assert_eq!(count(&handler, "documents_retired"), retired);
+    assert_eq!(document_identities(&store, "notes/B.md").len(), 1);
 }
 
 #[tokio::test]

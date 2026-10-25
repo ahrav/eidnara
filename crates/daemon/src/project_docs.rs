@@ -1,26 +1,89 @@
-//! Reads optional project documents into canonical hash and escaped XML forms.
+//! Reads the configured project documents into canonical hash and escaped XML forms.
 //!
-//! Documents are processed in fixed `ARCHITECTURE.md`, then `STRUCTURE.md`
-//! order. Each file is limited to 256 KiB. Metadata checks reject symlinks and
-//! narrow, but do not eliminate, the path-swap window before reading.
+//! The user-tier `project_docs.files` list names the documents, in order; its default is
+//! `ARCHITECTURE.md`, then `STRUCTURE.md`. Each path is resolved beneath the project root with
+//! `openat2` under [`RESOLVE`](crate::confined_path::RESOLVE). When `openat2` itself fails with
+//! `ENOSYS`, `EPERM`, `EINVAL`, or `EOPNOTSUPP`, [`read_beneath`] opens a top-level path with a
+//! no-follow `openat` relative to the root descriptor and reports a nested path `Unreadable`. Each
+//! file is limited to 256 KiB, checked on the opened descriptor.
 
+use std::io::Read as _;
+use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::Path;
 
-pub(crate) const PROJECT_DOC_FILES: [&str; 2] = ["ARCHITECTURE.md", "STRUCTURE.md"];
+use rustix::fs::{Mode, OFlags};
+
+use crate::confined_path::open_beneath;
+
+/// The documents read when the user tier names none.
+const DEFAULT_PROJECT_DOC_FILES: [&str; 2] = ["ARCHITECTURE.md", "STRUCTURE.md"];
+/// Entries one `project_docs.files` list may hold.
+const MAX_PROJECT_DOC_FILES: usize = 8;
 const PROJECT_DOCS_DELIMITER: &str = "\n\n---\n\n";
 const MAX_PROJECT_DOC_BYTES: u64 = 256 * 1024;
+
+/// A configured document's path relative to the project root: `/`-separated ordinary components,
+/// at most 16, none of them `.`, `..`, `.eidnara`, or `.git`, with no variable reference. The path
+/// is the `relative_path` identity value of the document's source lineage, so it is also a
+/// well-formed Kernel identity value: 1 to 512 bytes with no control character.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DocumentPath(String);
+
+impl DocumentPath {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The default list, shared by every test that composes a block the way the default configuration does.
+#[cfg(test)]
+pub(crate) fn default_document_paths_for_test() -> &'static [DocumentPath] {
+    static DEFAULT: std::sync::LazyLock<Vec<DocumentPath>> =
+        std::sync::LazyLock::new(default_document_paths);
+    &DEFAULT
+}
+
+/// The default list.
+pub(crate) fn default_document_paths() -> Vec<DocumentPath> {
+    DEFAULT_PROJECT_DOC_FILES
+        .into_iter()
+        .map(|path| DocumentPath(path.to_owned()))
+        .collect()
+}
+
+/// Admits `entries` as the configured list, or names the zero-based index of the first entry past
+/// [`MAX_PROJECT_DOC_FILES`], outside the path rule, or byte-equal to an earlier entry.
+pub(crate) fn admit_document_paths(entries: &[&str]) -> Result<Vec<DocumentPath>, usize> {
+    let mut admitted: Vec<DocumentPath> = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        if index == MAX_PROJECT_DOC_FILES
+            || !admissible(entry)
+            || admitted.iter().any(|path| path.0 == *entry)
+        {
+            return Err(index);
+        }
+        admitted.push(DocumentPath((*entry).to_owned()));
+    }
+    Ok(admitted)
+}
+
+fn admissible(entry: &str) -> bool {
+    kernel::source_identity::well_formed_value(entry)
+        && !crate::config::has_variable_reference(entry)
+        && crate::confined_path::check(entry).is_ok()
+}
 
 /// Both fields are empty when neither configured document is included.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectDocs {
     pub rendered_block: String,
     pub canonical_hash: String,
-    /// Each configured document's read, in the fixed file order: the raw bytes the canonical block was built from, or why it holds none.
-    pub(crate) reads: Vec<(&'static str, DocumentRead)>,
+    /// Each configured document's read, in list order: the raw bytes the canonical block was built from, or why it holds none.
+    pub(crate) reads: Vec<(DocumentPath, DocumentRead)>,
 }
 
 /// Where a pass leaves the configured documents it read for its prompt, for source capture to take once the response is built.
-pub(crate) type DocumentReads = std::sync::Mutex<Option<Vec<(&'static str, DocumentRead)>>>;
+pub(crate) type DocumentReads = std::sync::Mutex<Option<Vec<(DocumentPath, DocumentRead)>>>;
 
 /// Appends the canonical form of `raw` to `out`: the leading byte order mark dropped, each line's `\r\n` ending folded to `\n`, trailing spaces and tabs trimmed from every line, and trailing newlines dropped.
 fn canonicalize_doc_content_into(raw: &str, out: &mut String) {
@@ -109,26 +172,100 @@ pub(crate) enum DocumentRead {
     Unreadable,
 }
 
-/// Reads `path`, without following a symlink, as a regular file whose bytes fit `MAX_PROJECT_DOC_BYTES` and decode as UTF-8. The descriptor is validated and the cap enforced on bytes read, so a swap or growth after the open cannot change what is read; a failed read is classified from the path's own metadata.
-pub(crate) fn read_document(path: &Path) -> DocumentRead {
-    match crate::config::read_bounded_bytes(path, MAX_PROJECT_DOC_BYTES) {
-        Ok(bytes) => String::from_utf8(bytes).map_or(DocumentRead::NotUtf8, DocumentRead::Text),
-        // A file is verifiably missing only from a directory that exists; a vanished project root, such as an unmounted volume, is unreadable.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if path
-                .parent()
-                .is_some_and(|parent| std::fs::metadata(parent).is_ok_and(|meta| meta.is_dir()))
-            {
-                DocumentRead::Missing
-            } else {
-                DocumentRead::Unreadable
+/// Reads `path` beneath `root` as a regular file whose bytes fit `MAX_PROJECT_DOC_BYTES` and decode as UTF-8.
+#[cfg(test)]
+pub(crate) fn read_document(root: &Path, path: &DocumentPath) -> DocumentRead {
+    open_root(root).map_or(DocumentRead::Unreadable, |root| {
+        read_beneath(root.as_fd(), path, &open_beneath)
+    })
+}
+
+/// The project root as a directory descriptor every document of a pass resolves against, so one
+/// pass reads one tree. `None` when the root is gone, such as an unmounted volume: no read of the
+/// pass verifies a removal.
+fn open_root(root: &Path) -> Option<OwnedFd> {
+    rustix::fs::open(
+        root,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()
+}
+
+/// Treats errors consistent with syscall unavailability, unsupported resolve flags, or seccomp
+/// denial as a host-level refusal of `openat2`. These error codes can also arise from other causes.
+fn openat2_refused(errno: rustix::io::Errno) -> bool {
+    use rustix::io::Errno;
+    matches!(
+        errno,
+        Errno::NOSYS | Errno::PERM | Errno::INVAL | Errno::OPNOTSUPP
+    )
+}
+
+/// An `openat2` call relative to a directory descriptor, replaceable in tests by one that fails.
+type OpenBeneath<'a> = &'a dyn Fn(BorrowedFd<'_>, &str, OFlags) -> rustix::io::Result<OwnedFd>;
+
+/// Reads `path` beneath `root`.
+///
+/// The parent directory is opened first and the final component relative to it, both under
+/// [`RESOLVE`](crate::confined_path::RESOLVE). `Missing` means the final component is absent and
+/// its parent resolves beneath the root. A parent that is absent, a symlink, across a mount, or
+/// unopenable is `Unreadable`; a final-component symlink is `NotRegular`. On a host that refuses
+/// `openat2` itself, a top-level path opens with `openat` relative to the root descriptor and
+/// every nested path is `Unreadable`.
+fn read_beneath(root: BorrowedFd<'_>, path: &DocumentPath, open: OpenBeneath<'_>) -> DocumentRead {
+    let (parent, name) = match path.as_str().rsplit_once('/') {
+        Some((parent, name)) => (Some(parent), name),
+        None => (None, path.as_str()),
+    };
+    let opened_parent;
+    let dir = match parent {
+        None => root,
+        Some(parent) => match open(
+            root,
+            parent,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        ) {
+            Ok(fd) => {
+                opened_parent = fd;
+                opened_parent.as_fd()
             }
-        }
-        Err(_) => match std::fs::symlink_metadata(path) {
-            Ok(metadata) if !metadata.file_type().is_file() => DocumentRead::NotRegular,
-            Ok(metadata) if metadata.len() > MAX_PROJECT_DOC_BYTES => DocumentRead::Oversize,
-            _ => DocumentRead::Unreadable,
+            Err(_) => return DocumentRead::Unreadable,
         },
+    };
+    // A FIFO or device at a project-controlled path would block the open or the read; `NONBLOCK` keeps the open from waiting on a writer, and the descriptor's own type settles what was reached before any byte is read.
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let opened = match open(dir, name, flags) {
+        // The single-component fallback resolves one ordinary entry relative to the root descriptor, and `NOFOLLOW` rejects a final symlink; a mount at that entry is crossed.
+        Err(errno) if parent.is_none() && openat2_refused(errno) => {
+            rustix::fs::openat(dir, name, flags, Mode::empty())
+        }
+        opened => opened,
+    };
+    let file = match opened {
+        Ok(fd) => std::fs::File::from(fd),
+        Err(rustix::io::Errno::NOENT) => return DocumentRead::Missing,
+        Err(rustix::io::Errno::LOOP) => return DocumentRead::NotRegular,
+        Err(_) => return DocumentRead::Unreadable,
+    };
+    let Ok(metadata) = file.metadata() else {
+        return DocumentRead::Unreadable;
+    };
+    if !metadata.is_file() {
+        return DocumentRead::NotRegular;
+    }
+    if metadata.len() > MAX_PROJECT_DOC_BYTES {
+        return DocumentRead::Oversize;
+    }
+    let mut raw = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(0)
+            .saturating_add(1),
+    );
+    match file.take(MAX_PROJECT_DOC_BYTES + 1).read_to_end(&mut raw) {
+        Err(_) => DocumentRead::Unreadable,
+        Ok(_) if raw.len() as u64 > MAX_PROJECT_DOC_BYTES => DocumentRead::Oversize,
+        Ok(_) => String::from_utf8(raw).map_or(DocumentRead::NotUtf8, DocumentRead::Text),
     }
 }
 
@@ -148,13 +285,13 @@ pub(crate) fn clear_reads(sink: Option<&DocumentReads>) {
 
 pub(crate) fn take_reads(
     sink: Option<&DocumentReads>,
-) -> Option<Vec<(&'static str, DocumentRead)>> {
+) -> Option<Vec<(DocumentPath, DocumentRead)>> {
     sink.and_then(|sink| sink.lock().expect("document reads mutex").take())
 }
 
 pub(crate) fn restore_reads(
     sink: Option<&DocumentReads>,
-    reads: Option<Vec<(&'static str, DocumentRead)>>,
+    reads: Option<Vec<(DocumentPath, DocumentRead)>>,
 ) {
     if let (Some(sink), Some(reads)) = (sink, reads) {
         sink.lock()
@@ -168,14 +305,19 @@ pub(crate) fn restore_reads(
 /// Missing, non-regular, unreadable, and non-UTF-8 files are skipped, as are
 /// files over 256 KiB; the cap holds on the bytes read from one no-follow
 /// descriptor, so a concurrent swap or growth cannot bypass it.
-/// The hash covers canonical unescaped content in fixed filename order, while
+/// The hash covers canonical unescaped content in list order under each configured path, while
 /// `rendered_block` XML-escapes file names and content. This function does not
 /// panic for filesystem or decoding failures.
-pub fn read_project_docs_canonical(project_directory: &str) -> ProjectDocs {
-    let dir = Path::new(project_directory);
-    let reads: Vec<(&'static str, DocumentRead)> = PROJECT_DOC_FILES
-        .into_iter()
-        .map(|filename| (filename, read_document(&dir.join(filename))))
+pub fn read_project_docs_canonical(project_directory: &str, files: &[DocumentPath]) -> ProjectDocs {
+    let root = open_root(Path::new(project_directory));
+    let reads: Vec<(DocumentPath, DocumentRead)> = files
+        .iter()
+        .map(|path| {
+            let read = root.as_ref().map_or(DocumentRead::Unreadable, |root| {
+                read_beneath(root.as_fd(), path, &open_beneath)
+            });
+            (path.clone(), read)
+        })
         .collect();
     let texts: usize = reads
         .iter()
@@ -206,11 +348,11 @@ pub fn read_project_docs_canonical(project_directory: &str) -> ProjectDocs {
         }
         sections += 1;
         hash.update(b"file:");
-        hash.update(filename.as_bytes());
+        hash.update(filename.as_str().as_bytes());
         hash.update(b"\n");
         hash.update(canonical.as_bytes());
         rendered_block.push_str("<file name=\"");
-        escape_xml_into(filename, true, &mut rendered_block);
+        escape_xml_into(filename.as_str(), true, &mut rendered_block);
         rendered_block.push_str("\">\n");
         escape_xml_into(&canonical, false, &mut rendered_block);
         rendered_block.push_str("\n</file>");
@@ -235,7 +377,12 @@ mod tests {
     use serde::Deserialize;
     use std::io::Write;
 
+    fn doc(path: &str) -> DocumentPath {
+        admit_document_paths(&[path]).unwrap().remove(0)
+    }
+
     fn write_doc(dir: &Path, name: &str, body: &str) {
+        std::fs::create_dir_all(dir.join(name).parent().unwrap()).unwrap();
         let mut f = std::fs::File::create(dir.join(name)).unwrap();
         f.write_all(body.as_bytes()).unwrap();
     }
@@ -249,7 +396,10 @@ mod tests {
         std::os::unix::fs::symlink(&secret, dir.path().join("ARCHITECTURE.md")).unwrap();
         // A symlinked `ARCHITECTURE.md` is skipped; a regular `STRUCTURE.md` is included only when it is no larger than `MAX_PROJECT_DOC_BYTES` and can be read as UTF-8.
         write_doc(dir.path(), "STRUCTURE.md", "real struct");
-        let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
+        let docs = read_project_docs_canonical(
+            dir.path().to_str().unwrap(),
+            default_document_paths_for_test(),
+        );
         #[cfg(unix)]
         {
             assert!(
@@ -272,7 +422,10 @@ mod tests {
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(MAX_PROJECT_DOC_BYTES + 1).unwrap();
         drop(file);
-        assert_eq!(read_document(&path), DocumentRead::Oversize);
+        assert_eq!(
+            read_document(dir.path(), &doc("ARCHITECTURE.md")),
+            DocumentRead::Oversize
+        );
 
         let fifo = dir.path().join("STRUCTURE.md");
         rustix::fs::mkfifoat(
@@ -282,7 +435,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_document(&fifo),
+            read_document(dir.path(), &doc("STRUCTURE.md")),
             DocumentRead::NotRegular,
             "a FIFO is refused without blocking on a writer"
         );
@@ -304,11 +457,11 @@ mod tests {
     fn a_file_is_missing_only_from_a_directory_that_exists() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            read_document(&dir.path().join("ARCHITECTURE.md")),
+            read_document(dir.path(), &doc("ARCHITECTURE.md")),
             DocumentRead::Missing
         );
         assert_eq!(
-            read_document(&dir.path().join("gone").join("ARCHITECTURE.md")),
+            read_document(&dir.path().join("gone"), &doc("ARCHITECTURE.md")),
             DocumentRead::Unreadable,
             "a vanished root verifies no removal"
         );
@@ -320,7 +473,10 @@ mod tests {
         let big = "x".repeat((MAX_PROJECT_DOC_BYTES + 1) as usize);
         write_doc(dir.path(), "ARCHITECTURE.md", &big);
         write_doc(dir.path(), "STRUCTURE.md", "small");
-        let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
+        let docs = read_project_docs_canonical(
+            dir.path().to_str().unwrap(),
+            default_document_paths_for_test(),
+        );
         assert!(!docs.rendered_block.contains(&big));
         assert!(docs.rendered_block.contains("small"));
     }
@@ -407,7 +563,7 @@ mod tests {
                     files.push((name, body.as_str()));
                 }
             }
-            let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
+            let docs = read_project_docs_canonical(dir.path().to_str().unwrap(), default_document_paths_for_test());
             let (block, hash) = reference_docs(&files);
             proptest::prop_assert_eq!(docs.rendered_block, block);
             proptest::prop_assert_eq!(docs.canonical_hash, hash);
@@ -416,6 +572,9 @@ mod tests {
 
     #[derive(Deserialize)]
     struct DocCase {
+        /// The configured list; a case without one reads the default.
+        #[serde(default)]
+        paths: Option<Vec<String>>,
         files: Vec<(String, String)>, // (filename, raw body)
         rendered_block: String,
         canonical_hash: String,
@@ -435,7 +594,13 @@ mod tests {
             for (name, body) in &case.files {
                 write_doc(dir.path(), name, body);
             }
-            let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
+            let configured = case.paths.as_ref().map(|paths| {
+                admit_document_paths(&paths.iter().map(String::as_str).collect::<Vec<_>>()).unwrap()
+            });
+            let files = configured
+                .as_deref()
+                .unwrap_or(default_document_paths_for_test());
+            let docs = read_project_docs_canonical(dir.path().to_str().unwrap(), files);
             assert_eq!(
                 docs.rendered_block, case.rendered_block,
                 "render mismatch case {n}"
@@ -445,5 +610,158 @@ mod tests {
                 "hash mismatch case {n}"
             );
         }
+    }
+
+    /// Every class the admission rule refuses, each in the first position the rule reaches it.
+    #[test]
+    fn admission_names_the_first_refused_entry() {
+        let long = "a".repeat(513);
+        let deep = vec!["d"; 17].join("/");
+        let nine: Vec<String> = (0..9).map(|index| format!("d{index}.md")).collect();
+        let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
+        for (entries, index) in [
+            (vec!["../x.md"], 0),
+            (vec!["/abs.md"], 0),
+            (vec!["a//b.md"], 0),
+            (vec!["a/./b.md"], 0),
+            (vec![".git/HEAD"], 0),
+            (vec![".GIT/HEAD"], 0),
+            (vec!["a/.Eidnara/x"], 0),
+            (vec!["src/.git"], 0),
+            (vec![".eidnara/x"], 0),
+            (vec!["a\0b"], 0),
+            (vec!["docs/a\tb.md"], 0),
+            (vec!["a\u{7f}.md"], 0),
+            (vec!["a\u{85}.md"], 0),
+            (vec!["{env:HOME}/x.md"], 0),
+            (vec!["docs/{file:x}"], 0),
+            (vec![""], 0),
+            (vec![long.as_str()], 0),
+            (vec![deep.as_str()], 0),
+            (vec!["A.md", "A.md"], 1),
+            (nine.clone(), 8),
+        ] {
+            assert_eq!(admit_document_paths(&entries), Err(index), "{entries:?}");
+        }
+        let sixteen = vec!["d"; 16].join("/");
+        let admitted =
+            admit_document_paths(&["docs/ARCHITECTURE.md", "A.md", "a.md", &sixteen]).unwrap();
+        assert_eq!(admitted[0].as_str(), "docs/ARCHITECTURE.md");
+        assert_eq!(
+            admitted.len(),
+            4,
+            "byte-distinct names are distinct entries"
+        );
+        assert_eq!(admit_document_paths(&nine[..8]).unwrap().len(), 8);
+        assert_eq!(admit_document_paths(&[]).unwrap(), Vec::new());
+        assert_eq!(admit_document_paths(&[&"a".repeat(512)]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn every_admitted_path_is_a_kernel_identity_value() {
+        let candidates = [
+            "a".repeat(512),
+            "a".repeat(513),
+            "a".repeat(1024),
+            "docs/a\tb.md".to_owned(),
+            "a\nb.md".to_owned(),
+            "a\u{7f}.md".to_owned(),
+            "a\u{85}.md".to_owned(),
+            "docs/\u{e9}t\u{e9}.md".to_owned(),
+        ];
+        for candidate in &candidates {
+            if admit_document_paths(&[candidate]).is_ok() {
+                assert!(
+                    kernel::source_identity::well_formed_value(candidate),
+                    "admitted {candidate:?} is not a Kernel identity value"
+                );
+            }
+        }
+        assert!(admit_document_paths(&["docs/\u{e9}t\u{e9}.md"]).is_ok());
+    }
+
+    /// A symlinked or absent parent, or any path through one, is unreadable; a final-component
+    /// symlink is not a regular file; a missing file in a present nested parent is missing.
+    #[cfg(unix)]
+    #[test]
+    fn nested_reads_resolve_beneath_the_root() {
+        let outside = tempfile::tempdir().unwrap();
+        write_doc(outside.path(), "A.md", "OUTSIDE");
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("docs")).unwrap();
+        assert_eq!(
+            read_document(dir.path(), &doc("docs/A.md")),
+            DocumentRead::Unreadable
+        );
+        let docs = read_project_docs_canonical(
+            dir.path().to_str().unwrap(),
+            &admit_document_paths(&["docs/A.md"]).unwrap(),
+        );
+        assert!(docs.rendered_block.is_empty(), "{}", docs.rendered_block);
+        assert_eq!(
+            read_document(dir.path(), &doc("absent/A.md")),
+            DocumentRead::Unreadable,
+            "an absent parent verifies no removal"
+        );
+        write_doc(dir.path(), "real/A.md", "inside");
+        assert_eq!(
+            read_document(dir.path(), &doc("real/A.md")),
+            DocumentRead::Text("inside".to_owned())
+        );
+        assert_eq!(
+            read_document(dir.path(), &doc("real/B.md")),
+            DocumentRead::Missing
+        );
+        std::os::unix::fs::symlink(outside.path().join("A.md"), dir.path().join("real/link.md"))
+            .unwrap();
+        assert_eq!(
+            read_document(dir.path(), &doc("real/link.md")),
+            DocumentRead::NotRegular
+        );
+        std::os::unix::fs::symlink(
+            outside.path().join("A.md"),
+            dir.path().join("ARCHITECTURE.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            read_document(dir.path(), &doc("ARCHITECTURE.md")),
+            DocumentRead::NotRegular
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_without_openat2_reads_top_level_documents_and_refuses_nested_ones() {
+        let outside = tempfile::tempdir().unwrap();
+        write_doc(outside.path(), "A.md", "OUTSIDE");
+        let dir = tempfile::tempdir().unwrap();
+        write_doc(dir.path(), "ARCHITECTURE.md", "text");
+        write_doc(dir.path(), "docs/A.md", "text");
+        std::os::unix::fs::symlink(outside.path().join("A.md"), dir.path().join("LINK.md"))
+            .unwrap();
+        let root = open_root(dir.path()).unwrap();
+        for errno in [
+            rustix::io::Errno::NOSYS,
+            rustix::io::Errno::PERM,
+            rustix::io::Errno::INVAL,
+            rustix::io::Errno::OPNOTSUPP,
+        ] {
+            let read = |path: &str| read_beneath(root.as_fd(), &doc(path), &|_, _, _| Err(errno));
+            assert_eq!(
+                read("ARCHITECTURE.md"),
+                DocumentRead::Text("text".to_owned()),
+                "{errno:?}"
+            );
+            assert_eq!(read("STRUCTURE.md"), DocumentRead::Missing, "{errno:?}");
+            assert_eq!(read("LINK.md"), DocumentRead::NotRegular, "{errno:?}");
+            assert_eq!(read("docs/A.md"), DocumentRead::Unreadable, "{errno:?}");
+        }
+        assert_eq!(
+            read_beneath(root.as_fd(), &doc("ARCHITECTURE.md"), &|_, _, _| Err(
+                rustix::io::Errno::XDEV
+            )),
+            DocumentRead::Unreadable,
+            "a refusal of the entry itself takes no fallback"
+        );
     }
 }

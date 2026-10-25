@@ -90,7 +90,7 @@ revisions. Three cited files moved:
 
 One claim changed: `settled` (`corpus_replay.rs:263-286`) now maps only
 `IdentityReused` to `identity_conflict`; a permanent descriptor refusal is an
-unnamed outcome, as `classify` (`source_capture.rs:1239-1241`) already counted
+unnamed outcome, as `classify` (`source_capture.rs:1247-1249`) already counted
 it. [`loss-conditions.md`](loss-conditions.md#loss-condition-enumeration)
 states the HEAD mapping. Reachability changes: the gate record and the literal
 classification record are `test-only`; their subjects are a CI step and an
@@ -113,9 +113,9 @@ U7 ([#1112](https://github.com/ahrav/eidnara/issues/1112)) landed on this
 branch after U6. Status change: il-repository-id-equals-project-id-at-head is
 `invalidated`. `plan_document` writes the derived repository identity into
 `repository_id` (`crates/daemon/src/repository_identity.rs:62`, used at
-`source_capture.rs:1092`), with the project digest only as the fallback, and a
+`source_capture.rs:1100`), with the project digest only as the fallback, and a
 pass retires a live row under another `repository_id` before it publishes
-(`source_capture.rs:1477`, retired at `:943`); the record's
+(`source_capture.rs:1485`, retired at `:943`); the record's
 [evidence file](evidence/il-repository-id-equals-project-id-at-head.md)
 records the re-read and the U7 checks that succeed it. No other record changed
 status.

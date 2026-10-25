@@ -56,32 +56,32 @@ evidence, not proof.
 - `default-production`: runs under `DaemonConfig::default()`. Every transform
   request projects its window, so wire flattening (`wire.rs:540`) runs on the
   default path, and the m0 composer reads project documents with
-  `inject_docs: true` (`crates/daemon/src/config.rs:162`; the additive-only
-  composer reads them at `crates/daemon/src/transform.rs:2818-2819`).
+  `inject_docs: true` (`crates/daemon/src/config.rs:164`; the additive-only
+  composer reads them at `crates/daemon/src/transform.rs:2820-2821`).
   Selection, reduced-call rendering, and to-do injection do not run under the
-  default: `model_chain` defaults empty (`config.rs:147`), so `eidnara_folds()`
-  is false (`config.rs:187-191`), and `apply_once` hands the request to
-  `apply_additive_only` (`transform.rs:3350-3351`), which projects the window
+  default: `model_chain` defaults empty (`config.rs:149`), so `eidnara_folds()`
+  is false (`config.rs:190-194`), and `apply_once` hands the request to
+  `apply_additive_only` (`transform.rs:3352-3353`), which projects the window
   and composes m0 without selecting or injecting. The one request that passes
   that gate with folds off, a switched-lineage subagent, returns a passthrough
-  (`transform.rs:3364-3370`).
+  (`transform.rs:3366-3372`).
 - `explicit-config-only`: the fold path runs only when `eidnara_folds()`
   holds: an admitted configuration with `compaction_enabled` (default true,
-  `config.rs:149`) and a non-empty `model_chain`. On that path selection is
-  called from `transform.rs:4133`, injection from `transform.rs:4067` and
-  `:4451`, and reduced calls render from `transform.rs:5196` through
-  `transform.rs:11890`. Class-driven supersession (edit markers, the
+  `config.rs:151`) and a non-empty `model_chain`. On that path selection is
+  called from `transform.rs:4135`, injection from `transform.rs:4069` and
+  `:4453`, and reduced calls render from `transform.rs:5201` through
+  `transform.rs:11895`. Class-driven supersession (edit markers, the
   `todowrite` keep-one, zero-value drops) also needs `smart_drops`, which
-  defaults false (`config.rs:165`) and reaches selection unchanged
-  (`crates/daemon/src/lib.rs:9583`, `transform.rs:4162-4163`), plus an
+  defaults false (`config.rs:168`) and reaches selection unchanged
+  (`crates/daemon/src/lib.rs:9585`, `transform.rs:4164-4165`), plus an
   emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`,
   `:980`). Capture runs only when `source_capture_enabled` is
-  set (`config.rs:152` defaults it false; `sc.rs:291-302` gates on it). The
+  set (`config.rs:154` defaults it false; `sc.rs:291-302` gates on it). The
   summarizer `TC:` line runs only on the history-summarizer path, which needs a
-  non-empty model chain: `model_chain` defaults empty (`config.rs:147`),
-  `eidnara_folds` requires it (`config.rs:187-191`),
+  non-empty model chain: `model_chain` defaults empty (`config.rs:149`),
+  `eidnara_folds` requires it (`config.rs:190-194`),
   `prepare_history_summarizer_with` returns before the trigger estimate when
-  `eidnara_folds` is false (`crates/daemon/src/lib.rs:9814`), and the firing
+  `eidnara_folds` is false (`crates/daemon/src/lib.rs:9815`), and the firing
   assembler returns `NoModels` (`history_summarizer_chunk.rs:860-864`).
 - `test-only`: the subject is a CI step or an authoring-time artifact, not a
   daemon code path: the literal gate (`scripts/forbid-tool-literals.sh`, run
@@ -100,7 +100,7 @@ evidence, not proof.
 | [il-path-arg-key-order-first-match](#il-path-arg-key-order-first-match) | A | safety | default-production | always | partial | active |
 | [il-repository-id-equals-project-id-at-head](#il-repository-id-equals-project-id-at-head) | A | safety | explicit-config-only | always | partial | invalidated |
 | [il-tool-name-matching-differs-across-consumers](#il-tool-name-matching-differs-across-consumers) | A | safety | explicit-config-only | always | yes | active |
-| [il-doc-read-nofollow-final-component-flat-list](#il-doc-read-nofollow-final-component-flat-list) | A | safety | default-production | always | partial | active |
+| [il-doc-read-nofollow-final-component-flat-list](#il-doc-read-nofollow-final-component-flat-list) | A | safety | default-production | always | not yet | invalidated |
 | [il-reduced-tool-call-carries-extracted-path](#il-reduced-tool-call-carries-extracted-path) | A (queued) | safety | explicit-config-only | always | not yet | active |
 | [il-synthetic-todowrite-round-trips-under-one-name](#il-synthetic-todowrite-round-trips-under-one-name) | A (queued) | safety | explicit-config-only | always | partial | active |
 | [il-tool-summary-description-precedes-key-arg](#il-tool-summary-description-precedes-key-arg) | A (queued) | safety | explicit-config-only | always | partial | active |
@@ -140,12 +140,12 @@ Open questions: None.
 ### il-adapter-refusal-is-per-message
 
 Type: safety
-Reachability: explicit-config-only - `opencode_units_within` and `pi_units_within` have one production caller, `CaptureJob::units` (`sc.rs:1158-1188`), behind `consents` (`sc.rs:291-302`).
+Reachability: explicit-config-only - `opencode_units_within` and `pi_units_within` have one production caller, `CaptureJob::units` (`sc.rs:1166-1196`), behind `consents` (`sc.rs:291-302`).
 Status: active
 Exercised: partial - `hs-tests:445` (Pi tool result with an `image` item refuses as `UnsupportedShape("tool result item")`), `:782`, `:795`, `:1130`; `sc-tests:820`, `:1316`, `:1319` count refused records; `replay:80` `every_frozen_session_reconciles_with_no_unclassified_loss` replays the frozen Pi session's image-bearing tool result, asserts the adapter refused it, and asserts the reader classifies it `non_text_item`; `hs-tests:681-686` gives an OpenCode message whose text parts (`hs-tests:388`, `:393`) sit beside a settled tool part with an object `state.output` and asserts the whole record refuses as `UnsupportedShape("tool output")`; `hs-tests:757-762` gives a Pi `toolResult` whose text item (`TOOL_BYTES`, `hs-tests:433`) is followed by an `image` item and asserts the whole record refuses as `UnsupportedShape("tool result item")`. No capture-pass test counts either shape in `adapter_refused`; the frozen Pi session's image-bearing result (`replay:80`, entry `e0041`, a text item then an `image` item) replays through a capture pass, but the independent reader classifies that whole record as a `non_text_item` non-unit (`crates/daemon/src/source_corpus.rs:720-729`), so the pass expects no unit from it and its refusal reconciles as no loss rather than as `adapter_refused`.
 Guarantee: An adapter decides a whole native record at once: any refusal arm reached while reading a record returns `Err(AdapterRefusal)` and the record yields zero units, including units already built from earlier parts, and the pass counts that record once in `adapter_refused`.
-Check: `always` - for every record the adapter returns `Ok(Some(units))`, `Ok(None)` (budget stop through `Kept::keep`, `hs.rs:321`, `:354`, `:435`, `:443`, `:454`), or `Err(_)` with no unit; the `?` arms at `hs.rs:313`, `:327`, `:340`, `:343`, `:351`, `:424`, `:431`, `:433`, `:452` return before `kept.units` is read, and `sc.rs:1180` counts each `Err` once, added at `:1183-1186`. `always` because each call is a pure function of one record.
-Fault/timing angle: shape-driven. A budget stop (`Ok(None)`) discards that record's earlier units and ends the pass; refusals seen earlier in the stopped pass are still counted (`sc.rs:1174-1186`).
+Check: `always` - for every record the adapter returns `Ok(Some(units))`, `Ok(None)` (budget stop through `Kept::keep`, `hs.rs:321`, `:354`, `:435`, `:443`, `:454`), or `Err(_)` with no unit; the `?` arms at `hs.rs:313`, `:327`, `:340`, `:343`, `:351`, `:424`, `:431`, `:433`, `:452` return before `kept.units` is read, and `sc.rs:1188` counts each `Err` once, added at `:1191-1194`. `always` because each call is a pure function of one record.
+Fault/timing angle: shape-driven. A budget stop (`Ok(None)`) discards that record's earlier units and ends the pass; refusals seen earlier in the stopped pass are still counted (`sc.rs:1182-1194`).
 Required faults and enabling state: a Pi `toolResult` with a text item and a non-text item; an OpenCode message with a text part and a settled tool part whose `state.output` is not a string; an OpenCode text part whose `text` is not a string beside other text parts.
 Confidence: high - [evidence](evidence/il-adapter-refusal-is-per-message.md). Code read in full at `41d889ea4`; both refusal shapes matched to tests.
 Existing check: `hs-tests:445` (with the OpenCode `tool output` arm at `:681-686` and the Pi text-then-image arm at `:757-762`), `:782`, `:795`, `:1130`; `sc-tests:820`, `:1316`; `replay:80`; all unaudited.
@@ -218,15 +218,15 @@ Open questions:
 ### il-repository-id-equals-project-id-at-head
 
 Type: safety
-Reachability: explicit-config-only - `plan_document` (`sc.rs:1070`) runs inside `capture_documents` (`sc.rs:904`) under consent with `inject_docs` set.
-Status: invalidated - U7 ([#1112](https://github.com/ahrav/eidnara/issues/1112)) derives `repository_id` from the repository (`crates/daemon/src/repository_identity.rs:62`, used at `sc.rs:1092`); the project digest remains the value only as the fallback. Kept so that change has a named predecessor.
-Exercised: partial - the document tests at `sc-tests:1964`, `:2137`, `:2202`, and `:2276` exercise lineage, retirement, renames, and project isolation through `live_document`, which selects rows by `relative_path` alone (`sc-tests:1903-1909`); the `project_id` and `repository_id` values at `sc-tests:2164-2167` build another producer's fixture. No test asserts the equality as such; the U7 successors under `Existing check` read the `repository_id` capture writes (`sc-tests:2721`) and hold two worktrees of one repository.
+Reachability: explicit-config-only - `plan_document` (`sc.rs:1078`) runs inside `capture_documents` (`sc.rs:904`) under consent with `inject_docs` set.
+Status: invalidated - U7 ([#1112](https://github.com/ahrav/eidnara/issues/1112)) derives `repository_id` from the repository (`crates/daemon/src/repository_identity.rs:62`, used at `sc.rs:1100`); the project digest remains the value only as the fallback. Kept so that change has a named predecessor.
+Exercised: partial - the document tests at `sc-tests:1964`, `:2144`, `:2209`, and `:2283` exercise lineage, retirement, renames, and project isolation through `live_document`, which selects rows by `relative_path` alone (`sc-tests:1903-1909`); the `project_id` and `repository_id` values at `sc-tests:2171-2174` build another producer's fixture. No test asserts the equality as such; the U7 successors under `Existing check` read the `repository_id` capture writes (`sc-tests:2728`) and hold two worktrees of one repository.
 Guarantee: Before U7, every `RepositoryDocuments` unit the capture path built carried the identity `[("project_id", P), ("repository_id", P), ("relative_path", name)]` with `P` the bound project digest and `name` a `PROJECT_DOC_FILES` entry, and the live-row lookup, the unchanged check, the head read, and retirement all key on that tuple.
-Check: `always` - before U7 the identity vector at `sc.rs:1090-1094` held `project_id` twice; it now holds the derived value; `sc.rs:1095` `document_lineage(&identity)`; `sc.rs:1097-1099` filters the live row to `CAPTURE_DOMAIN_ID`; `sc.rs:961` retires by the live row's `object_id` through `retire_document` (`sc.rs:1125`). `always` because the construction is unconditional.
+Check: `always` - before U7 the identity vector at `sc.rs:1098-1102` held `project_id` twice; it now holds the derived value; `sc.rs:1103` `document_lineage(&identity)`; `sc.rs:1105-1107` filters the live row to `CAPTURE_DOMAIN_ID`; `sc.rs:961` retires by the live row's `object_id` through `retire_document` (`sc.rs:1133`). `always` because the construction is unconditional.
 Fault/timing angle: none at HEAD. Once `repository_id` is derived, the value depends on repository history, which is why U7 adds a retire-by-`relative_path` step.
 Required faults and enabling state: two worktrees or clones holding the same `ARCHITECTURE.md`; a legacy row keyed `(P, P, path)` present when the first derived-identity pass runs.
 Confidence: high - [evidence](evidence/il-repository-id-equals-project-id-at-head.md). Code read at `41d889ea4` and re-read after U7.
-Existing check: the U7 successors `sc-tests:2736` (AE2 and restart convergence), `sc-tests:2777` (a crash between retire and publish), `sc-tests:2811` (AE3, two worktrees), `sc-tests:2860` (a failed derivation), `sc-tests:2935` (a shallow checkout), and `crates/daemon/src/repository_identity_tests.rs`; `crates/kernel/tests/eval_identity.rs` pins the encoding, not the value; unaudited.
+Existing check: the U7 successors `sc-tests:2743` (AE2 and restart convergence), `sc-tests:2784` (a crash between retire and publish), `sc-tests:2818` (AE3, two worktrees), `sc-tests:2867` (a failed derivation), `sc-tests:2942` (a shallow checkout), and `crates/daemon/src/repository_identity_tests.rs`; `crates/kernel/tests/eval_identity.rs` pins the encoding, not the value; unaudited.
 Impact: worktrees and clones split every document lineage. After U7 the obligations are the `ri-` records of #1105 Part B S3.
 Open questions:
 - A history walk that exceeds its cap on one pass and not the next would flip the derived identity. U7 memoizes the past-the-cap fallback for the incarnation, so a flip waits for a restart; the cap is `MAX_ROOT_WALK_COMMITS` (2^18, OQ1).
@@ -249,22 +249,22 @@ Open questions: None. The source asked which rule `classify` applies; U4 keeps t
 ### il-doc-read-nofollow-final-component-flat-list
 
 Type: safety
-Reachability: default-production - `read_project_docs_canonical` (`pd.rs:174`) runs on every m0 composition when `inject_docs` holds (default true, `config.rs:162`), independent of capture.
-Status: active - U8 ([#1113](https://github.com/ahrav/eidnara/issues/1113)) revises it by introducing configured nested names and an `openat2` beneath-root resolver.
-Exercised: partial - `pd.rs:244` (final-component symlink), `:267` (a sparse file already past the cap, and a FIFO refused without blocking), `:304` (`Missing` versus `Unreadable`), `:318` (oversize); `sc-tests:2315` `unreadable_documents_are_counted_and_retire_nothing`. No test grows a file past the cap during the read, which the bound on bytes read covers by construction (`config.rs:726-732`). No test opens a document through a symlinked parent because no name has a parent below the root.
-Guarantee: Each document is opened at `project_root.join(name)` for the fixed names with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, validated as a regular file on the opened descriptor, read to at most 256 KiB, and decoded as UTF-8; the names hold no separator, so the only resolvable symlink on the path is the project root itself.
-Check: `always` - `pd.rs:9` list; `pd.rs:178` `dir.join(filename)`; `config.rs:703-719` open flags and `is_file` on the descriptor; `pd.rs:113-133` classification. `always` because the read is unconditional per name.
-Fault/timing angle: a parent-directory swap before the open is outside `NOFOLLOW`, and at HEAD the only parent is the root. `read_document` classifies a `NotFound` open as `Missing` when `std::fs::metadata(parent)` is a directory (`pd.rs:117-122`), and `metadata` follows symlinks; under nested names a missing target under a symlinked parent would classify `Missing` and `plan_document` would retire the live row (`sc.rs:1100-1106`). U8's resolver must cover the classification path as well as the open.
-Required faults and enabling state: a symlinked final component (covered); a symlinked intermediate directory with and without a target file (unreachable at HEAD; U8 scenarios); a kernel without `openat2`.
-Confidence: high - [evidence](evidence/il-doc-read-nofollow-final-component-flat-list.md). Code read; flags verified at `41d889ea4`.
-Existing check: `pd.rs:244`, `:267`, `:304`, `:318`, `:387`, `:398`, `:429`; `sc-tests:2315`; unaudited.
-Impact: without U8's resolver, nested names would let a repository-controlled symlink route the daemon's read and capture outside the root. The hash input stays `file:{name}\n{canonical}` (`pd.rs:208-211`), so the default list hashes identically.
-Open questions: None (the classification-path finding is carried by OQ15 and U8).
+Reachability: default-production - `read_project_docs_canonical` (`pd.rs:311`) runs on every m0 composition when `inject_docs` holds (default true, `config.rs:164`), independent of capture.
+Status: invalidated - U8 ([#1113](https://github.com/ahrav/eidnara/issues/1113)) replaces the fixed list with the user-tier `project_docs.files` list and the final-component `NOFOLLOW` open with two `openat2` calls beneath the root (`pd.rs:177-270`); a host that refuses `openat2` itself reads a top-level path with a no-follow `openat` relative to the root descriptor (`pd.rs:238-244`). Kept so the `pd-` obligations of #1105 Part B S4 have a named predecessor.
+Exercised: not yet - the fixed list and the `NOFOLLOW` open no longer exist; the successor checks are listed under Existing check.
+Guarantee: Before U8, each document was opened at `project_root.join(name)` for the two fixed names with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, validated as a regular file on the opened descriptor, read to at most 256 KiB, and decoded as UTF-8; the names held no separator, so the only resolvable symlink on the path was the project root itself.
+Check: `always` - at `41d889ea4`, the fixed list, `dir.join(filename)`, the open flags, and the classification in `project_docs.rs` and `config.rs`. `always` because the read was unconditional per name.
+Fault/timing angle: before U8, `read_document` classified a `NotFound` open as `Missing` when the parent's followed metadata was a directory. U8 verifies `Missing` against a parent opened beneath the root as a directory (`pd.rs:224-234`, `:247`), so an absent or symlinked parent is `Unreadable` and retires nothing.
+Required faults and enabling state: a symlinked final component; a symlinked intermediate directory with and without a target file; a kernel without `openat2`.
+Confidence: high - [evidence](evidence/il-doc-read-nofollow-final-component-flat-list.md). Code read at `41d889ea4` and re-read after U8.
+Existing check: the U8 successors `pd.rs:617` (admission), `pd.rs:661` (every admitted path is a Kernel identity value), `crates/daemon/src/confined_path.rs:60` (the shared component rule) and `:92` (the resolve flags), `pd.rs:687` (nested reads beneath the root), `pd.rs:734` (no `openat2`: top-level paths read through the fallback, nested paths are `Unreadable`), `pd.rs:588` (goldens, with a nested case), `pd.rs:391` (final-component symlink), `config.rs:2396` and `:2446` (the key), `config.rs:3706` (the parity fixture), `sc-tests:3036`, `:3099`, and `:3124` (capture over a configured list, beside a path of the Kernel's maximum identity length, and through a symlinked or absent parent); unaudited.
+Impact: before U8, a nested name would have let a repository-controlled symlink route the daemon's read and capture outside the root. The hash input stays `file:{name}\n{canonical}` (`pd.rs:350-353`), so the default list hashes identically.
+Open questions: None.
 
 ### il-reduced-tool-call-carries-extracted-path
 
 Type: safety
-Reachability: explicit-config-only - `flatten_block` (`wire.rs:520`) stores `extract_file_path(input)` for every `ToolCall` on every transform (`wire.rs:540`, field `wire.rs:568`), but a reduced call renders only on the fold path: `apply_once` builds the output (`transform.rs:5196`), which renders a reduced call from that field (`transform.rs:11890-11896`) through `reduced_block` (`wire.rs:445`); see Reachability classes. The source labelled this record default-production.
+Reachability: explicit-config-only - `flatten_block` (`wire.rs:520`) stores `extract_file_path(input)` for every `ToolCall` on every transform (`wire.rs:540`, field `wire.rs:568`), but a reduced call renders only on the fold path: `apply_once` builds the output (`transform.rs:5201`), which renders a reduced call from that field (`transform.rs:11895-11901`) through `reduced_block` (`wire.rs:445`); see Reachability classes. The source labelled this record default-production.
 Status: active
 Exercised: not yet - no test asserts a reduced `ToolCall` input's `path` against `extract_file_path` of the original; `wire.rs:1260` reduces a result with no path.
 Guarantee: The `path` key of every reduced `ToolCall` input equals `path_arg` of the original input, so the path key list is byte-visible compaction output.
@@ -279,15 +279,15 @@ Open questions: None.
 ### il-synthetic-todowrite-round-trips-under-one-name
 
 Type: safety
-Reachability: explicit-config-only - injection emits the synthetic call and result (`injection.rs:155-180`) and reads to-do state back (`injection.rs:429-457`) only on the fold path (`transform.rs:4067`, `:4451`; see Reachability classes). The source labelled this record default-production.
+Reachability: explicit-config-only - injection emits the synthetic call and result (`injection.rs:155-180`) and reads to-do state back (`injection.rs:429-457`) only on the fold path (`transform.rs:4069`, `:4453`; see Reachability classes). The source labelled this record default-production.
 Status: active
-Exercised: partial - `tv-tests:17` asserts `classify("todowrite") == TodoWrite` and `is_injected_todo_tool("todowrite")`; `injection.rs:553`, `:1047`, `:1052` assert the synthetic constants and names; `transform.rs:29645` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` replays the echoed synthetic pair beside a native `todowrite` call and asserts no duplicate tool-use id. No test asserts that keep-one and the read-back act on the native call alone when the echoed pair is present.
+Exercised: partial - `tv-tests:17` asserts `classify("todowrite") == TodoWrite` and `is_injected_todo_tool("todowrite")`; `injection.rs:553`, `:1047`, `:1052` assert the synthetic constants and names; `transform.rs:29651` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` replays the echoed synthetic pair beside a native `todowrite` call and asserts no duplicate tool-use id. No test asserts that keep-one and the read-back act on the native call alone when the echoed pair is present.
 Guarantee: Injection emits a synthetic call and result named `TODO_TOOL` (`injection.rs:158`, `:173`), reads to-do state back from calls `is_injected_todo_tool` accepts (`injection.rs:435`), and selection's keep-one rule counts calls `classify` names `TodoWrite` (`sel.rs:660-663`, `:693`); all three resolve `TODO_TOOL` (`tv.rs:26`).
 Check: `always` - `classify(TODO_TOOL) == ToolClass::TodoWrite` and `is_injected_todo_tool(TODO_TOOL)`. `always` because the constant is static and both queries are pure.
 Fault/timing angle: none.
-Required faults and enabling state: a fold-path window holding the echoed synthetic pair and one native `todowrite` call. Selection and the read-back never see the synthetic pair: ingress marks any message carrying a `synthetic_todo_` id synthetic (`transform.rs:2597-2615`), and `live` drops synthetic blocks (`transform.rs:3467-3471`) before `tail_for_selection` is built (`transform.rs:4063-4064`). The pair therefore exercises the id exclusion, and the native call exercises the shared name.
+Required faults and enabling state: a fold-path window holding the echoed synthetic pair and one native `todowrite` call. Selection and the read-back never see the synthetic pair: ingress marks any message carrying a `synthetic_todo_` id synthetic (`transform.rs:2599-2617`), and `live` drops synthetic blocks (`transform.rs:3469-3473`) before `tail_for_selection` is built (`transform.rs:4065-4066`). The pair therefore exercises the id exclusion, and the native call exercises the shared name.
 Confidence: high - [evidence](evidence/il-synthetic-todowrite-round-trips-under-one-name.md). The three uses read at `41d889ea4`; U4 replaced three spellings with one constant.
-Existing check: `tv-tests:17`; `injection.rs:553`, `:1047`, `:1052`; `transform.rs:29645`; `injection-golden.json`; unaudited.
+Existing check: `tv-tests:17`; `injection.rs:553`, `:1047`, `:1052`; `transform.rs:29651`; `injection-golden.json`; unaudited.
 Impact: the synthetic pair is excluded by id, so a divergent name would not make selection drop it. A divergence would emit the injected to-do state under a tool name that differs from the name the harness's own to-do calls carry, which is the name selection's keep-one and the read-back match.
 Open questions: None.
 
@@ -296,13 +296,13 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1254` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:251`, `:270`) at `history_summarizer_chunk.rs:1259` and `boundary.rs:1867`.
 Status: active
-Exercised: partial - `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:19639` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:19925-19930`, the input at `lib.rs:26289`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. No test gives one input both a description and a key argument, so the precedence between the first two arms is not asserted.
+Exercised: partial - `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:19641` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:19927-19932`, the input at `lib.rs:26292`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. No test gives one input both a description and a key argument, so the precedence between the first two arms is not asserted.
 Guarantee: A non-empty string `description` renders `TC: {description}`; otherwise `extract_key_arg` supplies the argument, cut to 60 scalar values plus `…` for a path-like key, and renders `TC: {name}({key_arg})`; otherwise `TC: {name}`; the result passes through `normalize_text`.
 Check: `always` - `history_summarizer_chunk.rs:1290-1302`. `always` because the function is pure.
 Fault/timing angle: none.
 Required faults and enabling state: inputs with a description and a path; with a 61-scalar path; with neither.
 Confidence: high - [evidence](evidence/il-tool-summary-description-precedes-key-arg.md). The source stated the description arm as `name(description)`; the code renders the description alone, and this record states the code.
-Existing check: `history_summarizer_chunk.rs:3251`, `:3312`; `lib.rs:19639`; `tv-tests:66`; the chunk golden; unaudited.
+Existing check: `history_summarizer_chunk.rs:3251`, `:3312`; `lib.rs:19641`; `tv-tests:66`; the chunk golden; unaudited.
 Impact: `display_arg` must reproduce the precedence and the marker byte for byte, or the chunk golden changes.
 Open questions: None.
 
@@ -311,13 +311,13 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only - batch ingest under consent; the block arises only after an operator purge.
 Status: invalidated - U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) refuses a blocked unit alone during screening (`hs.rs:1613-1619`). Kept so the `sc-readmit-` obligations have a named predecessor.
-Exercised: not yet - the behavior no longer exists for a block present at the screening read; the path it describes remains for a purge that commits after that read, which `sc-tests:2561` exercises.
-Guarantee: Before U6, a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1491-1493`), the pass counts `kernel_error` (`sc.rs:1517-1522`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:864-889`), so the batch is retried whole on each later pass while the block holds.
+Exercised: not yet - the behavior no longer exists for a block present at the screening read; the path it describes remains for a purge that commits after that read, which `sc-tests:2568` exercises.
+Guarantee: Before U6, a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1491-1493`), the pass counts `kernel_error` (`sc.rs:1525-1530`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:864-889`), so the batch is retried whole on each later pass while the block holds.
 Check: `always` - a batch holding one tombstoned or pending-unlink digest ends `kernel_error` with every keyed unit pending and nothing retained. `always` because the Kernel check runs on every new reference.
 Fault/timing angle: a purge committed before the pass; the block outlives the pending unlink because every pending unlink is written with a tombstone.
 Required faults and enabling state: an operator purge of a captured digest, then identical bytes under a new identity beside a sibling.
 Confidence: high - [evidence](evidence/il-readmission-block-ends-batch-unnamed-at-head.md). Traced at `41d889ea4`, whose pre-screen held no re-admission check, and re-read after U6.
-Existing check: the U6 successors `sc-tests:2514` (AE5, tombstone and pending unlink), `sc-tests:2561` (a purge between screening and the commit), `sc-tests:2607` (receipt replay precedence), `sc-tests:2631` (a reclaiming digest stays pending), `hs-tests:2555` (no admission slot), `hs-tests:2607` (a refused revision releases its lineage), `hs-tests:2664` (an evidence-receipt conflict precedes the pre-screen), and `crates/kernel/tests/cas_fault_injection.rs:589` (the preview query); unaudited.
+Existing check: the U6 successors `sc-tests:2521` (AE5, tombstone and pending unlink), `sc-tests:2568` (a purge between screening and the commit), `sc-tests:2614` (receipt replay precedence), `sc-tests:2638` (a reclaiming digest stays pending), `hs-tests:2555` (no admission slot), `hs-tests:2607` (a refused revision releases its lineage), `hs-tests:2664` (an evidence-receipt conflict precedes the pre-screen), and `crates/kernel/tests/cas_fault_injection.rs:589` (the preview query); unaudited.
 Impact: before U6, one purged digest stalled every unit of its batch on every pass. U6 replaces this with a terminal per-unit refusal; the #1104 document rows "Pending unlink (OQ20)" and "Tombstone after purge (OQ21)" become stale then (U10 handoff).
 Open questions: None.
 
@@ -357,7 +357,7 @@ Falsifier or legal witness: Falsifier: `classify("")` panics. Legal witness: `cl
 ### il-unknown-tool-never-dropped-deduped-or-edit-marked
 
 Type: safety
-Reachability: explicit-config-only - the tier lookup (`sel.rs:749-755`) runs for every arc on the fold path (`transform.rs:4133`), and `select_supersession` (`sel.rs:630`) runs there only with `smart_drops` set and an emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`, `:980`); see Reachability classes. The source labelled this record default-production.
+Reachability: explicit-config-only - the tier lookup (`sel.rs:749-755`) runs for every arc on the fold path (`transform.rs:4135`), and `select_supersession` (`sel.rs:630`) runs there only with `smart_drops` set and an emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`, `:980`); see Reachability classes. The source labelled this record default-production.
 Status: active
 Exercised: yes - `sel.rs:2828` `identical_calls_produce_no_dedup_decision_for_any_tool_name` runs two identical `mcp_foo` calls carrying `filePath` and `oldString` and asserts no decision, beside an `edit` positive control; `tv-tests:133` `an_unknown_tool_takes_every_default`.
 Guarantee: For an `Unknown` tool, selection never drops it as a zero-value meta tool, never deduplicates it, and never compresses it into an `edit_marker` by a class decision; its selection tier is 3 unless the name carries two `mcp_` prefixes over a tabled name, its display argument comes from the generic key list, and `exit_code` is `None`.
@@ -390,7 +390,7 @@ Falsifier or legal witness: Falsifier: the gate exits 1 on the post-U4 tree beca
 ### il-dedup-removal-leaves-goldens-byte-identical
 
 Type: safety
-Reachability: explicit-config-only - the removed selector ran inside selection, which runs only on the fold path (`transform.rs:4133`; see Reachability classes), and the goldens pin selection, summarizer chunking, and compression output. The source labelled this record default-production.
+Reachability: explicit-config-only - the removed selector ran inside selection, which runs only on the fold path (`transform.rs:4135`; see Reachability classes), and the goldens pin selection, summarizer chunking, and compression output. The source labelled this record default-production.
 Status: active
 Exercised: yes - `git diff a91dbc2b6 97afdaff1 -- crates/daemon/testdata` is empty, so U4 changed no golden; `crates/daemon/tests/selection_differential.rs:2248` `optimized_matches_frozen_reference_on_identical_calls` and the rest of the differential pass against a reference without dedup.
 Guarantee: Removing `DEDUP_SAFE_TOOLS`, `select_tool_dedup`, `dedup_name`, and the mirrored differential constants changed no byte of `selection-golden.json`, `differential-golden.json`, `history_summarizer-chunk-golden.json`, or `compression-fidelity.json`, because no tool either harness sends was in the dedup list.
@@ -434,7 +434,7 @@ Confidence: medium - [evidence](evidence/il-literal-classified-contract-or-vocab
 Existing check: none beyond the table; unaudited.
 Impact: an unclassified literal is moved into or out of the module by habit, and the gate's set drifts from the classification.
 Open questions:
-- These Eidnara-owned spellings are not defined once: `synthetic_todo_` (`injection.rs:20`, `codec/opencode.rs:1074`), the `eidnara_note` actions `read` and `dismiss` (`tv.rs:37`, `lib.rs:12854`, `:13171`, `:18606`, `crates/daemon/src/conditional_note_evaluation.rs:1905`), and the placeholder `tool` for a missing native tool name or call id (`codec/opencode.rs:1382`; `codec/pi.rs:458`, `:862`, `:878`, `:889`, `:1127`, `:1129`, `:1885`). Define each once and reference it, or accept the spellings? (needs human input: daemon owner)
+- These Eidnara-owned spellings are not defined once: `synthetic_todo_` (`injection.rs:20`, `codec/opencode.rs:1074`), the `eidnara_note` actions `read` and `dismiss` (`tv.rs:37`, `lib.rs:12855`, `:13172`, `:18608`, `crates/daemon/src/conditional_note_evaluation.rs:1905`), and the placeholder `tool` for a missing native tool name or call id (`codec/opencode.rs:1382`; `codec/pi.rs:458`, `:862`, `:878`, `:889`, `:1127`, `:1129`, `:1885`). Define each once and reference it, or accept the spellings? (needs human input: daemon owner)
 Falsifier or legal witness: Falsifier: `state.metadata.exit` recorded as contract. Legal witness: `info` contract, `filePath` vocabulary, `eidnara_note` Eidnara-owned.
 
 ### il-path-arg-harness-neutral

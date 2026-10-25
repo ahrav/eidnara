@@ -12,6 +12,7 @@ pub mod codec;
 mod commit_stream;
 pub(crate) mod conditional_note_evaluation;
 pub(crate) mod config;
+pub(crate) mod confined_path;
 pub mod context_capabilities;
 pub mod coverage;
 pub mod decay_render;
@@ -9566,6 +9567,7 @@ impl HandlerCore {
                 .unwrap_or(binding.history_budget_tokens),
             memory_enabled: binding.config.memory_enabled,
             inject_docs: binding.config.inject_docs,
+            project_doc_files: &binding.config.project_doc_files,
             document_reads: document_reads.as_deref(),
             temporal_awareness: binding.config.temporal_awareness,
             user_profile_budget_tokens: binding.config.user_profile_budget_tokens,
@@ -26224,6 +26226,7 @@ mod tests {
             memory_budget_tokens: 4_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,
+            project_doc_files: crate::project_docs::default_document_paths(),
             temporal_awareness: true,
             prompt_surface_guidance_override: None,
             smart_drops: false,
@@ -42727,6 +42730,7 @@ mod tests {
                 user_profile_budget_tokens: 4_000.0,
                 memory_enabled: true,
                 inject_docs: true,
+                project_doc_files: crate::project_docs::default_document_paths_for_test(),
                 document_reads: None,
                 temporal_awareness: true,
                 now_ms: now_ms(),

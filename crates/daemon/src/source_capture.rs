@@ -26,7 +26,7 @@ use crate::harness_sources::{
 };
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
-use crate::project_docs::DocumentRead;
+use crate::project_docs::{DocumentPath, DocumentRead};
 use crate::repository_identity::{
     DerivationFailure, MAX_ROOT_WALK_COMMITS, RepositoryIdentity, derive,
 };
@@ -337,7 +337,7 @@ pub(crate) struct CaptureHandoff {
 /// The document reads a capture holds until its documents batch takes them. A handoff or job dropped with reads still held dropped them before the batch, so the drop counts them as `documents_refused`; the reads wait for the next pass that composes the block.
 struct PendingDocuments {
     capture: Arc<SourceCapture>,
-    reads: Vec<(&'static str, DocumentRead)>,
+    reads: Vec<(DocumentPath, DocumentRead)>,
     /// The project's repository identity, derived before the commit gate so a slow walk holds no other capture or session deletion.
     identity: Option<Derivation>,
 }
@@ -346,7 +346,7 @@ struct PendingDocuments {
 type Derivation = Result<RepositoryIdentity, DerivationFailure>;
 
 impl PendingDocuments {
-    fn take(mut self) -> (Vec<(&'static str, DocumentRead)>, Option<Derivation>) {
+    fn take(mut self) -> (Vec<(DocumentPath, DocumentRead)>, Option<Derivation>) {
         (std::mem::take(&mut self.reads), self.identity.take())
     }
 }
@@ -1006,7 +1006,7 @@ impl CaptureJob {
         store: &KernelStore,
         incarnation: &str,
         repository_id: &str,
-        documents: Vec<(&'static str, DocumentRead)>,
+        documents: Vec<(DocumentPath, DocumentRead)>,
     ) -> Result<DocumentPlan, KernelError> {
         let project_id = self.session.project_id.as_str();
         let unswept: Vec<Option<String>> = {
@@ -1014,27 +1014,35 @@ impl CaptureJob {
             documents
                 .iter()
                 .map(|(path, _)| {
+                    let path = path.as_str();
                     let key = format!("{incarnation}\u{1f}{project_id}\u{1f}{path}");
                     (!swept.contains(&key)).then_some(key)
                 })
                 .collect()
         };
         let (_, plan) = store.preview(self.preview_deadline(), |preview| {
-            let (mut paths, mut swept) = (Vec::new(), Vec::new());
+            let (mut settled, mut swept) = (Vec::new(), Vec::new());
             let mut steps = Vec::with_capacity(documents.len());
             for ((path, read), key) in documents.into_iter().zip(unswept) {
-                let step = self.plan_document(preview, repository_id, path, read)?;
+                let step = self.plan_document(preview, repository_id, path.as_str(), read)?;
                 if let Some(key) = key.filter(|_| step.settles_lineage()) {
-                    paths.push(path);
+                    settled.push(path);
                     swept.push(key);
                 }
                 steps.push(step);
             }
             #[cfg(test)]
-            if !paths.is_empty() {
+            if !settled.is_empty() {
                 run_hook(&self.capture.before_stale_sweep);
             }
-            let stale = stale_documents(preview, &self.budget, project_id, repository_id, &paths)?;
+            let settled_paths: Vec<&str> = settled.iter().map(DocumentPath::as_str).collect();
+            let stale = stale_documents(
+                preview,
+                &self.budget,
+                project_id,
+                repository_id,
+                &settled_paths,
+            )?;
             Ok(DocumentPlan {
                 steps,
                 stale,
@@ -1071,7 +1079,7 @@ impl CaptureJob {
         &self,
         preview: &kernel::Preview<'_>,
         repository_id: &str,
-        path: &'static str,
+        path: &str,
         read: DocumentRead,
     ) -> Result<DocumentStep, KernelError> {
         let text = match read {

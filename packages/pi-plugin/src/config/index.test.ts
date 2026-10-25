@@ -818,3 +818,48 @@ describe("fold-authority parity fixture", () => {
         }
     });
 });
+
+describe("project-docs parity fixture", () => {
+    interface ProjectDocsRow {
+        name: string;
+        user: Record<string, unknown>;
+        project: Record<string, unknown>;
+        expected_files: string[];
+        expected_project_warning: boolean;
+    }
+    const DEFAULT_FILES = ["ARCHITECTURE.md", "STRUCTURE.md"];
+    const fixture = JSON.parse(
+        readFileSync(
+            join(
+                import.meta.dir,
+                "../../../opencode-plugin/src/config/__fixtures__/project-docs-parity.json",
+            ),
+            "utf-8",
+        ),
+    ) as { rows: ProjectDocsRow[] };
+
+    it("every row matches through the Pi loader", () => {
+        expect(fixture.rows.length).toBeGreaterThan(0);
+        for (const row of fixture.rows) {
+            const cwd = makeTempRoot("eidnara-pi-cwd-");
+            const home = makeTempRoot("eidnara-pi-home-");
+            withHome(home);
+            writeUserConfig(home, JSON.stringify(row.user));
+            writeProjectConfig(cwd, JSON.stringify(row.project));
+
+            const result = loadPiConfigDetailed({ cwd });
+
+            expect({
+                name: row.name,
+                files: result.config.project_docs?.files ?? DEFAULT_FILES,
+                warned: result.warnings.filter((warning) =>
+                    warning.includes("Ignoring project_docs from project config"),
+                ).length,
+            }).toEqual({
+                name: row.name,
+                files: row.expected_files,
+                warned: row.expected_project_warning ? 1 : 0,
+            });
+        }
+    });
+});

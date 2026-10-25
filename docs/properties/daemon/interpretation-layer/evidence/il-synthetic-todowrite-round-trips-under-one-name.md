@@ -17,13 +17,13 @@ counts one tool name through three spellings.
   keep-one at `crates/daemon/src/selection.rs:660-663` and the two-pass
   exemption at `selection.rs:693`.
 - Exclusion: ingress marks any message carrying a `synthetic_todo_` id
-  synthetic (`crates/daemon/src/transform.rs:2597-2615`), and `live` drops
-  synthetic blocks (`transform.rs:3467-3471`) before `tail_for_selection` is
-  built (`transform.rs:4063-4064`). Selection and the read-back read that
+  synthetic (`crates/daemon/src/transform.rs:2599-2617`), and `live` drops
+  synthetic blocks (`transform.rs:3469-3473`) before `tail_for_selection` is
+  built (`transform.rs:4065-4066`). Selection and the read-back read that
   tail, so neither sees the echoed synthetic pair.
 - Tests: `crates/daemon/src/tool_vocabulary_tests.rs:17` (the `todowrite`
   row); `injection.rs:553`, `:1047`, `:1052`;
-  `crates/daemon/src/transform.rs:29645`
+  `crates/daemon/src/transform.rs:29651`
   `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live`
   (the echoed pair beside a native `todowrite` call, no duplicate tool-use
   id).
@@ -57,7 +57,7 @@ keep-one and the read-back act on the native call alone.
 - Conclusion: resolved with answer; the test gap stays open.
 
 ### Q: Can selection drop the synthetic call as an older `todowrite`?
-- Sources examined: `transform.rs:2597-2615`, `:3467-3471`, `:4063-4064`;
+- Sources examined: `transform.rs:2599-2617`, `:3469-3473`, `:4065-4066`;
   `injection.rs:164-165`, `:181-182` (the emitted messages carry
   `synthetic: true`).
 - Findings: no. The synthetic pair is excluded by its `synthetic_todo_` id and
@@ -76,14 +76,14 @@ keep-one and the read-back act on the native call alone.
 - Conclusion: resolved with answer.
 
 ### Q: Does the record run under `DaemonConfig::default()`, as the source's label says?
-- Sources examined: `crates/daemon/src/config.rs:147`, `:187-191`;
-  `crates/daemon/src/transform.rs:3350-3351`, `:3364-3370`, `:4067`, `:4451`.
+- Sources examined: `crates/daemon/src/config.rs:149`, `:190-194`;
+  `crates/daemon/src/transform.rs:3352-3353`, `:3366-3372`, `:4069`, `:4453`.
 - Findings: no. The default `model_chain` is empty, so `eidnara_folds()` is
   false and `apply_once` hands the request to `apply_additive_only`, which
-  projects the window (`transform.rs:2852`) and composes m0
-  (`transform.rs:3061`) without selecting, injecting, or rendering a
+  projects the window (`transform.rs:2854`) and composes m0
+  (`transform.rs:3063`) without selecting, injecting, or rendering a
   reduced call. A switched-lineage subagent request passes the gate and
-  returns a passthrough. Emission and the read-back run from `transform.rs:4067` and `:4451`,
+  returns a passthrough. Emission and the read-back run from `transform.rs:4069` and `:4453`,
   inside `apply_once` past the gate.
 - Missing evidence: none.
 - Conclusion: resolved with answer: `explicit-config-only`.

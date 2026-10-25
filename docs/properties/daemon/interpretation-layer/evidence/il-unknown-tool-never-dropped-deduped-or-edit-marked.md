@@ -76,15 +76,15 @@ Covered for class decisions.
 - Conclusion: resolved with answer: the label follows the source's rationale.
 
 ### Q: Does the record run under `DaemonConfig::default()`, as the source's label says?
-- Sources examined: `crates/daemon/src/config.rs:147`, `:187-191`;
-  `crates/daemon/src/transform.rs:3350-3351`, `:3364-3370`, `:4133`; `crates/daemon/src/selection.rs:958`, `:980`; `config.rs:165`.
+- Sources examined: `crates/daemon/src/config.rs:149`, `:190-194`;
+  `crates/daemon/src/transform.rs:3352-3353`, `:3366-3372`, `:4135`; `crates/daemon/src/selection.rs:958`, `:980`; `config.rs:168`.
 - Findings: no. The default `model_chain` is empty, so `eidnara_folds()` is
   false and `apply_once` hands the request to `apply_additive_only`, which
-  projects the window (`transform.rs:2852`) and composes m0
-  (`transform.rs:3061`) without selecting, injecting, or rendering a
+  projects the window (`transform.rs:2854`) and composes m0
+  (`transform.rs:3063`) without selecting, injecting, or rendering a
   reduced call. A switched-lineage subagent request passes the gate and
-  returns a passthrough. Selection runs from `transform.rs:4133` inside `apply_once`. The class
-  arms also need `smart_drops`, which defaults false (`config.rs:165`), and
+  returns a passthrough. Selection runs from `transform.rs:4135` inside `apply_once`. The class
+  arms also need `smart_drops`, which defaults false (`config.rs:168`), and
   an emergency or two-pass reclaim batch or an admitted ride
   (`selection.rs:958`, `:980`).
 - Missing evidence: none.

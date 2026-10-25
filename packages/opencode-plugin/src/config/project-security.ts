@@ -515,6 +515,18 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         }
     }
 
+    // The daemon reads the document list from the user tier only, so the strip removes the
+    // block and warns when it sets the list, as the daemon's tier merge does.
+    if ("project_docs" in projectRaw) {
+        const projectDocs = projectRaw.project_docs;
+        delete projectRaw.project_docs;
+        if (isPlainObject(projectDocs) && "files" in projectDocs) {
+            warnings.push(
+                "Ignoring project_docs from project config (security: the repository documents the daemon reads and retains are a user-level choice).",
+            );
+        }
+    }
+
     for (const field of ["host", "shadow_embedding"] as const) {
         if (field in projectRaw) {
             delete projectRaw[field];
