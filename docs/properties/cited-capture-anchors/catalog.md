@@ -49,8 +49,8 @@ the two N1 records #1133 makes checkable, and for the two N2 head records
 #1134 makes checkable. The other 10 records use
 `Status: proposed`, the value the specification assigns to a designed
 obligation whose code does not exist yet. A proposed record names the ticket
-that converts it to `active`, carries `Exercised: not yet`, and states the
-intended reachability. Every existing check named in this part has status
+that converts it to `active`, carries `Exercised: not yet` with the missing
+code named, and states the intended reachability. Every existing check named in this part has status
 `unaudited` in `existing-checks.md`.
 
 ## Reachability classes
@@ -421,7 +421,7 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only (intended) - as above
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135), restated there for `block`, `span`, and `first`
-Exercised: not yet
+Exercised: not yet - no citation descriptor is derived yet; U3 (#1135) lands the derivation
 Guarantee: When a message has several text blocks, the cited descriptors are the located block or run of blocks whose text contains the quote, falling back to the lowest live `block_index` with the rule recorded in the rationale.
 Check: `always` - for every cited capture decision, the cited blocks' text joined with `\n` contains the quote, or the rationale records `first` and no located block contains it
 Fault/timing angle: none
@@ -436,7 +436,7 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only (intended) - as above
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135); under the event placement the owner chose for OQ2-10 the guarantee reduces to the evidence pin
-Exercised: not yet
+Exercised: not yet - no capture decision cites evidence yet; U3 (#1135) lands the citation
 Guarantee: The evidence a capture decision cites survives `expire_harness_captures` while the decision is live, and retiring it while cited is refused.
 Check: `always` - for every live cited capture decision, the cited evidence row is live after each sweep
 Fault/timing angle: a sweep running after the evidence's `retain_until`
@@ -466,7 +466,7 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only (intended) - as above
 Status: proposed - owner: U4 ticket [#1136](https://github.com/ahrav/eidnara/issues/1136)
-Exercised: not yet
+Exercised: not yet - no settlement wait or citation lookup exists yet; U4 (#1136) lands them
 Guarantee: The citation lookup of a submission runs only after the session's settlement record is ended, refused, absent, or past its deadline.
 Check: `always` - at the instant the publish envelope opens, the record for `(project_id, harness, session_id)` is not running within its deadline
 Fault/timing angle: a slow source job and a fast harness submit
@@ -481,7 +481,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production (intended) - every capture decision after U3
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135); U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136)) adds the `publish_budget_expired` state
-Exercised: not yet
+Exercised: not yet - no capture decision records a citation or anchor reason yet; U3 (#1135) lands the rationale
 Guarantee: Every capture decision carries exactly one citation reason and one anchor reason from the closed vocabularies, chosen by the specification's precedence, and a cited or anchored decision carries the matching `cited` or `anchored` value.
 Check: `always` - `(no citation) == (citation != "cited")` and `(anchor_id IS NULL) == (anchor == "head_unavailable")` for every capture decision, each value in the fixed set
 Fault/timing angle: none
@@ -496,7 +496,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production (intended) - as above
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135)
-Exercised: not yet
+Exercised: not yet - no per-reason counter exists yet; U3 (#1135) lands them
 Guarantee: Within one daemon process, each per-reason counter equals the number of committed capture decisions carrying that reason since process start, at most the number of attempted publishes carrying it.
 Check: `always` - after each publish settles, `counter[reason] >= committed(reason)` and `counter[reason] <= attempted(reason)`, with the increment after the receipt returns and only for a receipt that was not replayed
 Fault/timing angle: a publish that rolls back after the reason was computed
@@ -511,7 +511,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production (intended) - as above
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135)
-Exercised: not yet
+Exercised: not yet - no production capture decision carries an anchor or a citation yet; U3 (#1135) lands both
 Guarantee: A capture decision's admission record carries `ModelInference` and `AssistantInference` and the same maturity whether or not it has an anchor or a citation.
 Check: `always` - sibling capture decisions that differ only in anchor or citation presence have equal `source_class`, `taint_class`, `maturity`, `effective_maturity`, and `elevated_support`
 Fault/timing angle: none
@@ -526,7 +526,7 @@ Open questions: None.
 Type: reachability
 Reachability: default-production (intended) - campaign coverage
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135) to `partial`; U4 ticket [#1136](https://github.com/ahrav/eidnara/issues/1136) to `active`
-Exercised: not yet
+Exercised: not yet - no cited capture decision exists yet; U3 (#1135) lands the first and U4 (#1136) the remaining miss reasons
 Guarantee: A test campaign produces at least one capture decision with both an anchor and a citation, and at least one decision for each miss reason, so every legal state is constructed.
 Check: `sometimes` - states, not code points: a committed decision with an anchor and a citation, and one per miss reason
 Fault/timing angle: none
