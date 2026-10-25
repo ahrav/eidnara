@@ -208,7 +208,7 @@ not defined once:
 | `interrupted` | contract | OpenCode abort flag in tool metadata | - | `tool_outcome.rs:55` |
 | `isError` | contract | Pi tool result field | - | `tool_outcome.rs:63`; `codec/pi.rs:746, 1131, 1431` |
 | `message` | contract | Pi entry field | - | `codec/pi.rs:300, 499, 587, 1208, 1244, 1556` |
-| `metadata` | contract | OpenCode tool or part metadata container | - | `tool_outcome.rs:29, 52`; `codec/opencode.rs:201, 498, 589, 981, 983, 989, 992, 998, 999, 1013, 1163, 1168, 1187, 1360` |
+| `metadata` | contract | OpenCode tool or part metadata container | - | `tool_outcome.rs:31, 54`; `codec/opencode.rs:201, 498, 589, 981, 983, 989, 992, 998, 999, 1013, 1163, 1168, 1187, 1360` |
 | `mime` | contract | file part field | - | `codec/opencode.rs:622, 679, 1236, 1326`; `codec/pi.rs:740, 1805, 1837` |
 | `mimeType` | contract | file part field | - | `codec/opencode.rs:623, 680, 1326`; `codec/pi.rs:739, 1805, 1836, 1855` |
 | `model` | contract | model field | - | `codec/opencode.rs:605, 611, 613`; `codec/pi.rs:1523, 1615` |
