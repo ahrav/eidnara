@@ -2348,6 +2348,7 @@ fn a_report_records_the_rebill_per_paired_arm_and_never_drops_it() {
     }
     // A record whose product leaves `u64` is refused rather than wrapped.
     let mut overflowing = open_report();
+    // `fresh` at 2^53 tokens fits `u64`; only `aged` overflows.
     overflowing
         .prefix_rebill
         .insert("fresh".to_string(), rebill(2, 1, 1 << 52));
@@ -2365,20 +2366,10 @@ fn a_report_records_the_rebill_per_paired_arm_and_never_drops_it() {
     let mut fresh_overflow = open_report();
     fresh_overflow
         .prefix_rebill
-        .insert("fresh".to_string(), rebill(2, 1, 1 << 52));
+        .insert("fresh".to_string(), rebill(u32::MAX, u32::MAX, 1 << 52));
     fresh_overflow
         .prefix_rebill
         .insert("aged".to_string(), rebill(3, 4, 1000));
-    fresh_overflow
-        .prefix_rebill
-        .get_mut("fresh")
-        .unwrap()
-        .accepted_writes = u32::MAX;
-    fresh_overflow
-        .prefix_rebill
-        .get_mut("fresh")
-        .unwrap()
-        .live_sessions = u32::MAX;
     assert_eq!(
         fresh_overflow.validate(),
         Err(ReportError::RebillOverflow {
