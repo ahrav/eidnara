@@ -1166,7 +1166,9 @@ pub fn pair_table_digest(pairs: &[PairOutcome]) -> Result<String, StatisticsErro
 }
 
 /// Analyzes a completed pair table under the family the manifest froze. The
-/// order is the contract: the run must have completed, then the freeze check, then the pilot's block, then the
+/// order is the contract: the run must have completed, then the freeze check,
+/// then agreement of the run's `config.capture` with `family.capture`, then
+/// the pilot's block, then the
 /// arm-miss asymmetry block over the manifest's own arm rates, then the
 /// table's conformance to the frozen plan (its size is the frozen pair count,
 /// every pair is in a frozen task family, and no pair id repeats), and only
