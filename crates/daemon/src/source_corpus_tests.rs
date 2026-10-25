@@ -510,7 +510,7 @@ fn a_credential_shape_fails_the_redaction_scan_unless_its_unit_is_a_canary() {
     assert_eq!(redaction_violations("f", &tool_part), Vec::<String>::new());
     let beside = json!({"units": [{"canary": true, "text": CANARY}, {"text": CANARY}]});
     assert_eq!(redaction_violations("f", &beside).len(), 1);
-    let other_secret = "sk-ant-api03-Qq1Ww2Ee3Rr4Tt5Yy6Uu7Ii8Oo9Pp0AaSsDdFfGg";
+    let other_secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
     let inside = json!({"parts": [{"canary": true, "state": {"output": CANARY,
         "input": {"command": other_secret}}}]});
     assert_eq!(redaction_violations("f", &inside).len(), 1);
