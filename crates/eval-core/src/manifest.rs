@@ -367,7 +367,8 @@ pub fn parse_capture_declaration(value: &Value) -> Result<CaptureDeclaration, Ma
     let declaration: CaptureDeclaration =
         serde_json::from_value(value.clone()).map_err(|error| malformed(error.to_string()))?;
     let spelled = canonical_json_encode(value).map_err(|error| malformed(format!("{error:?}")))?;
-    let canonical = canonical_json_encode(&serde_json::to_value(declaration).expect("serializes"))?;
+    let canonical = canonical_json_encode(&serde_json::to_value(declaration).expect("serializes"))
+        .expect("a declaration holds only enum strings");
     if spelled != canonical {
         return Err(malformed(format!(
             "{spelled} is not the spelling {canonical}"
