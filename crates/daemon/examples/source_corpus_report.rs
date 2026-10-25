@@ -426,7 +426,8 @@ fn main() -> ExitCode {
         out,
         "## Publish time against admitted bytes\n\nHost: {}. Runs: {runs}, one after another \
          in one process; each run replays every session into its own fresh kernel, OpenCode \
-         first. Pairs are (admitted bytes, elapsed ms) per batch, measured around the screened \
+         first, after the session sections above have replayed each session once in the same \
+         process. Pairs are (admitted bytes, elapsed ms) per batch, measured around the screened \
          publisher. The daemon's `publish_ms_last` and `publish_ms_max` gauges also span the \
          receipt preview wait, and no daemon counter records admitted bytes per batch; these \
          pairs are the replay harness's measurement.",
