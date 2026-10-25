@@ -219,3 +219,26 @@ fn the_derived_value_fits_the_unchanged_identity_encoding() {
     )));
     assert_eq!(RepositoryIdentity::Fallback.value("project"), "project");
 }
+
+/// The plugin's resolver recognizes a repository by a `.git` entry in the directory or an ancestor,
+/// so a bare repository takes its directory fallback there; the daemon falls back the same way,
+/// whether the bare repository is the root or an ancestor of it.
+#[test]
+fn a_bare_repository_falls_back_as_the_plugin_does() {
+    let source = tempfile::tempdir().unwrap();
+    repository(source.path(), 2);
+    let bare = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", source.path().display());
+    git(bare.path(), &["clone", "-q", "--bare", &url, "repo.git"]).unwrap();
+    let bare = bare.path().join("repo.git");
+    let nested = bare.join("docs");
+    std::fs::create_dir_all(&nested).unwrap();
+    for dir in [&bare, &nested] {
+        assert_eq!(
+            derived(dir),
+            RepositoryIdentity::Fallback,
+            "{}",
+            dir.display()
+        );
+    }
+}

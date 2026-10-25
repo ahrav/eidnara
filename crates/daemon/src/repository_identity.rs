@@ -96,7 +96,8 @@ pub(crate) fn derive(
         Err(_) => return Err(DerivationFailure::Unreadable),
     };
     repo.objects.ignore_replacements = true;
-    if repo.is_shallow() {
+    // A bare repository falls back, as the plugin's resolver does.
+    if repo.is_bare() || repo.is_shallow() {
         return Ok(RepositoryIdentity::Fallback);
     }
     let head = repo.head().map_err(|_| DerivationFailure::Unreadable)?;
