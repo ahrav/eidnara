@@ -2887,8 +2887,23 @@ async fn a_failed_derivation_refuses_the_documents_and_the_next_pass_derives() {
         .unwrap() = Some(Arc::new(|| {
         std::thread::sleep(source_capture::REPOSITORY_WALK_BUDGET + Duration::from_millis(100));
     }));
-    let deadlines = count(&handler, "deadline");
-    document_pass(&handler, "base-2").await;
+    // The route's first pass of its own session composes the block, so it reads the documents, and its window message publishes in the window's commit after the walk's share of the budget ran out.
+    let (deadlines, published) = (
+        count(&handler, "deadline"),
+        count(&handler, "units_published"),
+    );
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user(
+                "msg_window",
+                1_700_000_000_000,
+                "window text",
+            )],
+            "base-2",
+        ),
+    )
+    .await;
     for _ in 0..1_000 {
         if handler.source_capture.is_idle() {
             break;
@@ -2897,6 +2912,12 @@ async fn a_failed_derivation_refuses_the_documents_and_the_next_pass_derives() {
     }
     assert_eq!(count(&handler, "deadline") - deadlines, 1);
     assert_eq!(count(&handler, "documents_refused") - refused, 4);
+    assert_eq!(
+        count(&handler, "units_published") - published,
+        1,
+        "{}",
+        report(&handler)
+    );
     assert_eq!(document_identities(&store, "ARCHITECTURE.md"), []);
 
     *handler

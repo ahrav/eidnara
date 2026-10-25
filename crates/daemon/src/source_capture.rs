@@ -1016,15 +1016,11 @@ impl CaptureJob {
         if let Some(identity) = self.capture.repository_ids().get(project_id) {
             return Ok(identity.clone());
         }
-        let walk_deadline = Instant::now() + REPOSITORY_WALK_BUDGET;
-        let walk = EvalBudget::new(
-            Some(
-                self.budget
-                    .deadline()
-                    .map_or(walk_deadline, |deadline| deadline.min(walk_deadline)),
-            ),
-            Arc::clone(&self.interrupt),
-        );
+        // A private interrupt the job's cancellation still raises: the walk's own deadline ends the walk alone, never the job.
+        let walk = self
+            .budget
+            .linked()
+            .bounded_by(Instant::now() + REPOSITORY_WALK_BUDGET);
         #[cfg(test)]
         run_hook(&self.capture.before_repository_derivation);
         let identity = derive(self.project.root(), &walk, MAX_ROOT_WALK_COMMITS)?;

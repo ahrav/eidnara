@@ -17,10 +17,10 @@ unnamed batch conflict, which the plan's R16 replaces.
   when `unit` is `None`.
 - `publish_locked` (`crates/daemon/src/source_capture.rs:845-870`) records
   every keyed unit `Pending` and ends with `kernel_end`, which counts
-  `kernel_error` (`source_capture.rs:1479-1484`).
+  `kernel_error` (`source_capture.rs:1475-1480`).
 - `is_permanent` lists `ReAdmissionBlocked` (`harness_sources.rs:578`), and
   `classify` maps a permanent refusal to `units_refused_terminal`
-  (`source_capture.rs:1212-1214`); neither is reached on this path.
+  (`source_capture.rs:1208-1210`); neither is reached on this path.
 
 ## Failure scenario
 
