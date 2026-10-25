@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use context_core::canonical_json::is_lower_hex;
 use serde::{Deserialize, Serialize};
 
+use crate::blank;
 use crate::campaign::{SampleError, SampleLedger, SampleRecord};
 use crate::pairs::ArmKind;
 
-/// The `task_arm` key of every memory write a sample makes. The key reads
-/// `task` and `arm` only, so every retry of a sample shares its key.
+/// The [`WriteKeyScheme::TaskArm`](crate::WriteKeyScheme::TaskArm) key of
+/// every memory write a sample makes. The key reads `task` and `arm` only, so
+/// every retry of a sample shares its key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WriteKey {
@@ -29,11 +32,15 @@ pub fn excludes(target: &SampleRecord, key: &WriteKey) -> bool {
     key.task == target.task
 }
 
+/// One memory write the runner admitted into a history pool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryWrite {
+    /// Unique across the record; reads name the write by it.
     pub write_id: String,
+    /// The history pool the write entered.
     pub pool: String,
+    /// The writer's `WriteKey`, the key the runner stored the write under.
     pub key: WriteKey,
     /// The ledger sample that made the write.
     pub writer: String,
@@ -44,6 +51,7 @@ pub struct MemoryWrite {
     pub sequence: u32,
 }
 
+/// One memory read: a pool served `write_id` to `reader`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryRead {
@@ -57,7 +65,8 @@ pub struct MemoryRead {
 
 /// The runner's record of every memory write and read in a run's pools.
 /// `read_counts` is the runner's completeness attestation: one entry per
-/// ledger sample, the number of reads it recorded for that sample.
+/// ledger sample, the number of reads it recorded for that sample, with an
+/// explicit `0` for a sample that read nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccessRecord {
@@ -66,24 +75,30 @@ pub struct AccessRecord {
     pub read_counts: BTreeMap<String, u32>,
 }
 
+/// The refusals of [`AccessRecord::check_disjoint`], one per defect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessError {
     /// The ledger fails `SampleLedger::validate`; nothing in the record is
     /// read.
     Ledger(SampleError),
-    RepeatedWrite {
+    /// The current run id is not a 64-character lowercase hex run id.
+    MalformedRun { eval_run_id: String },
+    /// A `write_id` or `pool` on the write `write_id`, or on a read of it,
+    /// is empty or whitespace.
+    Blank {
         write_id: String,
+        field: &'static str,
     },
-    UnknownWriter {
-        write_id: String,
-        writer: String,
-    },
+    /// Two writes share one `write_id`.
+    RepeatedWrite { write_id: String },
+    /// A write whose `writer` is no ledger sample.
+    UnknownWriter { write_id: String, writer: String },
     /// A write whose key is not its writer's `WriteKey`, so own-task
     /// attribution by key would misname the writer's task.
     KeyDisagreesWithWriter {
         write_id: String,
         key: WriteKey,
-        writer: WriteKey,
+        writer_key: WriteKey,
     },
     /// A write made under a run that is neither the current run nor in any
     /// sample's lineage.
@@ -91,13 +106,13 @@ pub enum AccessError {
         write_id: String,
         eval_run_id: String,
     },
-    UnknownReader {
-        reader: String,
-    },
-    UnknownWrite {
-        reader: String,
-        write_id: String,
-    },
+    /// A read whose `reader` is no ledger sample.
+    UnknownReader { reader: String },
+    /// A `read_counts` entry for a sample the ledger lacks.
+    UnknownAttestedSample { sample: String },
+    /// A read naming a write the record lacks.
+    UnknownWrite { reader: String, write_id: String },
+    /// A read from a pool other than the one its write entered.
     CrossPoolRead {
         reader: String,
         write_id: String,
@@ -133,6 +148,15 @@ impl AccessRecord {
         eval_run_id: &str,
     ) -> Result<(), AccessError> {
         ledger.validate().map_err(AccessError::Ledger)?;
+        if !is_lower_hex(eval_run_id, 64) {
+            return Err(AccessError::MalformedRun {
+                eval_run_id: eval_run_id.to_string(),
+            });
+        }
+        let blank_field = |write_id: &str, field| AccessError::Blank {
+            write_id: write_id.to_string(),
+            field,
+        };
         let known_runs: BTreeSet<&str> = std::iter::once(eval_run_id)
             .chain(
                 ledger
@@ -143,23 +167,28 @@ impl AccessRecord {
             .collect();
         let mut writes: BTreeMap<&str, &MemoryWrite> = BTreeMap::new();
         for write in &self.writes {
+            for (field, text) in [("write_id", &write.write_id), ("pool", &write.pool)] {
+                if blank(text) {
+                    return Err(blank_field(&write.write_id, field));
+                }
+            }
             if writes.insert(&write.write_id, write).is_some() {
                 return Err(AccessError::RepeatedWrite {
                     write_id: write.write_id.clone(),
                 });
             }
-            let Some(writer) = ledger.samples.get(&write.writer) else {
+            let Some(writer_record) = ledger.samples.get(&write.writer) else {
                 return Err(AccessError::UnknownWriter {
                     write_id: write.write_id.clone(),
                     writer: write.writer.clone(),
                 });
             };
-            let writer = WriteKey::from(writer);
-            if write.key != writer {
+            let writer_key = WriteKey::from(writer_record);
+            if write.key != writer_key {
                 return Err(AccessError::KeyDisagreesWithWriter {
                     write_id: write.write_id.clone(),
                     key: write.key.clone(),
-                    writer,
+                    writer_key,
                 });
             }
             if !known_runs.contains(write.eval_run_id.as_str()) {
@@ -169,8 +198,11 @@ impl AccessRecord {
                 });
             }
         }
-        let mut recorded: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut recorded_counts: BTreeMap<&str, usize> = BTreeMap::new();
         for read in &self.reads {
+            if blank(&read.pool) {
+                return Err(blank_field(&read.write_id, "pool"));
+            }
             let Some(sample) = ledger.samples.get(&read.reader) else {
                 return Err(AccessError::UnknownReader {
                     reader: read.reader.clone(),
@@ -199,23 +231,28 @@ impl AccessRecord {
                     key: write.key.clone(),
                 });
             }
-            *recorded.entry(&read.reader).or_default() += 1;
+            *recorded_counts.entry(&read.reader).or_default() += 1;
         }
-        if let Some(sample) = self
+        if let Some(sample_id) = self
             .read_counts
             .keys()
-            .find(|sample| !ledger.samples.contains_key(*sample))
+            .find(|sample_id| !ledger.samples.contains_key(*sample_id))
         {
-            return Err(AccessError::UnknownReader {
-                reader: sample.clone(),
+            return Err(AccessError::UnknownAttestedSample {
+                sample: sample_id.clone(),
             });
         }
-        for sample in ledger.samples.keys() {
-            let attested = self.read_counts.get(sample).copied();
-            let recorded = recorded.get(sample.as_str()).copied().unwrap_or(0);
+        for sample_id in ledger.samples.keys() {
+            let attested = self.read_counts.get(sample_id).copied();
+            let recorded = recorded_counts
+                .get(sample_id.as_str())
+                .copied()
+                .unwrap_or(0);
+            // A missing entry and a count past `usize` both compare unequal to
+            // `Some(recorded)`, so each is a mismatch.
             if attested.and_then(|count| usize::try_from(count).ok()) != Some(recorded) {
                 return Err(AccessError::ReadCountMismatch {
-                    sample: sample.clone(),
+                    sample: sample_id.clone(),
                     attested,
                     recorded,
                 });

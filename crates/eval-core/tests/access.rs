@@ -50,7 +50,7 @@ fn write(id: &str, writer: &str, key: WriteKey, run: &str) -> MemoryWrite {
         key,
         writer: writer.to_string(),
         eval_run_id: run.to_string(),
-        sequence: 0,
+        sequence: 5,
     }
 }
 
@@ -59,7 +59,7 @@ fn read(reader: &str, write_id: &str) -> MemoryRead {
         reader: reader.to_string(),
         pool: "p".to_string(),
         write_id: write_id.to_string(),
-        sequence: 1,
+        sequence: 9,
     }
 }
 
@@ -107,14 +107,11 @@ fn the_write_key_is_task_and_arm_and_retries_share_it() {
 #[test]
 fn excludes_names_the_own_task_under_every_arm_and_nothing_else() {
     let target = sample("s", "t1", ArmKind::Aged, &[]);
-    for (key, excluded) in [
-        (key("t1", ArmKind::Aged), true),
-        (key("t1", ArmKind::Fresh), true),
-        (key("t1", ArmKind::FreshMinimal), true),
-        (key("t2", ArmKind::Aged), false),
-        (key("t2", ArmKind::Fresh), false),
-    ] {
-        assert_eq!(excludes(&target, &key), excluded, "{key:?}");
+    for task in ["t1", "t2"] {
+        for arm in [ArmKind::Aged, ArmKind::Fresh, ArmKind::FreshMinimal] {
+            let key = key(task, arm);
+            assert_eq!(excludes(&target, &key), task == "t1", "{key:?}");
+        }
     }
 }
 
@@ -157,6 +154,17 @@ fn a_read_of_an_own_task_write_is_refused_naming_sample_read_and_key() {
         record(writes(), vec![read("s2", "w7")]).check_disjoint(&ledger, RUN),
         Err(AccessError::OwnTaskRead { sample, .. }) if sample == "s2"
     ));
+    // Order-free: a read sequenced before the write is refused the same way.
+    let mut early = read("s1", "w7");
+    early.sequence = 0;
+    assert_eq!(
+        record(writes(), vec![early.clone()]).check_disjoint(&ledger, RUN),
+        Err(AccessError::OwnTaskRead {
+            sample: "s1".to_string(),
+            read: Box::new(early),
+            key: key("t1", ArmKind::Aged),
+        })
+    );
 }
 
 #[test]
@@ -196,7 +204,7 @@ fn dangling_references_and_attestation_gaps_are_refused_by_name() {
         Some(AccessError::KeyDisagreesWithWriter {
             write_id: "w7".to_string(),
             key: key("t2", ArmKind::Aged),
-            writer: key("t1", ArmKind::Aged),
+            writer_key: key("t1", ArmKind::Aged),
         })
     );
     let mut unknown_reader = record(writes(), vec![]);
@@ -249,10 +257,45 @@ fn dangling_references_and_attestation_gaps_are_refused_by_name() {
     counted_stranger.read_counts.insert("s9".to_string(), 0);
     assert_eq!(
         refused(counted_stranger),
-        Some(AccessError::UnknownReader {
-            reader: "s9".to_string()
+        Some(AccessError::UnknownAttestedSample {
+            sample: "s9".to_string()
         })
     );
+    let mut nameless = writes();
+    nameless[0].write_id = " ".to_string();
+    assert_eq!(
+        refused(record(nameless, vec![])),
+        Some(AccessError::Blank {
+            write_id: " ".to_string(),
+            field: "write_id",
+        })
+    );
+    let mut poolless = writes();
+    poolless[1].pool = String::new();
+    assert_eq!(
+        refused(record(poolless, vec![])),
+        Some(AccessError::Blank {
+            write_id: "w7".to_string(),
+            field: "pool",
+        })
+    );
+    let mut unpooled = read("s1", "w3");
+    unpooled.pool = String::new();
+    assert_eq!(
+        refused(record(writes(), vec![unpooled])),
+        Some(AccessError::Blank {
+            write_id: "w3".to_string(),
+            field: "pool",
+        })
+    );
+    for run in ["", "AA".repeat(32).as_str(), "aa"] {
+        assert_eq!(
+            record(writes(), vec![]).check_disjoint(&ledger, run),
+            Err(AccessError::MalformedRun {
+                eval_run_id: run.to_string()
+            })
+        );
+    }
 }
 
 #[test]
@@ -287,6 +330,8 @@ fn the_access_record_round_trips_canonically_and_refuses_unknown_fields() {
     let encoded = canonical_json_encode(&value).unwrap();
     let decoded: AccessRecord = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, record);
+    assert_eq!(value.pointer("/writes/0/sequence"), Some(&json!(5)));
+    assert_eq!(value.pointer("/reads/0/sequence"), Some(&json!(9)));
     assert_eq!(
         canonical_json_encode(&serde_json::to_value(&decoded).unwrap()).unwrap(),
         encoded
