@@ -38,7 +38,7 @@ Roots for an unborn HEAD, a plain directory, a missing directory, a
 repository declaring SHA-256, and a HEAD detached at a tree
 (`crates/daemon/src/memory_capture/head.rs:139`); and the route-level
 submission over unborn, plain, and SHA-256 roots, asserting the frozen value
-and that both jobs publish (`crates/daemon/src/lib.rs:24620`).
+and that both jobs publish (`crates/daemon/src/lib.rs:24632`).
 
 ## Investigation log
 
@@ -69,8 +69,8 @@ and that both jobs publish (`crates/daemon/src/lib.rs:24620`).
 - Sources examined: the publish closure and tests at the U3 branch.
 - Findings: a `HeadUnavailable` plan builds no anchor spec, every decision
   records `anchor: "head_unavailable"` with `anchor_id` empty, and
-  `decisions_head_unavailable` counts each; `crates/daemon/src/source_capture_tests.rs:3651` checks a plain and
-  an unborn root, and `crates/daemon/src/lib.rs:24730` a plan without
+  `decisions_head_unavailable` counts each; `crates/daemon/src/source_capture_tests.rs:3646` checks a plain and
+  an unborn root, and `crates/daemon/src/lib.rs:24742` a plan without
   `head`.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

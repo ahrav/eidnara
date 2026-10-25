@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-`append_citations` (`crates/daemon/src/memory_capture/cite.rs:323`) appends one `memory_capture_citation` event per cited block through `Envelope::append_decision_event`, which checks the evidence is live. The decision row keeps `evidence_id` empty, so `fold_cited_evidence_class` does not raise its class. `EVIDENCE_CITED_SQL` (`crates/kernel/src/slice/write.rs:42`) counts decision events of live decisions, so `expire_harness_captures` (`crates/kernel/src/local_file.rs:245`) keeps the cited evidence and `retire_evidence` refuses it with `Conflict`.
+`append_citations` (`crates/daemon/src/memory_capture/cite.rs:338`) appends one `memory_capture_citation` event per cited block through `Envelope::append_decision_event`, which checks the evidence is live. The decision row keeps `evidence_id` empty, so `fold_cited_evidence_class` does not raise its class. `EVIDENCE_CITED_SQL` (`crates/kernel/src/slice/write.rs:42`) counts decision events of live decisions, so `expire_harness_captures` (`crates/kernel/src/local_file.rs:245`) keeps the cited evidence and `retire_evidence` refuses it with `Conflict`.
 
 ## Failure scenario
 
@@ -18,7 +18,7 @@ A sweep after the evidence's `retain_until`.
 
 ## What a test must construct
 
-A cited decision, a sweep at a far-future instant, and a retirement attempt (`crates/daemon/src/source_capture_tests.rs:3796`); the cited decision's class and empty `evidence_id` (`crates/daemon/src/source_capture_tests.rs:3501`).
+A cited decision, a sweep at a far-future instant, and a retirement attempt (`crates/daemon/src/source_capture_tests.rs:3783`); the cited decision's class and empty `evidence_id` (`crates/daemon/src/source_capture_tests.rs:3496`).
 
 ## Investigation log
 

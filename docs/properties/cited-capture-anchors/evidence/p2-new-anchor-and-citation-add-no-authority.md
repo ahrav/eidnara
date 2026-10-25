@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-Admission is `(ModelInference, AssistantInference)` for every capture decision (`crates/daemon/src/memory_capture.rs:1301`). The anchor is a parent row and the citation is a decision event; neither is an input to `record_admission`, and the decision row's class stays its own because `decisions.evidence_id` is empty.
+Admission is `(ModelInference, AssistantInference)` for every capture decision (`crates/daemon/src/memory_capture.rs:1309`). The anchor is a parent row and the citation is a decision event; neither is an input to `record_admission`, and the decision row's class stays its own because `decisions.evidence_id` is empty.
 
 ## Failure scenario
 
@@ -18,7 +18,7 @@ None.
 
 ## What a test must construct
 
-Four cited decisions and one uncited sibling in one session, compared on admission columns and served visibility (`crates/daemon/src/source_capture_tests.rs:3501`).
+Four cited decisions and one uncited sibling in one session, compared on admission columns and served visibility (`crates/daemon/src/source_capture_tests.rs:3496`).
 
 ## Investigation log
 

@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-`locate` (`crates/daemon/src/memory_capture/cite.rs:181`) runs one SHA-256 over the job text, finalizing a clone at each `\n` and at the end; a segment whose lowercase hex digest equals the next live block's `artifact_digest` locates that block, and the walk stops at the first block it cannot locate. The job text is the `\n`-join of the message's text items (`native_capture_fragments`), and each descriptor's bytes are one item's text, so an unredacted message locates every block. `target` (`:211`) takes the first occurrence of the quote: inside one located block gives `block`; across located adjacent blocks gives `span`, where the separator after a located block opens a quote in that block and the separator before one closes a quote in it, so the cited blocks joined with `\n` contain the quote; anything else (a quote in an unlocated block, or absent) gives `first`, the lowest live block. Each block's digest is decoded to bytes once, so the walk compares raw digests at each `\n`. `Citation::cite` (`:293`) writes `citation_block`, `citation_blocks`, and `citation_evidence` in ascending order, and `append_citations` (`:323`) writes one event per cited block in the same order.
+`locate` (`crates/daemon/src/memory_capture/cite.rs:196`) runs one SHA-256 over the job text, finalizing a clone at each `\n` and at the end; a segment whose lowercase hex digest equals the next live block's `artifact_digest` locates that block, and the walk stops at the first block it cannot locate. The job text is the `\n`-join of the message's text items (`native_capture_fragments`), and each descriptor's bytes are one item's text, so an unredacted message locates every block. `target` (`:226`) takes the first occurrence of the quote: inside one located block gives `block`; across located adjacent blocks gives `span`, where the separator after a located block opens a quote in that block and the separator before one closes a quote in it, so the cited blocks joined with `\n` contain the quote; anything else (a quote in an unlocated block, or absent) gives `first`, the lowest live block. Each block's digest is decoded to bytes once, so the walk compares raw digests at each `\n`. `Citation::cite` (`:308`) writes `citation_block`, `citation_blocks`, and `citation_evidence` in ascending order, and `append_citations` (`:338`) writes one event per cited block in the same order.
 
 ## Failure scenario
 
@@ -18,7 +18,7 @@ None.
 
 ## What a test must construct
 
-The end-to-end fixtures at `crates/daemon/src/source_capture_tests.rs:3501`: one block; the third of four items; a quote across two items; a quote starting at a separator; a message whose first block holds a secret, which source capture refuses, so that block has no descriptor. Unit tests at `crates/daemon/src/memory_capture/cite.rs:386` and `:397` cover inner newlines, an empty block, a stopped walk, and a partial located prefix; the property tests at `:489` and `:503` locate every block of random joins and check that a random quote of a fully located message cites blocks whose join holds it.
+The end-to-end fixtures at `crates/daemon/src/source_capture_tests.rs:3496`: one block; the third of four items; a quote across two items; a quote starting at a separator; a message whose first block holds a secret, which source capture refuses, so that block has no descriptor. Unit tests at `crates/daemon/src/memory_capture/cite.rs:401` and `:412` cover inner newlines, an empty block, a stopped walk, and a partial located prefix; the property tests at `:504` and `:518` locate every block of random joins and check that a random quote of a fully located message cites blocks whose join holds it.
 
 ## Investigation log
 
@@ -33,7 +33,7 @@ The end-to-end fixtures at `crates/daemon/src/source_capture_tests.rs:3501`: one
 
 ### Q: Does the walk stay within the 500 ms criterion?
 
-- Sources examined: `citation_cost_measurement` (`crates/daemon/src/memory_capture.rs:1819`) on the CI profile.
+- Sources examined: `citation_cost_measurement` (`crates/daemon/src/memory_capture.rs:1827`) on the CI profile.
 - Findings: across three runs of 20 timed publishes each (the project's
   first publish, which also creates its domain and scope, is untimed), the
   publish closure of a 3-memory job running all 256 probes measured medians

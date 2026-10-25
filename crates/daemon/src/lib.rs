@@ -584,11 +584,20 @@ impl TaskAdmission {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        self.try_spawn(future).ok()
+    }
+
+    /// As [`Self::spawn`], handing a refused future back unpolled.
+    fn try_spawn<F, T>(&self, future: F) -> Result<tokio::task::JoinHandle<T>, F>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
         let _gate = self.gate.lock().expect("module spawn gate mutex");
         if self.cancel.is_cancelled() {
-            return None;
+            return Err(future);
         }
-        Some(self.tasks.spawn(future))
+        Ok(self.tasks.spawn(future))
     }
 }
 
@@ -9167,8 +9176,11 @@ impl HandlerCore {
             let capture = handoff.supervisor();
             if let Some(job) = handoff.into_job(kernel, gate, cancel) {
                 let session = job.session().clone();
-                if admission.spawn(job.run()).is_none() {
+                if let Err(refused) = admission.try_spawn(job.run()) {
+                    // Recorded before the unrun job drops, so its slot's
+                    // release cannot end the entry first.
                     capture.refuse_handoff(source_capture::Count::RefusedShuttingDown, &session);
+                    drop(refused);
                 }
             }
         }))

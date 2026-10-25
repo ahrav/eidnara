@@ -114,40 +114,34 @@ enum NextStep {
 }
 
 impl HandlerCore {
-    /// What the session's source publish reached before this submit's
-    /// citation lookup, or `None` when the daemon was cancelled during the
-    /// wait. No wait runs with consent off, for a harness source capture
-    /// never serves (whose sources then read as not found), or when every
-    /// job's source id has the hashed shape that no descriptor carries.
-    async fn capture_settlement(
+    /// What each job session's source publish reached before this submit's
+    /// citation lookups, or `None` when the daemon was cancelled during a
+    /// wait. A plan spans its project's pending jobs, so each distinct job
+    /// session is awaited; at most one source job runs at a time, so the
+    /// waits together end by one budget deadline. No wait runs for an error
+    /// submit, with consent off, or for a job whose source id cannot join.
+    async fn capture_settlements(
         &self,
         binding: &SessionBinding,
-        session: &str,
         plan: &NativePlan,
-    ) -> Option<SettlementOutcome> {
-        if !(binding.config.source_capture_enabled && binding.config.memory_enabled) {
-            return Some(SettlementOutcome::Off);
+        error: bool,
+    ) -> Option<JobSettlements> {
+        let mut settlements = JobSettlements::new();
+        if error || !citation_consent(&binding.config) {
+            return Some(settlements);
         }
-        let Some(harness) = crate::harness_sources::Harness::parse(&binding.harness) else {
-            return Some(SettlementOutcome::Settled);
-        };
-        if plan
-            .jobs
-            .iter()
-            .all(|job| super::cite::is_hashed_source_id(&job.message_id))
-        {
-            return Some(SettlementOutcome::Settled);
+        for key in plan.jobs.iter().filter_map(super::cite::settlement_key) {
+            if settlements.contains_key(&key.session_id) {
+                continue;
+            }
+            let outcome = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => return None,
+                outcome = self.source_capture.await_settlement(&key) => outcome,
+            };
+            settlements.insert(key.session_id, outcome);
         }
-        let key = crate::harness_sources::SessionIdentity {
-            project_id: capture_project(binding),
-            harness,
-            session_id: session.to_owned(),
-        };
-        tokio::select! {
-            biased;
-            () = self.cancel.cancelled() => None,
-            outcome = self.source_capture.await_settlement(&key) => Some(outcome),
-        }
+        Some(settlements)
     }
 
     fn native_capture_work(&self, store: Arc<MemoryStore>, binding: SessionBinding) -> CaptureWork {
@@ -391,7 +385,10 @@ impl HandlerCore {
         // The wait runs here, before the blocking hop that takes the capture
         // commit gate. A cancel returns with nothing recorded; the guard then
         // releases the lease and the jobs stay eligible.
-        let Some(settlement) = self.capture_settlement(&binding, &session, &plan).await else {
+        let Some(settlements) = self
+            .capture_settlements(&binding, &plan, error.is_some())
+            .await
+        else {
             return respond(json!({"state":"pending"}));
         };
         let Some(store) = self.store() else {
@@ -404,7 +401,7 @@ impl HandlerCore {
         // outlives a dropped request future for as long as this work runs.
         match kernel_routes::blocking(move || {
             let _guard = guard;
-            work.settle(plan, output.as_deref(), error.as_deref(), settlement)
+            work.settle(plan, output.as_deref(), error.as_deref(), &settlements)
         })
         .await
         {
@@ -478,7 +475,7 @@ impl CaptureWork {
         plan: NativePlan,
         output: Option<&str>,
         error: Option<&str>,
-        settlement: SettlementOutcome,
+        settlements: &JobSettlements,
     ) -> PreparedOutcome {
         let now = now_ms();
         if let Some(error) = error {
@@ -504,7 +501,7 @@ impl CaptureWork {
         }
         // An unrecorded store error would leave these jobs immediately eligible again.
         let jobs = plan.jobs.clone();
-        match self.accept_native_output(plan, output.unwrap_or_default(), now, settlement) {
+        match self.accept_native_output(plan, output.unwrap_or_default(), now, settlements) {
             Ok(()) => respond(json!({"state":"processed"})),
             Err(code) => {
                 eprintln!("daemon: native memory capture submission failed: {code}");
@@ -528,7 +525,12 @@ impl CaptureWork {
         let mut unprepared = Vec::new();
         for job in jobs {
             if job.prepared.is_some() {
-                self.publish_or_recover(&job, SettlementOutcome::Settled)?;
+                // A replayed plan reads its session's record without waiting.
+                let settlement = super::cite::settlement_key(&job)
+                    .map_or(SettlementOutcome::Settled, |key| {
+                        self.source_capture.settlement_now(&key)
+                    });
+                self.publish_or_recover(&job, settlement)?;
             } else {
                 unprepared.push(job);
             }
@@ -594,7 +596,7 @@ impl CaptureWork {
         plan: NativePlan,
         output: &str,
         now: i64,
-        settlement: SettlementOutcome,
+        settlements: &JobSettlements,
     ) -> Result<(), &'static str> {
         let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing) {
             Ok(decisions) => decisions,
@@ -657,6 +659,10 @@ impl CaptureWork {
                 };
             if let Some(frozen) = prepared {
                 job.prepared = Some(frozen);
+                let settlement = settlements
+                    .get(&job.session_id)
+                    .copied()
+                    .unwrap_or(SettlementOutcome::Settled);
                 self.publish_or_recover(&job, settlement)?;
             }
         }

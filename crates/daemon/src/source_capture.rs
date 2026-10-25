@@ -588,13 +588,27 @@ impl SourceCapture {
         settlement::settle(receiver).await
     }
 
-    /// A poisoned record is a lost record: it starts empty, which reads as
-    /// settled everywhere.
+    /// What the session's source publish has reached now, without waiting:
+    /// a running publish reads as `BudgetExpired`.
+    pub(crate) fn settlement_now(&self, session: &SessionIdentity) -> SettlementOutcome {
+        self.settlements()
+            .subscribe(session)
+            .map_or(SettlementOutcome::Settled, |receiver| {
+                receiver
+                    .borrow()
+                    .outcome()
+                    .unwrap_or(SettlementOutcome::BudgetExpired)
+            })
+    }
+
+    /// A poisoned record is a lost record: it restarts empty, which reads as
+    /// settled everywhere, and keeps its acceptance count so a running job's
+    /// end never matches a later entry.
     fn settlements(&self) -> MutexGuard<'_, Settlements> {
         self.settlements.lock().unwrap_or_else(|poisoned| {
             self.settlements.clear_poison();
             let mut settlements = poisoned.into_inner();
-            *settlements = Settlements::default();
+            settlements.clear();
             settlements
         })
     }
@@ -731,7 +745,6 @@ impl CaptureHandoff {
             _retained: self.retained,
             capture: self.capture,
             window: self.window,
-            session: self.session,
             project: self.project,
             epoch: self.epoch,
             window_bytes: self.window_bytes,
@@ -751,7 +764,6 @@ pub(crate) struct CaptureJob {
     slot: ActiveSlot,
     _retained: RetainedCharge,
     window: Vec<Arc<Value>>,
-    session: SessionIdentity,
     project: ProjectBinding,
     epoch: u64,
     window_bytes: usize,
@@ -919,7 +931,9 @@ impl CaptureJob {
         }));
         drop(gate);
         match published {
-            Ok(end) => end,
+            // The end is recorded after the gate is released, so a submit
+            // woken by it never waits on the gate behind this job.
+            Ok(end) => self.end(end),
             Err(panic) => std::panic::resume_unwind(panic),
         }
     }
@@ -935,17 +949,17 @@ impl CaptureJob {
         documents: PendingDocuments,
     ) -> Count {
         if self.capture.delete_epoch.load(Ordering::Acquire) != self.epoch {
-            return self.end(Count::SessionInvalidated);
+            return Count::SessionInvalidated;
         }
         if let Err(error) = self.ensure_scope(store, incarnation) {
-            return self.end(kernel_end(error));
+            return kernel_end(error);
         }
         if self.budget.is_exhausted() {
-            return self.end(Count::Deadline);
+            return Count::Deadline;
         }
         if candidates.is_empty() {
             let end = self.capture_documents(store, publisher, incarnation, documents);
-            return self.end(end);
+            return end;
         }
         let observed_at = crate::now_ms();
         let started = Instant::now();
@@ -978,8 +992,7 @@ impl CaptureJob {
                     }
                 }
                 drop(memo);
-                let end = self.capture_documents(store, publisher, incarnation, documents);
-                self.end(end)
+                self.capture_documents(store, publisher, incarnation, documents)
             }
             Err(refusal) => {
                 let culprit = refusal.conflicting_unit();
@@ -1006,7 +1019,7 @@ impl CaptureJob {
                 if documents != Count::Completed {
                     log("documents ended", documents, 1);
                 }
-                self.end(kernel_end(refusal.error))
+                kernel_end(refusal.error)
             }
         }
     }
@@ -1049,7 +1062,7 @@ impl CaptureJob {
                 };
             }
         };
-        let repository_id = identity.value(&self.session.project_id);
+        let repository_id = identity.value(&self.slot.session.project_id);
         let plan = match self.plan_documents(store, incarnation, repository_id, documents) {
             Ok(plan) => plan,
             Err(error) => {
@@ -1128,7 +1141,7 @@ impl CaptureJob {
         repository_id: &str,
         documents: Vec<(DocumentPath, DocumentRead)>,
     ) -> Result<DocumentPlan, KernelError> {
-        let project_id = self.session.project_id.as_str();
+        let project_id = self.slot.session.project_id.as_str();
         let unswept: Vec<Option<String>> = {
             let swept = self.capture.swept_paths();
             documents
@@ -1174,7 +1187,7 @@ impl CaptureJob {
 
     /// The project's repository identity, derived once per incarnation; an environmental failure memoizes nothing, so the next pass derives again.
     fn repository_identity(&self) -> Result<RepositoryIdentity, DerivationFailure> {
-        let project_id = &self.session.project_id;
+        let project_id = &self.slot.session.project_id;
         if let Some(identity) = self.capture.repository_ids().get(project_id) {
             return Ok(identity.clone());
         }
@@ -1214,7 +1227,7 @@ impl CaptureJob {
             DocumentRead::NotUtf8 => return Ok(DocumentStep::Skip(Count::DocumentsNotUtf8)),
             DocumentRead::Unreadable => return Ok(DocumentStep::Skip(Count::DocumentsUnreadable)),
         };
-        let project_id = self.session.project_id.as_str();
+        let project_id = self.slot.session.project_id.as_str();
         let identity = vec![
             ("project_id", project_id.to_owned()),
             ("repository_id", repository_id.to_owned()),
@@ -1295,9 +1308,9 @@ impl CaptureJob {
         let mut stopped = false;
         for record in &self.window {
             let admit = &mut |bytes| copies.admit(bytes);
-            let adapted = match self.session.harness {
-                Harness::OpenCode => opencode_units_within(&self.session, record, admit),
-                Harness::Pi => pi_units_within(&self.session, record, admit),
+            let adapted = match self.slot.session.harness {
+                Harness::OpenCode => opencode_units_within(&self.slot.session, record, admit),
+                Harness::Pi => pi_units_within(&self.slot.session, record, admit),
             };
             match adapted {
                 Ok(Some(adapted)) => units.extend(adapted),
@@ -1326,7 +1339,7 @@ impl CaptureJob {
             producer: PRODUCER.to_owned(),
             request_digest: kernel::source_identity::identity_digest(operation_key.as_bytes()),
             operation_key,
-            actor: self.session.harness.as_str().to_owned(),
+            actor: self.slot.session.harness.as_str().to_owned(),
             cause: "source capture scope".to_owned(),
         };
         let project = &self.project;

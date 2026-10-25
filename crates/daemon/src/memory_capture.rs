@@ -581,6 +581,16 @@ pub(crate) fn capture_enabled(binding: &SessionBinding) -> bool {
         && binding.config.memory_auto_capture
 }
 
+/// The source and memory consent a capture citation needs. With it off, no
+/// submit waits on a source publish and no decision is looked up.
+fn citation_consent(config: &crate::config::DaemonConfig) -> bool {
+    config.source_capture_enabled && config.memory_enabled
+}
+
+/// Each job session's settlement outcome for one submit, keyed by session id;
+/// a session with no key is settled.
+type JobSettlements = std::collections::BTreeMap<String, SettlementOutcome>;
+
 /// Capture storage and leases key on the kernel binding's project digest:
 /// one canonical root is one queue however it is spelled, and two roots that
 /// differ only in bytes a lossy string would fold together stay distinct.
@@ -1004,9 +1014,7 @@ impl CaptureWork {
         if output.version != CAPTURE_SCHEMA_VERSION {
             return Err("invalid_preparation");
         }
-        let consent =
-            self.binding.config.source_capture_enabled && self.binding.config.memory_enabled;
-        let settlement = if consent {
+        let settlement = if citation_consent(&self.binding.config) {
             settlement
         } else {
             SettlementOutcome::Off

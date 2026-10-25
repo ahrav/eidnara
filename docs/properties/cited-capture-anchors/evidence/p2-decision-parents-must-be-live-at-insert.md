@@ -8,7 +8,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 `insert_decision` (`crates/kernel/src/slice/write.rs:920`) calls `require_parents` (`:1095`), which runs `require_live` for the domain and `require_optional_live` for proposition, scope, anchor, and evidence. Each query requires `invalidated_commit_seq IS NULL` inside the envelope's transaction and returns `NotFound` otherwise. The parent check runs before the registry insert, so a refusal leaves no registry row.
 
-Memory capture passes `anchor_id: None` (`crates/daemon/src/memory_capture.rs:1194`), so at the branch tip no production decision reaches the anchor clause. `crates/kernel/tests/kernel_anchor_write.rs:399` inserts a decision naming an anchor before the anchor in one envelope and gets `NotFound`, and the commit stores neither row.
+Memory capture passes `anchor_id: None` (`crates/daemon/src/memory_capture.rs:1202`), so at the branch tip no production decision reaches the anchor clause. `crates/kernel/tests/kernel_anchor_write.rs:399` inserts a decision naming an anchor before the anchor in one envelope and gets `NotFound`, and the commit stores neither row.
 
 ## Failure scenario
 
@@ -37,8 +37,8 @@ A decision naming a missing domain; a decision naming an anchor inserted after i
 - Findings: at U1 and U2 every production `DecisionSpec` set `anchor_id: None`.
   At U3 the capture publish inserts the job's anchor before the job's first
   decision and names it on every decision of the job
-  (`crates/daemon/src/memory_capture.rs:1253`), so the clause is reached on
-  every anchored publish (`crates/daemon/src/source_capture_tests.rs:3501`).
+  (`crates/daemon/src/memory_capture.rs:1261`), so the clause is reached on
+  every anchored publish (`crates/daemon/src/source_capture_tests.rs:3496`).
 - Missing evidence: none.
 - Conclusion: resolved with answer: R1's `always-or-unreached` label is
   reversed to `always` at U3.

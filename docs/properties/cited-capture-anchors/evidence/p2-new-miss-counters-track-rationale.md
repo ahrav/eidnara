@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-The publish closure pushes one citation `Count` and one anchor `Count` per written decision into a caller-owned list. `CaptureWork::publish` passes the list to `SourceCapture::record_capture_decisions` (`crates/daemon/src/source_capture.rs:648`) only after `commit_before` returned a receipt with `replayed == false`; a refused commit returns before the call, and a replayed receipt runs no closure. The seven counters join the closed `counts!` vocabulary, so `report()` emits them under `metrics.source_capture`, and the host sanitizer allowlist and the wire table carry their names (`crates/host-runtime/src/control.rs:709`, checked against the document by `:1960`). Each recorded reason also emits one log line, `memory decisions`, with the reason name and a count; a debug assertion keeps the recorded list to the seven decision counts. `decisions_publish_budget_expired` stays zero until U4, and the wire table says so.
+The publish closure pushes one citation `Count` and one anchor `Count` per written decision into a caller-owned list. `CaptureWork::publish` passes the list to `SourceCapture::record_capture_decisions` (`crates/daemon/src/source_capture.rs:662`) only after `commit_before` returned a receipt with `replayed == false`; a refused commit returns before the call, and a replayed receipt runs no closure. The seven counters join the closed `counts!` vocabulary, so `report()` emits them under `metrics.source_capture`, and the host sanitizer allowlist and the wire table carry their names (`crates/host-runtime/src/control.rs:709`, checked against the document by `:1960`). Each recorded reason also emits one log line, `memory decisions`, with the reason name and a count; a debug assertion keeps the recorded list to the seven decision counts. `decisions_publish_budget_expired` stays zero until U4, and the wire table says so.
 
 ## Failure scenario
 
@@ -18,7 +18,7 @@ A rollback after the reasons were computed; a lost reply followed by a replay.
 
 ## What a test must construct
 
-The seven counters after a mixed submission (`crates/daemon/src/source_capture_tests.rs:3501`, `:3651`); a committed publish replayed on retry with every counter unchanged (`crates/daemon/src/source_capture_tests.rs:3835`).
+The seven counters after a mixed submission (`crates/daemon/src/source_capture_tests.rs:3496`, `:3646`); a committed publish replayed on retry with every counter unchanged (`crates/daemon/src/source_capture_tests.rs:3822`).
 
 ## Investigation log
 
