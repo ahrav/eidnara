@@ -236,7 +236,7 @@ pub(crate) struct SourceCapture {
     counters: Counters,
     #[cfg(test)]
     pub(crate) before_publish: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// Runs inside the batch publication after the screening preview and before the commit, where a purge reaches the commit without the pre-screen seeing it.
+    /// Runs inside the batch publication after screening and before the commit, where a purge reaches the commit without the pre-screen seeing it.
     #[cfg(test)]
     pub(crate) between_screen_and_commit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// F23: when set, `session.delete` returns after the Kernel retirement commits and before the memory-store delete: an application-fault cut between the two commits.
