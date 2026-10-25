@@ -1032,9 +1032,10 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate, and the `eval_runner` example, whose report
-  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
-  is the intended producer of non-empty values
+  sans-I/O crate, and the `eval_runner` example, which writes an all-off family
+  copy and an undeclared run that `crates/daemon/tests/eval_campaign.rs`
+  analyzes; the out-of-tree runner (#1007) is the intended producer of
+  capture-on declarations
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/manifest.rs::a_capture_declaration_is_closed_total_and_canonical`,
@@ -1069,9 +1070,10 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate, and the `eval_runner` example, whose report
-  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
-  is the intended producer of non-empty values
+  sans-I/O crate, and the `eval_runner` example, which writes an all-off family
+  copy and an undeclared run that `crates/daemon/tests/eval_campaign.rs`
+  analyzes; the out-of-tree runner (#1007) is the intended producer of
+  capture-on declarations
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/statistics.rs::runs_under_different_capture_declarations_never_read_under_each_other`,
@@ -1106,9 +1108,10 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate, and the `eval_runner` example, whose report
-  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
-  is the intended producer of non-empty values
+  sans-I/O crate, and the `eval_runner` example, which writes an all-off family
+  copy and an undeclared run that `crates/daemon/tests/eval_campaign.rs`
+  analyzes; the out-of-tree runner (#1007) is the intended producer of
+  capture-on declarations
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/manifest.rs::a_capture_on_run_without_a_frozen_family_is_refused_by_name`,
@@ -1142,9 +1145,10 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate, and the `eval_runner` example, whose report
-  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
-  is the intended producer of non-empty values
+  sans-I/O crate, and the `eval_runner` example, which writes an all-off family
+  copy and an undeclared run that `crates/daemon/tests/eval_campaign.rs`
+  analyzes; the out-of-tree runner (#1007) is the intended producer of
+  capture-on declarations
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/statistics.rs::the_run_copy_of_the_capture_declaration_must_equal_the_family_copy`
@@ -1205,8 +1209,9 @@ Open questions:
   `task_arm_policy` scheme would be a new `WriteKeyScheme` variant and a new
   family digest (needs human input).
 - The lineage fixtures are hand-built;
-  `led-non-empty-lineage-reachable-from-a-producer` stays unexercised until a
-  producer retries a sample (unresolved, needs the runner, #1007).
+  `led-non-empty-lineage-reachable-from-a-producer` (#1119 Part A) stays
+  unexercised until a producer retries a sample (unresolved, needs the runner,
+  #1007).
 
 ### wk-excludes-names-own-task-only
 
@@ -1282,9 +1287,9 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate, and the `eval_runner` example, whose report
+  sans-I/O crate, and the `eval_runner` example, whose empty `ceilings`
   `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
-  is the intended producer of non-empty values
+  is the intended producer of declared ceilings
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/report.rs::a_ceiling_declaration_names_its_kind_task_pair_and_pinned_revision`,
@@ -1320,9 +1325,9 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate, and the `eval_runner` example, whose report
+  sans-I/O crate, and the `eval_runner` example, whose empty `ceilings`
   `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
-  is the intended producer of non-empty values
+  is the intended producer of declared ceilings
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/report.rs::a_declared_ceiling_leaves_the_claim_marginals_rates_and_gates_unchanged`
@@ -1350,7 +1355,8 @@ Confidence: high -
   refuse. The cited test declares a `Transfer` ceiling; a `ProjectKnowledge`
   ceiling reaches the same code by reading.
 Existing check: `crates/eval-core/src/claim.rs:138`;
-  `crates/eval-core/src/report.rs:64` (`CampaignGates::of`), `:903`; test above.
+  `crates/eval-core/src/report.rs:64` (`CampaignGates::of`), `:706`, `:903`;
+  test above.
 Impact: An injected-evidence ceiling counted as `transfer` would turn a bound
   into a real-history claim.
 Open questions: None.
@@ -1359,9 +1365,9 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate, and the `eval_runner` example, whose report
-  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
-  is the intended producer of non-empty values
+  sans-I/O crate, and the `eval_runner` example, whose zero re-bills
+  `crates/daemon/tests/eval_campaign.rs` parses and asserts; the out-of-tree
+  runner (#1007) is the intended producer of non-zero re-bills
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/report.rs::the_prefix_rebill_total_is_the_checked_product`,
@@ -1391,9 +1397,9 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate, and the `eval_runner` example, whose report
-  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
-  is the intended producer of non-empty values
+  sans-I/O crate, and the `eval_runner` example, whose zero re-bills
+  `crates/daemon/tests/eval_campaign.rs` parses and asserts; the out-of-tree
+  runner (#1007) is the intended producer of non-zero re-bills
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/report.rs::a_report_records_the_rebill_per_paired_arm_and_never_drops_it`,
@@ -1475,6 +1481,6 @@ Open questions: None.
   field set and digest, and `rebill-total-checked-multiplication` is the
   arithmetic it validates; neither touches the per-task budgets' censor order.
 - The parent specification (#1119) also names the existing behaviour these
-  records extend (its Part A: `fam-*`, `led-*`, `clm-*`, `arm-*`, `man-*`,
-  and `use-*` records). Those records are documented there and have no
-  records in this catalog yet.
+  records extend (its Part A: the `fam-*`, `led-*`, `clm-*`, `arm-*`, `man-*`,
+  and `use-*` records and `rid-run-id-covers-config-canonically`). They are
+  documented there; adding them here is an owner decision.

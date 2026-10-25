@@ -25,7 +25,7 @@ Legal witness: `{t1, Aged, lineage: []}` and `{t1, Aged, lineage: [run_a]}`
 yield one key. Smallest falsifier: a key that compares `lineage`.
 
 ## Investigation log
-### Q: Does this record discharge `led-non-empty-lineage-reachable-from-a-producer`?
+### Q: Does this record discharge `led-non-empty-lineage-reachable-from-a-producer` (#1119 Part A)?
 - Sources examined: the fixtures in `crates/eval-core/tests/access.rs`
 - Findings: the lineage values are hand-built; no in-tree producer writes a
   non-empty lineage

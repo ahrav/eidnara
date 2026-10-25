@@ -30,8 +30,9 @@ injected anchor set passed as `anchor_set`, yielding `Transfer`.
 ## Investigation log
 ### Q: Do ceiling figures appear in the report?
 - Sources examined: the report type
-- Findings: the report carries declarations only; figures come from the
-  runner's ceiling campaign (#1007)
+- Findings: the report carries declarations only; C15 requires each figure the
+  runner's ceiling campaign (#1007) reports to travel with its full
+  declaration
 - Missing evidence: none.
-- Conclusion: resolved with answer - a figure travels with its declaration
-  when the runner reports one
+- Conclusion: resolved with answer - the report carries declarations; figures
+  are the runner's, under C15

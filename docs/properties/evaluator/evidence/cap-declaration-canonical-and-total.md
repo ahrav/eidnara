@@ -44,8 +44,8 @@ spellings of one declaration producing two run ids.
 - Missing evidence: none.
 - Conclusion: resolved with answer - the pinned bytes carry the property
 ### Q: Catalog open question: The family copy decodes with plain serde, so it admits the array spelling
-- Sources examined: `crates/eval-core/src/capture.rs:29`
-  (`CaptureDeclaration`, `deny_unknown_fields`)
+- Sources examined: `crates/eval-core/src/capture.rs:29` and the family decode
+  in `parse_analysis_family` (`crates/eval-core/src/statistics.rs:760`)
 - Findings: The family copy decodes with plain serde, so it admits the array
   spelling; the family digest hashes the re-serialized value, so identity is
   unaffected

@@ -30,6 +30,7 @@ falsifier: `{ProjectKnowledge, "t1", "t2", <sha>}` admitted.
 ### Q: Catalog open question: Task ids are compared untrimmed, as the sample ledger compares them
 - Sources examined: `crates/eval-core/src/ceiling.rs:50`, `:83`
 - Findings: Task ids are compared untrimmed, as the sample ledger compares
-  them; `t1` and `t1 ` are two tasks
+  them; `t1` and `t1 ` are two tasks; `validate` tests tasks with `blank` and
+  compares them with plain `==` (`crates/eval-core/src/ceiling.rs:50`)
 - Missing evidence: an owner decision.
 - Conclusion: needs human input

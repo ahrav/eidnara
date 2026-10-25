@@ -2219,8 +2219,8 @@ worlds"). The sample ledger holds no ceiling sample, `derive_claim_class`
 reads provenance, anchor set, and criterion only, so the derivation is the
 same with and without a ceiling, and the paired marginals, the per-arm rate
 keys, and the run-gate denominators read no ceiling. The report carries
-declarations only; the runner's ceiling campaign (#1007) reports each figure
-beside its full declaration.
+declarations only; each figure the runner's ceiling campaign (#1007) reports
+must travel with its full declaration (C15 of #1119).
 
 **Prefix re-bill.** An accepted memory write hard-folds every live session on
 the project, and each fold re-bills that session's frozen prefix. `PrefixRebill
@@ -2235,7 +2235,7 @@ which keeps its six fields and its censor order, and it sits on the report,
 outside the manifest, `REQUIRED_FIELDS`, the residue rules, and the manifest
 digest. Its counts travel as JSON numbers inside the canonical safe range,
 which the report's canonical check enforces; the report stores the three
-counts and derives the total.
+counts, and `total()` derives the product.
 
 `CampaignGates::of` computes the run-level gates beside the three paired ones:
 `indeterminate` and `censoring` as shares of the attempted samples, since
