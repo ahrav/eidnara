@@ -287,14 +287,14 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only - batch ingest under consent; the block arises only after an operator purge.
-Status: invalidated - U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) refuses a blocked unit alone in the screening preview (`hs.rs:1593-1598`). Kept so the `sc-readmit-` obligations have a named predecessor.
+Status: invalidated - U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) refuses a blocked unit alone in the screening preview (`hs.rs:1594-1599`). Kept so the `sc-readmit-` obligations have a named predecessor.
 Exercised: not yet - the behavior no longer exists for a block present at the screening preview; the path it describes remains for a purge that commits after that preview, which `sc-tests:2561` exercises.
-Guarantee: Before U6, a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1482-1484`), the pass counts `kernel_error` (`sc.rs:1312-1317`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:827-852`), so the batch is retried whole on each later pass while the block holds.
+Guarantee: Before U6, a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1483-1485`), the pass counts `kernel_error` (`sc.rs:1312-1317`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:827-852`), so the batch is retried whole on each later pass while the block holds.
 Check: `always` - a batch holding one tombstoned or pending-unlink digest ends `kernel_error` with every keyed unit pending and nothing retained. `always` because the Kernel check runs on every new reference.
 Fault/timing angle: a purge committed before the pass; the block outlives the pending unlink because every pending unlink is written with a tombstone.
 Required faults and enabling state: an operator purge of a captured digest, then identical bytes under a new identity beside a sibling.
 Confidence: high - [evidence](evidence/il-readmission-block-ends-batch-unnamed-at-head.md). Traced at `41d889ea4`, whose pre-screen held no re-admission check, and re-read after U6.
-Existing check: the U6 successors `sc-tests:2514` (AE5, tombstone and pending unlink), `sc-tests:2561` (a purge between the screening preview and the commit), `sc-tests:2600` (receipt replay precedence), `sc-tests:2624` (a reclaiming digest stays pending), `hs-tests:2555` (no admission slot), and `crates/kernel/tests/cas_fault_injection.rs:588` (the preview query); unaudited.
+Existing check: the U6 successors `sc-tests:2514` (AE5, tombstone and pending unlink), `sc-tests:2561` (a purge between the screening preview and the commit), `sc-tests:2607` (receipt replay precedence), `sc-tests:2631` (a reclaiming digest stays pending), `hs-tests:2555` (no admission slot), and `crates/kernel/tests/cas_fault_injection.rs:589` (the preview query); unaudited.
 Impact: before U6, one purged digest stalled every unit of its batch on every pass. U6 replaces this with a terminal per-unit refusal; the #1104 document rows "Pending unlink (OQ20)" and "Tombstone after purge (OQ21)" become stale then (U10 handoff).
 Open questions: None.
 

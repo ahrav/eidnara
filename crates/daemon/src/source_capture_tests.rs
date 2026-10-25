@@ -2593,6 +2593,13 @@ async fn a_purge_between_screen_and_commit_fails_one_pass_then_converges() {
     assert_eq!(count(&handler, "kernel_error") - errors, 1);
     assert_eq!(count(&handler, "units_published") - published, 1);
     assert_eq!(count(&handler, "units_refused_terminal") - terminal, 1);
+
+    let skipped = count(&handler, "units_memo_skipped");
+    let tip = store.tip().unwrap();
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::Completed);
+    assert_eq!(count(&handler, "units_memo_skipped") - skipped, 2);
+    assert_eq!(store.tip().unwrap(), tip);
 }
 
 /// A unit whose descriptor receipt is stored replays it after its bytes are purged, with the memo empty as after a restart; the same bytes under a new identity are refused.

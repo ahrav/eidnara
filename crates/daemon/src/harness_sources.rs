@@ -1135,20 +1135,6 @@ impl SourcePublisher<'_> {
 }
 
 /// The receipt `preview` holds for `intent`'s key and the digest it was written under: `intent`'s digest, or else the `source-request.v1` digest of `unit` under `publisher`, which is computed only when the key holds a receipt under another digest. A receipt written before the outcome record replays as it was written, without enrichment. A key holding neither digest is [`KernelError::Conflict`].
-fn readmission_blocked(
-    preview: &kernel::Preview<'_>,
-    publisher: &SourcePublisher<'_>,
-    unit: &Prepared<'_>,
-) -> Result<bool, KernelError> {
-    match stored_receipt(preview, publisher.descriptor_intent(unit), unit, publisher) {
-        Ok(None) => preview.artifact_readmission_blocked(&kernel::source_identity::payload_id(
-            unit.unit.text.as_bytes(),
-        )),
-        Ok(Some(_)) | Err(KernelError::Conflict) => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
 fn stored_receipt(
     preview: &kernel::Envelope<'_>,
     intent: CommitIntent,
@@ -1167,6 +1153,21 @@ fn stored_receipt(
                 .ok_or(KernelError::Conflict)
         }
         other => Ok(other?.map(|receipt| (receipt, intent.request_digest))),
+    }
+}
+
+/// True when `unit`'s key holds no descriptor receipt and a purge tombstone or pending unlink names its payload digest. Receipt replay and the batch preview's request-conflict refusal take precedence over this check.
+fn readmission_blocked(
+    preview: &kernel::Preview<'_>,
+    publisher: &SourcePublisher<'_>,
+    unit: &Prepared<'_>,
+) -> Result<bool, KernelError> {
+    match stored_receipt(preview, publisher.descriptor_intent(unit), unit, publisher) {
+        Ok(None) => preview.artifact_readmission_blocked(&kernel::source_identity::payload_id(
+            unit.unit.text.as_bytes(),
+        )),
+        Ok(Some(_)) | Err(KernelError::Conflict) => Ok(false),
+        Err(error) => Err(error),
     }
 }
 

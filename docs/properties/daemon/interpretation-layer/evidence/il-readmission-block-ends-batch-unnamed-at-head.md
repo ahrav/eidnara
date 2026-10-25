@@ -13,7 +13,7 @@ unnamed batch conflict, which the plan's R16 replaces.
   batch contract says the error names no request
   (`crates/kernel/src/cas/ingest.rs:693`). The single ingest names
   `ReAdmissionBlocked` (`crates/kernel/src/cas/ingest.rs:461-468`, `:1151-1153`).
-- `BatchRefusal::conflicting_unit` (`harness_sources.rs:1482-1484`) is `None`
+- `BatchRefusal::conflicting_unit` (`harness_sources.rs:1483-1485`) is `None`
   when `unit` is `None`.
 - `publish_locked` (`crates/daemon/src/source_capture.rs:827-852`) records
   every keyed unit `Pending` and ends with `kernel_end`, which counts
@@ -57,8 +57,8 @@ pending, nothing retained.
 - Conclusion: resolved with answer.
 
 ### Q: What does U6 change?
-- Sources examined: `crates/daemon/src/harness_sources.rs:1593-1598` and
-  `:1138-1150`; `crates/kernel/src/cas/ingest.rs:1470-1474`; the U6 tests.
+- Sources examined: `crates/daemon/src/harness_sources.rs:1594-1599` and
+  `:1160-1172`; `crates/kernel/src/cas/ingest.rs:1470-1475`; the U6 tests.
 - Findings: the screening preview refuses a unit with no stored descriptor
   receipt whose payload digest is tombstoned or pending unlink, before the
   commit and without an admission slot. A purge that commits after that

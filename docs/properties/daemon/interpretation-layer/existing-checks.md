@@ -96,10 +96,10 @@ or whose check U4 deleted says so.
 | --- | --- | --- |
 | `sc-tests:2514` `a_blocked_digest_is_refused_alone_and_its_sibling_publishes` | AE5 for a tombstoned and a pending-unlink digest, and the pre-screen digest equal to the stored artifact digest | unaudited |
 | `sc-tests:2561` `a_purge_between_screen_and_commit_fails_one_pass_then_converges` | one `kernel_error` pass, then AE5 | unaudited |
-| `sc-tests:2600` `a_purged_unit_with_a_stored_receipt_replays` | receipt replay precedes the pre-screen | unaudited |
-| `sc-tests:2624` `a_reclaiming_digest_stays_pending_and_publishes_after_reclamation` | a reclaiming-only digest is never terminal | unaudited |
+| `sc-tests:2607` `a_purged_unit_with_a_stored_receipt_replays` | receipt replay precedes the pre-screen | unaudited |
+| `sc-tests:2631` `a_reclaiming_digest_stays_pending_and_publishes_after_reclamation` | a reclaiming-only digest is never terminal | unaudited |
 | `hs-tests:2555` `a_purged_digest_is_refused_before_the_batch_and_takes_no_admission_slot` | the refused unit takes no admission slot | unaudited |
-| `crates/kernel/tests/cas_fault_injection.rs:588` `readmission_preview_names_tombstoned_and_pending_unlink_digests_and_writes_nothing` | the preview query's truth table and that it writes nothing | unaudited |
+| `crates/kernel/tests/cas_fault_injection.rs:589` `readmission_preview_names_tombstoned_and_pending_unlink_digests_and_writes_nothing` | the preview query's truth table and that it writes nothing | unaudited |
 
 ## Suspiciously quiet areas
 

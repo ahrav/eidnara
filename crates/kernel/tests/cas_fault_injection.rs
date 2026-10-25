@@ -583,7 +583,8 @@ fn purge_and_gc_fault_table_preserves_pending_work_and_converges() {
 
 /// The capture pre-screen refuses a unit terminally only on this answer, so it must be true for
 /// both monotone tables and false for a digest whose reservation is only reclaiming, and the
-/// preview it runs in must leave the store as it found it.
+/// preview it runs in must leave the store as it found it. A pending unlink references its
+/// tombstone, so the pending-unlink digest carries both rows.
 #[test]
 fn readmission_preview_names_tombstoned_and_pending_unlink_digests_and_writes_nothing() {
     let root = tempfile::tempdir().unwrap();

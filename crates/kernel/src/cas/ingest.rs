@@ -1468,6 +1468,7 @@ fn artifact_is_blocked(
 }
 
 impl crate::Preview<'_> {
+    /// `artifact_readmission_blocked` returns true exactly when a purge tombstone or pending unlink names `digest`.
     pub fn artifact_readmission_blocked(&self, digest: &str) -> Result<bool, KernelError> {
         artifact_is_blocked(self.envelope.tx, digest)
     }
