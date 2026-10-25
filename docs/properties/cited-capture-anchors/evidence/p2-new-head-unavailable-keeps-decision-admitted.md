@@ -12,7 +12,7 @@ rationale reason, the counter, and the no-anchor clause.
 
 ## Evidence trail
 
-`observe_head` (`crates/daemon/src/memory_capture/head.rs:22`) returns
+`observe_head` (`crates/daemon/src/memory_capture/head.rs:21`) returns
 `HeadUnavailable` when `git_sources::open` refuses the root (no repository,
 or an `extensions.objectFormat` gix refuses), when the object format is not
 SHA-1, when `head()` fails or names no id (unborn), and when the HEAD target
@@ -36,7 +36,7 @@ None.
 
 Roots for an unborn HEAD, a plain directory, a missing directory, a
 repository declaring SHA-256, and a HEAD detached at a tree
-(`crates/daemon/src/memory_capture/head.rs:140`); and the route-level
+(`crates/daemon/src/memory_capture/head.rs:139`); and the route-level
 submission over unborn, plain, and SHA-256 roots, asserting the frozen value
 and that both jobs publish (`crates/daemon/src/lib.rs:24619`).
 
@@ -47,7 +47,7 @@ and that both jobs publish (`crates/daemon/src/lib.rs:24619`).
 - Sources examined: OQ2-11 in ticket #1134 and `observe_head`.
 - Findings: the owner chose to anchor detached HEADs;
   `a_branch_head_and_a_detached_head_freeze_their_commit`
-  (`crates/daemon/src/memory_capture/head.rs:124`) freezes the detached
+  (`crates/daemon/src/memory_capture/head.rs:123`) freezes the detached
   commit.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

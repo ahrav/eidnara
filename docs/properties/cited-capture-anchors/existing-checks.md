@@ -28,7 +28,7 @@ part.
 | Message unit identity | `crates/daemon/src/harness_sources.rs:189` (`SessionIdentity::message_unit`) | one unit per text block | unaudited |
 | Evidence id from receipt key | `crates/daemon/src/harness_sources.rs:992` (`evidence_request`) | `srcev:` plus the unit key | unaudited |
 | Isolated bounded open | `crates/daemon/src/git_sources.rs:128` (`isolated_options`), `:138` (`open`) | isolation, replacement refs ignored, allocation limit | unaudited |
-| HEAD observation | `crates/daemon/src/memory_capture/head.rs:22` (`observe_head`), called once per submit at `crates/daemon/src/memory_capture/native.rs:562` | HEAD resolved through the ref store and one object header; unborn, unreadable, unsupported, non-commit, and non-repository roots are `HeadUnavailable` | unaudited |
+| HEAD observation | `crates/daemon/src/memory_capture/head.rs:21` (`observe_head`), called once per submit at `crates/daemon/src/memory_capture/native.rs:562` | HEAD resolved through the ref store and one object header; unborn, unreadable, unsupported, non-commit, and non-repository roots are `HeadUnavailable` | unaudited |
 | Anchor write validation | `crates/kernel/src/anchor_write.rs:263` (`validate_anchor`), `:254` (`validate_anchor_row`) | written anchor rows pass the engine's bound check and decoder and round-trip | unaudited |
 | Anchor write order | `crates/kernel/src/anchor_write.rs:320` (`insert_anchor_inner`) | registry row, anchor row, and change record in one envelope | unaudited |
 
@@ -70,10 +70,10 @@ part.
 | `crates/daemon/src/source_capture_tests.rs:180`, `:428`, `:464`, `:1072`, `:1233` | `p2-deferred-source-units-publish-on-a-later-pass` | unaudited |
 | `crates/daemon/tests/git_sources.rs:549` `refused_selections_publish_nothing_and_encodings_are_dispositions` | `p2-git-open-is-isolated-and-allocation-bounded` | unaudited |
 | `crates/daemon/tests/git_sources.rs:827` `delta_packed_commit_against_an_oversized_base_is_refused` | same | unaudited |
-| `crates/daemon/src/memory_capture/head.rs:124` `a_branch_head_and_a_detached_head_freeze_their_commit` | `p2-new-head-observed-once-and-frozen` | unaudited |
-| `crates/daemon/src/memory_capture/head.rs:140` `unborn_unsupported_non_commit_and_non_repository_roots_are_unavailable` | `p2-new-head-unavailable-keeps-decision-admitted`; `p2-git-open-is-isolated-and-allocation-bounded` | unaudited |
-| `crates/daemon/src/memory_capture/head.rs:174` `the_observation_reads_at_most_one_object_and_neither_the_index_nor_the_tree` | `p2-new-head-observed-once-and-frozen` (no status scan, at most one object read) | unaudited |
-| `crates/daemon/src/memory_capture/head.rs:205` `frozen_heads_serialize_as_tagged_values_and_round_trip`; `crates/daemon/src/memory_capture.rs:1654` `a_plan_frozen_without_a_head_reads_as_head_unavailable` | same (C13 compatibility) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:123` `a_branch_head_and_a_detached_head_freeze_their_commit` | `p2-new-head-observed-once-and-frozen` | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:139` `unborn_unsupported_non_commit_and_non_repository_roots_are_unavailable` | `p2-new-head-unavailable-keeps-decision-admitted`; `p2-git-open-is-isolated-and-allocation-bounded` | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:173` `the_observation_reads_at_most_one_object_and_neither_the_index_nor_the_tree` | `p2-new-head-observed-once-and-frozen` (no status scan, at most one object read) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:204` `frozen_heads_serialize_as_tagged_values_and_round_trip`; `crates/daemon/src/memory_capture.rs:1654` `a_plan_frozen_without_a_head_reads_as_head_unavailable` | same (C13 compatibility) | unaudited |
 | `crates/daemon/src/lib.rs:24619` `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it` | `p2-new-head-observed-once-and-frozen`; `p2-new-head-unavailable-keeps-decision-admitted` | unaudited |
 | `crates/daemon/src/lib.rs:24729` `a_plan_frozen_without_a_head_publishes_as_before` | `p2-new-head-observed-once-and-frozen` (C13: a plan without `head` publishes) | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:300` `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference` | `p2-new-anchor-row-decodes-on-write`; `p2-new-anchor-and-registry-share-one-envelope` | unaudited |

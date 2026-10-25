@@ -11,10 +11,9 @@ pub(crate) enum FrozenHead {
     /// The 40-character lowercase hex id of the commit HEAD names, directly
     /// when detached or through its branch.
     Commit(String),
-    /// An unborn or unreadable HEAD, a HEAD naming an object other than a
-    /// commit, an unsupported object format, or a repository-open failure,
-    /// which includes a root that is a subdirectory of a work tree: the open
-    /// performs no upward discovery, as the Kernel's checkout open does.
+    /// `HeadUnavailable` indicates an unborn or unreadable HEAD, a HEAD naming
+    /// a non-commit object, an unsupported object format, or a root that
+    /// `git_sources::open` refuses.
     #[default]
     HeadUnavailable,
 }
