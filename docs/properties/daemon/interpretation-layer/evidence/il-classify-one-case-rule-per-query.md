@@ -44,3 +44,10 @@ Covered.
   name takes that class; an MCP server exposing `edit` collides by design.
 - Missing evidence: none.
 - Conclusion: resolved with answer: a known condition, not a guarantee.
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: U4 implemented the rules as `NameRule` data; `crates/daemon/src/tool_vocabulary_tests.rs:17` pins the per-consumer table and `:257` every tabled name.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.

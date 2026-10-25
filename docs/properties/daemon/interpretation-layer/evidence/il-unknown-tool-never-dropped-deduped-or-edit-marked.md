@@ -42,3 +42,19 @@ Covered for class decisions.
 - Missing evidence: an owner decision.
 - Conclusion: needs human input; the record scopes the guarantee to class
   decisions.
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: U4 implemented the class arms; `crates/daemon/src/selection.rs:2828` runs an `Unknown` tool through selection beside an `edit` positive control.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.
+
+### Q: Why is the check `always(!X)` when the source's `Check` line opens with `always`?
+- Sources examined: the source record (#1105 Part B S2) and METHOD's
+  check-semantics rules.
+- Findings: the source's own rationale says "`always(!X)` for the forbidden
+  drop/dedup/mark; the forbidden states have no dedicated code point". METHOD
+  assigns a forbidden state with no detection point to `always(!X)`.
+- Missing evidence: none.
+- Conclusion: resolved with answer: the label follows the source's rationale.

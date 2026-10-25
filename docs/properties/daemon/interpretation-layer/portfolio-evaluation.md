@@ -24,14 +24,10 @@ records are proposed obligations and have no portfolio result of their own.
 - B1. HEAD records carry post-plan obligations in their `Impact` lines.
   Disposition: kept as links to the record or unit that owns each obligation.
 - B2. The reachability of the summarizer `TC:` path rested on a
-  medium-confidence label in #1104. Disposition: resolved here. The
-  history-summarizer path needs a non-empty model chain: the default is empty
-  (`crates/daemon/src/config.rs:147`), `eidnara_folds` requires one
-  (`config.rs:187-191`), the trigger estimate that formats `TC:` lines runs only
-  after `prepare_history_summarizer_with` passes its `eidnara_folds` check
-  (`crates/daemon/src/lib.rs:9813`), and the firing assembler returns `NoModels`
-  without one (`crates/daemon/src/history_summarizer_chunk.rs:860-864`).
-  Records on that path are `explicit-config-only`.
+  medium-confidence label in #1104. Disposition: resolved here; the path needs
+  a non-empty model chain, and the evidence is in
+  [`catalog.md`](catalog.md#reachability-classes). Records on that path are
+  `explicit-config-only`.
 
 ## Re-verification at `41d889ea4`
 
@@ -41,9 +37,19 @@ records are proposed obligations and have no portfolio result of their own.
   `explicit-config-only`; its only production caller is the capture adapter.
 - `Exercised` changes: nine records moved to `yes` on U4's checks
   (`crates/daemon/src/tool_vocabulary_tests.rs`,
-  `scripts/forbid-tool-literals.test.ts`, `selection.rs:2828`) and on this
-  part's literal table; il-adapter-refusal-is-per-message and
+  `scripts/forbid-tool-literals.test.ts`, `selection.rs:2828`):
+  il-path-arg-key-order-first-match, il-tool-name-matching-differs-across-consumers,
+  il-classify-total-with-unknown, il-unknown-tool-never-dropped-deduped-or-edit-marked,
+  il-gate-fails-on-distinctive-literal-outside-module,
+  il-dedup-removal-leaves-goldens-byte-identical,
+  il-exit-code-only-for-named-tool-and-harness, il-path-arg-harness-neutral, and
+  il-classify-one-case-rule-per-query. il-exit-code-only-for-opencode-bash was
+  already `yes`. il-literal-classified-contract-or-vocabulary is `partial` on
+  this part's table. il-adapter-refusal-is-per-message and
   il-unknown-part-kind-skipped-uncounted gained U3 replay witnesses.
+- Confidence changes: thirteen records moved from the source's `medium` to
+  `high`; each evidence file's investigation log names the code or test the
+  change rests on.
 - New findings: the generic vocabulary literals in `injection.rs` and
   `history_summarizer_chunk.rs`, and the Eidnara-owned spellings defined more
   than once (records il-vocabulary-literals-live-in-one-module and

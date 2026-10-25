@@ -44,3 +44,10 @@ A bare-name case (`{}` input) asserting `TC: name`.
   `name(description)`.
 - Missing evidence: none.
 - Conclusion: resolved with answer: corrected in the record.
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: the source left the locations unverified; this pass read `format_tool_summary` and every caller at `41d889ea4`, and `history_summarizer_chunk.rs:3312` and `crates/daemon/src/tool_vocabulary_tests.rs:66` exercise two of the three arms.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.

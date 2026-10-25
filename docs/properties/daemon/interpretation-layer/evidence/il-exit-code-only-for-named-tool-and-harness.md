@@ -38,3 +38,10 @@ Covered.
   the capture adapters, which run under `source_capture_enabled`.
 - Missing evidence: none.
 - Conclusion: resolved with answer: `explicit-config-only`.
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: U4 implemented the query; `crates/daemon/src/tool_vocabulary_tests.rs:145` runs it over the trace fixture and the mutated cases.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.

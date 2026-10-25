@@ -49,3 +49,10 @@ pending, nothing retained.
   capture does not call for a batch.
 - Missing evidence: none.
 - Conclusion: resolved with answer; U6 changes it.
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: the source left the trace pending; this pass followed the batch from the pre-screen through the Kernel batch ingest to `kernel_end` at `41d889ea4`, every step cited above.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.

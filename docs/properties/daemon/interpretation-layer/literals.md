@@ -7,13 +7,10 @@ states the rule; this file is its artifact.
 
 ## Scope and extraction
 
-The files are the ones the parent specification (#1105, D3 and R5) names as
-the interpretation layer, plus the module U4 moved their tables into, all under
+The nine files of [the catalog's scope](catalog.md#scope), all under
 `crates/daemon/src/`: `tool_vocabulary.rs`, `selection.rs`, `chunk_text.rs`,
 `wire.rs`, `tool_outcome.rs`, `injection.rs`, `history_summarizer_chunk.rs`,
-`codec/opencode.rs`, and `codec/pi.rs`. The specification counts seven sites;
-the two codecs are two files, and the vocabulary module is the eighth caller
-site's destination, so the table covers nine files.
+`codec/opencode.rs`, and `codec/pi.rs`.
 
 Production source is every line outside a top-level `#[cfg(test)]` module
 region (the rule `scripts/forbid-tool-literals.sh` applies) and outside a
@@ -44,10 +41,13 @@ Where Eidnara's own media-source object reuses a harness spelling (`type`,
 `url`, `data`, `mime`, `filename`), the row takes the harness's class,
 contract, because the spelling originates in the harness record.
 
-One row is one literal under one class. Ten spellings carry two classes at
-different sites and so have two rows: `action`, `cancelled`, `completed`,
-`content`, `file`, `image`, `path`, `read`, `status`, and `summary`. Every
-occurrence of every in-scope literal appears in exactly one row.
+One row is one literal under one class and one meaning. Ten spellings carry
+more than one meaning at different sites and so have more than one row:
+`action`, `cancelled`, `completed`, `file`, `image`, `path`, `read`,
+`status`, and `summary` have two rows each, and `content` has three (a diff
+key and a `todowrite` item key, both vocabulary, and the contract message
+field). Every occurrence of every in-scope literal appears in exactly one
+row.
 
 ## Distinctive vocabulary and the gate
 
@@ -84,8 +84,8 @@ carries the finding.
 
 `eidnara_reduce` and `eidnara_note` are defined once, at
 `prompt_surface.rs:65` and `:67`, and `tool_vocabulary.rs:23` imports them;
-neither is a literal in the nine files. Three Eidnara-owned spellings are not
-defined once:
+neither is a literal in the nine files. These Eidnara-owned spellings are
+not defined once:
 
 - `synthetic_todo_` at `injection.rs:20` and `codec/opencode.rs:1074`.
 - The `eidnara_note` actions `read` and `dismiss` at `tool_vocabulary.rs:37`,

@@ -9,20 +9,12 @@ holds their tool-name and argument-key tables.
 ## Source
 
 The generalize-source-context specification
-([#1105](https://github.com/ahrav/eidnara/issues/1105)) carries the records:
-Part A (comment 1, existing behavior, 13 records including four queued gaps)
-and Part B S2 (comment 2, proposed obligations for the vocabulary module and
-its gate, 9 records), both authored at `a0e3f2993`. U5
-([#1110](https://github.com/ahrav/eidnara/issues/1110)) lands them here after
-U4 ([#1107](https://github.com/ahrav/eidnara/issues/1107)) moved the tables
-into `crates/daemon/src/tool_vocabulary.rs` and added the literal gate. Every
-code reference is verified at `41d889ea4`, the #1109 branch tip this part's
-branch starts from; the part changes only `docs/`.
-
-Part B records stay proposed obligations: an `Exercised: yes` line names the
-check that exercises a record, which is evidence, not proof. The ten #1104
-records this work touches live on PR #1104's branch and are linked, not
-revised (see [`catalog.md`](catalog.md#1104-records-this-work-touches)).
+([#1105](https://github.com/ahrav/eidnara/issues/1105)) carries the records,
+Part A (existing behavior) and Part B S2 (the vocabulary module and its gate).
+U5 ([#1110](https://github.com/ahrav/eidnara/issues/1110)) lands them; the
+provenance and verification commit are stated in
+[`catalog.md`](catalog.md#scope). The ten #1104 records this work touches are
+linked, not revised.
 
 ## Layout
 
