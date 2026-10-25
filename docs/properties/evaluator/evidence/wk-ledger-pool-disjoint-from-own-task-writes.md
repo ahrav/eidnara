@@ -40,3 +40,10 @@ Legal witness: reads(s1) = {w3 keyed (t2, Aged)} with writes {w3, w7 keyed
 - Missing evidence: none.
 - Conclusion: resolved with answer - `KeyDisagreesWithWriter` keeps key-based
   attribution sound, added in #1122 beyond the spec's list
+### Q: Catalog open question: Recording completeness is the runner's attestation in `read_counts`
+- Sources examined: `crates/eval-core/src/access.rs:152` (`check_disjoint`),
+  `:232` (own-run attribution)
+- Findings: Recording completeness is the runner's attestation in
+  `read_counts`; the evaluator cannot observe a read the runner did not record
+- Missing evidence: an owner decision.
+- Conclusion: needs human input

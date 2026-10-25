@@ -29,5 +29,13 @@ yield one key. Smallest falsifier: a key that compares `lineage`.
 - Sources examined: the fixtures in `crates/eval-core/tests/access.rs`
 - Findings: the lineage values are hand-built; no in-tree producer writes a
   non-empty lineage
-- Missing evidence: a producer that writes a non-empty lineage.
+- Missing evidence: a runner (#1007) that retries a sample.
 - Conclusion: unresolved, needs a runner (#1007) that retries a sample
+### Q: Catalog open question: Two history policies of one arm share one key, as #1122 resolved OQ7-4
+- Sources examined: `crates/eval-core/src/access.rs:22`
+  (`From<&SampleRecord>`)
+- Findings: Two history policies of one arm share one key, as #1122 resolved
+  OQ7-4; a `task_arm_policy` scheme would be a new `WriteKeyScheme` variant
+  and a new family digest
+- Missing evidence: an owner decision.
+- Conclusion: needs human input

@@ -1032,7 +1032,9 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+  sans-I/O crate, and the `eval_runner` example, whose report
+  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
+  is the intended producer of non-empty values
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/manifest.rs::a_capture_declaration_is_closed_total_and_canonical`,
@@ -1048,9 +1050,8 @@ Check: `always` - `parse_capture_declaration` returns the declaration for the
   declaration is the pinned key-sorted bytes; a family document with an unknown
   variant or no `capture` is `Shape`. Must hold on every parse, so `always`.
 Fault/timing angle: None.
-Required faults and enabling state: Inputs with reordered keys, an unknown
-  variant, `write_key: "pair"`, a missing `memory_capture`, and the decoder's
-  array and map spellings.
+Required faults and enabling state: An unknown variant, `write_key: "pair"`, a
+  missing `memory_capture`, and the decoder's array and map spellings.
 Confidence: high - [evidence](evidence/cap-declaration-canonical-and-total.md).
   Ran the cited tests at HEAD; read `parse_capture_declaration`
   (`crates/eval-core/src/manifest.rs:365`), which refuses any input whose
@@ -1068,7 +1069,9 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+  sans-I/O crate, and the `eval_runner` example, whose report
+  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
+  is the intended producer of non-empty values
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/statistics.rs::runs_under_different_capture_declarations_never_read_under_each_other`,
@@ -1076,12 +1079,14 @@ Exercised: yes -
 Guarantee: Two `AnalysisFamily` values equal except in `capture` have different
   digests, so `FrozenFamily::check` and `analyze` refuse a report read under the
   other declaration with `FamilyChangedAfterResults` naming both digests.
-Check: `always` - for families `{off, on}` and `{off, off}`, the digests differ,
-  the run ids of manifests differing only in `memory_capture` differ, and
-  `analyze` of either manifest under the other family is
-  `FamilyChangedAfterResults {recorded, found}` with `recorded` the manifest's
-  digest and `found != recorded`; the post-hoc edit table's `capture`-only edit
-  is refused the same way. Must hold on every check, so `always`.
+Check: `always` - for families `{off, on}` and `{off, off}` (the cited tests
+  vary `memory_capture`; `source_capture` enters the digest the same way, read
+  from `digest`, which serializes the whole family), the digests differ, the run
+  ids of manifests differing only in `memory_capture` differ, and `analyze` of
+  either manifest under the other family is `FamilyChangedAfterResults
+  {recorded, found}` with `recorded` the manifest's digest and `found !=
+  recorded`; the post-hoc edit table's `capture`-only edit is refused the same
+  way. Must hold on every check, so `always`.
 Fault/timing angle: A family edited after results, the window the freeze gate
   guards.
 Required faults and enabling state: A manifest frozen under one declaration and
@@ -1101,7 +1106,9 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+  sans-I/O crate, and the `eval_runner` example, whose report
+  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
+  is the intended producer of non-empty values
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/manifest.rs::a_capture_on_run_without_a_frozen_family_is_refused_by_name`,
@@ -1124,8 +1131,8 @@ Required faults and enabling state: A manifest with `capture {off, on}` and
 Confidence: high -
   [evidence](evidence/cap-capture-on-requires-frozen-family.md). Ran the cited
   tests at HEAD; read `Manifest::validate`
-  (`crates/eval-core/src/manifest.rs:564`) and the accessor
-  `capture_declaration` (`:575`).
+  (`crates/eval-core/src/manifest.rs:405`), its refusal (`:564`), and the
+  accessor `capture_declaration` (`:575`).
 Existing check: `crates/eval-core/src/manifest.rs:564`, `:575`; tests above.
 Impact: A capture-on run with no frozen family would escape the family gate
   entirely.
@@ -1135,7 +1142,9 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+  sans-I/O crate, and the `eval_runner` example, whose report
+  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
+  is the intended producer of non-empty values
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/statistics.rs::the_run_copy_of_the_capture_declaration_must_equal_the_family_copy`
@@ -1195,6 +1204,9 @@ Open questions:
 - Two history policies of one arm share one key, as #1122 resolved OQ7-4; a
   `task_arm_policy` scheme would be a new `WriteKeyScheme` variant and a new
   family digest (needs human input).
+- The lineage fixtures are hand-built;
+  `led-non-empty-lineage-reachable-from-a-producer` stays unexercised until a
+  producer retries a sample (unresolved, needs the runner, #1007).
 
 ### wk-excludes-names-own-task-only
 
@@ -1270,7 +1282,9 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+  sans-I/O crate, and the `eval_runner` example, whose report
+  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
+  is the intended producer of non-empty values
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/report.rs::a_ceiling_declaration_names_its_kind_task_pair_and_pinned_revision`,
@@ -1306,7 +1320,9 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+  sans-I/O crate, and the `eval_runner` example, whose report
+  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
+  is the intended producer of non-empty values
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/report.rs::a_declared_ceiling_leaves_the_claim_marginals_rates_and_gates_unchanged`
@@ -1314,21 +1330,25 @@ Guarantee: A ceiling declared on a report changes none of the inputs of
   `derive_claim_class`, the paired marginals, the per-arm rate keys, or the run
   gates, so the report validates with the same `claims.derivation` with and
   without it.
-Check: `always` - a report carrying a valid `Transfer` ceiling parses with the
-  same derivation as the fixture without one (`GeneratedPhase1`), the same
-  `rates` and run gates, and arm-rate keys exactly `aged` and `fresh`; two
-  mutations that make `PairsExceedSamples` refuse identically with and without
-  the ceiling. A ceiling is a declaration block, so no input can change, hence
-  `always`.
+Check: `always` - a report carrying a valid `Transfer` ceiling (the kind the
+  cited test declares) parses with the same derivation as the fixture without
+  one (`GeneratedPhase1`), the same `rates` and run gates, and arm-rate keys
+  exactly `aged` and `fresh`; two mutations that make `PairsExceedSamples`
+  refuse identically with and without the ceiling. A ceiling is a declaration
+  block, so no input can change, hence `always`.
 Fault/timing angle: None.
 Required faults and enabling state: A run with a valid `Transfer` ceiling beside
   a `GeneratedPhase1` derivation.
 Confidence: high -
   [evidence](evidence/ceil-arm-leaves-claim-class-unchanged.md). Ran the cited
   test at HEAD; read `derive_claim_class` (`crates/eval-core/src/claim.rs:138`),
-  whose three arguments carry no ceiling, and the marginal loop
-  (`crates/eval-core/src/report.rs:903`), which iterates `ArmKind::Aged` and
-  `ArmKind::Fresh`.
+  whose three arguments carry no ceiling, the per-arm reads in
+  `check_pairs_backed` (`crates/eval-core/src/report.rs:903`), and the
+  suppression-branch loop over `ArmKind::Aged` and `ArmKind::Fresh` (`:706`).
+  The oracle is the validator's re-derivation: `parse_report` recomputes the
+  claim class, rates, and gates, so a ceiling that moved any of them would
+  refuse. The cited test declares a `Transfer` ceiling; a `ProjectKnowledge`
+  ceiling reaches the same code by reading.
 Existing check: `crates/eval-core/src/claim.rs:138`;
   `crates/eval-core/src/report.rs:64` (`CampaignGates::of`), `:903`; test above.
 Impact: An injected-evidence ceiling counted as `transfer` would turn a bound
@@ -1339,7 +1359,9 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+  sans-I/O crate, and the `eval_runner` example, whose report
+  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
+  is the intended producer of non-empty values
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/report.rs::the_prefix_rebill_total_is_the_checked_product`,
@@ -1369,7 +1391,9 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `crates/eval-core/tests/` integration tests over the
-  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+  sans-I/O crate, and the `eval_runner` example, whose report
+  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
+  is the intended producer of non-empty values
 Status: active
 Exercised: yes -
   `crates/eval-core/tests/report.rs::a_report_records_the_rebill_per_paired_arm_and_never_drops_it`,
@@ -1450,3 +1474,7 @@ Open questions: None.
 - `rebill-recorded-and-never-dropped` sits on the report, outside the manifest
   field set and digest, and `rebill-total-checked-multiplication` is the
   arithmetic it validates; neither touches the per-task budgets' censor order.
+- The parent specification (#1119) also names the existing behaviour these
+  records extend (its Part A: `fam-*`, `led-*`, `clm-*`, `arm-*`, `man-*`,
+  and `use-*` records). Those records are documented there and have no
+  records in this catalog yet.

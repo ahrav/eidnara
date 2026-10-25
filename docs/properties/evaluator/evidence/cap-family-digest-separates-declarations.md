@@ -15,8 +15,8 @@ implemented by #1121.
   gains a `capture` row in its edit table.
 
 ## Failure scenario
-A `capture` serialized with a skip-if-default attribute would make `{off,
-off}` and an absent field digest alike, and a family edited from off to on
+A digest that left a capture switch out of the serialized family would give
+`{off, off}` and `{off, on}` one digest, and a family edited from off to on
 after results would pass the freeze.
 
 ## Timing windows and dependencies

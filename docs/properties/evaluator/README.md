@@ -1042,9 +1042,16 @@ Capture declaration, family copy (`crates/eval-core/tests/statistics.rs`,
   (`cap-config-and-family-declaration-agree`): five run copies against four
   family declarations; a report exactly when they agree, with absent read as
   all off, and the freeze check first.
-- `a_capture_on_run_without_a_frozen_family_never_reaches_the_family_gate`,
-  `a_family_document_declaration_is_closed`,
-  `evaluator_document_names_the_current_analysis_family_literal`.
+- `a_capture_on_run_without_a_frozen_family_never_reaches_the_family_gate`
+  (`cap-capture-on-requires-frozen-family`): a capture-on run with no frozen
+  family reaches `analyze` only as `InvalidManifest`, and an undeclared or
+  all-off one still reads as `FamilyNotRecorded`.
+- `a_family_document_declaration_is_closed`
+  (`cap-declaration-canonical-and-total`): a family document with an unknown
+  variant or no `capture` is a shape error.
+- `evaluator_document_names_the_current_analysis_family_literal`: every
+  `eval-analysis-family/vN` literal in `docs/evaluator.md` names the current
+  version and its history line.
 
 ## Phase 3 executed checks: censored outcomes
 

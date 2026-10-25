@@ -28,8 +28,8 @@ into several identities.
 None.
 
 ## What a test must construct
-Inputs with reordered keys, an unknown variant, `write_key: "pair"`, a missing
-`memory_capture`, and the decoder's array and map spellings.
+An unknown variant, `write_key: "pair"`, a missing `memory_capture`, and the
+decoder's array and map spellings.
 
 Legal witness:
 `{"memory_capture":"on","source_capture":"off","write_key":"task_arm"}` parses
@@ -43,3 +43,11 @@ spellings of one declaration producing two run ids.
   is key-sorted already, and the canonical encoder sorts keys
 - Missing evidence: none.
 - Conclusion: resolved with answer - the pinned bytes carry the property
+### Q: Catalog open question: The family copy decodes with plain serde, so it admits the array spelling
+- Sources examined: `crates/eval-core/src/capture.rs:29`
+  (`CaptureDeclaration`, `deny_unknown_fields`)
+- Findings: The family copy decodes with plain serde, so it admits the array
+  spelling; the family digest hashes the re-serialized value, so identity is
+  unaffected
+- Missing evidence: an owner decision.
+- Conclusion: needs human input

@@ -1039,32 +1039,35 @@ component is a typed refusal rather than a quiet re-analysis.
 
 **Capture declaration.** `CaptureDeclaration {source_capture, memory_capture,
 write_key}` states the capture policy a run executed under: each switch is
-`on` or `off`, and `write_key` names the scheme memory writes are keyed by,
-today only `task_arm` (see "Write key and pool disjointness"). All three
-fields are required and unknown fields or variants are refused. The family's
-`capture` field is the authoritative copy, and the family digest covers it,
-so two runs under different declarations have different family digests and
-`FrozenFamily::check` refuses either report read under the other's family
-(`FamilyChangedAfterResults`). `parse_analysis_family` compares the `schema`
-literal before it decodes any field, so a version-2 document, which has no
-`capture`, is `SchemaMismatch` naming its literal. The run's copy lives under
-the key `capture` (`CAPTURE_CONFIG_KEY`) of `run_identity.config`, so it
-enters `eval_run_id` and the manifest digest with the rest of `config`; an
-absent key is an undeclared run, which keeps every capture-free manifest and
-its frozen constants unchanged. `Manifest::capture_declaration` is the one
-reader of that copy: an absent key is `None`, and a present value that is no
-declaration, including the decoder's array and single-key-map spellings, is
-`MalformedCapture`, so one declaration has one spelling inside the run id.
-`Manifest::validate` refuses a run whose copy declares either switch `on`
-while `analysis_family_digest` is null (`CaptureOnWithoutFrozenFamily`); an
-undeclared run counts as both switches `off`, so it and an all-off run still
-reach `FamilyNotRecorded` at analysis. `analyze`, after the freeze check,
-refuses a copy that differs from `family.capture`
-(`CaptureDeclarationMismatch {config, family}`); an absent copy agrees only
-with both switches `off`. The declaration freezes the two switches and the
-key scheme, not which arms write or what a read may reach: two runs with
-equal declarations and different runner writer sets compare as equal, and the
-writer set is the runner's attestation.
+`on` or `off`, and `write_key` names the scheme memory writes are keyed by;
+the one scheme is `task_arm` (see "Write key and pool disjointness"). All
+three fields are required and unknown fields or variants are refused. The
+family's `capture` field is the authoritative copy, and the family digest
+covers it, so two runs under different declarations have different family
+digests and `FrozenFamily::check` refuses either report read under the
+other's family (`FamilyChangedAfterResults`). `parse_analysis_family`
+compares the `schema` literal before it decodes any field, so a version-2
+document, which has no `capture`, is `SchemaMismatch` naming its literal.
+
+The run's copy lives under the key `capture` (`CAPTURE_CONFIG_KEY`) of
+`run_identity.config`, so it enters `eval_run_id` and the manifest digest
+with the rest of `config`; an absent key is an undeclared run, which keeps
+every capture-free manifest and its frozen constants unchanged.
+`Manifest::capture_declaration` is the one reader of that copy: an absent key
+is `None`, and a present value that is no declaration, including the
+decoder's array and single-key-map spellings, is `MalformedCapture`, so one
+declaration has one spelling inside the run id. `Manifest::validate` refuses
+a run whose copy declares either switch `on` while `analysis_family_digest`
+is null (`CaptureOnWithoutFrozenFamily`); an undeclared run counts as both
+switches `off`, so it and an all-off run still reach `FamilyNotRecorded` at
+analysis. `analyze`, after the freeze check, refuses a copy that differs
+from `family.capture` (`CaptureDeclarationMismatch {config, family}`); an
+absent copy agrees only with both switches `off`.
+
+The declaration freezes the two switches and the key scheme. The set of arms
+that write and the scope a read may reach are the runner's attestation, so
+two runs with equal declarations and different runner writer sets compare as
+equal.
 
 **ICC pilot.** A `ClusterKey` is a task family and a world seed; the
 `family` clustering unit groups by family and the `world_seed` unit by the
@@ -1990,32 +1993,39 @@ key whatever its `id`, `lineage`, `policy`, `cut`, or `terminal`; two history
 policies of one arm share one key. `excludes(target, key)` is true exactly
 when `key.task == target.task`, under every arm: the runner keys every memory
 write by its writer's `WriteKey` and drops the target's own task's writes from
-its pool at read time. The evaluator reads no store; the runner hands it an
+its pool at read time. The runner owns the store and hands the evaluator an
 `AccessRecord {writes, reads, read_counts}`. A `MemoryWrite {write_id, pool,
 key, writer, eval_run_id, sequence}` names the ledger sample that wrote it and
 the run that made it; a `MemoryRead {reader, pool, write_id, sequence}` names
 the sample whose pool served it; `read_counts` attests, for every ledger
-sample with an explicit `0` for one that read nothing, how many reads the
+sample, with an explicit `0` for one that read nothing, how many reads the
 runner recorded. `AccessRecord::check_disjoint(ledger, eval_run_id)` refuses
-an invalid ledger first, on `SampleLedger::validate`'s terms (`Ledger`), then
-a current run id that is not a lowercase-hex run id (`MalformedRun`), a blank
-`write_id` or `pool` (`Blank`), a repeated write id (`RepeatedWrite`), a
-writer outside the ledger (`UnknownWriter`), a write key that is not its
-writer's (`KeyDisagreesWithWriter`, since attribution reads the key), and a
-write under a run that is neither this run nor in any sample's lineage
-(`UnknownRun`). For reads it refuses a reader outside the ledger
-(`UnknownReader`), a read of a write the record lacks (`UnknownWrite`), a
-read from another pool than its write's (`CrossPoolRead`), and any read by a
-sample of one of its own writes: a write in its pool whose key task is its
-task, made by this run or by a run in that sample's own lineage
-(`OwnTaskRead {sample, read, key}`). A write made under a run in another
-sample's lineage is not the reader's. The check is order-free: sequences are
-carried for audit and never compared, so a read sequenced before its write is
-refused the same way. Last, a `read_counts` entry for a sample the ledger
-lacks is `UnknownAttestedSample`, and a count that differs from the reads
-recorded for a sample, or a missing entry, is `ReadCountMismatch {sample,
-attested, recorded}`. A pass proves disjointness over the supplied record
-only; recording completeness is the runner's attestation.
+in this order:
+
+- the ledger, on `SampleLedger::validate`'s terms (`Ledger`), before the
+  record is read, then a current run id that is not a 64-character
+  lowercase-hex run id (`MalformedRun`);
+- each write: a blank `write_id` or `pool` (`Blank`), a repeated write id
+  (`RepeatedWrite`), a writer outside the ledger (`UnknownWriter`), a key
+  that is not its writer's (`KeyDisagreesWithWriter`, since attribution reads
+  the key), and a run that is neither this run nor in any sample's lineage
+  (`UnknownRun`);
+- each read: a blank `pool` (`Blank`), a reader outside the ledger
+  (`UnknownReader`), a write the record lacks (`UnknownWrite`), a pool other
+  than its write's (`CrossPoolRead`), and a read by a sample of one of its
+  own writes, a write in its pool whose key task is its task, made by this
+  run or by a run in that sample's own lineage (`OwnTaskRead {sample, read,
+  key}`); a write made under a run in another sample's lineage belongs to
+  that sample's attempt and passes;
+- the attestation: a `read_counts` entry for a sample the ledger lacks
+  (`UnknownAttestedSample`), and a count that differs from the reads recorded
+  for a sample, or a missing entry (`ReadCountMismatch {sample, attested,
+  recorded}`).
+
+The check is order-free: sequences are carried for audit and never compared,
+so a read sequenced before its write is refused the same way. A pass proves
+disjointness over the supplied record; recording completeness is the
+runner's attestation.
 
 **Envelope.** `Envelope {bounds, peaks}` is held from launch. `observe(resource,
 value)` records the peak first and refuses second while any peak is over its
@@ -2064,12 +2074,13 @@ carries rather than read from what it says:
   to the same range (`NotCanonical`), so an unapproved-looking budget cannot
   start a campaign before `digest` would refuse it.
 - Ceilings: each entry of `ceilings` must validate as a `CeilingDeclaration`
-  (`Ceiling {index, error}`), and no entry may equal an earlier one in all
-  four fields (`RepeatedCeiling`); one task pair pinned at two revisions is
-  two declarations.
-- Prefix re-bill: `prefix_rebill` must be keyed by exactly `aged` and `fresh`,
-  as `arm_rates` is (`RebillArmsNotPaired {found}`), and each record's
-  `total()` must fit `u64` (`RebillOverflow {arm}`).
+  (see "Oracle ceilings" below; `Ceiling {index, error}`), and no entry may
+  equal an earlier one in all four fields (`RepeatedCeiling`); one task pair
+  pinned at two revisions is two declarations.
+- Prefix re-bill: `prefix_rebill` (see "Prefix re-bill" below) must be keyed
+  by exactly `aged` and `fresh`, as `arm_rates` is
+  (`RebillArmsNotPaired {found}`), and each record's `total()` must fit `u64`
+  (`RebillOverflow {arm}`).
 - Claims: `claims.boundary` must equal `ClaimBoundary::pinned()` as a
   structure, order included (`ClaimBoundaryMismatch`); `established` is a
   closed vocabulary (`required_evidence_present_at_every_live_stage`,
@@ -2197,17 +2208,19 @@ revision_sha}` declares an oracle-injection ceiling: a bound on retrieval for
 one task pair at a pinned revision. `kind` is `transfer` (another task's
 evidence, so `source_task` and `target_task` differ) or `project_knowledge`
 (the target task's own, so they are equal). `validate` refuses a blank task
-(`BlankTask {field}`), a `revision_sha` that is not 40 lowercase hex, the
-form of the run identity's `code_sha` (`MalformedRevision`), `transfer` over
-one task (`TransferWithinOneTask`), and `project_knowledge` across two
+(`BlankTask {field}`), a `revision_sha` that is not 40 lowercase hex, the form
+of the run identity's `code_sha` (`MalformedRevision`), `transfer` over one
+task (`TransferWithinOneTask`), and `project_knowledge` across two
 (`ProjectKnowledgeAcrossTasks`); `parse_ceiling_declaration` also refuses
-every spelling but the object one (`Shape`). A ceiling is a diagnostic
-declared beside the arms, never an arm: `ArmKind` and the sample ledger hold
-no ceiling sample, `derive_claim_class` reads provenance, anchor set, and
-criterion only, so the derivation is the same with and without a ceiling, and
-the paired marginals, the per-arm rate keys, and the run-gate denominators
-read no ceiling. A ceiling figure, measured by the runner's ceiling campaign,
-travels with its full declaration.
+every spelling but the object one (`Shape`). An oracle ceiling is a diagnostic
+declared beside the arms, never an `ArmKind`; it is a separate notion from the
+`fresh_minimal` arm, the paired worlds' diagnostic ceiling (see "Paired
+worlds"). The sample ledger holds no ceiling sample, `derive_claim_class`
+reads provenance, anchor set, and criterion only, so the derivation is the
+same with and without a ceiling, and the paired marginals, the per-arm rate
+keys, and the run-gate denominators read no ceiling. The report carries
+declarations only; the runner's ceiling campaign (#1007) reports each figure
+beside its full declaration.
 
 **Prefix re-bill.** An accepted memory write hard-folds every live session on
 the project, and each fold re-bills that session's frozen prefix. `PrefixRebill
@@ -2221,7 +2234,8 @@ than a wrapped or saturated value. The record is a sibling of `TaskUsage`,
 which keeps its six fields and its censor order, and it sits on the report,
 outside the manifest, `REQUIRED_FIELDS`, the residue rules, and the manifest
 digest. Its counts travel as JSON numbers inside the canonical safe range,
-which the report's canonical check enforces; no total is stored.
+which the report's canonical check enforces; the report stores the three
+counts and derives the total.
 
 `CampaignGates::of` computes the run-level gates beside the three paired ones:
 `indeterminate` and `censoring` as shares of the attempted samples, since

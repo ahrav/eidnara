@@ -27,4 +27,9 @@ Legal witness: `{Transfer, "t1", "t2", <40 lower hex>}` round-trips. Smallest
 falsifier: `{ProjectKnowledge, "t1", "t2", <sha>}` admitted.
 
 ## Investigation log
-No open questions were raised while verifying this record.
+### Q: Catalog open question: Task ids are compared untrimmed, as the sample ledger compares them
+- Sources examined: `crates/eval-core/src/ceiling.rs:50`, `:83`
+- Findings: Task ids are compared untrimmed, as the sample ledger compares
+  them; `t1` and `t1 ` are two tasks
+- Missing evidence: an owner decision.
+- Conclusion: needs human input

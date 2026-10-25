@@ -27,4 +27,11 @@ Legal witness: both copies `{on, on, task_arm}`; analysis proceeds. Smallest
 falsifier: config `on`, family `off`, and analysis returns a report.
 
 ## Investigation log
-No open questions were raised while verifying this record.
+### Q: Catalog open question: `FrozenFamily::check` and `AnalysisFamily::claim_class` do not compare the copies
+- Sources examined: `crates/eval-core/src/statistics.rs:1189` (agreement
+  check), `:1347` (`CaptureDeclarationMismatch`)
+- Findings: `FrozenFamily::check` and `AnalysisFamily::claim_class` do not
+  compare the copies; a consumer pairing a manifest with a family outside
+  `analyze` must repeat the comparison
+- Missing evidence: an owner decision.
+- Conclusion: needs human input
