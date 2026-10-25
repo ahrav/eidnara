@@ -1975,17 +1975,18 @@ cassette under the campaign namespace.
 ## Suite B report
 
 `report.rs` is the one serializer every campaign publishes through.
-`SuiteBReport` (`eval-suite-b-report/v1`) carries the run, the approved
-`profile` verbatim and its `profile_digest`, the surface (whose `reachability`
-is a function of it: surfaces 1 and 3 are `default-production`, surface 2 is
-`explicit-config-only`, and the query route and packing are `test-only`, the
-label `ChainStage::REACHABILITY` gives them), the frozen `family`, `claims`,
-the `outcome`, the `samples` ledger and its `rates`, per-arm cassette
-`arm_rates`, the injection scores, and the envelope. The ceilings, margins,
-and baseline bounds a report is gated on are read from the profile it
-carries, never restated beside it. `serialize` and `parse_report` refuse
-before a byte moves, and every refusal below is derived from what the report
-carries rather than read from what it says:
+`SuiteBReport` (`eval-suite-b-report/v2`; version 2 added `ceilings`) carries
+the run, the approved `profile` verbatim and its `profile_digest`, the surface
+(whose `reachability` is a function of it: surfaces 1 and 3 are
+`default-production`, surface 2 is `explicit-config-only`, and the query route
+and packing are `test-only`, the label `ChainStage::REACHABILITY` gives them),
+the frozen `family`, `claims`, the `outcome`, the `samples` ledger and its
+`rates`, per-arm cassette `arm_rates`, the injection scores, the envelope, and
+the declared oracle `ceilings`. The run-gate ceilings, margins, and baseline
+bounds a report is gated on are read from the profile it carries, never
+restated beside it. `serialize` and `parse_report` refuse before a byte moves,
+and every refusal below is derived from what the report carries rather than
+read from what it says:
 
 - Identity: the schema, a lowercase-hex `eval_run_id`, a profile that
   validates and is approved (`Profile`), a `profile_digest` equal to
