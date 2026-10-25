@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use gix::odb::store::init::Slots;
 use serde::{Deserialize, Serialize};
 
-use crate::git_sources::{self, SlotsExhausted};
+use crate::git_sources::{self, CyclicDeltaChain, SlotsExhausted};
 
 const HEAD_OBJECT_BYTES: NonZeroU64 = NonZeroU64::new(1 << 20).unwrap();
 const HEAD_INDEX_SLOTS: u16 = 128;
@@ -17,8 +17,9 @@ pub(crate) enum FrozenHead {
     /// when detached or through its branch.
     Commit(String),
     /// `HeadUnavailable` indicates an unborn or unreadable HEAD, a HEAD naming
-    /// a non-commit or absent object, an unsupported object format, or a
-    /// root that `git_sources::open_with_slots` refuses.
+    /// a non-commit or absent object, a HEAD stored in a pack whose delta
+    /// chain revisits an entry, an unsupported object format, or a root that
+    /// `git_sources::open_with_slots` refuses.
     #[default]
     HeadUnavailable,
 }
@@ -39,10 +40,12 @@ pub(crate) fn observe_head(root: &Path) -> FrozenHead {
     let Some(id) = head_id(&repo) else {
         return FrozenHead::HeadUnavailable;
     };
-    let kind = git_sources::file_object_kind(&repo, &id, &LAST_HEAD_INDEX).or_else(|| {
-        git_sources::store_object_kind(&repo, &id)
-            .unwrap_or_else(|SlotsExhausted| reopened_kind(root, &id))
-    });
+    let kind = match git_sources::file_object_kind(&repo, &id, &LAST_HEAD_INDEX) {
+        Ok(Some(kind)) => Some(kind),
+        Ok(None) => git_sources::store_object_kind(&repo, &id)
+            .unwrap_or_else(|SlotsExhausted| reopened_kind(root, &id)),
+        Err(CyclicDeltaChain) => None,
+    };
     let hex = id.to_hex().to_string();
     if kind == Some(gix::object::Kind::Commit) && git_sources::parse_oid(&hex, hash).is_some() {
         FrozenHead::Commit(hex)
@@ -164,12 +167,15 @@ pub(crate) mod fixtures {
 
     /// The delta encoding [`write_pack`] uses for its last object, with the
     /// first object as the base.
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Delta {
         Offset,
         Id,
         /// The delta references the first object by id as an external base.
         OutsideId,
+        /// The delta names its own id as the base, so the chain revisits
+        /// its only entry.
+        SelfId,
     }
 
     fn first_written(delta: Option<Delta>) -> usize {
@@ -200,17 +206,24 @@ pub(crate) mod fixtures {
         pack.extend_from_slice(&2u32.to_be_bytes());
         pack.extend_from_slice(&(written.len() as u32).to_be_bytes());
         let mut offsets = Vec::new();
-        for (position, (_, kind, data)) in written.iter().enumerate() {
+        for (position, (id, kind, data)) in written.iter().enumerate() {
             let offset = pack.len();
             offsets.push(offset);
-            let base = &objects[0];
-            let header = match delta.filter(|_| position + 1 == written.len() && objects.len() > 1)
+            let base = if delta == Some(Delta::SelfId) {
+                &written[position]
+            } else {
+                &objects[0]
+            };
+            let is_last = position + 1 == written.len();
+            let header = match delta
+                .filter(|delta| is_last && (objects.len() > 1 || *delta == Delta::SelfId))
             {
                 None => None,
                 Some(Delta::Offset) => Some(Header::OfsDelta {
                     base_distance: (offset - offsets[0]) as u64,
                 }),
                 Some(Delta::Id | Delta::OutsideId) => Some(Header::RefDelta { base_id: base.0 }),
+                Some(Delta::SelfId) => Some(Header::RefDelta { base_id: *id }),
             };
             let body = match header {
                 None => data.clone(),
@@ -321,7 +334,9 @@ mod tests {
         gix::ObjectId::from_hex(hex.as_bytes()).unwrap()
     }
 
-    const COMMIT: Option<gix::object::Kind> = Some(gix::object::Kind::Commit);
+    const COMMIT: Result<Option<gix::object::Kind>, CyclicDeltaChain> =
+        Ok(Some(gix::object::Kind::Commit));
+    const ABSENT: Result<Option<gix::object::Kind>, CyclicDeltaChain> = Ok(None);
 
     fn head_id(root: &Path) -> String {
         gix::open_opts(root, gix::open::Options::isolated())
@@ -526,7 +541,7 @@ mod tests {
         );
         let none = Mutex::new(None);
         let kind = git_sources::file_object_kind(&open(dir.path()), &oid(&commits[1]), &none);
-        assert_eq!(kind, None);
+        assert_eq!(kind, ABSENT);
         assert_eq!(
             observe_head(dir.path()),
             FrozenHead::Commit(commits[1].clone())
@@ -567,9 +582,53 @@ mod tests {
         .unwrap();
         let hint = Mutex::new(Some(foreign));
         let kind = git_sources::file_object_kind(&open(&second), &oid(&commits[1]), &hint);
-        assert_eq!(kind, None);
+        assert_eq!(kind, ABSENT);
+        let hint = Mutex::new(Some(linked));
+        let kind = git_sources::file_object_kind(&open(&second), &oid(&commits[1]), &hint);
+        assert_eq!(kind, ABSENT, "a hinted index that became a symlink");
         detach(&second, &commits[1]);
         assert_eq!(observe_head(&second), FrozenHead::HeadUnavailable);
+    }
+
+    #[test]
+    fn a_delta_chain_that_revisits_an_entry_is_unavailable_without_a_store_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let commits = repository(dir.path(), 1);
+        pack_objects(dir.path(), &[&commits[0]], Some(Delta::SelfId));
+        let none = Mutex::new(None);
+        let kind = git_sources::file_object_kind(&open(dir.path()), &oid(&commits[0]), &none);
+        assert_eq!(kind, Err(CyclicDeltaChain));
+        assert_eq!(observe_head(dir.path()), FrozenHead::HeadUnavailable);
+    }
+
+    /// The test adds the base pack and more packs than slots after the
+    /// store's first lookup, so the second lookup meets the exhaustion while
+    /// it resolves the delta base.
+    #[test]
+    fn slot_exhaustion_while_resolving_a_delta_base_reads_as_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let commits = repository(dir.path(), 2);
+        let base = stored_object(dir.path(), &commits[0]);
+        pack_objects(
+            dir.path(),
+            &[&commits[0], &commits[1]],
+            Some(Delta::OutsideId),
+        );
+        let loose = dir
+            .path()
+            .join(".git/objects")
+            .join(&commits[0][..2])
+            .join(&commits[0][2..]);
+        std::fs::remove_file(loose).unwrap();
+        let slots = Slots::Given(HEAD_INDEX_SLOTS);
+        let repo = git_sources::open_with_slots(dir.path(), HEAD_OBJECT_BYTES, slots).unwrap();
+        assert!(matches!(
+            git_sources::store_object_kind(&repo, &oid(&commits[1])),
+            Ok(None)
+        ));
+        write_pack(dir.path(), &[base], None);
+        pack_blobs(dir.path(), HEAD_INDEX_SLOTS);
+        assert!(git_sources::store_object_kind(&repo, &oid(&commits[1])).is_err());
     }
 
     #[test]

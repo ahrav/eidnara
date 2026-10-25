@@ -44,8 +44,9 @@ N5 miss accounting, and N6 unchanged authority.
 
 ## Status vocabulary
 
-`Status:` uses METHOD's `active` for the 14 existing-behavior records and for
-the two N1 records #1133 makes checkable. The other 12 records use
+`Status:` uses METHOD's `active` for the 14 existing-behavior records, for
+the two N1 records #1133 makes checkable, and for the two N2 head records
+#1134 makes checkable. The other 10 records use
 `Status: proposed`, the value the specification assigns to a designed
 obligation whose code does not exist yet. A proposed record names the ticket
 that converts it to `active`, carries `Exercised: not yet`, and states the
@@ -311,15 +312,15 @@ Open questions: None.
 ### p2-git-open-is-isolated-and-allocation-bounded
 
 Type: safety
-Reachability: default-production - every native capture submit opens the project root through `git_sources::open_with_slots` in `observe_head` (`crates/daemon/src/memory_capture/head.rs:30`), added by U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)); before U2 the only caller was `GitReconciler`, which only tests construct (relabelled per METHOD rule 4)
+Reachability: default-production - every native capture submit opens the project root through `git_sources::open_with_slots` in `observe_head` (`crates/daemon/src/memory_capture/head.rs:31`), added by U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)); before U2 the only caller was `GitReconciler`, which only tests construct (relabelled per METHOD rule 4)
 Status: active
 Exercised: yes - git-source tests refuse selections and an oversized delta base; the head-observation tests open repositories through `open_with_slots`, refuse the roots the default sizing refuses, and exhaust the first slot count
 Guarantee: The daemon's repository open skips installation, user, and system configuration, ignores replacement refs, and installs `max_object_bytes` as gix's allocation limit after the repository's own configuration.
 Check: `always` - every repository the daemon opens through `git_sources::open` or `git_sources::open_with_slots` has `objects.ignore_replacements` set and the allocation limit equal to the bound; a packed delta whose base exceeds it is refused
 Fault/timing angle: none
 Required faults and enabling state: a delta-packed commit against an oversized base; a repository declaring an unsupported `extensions.objectFormat`
-Confidence: high - [evidence](evidence/p2-git-open-is-isolated-and-allocation-bounded.md). Read `isolated_options` at `crates/daemon/src/git_sources.rs:130`, `open` at `:137`, `open_with_slots` at `:147`, and `file_object_kind` at `:200`
-Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`; `crates/daemon/src/memory_capture/head.rs:400`, `:608` (unaudited)
+Confidence: high - [evidence](evidence/p2-git-open-is-isolated-and-allocation-bounded.md). Read `isolated_options` at `crates/daemon/src/git_sources.rs:131`, `open` at `:138`, `open_with_slots` at `:148`, and `file_object_kind` at `:205`
+Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`; `crates/daemon/src/memory_capture/head.rs:415`, `:667` (unaudited)
 Impact: an unisolated open would let repository or user configuration raise the bound or substitute objects
 Open questions: None.
 
@@ -381,7 +382,7 @@ Check: `always` - every job frozen by one submission carries the identical `head
 Fault/timing angle: a `git checkout` between the submit and its retry
 Required faults and enabling state: a commit on the checked-out branch between the submit and the retry, with completion refused so the frozen plans stay in the store
 Confidence: high - [evidence](evidence/p2-new-head-observed-once-and-frozen.md). Read `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:548`): one `observe_head` call precedes the loop that freezes each job's plan, and the receipt digest covers every frozen byte (`crates/daemon/src/memory_capture.rs:1175`)
-Existing check: `crates/daemon/src/lib.rs:24619`; `crates/daemon/src/memory_capture/head.rs:335`, `:357`, `:501`, `:608` (unaudited)
+Existing check: `crates/daemon/src/lib.rs:24619`; `crates/daemon/src/memory_capture/head.rs:350`, `:372`, `:516`, `:667` (unaudited)
 Impact: the anchor stops describing the revision at which the quote was observed, and the receipt no longer covers the anchor's value
 Open questions: None.
 
@@ -395,8 +396,8 @@ Guarantee: When HEAD is unborn or unreadable, the object format is unsupported, 
 Check: `always-or-unreached` - the path runs only when the head observation is unavailable; whenever it runs, the committed decision has `anchor_id IS NULL`, the rationale carries the reason, and no anchor row names the job
 Fault/timing angle: none
 Required faults and enabling state: a root with no `.git`; an unborn branch; an `objectFormat` gix refuses
-Confidence: medium - [evidence](evidence/p2-new-head-unavailable-keeps-decision-admitted.md). The owner decided on 2026-10-25 (OQ2-11) that a detached HEAD anchors at its commit, which removes detached HEAD from this path; `observe_head` (`crates/daemon/src/memory_capture/head.rs:30`) maps every other refusal to `HeadUnavailable`
-Existing check: `crates/daemon/src/memory_capture/head.rs:357`, `:400`, `:552`; `crates/daemon/src/lib.rs:24619` (unaudited)
+Confidence: medium - [evidence](evidence/p2-new-head-unavailable-keeps-decision-admitted.md). The owner decided on 2026-10-25 (OQ2-11) that a detached HEAD anchors at its commit, which removes detached HEAD from this path; `observe_head` (`crates/daemon/src/memory_capture/head.rs:31`) maps every other refusal to `HeadUnavailable`
+Existing check: `crates/daemon/src/memory_capture/head.rs:372`, `:415`, `:567`; `crates/daemon/src/lib.rs:24619` (unaudited)
 Impact: capture would stop in fresh checkouts
 Open questions: None.
 

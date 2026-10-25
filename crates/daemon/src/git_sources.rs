@@ -2,6 +2,7 @@
 //!
 //! Object headers, the store's allocations, and decoded sizes are bounded independently; a selection is refused whole if any object is missing, corrupt, non-commit, repeated, or exceeds a bound. A non-UTF-8 message or a declared non-UTF-8 encoding is an explicit disposition rather than a converted or dropped row.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
@@ -194,22 +195,29 @@ fn sizing_inputs_readable(objects: &Path) -> bool {
     })
 }
 
-/// The lookup returns the kind of object `id` from `repo`'s own loose objects, then its pack files. `None` leaves the read to [`store_object_kind`], which also searches alternates and resolves delta bases across packs. Both reads look up `id` directly and decode only headers: the loose read inflates at most 64 bytes, and the pack read decodes entry headers and each delta's size prefix.
+/// The lookup returns `id`'s kind by decoding headers from `repo`'s own loose objects, then its pack files. Loose read errors and unusable pack lookups count as misses.
 ///
-/// The pack read tries `hint`'s index first when it lies in this repository's `objects/pack`, then the other indices newest first, and stores the index that answers in `hint`.
+/// The pack read tries `hint`'s index first when it lies in this repository's `objects/pack`, then the other indices newest first, and stores the index that answers in `hint`. Both the hinted and the scanned lookups require regular index and pack files.
+///
+/// # Errors
+///
+/// A delta chain that revisits a pack entry produces [`CyclicDeltaChain`].
 pub(crate) fn file_object_kind(
     repo: &gix::Repository,
     id: &gix::oid,
     hint: &Mutex<Option<PathBuf>>,
-) -> Option<gix::object::Kind> {
+) -> Result<Option<gix::object::Kind>, CyclicDeltaChain> {
     let objects = repo.objects.store_ref().path();
     let hash = repo.object_hash();
-    gix::odb::loose::Store::at(objects, hash)
+    let loose = gix::odb::loose::Store::at(objects, hash)
         .try_header(id)
         .ok()
         .flatten()
-        .map(|(_, kind)| kind)
-        .or_else(|| packed_kind(&objects.join("pack"), hash, id, hint))
+        .map(|(_, kind)| kind);
+    match loose {
+        Some(kind) => Ok(Some(kind)),
+        None => packed_kind(&objects.join("pack"), hash, id, hint),
+    }
 }
 
 fn packed_kind(
@@ -217,20 +225,21 @@ fn packed_kind(
     hash: gix::hash::Kind,
     id: &gix::oid,
     hint: &Mutex<Option<PathBuf>>,
-) -> Option<gix::object::Kind> {
+) -> Result<Option<gix::object::Kind>, CyclicDeltaChain> {
     let hinted = hint
         .lock()
         .ok()
         .and_then(|hint| hint.clone())
         .filter(|path| path.parent() == Some(pack_dir));
-    if let Some(kind) = hinted
-        .as_deref()
-        .and_then(|path| index_kind(path, hash, id))
+    if let Some(path) = hinted.as_deref()
+        && let Some(kind) = index_kind(path, hash, id)?
     {
-        return Some(kind);
+        return Ok(Some(kind));
     }
-    let mut indices: Vec<_> = std::fs::read_dir(pack_dir)
-        .ok()?
+    let Ok(entries) = std::fs::read_dir(pack_dir) else {
+        return Ok(None);
+    };
+    let mut indices: Vec<_> = entries
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
@@ -243,31 +252,66 @@ fn packed_kind(
         })
         .collect();
     indices.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-    let (path, kind) = indices
-        .into_iter()
-        .find_map(|(_, path)| index_kind(&path, hash, id).map(|kind| (path, kind)))?;
-    if let Ok(mut hint) = hint.lock() {
-        *hint = Some(path);
+    for (_, path) in indices {
+        if let Some(kind) = index_kind(&path, hash, id)? {
+            if let Ok(mut hint) = hint.lock() {
+                *hint = Some(path);
+            }
+            return Ok(Some(kind));
+        }
     }
-    Some(kind)
+    Ok(None)
 }
 
-fn index_kind(path: &Path, hash: gix::hash::Kind, id: &gix::oid) -> Option<gix::object::Kind> {
+/// A pack stores the looked-up object in a delta chain that revisits one of the pack's entries, so its header cannot be decoded.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CyclicDeltaChain;
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+/// Reads `id`'s header from the pack `path` indexes. Each ref-delta hop resolves its base in the same index; a well-formed chain visits each entry at most once, so more hops than the index holds entries means the chain revisits an entry.
+fn index_kind(
+    path: &Path,
+    hash: gix::hash::Kind,
+    id: &gix::oid,
+) -> Result<Option<gix::object::Kind>, CyclicDeltaChain> {
     use gix::odb::pack;
-    let index = pack::index::File::at(path, hash).ok()?;
-    let position = index.lookup(id)?;
-    let data = pack::data::File::at(path.with_extension("pack"), hash).ok()?;
+    let pack_path = path.with_extension("pack");
+    if !is_regular_file(path) || !is_regular_file(&pack_path) {
+        return Ok(None);
+    }
+    let Ok(index) = pack::index::File::at(path, hash) else {
+        return Ok(None);
+    };
+    let Some(position) = index.lookup(id) else {
+        return Ok(None);
+    };
+    let Ok(data) = pack::data::File::at(pack_path, hash) else {
+        return Ok(None);
+    };
     let entry_at = |position| data.entry(index.pack_offset_at_index(position)).ok();
+    let Some(entry) = entry_at(position) else {
+        return Ok(None);
+    };
+    let remaining_hops = Cell::new(index.num_objects());
+    let revisited = Cell::new(false);
     let in_pack = |base: &gix::oid| {
+        let Some(left) = remaining_hops.get().checked_sub(1) else {
+            revisited.set(true);
+            return None;
+        };
+        remaining_hops.set(left);
         let entry = entry_at(index.lookup(base)?)?;
         Some(pack::data::decode::header::ResolvedBase::InPack(entry))
     };
-    let header = data.decode_header(
-        entry_at(position)?,
-        &mut gix::zlib::Inflate::default(),
-        &in_pack,
-    );
-    header.ok().map(|header| header.kind)
+    let header = data.decode_header(entry, &mut gix::zlib::Inflate::default(), &in_pack);
+    match header {
+        Ok(header) => Ok(Some(header.kind)),
+        Err(_) if revisited.get() => Err(CyclicDeltaChain),
+        Err(_) => Ok(None),
+    }
 }
 
 /// The object store's lookup needed more pack index slots than [`open_with_slots`] received.
@@ -278,19 +322,24 @@ pub(crate) fn store_object_kind(
     repo: &gix::Repository,
     id: &gix::oid,
 ) -> Result<Option<gix::object::Kind>, SlotsExhausted> {
-    use gix::odb::store::{find::Error as Find, load_index::Error as LoadIndex};
     match repo.try_find_header(id) {
         Ok(header) => Ok(header.map(|header| header.kind())),
-        Err(error)
-            if matches!(
-                error.0.downcast_ref::<Find>(),
-                Some(Find::LoadIndex(LoadIndex::InsufficientSlots { .. }))
-            ) =>
-        {
-            Err(SlotsExhausted)
-        }
+        Err(error) if exhausts_slots(&error.0) => Err(SlotsExhausted),
         Err(_) => Ok(None),
     }
+}
+
+/// Whether the store ran out of pack index slots while looking up the object or any base in its delta chain. The store wraps a base lookup's failure in `DeltaBaseLookup`.
+fn exhausts_slots(error: &gix::objs::find::Error) -> bool {
+    use gix::odb::store::{find::Error as Store, load_index::Error as LoadIndex};
+    fn walk(error: &Store) -> bool {
+        match error {
+            Store::LoadIndex(LoadIndex::InsufficientSlots { .. }) => true,
+            Store::DeltaBaseLookup { err, .. } => walk(err),
+            _ => false,
+        }
+    }
+    error.downcast_ref::<Store>().is_some_and(walk)
 }
 
 /// Whether the store refused an object because materializing it needs an allocation above its limit, anywhere in a delta chain.
