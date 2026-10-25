@@ -184,7 +184,7 @@ Check: `always` - every committed decision row names a live domain and, for each
 Fault/timing angle: a parent retired in an earlier commit, or inserted later in the same envelope
 Required faults and enabling state: a decision naming a missing domain; a decision naming an anchor inserted after it in one envelope
 Confidence: high - [evidence](evidence/p2-decision-parents-must-be-live-at-insert.md). Read `require_parents` at `crates/kernel/src/slice/write.rs:1095`
-Existing check: `crates/kernel/tests/kernel_slice.rs:196`; `crates/kernel/tests/kernel_envelope.rs:669`; for anchors `crates/kernel/tests/kernel_anchor_write.rs:388` (unaudited)
+Existing check: `crates/kernel/tests/kernel_slice.rs:196`; `crates/kernel/tests/kernel_envelope.rs:669`; for anchors `crates/kernel/tests/kernel_anchor_write.rs:393` (unaudited)
 Impact: a decision citing a missing anchor is refused `NotFound`, which fails the envelope and with it the whole capture job
 Open questions: None.
 
@@ -334,7 +334,7 @@ Check: `always` - after any commit that inserted an anchor, `validate_anchor_row
 Fault/timing angle: none
 Required faults and enabling state: an uppercase oid, a 39-character oid, a captures payload above the bound, a non-half-open interval, an empty value, an unparseable range, duplicate captures, a capture naming another commit, a secret in a value or a capture, and a raw row with an unowned column
 Confidence: high - [evidence](evidence/p2-new-anchor-row-decodes-on-write.md). Read `validate_anchor` at `crates/kernel/src/anchor_write.rs:263` and `insert_anchor_inner` at `:320`; the typed `AnchorValue` (`:35`) makes an unowned column unrepresentable, and the round trip at `:136` compares the decoded condition to the request
-Existing check: `crates/kernel/tests/kernel_anchor_write.rs:300`, `:443`, `:595`, `:367` (unaudited)
+Existing check: `crates/kernel/tests/kernel_anchor_write.rs:300`, `:448`, `:600`, `:372` (unaudited)
 Impact: a capture decision anchored to an undecodable row evaluates `Uncertain` forever and revalidation fails silently
 Open questions:
 - The specification asked whether the writer accepts a typed enum or a raw `AnchorRowSpec`; #1133 resolved it as the typed `AnchorValue` enum, with `validate_anchor_row` exposed for raw-row checks only.
@@ -349,8 +349,8 @@ Guarantee: An `anchors` row and its `object_registry` row are visible together o
 Check: `always` - for every live `anchors` row there is an `object_registry` row of kind `anchor` with the same `object_id` and `created_commit_seq`, and every `decisions.anchor_id` names a row with `created_commit_seq <= decision.created_commit_seq`
 Fault/timing angle: a refusal inside the same envelope after the anchor insert
 Required faults and enabling state: `insert_decision` fails after `insert_anchor` succeeded inside one closure; a duplicate `anchor_id` within one envelope and across two commits
-Confidence: high - [evidence](evidence/p2-new-anchor-and-registry-share-one-envelope.md). Read `insert_anchor_inner` at `crates/kernel/src/anchor_write.rs:320` and `Envelope::guarded` at `crates/kernel/src/envelope.rs:348`
-Existing check: `crates/kernel/tests/kernel_anchor_write.rs:418`, `:643`, `:388`; `crates/daemon/tests/claim_sources.rs:1508` (unaudited)
+Confidence: high - [evidence](evidence/p2-new-anchor-and-registry-share-one-envelope.md). Read `insert_anchor_inner` at `crates/kernel/src/anchor_write.rs:379` and `Envelope::guarded` at `crates/kernel/src/envelope.rs:348`
+Existing check: `crates/kernel/tests/kernel_anchor_write.rs:423`, `:648`, `:393`; `crates/daemon/tests/claim_sources.rs:1508` (unaudited)
 Impact: an orphan anchor is unreachable and inflates the registry; a decision inserted before its anchor is refused `NotFound` and fails the job
 Open questions: None.
 
@@ -365,7 +365,7 @@ Check: `always` - for every capture decision with `anchor_id = Some(a)`, `a == a
 Fault/timing angle: a retry after `kernel_write_failed`
 Required faults and enabling state: `kernel_write_failed` on the first attempt, then a successful retry
 Confidence: medium - [evidence](evidence/p2-new-capture-anchor-identity-is-deterministic.md). The Kernel half, `Conflict` on a duplicate id, is checked by `a_duplicate_anchor_id_is_a_conflict_within_and_across_commits`
-Existing check: none for the derivation; `crates/kernel/tests/kernel_anchor_write.rs:643` for the Kernel refusal (unaudited)
+Existing check: none for the derivation; `crates/kernel/tests/kernel_anchor_write.rs:648` for the Kernel refusal (unaudited)
 Impact: duplicate anchors per job, or `Conflict` on retry that permanently fails the job
 Open questions:
 - Whether anchors should be shared across jobs at one oid (needs human input; the model keeps per-job identity because `insert_anchor` refuses duplicates and no receipt covers a cross-job row).

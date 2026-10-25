@@ -30,7 +30,7 @@ part.
 | Isolated bounded open | `crates/daemon/src/git_sources.rs:130` (`isolated_options`), `:137` (`open`), `:147` (`open_with_slots`) | isolation, replacement refs ignored, allocation limit; `open_with_slots` sizes the pack index slot map and, for a given size, refuses the repositories the default sizing refuses | unaudited |
 | HEAD observation | `crates/daemon/src/memory_capture/head.rs:30` (`observe_head`), called once per submit at `crates/daemon/src/memory_capture/native.rs:562` | HEAD resolved once through the ref store, following a branch that is itself symbolic to the end of its chain (`head_id`, `crates/daemon/src/memory_capture/head.rs:58`); the header of that one object id read from the loose object or pack files (`crates/daemon/src/git_sources.rs:200`, `file_object_kind`) or the object store (`:277`, `store_object_kind`); unborn, unreadable, unsupported, non-commit, absent-object, and non-repository roots are `HeadUnavailable` | unaudited |
 | Anchor write validation | `crates/kernel/src/anchor_write.rs:263` (`validate_anchor`), `:254` (`validate_anchor_row`) | written anchor rows pass the engine's bound check and decoder and round-trip | unaudited |
-| Anchor write order | `crates/kernel/src/anchor_write.rs:320` (`insert_anchor_inner`) | registry row, anchor row, and change record in one envelope | unaudited |
+| Anchor write order | `crates/kernel/src/anchor_write.rs:379` (`insert_anchor_inner`) | registry row, anchor row, and change record in one envelope | unaudited |
 
 ## Claim-bearing tests
 
@@ -50,7 +50,7 @@ part.
 | `crates/kernel/tests/kernel_applicability_engine.rs:148`, `:206`, `:518`, `:1029`, `:1064`, `:2621`, `:2659`, `:2881`, `:3080`, `:3434`, `:3676`, `:3943`, `:4024`, `:4095` | `p2-anchor-verdict-cache-key-covers-row-head-and-boundary` | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:196` `slice_payloads_redact_before_storage_and_missing_parents_are_typed` | `p2-decision-parents-must-be-live-at-insert` | unaudited |
 | `crates/kernel/tests/kernel_envelope.rs:669` `a_constraint_violation_is_a_conflict_rather_than_an_io_failure` | same | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:388` `a_decision_inserted_before_its_anchor_is_not_found_and_the_commit_rolls_back` | same (anchor clause); `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:393` `a_decision_inserted_before_its_anchor_is_not_found_and_the_commit_rolls_back` | same (anchor clause); `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:1453` `a_decision_citing_evidence_is_classified_no_lower_than_that_evidence` | `p2-citing-decision-carries-at-least-its-evidence-class` | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:1526` `a_decision_serves_no_lower_than_its_cited_evidence_reads_today` | same | unaudited |
 | `crates/kernel/tests/kernel_review_acceptance.rs:988` `an_accepted_decision_serves_no_lower_than_the_support_it_cites_reads_today` | same | unaudited |
@@ -81,12 +81,12 @@ part.
 | `crates/daemon/src/lib.rs:24619` `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it` | `p2-new-head-observed-once-and-frozen`; `p2-new-head-unavailable-keeps-decision-admitted` | unaudited |
 | `crates/daemon/src/lib.rs:24729` `a_plan_frozen_without_a_head_publishes_as_before` | `p2-new-head-observed-once-and-frozen` (C13: a plan without `head` publishes) | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:300` `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference` | `p2-new-anchor-row-decodes-on-write`; `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:367` `git_anchors_with_an_empty_capture_list_store_a_null_payload` | `p2-new-anchor-row-decodes-on-write` | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:443` `invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause` | same | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:595` `a_raw_row_with_an_unowned_column_is_conflicting_columns` | same | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:418` `a_decision_failure_after_the_anchor_rolls_back_both` | `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:622` `a_missing_domain_is_not_found` | same | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:643` `a_duplicate_anchor_id_is_a_conflict_within_and_across_commits` | same; Kernel half of `p2-new-capture-anchor-identity-is-deterministic` | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:372` `git_anchors_with_an_empty_capture_list_store_a_null_payload` | `p2-new-anchor-row-decodes-on-write` | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:448` `invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause` | same | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:600` `a_raw_row_with_an_unowned_column_is_conflicting_columns` | same | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:423` `a_decision_failure_after_the_anchor_rolls_back_both` | `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:627` `a_missing_domain_is_not_found` | same | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:648` `a_duplicate_anchor_id_is_a_conflict_within_and_across_commits` | same; Kernel half of `p2-new-capture-anchor-identity-is-deterministic` | unaudited |
 | `crates/daemon/tests/claim_sources.rs:1508` `anchor_commits_pass_through_the_claim_materializer` | `p2-new-anchor-and-registry-share-one-envelope` (consumer side) | unaudited |
 
 ## Empty categories
