@@ -990,8 +990,8 @@ empirical acceptance needs an approved profile.
 that parses can be embedded in a family and frozen; an integer past the safe
 range is `NotCanonical` at parse.
 
-**Analysis family.** `AnalysisFamily` (`eval-analysis-family/v2`; version 2
-added `transfer_criterion`) fixes
+**Analysis family.** `AnalysisFamily` (`eval-analysis-family/v3`; version 2
+added `transfer_criterion`, version 3 added `capture`) fixes
 everything a result depends on: endpoints (exactly the three gates
 `quality_loss`, `harm`, `floor`, since the report always carries them; any
 other list is `UnsupportedEndpoints`), task families, exclusions (the
@@ -1004,8 +1004,9 @@ bounds with no p-values to adjust, and a plan declaring another is
 `UnsupportedMultiplicity` rather than analyzed uncorrected), the profile, the
 interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
-seed, the live-trial repeat count `trials_k`, the ICC pilot, and the optional
-approved transfer criterion (see "Claim class").
+seed, the live-trial repeat count `trials_k`, the ICC pilot, the optional
+approved transfer criterion (see "Claim class"), and the run's capture
+declaration `capture`.
 `AnalysisFamily::validate` includes the digest's
 canonical-JSON check, so a family that validates can always be frozen (an
 integer outside the safe range is `NotCanonical` at parse). It also recomputes the
@@ -1974,17 +1975,18 @@ cassette under the campaign namespace.
 ## Suite B report
 
 `report.rs` is the one serializer every campaign publishes through.
-`SuiteBReport` (`eval-suite-b-report/v1`) carries the run, the approved
-`profile` verbatim and its `profile_digest`, the surface (whose `reachability`
-is a function of it: surfaces 1 and 3 are `default-production`, surface 2 is
-`explicit-config-only`, and the query route and packing are `test-only`, the
-label `ChainStage::REACHABILITY` gives them), the frozen `family`, `claims`,
-the `outcome`, the `samples` ledger and its `rates`, per-arm cassette
-`arm_rates`, the injection scores, and the envelope. The ceilings, margins,
-and baseline bounds a report is gated on are read from the profile it
-carries, never restated beside it. `serialize` and `parse_report` refuse
-before a byte moves, and every refusal below is derived from what the report
-carries rather than read from what it says:
+`SuiteBReport` (`eval-suite-b-report/v2`; version 2 added `ceilings`) carries
+the run, the approved `profile` verbatim and its `profile_digest`, the surface
+(whose `reachability` is a function of it: surfaces 1 and 3 are
+`default-production`, surface 2 is `explicit-config-only`, and the query route
+and packing are `test-only`, the label `ChainStage::REACHABILITY` gives them),
+the frozen `family`, `claims`, the `outcome`, the `samples` ledger and its
+`rates`, per-arm cassette `arm_rates`, the injection scores, the envelope, and
+the declared oracle `ceilings`. The run-gate ceilings, margins, and baseline
+bounds a report is gated on are read from the profile it carries, never
+restated beside it. `serialize` and `parse_report` refuse before a byte moves,
+and every refusal below is derived from what the report carries rather than
+read from what it says:
 
 - Identity: the schema, a lowercase-hex `eval_run_id`, a profile that
   validates and is approved (`Profile`), a `profile_digest` equal to

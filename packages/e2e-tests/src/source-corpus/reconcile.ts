@@ -18,14 +18,13 @@ export interface Reconciliation {
     readonly losses: Readonly<Record<PredictedLoss, number>>;
     /** Expected units neither admitted nor accounted to a loss condition, by key. */
     readonly unclassified: readonly string[];
-    /** Live descriptors of the session that no expected unit names, by key. */
+    /** One key per unmatched `messages` or `raw_tool_spans` descriptor in `sessionId`. */
     readonly phantom: readonly string[];
 }
 
-/** `messages` units are keyed by message and block, tool units by call and block. */
 export function unitKey(record: ExpectedRecord, unit: ExpectedUnit): string {
     return unit.tool
-        ? `raw_tool_spans:${unit.tool.callId}:${unit.block}`
+        ? `raw_tool_spans:${unit.tool.parentMessageId}:${unit.tool.callId}:${unit.block}`
         : `messages:${record.id}:${unit.block}`;
 }
 
@@ -34,7 +33,7 @@ function descriptorKey(descriptor: DescriptorIdentity): string | null {
     if (descriptor.class === "messages")
         return `messages:${identity.message_id}:${identity.block_index}`;
     if (descriptor.class === "raw_tool_spans") {
-        return `raw_tool_spans:${identity.tool_call_id}:${identity.block_index}`;
+        return `raw_tool_spans:${identity.parent_message_id}:${identity.tool_call_id}:${identity.block_index}`;
     }
     return null;
 }
@@ -42,7 +41,8 @@ function descriptorKey(descriptor: DescriptorIdentity): string | null {
 /**
  * Partitions every expected unit of `sessionId` into admitted (a live descriptor names it) or one
  * predicted loss condition: `unit_too_large` above the cap, `secret_bearing` for a unit `secret`
- * names. Anything else is unclassified, and a live descriptor no expected unit names is phantom.
+ * names. Each descriptor admits at most one unit. Anything else is unclassified, and each
+ * descriptor left over, such as a second revision of one tool result, is phantom.
  */
 export function reconcile(
     records: readonly ExpectedRecord[],
@@ -50,28 +50,29 @@ export function reconcile(
     sessionId: string,
     secret: (record: ExpectedRecord, unit: ExpectedUnit) => boolean,
 ): Reconciliation {
-    const live = new Set(
-        descriptors
-            .filter((descriptor) => descriptor.identity.session_id === sessionId)
-            .map(descriptorKey)
-            .filter((key): key is string => key !== null),
-    );
+    const live = new Map<string, number>();
+    for (const descriptor of descriptors) {
+        if (descriptor.identity.session_id !== sessionId) continue;
+        const key = descriptorKey(descriptor);
+        if (key !== null) live.set(key, (live.get(key) ?? 0) + 1);
+    }
     const losses: Record<PredictedLoss, number> = { unit_too_large: 0, secret_bearing: 0 };
     const unclassified: string[] = [];
-    const expectedKeys = new Set<string>();
     let expected = 0;
     let admitted = 0;
     for (const record of records) {
         for (const unit of record.units) {
             expected += 1;
             const key = unitKey(record, unit);
-            expectedKeys.add(key);
-            if (live.has(key)) admitted += 1;
-            else if (unit.byteLen > UNIT_CAP_BYTES) losses.unit_too_large += 1;
+            const remaining = live.get(key) ?? 0;
+            if (remaining > 0) {
+                live.set(key, remaining - 1);
+                admitted += 1;
+            } else if (unit.byteLen > UNIT_CAP_BYTES) losses.unit_too_large += 1;
             else if (secret(record, unit)) losses.secret_bearing += 1;
             else unclassified.push(key);
         }
     }
-    const phantom = [...live].filter((key) => !expectedKeys.has(key));
+    const phantom = [...live].flatMap(([key, count]) => Array<string>(count).fill(key));
     return { expected, admitted, losses, unclassified, phantom };
 }

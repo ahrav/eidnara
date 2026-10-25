@@ -2556,7 +2556,7 @@ async fn a_blocked_digest_is_refused_alone_and_its_sibling_publishes() {
     }
 }
 
-/// A purge that commits after the screening preview and before the batch commit fails that one pass with the unnamed conflict; the next pass screens the unit out and publishes its sibling.
+/// A purge that commits after screening and before the batch commit fails that one pass with the unnamed conflict; the next pass screens the unit out and publishes its sibling.
 #[tokio::test]
 async fn a_purge_between_screen_and_commit_fails_one_pass_then_converges() {
     let (handler, _dir, project) = capture_handler(capture_config(true), true).await;

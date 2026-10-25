@@ -3,9 +3,10 @@ import { describe, expect, it } from "bun:test";
 import type { ExpectedRecord } from "./expected.ts";
 import { reconcile, UNIT_CAP_BYTES } from "./reconcile.ts";
 
-const tool = (callId: string) => ({
+const tool = (callId: string, parentMessageId = "m2") => ({
     name: "bash",
     callId,
+    parentMessageId,
     isError: false,
     exit: 0,
     truncated: false,
@@ -32,6 +33,13 @@ const live = (cls: string, identity: Record<string, string>) => ({
     class: cls,
     identity: { session_id: "s", ...identity },
 });
+const span = (callId: string, parent = "m2", revision = "1") =>
+    live("raw_tool_spans", {
+        parent_message_id: parent,
+        tool_call_id: callId,
+        result_revision: revision,
+        block_index: "0",
+    });
 
 describe("live reconciliation", () => {
     it("partitions every expected unit into admitted or one predicted loss", () => {
@@ -39,7 +47,7 @@ describe("live reconciliation", () => {
             records,
             [
                 live("messages", { message_id: "m1", block_index: "0" }),
-                live("raw_tool_spans", { tool_call_id: "c1", block_index: "0" }),
+                span("c1"),
                 live("messages", { message_id: "other", block_index: "0", session_id: "x" }),
             ],
             "s",
@@ -55,17 +63,42 @@ describe("live reconciliation", () => {
     });
 
     it("names a dropped unit and a descriptor no expected unit names", () => {
-        const result = reconcile(
-            records,
-            [live("raw_tool_spans", { tool_call_id: "c9", block_index: "0" })],
+        const result = reconcile(records, [span("c9")], "s", () => false);
+        expect(result.unclassified).toEqual([
+            "messages:m1:0",
+            "raw_tool_spans:m2:c1:0",
+            "raw_tool_spans:m2:c3:0",
+        ]);
+        expect(result.phantom).toEqual(["raw_tool_spans:m2:c9:0"]);
+    });
+
+    it("does not admit a tool span published under another parent message", () => {
+        const result = reconcile(records.slice(1, 2), [span("c1", "m9")], "s", () => false);
+        expect(result.admitted).toBe(0);
+        expect(result.unclassified).toEqual(["raw_tool_spans:m2:c1:0", "raw_tool_spans:m2:c3:0"]);
+        expect(result.phantom).toEqual(["raw_tool_spans:m9:c1:0"]);
+    });
+
+    it("lets one descriptor admit one expected unit", () => {
+        const twoRevisions = reconcile(
+            records.slice(1, 2),
+            [span("c1", "m2", "1"), span("c1", "m2", "2"), span("c3")],
             "s",
             () => false,
         );
-        expect(result.unclassified).toEqual([
-            "messages:m1:0",
-            "raw_tool_spans:c1:0",
-            "raw_tool_spans:c3:0",
-        ]);
-        expect(result.phantom).toEqual(["raw_tool_spans:c9:0"]);
+        expect(twoRevisions.admitted).toBe(2);
+        expect(twoRevisions.phantom).toEqual(["raw_tool_spans:m2:c1:0"]);
+        const shared: ExpectedRecord = {
+            id: "m3",
+            role: "assistant",
+            units: [
+                { index: 0, partId: "p5", block: 0, byteLen: 4, tool: tool("c5", "m3") },
+                { index: 1, partId: "p6", block: 0, byteLen: 4, tool: tool("c5", "m3") },
+            ],
+            nonUnits: [],
+        };
+        const oneDescriptor = reconcile([shared], [span("c5", "m3")], "s", () => false);
+        expect(oneDescriptor.admitted).toBe(1);
+        expect(oneDescriptor.unclassified).toEqual(["raw_tool_spans:m3:c5:0"]);
     });
 });

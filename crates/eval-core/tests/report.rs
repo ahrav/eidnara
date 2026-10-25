@@ -10,15 +10,16 @@ use context_core::canonical_json::ContractError;
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmResult,
     AxisValue, BaselineContrast, BaselineFailure, BlockedReason, CLAIM_BOUNDARY_SCHEMA,
-    CampaignGates, CampaignProfile, Ceilings, CensorReason, ClaimBoundary, ClaimClass, Claims,
-    ClusterKey, ClusteringUnit, Cut, Envelope, EnvelopeExceeded, Established, EvaluatedSurface,
-    FrozenFamily, GATE_ENDPOINTS, GatedBlocks, HistoryPolicy, ITEM_COUNT_THRESHOLD, IccPilot,
-    InjectionScore, IntervalMethod, IntervalOutcome, IntervalWithheld, LivenessBounds, Manifest,
-    MultiplicityCorrection, PairOutcome, PairedReport, ProfileError, RECENCY_BASELINE_VERSION,
-    RUN_PROFILE_SCHEMA, Ratio, Reachability, RecencyBaseline, ReportError, ReportOutcome, Resource,
-    ResourceLimits, RunProfile, SUITE_B_REPORT_SCHEMA, SampleError, SampleLedger, SampleRecord,
-    Scale, SkipReason, StatisticsError, StopCondition, StoppingRule, SuiteBReport, Suppression,
-    TaskBudgets, Terminal, WorldProvenance, analyze, pair_table_digest, parse_report,
+    CampaignGates, CampaignProfile, CeilingDeclaration, CeilingError, CeilingKind, Ceilings,
+    CensorReason, ClaimBoundary, ClaimClass, Claims, ClusterKey, ClusteringUnit, Cut, Envelope,
+    EnvelopeExceeded, Established, EvaluatedSurface, FrozenFamily, GATE_ENDPOINTS, GatedBlocks,
+    HistoryPolicy, ITEM_COUNT_THRESHOLD, IccPilot, InjectionScore, IntervalMethod, IntervalOutcome,
+    IntervalWithheld, LivenessBounds, Manifest, MultiplicityCorrection, PairOutcome, PairedReport,
+    ProfileError, RECENCY_BASELINE_VERSION, RUN_PROFILE_SCHEMA, Ratio, Reachability,
+    RecencyBaseline, ReportError, ReportOutcome, Resource, ResourceLimits, RunProfile,
+    SUITE_B_REPORT_SCHEMA, SampleError, SampleLedger, SampleRecord, Scale, SkipReason,
+    StatisticsError, StopCondition, StoppingRule, SuiteBReport, Suppression, TaskBudgets, Terminal,
+    WorldProvenance, analyze, pair_table_digest, parse_ceiling_declaration, parse_report,
     reachability_of,
 };
 use serde_json::json;
@@ -81,6 +82,7 @@ fn family() -> AnalysisFamily {
         trials_k: 3,
         icc_pilot: pilot(),
         transfer_criterion: None,
+        capture: eval_core::CaptureDeclaration::OFF,
     }
 }
 
@@ -314,6 +316,7 @@ fn open_report() -> SuiteBReport {
         arm_rates: arm_rates(),
         injection: vec![],
         envelope: Envelope::new(limits()),
+        ceilings: vec![],
     }
 }
 
@@ -1988,4 +1991,257 @@ fn run_gates_are_shares_of_attempted_samples_and_padding_does_not_move_them() {
     // A refusal is a skip, so its share is of every declared sample.
     assert_eq!(before.redaction_refusals.statistic, ratio(1, 606));
     assert_eq!(after.redaction_refusals.statistic, ratio(1, 20_606));
+}
+
+fn ceiling(kind: CeilingKind, source: &str, target: &str) -> CeilingDeclaration {
+    CeilingDeclaration {
+        kind,
+        source_task: source.to_string(),
+        target_task: target.to_string(),
+        revision_sha: "4f".repeat(20),
+    }
+}
+
+#[test]
+fn a_ceiling_declaration_names_its_kind_task_pair_and_pinned_revision() {
+    let transfer = ceiling(CeilingKind::Transfer, "t1", "t2");
+    let value = serde_json::to_value(&transfer).unwrap();
+    assert_eq!(parse_ceiling_declaration(&value).unwrap(), transfer);
+    assert_eq!(
+        context_core::canonical_json::canonical_json_encode(&value).unwrap(),
+        format!(
+            r#"{{"kind":"transfer","revision_sha":"{}","source_task":"t1","target_task":"t2"}}"#,
+            "4f".repeat(20)
+        )
+    );
+    ceiling(CeilingKind::ProjectKnowledge, "t1", "t1")
+        .validate()
+        .unwrap();
+    let refusals: Vec<(&str, CeilingDeclaration, CeilingError)> = vec![
+        (
+            "transfer within one task",
+            ceiling(CeilingKind::Transfer, "t1", "t1"),
+            CeilingError::TransferWithinOneTask {
+                task: "t1".to_string(),
+            },
+        ),
+        (
+            "project knowledge across tasks",
+            ceiling(CeilingKind::ProjectKnowledge, "t1", "t2"),
+            CeilingError::ProjectKnowledgeAcrossTasks {
+                source_task: "t1".to_string(),
+                target_task: "t2".to_string(),
+            },
+        ),
+        (
+            "an upper-case revision",
+            CeilingDeclaration {
+                revision_sha: "4F".repeat(20),
+                ..transfer.clone()
+            },
+            CeilingError::MalformedRevision {
+                revision_sha: "4F".repeat(20),
+            },
+        ),
+        (
+            "a 64-hex revision",
+            CeilingDeclaration {
+                revision_sha: "4f".repeat(32),
+                ..transfer.clone()
+            },
+            CeilingError::MalformedRevision {
+                revision_sha: "4f".repeat(32),
+            },
+        ),
+        (
+            "a blank source task",
+            ceiling(CeilingKind::Transfer, " ", "t2"),
+            CeilingError::BlankTask {
+                field: "source_task",
+            },
+        ),
+        (
+            "a blank target task",
+            ceiling(CeilingKind::ProjectKnowledge, "t1", ""),
+            CeilingError::BlankTask {
+                field: "target_task",
+            },
+        ),
+    ];
+    for (label, declaration, expected) in refusals {
+        assert_eq!(declaration.validate(), Err(expected.clone()), "{label}");
+        assert_eq!(
+            parse_ceiling_declaration(&serde_json::to_value(&declaration).unwrap()),
+            Err(expected),
+            "{label}"
+        );
+    }
+    for shape in [
+        json!({"kind": "transfer", "source_task": "t1", "target_task": "t2",
+               "revision_sha": "4f".repeat(20), "figure": "0.9"}),
+        json!({"kind": "oracle", "source_task": "t1", "target_task": "t2",
+               "revision_sha": "4f".repeat(20)}),
+        json!({"kind": "transfer", "source_task": "t1", "target_task": "t2"}),
+        json!(["transfer", "t1", "t2", "4f".repeat(20)]),
+    ] {
+        assert!(
+            matches!(
+                parse_ceiling_declaration(&shape),
+                Err(CeilingError::Shape(_))
+            ),
+            "{shape}"
+        );
+    }
+}
+
+#[test]
+fn a_declared_ceiling_leaves_the_claim_marginals_rates_and_gates_unchanged() {
+    let plain = open_report();
+    let mut declared = open_report();
+    declared
+        .ceilings
+        .push(ceiling(CeilingKind::Transfer, "t1", "t2"));
+    let value = declared.serialize().unwrap();
+    let parsed = parse_report(&value).unwrap();
+    assert_eq!(parsed.ceilings, declared.ceilings);
+    // `derive_claim_class` reads provenance, anchor set, and criterion only.
+    assert_eq!(parsed.claims.derivation, plain.claims.derivation);
+    assert_eq!(parsed.claims.derivation.class, ClaimClass::GeneratedPhase1);
+    assert_eq!(
+        parsed
+            .arm_rates
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["aged", "fresh"]
+    );
+    assert_eq!(parsed.rates, plain.rates);
+    let gates = |report: &SuiteBReport| match &report.outcome {
+        ReportOutcome::Open { gated } => gated.gates,
+        ReportOutcome::Suppressed { .. } => panic!("open"),
+    };
+    assert_eq!(gates(&parsed), gates(&plain));
+    // The paired-marginal bound refuses identically with a ceiling declared.
+    let one_arm: Mutate = Box::new(|r| {
+        for record in r.samples.samples.values_mut() {
+            record.arm = ArmKind::Aged;
+        }
+    });
+    let indeterminate: Mutate = Box::new(|r| {
+        r.samples.samples.get_mut("s001").unwrap().terminal = Terminal::Indeterminate;
+        r.rates = r.samples.rates().unwrap();
+        let ceilings = r.profile.ceilings().unwrap();
+        gated(r).gates = CampaignGates::of(&r.samples, &ceilings, &r.family, &r.arm_rates).unwrap();
+    });
+    for mutate in [one_arm, indeterminate] {
+        let (mut without, mut with) = (plain.clone(), declared.clone());
+        mutate(&mut without);
+        mutate(&mut with);
+        let refused = without.serialize().unwrap_err();
+        assert!(
+            matches!(refused, ReportError::PairsExceedSamples { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(with.serialize(), Err(refused));
+    }
+}
+
+#[test]
+fn an_invalid_or_repeated_ceiling_refuses_the_report_by_name() {
+    let mut invalid = open_report();
+    invalid
+        .ceilings
+        .push(ceiling(CeilingKind::ProjectKnowledge, "t1", "t2"));
+    invalid
+        .ceilings
+        .insert(0, ceiling(CeilingKind::Transfer, "t1", "t2"));
+    let expected = ReportError::Ceiling {
+        index: 1,
+        error: CeilingError::ProjectKnowledgeAcrossTasks {
+            source_task: "t1".to_string(),
+            target_task: "t2".to_string(),
+        },
+    };
+    assert_eq!(invalid.validate(), Err(expected.clone()));
+    assert_eq!(
+        parse_report(&serde_json::to_value(&invalid).unwrap()),
+        Err(expected)
+    );
+    let mut repeated = open_report();
+    let transfer = ceiling(CeilingKind::Transfer, "t1", "t2");
+    repeated.ceilings = vec![
+        transfer.clone(),
+        ceiling(CeilingKind::ProjectKnowledge, "t2", "t2"),
+        transfer.clone(),
+    ];
+    assert_eq!(
+        repeated.validate(),
+        Err(ReportError::RepeatedCeiling(transfer.clone()))
+    );
+    assert_eq!(
+        parse_report(&serde_json::to_value(&repeated).unwrap()),
+        Err(ReportError::RepeatedCeiling(transfer.clone()))
+    );
+    // Inside a report, the array spelling of a ceiling is refused on the
+    // round trip.
+    let mut arrayed = open_report().serialize().unwrap();
+    arrayed["ceilings"] = json!([["transfer", "t1", "t2", "4f".repeat(20)]]);
+    assert_eq!(parse_report(&arrayed), Err(ReportError::Lossy));
+    // One task pair pinned at two revisions is two declarations.
+    let mut repinned = open_report();
+    repinned.ceilings = vec![
+        transfer.clone(),
+        CeilingDeclaration {
+            revision_sha: "5e".repeat(20),
+            ..transfer
+        },
+    ];
+    parse_report(&repinned.serialize().unwrap()).unwrap();
+    // A previous-version document is refused by its literal.
+    let mut v1 = open_report();
+    v1.schema = "eval-suite-b-report/v1".to_string();
+    assert_eq!(
+        v1.validate(),
+        Err(ReportError::SchemaMismatch {
+            found: "eval-suite-b-report/v1".to_string()
+        })
+    );
+    let mut v1_document = serde_json::to_value(&v1).unwrap();
+    v1_document.as_object_mut().unwrap().remove("ceilings");
+    assert!(matches!(
+        parse_report(&v1_document),
+        Err(ReportError::Shape(_))
+    ));
+}
+
+/// `docs/evaluator.md` is a test input: every `eval-suite-b-report/vN`
+/// literal names the current version.
+#[test]
+fn evaluator_document_names_the_current_report_literal() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/evaluator.md");
+    let doc = std::fs::read_to_string(&path).expect("read docs/evaluator.md");
+    let (prefix, version) = SUITE_B_REPORT_SCHEMA
+        .rsplit_once("/v")
+        .expect("schema literal ends in a version");
+    let mut named = 0;
+    for (offset, _) in doc.match_indices(&format!("`{prefix}/")) {
+        let literal = doc[offset + 1..]
+            .split('`')
+            .next()
+            .expect("a backtick opens a literal");
+        assert_eq!(
+            literal, SUITE_B_REPORT_SCHEMA,
+            "stale report literal `{literal}`"
+        );
+        named += 1;
+    }
+    assert!(
+        named > 0,
+        "evaluator document names no `{SUITE_B_REPORT_SCHEMA}`"
+    );
+    assert!(
+        doc.contains(&format!("eval-suite-b-report/v{version}`;")),
+        "evaluator document lacks the version {version} history"
+    );
+    assert!(doc.contains("version 2 added `ceilings`"));
 }

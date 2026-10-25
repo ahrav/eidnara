@@ -7,15 +7,20 @@ project digest into both identity fields.
 
 ## Evidence trail
 
-- `crates/daemon/src/source_capture.rs:1064-1116` `plan_document`; the identity
-  vector at `:1084-1088` holds `("project_id", P)`, `("repository_id", P)`, and
+- `crates/daemon/src/source_capture.rs:1070-1122` `plan_document`; the identity
+  vector at `:1090-1094` holds `("project_id", P)`, `("repository_id", P)`, and
   `("relative_path", name)`.
-- `:1089` derives the lineage from that identity; `:1091-1093` reads the live row
+- `:1095` derives the lineage from that identity; `:1097-1099` reads the live row
   and keeps it only for `CAPTURE_DOMAIN_ID` (`source_capture.rs:53`).
-- A missing document retires the live row (`:1094-1100`) through
-  `retire_document` (`:1119-1141`), called from `capture_documents` at `:955`.
+- A missing document retires the live row (`:1100-1106`) through
+  `retire_document` (`:1125-1147`), called from `capture_documents` at `:961`.
 - `crates/kernel/tests/eval_identity.rs` pins the identity encoding, not the
   values.
+- The document tests (`crates/daemon/src/source_capture_tests.rs:1964`,
+  `:2137`, `:2202`, `:2276`) read rows through `live_document`, which selects
+  by `relative_path` alone (`source_capture_tests.rs:1903-1909`). The
+  `project_id` and `repository_id` values at `source_capture_tests.rs:2164-2167`
+  build another producer's fixture; no test asserts the values capture writes.
 
 ## Failure scenario
 
@@ -43,6 +48,15 @@ assertion over both lineages' identities; the U7 tests replace it.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
+### Q: Do the document tests assert the identity fields?
+- Sources examined: `source_capture_tests.rs:1903-1909`, `:1964`, `:2137`,
+  `:2164-2167`, `:2202`, `:2276`.
+- Findings: no. They assert revisions, retention, retirement, and counts;
+  the identity values they hold belong to a foreign fixture.
+- Missing evidence: none.
+- Conclusion: resolved with answer: corrected in the record's `Exercised`
+  line.
+
 ### Q: Can a cap on the history walk flip the derived identity?
 
 - Sources examined: #1105 OQ1 and U7's plan text.
@@ -54,7 +68,7 @@ assertion over both lineages' identities; the U7 tests replace it.
 ### Q: What does U7 change?
 
 - Sources examined: `crates/daemon/src/repository_identity.rs:62`;
-  `crates/daemon/src/source_capture.rs:1042`, `:1031`, `:1086`, `:1471`; the U7 tests.
+  `crates/daemon/src/source_capture.rs:1048`, `:1037`, `:1092`, `:1477`; the U7 tests.
 - Findings: the identity's `repository_id` is `git:` and the smallest root
   commit reachable from HEAD, or the project digest as a deterministic
   fallback, memoized per project for the incarnation. A pass retires every

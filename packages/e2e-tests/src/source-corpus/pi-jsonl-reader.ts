@@ -101,6 +101,7 @@ export function readPiSession(jsonl: string): ExpectedRecord[] {
         const tool = {
             name: text(message.toolName, `${at} toolName`),
             callId: text(message.toolCallId, `${at} toolCallId`),
+            parentMessageId: typeof entry.parentId === "string" ? entry.parentId : null,
             isError: message.isError,
             exit: null,
             truncated: typeof truncated === "boolean" ? truncated : null,

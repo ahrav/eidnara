@@ -528,6 +528,8 @@ pub(crate) struct ExpectedUnit {
 pub(crate) struct ExpectedTool {
     pub name: String,
     pub call_id: String,
+    /// The OpenCode tool part's message id, or the Pi `toolResult` entry's `parentId`.
+    pub parent: String,
     pub is_error: bool,
     /// OpenCode `state.metadata.exit` when the harness wrote an integer; Pi writes none.
     pub exit: Option<i64>,
@@ -732,6 +734,7 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
     let tool = ExpectedTool {
         name: string(message, "toolName", at)?.to_owned(),
         call_id: string(message, "toolCallId", at)?.to_owned(),
+        parent: string(entry, "parentId", at)?.to_owned(),
         is_error: message
             .get("isError")
             .and_then(Value::as_bool)
@@ -880,6 +883,7 @@ pub(crate) fn read_opencode_session(
                         byte_len: output.len(),
                         tool: Some(ExpectedTool {
                             call_id: string(&part, "callID", &at)?.to_owned(),
+                            parent: id.clone(),
                             name,
                             is_error,
                             exit,
@@ -989,9 +993,8 @@ fn detects(text: &str) -> Result<bool, context_core::redaction::RedactionError> 
 
 /// Every string or object key in `value` whose redaction verdict is wrong. A string must be
 /// negative, except inside an object carrying `"canary": true`: there the unit content
-/// ([`canary_content`]) must be positive, and a string that contains that content or lies within
-/// it, such as a harness's preview copy of the same output, is exempt. `at` names the fixture in
-/// each finding.
+/// ([`canary_content`]) must be positive, and a string that lies within that content, such as a
+/// harness's preview copy of the same output, is exempt. `at` names the fixture in each finding.
 pub(crate) fn redaction_violations(at: &str, value: &Value) -> Vec<String> {
     fn walk(
         at: &str,
@@ -1002,9 +1005,7 @@ pub(crate) fn redaction_violations(at: &str, value: &Value) -> Vec<String> {
     ) {
         match value {
             Value::String(text) => {
-                let exempt = canary.is_some_and(|content| {
-                    content.contains(text.as_str()) || text.contains(content)
-                });
+                let exempt = canary.is_some_and(|content| content.contains(text.as_str()));
                 let verdict = detects(text);
                 if !exempt && verdict != Ok(false) {
                     out.push(format!("{at}{pointer}: not negative ({verdict:?})"));

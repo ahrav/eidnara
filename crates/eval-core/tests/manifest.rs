@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use context_core::canonical_json::{ContractError, canonical_json_encode};
 use eval_core::{
-    ArmRates, Attestation, BinaryDigest, CLOCK_FIELD_KEEP_ALLOWLIST, ClaimBoundary, DROPPED_FIELDS,
-    IdentityError, MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError,
-    ObservationSchema, REQUIRED_FIELDS, RUN_ID_PROTOCOL, ResidueEntry, ResidueError, Rule,
-    RunIdentity, SemanticTrace, eval_run_id, is_canonical_decimal, is_clock_named, is_never_kept,
-    parse_manifest, zero_bytes_sha256,
+    ArmRates, Attestation, BinaryDigest, CAPTURE_CONFIG_KEY, CLOCK_FIELD_KEEP_ALLOWLIST,
+    CaptureDeclaration, CaptureSwitch, ClaimBoundary, DROPPED_FIELDS, IdentityError,
+    MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError, ObservationSchema,
+    REQUIRED_FIELDS, RUN_ID_PROTOCOL, ResidueEntry, ResidueError, Rule, RunIdentity, SemanticTrace,
+    WriteKeyScheme, eval_run_id, is_canonical_decimal, is_clock_named, is_never_kept,
+    parse_capture_declaration, parse_manifest, zero_bytes_sha256,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1129,4 +1130,161 @@ fn a_prefix_then_generate_run_is_replay_built_only() {
     generated_bulk.construction = eval_core::Construction::Bulk;
     generated_bulk.execution_mode = eval_core::ExecutionMode::Generate;
     assert!(generated_bulk.validate().is_ok());
+}
+
+/// Writes `capture` under `config.capture` and re-derives the run id the
+/// identity now hashes to.
+fn declare(m: &mut Manifest, capture: Value) {
+    m.run_identity.config[CAPTURE_CONFIG_KEY] = capture;
+    m.eval_run_id = eval_run_id(&m.run_identity).unwrap();
+}
+
+/// The support identity with `{"source_capture": "on", "memory_capture":
+/// "off"}` under `config.capture`, inside a manifest that froze a family; its
+/// constants are pinned apart from the capture-free fixture's.
+fn capture_on_manifest() -> Manifest {
+    let mut m = manifest();
+    declare(
+        &mut m,
+        json!({
+            "source_capture": "on",
+            "memory_capture": "off",
+            "write_key": "task_arm",
+        }),
+    );
+    m.analysis_family_digest = Some("ab".repeat(32));
+    m.recency_baseline = Some(eval_core::RecencyBaseline {
+        version: eval_core::RECENCY_BASELINE_VERSION.to_string(),
+        bounds: BTreeMap::from([(eval_core::EvaluatedSurface::Surface1, 100)]),
+    });
+    m
+}
+
+const CAPTURE_ON_RUN_ID: &str = "ec315ca98964695e470e0a7f59167961db17d18eb39ae9a17c20c8c136552f04";
+const CAPTURE_ON_MANIFEST_DIGEST: &str =
+    "36f0bb26535e18e4d1da49ab9296d04d708f6dc57f61f0f3393a7494098091a4";
+
+#[test]
+fn a_capture_declaring_fixture_pins_its_own_digests() {
+    let m = capture_on_manifest();
+    assert_eq!(m.eval_run_id, CAPTURE_ON_RUN_ID);
+    assert_eq!(m.digest().unwrap(), CAPTURE_ON_MANIFEST_DIGEST);
+    assert_ne!(m.eval_run_id, FIXTURE_RUN_ID);
+}
+
+#[test]
+fn a_capture_declaration_is_closed_total_and_canonical() {
+    let forward = json!({"memory_capture": "on", "source_capture": "off", "write_key": "task_arm"});
+    let declaration = parse_capture_declaration(&forward).unwrap();
+    assert_eq!(
+        declaration,
+        CaptureDeclaration {
+            source_capture: CaptureSwitch::Off,
+            memory_capture: CaptureSwitch::On,
+            write_key: WriteKeyScheme::TaskArm,
+        }
+    );
+    // The canonical encoder sorts keys, so these bytes are the one spelling
+    // for every input key order.
+    let encode = |d: &CaptureDeclaration| canonical_json_encode(&serde_json::to_value(d).unwrap());
+    assert_eq!(
+        encode(&declaration).unwrap(),
+        r#"{"memory_capture":"on","source_capture":"off","write_key":"task_arm"}"#
+    );
+    assert!(declaration.any_on());
+    assert!(!CaptureDeclaration::OFF.any_on());
+    for (label, value) in [
+        (
+            "unknown variant",
+            json!({"source_capture": "On", "memory_capture": "on", "write_key": "task_arm"}),
+        ),
+        (
+            "unknown scheme",
+            json!({"source_capture": "off", "memory_capture": "on", "write_key": "pair"}),
+        ),
+        (
+            "missing field",
+            json!({"source_capture": "off", "write_key": "task_arm"}),
+        ),
+        (
+            "unknown field",
+            json!({
+                "source_capture": "off",
+                "memory_capture": "on",
+                "write_key": "task_arm",
+                "read_scope": "all",
+            }),
+        ),
+        ("not an object", json!("on")),
+        ("array form", json!(["off", "on", "task_arm"])),
+        (
+            "single-key map variant",
+            json!({"source_capture": {"on": null}, "memory_capture": "on", "write_key": "task_arm"}),
+        ),
+    ] {
+        assert!(
+            matches!(
+                parse_capture_declaration(&value),
+                Err(ManifestError::MalformedCapture(_))
+            ),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn a_capture_on_run_without_a_frozen_family_is_refused_by_name() {
+    let frozen = capture_on_manifest();
+    frozen.validate().unwrap();
+    assert_eq!(
+        frozen
+            .capture_declaration()
+            .unwrap()
+            .map(|d| d.source_capture),
+        Some(CaptureSwitch::On)
+    );
+    let unfrozen = |capture: Value| {
+        let mut m = manifest();
+        declare(&mut m, capture);
+        m
+    };
+    for (source, memory) in [("off", "on"), ("on", "off"), ("on", "on")] {
+        let m = unfrozen(json!({
+            "source_capture": source,
+            "memory_capture": memory,
+            "write_key": "task_arm",
+        }));
+        assert_eq!(
+            m.validate(),
+            Err(ManifestError::CaptureOnWithoutFrozenFamily),
+            "{source}/{memory}"
+        );
+        assert_eq!(
+            parse_manifest(&m.to_value()),
+            Err(ManifestError::CaptureOnWithoutFrozenFamily)
+        );
+    }
+    // Undeclared and all-off runs need no family.
+    let off = unfrozen(serde_json::to_value(CaptureDeclaration::OFF).unwrap());
+    off.validate().unwrap();
+    assert_eq!(
+        off.capture_declaration().unwrap(),
+        Some(CaptureDeclaration::OFF)
+    );
+    manifest().validate().unwrap();
+    assert_eq!(manifest().capture_declaration().unwrap(), None);
+    // A present value that is no declaration is refused whether or not a
+    // family was frozen.
+    let mut malformed = capture_on_manifest();
+    let mut capture = malformed.run_identity.config[CAPTURE_CONFIG_KEY].clone();
+    capture["memory_capture"] = json!(true);
+    declare(&mut malformed, capture);
+    assert!(matches!(
+        malformed.validate(),
+        Err(ManifestError::MalformedCapture(_))
+    ));
+    assert!(matches!(
+        unfrozen(json!(null)).validate(),
+        Err(ManifestError::MalformedCapture(_))
+    ));
 }

@@ -13,14 +13,14 @@ unnamed batch conflict, which the plan's R16 replaces.
   batch contract says the error names no request
   (`crates/kernel/src/cas/ingest.rs:693`). The single ingest names
   `ReAdmissionBlocked` (`crates/kernel/src/cas/ingest.rs:461-468`, `:1151-1153`).
-- `BatchRefusal::conflicting_unit` (`harness_sources.rs:1483-1485`) is `None`
+- `BatchRefusal::conflicting_unit` (`harness_sources.rs:1491-1493`) is `None`
   when `unit` is `None`.
-- `publish_locked` (`crates/daemon/src/source_capture.rs:858-883`) records
+- `publish_locked` (`crates/daemon/src/source_capture.rs:864-889`) records
   every keyed unit `Pending` and ends with `kernel_end`, which counts
-  `kernel_error` (`source_capture.rs:1511-1516`).
+  `kernel_error` (`source_capture.rs:1517-1522`).
 - `is_permanent` lists `ReAdmissionBlocked` (`harness_sources.rs:578`), and
   `classify` maps a permanent refusal to `units_refused_terminal`
-  (`source_capture.rs:1236-1238`); neither is reached on this path.
+  (`source_capture.rs:1242-1244`); neither is reached on this path.
 
 ## Failure scenario
 
@@ -53,19 +53,20 @@ pending, nothing retained.
 ### Q: Why does confidence move from the source's `medium` to `high`?
 
 - Sources examined: the source record in #1105; the code and tests cited above.
-- Findings: the source left the trace pending; this pass followed the batch from the pre-screen through the Kernel batch ingest to `kernel_end` at `41d889ea4`, every step cited above.
+- Findings: the source left the trace pending; this pass followed the batch from the pre-screen through the Kernel batch ingest to `kernel_end` at `41d889ea4`, every step cited above; the `source_capture.rs` ranges were re-checked at `aff5a00e6`, where six lines inserted at `:458-463` moved them.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where
   the record names one, stays open.
 - Conclusion: resolved with answer.
 
 ### Q: What does U6 change?
 
-- Sources examined: `crates/daemon/src/harness_sources.rs:1594-1599` and
-  `:1160-1172`; `crates/kernel/src/cas/ingest.rs:1470-1475`; the U6 tests.
-- Findings: the screening preview refuses a unit with no stored descriptor
-  receipt whose payload digest is tombstoned or pending unlink, before the
-  commit and without an admission slot. A purge that commits after that
-  preview still reaches batch ingest and ends one pass `kernel_error`
+- Sources examined: `crates/daemon/src/harness_sources.rs:1613-1619`,
+  `:1635-1670`, and `:1160-1180`; `crates/kernel/src/cas/ingest.rs:1470-1475`; the U6 tests.
+- Findings: screening refuses a unit with no stored descriptor receipt, no
+  evidence receipt under another request, and a payload digest that is
+  tombstoned or pending unlink, before the commit and without an admission
+  slot. A purge that commits after that screening read still reaches batch
+  ingest and ends one pass `kernel_error`
   (`crates/daemon/src/source_capture_tests.rs:2561`).
 - Missing evidence: none.
 - Conclusion: resolved with answer: the record is invalidated.

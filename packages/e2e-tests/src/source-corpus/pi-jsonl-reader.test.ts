@@ -40,6 +40,7 @@ describe("Pi JSONL reader", () => {
         expect(records[3]?.units[0]?.tool).toEqual({
             name: "bash",
             callId: "c2",
+            parentMessageId: "p",
             isError: true,
             exit: null,
             truncated: true,
