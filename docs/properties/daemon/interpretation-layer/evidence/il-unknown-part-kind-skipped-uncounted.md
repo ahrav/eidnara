@@ -18,8 +18,8 @@ several part shapes with no unit, no refusal, and no counter.
 - The independent reader classifies every arm with a closed reason
   (`crates/daemon/src/source_corpus.rs:573-594`): `non_text_part`,
   `ignored_text`, `unsettled_text`, `unsettled_tool`, `skipped_item`.
-- U3 witnesses: `crates/daemon/tests/source_corpus_replay.rs:225` (an `image`
-  part), `:345` (a pending tool part), `:93` (the frozen OpenCode session
+- U3 witnesses: `crates/daemon/tests/source_corpus_replay.rs:213` (an `image`
+  part), `:336` (a pending tool part), `:80` (the frozen OpenCode session
   holds `non_text_part` records).
 
 ## Failure scenario
@@ -34,7 +34,7 @@ Three arms are time-dependent, each on its own condition. A running or
 pending tool part is skipped by status whether or not the turn has completed
 (`crates/daemon/src/harness_sources.rs:328-332`); it becomes a unit only on a
 pass after its status settles to `completed` or `error`.
-`crates/daemon/tests/source_corpus_replay.rs:345` holds a pending part in a
+`crates/daemon/tests/source_corpus_replay.rs:336` holds a pending part in a
 completed turn and still expects `unsettled_tool`. An interrupted tool part
 (`harness_sources.rs:334-336`) and unfinished assistant text
 (`harness_sources.rs:308`) become units on a pass after the turn gains

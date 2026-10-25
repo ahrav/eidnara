@@ -3,7 +3,8 @@
 Fault classes for the interpretation layer, the records each one constructs,
 and the coverage checks to add. Carried from #1105 Part A section A4 and
 updated for the checks U1 to U4 landed; code references verified at
-`41d889ea4`. Abbreviations follow [`catalog.md`](catalog.md#scope).
+`41d889ea4` and re-checked at `aff5a00e6`. Abbreviations follow
+[`catalog.md`](catalog.md#scope).
 
 ## Fault classes
 
@@ -13,9 +14,9 @@ updated for the checks U1 to U4 landed; code references verified at
 | F-a2 name differing by case or `mcp_` prefix | hand-built names | il-tool-name-matching-differs-across-consumers, il-classify-one-case-rule-per-query, il-synthetic-todowrite-round-trips-under-one-name | yes: `tv-tests:17`, `:257` |
 | F-a3 input with two recognized keys, a non-string first key, `file_path` only, a 61-scalar value | hand-built JSON | il-path-arg-key-order-first-match, il-path-arg-harness-neutral, il-reduced-tool-call-carries-extracted-path, il-tool-summary-description-precedes-key-arg | yes at the query level: `tv-tests:66`, except an input pairing `pattern` with `filePath`; not through a reduced call |
 | F-a4 `bash` part with null, string, or float `exit`; non-`bash` part with `exit`; Pi truncated result | trace fixture mutation; Pi corpus session | il-exit-code-only-for-opencode-bash, il-exit-code-only-for-named-tool-and-harness, il-truncated-flag-read-per-harness | yes, except a harness-produced Pi truncated result: `tv-tests:145`, `:185` |
-| F-b1 Pi `toolResult` with a text item and an image item | frozen Pi session (`crates/daemon/testdata/corpus/sessions/pi-0.80.2/mix.json`); `hs-tests:445` fixture | il-adapter-refusal-is-per-message | yes: `replay:93` |
+| F-b1 Pi `toolResult` with a text item and an image item | frozen Pi session (`crates/daemon/testdata/corpus/sessions/pi-0.80.2/mix.json`); `hs-tests:445` fixture | il-adapter-refusal-is-per-message | at the adapter: `hs-tests:757-762`, and through a capture pass in `replay:80`, where the reader classifies the record as a `non_text_item` non-unit, so the refusal reconciles as no loss, not as `adapter_refused` |
 | F-b2 OpenCode message with text parts beside a settled tool whose output is not a string | hand-built JSON | il-adapter-refusal-is-per-message | yes at the adapter: `hs-tests:681-686`; not through a capture pass |
-| F-b3 `step-start`, `reasoning`, `file`, `ignored` text, running or pending tool, interrupted tool | frozen OpenCode session; synthetic sessions in `replay` | il-unknown-part-kind-skipped-uncounted | partly: `replay:93`, `:225`, `:345` |
+| F-b3 `step-start`, `reasoning`, `file`, `ignored` text, running or pending tool, interrupted tool | frozen OpenCode session; synthetic sessions in `replay` | il-unknown-part-kind-skipped-uncounted | partly: `replay:80`, `:213`, `:336` |
 | F-b4 second pass after the turn completes (unfinished text, interrupted tool) or after a pending or running tool settles | two-pass capture test | il-unknown-part-kind-skipped-uncounted | yes for text: `hs-tests:922`; no for a settled tool or an interrupted tool |
 | F-b5 purged digest re-offered beside a sibling | Kernel purge, then a capture pass | il-readmission-block-ends-batch-unnamed-at-head | no |
 | F-c1 legacy `(P, P, path)` live row, then a derived-identity pass | seeded Kernel row plus a `git init` root | il-repository-id-equals-project-id-at-head | no (U7) |

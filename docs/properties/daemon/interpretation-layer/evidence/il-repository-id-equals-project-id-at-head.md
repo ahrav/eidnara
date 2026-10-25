@@ -7,8 +7,8 @@ project digest into both identity fields.
 
 ## Evidence trail
 
-- `crates/daemon/src/source_capture.rs:923-974` `plan_document`; the identity
-  vector at `:942-946` holds `("project_id", P)`, `("repository_id", P)`, and
+- `crates/daemon/src/source_capture.rs:929-980` `plan_document`; the identity
+  vector at `:948-952` holds `("project_id", P)`, `("repository_id", P)`, and
   `("relative_path", name)`.
 - `:947` derives the lineage from that identity; `:949-951` reads the live row
   and keeps it only for `CAPTURE_DOMAIN_ID` (`source_capture.rs:48`).

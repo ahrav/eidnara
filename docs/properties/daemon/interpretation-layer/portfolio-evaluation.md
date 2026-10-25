@@ -3,7 +3,8 @@
 The fresh-context evaluation of Part A ran during #1105's authoring, at
 `a0e3f2993`, through the four METHOD lenses (harness fit, coverage balance,
 implementability, wildcard). This file records its dispositions as carried
-into this part and what re-verification at `41d889ea4` changed. Part B S2
+into this part and what re-verification at `41d889ea4` and the re-check at
+`aff5a00e6` changed. Part B S2
 records are proposed obligations and have no portfolio result of their own.
 
 ## Finding disposition
@@ -71,3 +72,26 @@ records are proposed obligations and have no portfolio result of their own.
   `history_summarizer_chunk.rs`, and the Eidnara-owned spellings defined more
   than once (records il-vocabulary-literals-live-in-one-module and
   il-literal-classified-contract-or-vocabulary).
+
+## Re-check at `aff5a00e6`
+
+The branch starts from `aff5a00e6`, the #1109 tip after `41d889ea4`. The nine
+interpretation-layer files, `harness_sources.rs`, `project_docs.rs`,
+`config.rs`, and `crates/kernel/src/cas/ingest.rs` are identical at both
+revisions. Three cited files moved:
+
+- `source_capture.rs`: six lines inserted at `:458-463` shift every later
+  reference by six.
+- `lib.rs`: three lines removed at `:14141-14145` shift every later reference
+  by three.
+- `tests/source_corpus_replay.rs` and `tests/support/corpus_replay.rs`: the
+  replay oracle gained tests and moved; every `replay:` reference is updated
+  in [`existing-checks.md`](existing-checks.md#corpus-oracle-landed-by-u1-to-u3).
+
+One claim changed: `settled` (`corpus_replay.rs:263-286`) now maps only
+`IdentityReused` to `identity_conflict`; a permanent descriptor refusal is an
+unnamed outcome, as `classify` (`source_capture.rs:1092-1094`) already counted
+it. [`loss-conditions.md`](loss-conditions.md#loss-condition-enumeration)
+states the HEAD mapping. Reachability changes: the gate record and the literal
+classification record are `test-only`; their subjects are a CI step and an
+authoring-time artifact, not daemon code paths.

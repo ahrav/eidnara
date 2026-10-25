@@ -10,8 +10,8 @@ identifiers.
 
 - [`literals.md`](../literals.md) lists 256 distinct string literals at 895
   occurrences in the production source of nine files. 156 name a field, a
-  tool, an argument key, or a discriminator value, in 167 rows (39
-  vocabulary, 34 Eidnara-owned, 94 contract), and cover 755 of those
+  tool, an argument key, or a discriminator value, in 173 rows (39
+  vocabulary, 35 Eidnara-owned, 99 contract), and cover 755 of those
   occurrences; 100 are excluded with a reason.
 - The table was built by extracting every string literal outside top-level
   `#[cfg(test)]` regions and items, assigning each occurrence to one row, and
@@ -21,8 +21,12 @@ identifiers.
 - Eidnara-owned identifiers defined more than once: `synthetic_todo_`
   (`crates/daemon/src/injection.rs:20`, `crates/daemon/src/codec/opencode.rs:1074`);
   the `eidnara_note` actions (`crates/daemon/src/tool_vocabulary.rs:37`,
-  `crates/daemon/src/lib.rs:12853`, `:13170`, `:18608`,
-  `crates/daemon/src/conditional_note_evaluation.rs:1905`).
+  `crates/daemon/src/lib.rs:12853`, `:13170`, `:18605`,
+  `crates/daemon/src/conditional_note_evaluation.rs:1905`); the placeholder
+  `tool` for a missing native tool name or call id
+  (`crates/daemon/src/codec/opencode.rs:1382`; `codec/pi.rs:458`, `:862`,
+  `:878`, `:889`, `:1127`, `:1129`, `:1885`), recorded as its own
+  Eidnara-owned row after review split the `tool` row by meaning.
 
 ## Failure scenario
 

@@ -1,9 +1,10 @@
 # Existing checks
 
 Every claim-bearing check in the tree for the interpretation layer, verified at
-`41d889ea4`. Every check is `unaudited`; adequacy verdicts belong to
-`/testing:invariant-test-review`. Abbreviations follow
-[`catalog.md`](catalog.md#scope). The inventory carries #1105 Part A's table
+`41d889ea4` and re-checked at `aff5a00e6`, where `lib.rs` and the replay test
+moved and the replay gained three tests listed below. Every check is
+`unaudited`; adequacy verdicts belong to `/testing:invariant-test-review`.
+Abbreviations follow [`catalog.md`](catalog.md#scope). The inventory carries #1105 Part A's table
 forward and adds the checks U1 to U4 landed; a row whose source citation moved
 or whose check U4 deleted says so.
 
@@ -42,7 +43,7 @@ or whose check U4 deleted says so.
 | --- | --- | --- |
 | `history_summarizer_chunk.rs:3251` `repeated_call_ids_render_each_call_with_its_own_arguments` | `TC: read(one.rs)` from `filePath` | unaudited |
 | `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` | the description arm and a `filePath` key argument on separate inputs, with newlines collapsed | unaudited |
-| `crates/daemon/src/lib.rs:19639` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:19925-19930`, `:26289`) | unaudited |
+| `crates/daemon/src/lib.rs:19636` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:19922-19927`, `:26286`) | unaudited |
 | `crates/daemon/testdata/history_summarizer-chunk-golden.json` | `TC:` lines from short arguments | unaudited |
 
 ## Wire and injection
@@ -73,13 +74,16 @@ or whose check U4 deleted says so.
 
 | Check | Covers | Status |
 | --- | --- | --- |
-| `replay:93` `every_frozen_session_reconciles_with_no_unclassified_loss` | both frozen sessions reconcile with every unit admitted or under one named condition; the Pi image-bearing result is refused whole and classified `non_text_item` | unaudited |
-| `replay:225` `ae1_replays_nineteen_units_and_one_classified_skip` | 19 units and an `image` part as `non_text_part` | unaudited |
-| `replay:247` `a_mutated_adapter_fails_the_replay_naming_the_part` | the oracle shares no adapter code | unaudited |
-| `replay:307` `an_oversized_unit_and_a_33_unit_batch_reconcile_to_named_losses` | `unit_too_large` and `deferred` | unaudited |
-| `replay:345` `a_pending_tool_part_is_a_non_unit_and_loses_no_unit` | the `unsettled_tool` non-unit | unaudited |
-| `replay:420` `admitted_plus_named_loss_equals_expected_for_any_order_split_and_size` (proptest) | the loss identity over creation order, batch splits, and sizes around 64 KiB | unaudited |
-| `replay:449` `a_seeded_dropped_unit_fails_the_identity_naming_the_unit` | a dropped unit is named | unaudited |
+| `replay:80` `every_frozen_session_reconciles_with_no_unclassified_loss` | both frozen sessions reconcile with every unit admitted or under one named condition; the Pi image-bearing result is refused whole and classified `non_text_item` | unaudited |
+| `replay:213` `ae1_replays_nineteen_units_and_one_classified_skip` | 19 units and an `image` part as `non_text_part` | unaudited |
+| `replay:236` `a_mutated_adapter_fails_the_replay_naming_the_part` | the oracle shares no adapter code | unaudited |
+| `replay:297` `an_oversized_unit_and_a_33_unit_batch_reconcile_to_named_losses` | `unit_too_large` and `deferred` | unaudited |
+| `replay:336` `a_pending_tool_part_is_a_non_unit_and_loses_no_unit` | the `unsettled_tool` non-unit | unaudited |
+| `replay:423` `admitted_plus_named_loss_equals_expected_for_any_order_split_and_size` (proptest) | the loss identity over creation order, batch splits, and sizes around 64 KiB | unaudited |
+| `replay:443` `the_identity_case_fails_when_the_adapter_refuses_every_record` | an adapter that refuses every record fails the identity | unaudited |
+| `replay:470` `a_seeded_dropped_unit_fails_the_identity_naming_the_unit` | a dropped unit is named | unaudited |
+| `replay:500` `a_refused_outcome_record_is_unclassified_loss` | a permanent descriptor refusal is an unnamed, unclassified loss, not `identity_conflict` ([`loss-conditions.md`](loss-conditions.md#loss-condition-enumeration)) | unaudited |
+| `replay:530` `a_changed_unit_under_a_published_identity_conflicts_alone` | `identity_conflict` names only the changed unit | unaudited |
 | `crates/daemon/src/source_corpus_tests.rs` | the Rust readers and the closed enumerations | unaudited |
 
 ## Project documents and repository identity

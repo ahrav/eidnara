@@ -39,8 +39,12 @@ not on this branch.
 Provenance. Part A records (existing behavior) come from #1105 comment 1 and
 Part B S2 records (proposed obligations) from comment 2, both authored at
 `a0e3f2993`. Every record here was re-verified against the code at
-`41d889ea4`, the tip of the #1109 branch this part's branch starts from; this
-part changes only `docs/`, so the references hold at its head. Corrections to
+`41d889ea4`, and every line reference was re-checked at `aff5a00e6`, the tip
+of the #1109 branch this part's branch starts from; the ranges in
+`source_capture.rs`, `lib.rs`, and the replay tests that moved between the two
+revisions are corrected here, and the interpretation-layer files are identical
+at both. This part changes only `docs/`, so the references hold at its head.
+Corrections to
 the source's coordinates and claims are stated in each record's evidence
 file. Records keep their source's `Check` semantics and confidence unless the
 evidence file's investigation log says why they changed; a Part B record's
@@ -79,7 +83,10 @@ evidence, not proof.
   `prepare_history_summarizer_with` returns before the trigger estimate when
   `eidnara_folds` is false (`crates/daemon/src/lib.rs:9813`), and the firing
   assembler returns `NoModels` (`history_summarizer_chunk.rs:860-864`).
-- `test-only`: none.
+- `test-only`: the subject is a CI step or an authoring-time artifact, not a
+  daemon code path: the literal gate (`scripts/forbid-tool-literals.sh`, run
+  by `.github/workflows/ci.yml:302-303`) and the literal classification table
+  ([`literals.md`](literals.md)).
 
 ## Index
 
@@ -101,10 +108,10 @@ evidence, not proof.
 | [il-vocabulary-literals-live-in-one-module](#il-vocabulary-literals-live-in-one-module) | B S2 | safety | default-production | always | partial | active |
 | [il-classify-total-with-unknown](#il-classify-total-with-unknown) | B S2 | safety | explicit-config-only | always | yes | active |
 | [il-unknown-tool-never-dropped-deduped-or-edit-marked](#il-unknown-tool-never-dropped-deduped-or-edit-marked) | B S2 | safety | explicit-config-only | always(!X) | yes | active |
-| [il-gate-fails-on-distinctive-literal-outside-module](#il-gate-fails-on-distinctive-literal-outside-module) | B S2 | safety | default-production | always | yes | active |
+| [il-gate-fails-on-distinctive-literal-outside-module](#il-gate-fails-on-distinctive-literal-outside-module) | B S2 | safety | test-only | always | yes | active |
 | [il-dedup-removal-leaves-goldens-byte-identical](#il-dedup-removal-leaves-goldens-byte-identical) | B S2 | safety | explicit-config-only | always | yes | active |
 | [il-exit-code-only-for-named-tool-and-harness](#il-exit-code-only-for-named-tool-and-harness) | B S2 | safety | explicit-config-only | always | yes | active |
-| [il-literal-classified-contract-or-vocabulary](#il-literal-classified-contract-or-vocabulary) | B S2 | safety | default-production | always | partial | active |
+| [il-literal-classified-contract-or-vocabulary](#il-literal-classified-contract-or-vocabulary) | B S2 | safety | test-only | always | partial | active |
 | [il-path-arg-harness-neutral](#il-path-arg-harness-neutral) | B S2 | safety | default-production | always | partial | active |
 | [il-classify-one-case-rule-per-query](#il-classify-one-case-rule-per-query) | B S2 | safety | explicit-config-only | always | yes | active |
 
@@ -133,15 +140,15 @@ Open questions: None.
 ### il-adapter-refusal-is-per-message
 
 Type: safety
-Reachability: explicit-config-only - `opencode_units_within` and `pi_units_within` have one production caller, `CaptureJob::units` (`sc.rs:1005-1035`), behind `consents` (`sc.rs:262-273`).
+Reachability: explicit-config-only - `opencode_units_within` and `pi_units_within` have one production caller, `CaptureJob::units` (`sc.rs:1011-1041`), behind `consents` (`sc.rs:262-273`).
 Status: active
-Exercised: partial - `hs-tests:445` (Pi tool result with an `image` item refuses as `UnsupportedShape("tool result item")`), `:782`, `:795`, `:1130`; `sc-tests:820`, `:1316`, `:1319` count refused records; `replay:93` `every_frozen_session_reconciles_with_no_unclassified_loss` replays the frozen Pi session's image-bearing tool result, asserts the adapter refused it, and asserts the reader classifies it `non_text_item`; `hs-tests:681-686` gives an OpenCode message whose text parts (`hs-tests:388`, `:393`) sit beside a settled tool part with an object `state.output` and asserts the whole record refuses as `UnsupportedShape("tool output")`. No capture-pass test counts that OpenCode shape in `adapter_refused`.
+Exercised: partial - `hs-tests:445` (Pi tool result with an `image` item refuses as `UnsupportedShape("tool result item")`), `:782`, `:795`, `:1130`; `sc-tests:820`, `:1316`, `:1319` count refused records; `replay:80` `every_frozen_session_reconciles_with_no_unclassified_loss` replays the frozen Pi session's image-bearing tool result, asserts the adapter refused it, and asserts the reader classifies it `non_text_item`; `hs-tests:681-686` gives an OpenCode message whose text parts (`hs-tests:388`, `:393`) sit beside a settled tool part with an object `state.output` and asserts the whole record refuses as `UnsupportedShape("tool output")`; `hs-tests:757-762` gives a Pi `toolResult` whose text item (`TOOL_BYTES`, `hs-tests:433`) is followed by an `image` item and asserts the whole record refuses as `UnsupportedShape("tool result item")`. No capture-pass test counts either shape in `adapter_refused`; the frozen Pi session's image-bearing result (`replay:80`, entry `e0041`, a text item then an `image` item) replays through a capture pass, but the independent reader classifies that whole record as a `non_text_item` non-unit (`crates/daemon/src/source_corpus.rs:720-729`), so the pass expects no unit from it and its refusal reconciles as no loss rather than as `adapter_refused`.
 Guarantee: An adapter decides a whole native record at once: any refusal arm reached while reading a record returns `Err(AdapterRefusal)` and the record yields zero units, including units already built from earlier parts, and the pass counts that record once in `adapter_refused`.
-Check: `always` - for every record the adapter returns `Ok(Some(units))`, `Ok(None)` (budget stop through `Kept::keep`, `hs.rs:321`, `:354`, `:435`, `:443`, `:454`), or `Err(_)` with no unit; the `?` arms at `hs.rs:313`, `:327`, `:340`, `:343`, `:351`, `:424`, `:431`, `:433`, `:452` return before `kept.units` is read, and `sc.rs:1027` counts each `Err` once, added at `:1030-1033`. `always` because each call is a pure function of one record.
-Fault/timing angle: shape-driven. A budget stop (`Ok(None)`) discards that record's earlier units and ends the pass; refusals seen earlier in the stopped pass are still counted (`sc.rs:1021-1033`).
+Check: `always` - for every record the adapter returns `Ok(Some(units))`, `Ok(None)` (budget stop through `Kept::keep`, `hs.rs:321`, `:354`, `:435`, `:443`, `:454`), or `Err(_)` with no unit; the `?` arms at `hs.rs:313`, `:327`, `:340`, `:343`, `:351`, `:424`, `:431`, `:433`, `:452` return before `kept.units` is read, and `sc.rs:1033` counts each `Err` once, added at `:1036-1039`. `always` because each call is a pure function of one record.
+Fault/timing angle: shape-driven. A budget stop (`Ok(None)`) discards that record's earlier units and ends the pass; refusals seen earlier in the stopped pass are still counted (`sc.rs:1027-1039`).
 Required faults and enabling state: a Pi `toolResult` with a text item and a non-text item; an OpenCode message with a text part and a settled tool part whose `state.output` is not a string; an OpenCode text part whose `text` is not a string beside other text parts.
 Confidence: high - [evidence](evidence/il-adapter-refusal-is-per-message.md). Code read in full at `41d889ea4`; both refusal shapes matched to tests.
-Existing check: `hs-tests:445` (with the OpenCode `tool output` arm at `:681-686`), `:782`, `:795`, `:1130`; `sc-tests:820`, `:1316`; `replay:93`; all unaudited.
+Existing check: `hs-tests:445` (with the OpenCode `tool output` arm at `:681-686` and the Pi text-then-image arm at `:757-762`), `:782`, `:795`, `:1130`; `sc-tests:820`, `:1316`; `replay:80`; all unaudited.
 Impact: one unsupported item silences every text block of its message. The loss is counted, not attributed; the corpus reconciliation derives the lost-unit count from the independent reader ([`loss-conditions.md`](loss-conditions.md), `adapter_refused`). `sc-adapter-identity-native-or-refused` (#1104) covers the identity arms, not the per-message blast radius.
 Open questions:
 - Should a non-text item refuse the message or be skipped like a Pi user-message `image` item (`hs.rs:448` skips it)? The asymmetry is implemented behavior. (needs human input)
@@ -151,13 +158,13 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - same caller and gate as the record above.
 Status: active
-Exercised: partial - `hs-tests:445` (4 units from 7 parts), `:922` (unfinished assistant text deferred); `replay:225` `ae1_replays_nineteen_units_and_one_classified_skip` (an `image` part as `non_text_part`), `replay:345` `a_pending_tool_part_is_a_non_unit_and_loses_no_unit`, and the frozen OpenCode session (`replay:93`, `non_text_part` present). The independent reader classifies every arm (`crates/daemon/src/source_corpus.rs:573-594`); no daemon counter observes the skips because none exists.
+Exercised: partial - `hs-tests:445` (4 units from 7 parts), `:922` (unfinished assistant text deferred); `replay:213` `ae1_replays_nineteen_units_and_one_classified_skip` (an `image` part as `non_text_part`), `replay:336` `a_pending_tool_part_is_a_non_unit_and_loses_no_unit`, and the frozen OpenCode session (`replay:80`, `non_text_part` present). The independent reader classifies every arm (`crates/daemon/src/source_corpus.rs:573-594`); no daemon counter observes the skips because none exists.
 Guarantee: A part the adapter does not read is skipped without a unit, a refusal, or a counter: OpenCode part kinds other than `text` and `tool`, `text` parts marked `ignored`, assistant `text` parts of a turn without `time.completed`, `tool` parts whose `state.status` is neither `completed` nor `error`, interrupted tool parts of an incomplete turn, and Pi user or assistant content items whose `type` is not `text`.
 Check: `always` - for every such part, the unit vector and `Count::AdapterRefused` are unchanged: arms at `hs.rs:307` (`ignored`), `:308` (unfinished assistant text), `:331` (`_ => continue` on status), `:334-336` (interrupted in an incomplete turn), `:357` (`_ => {}` on part type), `:448` (Pi item filter). `always` because the arms are unconditional on the matched shape.
-Fault/timing angle: three arms are time-dependent, each on its own condition. A `running` or `pending` tool part is skipped by status whether or not the turn has completed (`hs.rs:328-332`), so it becomes a unit only on a pass after its `state.status` settles to `completed` or `error`; `replay:345` holds a pending part in a completed turn and still expects `unsettled_tool`. An interrupted tool part (`hs.rs:334-336`) and unfinished assistant text (`hs.rs:308`) become units on a pass after the turn gains `time.completed` (`hs-tests:922` shows the text case). The `ignored`, non-text, and unknown-kind arms are permanent for that part.
+Fault/timing angle: three arms are time-dependent, each on its own condition. A `running` or `pending` tool part is skipped by status whether or not the turn has completed (`hs.rs:328-332`), so it becomes a unit only on a pass after its `state.status` settles to `completed` or `error`; `replay:336` holds a pending part in a completed turn and still expects `unsettled_tool`. An interrupted tool part (`hs.rs:334-336`) and unfinished assistant text (`hs.rs:308`) become units on a pass after the turn gains `time.completed` (`hs-tests:922` shows the text case). The `ignored`, non-text, and unknown-kind arms are permanent for that part.
 Required faults and enabling state: a window holding a part of each arm; for the pending or running arm, a later pass after the part's status settles; for the interrupted and unfinished-text arms, a later pass after the turn completes.
 Confidence: high - [evidence](evidence/il-unknown-part-kind-skipped-uncounted.md). Each arm read and cited at `41d889ea4`.
-Existing check: `hs-tests:445`, `:922`; `replay:93`, `:225`, `:345`; unaudited. No counter exists to audit.
+Existing check: `hs-tests:445`, `:922`; `replay:80`, `:213`, `:336`; unaudited. No counter exists to audit.
 Impact: `adapter_refused` undercounts observed-but-uncaptured content. The corpus reconciliation reaches `unclassified_loss == 0` by classifying these from the independent reader, as U1 decided.
 Open questions: None. The source's question (daemon counter or oracle-side classification) is resolved by U1 and U3: the oracle classifies them through the closed `NonUnitReason` enumeration.
 
@@ -211,11 +218,11 @@ Open questions:
 ### il-repository-id-equals-project-id-at-head
 
 Type: safety
-Reachability: explicit-config-only - `plan_document` (`sc.rs:923`) runs inside `capture_documents` (`sc.rs:844`) under consent with `inject_docs` set.
+Reachability: explicit-config-only - `plan_document` (`sc.rs:929`) runs inside `capture_documents` (`sc.rs:850`) under consent with `inject_docs` set.
 Status: active - U7 ([#1112](https://github.com/ahrav/eidnara/issues/1112)) invalidates it by deriving `repository_id` from the repository; kept so that change has a named predecessor.
 Exercised: partial - the document tests at `sc-tests:1964`, `:2137`, `:2202`, and `:2276` exercise lineage, retirement, renames, and project isolation through `live_document`, which selects rows by `relative_path` alone (`sc-tests:1903-1909`); the `project_id` and `repository_id` values at `sc-tests:2164-2167` build another producer's fixture. No test asserts the `project_id` or `repository_id` value that capture writes, and none holds two checkouts of one repository.
 Guarantee: Every `RepositoryDocuments` unit the capture path builds carries the identity `[("project_id", P), ("repository_id", P), ("relative_path", name)]` with `P` the bound project digest and `name` a `PROJECT_DOC_FILES` entry, and the live-row lookup, the unchanged check, the head read, and retirement all key on that tuple.
-Check: `always` - `sc.rs:942-946` builds the vector with `project_id` twice; `sc.rs:947` `document_lineage(&identity)`; `sc.rs:949-951` filters the live row to `CAPTURE_DOMAIN_ID`; `sc.rs:880` retires by the live row's `object_id` through `retire_document` (`sc.rs:977`). `always` because the construction is unconditional.
+Check: `always` - `sc.rs:948-952` builds the vector with `project_id` twice; `sc.rs:953` `document_lineage(&identity)`; `sc.rs:955-957` filters the live row to `CAPTURE_DOMAIN_ID`; `sc.rs:886` retires by the live row's `object_id` through `retire_document` (`sc.rs:983`). `always` because the construction is unconditional.
 Fault/timing angle: none at HEAD. Once `repository_id` is derived, the value depends on repository history, which is why U7 adds a retire-by-`relative_path` step.
 Required faults and enabling state: two worktrees or clones holding the same `ARCHITECTURE.md`; a legacy row keyed `(P, P, path)` present when the first derived-identity pass runs.
 Confidence: high - [evidence](evidence/il-repository-id-equals-project-id-at-head.md). Code read at `41d889ea4`.
@@ -247,7 +254,7 @@ Status: active - U8 ([#1113](https://github.com/ahrav/eidnara/issues/1113)) revi
 Exercised: partial - `pd.rs:244` (final-component symlink), `:267` (a sparse file already past the cap, and a FIFO refused without blocking), `:304` (`Missing` versus `Unreadable`), `:318` (oversize); `sc-tests:2315` `unreadable_documents_are_counted_and_retire_nothing`. No test grows a file past the cap during the read, which the bound on bytes read covers by construction (`config.rs:726-732`). No test opens a document through a symlinked parent because no name has a parent below the root.
 Guarantee: Each document is opened at `project_root.join(name)` for the fixed names with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, validated as a regular file on the opened descriptor, read to at most 256 KiB, and decoded as UTF-8; the names hold no separator, so the only resolvable symlink on the path is the project root itself.
 Check: `always` - `pd.rs:9` list; `pd.rs:178` `dir.join(filename)`; `config.rs:703-719` open flags and `is_file` on the descriptor; `pd.rs:113-133` classification. `always` because the read is unconditional per name.
-Fault/timing angle: a parent-directory swap before the open is outside `NOFOLLOW`, and at HEAD the only parent is the root. `read_document` classifies a `NotFound` open as `Missing` when `std::fs::metadata(parent)` is a directory (`pd.rs:117-122`), and `metadata` follows symlinks; under nested names a missing target under a symlinked parent would classify `Missing` and `plan_document` would retire the live row (`sc.rs:952-958`). U8's resolver must cover the classification path as well as the open.
+Fault/timing angle: a parent-directory swap before the open is outside `NOFOLLOW`, and at HEAD the only parent is the root. `read_document` classifies a `NotFound` open as `Missing` when `std::fs::metadata(parent)` is a directory (`pd.rs:117-122`), and `metadata` follows symlinks; under nested names a missing target under a symlinked parent would classify `Missing` and `plan_document` would retire the live row (`sc.rs:958-964`). U8's resolver must cover the classification path as well as the open.
 Required faults and enabling state: a symlinked final component (covered); a symlinked intermediate directory with and without a target file (unreachable at HEAD; U8 scenarios); a kernel without `openat2`.
 Confidence: high - [evidence](evidence/il-doc-read-nofollow-final-component-flat-list.md). Code read; flags verified at `41d889ea4`.
 Existing check: `pd.rs:244`, `:267`, `:304`, `:318`, `:387`, `:398`, `:429`; `sc-tests:2315`; unaudited.
@@ -289,13 +296,13 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1254` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:251`, `:270`) at `history_summarizer_chunk.rs:1259` and `boundary.rs:1867`.
 Status: active
-Exercised: partial - `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:19639` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:19925-19930`, the input at `lib.rs:26289`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. No test gives one input both a description and a key argument, so the precedence between the first two arms is not asserted.
+Exercised: partial - `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:19636` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:19922-19927`, the input at `lib.rs:26286`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. No test gives one input both a description and a key argument, so the precedence between the first two arms is not asserted.
 Guarantee: A non-empty string `description` renders `TC: {description}`; otherwise `extract_key_arg` supplies the argument, cut to 60 scalar values plus `…` for a path-like key, and renders `TC: {name}({key_arg})`; otherwise `TC: {name}`; the result passes through `normalize_text`.
 Check: `always` - `history_summarizer_chunk.rs:1290-1302`. `always` because the function is pure.
 Fault/timing angle: none.
 Required faults and enabling state: inputs with a description and a path; with a 61-scalar path; with neither.
 Confidence: high - [evidence](evidence/il-tool-summary-description-precedes-key-arg.md). The source stated the description arm as `name(description)`; the code renders the description alone, and this record states the code.
-Existing check: `history_summarizer_chunk.rs:3251`, `:3312`; `lib.rs:19639`; `tv-tests:66`; the chunk golden; unaudited.
+Existing check: `history_summarizer_chunk.rs:3251`, `:3312`; `lib.rs:19636`; `tv-tests:66`; the chunk golden; unaudited.
 Impact: `display_arg` must reproduce the precedence and the marker byte for byte, or the chunk golden changes.
 Open questions: None.
 
@@ -305,7 +312,7 @@ Type: safety
 Reachability: explicit-config-only - batch ingest under consent; the block arises only after an operator purge.
 Status: active - U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) invalidates it with a per-unit pre-screen.
 Exercised: not yet - no daemon test mentions `ReAdmissionBlocked` or a purge; the Kernel tests linked from `sc-readmission-blocked-after-purge-tombstone` (#1104) cover ingest only.
-Guarantee: At HEAD a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1468-1470`), the pass counts `kernel_error` (`sc.rs:1290-1295`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:805-830`), so the batch is retried whole on each later pass while the block holds.
+Guarantee: At HEAD a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1468-1470`), the pass counts `kernel_error` (`sc.rs:1296-1301`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:811-836`), so the batch is retried whole on each later pass while the block holds.
 Check: `always` - a batch holding one tombstoned or pending-unlink digest ends `kernel_error` with every keyed unit pending and nothing retained. `always` because the Kernel check runs on every new reference.
 Fault/timing angle: a purge committed before the pass; the block outlives the pending unlink because every pending unlink is written with a tombstone.
 Required faults and enabling state: an operator purge of a captured digest, then identical bytes under a new identity beside a sibling.
@@ -367,7 +374,7 @@ Falsifier or legal witness: Falsifier: `mcp_foo` with an `oldString` key is rend
 ### il-gate-fails-on-distinctive-literal-outside-module
 
 Type: safety
-Reachability: default-production - the gate runs in CI on every pull request (`.github/workflows/ci.yml:302-303`).
+Reachability: test-only - the gate is a CI step (`.github/workflows/ci.yml:302-303`) over the source tree, not a daemon code path; it runs on every pull request under no daemon configuration.
 Status: active
 Exercised: yes - `scripts/forbid-tool-literals.test.ts` (run by `bun test ./scripts` in `bun run check:repo`) asserts exit 0 on a clean tree, exit 1 naming file and line for a production literal, an `mcp_` name, and a nested production module, exit 0 for the module, `*_tests.rs`, `tests/`, `testdata/`, and a top-level test module, and exit 2 outside a git checkout.
 Guarantee: A distinctive literal from the gated set (`filePath`, `file_path`, `oldString`, `newString`, `old_string`, `new_string`, `bash_status`, `bash_kill`, `todowrite`, `apply_patch`, `aft_outline`, `aft_zoom`, `aft_search`, or an `mcp_`-prefixed string) in `crates/daemon/src/**/*.rs` outside `tool_vocabulary.rs`, `*_tests.rs`, `tests/`, `testdata/`, and top-level `#[cfg(test)]` module regions makes the script exit 1 naming file and line; a tool failure exits 2; a clean tree exits 0.
@@ -416,9 +423,9 @@ Falsifier or legal witness: Falsifier: `exit_code(OpenCode, "mcp_foo", {exit: 2}
 ### il-literal-classified-contract-or-vocabulary
 
 Type: safety
-Reachability: default-production - the classification governs every literal of the interpretation layer.
+Reachability: test-only - the classification is a static artifact over the source tree ([`literals.md`](literals.md)), checked at authoring time; the literals it classifies are read by production code, but the property itself is not a daemon code path.
 Status: active
-Exercised: partial - [`literals.md`](literals.md) lands the table (256 distinct literals, 167 rows covering every field, tool, and argument-key literal, 100 excluded literals with reasons), checked once at authoring; no recurring check re-runs the classification.
+Exercised: partial - [`literals.md`](literals.md) lands the table (256 distinct literals, 173 rows covering every field, tool, and argument-key literal, 100 excluded literals with reasons), checked once at authoring; no recurring check re-runs the classification.
 Guarantee: Every string literal in the interpretation-layer files that names a field, a tool, or an argument key carries exactly one recorded class per site: contract (a harness with zero tools registered still emits it), vocabulary (a tool author chose it), or Eidnara-owned (Eidnara defines it); vocabulary literals live in the module, contract literals stay with their codec or adapter, and Eidnara-owned identifiers are defined once and referenced.
 Check: `always` - the table lists every in-scope occurrence in exactly one row, and the gate's distinctive set equals the vocabulary rows' distinctive subset. `always` because the table is a static artifact checked at authoring.
 Fault/timing angle: none.
@@ -427,7 +434,7 @@ Confidence: medium - [evidence](evidence/il-literal-classified-contract-or-vocab
 Existing check: none beyond the table; unaudited.
 Impact: an unclassified literal is moved into or out of the module by habit, and the gate's set drifts from the classification.
 Open questions:
-- These Eidnara-owned spellings are not defined once: `synthetic_todo_` (`injection.rs:20`, `codec/opencode.rs:1074`) and the `eidnara_note` actions `read` and `dismiss` (`tv.rs:37`, `lib.rs:12853`, `:13170`, `:18608`, `crates/daemon/src/conditional_note_evaluation.rs:1905`). Define each once and reference it, or accept the spellings? (needs human input: daemon owner)
+- These Eidnara-owned spellings are not defined once: `synthetic_todo_` (`injection.rs:20`, `codec/opencode.rs:1074`), the `eidnara_note` actions `read` and `dismiss` (`tv.rs:37`, `lib.rs:12853`, `:13170`, `:18605`, `crates/daemon/src/conditional_note_evaluation.rs:1905`), and the placeholder `tool` for a missing native tool name or call id (`codec/opencode.rs:1382`; `codec/pi.rs:458`, `:862`, `:878`, `:889`, `:1127`, `:1129`, `:1885`). Define each once and reference it, or accept the spellings? (needs human input: daemon owner)
 Falsifier or legal witness: Falsifier: `state.metadata.exit` recorded as contract. Legal witness: `info` contract, `filePath` vocabulary, `eidnara_note` Eidnara-owned.
 
 ### il-path-arg-harness-neutral
