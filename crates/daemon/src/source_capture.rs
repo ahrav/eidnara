@@ -17,6 +17,12 @@ use kernel::source_identity::OccurrenceClass;
 use kernel::{CommitIntent, KernelError, KernelStore, ProviderEgress, Sensitivity};
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+mod settlement;
+#[cfg(test)]
+pub(crate) use settlement::Settlement;
+pub(crate) use settlement::SettlementOutcome;
+use settlement::Settlements;
 use tokio_util::sync::CancellationToken;
 
 use crate::harness_sources::{
@@ -261,6 +267,15 @@ pub(crate) struct SourceCapture {
     /// Bumped by every `session.delete` under the capture commit gate; a job taken at an older epoch publishes nothing, and the next pass offers its window again.
     delete_epoch: AtomicU64,
     counters: Counters,
+    /// Each session's latest handoff outcome, which a memory-capture submit
+    /// waits on before its citation lookup.
+    settlements: Mutex<Settlements>,
+    /// Submits that found a `Running` entry and armed a wait.
+    #[cfg(test)]
+    pub(crate) settlement_waits: AtomicU64,
+    /// Memory-capture publications that may run a citation lookup.
+    #[cfg(test)]
+    pub(crate) citation_publishes: AtomicU64,
     #[cfg(test)]
     pub(crate) before_publish: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Runs inside the batch publication after screening and before the commit, where a purge reaches the commit without the pre-screen seeing it.
@@ -290,6 +305,11 @@ impl Default for SourceCapture {
             swept_paths: Mutex::default(),
             delete_epoch: AtomicU64::new(0),
             counters: Counters::default(),
+            settlements: Mutex::default(),
+            #[cfg(test)]
+            settlement_waits: AtomicU64::new(0),
+            #[cfg(test)]
+            citation_publishes: AtomicU64::new(0),
             #[cfg(test)]
             before_publish: Mutex::new(None),
             #[cfg(test)]
@@ -439,12 +459,19 @@ impl CopyCharge<'_> {
 /// Counts the slot as active while the permit lives, so a panicking job releases both.
 struct ActiveSlot {
     capture: Arc<SourceCapture>,
+    session: SessionIdentity,
+    acceptance: u64,
     _permit: OwnedSemaphorePermit,
 }
 
 impl Drop for ActiveSlot {
+    /// A slot released by a job that recorded no end, such as one dropped
+    /// unrun, ends its settlement as `Discarded`.
     fn drop(&mut self) {
         self.capture.counters.sub(Count::Active, 1);
+        self.capture
+            .settlements()
+            .end_if_running(&self.session, self.acceptance, Count::Discarded);
     }
 }
 
@@ -539,6 +566,44 @@ impl SourceCapture {
     pub(crate) fn refuse(&self, refusal: Count) {
         self.counters.add(refusal, 1);
         log("handoff refused", refusal, 1);
+    }
+
+    /// Refuses a pass's handoff and records the session's publish as refused.
+    pub(crate) fn refuse_handoff(&self, refusal: Count, session: &SessionIdentity) {
+        self.refuse(refusal);
+        self.settlements().refuse(session);
+    }
+
+    /// Waits until the session's source publish has settled, at most until
+    /// the running job's budget deadline. Holds no lock across the wait.
+    pub(crate) async fn await_settlement(&self, session: &SessionIdentity) -> SettlementOutcome {
+        let receiver = self.settlements().subscribe(session);
+        #[cfg(test)]
+        if receiver
+            .as_ref()
+            .is_some_and(|receiver| matches!(*receiver.borrow(), Settlement::Running { .. }))
+        {
+            self.settlement_waits.fetch_add(1, Ordering::Relaxed);
+        }
+        settlement::settle(receiver).await
+    }
+
+    /// A poisoned record is a lost record: it starts empty, which reads as
+    /// settled everywhere.
+    fn settlements(&self) -> MutexGuard<'_, Settlements> {
+        self.settlements.lock().unwrap_or_else(|poisoned| {
+            self.settlements.clear_poison();
+            let mut settlements = poisoned.into_inner();
+            *settlements = Settlements::default();
+            settlements
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settlement_for_test(&self, session: &SessionIdentity) -> Option<Settlement> {
+        self.settlements()
+            .subscribe(session)
+            .map(|receiver| *receiver.borrow())
     }
 
     /// A poisoned memo is a lost cache: it starts empty and the kernel's receipts answer.
@@ -636,22 +701,31 @@ impl CaptureHandoff {
         cancel: CancellationToken,
     ) -> Option<CaptureJob> {
         let Ok(permit) = Arc::clone(&self.capture.slot).try_acquire_owned() else {
-            self.capture.refuse(Count::RefusedQueueFull);
+            self.capture
+                .refuse_handoff(Count::RefusedQueueFull, &self.session);
             return None;
         };
         self.capture.counters.add(Count::Active, 1);
+        // One instant starts the job's budget and bounds a submit's wait on it.
+        let accepted_at = tokio::time::Instant::now();
+        let acceptance = self
+            .capture
+            .settlements()
+            .accept(&self.session, accepted_at);
         let interrupt = Arc::new(AtomicBool::new(false));
         Some(CaptureJob {
             budget: EvalBudget::new(
-                Some(Instant::now() + CAPTURE_BUDGET),
+                Some(accepted_at.into_std() + CAPTURE_BUDGET),
                 Arc::clone(&interrupt),
             ),
             interrupt,
             kernel,
             commit_gate,
             cancel,
-            _slot: ActiveSlot {
+            slot: ActiveSlot {
                 capture: Arc::clone(&self.capture),
+                session: self.session.clone(),
+                acceptance,
                 _permit: permit,
             },
             _retained: self.retained,
@@ -674,7 +748,7 @@ pub(crate) struct CaptureJob {
     kernel: Arc<KernelOpenCoordinator>,
     commit_gate: Arc<Mutex<()>>,
     cancel: CancellationToken,
-    _slot: ActiveSlot,
+    slot: ActiveSlot,
     _retained: RetainedCharge,
     window: Vec<Arc<Value>>,
     session: SessionIdentity,
@@ -685,12 +759,18 @@ pub(crate) struct CaptureJob {
 }
 
 impl CaptureJob {
+    /// The session the job publishes for.
+    pub(crate) fn session(&self) -> &SessionIdentity {
+        &self.slot.session
+    }
+
     /// Runs the publication on the blocking pool and returns once it physically completes. Cancellation interrupts the budget, so the job stops before its next kernel wait; the wait for completion is then bounded by the budget, the capture commit gate's current holder, and the adapters' work on the window.
     pub(crate) async fn run(self) -> Count {
         self.capture.counters.add(Count::Admitted, 1);
         let interrupt = Arc::clone(&self.interrupt);
         let cancel = self.cancel.clone();
         let capture = Arc::clone(&self.capture);
+        let (session, acceptance) = (self.slot.session.clone(), self.slot.acceptance);
         let mut join = tokio::task::spawn_blocking(move || self.publish());
         let joined = tokio::select! {
             joined = &mut join => joined,
@@ -706,11 +786,15 @@ impl CaptureJob {
             Err(_) => Count::Discarded,
         };
         capture.counters.add(end, 1);
+        capture.settlements().end(&session, acceptance, end);
         log("job ended", end, 1);
         end
     }
 
     fn end(&self, end: Count) -> Count {
+        self.capture
+            .settlements()
+            .end(&self.slot.session, self.slot.acceptance, end);
         self.capture.counters.add(end, 1);
         if end != Count::Completed {
             log("job ended", end, 1);

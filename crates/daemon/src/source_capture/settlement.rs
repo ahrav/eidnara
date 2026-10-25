@@ -1,0 +1,323 @@
+//! The per-session settlement record a memory-capture submit waits on before
+//! its citation lookup. The supervisor writes it at each handoff exit: a
+//! job taking the publication slot is `Running`, a handoff refusal is
+//! `Refused`, and the job's end is `Ended`. A key with no entry is settled,
+//! which is exact after a restart because no earlier job can still run.
+
+use std::collections::VecDeque;
+
+use tokio::sync::watch;
+use tokio::time::Instant;
+
+use super::{CAPTURE_BUDGET, Count};
+use crate::harness_sources::SessionIdentity;
+
+/// Entries the record keeps. Eviction drops the oldest entry that is not
+/// `Running`; a `Running` entry outlives its budget before it can go.
+pub(crate) const MAX_SETTLEMENTS: usize = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Settlement {
+    /// A job of the session holds the publication slot since `accepted_at`,
+    /// the instant its 5 s budget started.
+    Running {
+        accepted_at: Instant,
+    },
+    Ended {
+        outcome: Count,
+    },
+    Refused,
+}
+
+/// What a submit's citation lookup may conclude from an empty read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettlementOutcome {
+    /// Source or memory consent is off: no lookup runs.
+    Off,
+    /// The session's publish ended or none ran: an empty read means the
+    /// descriptor does not exist.
+    Settled,
+    /// The publish was refused, ran out its budget, or was still running at
+    /// the deadline: an empty read means the descriptor may not have landed.
+    BudgetExpired,
+}
+
+struct Entry {
+    key: SessionIdentity,
+    /// The acceptance or refusal that last wrote the entry; a terminal write
+    /// from an earlier one is ignored.
+    acceptance: u64,
+    state: watch::Sender<Settlement>,
+}
+
+#[derive(Default)]
+pub(super) struct Settlements {
+    entries: VecDeque<Entry>,
+    acceptances: u64,
+}
+
+impl Settlements {
+    /// Records that a job of `key` took the slot; returns the acceptance its
+    /// end must name.
+    pub(super) fn accept(&mut self, key: &SessionIdentity, accepted_at: Instant) -> u64 {
+        self.write(key, Settlement::Running { accepted_at })
+    }
+
+    pub(super) fn refuse(&mut self, key: &SessionIdentity) {
+        self.write(key, Settlement::Refused);
+    }
+
+    /// Records the end of the job that took the slot at `acceptance`.
+    pub(super) fn end(&mut self, key: &SessionIdentity, acceptance: u64, outcome: Count) {
+        if let Some(entry) = self
+            .entry(key)
+            .filter(|entry| entry.acceptance == acceptance)
+        {
+            entry.state.send_replace(Settlement::Ended { outcome });
+        }
+    }
+
+    /// Ends the job at `acceptance` as `outcome` when nothing has ended it,
+    /// so a released slot leaves no `Running` entry behind.
+    pub(super) fn end_if_running(
+        &mut self,
+        key: &SessionIdentity,
+        acceptance: u64,
+        outcome: Count,
+    ) {
+        if let Some(entry) = self
+            .entry(key)
+            .filter(|entry| entry.acceptance == acceptance)
+            && matches!(*entry.state.borrow(), Settlement::Running { .. })
+        {
+            entry.state.send_replace(Settlement::Ended { outcome });
+        }
+    }
+
+    pub(super) fn subscribe(&self, key: &SessionIdentity) -> Option<watch::Receiver<Settlement>> {
+        self.entries
+            .iter()
+            .find(|entry| entry.key == *key)
+            .map(|entry| entry.state.subscribe())
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn entry(&mut self, key: &SessionIdentity) -> Option<&mut Entry> {
+        self.entries.iter_mut().find(|entry| entry.key == *key)
+    }
+
+    fn write(&mut self, key: &SessionIdentity, state: Settlement) -> u64 {
+        self.acceptances += 1;
+        let acceptance = self.acceptances;
+        if let Some(entry) = self.entry(key) {
+            entry.acceptance = acceptance;
+            entry.state.send_replace(state);
+            return acceptance;
+        }
+        if self.entries.len() >= MAX_SETTLEMENTS {
+            self.evict();
+        }
+        self.entries.push_back(Entry {
+            key: key.clone(),
+            acceptance,
+            state: watch::Sender::new(state),
+        });
+        acceptance
+    }
+
+    /// Drops the oldest entry that is not `Running`, moving `Running` entries
+    /// found at the front to the back. One slot means at most one entry is
+    /// `Running`, so the walk ends within two steps.
+    fn evict(&mut self) {
+        for _ in 0..self.entries.len() {
+            let Some(front) = self.entries.pop_front() else {
+                return;
+            };
+            if matches!(*front.state.borrow(), Settlement::Running { .. }) {
+                self.entries.push_back(front);
+            } else {
+                return;
+            }
+        }
+    }
+}
+
+/// Waits for the settlement `receiver` reports, bounded by the running job's
+/// budget deadline.
+pub(super) async fn settle(receiver: Option<watch::Receiver<Settlement>>) -> SettlementOutcome {
+    let Some(mut receiver) = receiver else {
+        return SettlementOutcome::Settled;
+    };
+    let current = *receiver.borrow_and_update();
+    let state = match current {
+        Settlement::Running { accepted_at } => {
+            match tokio::time::timeout_at(
+                accepted_at + CAPTURE_BUDGET,
+                receiver.wait_for(|state| !matches!(state, Settlement::Running { .. })),
+            )
+            .await
+            {
+                Err(_elapsed) => return SettlementOutcome::BudgetExpired,
+                Ok(Err(_closed)) => return SettlementOutcome::Settled,
+                Ok(Ok(state)) => *state,
+            }
+        }
+        terminal => terminal,
+    };
+    match state {
+        Settlement::Ended {
+            outcome: Count::Deadline,
+        }
+        | Settlement::Refused => SettlementOutcome::BudgetExpired,
+        Settlement::Ended { .. } | Settlement::Running { .. } => SettlementOutcome::Settled,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::harness_sources::Harness;
+
+    fn key(session: &str) -> SessionIdentity {
+        SessionIdentity {
+            project_id: "a".repeat(64),
+            harness: Harness::Pi,
+            session_id: session.to_owned(),
+        }
+    }
+
+    async fn outcome(settlements: &Settlements, session: &str) -> SettlementOutcome {
+        settle(settlements.subscribe(&key(session))).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_or_absent_entry_settles_without_waiting() {
+        let mut settlements = Settlements::default();
+        let started = Instant::now();
+        assert_eq!(
+            outcome(&settlements, "absent").await,
+            SettlementOutcome::Settled
+        );
+        let completed = settlements.accept(&key("completed"), Instant::now());
+        settlements.end(&key("completed"), completed, Count::Completed);
+        assert_eq!(
+            outcome(&settlements, "completed").await,
+            SettlementOutcome::Settled
+        );
+        let deadline = settlements.accept(&key("deadline"), Instant::now());
+        settlements.end(&key("deadline"), deadline, Count::Deadline);
+        assert_eq!(
+            outcome(&settlements, "deadline").await,
+            SettlementOutcome::BudgetExpired
+        );
+        settlements.refuse(&key("refused"));
+        assert_eq!(
+            outcome(&settlements, "refused").await,
+            SettlementOutcome::BudgetExpired
+        );
+        assert_eq!(Instant::now(), started, "no wait was armed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_running_entry_waits_for_its_end_or_its_budget_deadline() {
+        let settlements = std::sync::Arc::new(std::sync::Mutex::new(Settlements::default()));
+        let accepted_at = Instant::now();
+        let acceptance = settlements
+            .lock()
+            .unwrap()
+            .accept(&key("ends"), accepted_at);
+        let receiver = settlements.lock().unwrap().subscribe(&key("ends"));
+        let waiter = tokio::spawn(settle(receiver));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(!waiter.is_finished());
+        settlements
+            .lock()
+            .unwrap()
+            .end(&key("ends"), acceptance, Count::Completed);
+        assert_eq!(waiter.await.unwrap(), SettlementOutcome::Settled);
+        assert_eq!(Instant::now() - accepted_at, Duration::from_secs(1));
+
+        settlements
+            .lock()
+            .unwrap()
+            .accept(&key("stalls"), Instant::now());
+        let started = Instant::now();
+        let receiver = settlements.lock().unwrap().subscribe(&key("stalls"));
+        let waiter = tokio::spawn(settle(receiver));
+        tokio::time::advance(CAPTURE_BUDGET - Duration::from_millis(1)).await;
+        assert!(!waiter.is_finished());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(waiter.await.unwrap(), SettlementOutcome::BudgetExpired);
+        assert_eq!(Instant::now() - started, CAPTURE_BUDGET);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_overwrites_a_running_entry_and_its_late_end_is_ignored() {
+        let mut settlements = Settlements::default();
+        let first = settlements.accept(&key("ses"), Instant::now());
+        let receiver = settlements.subscribe(&key("ses"));
+        settlements.refuse(&key("ses"));
+        settlements.end(&key("ses"), first, Count::Completed);
+        settlements.end_if_running(&key("ses"), first, Count::Discarded);
+        assert_eq!(settle(receiver).await, SettlementOutcome::BudgetExpired);
+        assert_eq!(
+            *settlements.subscribe(&key("ses")).unwrap().borrow(),
+            Settlement::Refused
+        );
+    }
+
+    #[test]
+    fn a_released_slot_ends_a_running_entry_once() {
+        let mut settlements = Settlements::default();
+        let acceptance = settlements.accept(&key("ses"), Instant::now());
+        settlements.end_if_running(&key("ses"), acceptance, Count::Discarded);
+        settlements.end(&key("ses"), acceptance, Count::WorkerPanicked);
+        settlements.end_if_running(&key("ses"), acceptance, Count::Discarded);
+        assert_eq!(
+            *settlements.subscribe(&key("ses")).unwrap().borrow(),
+            Settlement::Ended {
+                outcome: Count::WorkerPanicked
+            }
+        );
+    }
+
+    #[test]
+    fn the_record_keeps_its_bound_by_dropping_the_oldest_settled_entry() {
+        let mut settlements = Settlements::default();
+        settlements.accept(&key("running"), Instant::now());
+        for index in 0..MAX_SETTLEMENTS {
+            settlements.refuse(&key(&format!("settled-{index}")));
+        }
+        assert_eq!(settlements.len(), MAX_SETTLEMENTS);
+        assert!(
+            settlements.subscribe(&key("running")).is_some(),
+            "a running entry at the front moves back instead of going"
+        );
+        assert!(settlements.subscribe(&key("settled-0")).is_none());
+        assert!(settlements.subscribe(&key("settled-1")).is_some());
+        settlements.refuse(&key("one-more"));
+        assert_eq!(settlements.len(), MAX_SETTLEMENTS);
+        assert!(settlements.subscribe(&key("settled-1")).is_none());
+        assert!(settlements.subscribe(&key("running")).is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_evicted_entry_reads_as_settled_to_its_waiter() {
+        let mut settlements = Settlements::default();
+        settlements.refuse(&key("oldest"));
+        let acceptance = settlements.accept(&key("waited"), Instant::now());
+        let receiver = settlements.subscribe(&key("waited"));
+        settlements.end(&key("waited"), acceptance, Count::Completed);
+        for index in 0..MAX_SETTLEMENTS {
+            settlements.refuse(&key(&format!("filler-{index}")));
+        }
+        assert!(settlements.subscribe(&key("waited")).is_none());
+        assert_eq!(settle(receiver).await, SettlementOutcome::Settled);
+    }
+}

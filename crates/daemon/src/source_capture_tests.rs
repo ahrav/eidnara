@@ -8,6 +8,7 @@ use kernel::{ArtifactHandle, KernelStore, LiveDescriptor, SourceClass, Surface, 
 
 use super::*;
 use crate::harness_sources::MAX_SOURCE_BATCH_UNITS;
+use crate::source_capture::{Count, Settlement};
 
 const SESSION: &str = "ses";
 /// A literal that must never reach a log line, a counter, or the health report.
@@ -3266,38 +3267,64 @@ fn bind_pi(handler: &Handler, project: &Path, config: DaemonConfig) {
 /// Captures `messages` as `(id, text)` user sources and submits one memory per
 /// source quoting `quotes[i]`; returns the submission's state.
 async fn capture_quotes(handler: &Handler, messages: &[(&str, &str)], quotes: &[&str]) -> Value {
-    let request = json!({"method":"memory.capture","session_id":SESSION,"messages":messages.iter().map(|(id, text)| json!({"id":id,"role":"user","text":text})).collect::<Vec<_>>()});
-    assert_eq!(
-        tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
-        "accepted"
-    );
-    let next =
-        json!({"method":"memory.capture.next","session_id":SESSION,"model":"custom-native/model"});
-    let work = tool_body(
-        handler
-            .handle_native_capture_next(test_route(7), &next)
-            .await,
-    );
-    assert_eq!(work["state"], "work", "{work}");
-    let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
-    let prompt_messages = prompt["messages"].as_array().unwrap();
-    assert_eq!(prompt_messages.len(), messages.len());
-    let decisions: Vec<Value> = prompt_messages
-        .iter()
-        .zip(quotes)
-        .map(|(message, quote)| {
-            assert!(message["text"].as_str().unwrap().contains(quote), "{message}");
-            json!({"message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":quote,"quote":quote}]})
-        })
-        .collect();
-    let output = json!({"version":1,"decisions":decisions});
-    let submission = json!({"method":"memory.capture.submit","session_id":SESSION,"lease":work["lease"],"model":work["model"],"output":output.to_string()});
+    let submission = prepare_submission(handler, test_route(7), SESSION, messages, quotes).await;
     tool_body(
         handler
             .handle_native_capture_submit(test_route(7), &submission)
             .await,
     )["state"]
         .clone()
+}
+
+/// Captures `messages` on `route` and leases them; returns the submission
+/// that answers with one memory per source quoting `quotes[i]`.
+async fn prepare_submission(
+    handler: &Handler,
+    route: RouteHandle,
+    session: &str,
+    messages: &[(&str, &str)],
+    quotes: &[&str],
+) -> Value {
+    let request = json!({"method":"memory.capture","session_id":session,"messages":messages.iter().map(|(id, text)| json!({"id":id,"role":"user","text":text})).collect::<Vec<_>>()});
+    assert_eq!(
+        tool_body(handler.handle_memory_capture(route, &request).await)["state"],
+        "accepted"
+    );
+    let next =
+        json!({"method":"memory.capture.next","session_id":session,"model":"custom-native/model"});
+    let work = tool_body(handler.handle_native_capture_next(route, &next).await);
+    assert_eq!(work["state"], "work", "{work}");
+    let submission = submission_for(&work, session, quotes);
+    let output: Value = serde_json::from_str(submission["output"].as_str().unwrap()).unwrap();
+    assert!(
+        output["decisions"].as_array().unwrap().len() >= messages.len(),
+        "{output}"
+    );
+    submission
+}
+
+/// Answers a leased batch: each message quotes the first quote it contains,
+/// and a message that contains none answers with no memory. The lease spans
+/// the project's pending jobs, so a pass's auto-captured jobs may share it.
+fn submission_for(work: &Value, session: &str, quotes: &[&str]) -> Value {
+    let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+    let decisions: Vec<Value> = prompt["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| {
+            let text = message["text"].as_str().unwrap();
+            let memories: Vec<Value> = quotes
+                .iter()
+                .find(|quote| text.contains(*quote))
+                .map(|quote| json!({"category":"CONFIG_VALUES","content":quote,"quote":quote}))
+                .into_iter()
+                .collect();
+            json!({"message_id":message["id"],"memories":memories})
+        })
+        .collect();
+    let output = json!({"version":1,"decisions":decisions});
+    json!({"method":"memory.capture.submit","session_id":session,"lease":work["lease"],"model":work["model"],"output":output.to_string()})
 }
 
 /// One committed capture decision as the Kernel stores it.
@@ -3660,6 +3687,14 @@ async fn misses_carry_one_closed_reason_each_and_the_counters_follow_them() {
         );
         let decisions = captured_decisions(dir.path());
         let reason = |message: &str| decisions[message].rationale["citation"].clone();
+        assert_eq!(
+            handler
+                .source_capture
+                .settlement_waits
+                .load(Ordering::Relaxed),
+            0,
+            "no publish ran, so no submit waited"
+        );
         if source_capture {
             assert_eq!(reason("native-user-1"), "descriptor_not_found", "{fixture}");
             assert_eq!(reason(&hashed), "source_id_unjoinable", "{fixture}");
@@ -3834,4 +3869,495 @@ async fn a_replayed_publish_adds_no_rows_and_no_counts() {
     assert_eq!(anchor_oids(dir.path()), anchors);
     assert_eq!(counter(&handler, "decisions_cited"), cited);
     assert_eq!(counter(&handler, "decisions_anchored"), 2);
+}
+
+/// The settlement key a Pi submit on `session` waits on.
+fn pi_key(project: &Path, session: &str) -> crate::harness_sources::SessionIdentity {
+    crate::harness_sources::SessionIdentity {
+        project_id: kernel_routes::ProjectBinding::new(project)
+            .digest()
+            .to_owned(),
+        harness: crate::harness_sources::Harness::Pi,
+        session_id: session.to_owned(),
+    }
+}
+
+/// One Pi user message the settlement tests publish and quote.
+const SETTLED_SOURCE: (&str, &str) = ("pi-settled", "Use port 4321 for staging.");
+
+fn settled_row(session_offset: u64) -> Value {
+    pi_row(
+        SETTLED_SOURCE.0,
+        None,
+        json!({"role":"user","content":SETTLED_SOURCE.1,"timestamp":1_700_000_000_000u64 + session_offset}),
+    )
+}
+
+/// Parks the next source publish inside its job, before the capture commit
+/// gate; returns a receiver signalled when the job parks and a sender that
+/// releases it.
+fn park_source_publish(handler: &Handler) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let go_rx = Arc::new(Mutex::new(go_rx));
+    let entered_tx = Arc::new(Mutex::new(entered_tx));
+    *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+        entered_tx.lock().unwrap().send(()).unwrap();
+        let _ = go_rx.lock().unwrap().recv();
+    }));
+    (entered_rx, go_tx)
+}
+
+async fn wait_parked(entered: mpsc::Receiver<()>) {
+    tokio::task::spawn_blocking(move || entered.recv().unwrap())
+        .await
+        .unwrap();
+}
+
+/// A handler whose project is a one-commit repository, bound for Pi capture
+/// with source capture on.
+async fn settling_handler() -> (Arc<Handler>, tempfile::TempDir, PathBuf) {
+    let (handler, dir, project) = capture_handler(citing_config(true), true).await;
+    crate::memory_capture::head_fixtures::repository(&project, 1);
+    bind_pi(&handler, &project, citing_config(true));
+    (Arc::new(handler), dir, project)
+}
+
+/// AC8: a submit after the pass's publish ended arms no wait and cites.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_submit_after_the_publish_ended_arms_no_wait_and_cites() {
+    let (handler, dir, project) = settling_handler().await;
+    pass(&handler, pi_request(&[settled_row(0)], "base-1")).await;
+    settle(&handler).await;
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_for_test(&pi_key(&project, SESSION)),
+        Some(Settlement::Ended {
+            outcome: Count::Completed
+        })
+    );
+    assert_eq!(
+        capture_quotes(&handler, &[SETTLED_SOURCE], &[SETTLED_SOURCE.1]).await,
+        "processed"
+    );
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_waits
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        captured_decisions(dir.path())[SETTLED_SOURCE.0].rationale["citation"],
+        "cited"
+    );
+}
+
+/// A submit that arrives while the pass's publish runs waits outside the
+/// capture commit gate, runs its lookup only after the publish ends, and
+/// cites the descriptor the publish wrote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_submit_during_the_publish_waits_outside_the_gate_and_then_cites() {
+    let (handler, dir, project) = settling_handler().await;
+    let (entered, go) = park_source_publish(&handler);
+    pass(&handler, pi_request(&[settled_row(0)], "base-1")).await;
+    wait_parked(entered).await;
+    assert!(matches!(
+        handler
+            .source_capture
+            .settlement_for_test(&pi_key(&project, SESSION)),
+        Some(Settlement::Running { .. })
+    ));
+    let submission = prepare_submission(
+        &handler,
+        test_route(7),
+        SESSION,
+        &[SETTLED_SOURCE],
+        &[SETTLED_SOURCE.1],
+    )
+    .await;
+    let submit = tokio::spawn({
+        let handler = Arc::clone(&handler);
+        async move {
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await,
+            )["state"]
+                .clone()
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !submit.is_finished(),
+        "the submit waits on the running publish"
+    );
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_waits
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert!(
+        handler.capture_commit_gate.try_lock().is_ok(),
+        "the waiting submit holds no capture commit gate"
+    );
+    assert_eq!(
+        handler
+            .source_capture
+            .citation_publishes
+            .load(Ordering::Relaxed),
+        0,
+        "no lookup ran while the entry was Running"
+    );
+    assert!(captured_decisions(dir.path()).is_empty());
+    go.send(()).unwrap();
+    assert_eq!(submit.await.unwrap(), "processed");
+    assert_eq!(
+        captured_decisions(dir.path())[SETTLED_SOURCE.0].rationale["citation"],
+        "cited"
+    );
+    *handler.source_capture.before_publish.lock().unwrap() = None;
+}
+
+/// AC9: a publish that outlasts its budget releases the waiting submit at
+/// the budget deadline measured from the handoff's acceptance, and the
+/// decision reports `publish_budget_expired`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_publish_past_its_budget_releases_the_submit_at_the_deadline() {
+    let (handler, dir, project) = settling_handler().await;
+    let (entered, go) = park_source_publish(&handler);
+    pass(&handler, pi_request(&[settled_row(0)], "base-1")).await;
+    wait_parked(entered).await;
+    let Some(Settlement::Running { accepted_at }) = handler
+        .source_capture
+        .settlement_for_test(&pi_key(&project, SESSION))
+    else {
+        panic!("the parked job holds a Running entry");
+    };
+    assert_eq!(
+        capture_quotes(&handler, &[SETTLED_SOURCE], &[SETTLED_SOURCE.1]).await,
+        "processed"
+    );
+    let waited = tokio::time::Instant::now() - accepted_at;
+    assert!(
+        waited >= crate::source_capture::CAPTURE_BUDGET
+            && waited < crate::source_capture::CAPTURE_BUDGET + Duration::from_secs(2),
+        "released at the deadline: {waited:?}"
+    );
+    let decision = &captured_decisions(dir.path())[SETTLED_SOURCE.0];
+    assert_eq!(decision.rationale["citation"], "publish_budget_expired");
+    assert!(decision.events.is_empty());
+    assert_eq!(counter(&handler, "decisions_publish_budget_expired"), 1);
+    go.send(()).unwrap();
+    settle(&handler).await;
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_for_test(&pi_key(&project, SESSION)),
+        Some(Settlement::Ended {
+            outcome: Count::Deadline
+        }),
+        "the stalled job ends on its own budget"
+    );
+}
+
+/// AC10: a handoff refused because another session's job holds the slot
+/// settles at once as `publish_budget_expired`; a shutting-down refusal
+/// records the same; a hashed source id skips the wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refused_handoffs_settle_at_once_and_hashed_ids_skip_the_wait() {
+    let (handler, dir, project) = settling_handler().await;
+    let (entered, go) = park_source_publish(&handler);
+    pass(&handler, pi_request(&[settled_row(0)], "base-1")).await;
+    wait_parked(entered).await;
+    let mut other = binding_with_harness(project.to_str().unwrap(), "pi", "ses-y");
+    other.config = capture_config(true);
+    handler.bind_route(test_route(8), other.clone());
+    let mut request = pi_request(&[settled_row(0)], "base-y");
+    request["session_id"] = json!("ses-y");
+    pass_on(&handler, test_route(8), request).await;
+    assert_eq!(report(&handler)["refused_queue_full"], 1);
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_for_test(&pi_key(&project, "ses-y")),
+        Some(Settlement::Refused)
+    );
+    other.config = citing_config(true);
+    handler.bind_route(test_route(8), other);
+    let submission = prepare_submission(
+        &handler,
+        test_route(8),
+        "ses-y",
+        &[SETTLED_SOURCE],
+        &[SETTLED_SOURCE.1],
+    )
+    .await;
+    let started = std::time::Instant::now();
+    assert_eq!(
+        tool_body(
+            handler
+                .handle_native_capture_submit(test_route(8), &submission)
+                .await
+        )["state"],
+        "processed"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_waits
+            .load(Ordering::Relaxed),
+        0
+    );
+    let decisions = captured_decisions(dir.path());
+    assert_eq!(
+        decisions[SETTLED_SOURCE.0].rationale["citation"],
+        "publish_budget_expired"
+    );
+
+    let hashed = format!("{}:0", "d".repeat(64));
+    assert_eq!(
+        capture_quotes(
+            &handler,
+            &[(hashed.as_str(), "Production listens on 8080.")],
+            &["Production listens on 8080."]
+        )
+        .await,
+        "processed"
+    );
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_waits
+            .load(Ordering::Relaxed),
+        0,
+        "every source id is hashed, so the submit skips the wait"
+    );
+    assert!(matches!(
+        handler
+            .source_capture
+            .settlement_for_test(&pi_key(&project, SESSION)),
+        Some(Settlement::Running { .. })
+    ));
+    assert_eq!(
+        captured_decisions(dir.path())[&hashed].rationale["citation"],
+        "source_id_unjoinable"
+    );
+    go.send(()).unwrap();
+    settle(&handler).await;
+    *handler.source_capture.before_publish.lock().unwrap() = None;
+
+    handler
+        .source_capture
+        .refuse_handoff(Count::RefusedShuttingDown, &pi_key(&project, "ses-z"));
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_for_test(&pi_key(&project, "ses-z")),
+        Some(Settlement::Refused)
+    );
+}
+
+/// A shutdown refusal on the handoff path records the session's settlement
+/// as refused; the job and its `Running` entry exist only after the
+/// response settles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_settlement_is_written_after_the_response_and_a_shutdown_refusal_records_it() {
+    let (handler, _dir, project) = settling_handler().await;
+    let key = pi_key(&project, SESSION);
+    let request = handler.test_client_prepare_request(pi_request(&[settled_row(0)], "base-1"));
+    let mut outcome = handler
+        .handle_transform_for_test(test_route(7), request.clone())
+        .await;
+    let after = outcome
+        .take_after_response()
+        .expect("the window is charged");
+    assert!(matches!(
+        handler.test_client_apply(&request, outcome),
+        PreparedOutcome::Response(_)
+    ));
+    assert_eq!(
+        handler.source_capture.settlement_for_test(&key),
+        None,
+        "the response is complete before any job or entry exists"
+    );
+    after.run();
+    settle(&handler).await;
+    assert_eq!(
+        handler.source_capture.settlement_for_test(&key),
+        Some(Settlement::Ended {
+            outcome: Count::Completed
+        })
+    );
+
+    let request = handler.test_client_prepare_request(pi_request(&[settled_row(5)], "base-2"));
+    let mut outcome = handler
+        .handle_transform_for_test(test_route(7), request)
+        .await;
+    let after = outcome
+        .take_after_response()
+        .expect("the window is charged");
+    handler.shutdown().await.unwrap();
+    after.run();
+    assert_eq!(report(&handler)["refused_shutting_down"], 1);
+    assert_eq!(
+        handler.source_capture.settlement_for_test(&key),
+        Some(Settlement::Refused)
+    );
+}
+
+/// A daemon cancel during the wait returns before the blocking hop: no
+/// decision is written and the lease is released, so the jobs stay eligible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_during_the_wait_writes_no_decision_and_releases_the_lease() {
+    let (handler, dir, _project) = settling_handler().await;
+    let (entered, go) = park_source_publish(&handler);
+    pass(&handler, pi_request(&[settled_row(0)], "base-1")).await;
+    wait_parked(entered).await;
+    let submission = prepare_submission(
+        &handler,
+        test_route(7),
+        SESSION,
+        &[SETTLED_SOURCE],
+        &[SETTLED_SOURCE.1],
+    )
+    .await;
+    let submit = tokio::spawn({
+        let handler = Arc::clone(&handler);
+        async move {
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await,
+            )["state"]
+                .clone()
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handler.cancel.cancel();
+    assert_eq!(submit.await.unwrap(), "pending");
+    assert!(captured_decisions(dir.path()).is_empty());
+    assert_eq!(
+        handler.native_capture.lock().unwrap().reserved_for_test(),
+        0
+    );
+    go.send(()).unwrap();
+    settle(&handler).await;
+}
+
+/// Every job end leaves its entry `Ended`: a completed publish and a
+/// panicking one, whose slot is idle again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_job_end_leaves_an_ended_settlement_and_an_idle_slot() {
+    let (handler, _dir, project) = settling_handler().await;
+    *handler.source_capture.before_publish.lock().unwrap() =
+        Some(Arc::new(|| panic!("injected worker panic")));
+    pass(&handler, pi_request(&[settled_row(0)], "base-1")).await;
+    settle(&handler).await;
+    assert!(handler.source_capture.is_idle());
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_for_test(&pi_key(&project, SESSION)),
+        Some(Settlement::Ended {
+            outcome: Count::WorkerPanicked
+        })
+    );
+    *handler.source_capture.before_publish.lock().unwrap() = None;
+    pass(&handler, pi_request(&[settled_row(1)], "base-2")).await;
+    settle(&handler).await;
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_for_test(&pi_key(&project, SESSION)),
+        Some(Settlement::Ended {
+            outcome: Count::Completed
+        })
+    );
+}
+
+/// A completed publish can leave a unit deferred: the entry is `Ended {
+/// Completed }`, the submit arms no wait, the published unit cites, and the
+/// deferred one reports `descriptor_not_found`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found() {
+    let (handler, dir, project) = settling_handler().await;
+    let ids: Vec<String> = (0..=MAX_SOURCE_BATCH_UNITS)
+        .map(|index| format!("pi-{index:03}"))
+        .collect();
+    let texts: Vec<String> = (0..=MAX_SOURCE_BATCH_UNITS)
+        .map(|index| format!("Deferred check {index:03} uses port {}.", 4000 + index))
+        .collect();
+    let rows: Vec<Value> = (0..=MAX_SOURCE_BATCH_UNITS)
+        .map(|index| {
+            pi_row(
+                &ids[index],
+                index.checked_sub(1).map(|parent| ids[parent].as_str()),
+                json!({"role":"user","content":texts[index],"timestamp":1_700_000_000_000u64 + index as u64}),
+            )
+        })
+        .collect();
+    pass(&handler, pi_request(&rows, "base-1")).await;
+    settle(&handler).await;
+    assert_eq!(report(&handler)["units_deferred"], 1);
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_for_test(&pi_key(&project, SESSION)),
+        Some(Settlement::Ended {
+            outcome: Count::Completed
+        })
+    );
+    let (first, last) = (0, MAX_SOURCE_BATCH_UNITS);
+    let sources = [
+        (ids[first].as_str(), texts[first].as_str()),
+        (ids[last].as_str(), texts[last].as_str()),
+    ];
+    let quotes = [texts[first].as_str(), texts[last].as_str()];
+    assert_eq!(
+        capture_quotes(&handler, &sources, &quotes).await,
+        "processed"
+    );
+    // The pass auto-captured every message, so later leases carry the rest.
+    let next =
+        json!({"method":"memory.capture.next","session_id":SESSION,"model":"custom-native/model"});
+    loop {
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        if work["state"] != "work" {
+            break;
+        }
+        let submission = submission_for(&work, SESSION, &quotes);
+        let state = tool_body(
+            handler
+                .handle_native_capture_submit(test_route(7), &submission)
+                .await,
+        )["state"]
+            .clone();
+        assert_eq!(state, "processed");
+    }
+    assert_eq!(
+        handler
+            .source_capture
+            .settlement_waits
+            .load(Ordering::Relaxed),
+        0
+    );
+    let deferred = live(&kernel_store(&handler), OccurrenceClass::Messages)
+        .iter()
+        .all(|row| identity_of(row)[3] != ("message_id", ids[last].as_str()));
+    assert!(deferred, "the last unit is the deferred one");
+    let decisions = captured_decisions(dir.path());
+    assert_eq!(decisions[&ids[first]].rationale["citation"], "cited");
+    assert_eq!(
+        decisions[&ids[last]].rationale["citation"],
+        "descriptor_not_found"
+    );
 }

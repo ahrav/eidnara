@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-The source-capture memo records `Disposition::Pending { since_ms }` (`crates/daemon/src/source_capture.rs:177`) for a unit that did not publish in its pass. The module documentation states that pending units are offered ahead of units the memo does not know. `crates/daemon/src/source_capture_tests.rs:428` publishes 32 units of a 33-unit window and the deferred unit on the next pass; `:464` publishes a unit pending behind a starting Kernel.
+The source-capture memo records `Disposition::Pending { since_ms }` (`crates/daemon/src/source_capture.rs:183`) for a unit that did not publish in its pass. The module documentation states that pending units are offered ahead of units the memo does not know. `crates/daemon/src/source_capture_tests.rs:429` publishes 32 units of a 33-unit window and the deferred unit on the next pass; `:465` publishes a unit pending behind a starting Kernel.
 
 ## Failure scenario
 
@@ -24,7 +24,7 @@ A 33-unit window and a second pass; a Kernel still starting during the first pas
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/daemon/src/source_capture_tests.rs:180`, `:428`, `:464`, `:1072`, `:1233`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/daemon/src/source_capture_tests.rs:181`, `:429`, `:465`, `:1073`, `:1234`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

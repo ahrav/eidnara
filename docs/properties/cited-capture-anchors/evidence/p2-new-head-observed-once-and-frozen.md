@@ -10,21 +10,21 @@ that each anchor's oid equals its plan's frozen head.
 
 ## Evidence trail
 
-`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:549`)
+`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:592`)
 parses the submission's output, then calls `observe_head` once
-(`:563`) on the binding's canonical project root before the loop that
+(`:607`) on the binding's canonical project root before the loop that
 builds and freezes one `PreparedCapture` per job. Each plan carries the
-same `head` value (`crates/daemon/src/memory_capture.rs:926`), serialized
+same `head` value (`crates/daemon/src/memory_capture.rs:927`), serialized
 as `{"commit":"<40 hex>"}` or `"head_unavailable"`
 (`crates/daemon/src/memory_capture/head.rs:10`). The store freezes a plan
 once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:373`,
 returns the stored text to a later call), and `publish` reads the stored
 text, so a retry publishes the value frozen at submit. The commit's request
 digest is the SHA-256 of the frozen text
-(`crates/daemon/src/memory_capture.rs:1191`), so the receipt covers the head.
+(`crates/daemon/src/memory_capture.rs:1209`), so the receipt covers the head.
 
 The observation runs inside the `kernel_routes::blocking` hop of the submit
-handler (`crates/daemon/src/memory_capture/native.rs:363`), before `publish`
+handler (`crates/daemon/src/memory_capture/native.rs:405`), before `publish`
 takes the capture commit gate.
 
 A plan frozen with a `head` field is refused by a daemon built before the
@@ -51,7 +51,7 @@ store trigger, so both frozen plans stay readable; a new commit on the
 checked-out branch; a retry while the trigger still refuses completion, after
 which both plans still hold the submit-time head; then the trigger dropped and
 a drain that publishes the frozen plans. `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it`
-(`crates/daemon/src/lib.rs:24619`) does this for a repository with
+(`crates/daemon/src/lib.rs:24620`) does this for a repository with
 commits, a detached HEAD, an unborn HEAD, a plain directory, and a
 repository declaring SHA-256.
 
@@ -74,16 +74,16 @@ repository declaring SHA-256.
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
   without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:1947`).
+  (`crates/daemon/src/memory_capture.rs:1973`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
 ### Q: Does the anchor use the frozen value?
 
-- Sources examined: `anchor_spec` (`crates/daemon/src/memory_capture/cite.rs:341`)
+- Sources examined: `anchor_spec` (`crates/daemon/src/memory_capture/cite.rs:347`)
   and the publish closure at the U3 branch.
 - Findings: the anchor's oid is the plan's `FrozenHead::Commit`; the U3
   tests compare each anchor row's oid with the fixture HEAD at submit
-  (`crates/daemon/src/source_capture_tests.rs:3474`, `:3624`).
+  (`crates/daemon/src/source_capture_tests.rs:3501`, `:3651`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.

@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use super::FrozenHead;
-use crate::source_capture::Count;
+use crate::source_capture::{Count, SettlementOutcome};
 
 /// Block indexes a message's citation lookup probes, `0..MAX_CITATION_BLOCKS`.
 pub(super) const MAX_CITATION_BLOCKS: usize = 256;
@@ -22,6 +22,7 @@ pub(super) enum CitationReason {
     Cited,
     SourceCaptureOff,
     SourceIdUnjoinable,
+    PublishBudgetExpired,
     DescriptorNotFound,
 }
 
@@ -31,6 +32,7 @@ impl CitationReason {
             Self::Cited => "cited",
             Self::SourceCaptureOff => "source_capture_off",
             Self::SourceIdUnjoinable => "source_id_unjoinable",
+            Self::PublishBudgetExpired => "publish_budget_expired",
             Self::DescriptorNotFound => "descriptor_not_found",
         }
     }
@@ -40,6 +42,7 @@ impl CitationReason {
             Self::Cited => Count::DecisionsCited,
             Self::SourceCaptureOff => Count::DecisionsSourceCaptureOff,
             Self::SourceIdUnjoinable => Count::DecisionsSourceIdUnjoinable,
+            Self::PublishBudgetExpired => Count::DecisionsPublishBudgetExpired,
             Self::DescriptorNotFound => Count::DecisionsDescriptorNotFound,
         }
     }
@@ -237,18 +240,19 @@ pub(super) fn target<'b>(
 impl Citation {
     /// Reads the live descriptors of the job's message inside `envelope`, so
     /// the read, the anchor, the decisions, and their citation events share
-    /// one view. `consent` is the binding's source and memory consent.
+    /// one view. `settlement` is what the session's source publish reached
+    /// before the submit; `Off` means consent is off and nothing is read.
     pub(super) fn lookup(
         envelope: &Envelope<'_>,
         job: &CaptureJob,
-        consent: bool,
+        settlement: SettlementOutcome,
     ) -> Result<Self, KernelError> {
         let empty = |reason| Self {
             reason,
             blocks: Vec::new(),
             located: Vec::new(),
         };
-        if !consent {
+        if settlement == SettlementOutcome::Off {
             return Ok(empty(CitationReason::SourceCaptureOff));
         }
         let mut blocks = Vec::new();
@@ -269,6 +273,8 @@ impl Citation {
         if blocks.is_empty() {
             return Ok(empty(if is_hashed_source_id(&job.message_id) {
                 CitationReason::SourceIdUnjoinable
+            } else if settlement == SettlementOutcome::BudgetExpired {
+                CitationReason::PublishBudgetExpired
             } else {
                 CitationReason::DescriptorNotFound
             }));
@@ -462,7 +468,7 @@ mod tests {
                     cause: "lookup".into(),
                 },
                 |envelope| {
-                    let citation = Citation::lookup(envelope, &job, true)?;
+                    let citation = Citation::lookup(envelope, &job, SettlementOutcome::Settled)?;
                     let mut rationale = Map::new();
                     let mut reasons = Vec::new();
                     assert!(

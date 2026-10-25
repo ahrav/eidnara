@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`parse_capture_batch` (`crates/daemon/src/memory_capture.rs:211`) refuses the batch when a row's `message_id` names no batch message or repeats one. `validate_capture_memories` (`:273`) refuses a memory whose quote is empty, over `MAX_CAPTURE_MEMORY_BYTES`, or not contained in its own source's text (`:291`). The system prompt states the rule at `:133`. A refusal fails only the affected source's jobs.
+`parse_capture_batch` (`crates/daemon/src/memory_capture.rs:212`) refuses the batch when a row's `message_id` names no batch message or repeats one. `validate_capture_memories` (`:274`) refuses a memory whose quote is empty, over `MAX_CAPTURE_MEMORY_BYTES`, or not contained in its own source's text (`:292`). The system prompt states the rule at `:134`. A refusal fails only the affected source's jobs.
 
 ## Failure scenario
 
@@ -24,7 +24,7 @@ A batch where one memory quotes another message; an invented `message_id`; a dup
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/daemon/src/memory_capture.rs:1367`, `:1400`, `:1432`, `:1473`, `:1480`; `crates/daemon/src/lib.rs:24884`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/daemon/src/memory_capture.rs:1385`, `:1418`, `:1450`, `:1491`, `:1498`; `crates/daemon/src/lib.rs:24885`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

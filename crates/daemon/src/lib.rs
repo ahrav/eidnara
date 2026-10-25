@@ -9165,10 +9165,11 @@ impl HandlerCore {
         let cancel = self.cancel.clone();
         Some(dispatch::AfterResponse::new(move || {
             let capture = handoff.supervisor();
-            if let Some(job) = handoff.into_job(kernel, gate, cancel)
-                && admission.spawn(job.run()).is_none()
-            {
-                capture.refuse(source_capture::Count::RefusedShuttingDown);
+            if let Some(job) = handoff.into_job(kernel, gate, cancel) {
+                let session = job.session().clone();
+                if admission.spawn(job.run()).is_none() {
+                    capture.refuse_handoff(source_capture::Count::RefusedShuttingDown, &session);
+                }
             }
         }))
     }

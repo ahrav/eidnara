@@ -39,6 +39,13 @@ impl Harness {
             Self::Pi => "pi",
         }
     }
+
+    /// The harness whose `as_str` is `value`.
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::OpenCode, Self::Pi]
+            .into_iter()
+            .find(|harness| harness.as_str() == value)
+    }
 }
 
 /// The route-bound identity every unit of a session is published under. `project_id` is the bound project's digest, the scope term's exact value.
