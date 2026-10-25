@@ -24596,6 +24596,183 @@ mod tests {
         );
     }
 
+    /// The frozen `head` of every job a submission prepared, read while a
+    /// trigger refuses completion so the plans stay in the store.
+    fn frozen_heads(store: &MemoryStore) -> Vec<Value> {
+        store
+            .with_conn_for_test(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT prepared_json FROM memory_capture_jobs
+                     WHERE prepared_json IS NOT NULL ORDER BY rowid",
+                )?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|plan| serde_json::from_str::<Value>(&plan).unwrap()["head"].clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it() {
+        use crate::memory_capture::FrozenHead;
+        use crate::memory_capture::head_fixtures::{commit, declare_sha256, detach, repository};
+        for fixture in ["commits", "detached", "unborn", "plain", "sha256"] {
+            let state = Arc::new(ProducerState::default());
+            let (handler, store, _dir, project) =
+                handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+            let expected = match fixture {
+                "commits" => FrozenHead::Commit(repository(&project, 2).remove(1)),
+                "detached" => {
+                    let first = repository(&project, 2).remove(0);
+                    detach(&project, &first);
+                    FrozenHead::Commit(first)
+                }
+                "unborn" => {
+                    gix::init(&project).unwrap();
+                    FrozenHead::HeadUnavailable
+                }
+                "sha256" => {
+                    repository(&project, 1);
+                    declare_sha256(&project);
+                    FrozenHead::HeadUnavailable
+                }
+                _ => FrozenHead::HeadUnavailable,
+            };
+            handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+            store
+                .execute_tag_sql_for_test(
+                    "CREATE TRIGGER hold_plans BEFORE UPDATE ON memory_capture_jobs
+                     WHEN NEW.commit_seq IS NOT NULL BEGIN SELECT RAISE(ABORT,'held'); END",
+                )
+                .unwrap();
+            let request = json!({"method":"memory.capture","session_id":"ses","messages":[
+                {"id":"native-user-1","role":"user","text":"Use port 4321 for staging."},
+                {"id":"native-user-2","role":"user","text":"Production listens on 8080."},
+            ]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+            let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
+            let work = tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await,
+            );
+            assert_eq!(work["state"], "work", "{fixture}: {work}");
+            let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+            let messages = prompt["messages"].as_array().unwrap();
+            assert_eq!(
+                messages.len(),
+                2,
+                "{fixture}: one submission carries both jobs"
+            );
+            let output = json!({"version":1,"decisions":messages.iter().map(|message| {
+                let text = message["text"].as_str().unwrap();
+                json!({"message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":text,"quote":text}]})
+            }).collect::<Vec<_>>()});
+            let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
+            assert_eq!(
+                tool_body(
+                    handler
+                        .handle_native_capture_submit(test_route(7), &submission)
+                        .await
+                )["state"],
+                "processed",
+                "{fixture}"
+            );
+            let expected = serde_json::to_value(&expected).unwrap();
+            assert_eq!(frozen_heads(&store), vec![expected.clone(); 2], "{fixture}");
+            if fixture == "commits" {
+                commit(&project, "checked out later\n");
+                store
+                    .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+                    .unwrap();
+                assert_eq!(
+                    tool_body(
+                        handler
+                            .handle_native_capture_next(test_route(7), &next)
+                            .await
+                    )["state"],
+                    "pending",
+                    "the held retry publishes again and is refused completion again"
+                );
+                assert_eq!(
+                    frozen_heads(&store),
+                    vec![expected.clone(); 2],
+                    "a retry after a later commit keeps the head frozen at submit"
+                );
+            }
+            store
+                .execute_tag_sql_for_test(
+                    "DROP TRIGGER hold_plans; UPDATE memory_capture_jobs SET retry_at_ms=0",
+                )
+                .unwrap();
+            assert_eq!(
+                tool_body(
+                    handler
+                        .handle_native_capture_next(test_route(7), &next)
+                        .await
+                )["state"],
+                "ready",
+                "{fixture}"
+            );
+            let status = store.memory_capture_status(&capture_key(&project)).unwrap();
+            assert_eq!((status.completed, status.pending), (2, 0), "{fixture}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plan_frozen_without_a_head_publishes_as_before() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let request = json!({"method":"memory.capture","session_id":"ses","messages":[
+            {"id":"native-user-1","role":"user","text":"Use port 4321 for staging."},
+        ]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        let key = capture_key(&project);
+        let job = store
+            .pending_memory_captures(&key, "pi", now_ms())
+            .unwrap()
+            .remove(0);
+        let legacy = json!({"version":1,"model":"custom-native/model","existing":[],"memories":[{
+            "category":"CONFIG_VALUES",
+            "content":"User stated: Use port 4321 for staging.",
+            "quote":"Use port 4321 for staging.",
+        }]})
+        .to_string();
+        store
+            .prepare_memory_capture(&key, &job.job_id, &legacy)
+            .unwrap();
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "ready"
+        );
+        assert_eq!(store.memory_capture_status(&key).unwrap().completed, 1);
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(memories.rows.len(), 1);
+    }
+
     #[tokio::test]
     async fn native_capture_leases_expire_and_never_publish_stale_or_deleted_sources() {
         let state = Arc::new(ProducerState::default());

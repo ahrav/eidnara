@@ -2,29 +2,98 @@
 
 ## Discovery trigger
 
-Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed obligation. Resolved placement: OQ2-4, read at admission and frozen in the plan (owner decision 2026-10-25). Owner: the U2 ticket [#1134](https://github.com/ahrav/eidnara/issues/1134), with U3 completing the anchor clause.
+Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed obligation for N2, placement resolved by OQ2-4 (read at
+admission and freeze in the plan, owner decision 2026-10-25). Activated by
+the U2 ticket [#1134](https://github.com/ahrav/eidnara/issues/1134); the U3
+ticket [#1135](https://github.com/ahrav/eidnara/issues/1135) adds the clause
+that each anchor's oid equals its plan's frozen head.
 
 ## Evidence trail
 
-The receipt digest already covers every byte of the frozen plan (`crates/daemon/src/memory_capture.rs:1167`), so a `head` field in the plan is covered by the receipt. U2 adds the field with a serde default and reads HEAD once per submit through the isolated open (`crates/daemon/src/git_sources.rs:138`).
+`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:548`)
+parses the submission's output, then calls `observe_head` once
+(`:562`) on the binding's canonical project root before the loop that
+builds and freezes one `PreparedCapture` per job. Each plan carries the
+same `head` value (`crates/daemon/src/memory_capture.rs:922`), serialized
+as `{"commit":"<40 hex>"}` or `"head_unavailable"`
+(`crates/daemon/src/memory_capture/head.rs:15`). `observe_head` (`:32`)
+resolves HEAD once through `head_id` (`:62`), which follows a branch that
+is itself symbolic, such as one `git symbolic-ref` aliases to another
+branch, to the end of its chain, as the Kernel's checkout snapshot
+(`head_id`, `crates/kernel/src/applicability/checkout.rs:699`) does; when its first store lookup exhausts the store's index
+slots, only the object lookup repeats, for the same id, in a store opened
+with the default slot sizing (`reopened_kind`, `:70`). The store freezes a plan
+once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:373`,
+returns the stored text to a later call), and `publish` reads the stored
+text, so a retry publishes the value frozen at submit. The commit's request
+digest is the SHA-256 of the frozen text
+(`crates/daemon/src/memory_capture.rs:1175`), so the receipt covers the head.
+
+The observation runs inside the `kernel_routes::blocking` hop of the submit
+handler (`crates/daemon/src/memory_capture/native.rs:362`), before `publish`
+takes the capture commit gate.
+
+A plan frozen with a `head` field is refused by a daemon built before the
+field existed, because `PreparedCapture` denies unknown fields; rolling back
+the daemon with prepared plans in flight is unsupported. The derived
+`Deserialize` accepts any string in `Commit`; the U3 consumer passes it to
+`insert_anchor`, whose decoder refuses anything but a lowercase hex oid.
 
 ## Failure scenario
 
-Two jobs of one submission frozen with different HEADs, or an anchor whose oid differs from its plan.
+A read per job, or a read at publish time, would let a checkout between two
+jobs of one submission, or between a submit and its retry, give the jobs
+different heads and a retry a head its plan never recorded.
 
 ## Timing windows and dependencies
 
-A checkout between the submit and a retry.
+A commit or checkout on the project between the submit and a retry. The
+plan is frozen before the first publish, so the window cannot reach it.
 
 ## What a test must construct
 
-A two-job submission asserting identical frozen heads, then a checkout and a retry asserting the frozen value is unchanged.
+A two-job submission on a repository fixture with completion refused by a
+store trigger, so both frozen plans stay readable; a new commit on the
+checked-out branch; a retry while the trigger still refuses completion, after
+which both plans still hold the submit-time head; then the trigger dropped and
+a drain that publishes the frozen plans. `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it`
+(`crates/daemon/src/lib.rs:24619`) does this for a repository with
+commits, a detached HEAD, an unborn HEAD, a plain directory, and a
+repository declaring SHA-256. The head-observation tests freeze a HEAD
+commit stored whole, as an offset delta, and as an id delta in a pack
+(`crates/daemon/src/memory_capture/head.rs:517`), one stored as a delta
+whose base sits in another pack (`:534`), and one held only by an
+alternate behind more pack indices than the first slot count (`:690`).
+`a_head_through_a_branch_alias_freezes_the_aliased_commit` (`:373`) freezes
+the commit a HEAD reaches through one and two branch aliases, with the
+aliased branch loose and in `packed-refs`.
 
 ## Investigation log
 
-### Q: Does code for this obligation exist at the branch tip?
+### Q: Is the head read once per submission?
 
-- Sources examined: the surfaces named in the trail, read at the branch that adds this part.
-- Findings: No. The record stays `proposed` until its owner lands the behavior and the check.
-- Missing evidence: the implementation.
-- Conclusion: unresolved, needs the U2 ticket [#1134](https://github.com/ahrav/eidnara/issues/1134), with U3 completing the anchor clause.
+- Sources examined: `accept_native_output` and its callers at the branch
+  that adds U2.
+- Findings: one call precedes the per-job loop; `settle` calls
+  `accept_native_output` once per submit. The route test sees two identical
+  heads, which a per-job read would also produce because nothing moves HEAD
+  between jobs; the single read rests on the code structure.
+- Missing evidence: a test that moves HEAD between two jobs of one
+  submission, which needs a hook inside the loop.
+- Conclusion: resolved with answer.
+
+### Q: Does the plan schema version change?
+
+- Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
+- Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
+  without it reads as `HeadUnavailable`
+  (`crates/daemon/src/memory_capture.rs:1654`).
+- Missing evidence: none.
+- Conclusion: resolved with answer.
+
+### Q: Does the anchor use the frozen value?
+
+- Sources examined: the publish closure.
+- Findings: no anchor is written at U2.
+- Missing evidence: the U3 anchor insert.
+- Conclusion: unresolved, needs #1135.

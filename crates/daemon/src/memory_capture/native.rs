@@ -558,6 +558,8 @@ impl CaptureWork {
                 return self.failed(&plan.jobs, "extraction_failed", now);
             }
         };
+        // One read per submission, so every plan it freezes names one HEAD.
+        let head = observe_head(self.binding.kernel_project.root());
         for (mut job, decision) in plan.jobs.into_iter().zip(decisions) {
             let decision = match decision {
                 Ok(decision) => decision,
@@ -592,6 +594,7 @@ impl CaptureWork {
                 model: plan.model.clone(),
                 existing,
                 memories,
+                head: head.clone(),
             };
             let frozen = serde_json::to_string(&output).map_err(|_| "output_encoding_failed")?;
             let prepared =

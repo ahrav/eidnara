@@ -6,9 +6,10 @@ evidence-cited memory capture specification
 Eidnara `a0e3f2993`. The specification's long-form bundle is unavailable, so
 the U1 ticket ([#1133](https://github.com/ahrav/eidnara/issues/1133))
 reconstructs every record from the specification body and re-verifies every
-reference against the branch that adds this part, based on `3a3b916b7`. A
-reference `path:line` names the first line of the function, constant, or
-test it cites at that branch.
+reference against the branch that adds this part, based on `3a3b916b7`. U2
+([#1134](https://github.com/ahrav/eidnara/issues/1134)) re-verifies every
+reference at its own branch. A reference `path:line` names the first line of
+the function, constant, or test it cites at the latest of those branches.
 
 ## Scope
 
@@ -29,7 +30,10 @@ Surfaces with behavior at the branch tip:
 4. S4, `messages` descriptor identity and lookup:
    `crates/daemon/src/harness_sources.rs` and
    `crates/daemon/src/source_capture.rs`.
-5. S5, the bounded git open: `crates/daemon/src/git_sources.rs`.
+5. S5, the bounded git open: `crates/daemon/src/git_sources.rs`, and the
+   capture HEAD observation that uses it,
+   `crates/daemon/src/memory_capture/head.rs` (`observe_head`), added by
+   #1134.
 6. N1, the typed anchor write: `crates/kernel/src/anchor_write.rs`
    (`Envelope::insert_anchor`, `validate_anchor`, `validate_anchor_row`),
    added by #1133.
@@ -40,27 +44,27 @@ N5 miss accounting, and N6 unchanged authority.
 
 ## Status vocabulary
 
-`Status:` uses METHOD's `active` for the 14 existing-behavior records and for
-the two N1 records #1133 makes checkable. The other 12 records use
+`Status:` uses METHOD's `active` for the 14 existing-behavior records, for
+the two N1 records #1133 makes checkable, and for the two N2 head records
+#1134 makes checkable. The other 10 records use
 `Status: proposed`, the value the specification assigns to a designed
 obligation whose code does not exist yet. A proposed record names the ticket
-that converts it to `active`, carries `Exercised: not yet`, and states the
-intended reachability. Every existing check named in this part has status
+that converts it to `active`, carries `Exercised: not yet` with the missing
+code named, and states the intended reachability. Every existing check named in this part has status
 `unaudited` in `existing-checks.md`.
 
 ## Reachability classes
 
 - `default-production`: reached with the shipped configuration. Memory
   capture runs when `memory_enabled`, `auto_promote`, and
-  `memory_auto_capture` are on (`crates/daemon/src/memory_capture.rs:570`),
+  `memory_auto_capture` are on (`crates/daemon/src/memory_capture.rs:574`),
   and all three default to on (`crates/daemon/src/config.rs:146`).
 - `explicit-config-only`: reached only when source capture is enabled;
   `source_capture_enabled` defaults to off (`crates/daemon/src/config.rs:146`).
 - `test-only`: no production caller at the branch tip. Nothing outside
   `crates/kernel` calls `evaluate_batch` or builds an `ApplicabilityRequest`,
-  and `GitReconciler`, the only caller of `git_sources::open`, is constructed
-  only by tests. `Envelope::insert_anchor` has no production caller until
-  U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135)).
+  and `Envelope::insert_anchor` has no production caller until U3
+  ([#1135](https://github.com/ahrav/eidnara/issues/1135)).
 
 ## Index
 
@@ -79,12 +83,12 @@ intended reachability. Every existing check named in this part has status
 | `p2-capture-publish-and-session-delete-are-serialized` | safety | S3 | active | `always` | default-production |
 | `p2-messages-descriptor-identity-is-per-block-and-evidence-id-is-the-receipt-key` | safety | S4 | active | `always` | explicit-config-only |
 | `p2-deferred-source-units-publish-on-a-later-pass` | reachability | S4 | active | `sometimes` | explicit-config-only |
-| `p2-git-open-is-isolated-and-allocation-bounded` | safety | S5 | active | `always` | test-only |
+| `p2-git-open-is-isolated-and-allocation-bounded` | safety | S5 | active | `always` | default-production |
 | `p2-new-anchor-row-decodes-on-write` | safety | N1 | active | `always` | test-only |
 | `p2-new-anchor-and-registry-share-one-envelope` | safety | N1 | active | `always` | test-only |
 | `p2-new-capture-anchor-identity-is-deterministic` | safety | N2 | proposed (#1135) | `always` | default-production (intended) |
-| `p2-new-head-observed-once-and-frozen` | safety | N2 | proposed (#1134) | `always` | default-production (intended) |
-| `p2-new-head-unavailable-keeps-decision-admitted` | safety | N2 | proposed (#1134) | `always-or-unreached` | default-production (intended) |
+| `p2-new-head-observed-once-and-frozen` | safety | N2 | active | `always` | default-production |
+| `p2-new-head-unavailable-keeps-decision-admitted` | safety | N2 | active (exercised partial) | `always-or-unreached` | default-production |
 | `p2-new-citation-is-alias-only` | safety | N3 | proposed (#1135) | `always` | explicit-config-only (intended) |
 | `p2-new-citation-block-target-rule` | safety | N3 | proposed (#1135) | `always` | explicit-config-only (intended) |
 | `p2-new-citation-folds-sensitivity-and-pins-evidence` | safety | N3 | proposed (#1135) | `always` | explicit-config-only (intended) |
@@ -96,15 +100,17 @@ intended reachability. Every existing check named in this part has status
 | `p2-new-cited-decision-pair-observed` | reachability | N2 to N5 | proposed (#1135, #1136) | `sometimes` | default-production (intended) |
 
 Counts: 28 records; 14 existing-behavior records with `unaudited` existing
-checks, 2 active N1 records, 12 proposed records. Semantics distribution:
+checks, 2 active N1 records (U1), 2 active N2 head records (U2, both
+exercised partially until U3), and 10 proposed records. Semantics distribution:
 `always` 25, `always-or-unreached` 1, `sometimes` 2, `reachable` 0,
 `unreachable` 0. The anchor clause of
 `p2-decision-parents-must-be-live-at-insert` is a second,
 `always-or-unreached` check inside an `always` record and is not counted
-separately. Reachability: 7 test-only, 6 default-production, 3
-explicit-config-only among the 16 active records; the specification's count
+separately. Reachability: 6 test-only, 9 default-production, 3
+explicit-config-only among the 18 active records. The specification's count
 of 5 test-only records grows by the two N1 records, whose writer has no
-production caller yet.
+production caller yet, and shrinks by one when U2 routes capture through the
+git open.
 
 ## Records
 
@@ -223,8 +229,8 @@ Guarantee: The capture commit's operation key is the project's `memory_capture` 
 Check: `always` - for every receipt of producer `memory_capture`, a second commit with the same key and digest is `replayed` and adds no row; one with a different digest returns `Conflict`. The receipt-conflict coverage marker is test-only (refinement R7): production never changes a frozen plan under its key
 Fault/timing angle: the first commit's reply is lost and the job is retried
 Required faults and enabling state: a publish retried after success; a frozen plan altered under the same key
-Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:1154` and the frozen-plan read in `publish` at `:968`
-Existing check: `crates/daemon/src/memory_capture.rs:1645`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24489` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:1162` and the frozen-plan read in `publish` at `:976`
+Existing check: `crates/daemon/src/memory_capture.rs:1674`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24489` (unaudited)
 Impact: a non-replaying retry would duplicate memories; a digest that omitted plan fields would let a changed plan replay the old receipt
 Open questions: None.
 
@@ -238,8 +244,8 @@ Guarantee: A captured memory is accepted only when its `message_id` names a mess
 Check: `always` - for every prepared memory, `source.text.contains(quote)` for the batch message whose id the memory's row names, and every row's `message_id` names exactly one batch message
 Fault/timing angle: none
 Required faults and enabling state: a quote taken from another message of the batch; an invented `message_id`; a duplicate `message_id`; an empty quote
-Confidence: high - [evidence](evidence/p2-capture-quote-is-an-exact-substring-of-its-own-batch-source.md). Read `parse_capture_batch` at `crates/daemon/src/memory_capture.rs:204` and `validate_capture_memories` at `:266`; the prompt states the rule at `:126` (offset corrected by refinement R8)
-Existing check: `crates/daemon/src/memory_capture.rs:1277`, `:1310`, `:1342`, `:1383`, `:1390`; `crates/daemon/src/lib.rs:24703` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-quote-is-an-exact-substring-of-its-own-batch-source.md). Read `parse_capture_batch` at `crates/daemon/src/memory_capture.rs:208` and `validate_capture_memories` at `:270`; the prompt states the rule at `:130` (offset corrected by refinement R8)
+Existing check: `crates/daemon/src/memory_capture.rs:1285`, `:1318`, `:1350`, `:1391`, `:1398`; `crates/daemon/src/lib.rs:24880` (unaudited)
 Impact: a quote from another message would cite evidence for a statement the source never made
 Open questions: None.
 
@@ -253,8 +259,8 @@ Guarantee: A capture job id is the SHA-256 of `(project, harness, session_id, me
 Check: `always` - for every capture job, `job_id == job_id(source, redacted_text)`, and for every decision it writes, `object_id == "mem_" + sha256(job_id + ":" + index)[..32]`
 Fault/timing angle: none
 Required faults and enabling state: the same source enqueued twice; a fragment id outside the store grammar
-Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:112`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:311`, and the object id at `:1188`
-Existing check: `crates/memory-store/src/memory_capture.rs:755`; `crates/daemon/src/memory_capture.rs:1409`, `:1458`, `:1558`, `:1580`, `:1645`; `crates/daemon/src/lib.rs:24489`, `:25619` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:112`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:315`, and the object id at `:1196`
+Existing check: `crates/memory-store/src/memory_capture.rs:755`; `crates/daemon/src/memory_capture.rs:1417`, `:1466`, `:1566`, `:1588`, `:1674`; `crates/daemon/src/lib.rs:24489`, `:25796` (unaudited)
 Impact: unstable ids would duplicate memories on retry and break the deterministic anchor id U3 derives from the job id
 Open questions: None.
 
@@ -268,8 +274,8 @@ Guarantee: Capture publication, capture checkpointing, source-capture publish, a
 Check: `always` - no capture or source publish commit for a session has a `commit_seq` after that session's delete sweep committed; observed by holding the gate from a test thread and asserting the competing operation has not committed (refinement R5 adds this gate-hold observation method)
 Fault/timing angle: a checkpoint or publish admitted before a delete that runs after it
 Required faults and enabling state: a session delete issued while a checkpoint or publish waits on the gate
-Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:975`, the delete path at `crates/daemon/src/lib.rs:6909`, and `capture_after_response` at `crates/daemon/src/lib.rs:9157`
-Existing check: `crates/daemon/src/lib.rs:24851`, `:25189`, `:25394`, `:25942`; `crates/daemon/src/lib.rs:24600`; `crates/daemon/src/source_capture_tests.rs:1036` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:983`, the delete path at `crates/daemon/src/lib.rs:6909`, and `capture_after_response` at `crates/daemon/src/lib.rs:9157`
+Existing check: `crates/daemon/src/lib.rs:25028`, `:25366`, `:25571`, `:26119`; `crates/daemon/src/lib.rs:24777`; `crates/daemon/src/source_capture_tests.rs:1036` (unaudited)
 Impact: an interleaving would leave a deleted session's memory or descriptor live
 Open questions: None.
 
@@ -306,15 +312,15 @@ Open questions: None.
 ### p2-git-open-is-isolated-and-allocation-bounded
 
 Type: safety
-Reachability: test-only - `git_sources::open` is called only by `GitReconciler`, which only tests construct; U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)) adds a default-production path through capture
+Reachability: default-production - every native capture submit opens the project root through `git_sources::open_with_slots` in `observe_head` (`crates/daemon/src/memory_capture/head.rs:32`), added by U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)); before U2 the only caller was `GitReconciler`, which only tests construct (relabelled per METHOD rule 4)
 Status: active
-Exercised: yes - git-source tests refuse selections and an oversized delta base
+Exercised: yes - git-source tests refuse selections and an oversized delta base; the head-observation tests open repositories through `open_with_slots`, refuse the roots the default sizing refuses, and exhaust the first slot count
 Guarantee: The daemon's repository open skips installation, user, and system configuration, ignores replacement refs, and installs `max_object_bytes` as gix's allocation limit after the repository's own configuration.
-Check: `always` - every repository the daemon opens through `git_sources::open` has `objects.ignore_replacements` set and the allocation limit equal to the bound; a packed delta whose base exceeds it is refused
+Check: `always` - every repository the daemon opens through `git_sources::open` or `git_sources::open_with_slots` has `objects.ignore_replacements` set and the allocation limit equal to the bound; a packed delta whose base exceeds it is refused
 Fault/timing angle: none
 Required faults and enabling state: a delta-packed commit against an oversized base; a repository declaring an unsupported `extensions.objectFormat`
-Confidence: high - [evidence](evidence/p2-git-open-is-isolated-and-allocation-bounded.md). Read `isolated_options` at `crates/daemon/src/git_sources.rs:128` and `open` at `:138`
-Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827` (unaudited)
+Confidence: high - [evidence](evidence/p2-git-open-is-isolated-and-allocation-bounded.md). Read `isolated_options` at `crates/daemon/src/git_sources.rs:131`, `open` at `:138`, `open_with_slots` at `:148`, and `file_object_kind` at `:205`
+Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`; `crates/daemon/src/memory_capture/head.rs:416`, `:690` (unaudited)
 Impact: an unisolated open would let repository or user configuration raise the bound or substitute objects
 Open questions: None.
 
@@ -368,30 +374,30 @@ Open questions:
 ### p2-new-head-observed-once-and-frozen
 
 Type: safety
-Reachability: default-production (intended) - every capture submit after U2
-Status: proposed - owner: U2 ticket [#1134](https://github.com/ahrav/eidnara/issues/1134); U3 completes the anchor-equals-frozen-head clause
-Exercised: not yet - the prepared plan has no `head` field
+Reachability: default-production - every `memory.capture.submit` whose output parses observes HEAD in `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:562`)
+Status: active - activated by U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)); U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135)) completes the anchor-equals-frozen-head clause
+Exercised: partial - `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it` freezes one head in both jobs of a submission for five roots and keeps it across a later commit and a retry; the head-observation tests freeze loose, packed, delta-packed, and alternate HEAD commits and a HEAD that reaches its commit through branch aliases; the anchor clause waits for U3
 Guarantee: The checkout HEAD is read once per `memory.capture.submit`, before any plan of that submission is frozen, and the observation is part of the frozen `prepared_json`, so the receipt digest covers the anchor's value.
-Check: `always` - for every capture decision with an anchor, `anchors.reachable_from_oid == parse(prepared_json).head.oid`, and every job frozen by one submission carries the identical `head`
+Check: `always` - every job frozen by one submission carries the identical `head`, equal to the commit the fixture's HEAD named at submit, and a retry publishes that frozen value; after U3, for every capture decision with an anchor, `anchors.reachable_from_oid == parse(prepared_json).head`
 Fault/timing angle: a `git checkout` between the submit and its retry
-Required faults and enabling state: a checkout of another commit between submit and retry
-Confidence: medium - [evidence](evidence/p2-new-head-observed-once-and-frozen.md). The receipt digest already covers every frozen byte (`crates/daemon/src/memory_capture.rs:1167`)
-Existing check: none
+Required faults and enabling state: a commit on the checked-out branch between the submit and the retry, with completion refused so the frozen plans stay in the store
+Confidence: high - [evidence](evidence/p2-new-head-observed-once-and-frozen.md). Read `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:548`): one `observe_head` call precedes the loop that freezes each job's plan, and the receipt digest covers every frozen byte (`crates/daemon/src/memory_capture.rs:1175`)
+Existing check: `crates/daemon/src/lib.rs:24619`; `crates/daemon/src/memory_capture/head.rs:351`, `:373`, `:517`, `:690` (unaudited)
 Impact: the anchor stops describing the revision at which the quote was observed, and the receipt no longer covers the anchor's value
 Open questions: None.
 
 ### p2-new-head-unavailable-keeps-decision-admitted
 
 Type: safety
-Reachability: default-production (intended) - capture in an unborn, unreadable, or non-repository root
-Status: proposed - owner: U2 ticket [#1134](https://github.com/ahrav/eidnara/issues/1134) to `partial`; U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135) to `active`
-Exercised: not yet - no head observation exists
+Reachability: default-production - capture in an unborn, unreadable, unsupported-format, or non-repository root
+Status: active - activated by U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)); U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135)) adds the rationale reason, the counter, and the anchor clause
+Exercised: partial - U2 constructs the unborn, plain, unsupported-format, missing, non-commit, and absent-object roots, roots with a cyclic alternates chain or an unlistable pack directory, a HEAD whose commit only another repository's pack holds, and a HEAD whose branch alias is cyclic or names an unborn branch: each freezes `head_unavailable` and the jobs publish as before; the rationale reason and the no-anchor clause wait for U3
 Guarantee: When HEAD is unborn or unreadable, the object format is unsupported, or the root is not a repository, the decision is still admitted with `anchor_id = None` and rationale `anchor: "head_unavailable"`, and no `anchors` row is written for the job.
 Check: `always-or-unreached` - the path runs only when the head observation is unavailable; whenever it runs, the committed decision has `anchor_id IS NULL`, the rationale carries the reason, and no anchor row names the job
 Fault/timing angle: none
 Required faults and enabling state: a root with no `.git`; an unborn branch; an `objectFormat` gix refuses
-Confidence: medium - [evidence](evidence/p2-new-head-unavailable-keeps-decision-admitted.md). The owner decided on 2026-10-25 (OQ2-11) that a detached HEAD anchors at its commit, which removes detached HEAD from this path
-Existing check: none
+Confidence: medium - [evidence](evidence/p2-new-head-unavailable-keeps-decision-admitted.md). The owner decided on 2026-10-25 (OQ2-11) that a detached HEAD anchors at its commit, which removes detached HEAD from this path; `observe_head` (`crates/daemon/src/memory_capture/head.rs:32`) maps every other refusal to `HeadUnavailable`
+Existing check: `crates/daemon/src/memory_capture/head.rs:373`, `:416`, `:568`; `crates/daemon/src/lib.rs:24619` (unaudited)
 Impact: capture would stop in fresh checkouts
 Open questions: None.
 
@@ -405,7 +411,7 @@ Guarantee: Every citation a capture decision carries equals the `detail.evidence
 Check: `always` - for every cited capture decision, a descriptor with that evidence id and the job's identity tuple was live at the decision's `created_commit_seq`, and `PreparedCapture` deserialization refuses an `evidence_id` key
 Fault/timing angle: none
 Required faults and enabling state: model output containing an `evidence_id` key; a descriptor of another session with the same `message_id`
-Confidence: medium - [evidence](evidence/p2-new-citation-is-alias-only.md). The validated `message_id` is the batch's own id (`crates/daemon/src/memory_capture.rs:204`)
+Confidence: medium - [evidence](evidence/p2-new-citation-is-alias-only.md). The validated `message_id` is the batch's own id (`crates/daemon/src/memory_capture.rs:208`)
 Existing check: none
 Impact: a model-emitted id would let the extraction forge its own evidence link
 Open questions: None.
@@ -415,11 +421,11 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only (intended) - as above
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135), restated there for `block`, `span`, and `first`
-Exercised: not yet
+Exercised: not yet - no citation descriptor is derived yet; U3 (#1135) lands the derivation
 Guarantee: When a message has several text blocks, the cited descriptors are the located block or run of blocks whose text contains the quote, falling back to the lowest live `block_index` with the rule recorded in the rationale.
 Check: `always` - for every cited capture decision, the cited blocks' text joined with `\n` contains the quote, or the rationale records `first` and no located block contains it
 Fault/timing angle: none
-Required faults and enabling state: a two-block message with the quote in the second block; a quote spanning the `\n` join (`crates/daemon/src/memory_capture.rs:311`)
+Required faults and enabling state: a two-block message with the quote in the second block; a quote spanning the `\n` join (`crates/daemon/src/memory_capture.rs:315`)
 Confidence: medium - [evidence](evidence/p2-new-citation-block-target-rule.md)
 Existing check: none
 Impact: revalidation reports a false mismatch for correctly captured memories
@@ -430,7 +436,7 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only (intended) - as above
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135); under the event placement the owner chose for OQ2-10 the guarantee reduces to the evidence pin
-Exercised: not yet
+Exercised: not yet - no capture decision cites evidence yet; U3 (#1135) lands the citation
 Guarantee: The evidence a capture decision cites survives `expire_harness_captures` while the decision is live, and retiring it while cited is refused.
 Check: `always` - for every live cited capture decision, the cited evidence row is live after each sweep
 Fault/timing angle: a sweep running after the evidence's `retain_until`
@@ -460,7 +466,7 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only (intended) - as above
 Status: proposed - owner: U4 ticket [#1136](https://github.com/ahrav/eidnara/issues/1136)
-Exercised: not yet
+Exercised: not yet - no settlement wait or citation lookup exists yet; U4 (#1136) lands them
 Guarantee: The citation lookup of a submission runs only after the session's settlement record is ended, refused, absent, or past its deadline.
 Check: `always` - at the instant the publish envelope opens, the record for `(project_id, harness, session_id)` is not running within its deadline
 Fault/timing angle: a slow source job and a fast harness submit
@@ -475,7 +481,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production (intended) - every capture decision after U3
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135); U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136)) adds the `publish_budget_expired` state
-Exercised: not yet
+Exercised: not yet - no capture decision records a citation or anchor reason yet; U3 (#1135) lands the rationale
 Guarantee: Every capture decision carries exactly one citation reason and one anchor reason from the closed vocabularies, chosen by the specification's precedence, and a cited or anchored decision carries the matching `cited` or `anchored` value.
 Check: `always` - `(no citation) == (citation != "cited")` and `(anchor_id IS NULL) == (anchor == "head_unavailable")` for every capture decision, each value in the fixed set
 Fault/timing angle: none
@@ -490,7 +496,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production (intended) - as above
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135)
-Exercised: not yet
+Exercised: not yet - no per-reason counter exists yet; U3 (#1135) lands them
 Guarantee: Within one daemon process, each per-reason counter equals the number of committed capture decisions carrying that reason since process start, at most the number of attempted publishes carrying it.
 Check: `always` - after each publish settles, `counter[reason] >= committed(reason)` and `counter[reason] <= attempted(reason)`, with the increment after the receipt returns and only for a receipt that was not replayed
 Fault/timing angle: a publish that rolls back after the reason was computed
@@ -505,12 +511,12 @@ Open questions: None.
 Type: safety
 Reachability: default-production (intended) - as above
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135)
-Exercised: not yet
+Exercised: not yet - no production capture decision carries an anchor or a citation yet; U3 (#1135) lands both
 Guarantee: A capture decision's admission record carries `ModelInference` and `AssistantInference` and the same maturity whether or not it has an anchor or a citation.
 Check: `always` - sibling capture decisions that differ only in anchor or citation presence have equal `source_class`, `taint_class`, `maturity`, `effective_maturity`, and `elevated_support`
 Fault/timing angle: none
 Required faults and enabling state: one cited and one uncited job in one session
-Confidence: medium - [evidence](evidence/p2-new-anchor-and-citation-add-no-authority.md). Admission classes are fixed at `crates/daemon/src/memory_capture.rs:1201`
+Confidence: medium - [evidence](evidence/p2-new-anchor-and-citation-add-no-authority.md). Admission classes are fixed at `crates/daemon/src/memory_capture.rs:1209`
 Existing check: none
 Impact: a model could raise its own authority by quoting a captured message
 Open questions: None.
@@ -520,7 +526,7 @@ Open questions: None.
 Type: reachability
 Reachability: default-production (intended) - campaign coverage
 Status: proposed - owner: U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135) to `partial`; U4 ticket [#1136](https://github.com/ahrav/eidnara/issues/1136) to `active`
-Exercised: not yet
+Exercised: not yet - no cited capture decision exists yet; U3 (#1135) lands the first and U4 (#1136) the remaining miss reasons
 Guarantee: A test campaign produces at least one capture decision with both an anchor and a citation, and at least one decision for each miss reason, so every legal state is constructed.
 Check: `sometimes` - states, not code points: a committed decision with an anchor and a citation, and one per miss reason
 Fault/timing angle: none

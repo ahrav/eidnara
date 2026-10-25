@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-The validated `message_id` is a batch id (`crates/daemon/src/memory_capture.rs:204`), and the evidence id is a receipt key the job cannot compute (`crates/daemon/src/harness_sources.rs:992`). U3 reads descriptors by lineage id inside the publish envelope and writes the read evidence id into a decision event.
+The validated `message_id` is a batch id (`crates/daemon/src/memory_capture.rs:208`), and the evidence id is a receipt key the job cannot compute (`crates/daemon/src/harness_sources.rs:992`). U3 reads descriptors by lineage id inside the publish envelope and writes the read evidence id into a decision event.
 
 ## Failure scenario
 

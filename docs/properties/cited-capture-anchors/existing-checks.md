@@ -20,14 +20,15 @@ part.
 | Live parents | `crates/kernel/src/slice/write.rs:1095` (`require_parents`) | decision parents are live at insert | unaudited |
 | Sensitivity fold | `crates/kernel/src/slice/write.rs:980` (`fold_cited_evidence_class`) | a citing row is no less restrictive than its evidence | unaudited |
 | Cited-evidence predicate | `crates/kernel/src/slice/write.rs:42` (`EVIDENCE_CITED_SQL`), `:585` (`retire_evidence`); `crates/kernel/src/local_file.rs:245` (`expire_harness_captures`) | cited evidence is never retired or swept | unaudited |
-| Capture receipt key and digest | `crates/daemon/src/memory_capture.rs:1154` (`publish_captured_memories`) | replay by job key and frozen-plan digest | unaudited |
-| Quote and source validation | `crates/daemon/src/memory_capture.rs:204` (`parse_capture_batch`), `:266` (`validate_capture_memories`) | quotes are substrings of their own batch source | unaudited |
+| Capture receipt key and digest | `crates/daemon/src/memory_capture.rs:1162` (`publish_captured_memories`) | replay by job key and frozen-plan digest | unaudited |
+| Quote and source validation | `crates/daemon/src/memory_capture.rs:208` (`parse_capture_batch`), `:270` (`validate_capture_memories`) | quotes are substrings of their own batch source | unaudited |
 | Job identity | `crates/memory-store/src/memory_capture.rs:112` (`job_id`) | job id derives from the source tuple and redacted text | unaudited |
-| Hashed fragment id | `crates/daemon/src/memory_capture.rs:311` (`native_capture_fragments`) | out-of-grammar or oversized ids become `{sha256}:{offset}` | unaudited |
-| Capture commit gate | `crates/daemon/src/memory_capture.rs:975`; `crates/daemon/src/lib.rs:6909` | publish, checkpoint, source publish, and delete serialize | unaudited |
+| Hashed fragment id | `crates/daemon/src/memory_capture.rs:315` (`native_capture_fragments`) | out-of-grammar or oversized ids become `{sha256}:{offset}` | unaudited |
+| Capture commit gate | `crates/daemon/src/memory_capture.rs:983`; `crates/daemon/src/lib.rs:6909` | publish, checkpoint, source publish, and delete serialize | unaudited |
 | Message unit identity | `crates/daemon/src/harness_sources.rs:189` (`SessionIdentity::message_unit`) | one unit per text block | unaudited |
 | Evidence id from receipt key | `crates/daemon/src/harness_sources.rs:992` (`evidence_request`) | `srcev:` plus the unit key | unaudited |
-| Isolated bounded open | `crates/daemon/src/git_sources.rs:128` (`isolated_options`), `:138` (`open`) | isolation, replacement refs ignored, allocation limit | unaudited |
+| Isolated bounded open | `crates/daemon/src/git_sources.rs:131` (`isolated_options`), `:138` (`open`), `:148` (`open_with_slots`) | isolation, replacement refs ignored, allocation limit; `open_with_slots` sizes the pack index slot map and, for a given size, refuses the repositories the default sizing refuses | unaudited |
+| HEAD observation | `crates/daemon/src/memory_capture/head.rs:32` (`observe_head`), called once per submit at `crates/daemon/src/memory_capture/native.rs:562` | HEAD resolved once through the ref store, following a branch that is itself symbolic to the end of its chain (`head_id`, `crates/daemon/src/memory_capture/head.rs:62`); the header of that one object id read from the loose object or pack files (`crates/daemon/src/git_sources.rs:205`, `file_object_kind`) or the object store (`:329`, `store_object_kind`); unborn, unreadable, unsupported, non-commit, absent-object, and non-repository roots, and a HEAD held by a corrupt pack (an index paired with another pack's data, or a delta chain that revisits an entry), are `HeadUnavailable` | unaudited |
 | Anchor write validation | `crates/kernel/src/anchor_write.rs:296` (`validate_anchor`), `:287` (`validate_anchor_row`) | written anchor rows pass the engine's bound check and decoder and round-trip | unaudited |
 | Anchor write order | `crates/kernel/src/anchor_write.rs:409` (`insert_anchor_inner`) | registry row, anchor row, and change record in one envelope | unaudited |
 
@@ -57,18 +58,29 @@ part.
 | `crates/daemon/tests/harness_sources.rs:3482` `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` | same | unaudited |
 | `crates/kernel/src/local_file.rs:791` `a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept` | same | unaudited |
 | `crates/kernel/src/local_file.rs:889` `a_refused_harness_capture_rolls_back_alone_inside_its_page_commit` | same | unaudited |
-| `crates/daemon/src/memory_capture.rs:1645` `correction_supersedes_and_replay_or_duplicate_creates_no_extra_memory` | `p2-capture-commit-replays-by-job-key-and-frozen-digest`; `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
+| `crates/daemon/src/memory_capture.rs:1674` `correction_supersedes_and_replay_or_duplicate_creates_no_extra_memory` | `p2-capture-commit-replays-by-job-key-and-frozen-digest`; `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
 | `crates/kernel/tests/kernel_envelope.rs:160` `receipt_replay_is_effect_free_and_digest_conflict_is_typed` | `p2-capture-commit-replays-by-job-key-and-frozen-digest` | unaudited |
 | `crates/daemon/src/lib.rs:24489` `automatic_capture_commits_once_and_is_explicitly_retrievable` | same; identity record | unaudited |
-| `crates/daemon/src/memory_capture.rs:1277`, `:1310`, `:1342`, `:1383`, `:1390` | `p2-capture-quote-is-an-exact-substring-of-its-own-batch-source` | unaudited |
-| `crates/daemon/src/lib.rs:24703` `automatic_capture_rejection_stays_pending_not_successful_empty_memory` | same | unaudited |
+| `crates/daemon/src/memory_capture.rs:1285`, `:1318`, `:1350`, `:1391`, `:1398` | `p2-capture-quote-is-an-exact-substring-of-its-own-batch-source` | unaudited |
+| `crates/daemon/src/lib.rs:24880` `automatic_capture_rejection_stays_pending_not_successful_empty_memory` | same | unaudited |
 | `crates/memory-store/src/memory_capture.rs:755` `job_identity_derives_from_redacted_text_so_a_stored_digest_cannot_confirm_a_secret` | `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
-| `crates/daemon/src/memory_capture.rs:1409`, `:1458`, `:1558`, `:1580`; `crates/daemon/src/lib.rs:25619` | same | unaudited |
-| `crates/daemon/src/lib.rs:24851`, `:25189`, `:25394`, `:25942`, `:24600`; `crates/daemon/src/source_capture_tests.rs:1036` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |
+| `crates/daemon/src/memory_capture.rs:1417`, `:1466`, `:1566`, `:1588`; `crates/daemon/src/lib.rs:25796` | same | unaudited |
+| `crates/daemon/src/lib.rs:25028`, `:25366`, `:25571`, `:26119`, `:24777`; `crates/daemon/src/source_capture_tests.rs:1036` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:866`, `:1258`; `crates/kernel/tests/kernel_source_descriptors.rs:494`, `:2484`, `:2593`, `:2717`, `:2795`, `:2871`; `crates/daemon/tests/harness_sources.rs:1706` | `p2-messages-descriptor-identity-is-per-block-and-evidence-id-is-the-receipt-key` | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:180`, `:428`, `:464`, `:1072`, `:1233` | `p2-deferred-source-units-publish-on-a-later-pass` | unaudited |
 | `crates/daemon/tests/git_sources.rs:549` `refused_selections_publish_nothing_and_encodings_are_dispositions` | `p2-git-open-is-isolated-and-allocation-bounded` | unaudited |
 | `crates/daemon/tests/git_sources.rs:827` `delta_packed_commit_against_an_oversized_base_is_refused` | same | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:351` `a_branch_head_and_a_detached_head_freeze_their_commit` | `p2-new-head-observed-once-and-frozen` (loose read) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:373` `a_head_through_a_branch_alias_freezes_the_aliased_commit` | `p2-new-head-observed-once-and-frozen` (branch aliases, loose and packed); `p2-new-head-unavailable-keeps-decision-admitted` (cyclic alias, alias to an unborn branch) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:416` `unborn_unsupported_non_commit_absent_and_non_repository_roots_are_unavailable` | `p2-new-head-unavailable-keeps-decision-admitted`; `p2-git-open-is-isolated-and-allocation-bounded` (refusals of the given slot count) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:486` `the_observation_reads_at_most_one_object_and_neither_the_index_nor_the_tree` | `p2-new-head-observed-once-and-frozen` (no status scan, at most one object read) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:517` `a_packed_head_commit_freezes_whole_or_as_a_delta_from_the_pack_files`; `:534` `a_delta_whose_base_is_in_another_pack_is_read_from_the_store` | `p2-new-head-observed-once-and-frozen` (whole, offset-delta, id-delta, and cross-pack entries) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:556` `a_hinted_pack_index_is_read_before_the_directory_scan`; `:568` `a_pack_index_of_another_repository_never_answers`; `:658` `the_newest_pack_index_answers_and_a_deleted_hint_falls_back_to_the_scan` | `p2-new-head-unavailable-keeps-decision-admitted` (the pack index hint orders reads only) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:595` `a_delta_chain_that_revisits_an_entry_is_unavailable_without_a_store_read`; `:609` `an_index_paired_with_another_pack_is_unavailable_without_a_store_read`; `:631` `slot_exhaustion_while_resolving_a_delta_base_reads_as_exhausted` | `p2-new-head-unavailable-keeps-decision-admitted` (a pack whose delta chain revisits an entry, an index paired with another pack's data); `p2-git-open-is-isolated-and-allocation-bounded` (slot exhaustion reported from inside a delta-base lookup) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:690` `a_head_commit_in_an_alternate_freezes_when_the_store_holds_more_indices_than_its_first_slots` | `p2-git-open-is-isolated-and-allocation-bounded`; `p2-new-head-observed-once-and-frozen` (slot retry, alternates) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:716` `frozen_heads_serialize_as_tagged_values_and_round_trip`; `crates/daemon/src/memory_capture.rs:1654` `a_plan_frozen_without_a_head_reads_as_head_unavailable` | same (C13 compatibility) | unaudited |
+| `crates/daemon/src/lib.rs:24619` `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it` | `p2-new-head-observed-once-and-frozen`; `p2-new-head-unavailable-keeps-decision-admitted` | unaudited |
+| `crates/daemon/src/lib.rs:24729` `a_plan_frozen_without_a_head_publishes_as_before` | `p2-new-head-observed-once-and-frozen` (C13: a plan without `head` publishes) | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:300` `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference` | `p2-new-anchor-row-decodes-on-write`; `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:372` `git_anchors_with_an_empty_capture_list_store_a_null_payload` | `p2-new-anchor-row-decodes-on-write` | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:448` `invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause` | same | unaudited |
@@ -83,13 +95,13 @@ part.
 - Property-based or model-checked tests over anchor rows: none found.
 - Production assertions on the anchor writer beyond typed refusals: none
   found; the writer returns `InvalidInput`, `NotFound`, or `Conflict`.
-- Checks for the 12 proposed records: none found; their code does not exist.
+- Checks for the 10 proposed records: none found; their code does not exist.
 
 ## Suspiciously quiet areas
 
 - No production path reads `anchors` rows into applicability candidates, so
   every S1 check runs on fixtures (specification K3).
-- The capture prompt rule at `crates/daemon/src/memory_capture.rs:126` is the
+- The capture prompt rule at `crates/daemon/src/memory_capture.rs:130` is the
   only statement of the quote contract the model sees; no test pins the
   prompt text to the validator.
 - No test joins a capture fragment id to a `messages` descriptor identity; the
