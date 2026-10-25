@@ -3,9 +3,16 @@
 //! job taking the publication slot is `Running`, a handoff refusal is
 //! `Refused`, and the job's end is `Ended`. A key with no entry is settled,
 //! which is exact after a restart because no earlier job can still run.
+//!
+//! Each entry holds its state inline. A submit that finds a `Running` entry
+//! subscribes to the entry's `tokio::sync::watch` channel, which the first
+//! such submit creates; the entry's next write sends on it and drops it, so
+//! the channel exists only while a submit waits.
 
 use std::collections::VecDeque;
+use std::hash::BuildHasher;
 
+use hashbrown::{DefaultHashBuilder, HashTable};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -58,15 +65,37 @@ pub(crate) enum SettlementOutcome {
 
 struct Entry {
     key: SessionIdentity,
+    /// The write that inserted the entry; its place in the eviction order.
+    inserted: u64,
     /// The acceptance or refusal that last wrote the entry; a terminal write
     /// from an earlier one is ignored.
     acceptance: u64,
-    state: watch::Sender<Settlement>,
+    state: Settlement,
+    /// The channel of the submits waiting on this `Running` state, present
+    /// from the first such submit until the entry's next write.
+    waiters: Option<watch::Sender<Settlement>>,
+}
+
+impl Entry {
+    /// Writes `state` and wakes every waiting submit with it; a waiter reads
+    /// the new state before it sees the channel close.
+    fn set(&mut self, state: Settlement) {
+        self.state = state;
+        if let Some(waiters) = self.waiters.take() {
+            waiters.send_replace(state);
+        }
+    }
 }
 
 #[derive(Default)]
 pub(super) struct Settlements {
-    entries: VecDeque<Entry>,
+    /// Entries hashed by key with foldhash; the bound caps a full collision
+    /// chain at `MAX_SETTLEMENTS` key comparisons, the cost of one scan of
+    /// the record.
+    entries: HashTable<Entry>,
+    hasher: DefaultHashBuilder,
+    /// Each entry's key hash and `inserted`, oldest insertion first.
+    order: VecDeque<(u64, u64)>,
     acceptances: u64,
 }
 
@@ -84,7 +113,7 @@ impl Settlements {
     /// Records the end of the job that took the slot at `acceptance`.
     pub(super) fn end(&mut self, key: &SessionIdentity, acceptance: u64, outcome: Count) {
         if let Some(entry) = self.current(key, acceptance) {
-            entry.state.send_replace(Settlement::Ended { outcome });
+            entry.set(Settlement::Ended { outcome });
         }
     }
 
@@ -97,41 +126,52 @@ impl Settlements {
         outcome: Count,
     ) {
         if let Some(entry) = self.current(key, acceptance)
-            && matches!(*entry.state.borrow(), Settlement::Running { .. })
+            && matches!(entry.state, Settlement::Running { .. })
         {
-            entry.state.send_replace(Settlement::Ended { outcome });
+            entry.set(Settlement::Ended { outcome });
         }
     }
 
-    /// The entry's state now and a receiver of its later writes; absent is
-    /// settled.
-    pub(super) fn observe(&self, key: &SessionIdentity) -> Observed {
-        Observed(self.subscribe(key).map(|mut receiver| {
-            let state = *receiver.borrow_and_update();
-            (state, receiver)
-        }))
-    }
-
-    pub(super) fn subscribe(&self, key: &SessionIdentity) -> Option<watch::Receiver<Settlement>> {
-        self.entries
-            .iter()
-            .find(|entry| entry.key == *key)
-            .map(|entry| entry.state.subscribe())
+    /// The entry's state now and, for a `Running` state, a receiver of the
+    /// entry's next write; absent is settled.
+    pub(super) fn observe(&mut self, key: &SessionIdentity) -> Observed {
+        let Some(entry) = self.entry_mut(key) else {
+            return Observed(Observation::Done(SettlementOutcome::Settled));
+        };
+        let Settlement::Running { accepted_at } = entry.state else {
+            return Observed(Observation::Done(
+                entry.state.outcome().unwrap_or(SettlementOutcome::Settled),
+            ));
+        };
+        let state = entry.state;
+        let receiver = entry
+            .waiters
+            .get_or_insert_with(|| watch::Sender::new(state))
+            .subscribe();
+        Observed(Observation::Running {
+            accepted_at,
+            receiver,
+        })
     }
 
     /// The outcome `key` has reached now: a running publish reads as
     /// `BudgetExpired`, an absent key as `Settled`.
     pub(super) fn now(&self, key: &SessionIdentity) -> SettlementOutcome {
-        self.entries.iter().find(|entry| entry.key == *key).map_or(
-            SettlementOutcome::Settled,
-            |entry| {
+        self.entries
+            .find(self.hasher.hash_one(key), |entry| entry.key == *key)
+            .map_or(SettlementOutcome::Settled, |entry| {
                 entry
                     .state
-                    .borrow()
                     .outcome()
                     .unwrap_or(SettlementOutcome::BudgetExpired)
-            },
-        )
+            })
+    }
+
+    #[cfg(test)]
+    pub(super) fn state(&self, key: &SessionIdentity) -> Option<Settlement> {
+        self.entries
+            .find(self.hasher.hash_one(key), |entry| entry.key == *key)
+            .map(|entry| entry.state)
     }
 
     #[cfg(test)]
@@ -142,71 +182,100 @@ impl Settlements {
     /// Drops every entry and keeps the acceptance count.
     pub(super) fn clear(&mut self) {
         self.entries.clear();
+        self.order.clear();
     }
 
-    fn entry(&mut self, key: &SessionIdentity) -> Option<&mut Entry> {
-        self.entries.iter_mut().find(|entry| entry.key == *key)
+    fn entry_mut(&mut self, key: &SessionIdentity) -> Option<&mut Entry> {
+        self.entries
+            .find_mut(self.hasher.hash_one(key), |entry| entry.key == *key)
     }
 
     /// The entry of `key` while the write at `acceptance` is its latest.
     fn current(&mut self, key: &SessionIdentity, acceptance: u64) -> Option<&mut Entry> {
-        self.entry(key)
+        self.entry_mut(key)
             .filter(|entry| entry.acceptance == acceptance)
     }
 
     fn write(&mut self, key: &SessionIdentity, state: Settlement) -> u64 {
         self.acceptances += 1;
         let acceptance = self.acceptances;
-        if let Some(entry) = self.entry(key) {
+        let hash = self.hasher.hash_one(key);
+        if let Some(entry) = self.entries.find_mut(hash, |entry| entry.key == *key) {
             entry.acceptance = acceptance;
-            entry.state.send_replace(state);
+            entry.set(state);
             return acceptance;
         }
         if self.entries.len() >= MAX_SETTLEMENTS {
             self.evict();
         }
-        self.entries.push_back(Entry {
-            key: key.clone(),
-            acceptance,
-            state: watch::Sender::new(state),
-        });
+        let hasher = &self.hasher;
+        self.entries.insert_unique(
+            hash,
+            Entry {
+                key: key.clone(),
+                inserted: acceptance,
+                acceptance,
+                state,
+                waiters: None,
+            },
+            |entry| hasher.hash_one(&entry.key),
+        );
+        self.order.push_back((hash, acceptance));
         acceptance
     }
 
     /// Drops the oldest entry that is not `Running`. One slot means at most
     /// one entry is `Running`, so the walk ends within two steps.
     fn evict(&mut self) {
-        if let Some(index) = self
+        let entries = &self.entries;
+        let Some(position) = self.order.iter().position(|&(hash, inserted)| {
+            entries
+                .find(hash, |entry| entry.inserted == inserted)
+                .is_some_and(|entry| entry.state.outcome().is_some())
+        }) else {
+            return;
+        };
+        let (hash, inserted) = self.order.remove(position).expect("a found position");
+        if let Ok(entry) = self
             .entries
-            .iter()
-            .position(|entry| entry.state.borrow().outcome().is_some())
+            .find_entry(hash, |entry| entry.inserted == inserted)
         {
-            self.entries.remove(index);
+            entry.remove();
         }
     }
 }
 
-/// One session's entry as a submit observed it, with a receiver of the
-/// writes after that observation.
-pub(crate) struct Observed(Option<(Settlement, watch::Receiver<Settlement>)>);
+enum Observation {
+    Done(SettlementOutcome),
+    Running {
+        accepted_at: Instant,
+        receiver: watch::Receiver<Settlement>,
+    },
+}
+
+/// One session's entry as a submit observed it: its outcome, or for a
+/// `Running` entry the deadline and a receiver of the entry's next write.
+pub(crate) struct Observed(Observation);
 
 impl Observed {
     #[cfg(test)]
     pub(super) fn is_running(&self) -> bool {
-        matches!(self.0, Some((Settlement::Running { .. }, _)))
+        matches!(self.0, Observation::Running { .. })
     }
 }
 
 /// Settles an observation, bounded by the running job's budget deadline. Any
 /// write after an observed `Running` state ends the wait: the entry's next
 /// write is the job's end, a refusal, or a newer acceptance, and a newer pass
-/// treats the older one as ended.
+/// treats the older one as ended. A record cleared under a waiter closes its
+/// channel, which reads as settled.
 pub(crate) async fn settle(observed: Observed) -> SettlementOutcome {
-    let Some((state, mut receiver)) = observed.0 else {
-        return SettlementOutcome::Settled;
-    };
-    let Settlement::Running { accepted_at } = state else {
-        return state.outcome().unwrap_or(SettlementOutcome::Settled);
+    let (accepted_at, mut receiver) = match observed.0 {
+        Observation::Done(outcome) => return outcome,
+        Observation::Running {
+            accepted_at,
+            receiver,
+        } => (accepted_at, receiver),
     };
     match tokio::time::timeout_at(accepted_at + CAPTURE_BUDGET, receiver.changed()).await {
         Err(_elapsed) => SettlementOutcome::BudgetExpired,
@@ -222,6 +291,8 @@ pub(crate) async fn settle(observed: Observed) -> SettlementOutcome {
 mod tests {
     use std::time::Duration;
 
+    use proptest::strategy::Strategy as _;
+
     use super::*;
     use crate::harness_sources::Harness;
 
@@ -233,7 +304,7 @@ mod tests {
         }
     }
 
-    async fn outcome(settlements: &Settlements, session: &str) -> SettlementOutcome {
+    async fn outcome(settlements: &mut Settlements, session: &str) -> SettlementOutcome {
         settle(settlements.observe(&key(session))).await
     }
 
@@ -242,24 +313,24 @@ mod tests {
         let mut settlements = Settlements::default();
         let started = Instant::now();
         assert_eq!(
-            outcome(&settlements, "absent").await,
+            outcome(&mut settlements, "absent").await,
             SettlementOutcome::Settled
         );
         let completed = settlements.accept(&key("completed"), Instant::now());
         settlements.end(&key("completed"), completed, Count::Completed);
         assert_eq!(
-            outcome(&settlements, "completed").await,
+            outcome(&mut settlements, "completed").await,
             SettlementOutcome::Settled
         );
         let deadline = settlements.accept(&key("deadline"), Instant::now());
         settlements.end(&key("deadline"), deadline, Count::Deadline);
         assert_eq!(
-            outcome(&settlements, "deadline").await,
+            outcome(&mut settlements, "deadline").await,
             SettlementOutcome::BudgetExpired
         );
         settlements.refuse(&key("refused"));
         assert_eq!(
-            outcome(&settlements, "refused").await,
+            outcome(&mut settlements, "refused").await,
             SettlementOutcome::BudgetExpired
         );
         assert_eq!(Instant::now(), started, "no wait was armed");
@@ -307,10 +378,7 @@ mod tests {
         settlements.end(&key("ses"), first, Count::Completed);
         settlements.end_if_running(&key("ses"), first, Count::Discarded);
         assert_eq!(settle(receiver).await, SettlementOutcome::BudgetExpired);
-        assert_eq!(
-            *settlements.subscribe(&key("ses")).unwrap().borrow(),
-            Settlement::Refused
-        );
+        assert_eq!(settlements.state(&key("ses")).unwrap(), Settlement::Refused);
     }
 
     #[test]
@@ -321,7 +389,7 @@ mod tests {
         settlements.end(&key("ses"), acceptance, Count::WorkerPanicked);
         settlements.end_if_running(&key("ses"), acceptance, Count::Discarded);
         assert_eq!(
-            *settlements.subscribe(&key("ses")).unwrap().borrow(),
+            settlements.state(&key("ses")).unwrap(),
             Settlement::Ended {
                 outcome: Count::WorkerPanicked
             }
@@ -337,15 +405,15 @@ mod tests {
         }
         assert_eq!(settlements.len(), MAX_SETTLEMENTS);
         assert!(
-            settlements.subscribe(&key("running")).is_some(),
+            settlements.state(&key("running")).is_some(),
             "a running entry is never evicted"
         );
-        assert!(settlements.subscribe(&key("settled-0")).is_none());
-        assert!(settlements.subscribe(&key("settled-1")).is_some());
+        assert!(settlements.state(&key("settled-0")).is_none());
+        assert!(settlements.state(&key("settled-1")).is_some());
         settlements.refuse(&key("one-more"));
         assert_eq!(settlements.len(), MAX_SETTLEMENTS);
-        assert!(settlements.subscribe(&key("settled-1")).is_none());
-        assert!(settlements.subscribe(&key("running")).is_some());
+        assert!(settlements.state(&key("settled-1")).is_none());
+        assert!(settlements.state(&key("running")).is_some());
     }
 
     #[tokio::test(start_paused = true)]
@@ -358,7 +426,7 @@ mod tests {
         for index in 0..MAX_SETTLEMENTS {
             settlements.refuse(&key(&format!("filler-{index}")));
         }
-        assert!(settlements.subscribe(&key("waited")).is_none());
+        assert!(settlements.state(&key("waited")).is_none());
         assert_eq!(settle(receiver).await, SettlementOutcome::Settled);
     }
 
@@ -423,7 +491,7 @@ mod tests {
         assert!(next > first, "a cleared record keeps its acceptance count");
         settlements.end(&key("ses"), first, Count::Completed);
         assert!(matches!(
-            *settlements.subscribe(&key("ses")).unwrap().borrow(),
+            settlements.state(&key("ses")).unwrap(),
             Settlement::Running { .. }
         ));
     }
@@ -454,7 +522,7 @@ mod tests {
             .unwrap()
             .accept(&key("a"), Instant::now());
         let observed = {
-            let settlements = settlements.lock().unwrap();
+            let mut settlements = settlements.lock().unwrap();
             [key("a"), key("b")].map(|session| settlements.observe(&session))
         };
         let started = Instant::now();
@@ -484,10 +552,356 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn every_submit_waiting_on_one_running_entry_reads_its_next_write() {
+        let settlements = std::sync::Arc::new(std::sync::Mutex::new(Settlements::default()));
+        let acceptance = settlements
+            .lock()
+            .unwrap()
+            .accept(&key("ses"), Instant::now());
+        let waiters: Vec<_> = (0..2)
+            .map(|_| {
+                let observed = settlements.lock().unwrap().observe(&key("ses"));
+                assert!(observed.is_running());
+                tokio::spawn(settle(observed))
+            })
+            .collect();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(waiters.iter().all(|waiter| !waiter.is_finished()));
+        settlements
+            .lock()
+            .unwrap()
+            .end(&key("ses"), acceptance, Count::Deadline);
+        for waiter in waiters {
+            assert_eq!(waiter.await.unwrap(), SettlementOutcome::BudgetExpired);
+        }
+        let later = settlements.lock().unwrap().observe(&key("ses"));
+        assert!(!later.is_running());
+        assert_eq!(settle(later).await, SettlementOutcome::BudgetExpired);
+    }
+
+    /// A newer pass that takes the slot before the waiter runs leaves the
+    /// waiter with the end it was woken by.
+    #[tokio::test(start_paused = true)]
+    async fn a_waiter_reads_the_first_write_after_its_observation() {
+        let mut settlements = Settlements::default();
+        let first = settlements.accept(&key("ses"), Instant::now());
+        let waiter = tokio::spawn(settle(settlements.observe(&key("ses"))));
+        settlements.end(&key("ses"), first, Count::Deadline);
+        settlements.accept(&key("ses"), Instant::now());
+        let started = Instant::now();
+        assert_eq!(waiter.await.unwrap(), SettlementOutcome::BudgetExpired);
+        assert_eq!(Instant::now(), started);
+    }
+
+    #[test]
+    fn an_end_naming_another_session_or_an_evicted_acceptance_is_ignored() {
+        let mut settlements = Settlements::default();
+        let acceptance = settlements.accept(&key("ses"), Instant::now());
+        settlements.end(&key("other"), acceptance, Count::Completed);
+        settlements.end_if_running(&key("other"), acceptance, Count::Discarded);
+        assert!(matches!(
+            settlements.state(&key("ses")).unwrap(),
+            Settlement::Running { .. }
+        ));
+        assert!(settlements.state(&key("other")).is_none());
+        settlements.end(&key("ses"), acceptance, Count::Completed);
+        for index in 0..MAX_SETTLEMENTS {
+            settlements.refuse(&key(&format!("filler-{index}")));
+        }
+        assert!(settlements.state(&key("ses")).is_none());
+        settlements.refuse(&key("ses"));
+        settlements.end(&key("ses"), acceptance, Count::Completed);
+        settlements.end_if_running(&key("ses"), acceptance, Count::Discarded);
+        assert_eq!(settlements.state(&key("ses")), Some(Settlement::Refused));
+        assert_eq!(settlements.len(), MAX_SETTLEMENTS);
+    }
+
+    /// The record as a linear list in insertion order, the form #1136
+    /// specifies, against which the indexed record is checked.
+    #[derive(Default)]
+    struct Model {
+        entries: VecDeque<(SessionIdentity, u64, Settlement)>,
+        acceptances: u64,
+    }
+
+    impl Model {
+        fn get(
+            &mut self,
+            key: &SessionIdentity,
+        ) -> Option<&mut (SessionIdentity, u64, Settlement)> {
+            self.entries.iter_mut().find(|entry| entry.0 == *key)
+        }
+
+        fn state(&self, key: &SessionIdentity) -> Option<Settlement> {
+            self.entries
+                .iter()
+                .find(|entry| entry.0 == *key)
+                .map(|entry| entry.2)
+        }
+
+        fn write(&mut self, key: &SessionIdentity, state: Settlement) -> u64 {
+            self.acceptances += 1;
+            let acceptance = self.acceptances;
+            if let Some(entry) = self.get(key) {
+                (entry.1, entry.2) = (acceptance, state);
+            } else {
+                if self.entries.len() >= MAX_SETTLEMENTS
+                    && let Some(oldest) = self
+                        .entries
+                        .iter()
+                        .position(|entry| entry.2.outcome().is_some())
+                {
+                    self.entries.remove(oldest);
+                }
+                self.entries.push_back((key.clone(), acceptance, state));
+            }
+            acceptance
+        }
+
+        /// Applies a terminal write; returns whether it wrote.
+        fn end(
+            &mut self,
+            key: &SessionIdentity,
+            acceptance: u64,
+            outcome: Count,
+            running_only: bool,
+        ) -> bool {
+            match self.get(key) {
+                Some(entry)
+                    if entry.1 == acceptance
+                        && (!running_only || matches!(entry.2, Settlement::Running { .. })) =>
+                {
+                    entry.2 = Settlement::Ended { outcome };
+                    true
+                }
+                _ => false,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Accept(usize),
+        Refuse(usize),
+        /// The running job ends with `Count::ALL[_]` and releases its slot.
+        End(usize),
+        /// The running job's slot is released with no end recorded.
+        Release,
+        /// A late terminal write naming an earlier acceptance, optionally
+        /// with another session's key.
+        Stale {
+            pick: usize,
+            key: Option<usize>,
+            outcome: usize,
+            running_only: bool,
+        },
+        Observe(usize),
+        Clear,
+    }
+
+    fn ops(
+        universe: usize,
+        refusals: u32,
+        len: std::ops::Range<usize>,
+    ) -> impl proptest::strategy::Strategy<Value = Vec<Op>> {
+        use proptest::prelude::*;
+        let outcome = 0..Count::ALL.len();
+        let op = prop_oneof![
+            3 => (0..universe).prop_map(Op::Accept),
+            refusals => (0..universe).prop_map(Op::Refuse),
+            2 => outcome.clone().prop_map(Op::End),
+            1 => Just(Op::Release),
+            2 => (any::<usize>(), proptest::option::of(0..universe), outcome, any::<bool>())
+                .prop_map(|(pick, key, outcome, running_only)| Op::Stale { pick, key, outcome, running_only }),
+            2 => (0..universe).prop_map(Op::Observe),
+            1 => Just(Op::Clear),
+        ];
+        proptest::collection::vec(op, len)
+    }
+
+    /// Runs `ops` against the record and the model under the single
+    /// publication slot, checking every observable after each step and
+    /// each waiter's outcome at the end; returns the record's largest size.
+    fn check_against_model(universe: usize, ops: Vec<Op>, every_key: bool) -> usize {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut largest = 0;
+            let keys: Vec<SessionIdentity> = (0..universe)
+                .map(|index| SessionIdentity {
+                    project_id: if index % 5 == 0 { "b" } else { "a" }.repeat(64),
+                    harness: if index % 3 == 0 {
+                        Harness::OpenCode
+                    } else {
+                        Harness::Pi
+                    },
+                    session_id: format!("ses-{index}"),
+                })
+                .collect();
+            let (mut record, mut model) = (Settlements::default(), Model::default());
+            let mut slot: Option<(usize, u64, u64)> = None;
+            let mut history: Vec<(usize, u64, u64)> = Vec::new();
+            type Waiter = (
+                usize,
+                Option<SettlementOutcome>,
+                std::pin::Pin<Box<dyn Future<Output = SettlementOutcome>>>,
+            );
+            let mut waiters: Vec<Waiter> = Vec::new();
+            let resolve =
+                |waiters: &mut Vec<Waiter>, key: Option<usize>, state: Option<Settlement>| {
+                    for waiter in waiters.iter_mut().filter(|waiter| {
+                        waiter.1.is_none() && key.is_none_or(|key| key == waiter.0)
+                    }) {
+                        waiter.1 = Some(
+                            state
+                                .and_then(Settlement::outcome)
+                                .unwrap_or(SettlementOutcome::Settled),
+                        );
+                    }
+                };
+            for op in ops {
+                let touched = match op {
+                    Op::Accept(k) if slot.is_none() => {
+                        let at = Instant::now();
+                        let ours = record.accept(&keys[k], at);
+                        let theirs = model.write(&keys[k], Settlement::Running { accepted_at: at });
+                        resolve(&mut waiters, Some(k), model.state(&keys[k]));
+                        slot = Some((k, ours, theirs));
+                        history.push((k, ours, theirs));
+                        Some(k)
+                    }
+                    Op::Accept(k) | Op::Refuse(k) => {
+                        record.refuse(&keys[k]);
+                        model.write(&keys[k], Settlement::Refused);
+                        resolve(&mut waiters, Some(k), model.state(&keys[k]));
+                        Some(k)
+                    }
+                    Op::End(outcome) => slot.take().map(|(k, ours, theirs)| {
+                        let outcome = Count::ALL[outcome];
+                        record.end(&keys[k], ours, outcome);
+                        record.end_if_running(&keys[k], ours, Count::Discarded);
+                        if model.end(&keys[k], theirs, outcome, false) {
+                            resolve(&mut waiters, Some(k), model.state(&keys[k]));
+                        }
+                        k
+                    }),
+                    Op::Release => slot.take().map(|(k, ours, theirs)| {
+                        record.end_if_running(&keys[k], ours, Count::Discarded);
+                        if model.end(&keys[k], theirs, Count::Discarded, true) {
+                            resolve(&mut waiters, Some(k), model.state(&keys[k]));
+                        }
+                        k
+                    }),
+                    Op::Stale {
+                        pick,
+                        key,
+                        outcome,
+                        running_only,
+                    } if !history.is_empty() => {
+                        let (own, ours, theirs) = history[pick % history.len()];
+                        let k = key.unwrap_or(own);
+                        let outcome = Count::ALL[outcome];
+                        if running_only {
+                            record.end_if_running(&keys[k], ours, outcome);
+                        } else {
+                            record.end(&keys[k], ours, outcome);
+                        }
+                        if model.end(&keys[k], theirs, outcome, running_only) {
+                            resolve(&mut waiters, Some(k), model.state(&keys[k]));
+                        }
+                        Some(k)
+                    }
+                    Op::Stale { .. } => None,
+                    Op::Observe(k) => {
+                        let state = model.state(&keys[k]);
+                        let resolution = match state {
+                            Some(Settlement::Running { .. }) => None,
+                            state => Some(
+                                state
+                                    .and_then(Settlement::outcome)
+                                    .unwrap_or(SettlementOutcome::Settled),
+                            ),
+                        };
+                        waiters.push((k, resolution, Box::pin(settle(record.observe(&keys[k])))));
+                        Some(k)
+                    }
+                    Op::Clear => {
+                        record.clear();
+                        model.entries.clear();
+                        resolve(&mut waiters, None, None);
+                        None
+                    }
+                };
+                assert_eq!(record.len(), model.entries.len());
+                assert!(record.len() <= MAX_SETTLEMENTS);
+                largest = largest.max(record.len());
+                let checked: Vec<usize> = if every_key {
+                    (0..universe).collect()
+                } else {
+                    touched.into_iter().collect()
+                };
+                for k in checked {
+                    assert_eq!(
+                        record.state(&keys[k]),
+                        model.state(&keys[k]),
+                        "{:?}",
+                        keys[k]
+                    );
+                    assert_eq!(
+                        record.now(&keys[k]),
+                        model
+                            .state(&keys[k])
+                            .map_or(SettlementOutcome::Settled, |state| state
+                                .outcome()
+                                .unwrap_or(SettlementOutcome::BudgetExpired))
+                    );
+                }
+            }
+            for key in &keys {
+                assert_eq!(record.state(key), model.state(key));
+            }
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            for (_, resolution, waiter) in &mut waiters {
+                assert_eq!(
+                    waiter.as_mut().poll(&mut context),
+                    resolution.map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+                );
+            }
+            tokio::time::advance(CAPTURE_BUDGET).await;
+            for (_, _, waiter) in waiters.iter_mut().filter(|waiter| waiter.1.is_none()) {
+                assert_eq!(waiter.await, SettlementOutcome::BudgetExpired);
+            }
+            largest
+        })
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn a_few_sessions_match_the_linear_model(ops in ops(3, 3, 0..64)) {
+            check_against_model(3, ops, true);
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn sessions_past_the_bound_match_the_linear_model(
+            ops in ops(2000, 60, 1900..2100)
+                .prop_map(|ops| ops.into_iter().filter(|op| !matches!(op, Op::Clear)).collect())
+        ) {
+            proptest::prop_assert_eq!(check_against_model(2000, ops, false), MAX_SETTLEMENTS);
+        }
+    }
+
     /// Measurement, run by hand: `cargo nextest run -p daemon --all-features
-    /// --run-ignored only -E 'test(settlement_cost)' --no-capture`. Times the
-    /// record's writes and subscribe at `MAX_SETTLEMENTS` entries, where each
-    /// scan visits every entry.
+    /// --run-ignored only -E 'test(settlement_cost)' --no-capture`.
     #[test]
     #[ignore = "measurement"]
     fn settlement_cost_measurement() {
@@ -502,11 +916,11 @@ mod tests {
             let acceptance = settlements.accept(&session, Instant::now());
             settlements.end(&session, acceptance, Count::Completed);
             settlements.end_if_running(&session, acceptance, Count::Discarded);
-            assert!(settlements.subscribe(&session).is_some());
+            assert!(!settlements.observe(&session).is_running());
         }
         let per_job = started.elapsed() / RUNS;
         println!(
-            "settlement cost at {MAX_SETTLEMENTS} entries: {per_job:?} per job (accept, end, release, subscribe)"
+            "settlement cost at {MAX_SETTLEMENTS} entries: {per_job:?} per job (accept, end, release, observe)"
         );
     }
 }

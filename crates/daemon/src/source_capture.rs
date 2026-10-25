@@ -578,7 +578,7 @@ impl SourceCapture {
     /// them is `Running`; each observation then settles on its own with
     /// [`settle`], and the waits together end by that one entry's deadline.
     pub(crate) fn observe_settlements(&self, sessions: &[SessionIdentity]) -> Vec<Observed> {
-        let settlements = self.settlements();
+        let mut settlements = self.settlements();
         let observed: Vec<Observed> = sessions
             .iter()
             .map(|session| settlements.observe(session))
@@ -614,9 +614,7 @@ impl SourceCapture {
 
     #[cfg(test)]
     pub(crate) fn settlement_for_test(&self, session: &SessionIdentity) -> Option<Settlement> {
-        self.settlements()
-            .subscribe(session)
-            .map(|receiver| *receiver.borrow())
+        self.settlements().state(session)
     }
 
     /// A poisoned memo is a lost cache: it starts empty and the kernel's receipts answer.

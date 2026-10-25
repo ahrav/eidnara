@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Harness {
     OpenCode,
     Pi,
@@ -49,7 +49,7 @@ impl Harness {
 }
 
 /// The route-bound identity every unit of a session is published under. `project_id` is the bound project's digest, the scope term's exact value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionIdentity {
     pub project_id: String,
     pub harness: Harness,
