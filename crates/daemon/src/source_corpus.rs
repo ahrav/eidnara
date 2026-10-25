@@ -759,9 +759,8 @@ fn detects(text: &str) -> Result<bool, context_core::redaction::RedactionError> 
 
 /// Every string or object key in `value` whose redaction verdict is wrong. A string must be
 /// negative, except inside an object carrying `"canary": true`: there the unit content
-/// ([`canary_content`]) must be positive, and a string that contains that content or lies within
-/// it, such as a harness's preview copy of the same output, is exempt. `at` names the fixture in
-/// each finding.
+/// ([`canary_content`]) must be positive, and a string that lies within that content, such as a
+/// harness's preview copy of the same output, is exempt. `at` names the fixture in each finding.
 pub(crate) fn redaction_violations(at: &str, value: &Value) -> Vec<String> {
     fn walk(
         at: &str,
@@ -772,9 +771,7 @@ pub(crate) fn redaction_violations(at: &str, value: &Value) -> Vec<String> {
     ) {
         match value {
             Value::String(text) => {
-                let exempt = canary.is_some_and(|content| {
-                    content.contains(text.as_str()) || text.contains(content)
-                });
+                let exempt = canary.is_some_and(|content| content.contains(text.as_str()));
                 let verdict = detects(text);
                 if !exempt && verdict != Ok(false) {
                     out.push(format!("{at}{pointer}: not negative ({verdict:?})"));

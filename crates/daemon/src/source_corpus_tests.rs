@@ -514,6 +514,15 @@ fn a_credential_shape_fails_the_redaction_scan_unless_its_unit_is_a_canary() {
     let inside = json!({"parts": [{"canary": true, "state": {"output": CANARY,
         "input": {"command": other_secret}}}]});
     assert_eq!(redaction_violations("f", &inside).len(), 1);
+    let truncated_preview = json!({"parts": [{"canary": true, "state": {
+        "output": format!("token {CANARY}\n"), "metadata": {"output": CANARY}}}]});
+    assert_eq!(
+        redaction_violations("f", &truncated_preview),
+        Vec::<String>::new()
+    );
+    let embedding = json!({"parts": [{"canary": true, "state": {"output": CANARY,
+        "metadata": {"output": format!("{CANARY} {other_secret}")}}}]});
+    assert_eq!(redaction_violations("f", &embedding).len(), 1);
     let negative_canary = json!({"units": [{"canary": true, "text": "ordinary"}]});
     assert_eq!(redaction_violations("f", &negative_canary).len(), 1);
     let textless = json!({"units": [{"canary": true}]});

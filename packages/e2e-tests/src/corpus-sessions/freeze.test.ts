@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 
 import { join } from "node:path";
 
@@ -11,10 +11,18 @@ import {
     loadFrozenOpenCode,
     OPENCODE_CLOSURE,
     PI_CLOSURE,
+    requireOpenCodeClosure,
+    snapshotStore,
 } from "./freeze.ts";
 import { CANARY } from "./workspace.ts";
 
-const { readFileSync } = process.getBuiltinModule("node:fs");
+const { mkdtempSync, readdirSync, readFileSync, rmSync } = process.getBuiltinModule("node:fs");
+const { tmpdir } = process.getBuiltinModule("node:os");
+
+const scratch: string[] = [];
+afterAll(() => {
+    for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
+});
 
 const SESSION = "ses_0123456789abcdefghijABCD";
 const ROOTS = [{ path: "/tmp/scratch-x/checkout", as: "/corpus/ripgrep" }];
@@ -125,5 +133,30 @@ describe("corpus session freeze", () => {
             ["e0001", "pi-corpus-session"],
         ]);
         expect(entries[1].message.content[0].canary).toBe(true);
+    });
+
+    it("replaces a kept store snapshot with the next run's store", () => {
+        const dir = mkdtempSync(join(tmpdir(), "freeze-snapshot-"));
+        scratch.push(dir);
+        const target = join(dir, "opencode.db");
+        for (const run of ["first", "second"]) {
+            const db = new Database(":memory:");
+            db.run("CREATE TABLE run (name TEXT)");
+            db.prepare("INSERT INTO run VALUES (?)").run(run);
+            snapshotStore(db, target);
+            db.close();
+        }
+        const kept = new Database(target, { readonly: true });
+        expect(kept.prepare("SELECT name FROM run").all()).toEqual([{ name: "second" }]);
+        kept.close();
+        expect(readdirSync(dir)).toEqual(["opencode.db"]);
+    });
+
+    it("accepts only the OpenCode version its closure names", () => {
+        expect(requireOpenCodeClosure("1.18.22\n")).toBe("1.18.22");
+        expect(requireOpenCodeClosure("opencode v1.18.22\n")).toBe("1.18.22");
+        for (const reported of ["opencode v2.1.1\n", "1.18.220", "11.18.22", ""]) {
+            expect(() => requireOpenCodeClosure(reported)).toThrow(OPENCODE_CLOSURE);
+        }
     });
 });
