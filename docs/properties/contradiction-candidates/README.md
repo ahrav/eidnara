@@ -5,7 +5,7 @@
 Plan: P5
 `docs/plans/2026-10-24-adaptive-discovery/05-write-time-contradiction-candidates-plan.md`.
 Plan baseline: `a0e3f2993`. Authored at HEAD `3a3b916b7`, 2026-10-24.
-Tracker spec: `<spec issue URL, filled after creation>`.
+Tracker spec: `https://github.com/ahrav/eidnara/issues/1163`.
 Method: `docs/properties/METHOD.md`.
 
 ## Parts
