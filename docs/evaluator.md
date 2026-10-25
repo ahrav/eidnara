@@ -990,8 +990,8 @@ empirical acceptance needs an approved profile.
 that parses can be embedded in a family and frozen; an integer past the safe
 range is `NotCanonical` at parse.
 
-**Analysis family.** `AnalysisFamily` (`eval-analysis-family/v2`; version 2
-added `transfer_criterion`) fixes
+**Analysis family.** `AnalysisFamily` (`eval-analysis-family/v3`; version 2
+added `transfer_criterion`, version 3 added `capture`) fixes
 everything a result depends on: endpoints (exactly the three gates
 `quality_loss`, `harm`, `floor`, since the report always carries them; any
 other list is `UnsupportedEndpoints`), task families, exclusions (the
@@ -1004,8 +1004,9 @@ bounds with no p-values to adjust, and a plan declaring another is
 `UnsupportedMultiplicity` rather than analyzed uncorrected), the profile, the
 interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
-seed, the live-trial repeat count `trials_k`, the ICC pilot, and the optional
-approved transfer criterion (see "Claim class").
+seed, the live-trial repeat count `trials_k`, the ICC pilot, the optional
+approved transfer criterion (see "Claim class"), and the run's capture
+declaration `capture`.
 `AnalysisFamily::validate` includes the digest's
 canonical-JSON check, so a family that validates can always be frozen (an
 integer outside the safe range is `NotCanonical` at parse). It also recomputes the

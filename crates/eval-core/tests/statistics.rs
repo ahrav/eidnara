@@ -4,14 +4,14 @@ use std::collections::BTreeMap;
 
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmRates, ArmResult, BlockedReason,
-    CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, EvaluatedSurface, FrozenFamily,
-    GATE_ENDPOINTS, Gates, ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod,
-    IntervalOutcome, IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES,
-    MIN_BOOTSTRAP_REPLICATES, Manifest, ManifestError, MultiplicityCorrection, PairCounts,
-    PairOutcome, PilotObservation, RECENCY_BASELINE_VERSION, Ratio, RecencyBaseline, RunStatus,
-    StatisticsError, StoppingRule, analyze, arm_miss_asymmetry, cluster_bootstrap_interval,
-    intraclass_correlation, pair_table_digest, parse_analysis_family, parse_campaign_profile,
-    run_icc_pilot,
+    CAPTURE_CONFIG_KEY, CampaignProfile, CaptureDeclaration, CaptureSwitch, CensorReason,
+    ClusterKey, ClusteringUnit, EvaluatedSurface, FrozenFamily, GATE_ENDPOINTS, Gates,
+    ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome,
+    IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES, Manifest,
+    ManifestError, MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation,
+    RECENCY_BASELINE_VERSION, Ratio, RecencyBaseline, RunStatus, StatisticsError, StoppingRule,
+    analyze, arm_miss_asymmetry, cluster_bootstrap_interval, eval_run_id, intraclass_correlation,
+    pair_table_digest, parse_analysis_family, parse_campaign_profile, run_icc_pilot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -79,6 +79,7 @@ fn family() -> AnalysisFamily {
         trials_k: 3,
         icc_pilot: pilot(300),
         transfer_criterion: None,
+        capture: eval_core::CaptureDeclaration::OFF,
     }
 }
 
@@ -407,6 +408,10 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
                 })
             }),
         ),
+        (
+            "capture",
+            Box::new(|f| f.capture.memory_capture = CaptureSwitch::On),
+        ),
     ];
     for (label, edit) in edits {
         let mut edited = family.clone();
@@ -473,7 +478,18 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
         no_repeats.validate(),
         Err(StatisticsError::EmptyFamilyField)
     );
-    // A version-1 document is reported by its schema, not by the field it lacks.
+    // Older documents are reported by their schema, not by a field they lack:
+    // version 2 carries no `capture`, which the schema check reads first.
+    assert_eq!(ANALYSIS_FAMILY_SCHEMA, "eval-analysis-family/v3");
+    let mut v2 = value.clone();
+    v2["schema"] = json!("eval-analysis-family/v2");
+    v2.as_object_mut().unwrap().remove("capture");
+    assert_eq!(
+        parse_analysis_family(&v2),
+        Err(StatisticsError::SchemaMismatch {
+            found: "eval-analysis-family/v2".to_string()
+        })
+    );
     let mut v1 = value.clone();
     v1["schema"] = json!("eval-analysis-family/v1");
     v1.as_object_mut().unwrap().remove("transfer_criterion");
@@ -1919,5 +1935,171 @@ fn the_frozen_family_owns_the_transfer_criterion() {
         family.digest().unwrap(),
         ruled.digest().unwrap(),
         "the criterion is part of what the family freezes"
+    );
+}
+
+/// `family` with the given switches, and a completed manifest that froze it
+/// and declares `config` under `config.capture` (absent for `None`).
+fn captured(family: &AnalysisFamily, config: Option<Value>) -> (Manifest, Vec<PairOutcome>) {
+    let pairs = pairs_at_threshold();
+    let frozen = FrozenFamily::freeze(family).unwrap();
+    let mut manifest = recorded(&frozen, arm_rates("0", "0"), &pairs);
+    if let Some(config) = config {
+        manifest.run_identity.config[CAPTURE_CONFIG_KEY] = config;
+    }
+    manifest.eval_run_id = eval_run_id(&manifest.run_identity).unwrap();
+    (manifest, pairs)
+}
+
+fn declaration(source: CaptureSwitch, memory: CaptureSwitch) -> CaptureDeclaration {
+    CaptureDeclaration {
+        source_capture: source,
+        memory_capture: memory,
+        ..CaptureDeclaration::OFF
+    }
+}
+
+#[test]
+fn capture_declarations_separate_families_and_the_run_copy_must_agree() {
+    use CaptureSwitch::{Off, On};
+    let with = |capture: CaptureDeclaration| AnalysisFamily {
+        capture,
+        ..family()
+    };
+    let config = |capture: CaptureDeclaration| Some(serde_json::to_value(capture).unwrap());
+    let off_on = with(declaration(Off, On));
+    let off_off = with(declaration(Off, Off));
+
+    // Runs differing only in `memory_capture` have different run ids and
+    // family digests, and neither report reads under the other's family.
+    let (memory_on, pairs) = captured(&off_on, config(declaration(Off, On)));
+    let (memory_off, _) = captured(&off_off, config(declaration(Off, Off)));
+    assert_ne!(memory_on.eval_run_id, memory_off.eval_run_id);
+    assert_ne!(off_on.digest().unwrap(), off_off.digest().unwrap());
+    for (manifest, family) in [(&memory_on, &off_off), (&memory_off, &off_on)] {
+        assert!(matches!(
+            analyze(manifest, family, &pairs),
+            Err(StatisticsError::FamilyChangedAfterResults { recorded, found })
+                if Some(&recorded) == manifest.analysis_family_digest.as_ref() && found != recorded
+        ));
+    }
+    assert!(matches!(
+        analyze(&memory_on, &off_on, &pairs),
+        Ok(Analysis::Report(_))
+    ));
+    assert!(matches!(
+        analyze(&memory_off, &off_off, &pairs),
+        Ok(Analysis::Report(_))
+    ));
+    // An absent key is an undeclared run, which agrees with both switches off.
+    let (undeclared, _) = captured(&off_off, None);
+    assert!(matches!(
+        analyze(&undeclared, &off_off, &pairs),
+        Ok(Analysis::Report(_))
+    ));
+
+    // The family's typed copy is authoritative: a run copy that differs is
+    // refused after the freeze check passes, and so is an absent key beside a
+    // family that captures.
+    for (family, run, expected) in [
+        (
+            with(declaration(On, On)),
+            config(declaration(On, Off)),
+            Some(declaration(On, Off)),
+        ),
+        (
+            off_off.clone(),
+            config(declaration(Off, On)),
+            Some(declaration(Off, On)),
+        ),
+        (with(declaration(On, Off)), None, None),
+        (off_on.clone(), None, None),
+    ] {
+        let (manifest, pairs) = captured(&family, run);
+        assert_eq!(
+            analyze(&manifest, &family, &pairs).err(),
+            Some(StatisticsError::CaptureDeclarationMismatch {
+                config: expected,
+                family: family.capture,
+            })
+        );
+    }
+    // The freeze check runs first: an edited family is refused as edited even
+    // when its declaration also disagrees.
+    let mut edited = off_off.clone();
+    edited.exclusions.push("post hoc".into());
+    let (manifest, pairs) = captured(&off_off, config(declaration(On, On)));
+    assert!(matches!(
+        analyze(&manifest, &edited, &pairs),
+        Err(StatisticsError::FamilyChangedAfterResults { .. })
+    ));
+
+    // A run that captures with no frozen family never reaches the family gate;
+    // an undeclared or all-off run without one still reads as unrecorded.
+    let mut unfrozen = support::manifest();
+    unfrozen.run_identity.config[CAPTURE_CONFIG_KEY] =
+        serde_json::to_value(declaration(Off, On)).unwrap();
+    unfrozen.eval_run_id = eval_run_id(&unfrozen.run_identity).unwrap();
+    assert_eq!(
+        analyze(&unfrozen, &off_on, &pairs).err(),
+        Some(StatisticsError::InvalidManifest(
+            ManifestError::CaptureOnWithoutFrozenFamily
+        ))
+    );
+    unfrozen.run_identity.config[CAPTURE_CONFIG_KEY] =
+        serde_json::to_value(CaptureDeclaration::OFF).unwrap();
+    unfrozen.eval_run_id = eval_run_id(&unfrozen.run_identity).unwrap();
+    unfrozen.validate().unwrap();
+    assert_eq!(
+        analyze(&unfrozen, &off_off, &pairs).err(),
+        Some(StatisticsError::FamilyNotRecorded)
+    );
+
+    // A family document's declaration is closed like the run's copy.
+    let mut value = serde_json::to_value(&off_on).unwrap();
+    assert_eq!(parse_analysis_family(&value).unwrap(), off_on);
+    value["capture"]["memory_capture"] = json!("On");
+    assert!(matches!(
+        parse_analysis_family(&value),
+        Err(StatisticsError::Shape(_))
+    ));
+    value.as_object_mut().unwrap().remove("capture");
+    assert!(matches!(
+        parse_analysis_family(&value),
+        Err(StatisticsError::Shape(_))
+    ));
+}
+
+/// `docs/evaluator.md` is a test input: every `eval-analysis-family/vN`
+/// literal names the current version and the version history names the field
+/// the current version added. The digest protocol literal
+/// `eval-analysis-family-digest/v1` versions separately.
+#[test]
+fn evaluator_document_names_the_current_analysis_family_literal() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/evaluator.md");
+    let doc = std::fs::read_to_string(&path).expect("read docs/evaluator.md");
+    let (prefix, version) = ANALYSIS_FAMILY_SCHEMA
+        .rsplit_once("/v")
+        .expect("schema literal ends in a version");
+    let opening = format!("`{prefix}/");
+    let mut named = 0;
+    for (offset, _) in doc.match_indices(&opening) {
+        let literal = doc[offset + 1..]
+            .split('`')
+            .next()
+            .expect("a backtick opens a literal");
+        assert_eq!(
+            literal, ANALYSIS_FAMILY_SCHEMA,
+            "stale family literal `{literal}`"
+        );
+        named += 1;
+    }
+    assert!(
+        named > 0,
+        "evaluator document names no `{ANALYSIS_FAMILY_SCHEMA}`"
+    );
+    assert!(
+        doc.contains(&format!("version {version} added `capture`")),
+        "evaluator document lacks the version {version} history"
     );
 }

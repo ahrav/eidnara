@@ -10,14 +10,14 @@ use context_core::canonical_json::{ContractError, canonical_json_encode, protoco
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::capture::CaptureDeclaration;
 use crate::claim::{
     AnchorSet, ClaimDerivation, TransferCriterion, UnmetClause, WorldProvenance, derive_claim_class,
 };
 use crate::manifest::{ArmRates, Manifest, ManifestError, RunStatus, is_canonical_decimal};
 
-/// Version 2 added `transfer_criterion`, so the rule a transfer claim must
-/// meet is part of what the family freezes.
-pub const ANALYSIS_FAMILY_SCHEMA: &str = "eval-analysis-family/v2";
+/// The family freezes `transfer_criterion` and `capture`.
+pub const ANALYSIS_FAMILY_SCHEMA: &str = "eval-analysis-family/v3";
 /// The gates a report carries; a frozen family declares exactly these.
 pub const GATE_ENDPOINTS: [&str; 3] = ["quality_loss", "harm", "floor"];
 /// The two arms of every pair, the keys `arm_rates` must carry.
@@ -597,6 +597,9 @@ pub struct AnalysisFamily {
     /// The approved rule a transfer claim must meet; `None` pins every
     /// report under this family to `generated_phase1`.
     pub transfer_criterion: Option<TransferCriterion>,
+    /// The authoritative capture declaration; the copy under
+    /// `run_identity.config.capture` must equal it at paired analysis.
+    pub capture: CaptureDeclaration,
 }
 
 impl AnalysisFamily {
@@ -745,6 +748,15 @@ impl AnalysisFamily {
 }
 
 pub fn parse_analysis_family(value: &Value) -> Result<AnalysisFamily, StatisticsError> {
+    // The literal decides the field set, so an older document is refused by
+    // its schema before a field it lacks can fail decoding.
+    if let Some(found) = value.get("schema").and_then(Value::as_str)
+        && found != ANALYSIS_FAMILY_SCHEMA
+    {
+        return Err(StatisticsError::SchemaMismatch {
+            found: found.to_string(),
+        });
+    }
     let family: AnalysisFamily = serde_json::from_value(value.clone())
         .map_err(|error| StatisticsError::Shape(error.to_string()))?;
     family.validate()?;
@@ -1172,6 +1184,13 @@ pub fn analyze(
     }
     let frozen = FrozenFamily::from_manifest(manifest)?;
     frozen.check(family)?;
+    let declared = manifest.capture_declaration()?;
+    if declared.unwrap_or(CaptureDeclaration::OFF) != family.capture {
+        return Err(StatisticsError::CaptureDeclarationMismatch {
+            config: declared,
+            family: family.capture,
+        });
+    }
     if let Some(blocked) = family.is_blocked() {
         return Ok(Analysis::Blocked(blocked));
     }
@@ -1320,6 +1339,13 @@ pub enum StatisticsError {
         found: String,
     },
     FamilyNotRecorded,
+    /// The manifest's `config.capture` copy differs from the frozen family's
+    /// declaration; `config: None` is an undeclared run, which agrees only
+    /// with both switches `off`.
+    CaptureDeclarationMismatch {
+        config: Option<CaptureDeclaration>,
+        family: CaptureDeclaration,
+    },
     PilotTooSmall,
     PilotInconsistent,
     PlanBelowRequiredN {
