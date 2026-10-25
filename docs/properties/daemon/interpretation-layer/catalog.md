@@ -56,12 +56,12 @@ evidence, not proof.
   `transform.rs:4067` and `:4451`). The m0 composer reads project documents with
   `inject_docs: true` (`config.rs:162`).
 - `explicit-config-only`: capture runs only when `source_capture_enabled` is
-  set (`config.rs:152` defaults it false; `sc.rs:267-278` gates on it). The
+  set (`config.rs:152` defaults it false; `sc.rs:283-294` gates on it). The
   summarizer `TC:` line runs only on the history-summarizer path, which needs a
   non-empty model chain: `model_chain` defaults empty (`config.rs:147`),
   `eidnara_folds` requires it (`config.rs:187-191`),
   `prepare_history_summarizer_with` returns before the trigger estimate when
-  `eidnara_folds` is false (`crates/daemon/src/lib.rs:9813`), and the firing
+  `eidnara_folds` is false (`crates/daemon/src/lib.rs:9814`), and the firing
   assembler returns `NoModels` (`history_summarizer_chunk.rs:860-864`).
 - `test-only`: none.
 
@@ -75,7 +75,7 @@ evidence, not proof.
 | [il-exit-code-only-for-opencode-bash](#il-exit-code-only-for-opencode-bash) | A | safety | explicit-config-only | always | yes | active |
 | [il-truncated-flag-read-per-harness](#il-truncated-flag-read-per-harness) | A | safety | explicit-config-only | always | partial | active |
 | [il-path-arg-key-order-first-match](#il-path-arg-key-order-first-match) | A | safety | default-production | always | yes | active |
-| [il-repository-id-equals-project-id-at-head](#il-repository-id-equals-project-id-at-head) | A | safety | explicit-config-only | always | partial | active |
+| [il-repository-id-equals-project-id-at-head](#il-repository-id-equals-project-id-at-head) | A | safety | explicit-config-only | always | partial | invalidated |
 | [il-tool-name-matching-differs-across-consumers](#il-tool-name-matching-differs-across-consumers) | A | safety | default-production | always | yes | active |
 | [il-doc-read-nofollow-final-component-flat-list](#il-doc-read-nofollow-final-component-flat-list) | A | safety | default-production | always | partial | active |
 | [il-reduced-tool-call-carries-extracted-path](#il-reduced-tool-call-carries-extracted-path) | A (queued) | safety | default-production | always | not yet | active |
@@ -117,12 +117,12 @@ Open questions: None.
 ### il-adapter-refusal-is-per-message
 
 Type: safety
-Reachability: explicit-config-only - `opencode_units_within` and `pi_units_within` have one production caller, `CaptureJob::units` (`sc.rs:1027-1057`), behind `consents` (`sc.rs:267-278`).
+Reachability: explicit-config-only - `opencode_units_within` and `pi_units_within` have one production caller, `CaptureJob::units` (`sc.rs:1131-1161`), behind `consents` (`sc.rs:283-294`).
 Status: active
 Exercised: partial - `hs-tests:445` (Pi tool result with an `image` item refuses as `UnsupportedShape("tool result item")`), `:782`, `:795`, `:1130`; `sc-tests:820`, `:1316`, `:1319` count refused records; `replay:93` `every_frozen_session_reconciles_with_no_unclassified_loss` replays the frozen Pi session's image-bearing tool result, asserts the adapter refused it, and asserts the reader classifies it `non_text_item`. No test holds an OpenCode message whose text parts sit beside a settled tool part with a non-string output.
 Guarantee: An adapter decides a whole native record at once: any refusal arm reached while reading a record returns `Err(AdapterRefusal)` and the record yields zero units, including units already built from earlier parts, and the pass counts that record once in `adapter_refused`.
-Check: `always` - for every record the adapter returns `Ok(Some(units))`, `Ok(None)` (budget stop through `Kept::keep`, `hs.rs:321`, `:354`, `:435`, `:443`, `:454`), or `Err(_)` with no unit; the `?` arms at `hs.rs:313`, `:327`, `:340`, `:343`, `:351`, `:424`, `:431`, `:433`, `:452` return before `kept.units` is read, and `sc.rs:1049` counts each `Err` once, added at `:1052-1055`. `always` because each call is a pure function of one record.
-Fault/timing angle: shape-driven. A budget stop (`Ok(None)`) discards that record's earlier units and ends the pass; refusals seen earlier in the stopped pass are still counted (`sc.rs:1043-1055`).
+Check: `always` - for every record the adapter returns `Ok(Some(units))`, `Ok(None)` (budget stop through `Kept::keep`, `hs.rs:321`, `:354`, `:435`, `:443`, `:454`), or `Err(_)` with no unit; the `?` arms at `hs.rs:313`, `:327`, `:340`, `:343`, `:351`, `:424`, `:431`, `:433`, `:452` return before `kept.units` is read, and `sc.rs:1153` counts each `Err` once, added at `:1156-1159`. `always` because each call is a pure function of one record.
+Fault/timing angle: shape-driven. A budget stop (`Ok(None)`) discards that record's earlier units and ends the pass; refusals seen earlier in the stopped pass are still counted (`sc.rs:1147-1159`).
 Required faults and enabling state: a Pi `toolResult` with a text item and a non-text item; an OpenCode message with a text part and a settled tool part whose `state.output` is not a string; an OpenCode text part whose `text` is not a string beside other text parts.
 Confidence: high - [evidence](evidence/il-adapter-refusal-is-per-message.md). Code read in full at `41d889ea4`; both refusal shapes matched to tests.
 Existing check: `hs-tests:445`, `:782`, `:795`, `:1130`; `sc-tests:820`, `:1316`; `replay:93`; all unaudited.
@@ -195,18 +195,18 @@ Open questions:
 ### il-repository-id-equals-project-id-at-head
 
 Type: safety
-Reachability: explicit-config-only - `plan_document` (`sc.rs:945`) runs inside `capture_documents` (`sc.rs:866`) under consent with `inject_docs` set.
-Status: active - U7 ([#1112](https://github.com/ahrav/eidnara/issues/1112)) invalidates it by deriving `repository_id` from the repository; kept so that change has a named predecessor.
+Reachability: explicit-config-only - `plan_document` (`sc.rs:1048`) runs inside `capture_documents` (`sc.rs:891`) under consent with `inject_docs` set.
+Status: invalidated - U7 ([#1112](https://github.com/ahrav/eidnara/issues/1112)) derives `repository_id` from the repository (`crates/daemon/src/repository_identity.rs:53`, used at `sc.rs:1070`); the project digest remains the value only as the fallback. Kept so that change has a named predecessor.
 Exercised: partial - the document tests at `sc-tests:1964`, `:2137`, `:2202`, and `:2276` assert identity fields one by one; no test asserts the equality as such, and none holds two checkouts of one repository.
-Guarantee: Every `RepositoryDocuments` unit the capture path builds carries the identity `[("project_id", P), ("repository_id", P), ("relative_path", name)]` with `P` the bound project digest and `name` a `PROJECT_DOC_FILES` entry, and the live-row lookup, the unchanged check, the head read, and retirement all key on that tuple.
-Check: `always` - `sc.rs:964-968` builds the vector with `project_id` twice; `sc.rs:969` `document_lineage(&identity)`; `sc.rs:971-973` filters the live row to `CAPTURE_DOMAIN_ID`; `sc.rs:902` retires by the live row's `object_id` through `retire_document` (`sc.rs:999`). `always` because the construction is unconditional.
+Guarantee: Before U7, every `RepositoryDocuments` unit the capture path built carried the identity `[("project_id", P), ("repository_id", P), ("relative_path", name)]` with `P` the bound project digest and `name` a `PROJECT_DOC_FILES` entry, and the live-row lookup, the unchanged check, the head read, and retirement all key on that tuple.
+Check: `always` - before U7 the identity vector at `sc.rs:1068-1072` held `project_id` twice; it now holds the derived value; `sc.rs:1073` `document_lineage(&identity)`; `sc.rs:1075-1077` filters the live row to `CAPTURE_DOMAIN_ID`; `sc.rs:981` retires by the live row's `object_id` through `retire_document` (`sc.rs:1103`). `always` because the construction is unconditional.
 Fault/timing angle: none at HEAD. Once `repository_id` is derived, the value depends on repository history, which is why U7 adds a retire-by-`relative_path` step.
 Required faults and enabling state: two worktrees or clones holding the same `ARCHITECTURE.md`; a legacy row keyed `(P, P, path)` present when the first derived-identity pass runs.
-Confidence: high - [evidence](evidence/il-repository-id-equals-project-id-at-head.md). Code read at `41d889ea4`.
-Existing check: `sc-tests:1964`, `:2137`, `:2202`, `:2276`; `crates/kernel/tests/eval_identity.rs` pins the encoding, not the value; unaudited.
+Confidence: high - [evidence](evidence/il-repository-id-equals-project-id-at-head.md). Code read at `41d889ea4` and re-read after U7.
+Existing check: the U7 successors `sc-tests:2739` (AE2 and restart convergence), `sc-tests:2780` (a crash between retire and publish), `sc-tests:2814` (AE3, two worktrees), `sc-tests:2863` (a failed derivation), `sc-tests:2915` (a shallow checkout), and `crates/daemon/src/repository_identity_tests.rs`; `crates/kernel/tests/eval_identity.rs` pins the encoding, not the value; unaudited.
 Impact: worktrees and clones split every document lineage. After U7 the obligations are the `ri-` records of #1105 Part B S3.
 Open questions:
-- A history walk that exceeds its cap on one pass and not the next would flip the derived identity; U7's stability scenario fixes the history. (unresolved, OQ1 owns the cap)
+- A history walk that exceeds its cap on one pass and not the next would flip the derived identity. U7 memoizes the past-the-cap fallback for the incarnation, so a flip waits for a restart; the cap is `MAX_ROOT_WALK_COMMITS` (2^18, OQ1).
 
 ### il-tool-name-matching-differs-across-consumers
 
@@ -231,7 +231,7 @@ Status: active - U8 ([#1113](https://github.com/ahrav/eidnara/issues/1113)) revi
 Exercised: partial - `pd.rs:244` (final-component symlink), `:267` (growth under the read), `:304` (`Missing` versus `Unreadable`), `:318` (oversize); `sc-tests:2315` `unreadable_documents_are_counted_and_retire_nothing`. No test opens a document through a symlinked parent because no name has a parent below the root.
 Guarantee: Each document is opened at `project_root.join(name)` for the fixed names with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, validated as a regular file on the opened descriptor, read to at most 256 KiB, and decoded as UTF-8; the names hold no separator, so the only resolvable symlink on the path is the project root itself.
 Check: `always` - `pd.rs:9` list; `pd.rs:178` `dir.join(filename)`; `config.rs:703-719` open flags and `is_file` on the descriptor; `pd.rs:113-133` classification. `always` because the read is unconditional per name.
-Fault/timing angle: a parent-directory swap before the open is outside `NOFOLLOW`, and at HEAD the only parent is the root. `read_document` classifies a `NotFound` open as `Missing` when `std::fs::metadata(parent)` is a directory (`pd.rs:117-122`), and `metadata` follows symlinks; under nested names a missing target under a symlinked parent would classify `Missing` and `plan_document` would retire the live row (`sc.rs:974-980`). U8's resolver must cover the classification path as well as the open.
+Fault/timing angle: a parent-directory swap before the open is outside `NOFOLLOW`, and at HEAD the only parent is the root. `read_document` classifies a `NotFound` open as `Missing` when `std::fs::metadata(parent)` is a directory (`pd.rs:117-122`), and `metadata` follows symlinks; under nested names a missing target under a symlinked parent would classify `Missing` and `plan_document` would retire the live row (`sc.rs:1078-1084`). U8's resolver must cover the classification path as well as the open.
 Required faults and enabling state: a symlinked final component (covered); a symlinked intermediate directory with and without a target file (unreachable at HEAD; U8 scenarios); a kernel without `openat2`.
 Confidence: high - [evidence](evidence/il-doc-read-nofollow-final-component-flat-list.md). Code read; flags verified at `41d889ea4`.
 Existing check: `pd.rs:244`, `:267`, `:304`, `:318`, `:387`, `:398`, `:429`; `sc-tests:2315`; unaudited.
@@ -289,7 +289,7 @@ Type: safety
 Reachability: explicit-config-only - batch ingest under consent; the block arises only after an operator purge.
 Status: invalidated - U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) refuses a blocked unit alone in the screening preview (`hs.rs:1594-1599`). Kept so the `sc-readmit-` obligations have a named predecessor.
 Exercised: not yet - the behavior no longer exists for a block present at the screening preview; the path it describes remains for a purge that commits after that preview, which `sc-tests:2561` exercises.
-Guarantee: Before U6, a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1483-1485`), the pass counts `kernel_error` (`sc.rs:1312-1317`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:827-852`), so the batch is retried whole on each later pass while the block holds.
+Guarantee: Before U6, a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1483-1485`), the pass counts `kernel_error` (`sc.rs:1458-1463`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:851-876`), so the batch is retried whole on each later pass while the block holds.
 Check: `always` - a batch holding one tombstoned or pending-unlink digest ends `kernel_error` with every keyed unit pending and nothing retained. `always` because the Kernel check runs on every new reference.
 Fault/timing angle: a purge committed before the pass; the block outlives the pending unlink because every pending unlink is written with a tombstone.
 Required faults and enabling state: an operator purge of a captured digest, then identical bytes under a new identity beside a sibling.
@@ -410,7 +410,7 @@ Confidence: medium - [evidence](evidence/il-literal-classified-contract-or-vocab
 Existing check: none beyond the table; unaudited.
 Impact: an unclassified literal is moved into or out of the module by habit, and the gate's set drifts from the classification.
 Open questions:
-- These Eidnara-owned spellings are not defined once: `synthetic_todo_` (`injection.rs:20`, `codec/opencode.rs:1074`) and the `eidnara_note` actions `read` and `dismiss` (`tv.rs:37`, `lib.rs:12853`, `:13170`, `:18608`, `crates/daemon/src/conditional_note_evaluation.rs:1905`). Define each once and reference it, or accept the spellings? (needs human input: daemon owner)
+- These Eidnara-owned spellings are not defined once: `synthetic_todo_` (`injection.rs:20`, `codec/opencode.rs:1074`) and the `eidnara_note` actions `read` and `dismiss` (`tv.rs:37`, `lib.rs:12854`, `:13171`, `:18609`, `crates/daemon/src/conditional_note_evaluation.rs:1905`). Define each once and reference it, or accept the spellings? (needs human input: daemon owner)
 Falsifier or legal witness: Falsifier: `state.metadata.exit` recorded as contract. Legal witness: `info` contract, `filePath` vocabulary, `eidnara_note` Eidnara-owned.
 
 ### il-path-arg-harness-neutral

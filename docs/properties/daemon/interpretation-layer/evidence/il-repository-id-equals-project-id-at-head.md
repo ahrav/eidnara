@@ -7,13 +7,13 @@ project digest into both identity fields.
 
 ## Evidence trail
 
-- `crates/daemon/src/source_capture.rs:945-996` `plan_document`; the identity
-  vector at `:964-968` holds `("project_id", P)`, `("repository_id", P)`, and
+- `crates/daemon/src/source_capture.rs:1048-1100` `plan_document`; the identity
+  vector at `:1068-1072` holds `("project_id", P)`, `("repository_id", P)`, and
   `("relative_path", name)`.
-- `:969` derives the lineage from that identity; `:971-973` reads the live row
-  and keeps it only for `CAPTURE_DOMAIN_ID` (`source_capture.rs:48`).
-- A missing document retires the live row (`:974-980`) through
-  `retire_document` (`:999-1016`), called from `capture_documents` at `:902`.
+- `:1073` derives the lineage from that identity; `:1075-1077` reads the live row
+  and keeps it only for `CAPTURE_DOMAIN_ID` (`source_capture.rs:51`).
+- A missing document retires the live row (`:1078-1084`) through
+  `retire_document` (`:1103-1120`), called from `capture_documents` at `:981`.
 - `crates/kernel/tests/eval_identity.rs` pins the identity encoding, not the
   values.
 
@@ -48,3 +48,14 @@ assertion over both lineages' identities; the U7 tests replace it.
   near the root count.
 - Missing evidence: the cap value.
 - Conclusion: unresolved, needs OQ1's decision.
+
+### Q: What does U7 change?
+- Sources examined: `crates/daemon/src/repository_identity.rs:53`;
+  `crates/daemon/src/source_capture.rs:1024`, `:945`, `:1070`, `:1420`; the U7 tests.
+- Findings: the identity's `repository_id` is `git:` and the smallest root
+  commit reachable from HEAD, or the project digest as a deterministic
+  fallback, memoized per project for the incarnation. A pass retires every
+  live capture-domain row of a settled path under another `repository_id`
+  before it publishes.
+- Missing evidence: none.
+- Conclusion: resolved with answer: the record is invalidated.

@@ -15,12 +15,12 @@ unnamed batch conflict, which the plan's R16 replaces.
   `ReAdmissionBlocked` (`crates/kernel/src/cas/ingest.rs:461-468`, `:1151-1153`).
 - `BatchRefusal::conflicting_unit` (`harness_sources.rs:1483-1485`) is `None`
   when `unit` is `None`.
-- `publish_locked` (`crates/daemon/src/source_capture.rs:827-852`) records
+- `publish_locked` (`crates/daemon/src/source_capture.rs:851-876`) records
   every keyed unit `Pending` and ends with `kernel_end`, which counts
-  `kernel_error` (`source_capture.rs:1312-1317`).
+  `kernel_error` (`source_capture.rs:1458-1463`).
 - `is_permanent` lists `ReAdmissionBlocked` (`harness_sources.rs:578`), and
   `classify` maps a permanent refusal to `units_refused_terminal`
-  (`source_capture.rs:1111-1113`); neither is reached on this path.
+  (`source_capture.rs:1215-1217`); neither is reached on this path.
 
 ## Failure scenario
 

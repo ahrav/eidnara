@@ -18,8 +18,8 @@ updated for the checks U1 to U4 landed; code references verified at
 | F-b3 `step-start`, `reasoning`, `file`, `ignored` text, running or pending tool, interrupted tool | frozen OpenCode session; synthetic sessions in `replay` | il-unknown-part-kind-skipped-uncounted | partly: `replay:93`, `:225`, `:345` |
 | F-b4 second pass after the turn completes | two-pass capture test | il-unknown-part-kind-skipped-uncounted | yes for text: `hs-tests:922` |
 | F-b5 purged digest re-offered beside a sibling | Kernel purge, then a capture pass | il-readmission-block-ends-batch-unnamed-at-head | yes, by U6: `sc-tests:2514`, `:2561`, `:2607`, `:2631`; `hs-tests:2555` |
-| F-c1 legacy `(P, P, path)` live row, then a derived-identity pass | seeded Kernel row plus a `git init` root | il-repository-id-equals-project-id-at-head | no (U7) |
-| F-c2 two worktrees of one repository | the U1 materializer with a worktree | il-repository-id-equals-project-id-at-head | no (U7) |
+| F-c1 legacy `(P, P, path)` live row, then a derived-identity pass | seeded Kernel row plus a `git init` root | il-repository-id-equals-project-id-at-head | yes, by U7: `sc-tests:2739`, `:2780`, `:2915` |
+| F-c2 two worktrees of one repository | the U1 materializer with a worktree | il-repository-id-equals-project-id-at-head | yes, by U7: `sc-tests:2814` |
 | F-c3 symlinked intermediate directory with and without a target; no `openat2` | U8 fixtures; a mocked syscall | il-doc-read-nofollow-final-component-flat-list | no (U8) |
 | F-d1 a distinctive literal added to a production file | a scratch tree | il-gate-fails-on-distinctive-literal-outside-module, il-vocabulary-literals-live-in-one-module | yes: `scripts/forbid-tool-literals.test.ts` |
 | F-d2 a golden diff in a move-only change | the PR base | il-dedup-removal-leaves-goldens-byte-identical | yes: `git diff a91dbc2b6 97afdaff1 -- crates/daemon/testdata` is empty |
@@ -52,4 +52,4 @@ Each marker asserts preconditions, never the violation.
    il-tool-summary-description-precedes-key-arg.
 5. A Pi session whose tool output passes the harness's own limit: gives
    il-truncated-flag-read-per-harness a harness-produced witness.
-6. The U7 and U8 fixtures (F-c1 to F-c3): owned by those units.
+6. The U8 fixtures (F-c3): owned by that unit.

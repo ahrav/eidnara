@@ -19,9 +19,9 @@ every sibling unit of its message.
 - Budget stop: `Kept::keep` (`harness_sources.rs:463-482`) returns `false`
   when the copy budget refuses; the adapter returns `Ok(None)` at `:321`,
   `:354`, `:435`, `:443`, or `:454`.
-- Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1027-1057`)
-  counts each `Err` once (`:1049`) and adds the count to `adapter_refused`
-  (`:1052-1055`), also when a later record stops the pass (`:1045-1048`).
+- Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1131-1161`)
+  counts each `Err` once (`:1153`) and adds the count to `adapter_refused`
+  (`:1156-1159`), also when a later record stops the pass (`:1149-1152`).
 - U3: `crates/daemon/tests/source_corpus_replay.rs:93` asserts that the frozen
   Pi session's image-bearing tool result is among `refused_records` and that
   the reader classifies it `non_text_item`.
