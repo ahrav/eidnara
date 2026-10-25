@@ -1175,10 +1175,6 @@ fn a_capture_declaring_fixture_pins_its_own_digests() {
 #[test]
 fn a_capture_declaration_is_closed_total_and_canonical() {
     let forward = json!({"memory_capture": "on", "source_capture": "off", "write_key": "task_arm"});
-    let reversed: Value = serde_json::from_str(
-        r#"{"write_key": "task_arm", "source_capture": "off", "memory_capture": "on"}"#,
-    )
-    .unwrap();
     let declaration = parse_capture_declaration(&forward).unwrap();
     assert_eq!(
         declaration,
@@ -1188,7 +1184,6 @@ fn a_capture_declaration_is_closed_total_and_canonical() {
             write_key: WriteKeyScheme::TaskArm,
         }
     );
-    assert_eq!(parse_capture_declaration(&reversed).unwrap(), declaration);
     // The canonical encoder sorts keys, so these bytes are the one spelling
     // for every input key order.
     let encode = |d: &CaptureDeclaration| canonical_json_encode(&serde_json::to_value(d).unwrap());

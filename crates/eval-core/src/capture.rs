@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 /// The `run_identity.config` key holding the run's copy of the declaration.
 pub const CAPTURE_CONFIG_KEY: &str = "capture";
 
+/// One capture switch, spelled `on` or `off` on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureSwitch {
@@ -22,6 +23,7 @@ pub enum WriteKeyScheme {
     TaskArm,
 }
 
+/// The three-field capture policy an analysis family freezes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureDeclaration {
