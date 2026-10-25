@@ -15,6 +15,7 @@ use crate::campaign::{
     Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError, RunProfile, SampleError,
     SampleLedger, SkipReason, Terminal, TerminalRates, UnsupportedReason,
 };
+use crate::ceiling::{CeilingDeclaration, CeilingError};
 use crate::census::{EvaluatedSurface, Reachability};
 use crate::claim::{AnchorSet, ClaimDerivation, WorldProvenance};
 use crate::governance::HistoryPolicy;
@@ -30,7 +31,7 @@ use crate::statistics::{
     arm_miss_asymmetry, balanced_mean_cluster, deflate, lopsided_mean_cluster,
 };
 
-pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v1";
+pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v2";
 
 /// The query route and the packer carry the label `ChainStage::REACHABILITY`
 /// gives them: no production caller.
@@ -194,6 +195,10 @@ pub struct SuiteBReport {
     pub arm_rates: BTreeMap<String, ArmRates>,
     pub injection: Vec<InjectionScore>,
     pub envelope: Envelope,
+    /// Oracle ceilings declared on the run, each a diagnostic that travels
+    /// with its full declaration. `derive_claim_class`, the paired
+    /// marginals, the per-arm rates, and the run gates read none of them.
+    pub ceilings: Vec<CeilingDeclaration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +295,8 @@ pub enum ReportError {
     },
     /// The parsed value drops a field the input carried.
     Lossy,
+    Ceiling(CeilingError),
+    RepeatedCeiling(CeilingDeclaration),
     Profile(ProfileError),
     Samples(SampleError),
     Statistics(StatisticsError),
@@ -327,6 +334,12 @@ impl SuiteBReport {
         // The retained arm rates parse whatever the outcome; a suppression
         // that never reads them still publishes them.
         arm_miss_asymmetry(&self.arm_rates).map_err(ReportError::Statistics)?;
+        for (index, ceiling) in self.ceilings.iter().enumerate() {
+            ceiling.validate().map_err(ReportError::Ceiling)?;
+            if self.ceilings[..index].contains(ceiling) {
+                return Err(ReportError::RepeatedCeiling(ceiling.clone()));
+            }
+        }
         Ok(())
     }
 
