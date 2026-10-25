@@ -16,10 +16,10 @@ variant one snake-case name and lists every variant once in `ALL`.
 | Name | Variant | What it accounts for | Daemon counter or adapter step |
 | --- | --- | --- | --- |
 | `adapter_refused` | `AdapterRefused` | the adapter refused the unit's whole native record | `adapter_refused`, added once per refused record by `CaptureJob::units` (`source_capture.rs:1027-1057`, the add at `:1052-1055`) |
-| `unit_too_large` | `UnitTooLarge` | the unit exceeds the per-unit byte cap | `units_unit_too_large`, from `UnitDisposition::UnitTooLarge` (`harness_sources.rs:1542-1545`, `source_capture.rs:1106`) |
+| `unit_too_large` | `UnitTooLarge` | the unit exceeds the per-unit byte cap | `units_unit_too_large`, from `UnitDisposition::UnitTooLarge` (`harness_sources.rs:1557-1560`, `source_capture.rs:1106`) |
 | `deferred` | `Deferred` | the unit was still deferred after the last replayed pass | `units_deferred` (`source_capture.rs:1107`) |
-| `secret_bearing` | `SecretBearing` | the Kernel refused the unit as secret-bearing | `units_refused_terminal`, from `exact_text_refusal` in the pre-screen (`harness_sources.rs:1590-1593`) |
-| `re_admission_blocked` | `ReAdmissionBlocked` | the Kernel refused the unit's artifact as re-admission blocked | `units_refused_terminal`, from the pre-screen's re-admission check (`harness_sources.rs:1594-1599`); a purge committed between the screening preview and the commit reaches batch ingest, which reports `kernel_error` for that pass (below) |
+| `secret_bearing` | `SecretBearing` | the Kernel refused the unit as secret-bearing | `units_refused_terminal`, from `exact_text_refusal` in the pre-screen (`harness_sources.rs:1609-1612`) |
+| `re_admission_blocked` | `ReAdmissionBlocked` | the Kernel refused the unit's artifact as re-admission blocked | `units_refused_terminal`, from the pre-screen's re-admission check (`harness_sources.rs:1613-1619`, answered at `:1635-1648`); a purge committed between the screening read and the commit reaches batch ingest, which reports `kernel_error` for that pass (below) |
 | `refused_retryable` | `RefusedRetryable` | the unit was refused with a retryable cause on the last pass | `units_refused_retryable` (`source_capture.rs:1114`) |
 | `identity_conflict` | `IdentityConflict` | the unit's identity held a different digest | `units_identity_conflict` (`source_capture.rs:1108-1110`, and `:833-836` for the unit a batch conflict names) |
 | `superseded` | `Superseded` | a later revision of the same identity replaced the unit | `units_superseded` (`source_capture.rs:1115`) |
@@ -77,30 +77,37 @@ repository instead and retires a live row whose `repository_id` differs.
 
 ## Capture pre-screen dispositions at HEAD
 
-`publish_screened` (`harness_sources.rs:1512`) decides each unit inside one
-screening preview (`harness_sources.rs:1537-1615`, through
-`publish_screened_between` at `:1522`) before the batch reaches the Kernel, in
-this order:
+`publish_screened` (`harness_sources.rs:1520`) decides each unit in the
+screening loop (`harness_sources.rs:1551-1671`, through
+`publish_screened_between` at `:1530`) before the batch reaches the Kernel, in
+this order. The loop prepares and scans units with no Kernel reader held; it
+reads the scope in one preview (`:1573-1579`) and the admitted units' receipts
+and re-admission states together in another (`:1635-1645`). When that read
+blocks a unit, screening resumes at the first blocked unit with its admission
+slot released (`:1649-1670`).
 
 | Check | Location | Disposition | Counter (`classify`, `source_capture.rs:1097-1117`) |
 | --- | --- | --- | --- |
-| text past `MAX_SOURCE_UNIT_BYTES` | `harness_sources.rs:1542-1545` | `UnitTooLarge` | `units_unit_too_large`, terminal |
-| batch already full | `:1546-1549` | `Deferred` | `units_deferred`, pending |
-| `prepare` refuses identity or revision | `:1550-1556` | `Refused(refusal)` | terminal when `is_permanent` (`:573-592`), else retryable |
-| scope refuses a project unit | `:1557-1571` | `Refused(Kernel NotFound)` | `units_refused_retryable` |
-| second unit of an admitted lineage | `:1573-1582` | `Refused(IdentityReused)` when key equal and digest differs, else `Deferred` | `units_identity_conflict` or `units_deferred` |
-| batch unit or byte bound reached | `:1583-1589` | `Deferred` | `units_deferred` |
-| secret-bearing text | `:1590-1593` | `Refused(Artifact(kind))` | `units_refused_terminal` |
-| no stored descriptor receipt and a purge tombstone or pending unlink names the payload digest | `:1594-1599`, through `readmission_blocked` (`:1160-1172`) and `Preview::artifact_readmission_blocked` (`crates/kernel/src/cas/ingest.rs:1470-1475`) | `Refused(Artifact(ReAdmissionBlocked))` | `units_refused_terminal` |
+| text past `MAX_SOURCE_UNIT_BYTES` | `harness_sources.rs:1557-1560` | `UnitTooLarge` | `units_unit_too_large`, terminal |
+| batch already full | `:1561-1564` | `Deferred` | `units_deferred`, pending |
+| `prepare` refuses identity or revision | `:1565-1571` | `Refused(refusal)` | terminal when `is_permanent` (`:573-592`), else retryable |
+| scope refuses a project unit | `:1572-1590` | `Refused(Kernel NotFound)` | `units_refused_retryable` |
+| second unit of an admitted lineage | `:1592-1601` | `Refused(IdentityReused)` when key equal and digest differs, else `Deferred` | `units_identity_conflict` or `units_deferred` |
+| batch unit or byte bound reached | `:1602-1608` | `Deferred` | `units_deferred` |
+| secret-bearing text | `:1609-1612` | `Refused(Artifact(kind))` | `units_refused_terminal` |
+| no stored descriptor receipt, no evidence receipt under another request, and a purge tombstone or pending unlink names the payload digest | `:1613-1619`, through `readmission_blocked` (`:1160-1180`) and `Preview::artifact_readmission_blocked` (`crates/kernel/src/cas/ingest.rs:1470-1475`) | `Refused(Artifact(ReAdmissionBlocked))` | `units_refused_terminal` |
 
 A refused unit takes no admission slot. A unit with a stored descriptor
-receipt skips the re-admission check and replays. A digest whose only state is
+receipt skips the re-admission check and replays. A unit whose descriptor or
+evidence receipt holds another request passes the check, and the batch preview
+refuses it as an identity conflict (`harness_sources.rs:1294`, through
+`conflicting_unit` at `:1491`). A digest whose only state is
 a reclaiming reservation passes the check; batch ingest then refuses the whole
 batch with `KernelError::Conflict` naming no unit
 (`crates/kernel/src/cas/ingest.rs:822-827`; the batch contract at `:693`), the
 pass counts `kernel_error` (`source_capture.rs:1312-1317`), every keyed unit
 stays pending (`source_capture.rs:827-852`), so the reclaiming unit's siblings
-wait with it, and the units publish once reclamation finishes. A purge committed after the screening preview and before
-the commit takes the same path for one pass; the next pass's screening preview
+wait with it, and the units publish once reclamation finishes. A purge committed after the screening read and before
+the commit takes the same path for one pass; the next pass's screening read
 refuses the purged unit and its siblings publish. The test seam between the two
 is `SourceCapture::between_screen_and_commit` (`source_capture.rs:240-242`).

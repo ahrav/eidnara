@@ -13,7 +13,7 @@ unnamed batch conflict, which the plan's R16 replaces.
   batch contract says the error names no request
   (`crates/kernel/src/cas/ingest.rs:693`). The single ingest names
   `ReAdmissionBlocked` (`crates/kernel/src/cas/ingest.rs:461-468`, `:1151-1153`).
-- `BatchRefusal::conflicting_unit` (`harness_sources.rs:1483-1485`) is `None`
+- `BatchRefusal::conflicting_unit` (`harness_sources.rs:1491-1493`) is `None`
   when `unit` is `None`.
 - `publish_locked` (`crates/daemon/src/source_capture.rs:827-852`) records
   every keyed unit `Pending` and ends with `kernel_end`, which counts
@@ -57,12 +57,13 @@ pending, nothing retained.
 - Conclusion: resolved with answer.
 
 ### Q: What does U6 change?
-- Sources examined: `crates/daemon/src/harness_sources.rs:1594-1599` and
-  `:1160-1172`; `crates/kernel/src/cas/ingest.rs:1470-1475`; the U6 tests.
-- Findings: the screening preview refuses a unit with no stored descriptor
-  receipt whose payload digest is tombstoned or pending unlink, before the
-  commit and without an admission slot. A purge that commits after that
-  preview still reaches batch ingest and ends one pass `kernel_error`
+- Sources examined: `crates/daemon/src/harness_sources.rs:1613-1619`,
+  `:1635-1670`, and `:1160-1180`; `crates/kernel/src/cas/ingest.rs:1470-1475`; the U6 tests.
+- Findings: screening refuses a unit with no stored descriptor receipt, no
+  evidence receipt under another request, and a payload digest that is
+  tombstoned or pending unlink, before the commit and without an admission
+  slot. A purge that commits after that screening read still reaches batch
+  ingest and ends one pass `kernel_error`
   (`crates/daemon/src/source_capture_tests.rs:2561`).
 - Missing evidence: none.
 - Conclusion: resolved with answer: the record is invalidated.

@@ -150,13 +150,13 @@ Open questions: None. The source's question (daemon counter or oracle-side class
 Type: safety
 Reachability: explicit-config-only - `to.rs:21` `opencode` and `to.rs:59` `pi` have production callers only in the capture adapters (`hs.rs:350`, `:432`); the record enters a capture unit's request digest.
 Status: active
-Exercised: yes - `tv-tests:145` `exit_codes_come_only_from_opencode_bash_integers` runs every case of `crates/daemon/testdata/opencode-tool-outcome-trace.json` (OpenCode 1.19.0) and the string, float, `read`, and Pi cases; `tv-tests:17` `each_consumer_keeps_its_name_rule` holds `Bash` and every other spelling to `None`; `hs-tests:3524` `opencode_tool_outcomes_follow_the_pinned_trace`; `sc-tests:224-227` reads `exit_code` through the capture path.
+Exercised: yes - `tv-tests:145` `exit_codes_come_only_from_opencode_bash_integers` runs every case of `crates/daemon/testdata/opencode-tool-outcome-trace.json` (OpenCode 1.19.0) and the string, float, `read`, and Pi cases; `tv-tests:17` `each_consumer_keeps_its_name_rule` holds `Bash` and every other spelling to `None`; `hs-tests:3619` `opencode_tool_outcomes_follow_the_pinned_trace`; `sc-tests:224-227` reads `exit_code` through the capture path.
 Guarantee: `ToolOutcome.exit_code` is `Some(n)` only when the record is an OpenCode `tool` part whose `tool` equals `"bash"` exactly and whose `state.metadata.exit` is a JSON integer; every Pi record and every other OpenCode tool leaves it `None`.
 Check: `always` - `to.rs:31` calls `tool_vocabulary::exit_code(Harness::OpenCode, tool_name, metadata)`, which matches `EXIT_CODE_TOOL` exactly and reads `exit` with `as_i64` (`tv.rs:200-207`, the name at `tv.rs:35`); `to.rs:72` sets `exit_code: None` for Pi. `always` because the functions are pure over one record.
 Fault/timing angle: none.
 Required faults and enabling state: a `bash` part with an integer `exit`; with a null, string, or float `exit`; a non-`bash` part carrying `exit`.
 Confidence: high - [evidence](evidence/il-exit-code-only-for-opencode-bash.md). Code and tests read; the frozen OpenCode 1.18.22 session's four `bash` parts carry `exit` 0 three times and `exit: null` once.
-Existing check: `tv-tests:17`, `:145`; `hs-tests:3524`; `sc-tests:224`; unaudited.
+Existing check: `tv-tests:17`, `:145`; `hs-tests:3619`; `sc-tests:224`; unaudited.
 Impact: an exit code attributed to a tool whose `exit` means something else would enter the frozen request digest. The digest grammar's `[; exit=N]` (#1066 D9) is still not emitted (`to.rs:156-176`).
 Open questions: None. The source asked whether OpenCode 1.18.22 writes `metadata.exit` for `bash`; the frozen session (`crates/daemon/testdata/corpus/sessions/opencode-1.18.22/mix.json`) shows it does.
 
@@ -165,13 +165,13 @@ Open questions: None. The source asked whether OpenCode 1.18.22 writes `metadata
 Type: safety
 Reachability: explicit-config-only - same callers as the record above.
 Status: active
-Exercised: partial - `tv-tests:185` `truncation_flags_are_read_from_each_harness_field` reads both paths, a non-boolean value, and a missing flag on synthetic records; `hs-tests:3524` covers the OpenCode trace. No corpus session holds a Pi `details.truncation.truncated` value: none of the frozen Pi session's thirteen tool results (twelve captured; the image-bearing one is refused) has the flag.
+Exercised: partial - `tv-tests:185` `truncation_flags_are_read_from_each_harness_field` reads both paths, a non-boolean value, and a missing flag on synthetic records; `hs-tests:3619` covers the OpenCode trace. No corpus session holds a Pi `details.truncation.truncated` value: none of the frozen Pi session's thirteen tool results (twelve captured; the image-bearing one is refused) has the flag.
 Guarantee: `ToolOutcome.truncated` is read only as the boolean `state.metadata.truncated` on an OpenCode `tool` part and only as the boolean `details.truncation.truncated` on a Pi `toolResult`; any other shape leaves it unset.
 Check: `always` - `to.rs:37` and `to.rs:71` call `tool_vocabulary::truncated_flag`, which reads the pointer `/metadata/truncated` under `state` or `/details/truncation/truncated` under the message with `as_bool` (`tv.rs:212-218`). `always` because the functions are pure over one record.
 Fault/timing angle: none.
 Required faults and enabling state: an OpenCode `bash` part with `truncated: true`; a Pi `bash` `toolResult` with `details.truncation.truncated: true`; a non-boolean value at either path.
 Confidence: high - [evidence](evidence/il-truncated-flag-read-per-harness.md). Code read; the Pi side has no harness-produced fixture.
-Existing check: `tv-tests:185`; `hs-tests:3524`; unaudited.
+Existing check: `tv-tests:185`; `hs-tests:3619`; unaudited.
 Impact: the corpus report stratifies byte lengths by this flag; for Pi every result is `truncated=unknown` until a session truncates.
 Open questions:
 - Which Pi 0.80.2 tool output makes the harness write `details.truncation`? The frozen 70,000-byte Pi result carries no flag. (unresolved, needs a Pi session whose `bash` or `read` output passes the harness's own limit)
@@ -287,14 +287,14 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only - batch ingest under consent; the block arises only after an operator purge.
-Status: invalidated - U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) refuses a blocked unit alone in the screening preview (`hs.rs:1594-1599`). Kept so the `sc-readmit-` obligations have a named predecessor.
-Exercised: not yet - the behavior no longer exists for a block present at the screening preview; the path it describes remains for a purge that commits after that preview, which `sc-tests:2561` exercises.
-Guarantee: Before U6, a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1483-1485`), the pass counts `kernel_error` (`sc.rs:1312-1317`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:827-852`), so the batch is retried whole on each later pass while the block holds.
+Status: invalidated - U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) refuses a blocked unit alone during screening (`hs.rs:1613-1619`). Kept so the `sc-readmit-` obligations have a named predecessor.
+Exercised: not yet - the behavior no longer exists for a block present at the screening read; the path it describes remains for a purge that commits after that read, which `sc-tests:2561` exercises.
+Guarantee: Before U6, a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1491-1493`), the pass counts `kernel_error` (`sc.rs:1312-1317`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:827-852`), so the batch is retried whole on each later pass while the block holds.
 Check: `always` - a batch holding one tombstoned or pending-unlink digest ends `kernel_error` with every keyed unit pending and nothing retained. `always` because the Kernel check runs on every new reference.
 Fault/timing angle: a purge committed before the pass; the block outlives the pending unlink because every pending unlink is written with a tombstone.
 Required faults and enabling state: an operator purge of a captured digest, then identical bytes under a new identity beside a sibling.
 Confidence: high - [evidence](evidence/il-readmission-block-ends-batch-unnamed-at-head.md). Traced at `41d889ea4`, whose pre-screen held no re-admission check, and re-read after U6.
-Existing check: the U6 successors `sc-tests:2514` (AE5, tombstone and pending unlink), `sc-tests:2561` (a purge between the screening preview and the commit), `sc-tests:2607` (receipt replay precedence), `sc-tests:2631` (a reclaiming digest stays pending), `hs-tests:2555` (no admission slot), and `crates/kernel/tests/cas_fault_injection.rs:589` (the preview query); unaudited.
+Existing check: the U6 successors `sc-tests:2514` (AE5, tombstone and pending unlink), `sc-tests:2561` (a purge between screening and the commit), `sc-tests:2607` (receipt replay precedence), `sc-tests:2631` (a reclaiming digest stays pending), `hs-tests:2555` (no admission slot), `hs-tests:2607` (a refused revision releases its lineage), `hs-tests:2664` (an evidence-receipt conflict precedes the pre-screen), and `crates/kernel/tests/cas_fault_injection.rs:589` (the preview query); unaudited.
 Impact: before U6, one purged digest stalled every unit of its batch on every pass. U6 replaces this with a terminal per-unit refusal; the #1104 document rows "Pending unlink (OQ20)" and "Tombstone after purge (OQ21)" become stale then (U10 handoff).
 Open questions: None.
 
