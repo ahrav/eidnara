@@ -14,7 +14,7 @@ several part shapes with no unit, no refusal, and no counter.
   turn), `:357` (`_ => {}` for every other part type).
 - Pi skip arm: `harness_sources.rs:448`, a user or assistant content item whose `type` is not
   `text`.
-- No `Count` variant names a skip (`crates/daemon/src/source_capture.rs:75-112`).
+- No `Count` variant names a skip (`crates/daemon/src/source_capture.rs:77-114`).
 - The independent reader classifies every arm with a closed reason
   (`crates/daemon/src/source_corpus.rs:573-594`): `non_text_part`,
   `ignored_text`, `unsettled_text`, `unsettled_tool`, `skipped_item`.

@@ -2858,7 +2858,7 @@ async fn two_worktrees_share_a_repository_identity_and_keep_their_lineages() {
     assert_eq!(store.tip().unwrap(), tip);
 }
 
-/// `ri-failed-derivation-refuses-pass-and-memoizes-nothing`: a derivation that cannot read an object or outlasts the job's budget refuses both of the pass's document reads, retires and publishes no document, and memoizes nothing, so the next pass derives and publishes.
+/// `ri-failed-derivation-refuses-pass-and-memoizes-nothing`: a derivation that cannot read an object or outlasts its share of the job's budget refuses both of the pass's document reads, retires and publishes no document, and memoizes nothing, so the next pass derives and publishes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_derivation_refuses_the_documents_and_the_next_pass_derives() {
     use super::source_corpus::git;
@@ -2885,7 +2885,7 @@ async fn a_failed_derivation_refuses_the_documents_and_the_next_pass_derives() {
         .before_repository_derivation
         .lock()
         .unwrap() = Some(Arc::new(|| {
-        std::thread::sleep(source_capture::CAPTURE_BUDGET + Duration::from_millis(100));
+        std::thread::sleep(source_capture::REPOSITORY_WALK_BUDGET + Duration::from_millis(100));
     }));
     let deadlines = count(&handler, "deadline");
     document_pass(&handler, "base-2").await;

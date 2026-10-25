@@ -66,6 +66,8 @@ pub(crate) fn derive(
 ) -> Result<RepositoryIdentity, DerivationFailure> {
     use gix::discover::upwards::Error as Upwards;
     let options = crate::git_sources::isolated_options(MAX_ROOT_WALK_OBJECT_BYTES);
+    // A `.git` entry at the root that discovery passes over could not be read, which the next pass
+    // retries; above the root, discovery skips an unusable candidate and so does this check.
     let trust = gix::sec::trust::Mapping {
         full: options.clone(),
         reduced: options,
@@ -76,7 +78,9 @@ pub(crate) fn derive(
             Upwards::NoGitRepository { .. }
             | Upwards::NoGitRepositoryWithinCeiling { .. }
             | Upwards::NoGitRepositoryWithinFs { .. },
-        )) if !git_entry_above(root) => return Ok(RepositoryIdentity::Fallback),
+        )) if std::fs::symlink_metadata(root.join(".git")).is_err() => {
+            return Ok(RepositoryIdentity::Fallback);
+        }
         Err(gix::discover::Error::Open(error))
             if crate::git_sources::declares_unsupported_object_format(&error) =>
         {
@@ -116,11 +120,4 @@ pub(crate) fn derive(
     Ok(smallest.map_or(RepositoryIdentity::Fallback, |hex| {
         RepositoryIdentity::Git(format!("git:{hex}"))
     }))
-}
-
-/// Whether `root` or a parent holds a `.git` entry, the marker the plugin's resolver looks for: a
-/// discovery that found no repository beside one could not read it, which the next pass retries.
-fn git_entry_above(root: &Path) -> bool {
-    root.ancestors()
-        .any(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
 }

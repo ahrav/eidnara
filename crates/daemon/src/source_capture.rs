@@ -33,6 +33,8 @@ use crate::repository_identity::{
 
 /// The cooperative budget of one publication, from handoff acceptance.
 pub(crate) const CAPTURE_BUDGET: Duration = Duration::from_secs(5);
+/// The share of the job's budget a repository identity derivation may spend, so a walk that does not finish leaves the window and the documents' commits the rest.
+pub(crate) const REPOSITORY_WALK_BUDGET: Duration = Duration::from_secs(2);
 /// The supervisor's byte budget: the retained window, the adapters' copies, and the batch's artifact preparation.
 const MAX_RETAINED_WINDOW_BYTES: usize = 32 * 1024 * 1024;
 /// Artifact preparation copies an admitted batch a bounded number of times.
@@ -895,7 +897,8 @@ impl CaptureJob {
             self.capture.counters.add(Count::DocumentsRefused, count);
             return Count::Deadline;
         }
-        let identity = match identity.unwrap_or_else(|| self.repository_identity()) {
+        // `publish` derives the identity of every pass that holds document reads.
+        let identity = match identity.unwrap_or(Err(DerivationFailure::Unreadable)) {
             Ok(identity) => identity,
             Err(failure) => {
                 self.capture.counters.add(Count::DocumentsRefused, count);
@@ -1013,9 +1016,18 @@ impl CaptureJob {
         if let Some(identity) = self.capture.repository_ids().get(project_id) {
             return Ok(identity.clone());
         }
+        let walk_deadline = Instant::now() + REPOSITORY_WALK_BUDGET;
+        let walk = EvalBudget::new(
+            Some(
+                self.budget
+                    .deadline()
+                    .map_or(walk_deadline, |deadline| deadline.min(walk_deadline)),
+            ),
+            Arc::clone(&self.interrupt),
+        );
         #[cfg(test)]
         run_hook(&self.capture.before_repository_derivation);
-        let identity = derive(self.project.root(), &self.budget, MAX_ROOT_WALK_COMMITS)?;
+        let identity = derive(self.project.root(), &walk, MAX_ROOT_WALK_COMMITS)?;
         Ok(self
             .capture
             .repository_ids()
