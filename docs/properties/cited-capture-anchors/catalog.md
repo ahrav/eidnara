@@ -118,7 +118,7 @@ Guarantee: An anchor row that `AnchorCondition::decode` refuses, or whose text c
 Check: `always` - for every candidate whose anchor row fails decode or exceeds the bound, the batch reports `Uncertain` for that candidate and every other candidate's verdict is unchanged; evaluated on every batch because rows come from storage
 Fault/timing angle: none
 Required faults and enabling state: an unknown `anchor_kind`; a git kind with an empty or uppercase oid; a row populating another kind's column; a payload above the bound; two captures of one commit
-Confidence: high - [evidence](evidence/p2-undecodable-or-oversized-anchor-row-is-uncertain.md). Verified the bound check runs before decode at `crates/kernel/src/applicability/engine.rs:537` and that decode refuses each named shape at `crates/kernel/src/anchor.rs:272`
+Confidence: high - [evidence](evidence/p2-undecodable-or-oversized-anchor-row-is-uncertain.md). Verified the bound check runs before decode at `crates/kernel/src/applicability/engine.rs:537` and that decode refuses each named shape at `crates/kernel/src/anchor.rs:273`
 Existing check: `crates/kernel/tests/kernel_anchor.rs:252`, `:289`, `:304`; `crates/kernel/tests/kernel_applicability_engine.rs:241`, `:2108`, `:4143` (unaudited)
 Impact: a malformed anchor that evaluated `Current` would inject a memory whose condition was never checked
 Open questions: None.
@@ -327,9 +327,9 @@ Exercised: yes - `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decis
 Guarantee: Every `anchors` row committed through `insert_anchor` decodes with `AnchorCondition::decode`, holds values only in the columns its kind owns, carries a lowercase hex oid for git kinds, and fits within `MAX_OBJECT_PAYLOAD_BYTES`.
 Check: `always` - after any commit that inserted an anchor, `validate_anchor_row(row)` is `Ok` for every stored row, which runs the engine's bound check and `AnchorCondition::decode` (and with it the unowned-column check); asserted at the end of each writing test because the writer is the only path that adds rows
 Fault/timing angle: none
-Required faults and enabling state: an uppercase oid, a 39-character oid, a captures payload above the bound, a non-half-open interval, an empty value, an unparseable range, duplicate captures, a capture naming another commit, a secret in a value or a capture, and a raw row with an unowned column
-Confidence: high - [evidence](evidence/p2-new-anchor-row-decodes-on-write.md). Read `validate_anchor` at `crates/kernel/src/anchor_write.rs:263` and `insert_anchor_inner` at `:320`; the typed `AnchorValue` (`:35`) makes an unowned column unrepresentable, and the round trip at `:136` compares the decoded condition to the request
-Existing check: `crates/kernel/tests/kernel_anchor_write.rs:300`, `:448`, `:600`, `:372` (unaudited)
+Required faults and enabling state: an uppercase oid, a 39-character oid, a captures payload above the bound, a non-half-open interval, an empty value, an unparseable range, duplicate captures, a capture naming another commit, a secret in a value or in any capture field including beside an absent `tree_oid` or `patch_id`, and a raw row with an unowned column
+Confidence: high - [evidence](evidence/p2-new-anchor-row-decodes-on-write.md). Read `validate_anchor` at `crates/kernel/src/anchor_write.rs:296` and `insert_anchor_inner` at `:409`; the typed `AnchorValue` (`:35`) makes an unowned column unrepresentable, and the round trip at `:149` compares the decoded condition to the request
+Existing check: `crates/kernel/tests/kernel_anchor_write.rs:300`, `:448`, `:673`, `:372` (unaudited)
 Impact: a capture decision anchored to an undecodable row evaluates `Uncertain` forever and revalidation fails silently
 Open questions:
 - The specification asked whether the writer accepts a typed enum or a raw `AnchorRowSpec`; #1133 resolved it as the typed `AnchorValue` enum, with `validate_anchor_row` exposed for raw-row checks only.
@@ -344,8 +344,8 @@ Guarantee: An `anchors` row and its `object_registry` row are visible together o
 Check: `always` - for every live `anchors` row there is an `object_registry` row of kind `anchor` with the same `object_id` and `created_commit_seq`, and every `decisions.anchor_id` names a row with `created_commit_seq <= decision.created_commit_seq`
 Fault/timing angle: a refusal inside the same envelope after the anchor insert
 Required faults and enabling state: `insert_decision` fails after `insert_anchor` succeeded inside one closure; a duplicate `anchor_id` within one envelope and across two commits
-Confidence: high - [evidence](evidence/p2-new-anchor-and-registry-share-one-envelope.md). Read `insert_anchor_inner` at `crates/kernel/src/anchor_write.rs:379` and `Envelope::guarded` at `crates/kernel/src/envelope.rs:348`
-Existing check: `crates/kernel/tests/kernel_anchor_write.rs:423`, `:648`, `:393`; `crates/daemon/tests/claim_sources.rs:1508` (unaudited)
+Confidence: high - [evidence](evidence/p2-new-anchor-and-registry-share-one-envelope.md). Read `insert_anchor_inner` at `crates/kernel/src/anchor_write.rs:409` and `Envelope::guarded` at `crates/kernel/src/envelope.rs:348`
+Existing check: `crates/kernel/tests/kernel_anchor_write.rs:423`, `:721`, `:393`; `crates/daemon/tests/claim_sources.rs:1508` (unaudited)
 Impact: an orphan anchor is unreachable and inflates the registry; a decision inserted before its anchor is refused `NotFound` and fails the job
 Open questions: None.
 
@@ -360,7 +360,7 @@ Check: `always` - for every capture decision with `anchor_id = Some(a)`, `a == a
 Fault/timing angle: a retry after `kernel_write_failed`
 Required faults and enabling state: `kernel_write_failed` on the first attempt, then a successful retry
 Confidence: medium - [evidence](evidence/p2-new-capture-anchor-identity-is-deterministic.md). The Kernel half, `Conflict` on a duplicate id, is checked by `a_duplicate_anchor_id_is_a_conflict_within_and_across_commits`
-Existing check: none for the derivation; `crates/kernel/tests/kernel_anchor_write.rs:648` for the Kernel refusal (unaudited)
+Existing check: none for the derivation; `crates/kernel/tests/kernel_anchor_write.rs:721` for the Kernel refusal (unaudited)
 Impact: duplicate anchors per job, or `Conflict` on retry that permanently fails the job
 Open questions:
 - Whether anchors should be shared across jobs at one oid (needs human input; the model keeps per-job identity because `insert_anchor` refuses duplicates and no receipt covers a cross-job row).

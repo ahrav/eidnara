@@ -29,7 +29,7 @@ that order and splits the fixture-rows item into its two tables.
 | R6 | Narrow the deferred-unit record to "can publish from the memo's `Pending` entry" | applied to `p2-deferred-source-units-publish-on-a-later-pass` |
 | R7 | Mark the receipt-conflict coverage marker test-only | applied to `p2-capture-commit-replays-by-job-key-and-frozen-digest` |
 | R8 | Fix the offset `memory_capture.rs:126` | applied: the prompt's quote rule is at `crates/daemon/src/memory_capture.rs:126` at the branch tip |
-| R9 | Fix the offset `anchor.rs:329` | applied: references to the decoder use `crates/kernel/src/anchor.rs:272` (`AnchorCondition::decode`) and the interval check inside it |
+| R9 | Fix the offset `anchor.rs:329` | applied: references to the decoder use `crates/kernel/src/anchor.rs:273` (`AnchorCondition::decode`) and the interval check inside it |
 | R10 | Fix the offset `source_capture.rs:598` | applied: `into_job` is `crates/daemon/src/source_capture.rs:596` and `CAPTURE_BUDGET` is `:35` at the branch tip |
 
 Line drift between `a0e3f2993` and the branch tip moved several daemon
@@ -37,6 +37,15 @@ references: the `crates/daemon/src/lib.rs` capture tests by 31 lines and
 `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
 from line 3331 to 3482. Each record cites the current line; the test names
 match the specification's.
+
+The per-field capture secret scan moved Kernel references: in
+`crates/kernel/src/anchor_write.rs`, `validate_anchor` from 263 to 296,
+`validate_anchor_row` from 254 to 287, `insert_anchor` from 375 to 405, and
+`insert_anchor_inner` from 379 to 409; in `crates/kernel/src/anchor.rs`,
+`AnchorCondition::decode` from 272 to 273; and the three
+`kernel_anchor_write.rs` tests after the refused-shape list by 73 lines. The
+catalog's `insert_anchor_inner` reference had named line 320, inside
+`insert_row`; it now names 409.
 
 ## Gaps queued
 

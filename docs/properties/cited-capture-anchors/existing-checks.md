@@ -12,9 +12,9 @@ part.
 | Guard | Location | Claim it carries | Status |
 | --- | --- | --- | --- |
 | Bound check before decode | `crates/kernel/src/applicability/engine.rs:1277` (`anchor_row_exceeds_bounds`), called at `:537` | oversized anchor rows are `Uncertain` without decoding | unaudited |
-| Kind-owned columns | `crates/kernel/src/anchor.rs:245` (`unowned_columns`) | a row naming one kind with another kind's value fails decode | unaudited |
-| Typed decode | `crates/kernel/src/anchor.rs:272` (`AnchorCondition::decode`) | unknown kinds, missing values, bad oids, bad ranges, and inverted intervals fail decode | unaudited |
-| Duplicate captures | `crates/kernel/src/anchor.rs:200` (`decode_captures`) | two captures of one commit fail decode | unaudited |
+| Kind-owned columns | `crates/kernel/src/anchor.rs:246` (`unowned_columns`) | a row naming one kind with another kind's value fails decode | unaudited |
+| Typed decode | `crates/kernel/src/anchor.rs:273` (`AnchorCondition::decode`) | unknown kinds, missing values, bad oids, bad ranges, and inverted intervals fail decode | unaudited |
+| Duplicate captures | `crates/kernel/src/anchor.rs:201` (`decode_captures`) | two captures of one commit fail decode | unaudited |
 | Ancestry first, complete-scan negative | `crates/kernel/src/applicability/resolve.rs:230` (`resolve_commit`), `:270` (`window_scan_complete`) | `Holds` on ancestor-or-equal; `DoesNotHold` only on complete evidence | unaudited |
 | Anchor cache key | `crates/kernel/src/applicability/engine.rs:205` (`AnchorCacheKey`) | verdict reuse requires equal identity, row, HEAD, state, and algorithm | unaudited |
 | Live parents | `crates/kernel/src/slice/write.rs:1095` (`require_parents`) | decision parents are live at insert | unaudited |
@@ -28,8 +28,8 @@ part.
 | Message unit identity | `crates/daemon/src/harness_sources.rs:189` (`SessionIdentity::message_unit`) | one unit per text block | unaudited |
 | Evidence id from receipt key | `crates/daemon/src/harness_sources.rs:992` (`evidence_request`) | `srcev:` plus the unit key | unaudited |
 | Isolated bounded open | `crates/daemon/src/git_sources.rs:128` (`isolated_options`), `:138` (`open`) | isolation, replacement refs ignored, allocation limit | unaudited |
-| Anchor write validation | `crates/kernel/src/anchor_write.rs:263` (`validate_anchor`), `:254` (`validate_anchor_row`) | written anchor rows pass the engine's bound check and decoder and round-trip | unaudited |
-| Anchor write order | `crates/kernel/src/anchor_write.rs:379` (`insert_anchor_inner`) | registry row, anchor row, and change record in one envelope | unaudited |
+| Anchor write validation | `crates/kernel/src/anchor_write.rs:296` (`validate_anchor`), `:287` (`validate_anchor_row`) | written anchor rows pass the engine's bound check and decoder and round-trip | unaudited |
+| Anchor write order | `crates/kernel/src/anchor_write.rs:409` (`insert_anchor_inner`) | registry row, anchor row, and change record in one envelope | unaudited |
 
 ## Claim-bearing tests
 
@@ -72,10 +72,10 @@ part.
 | `crates/kernel/tests/kernel_anchor_write.rs:300` `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference` | `p2-new-anchor-row-decodes-on-write`; `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:372` `git_anchors_with_an_empty_capture_list_store_a_null_payload` | `p2-new-anchor-row-decodes-on-write` | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:448` `invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause` | same | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:600` `a_raw_row_with_an_unowned_column_is_conflicting_columns` | same | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:673` `a_raw_row_with_an_unowned_column_is_conflicting_columns` | same | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:423` `a_decision_failure_after_the_anchor_rolls_back_both` | `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:627` `a_missing_domain_is_not_found` | same | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:648` `a_duplicate_anchor_id_is_a_conflict_within_and_across_commits` | same; Kernel half of `p2-new-capture-anchor-identity-is-deterministic` | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:700` `a_missing_domain_is_not_found` | same | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:721` `a_duplicate_anchor_id_is_a_conflict_within_and_across_commits` | same; Kernel half of `p2-new-capture-anchor-identity-is-deterministic` | unaudited |
 | `crates/daemon/tests/claim_sources.rs:1508` `anchor_commits_pass_through_the_claim_materializer` | `p2-new-anchor-and-registry-share-one-envelope` (consumer side) | unaudited |
 
 ## Empty categories
