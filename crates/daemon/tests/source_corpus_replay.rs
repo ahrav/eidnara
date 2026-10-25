@@ -170,7 +170,8 @@ fn synthetic_opencode(session: &str, parts: &[Part]) -> Value {
 }
 
 /// As [`synthetic_opencode`], with part `index` created at `2_000 + order[index]` and the parts
-/// stored in reverse, so neither the stored order nor the id order is the creation order.
+/// stored in reverse: the stored order always differs from the creation order, and the id order
+/// differs whenever `order` is not the identity.
 fn synthetic_opencode_ordered(session: &str, parts: &[Part], order: &[usize]) -> Value {
     let part = |index: usize, data: Value| json!({ "id": format!("prt_{session}_{index:03}"), "time_created": 2_000 + order[index], "data": data });
     let mut assistant: Vec<Value> = parts
@@ -400,6 +401,17 @@ proptest! {
 #[test]
 fn a_single_text_part_replays_in_one_pass() {
     identity_case(&[Part::Text(1)], &[0], 1).unwrap();
+    let session = fresh_session("single");
+    let (_, records) = opencode_records(&synthetic_opencode(&session, &[Part::Text(1)]));
+    let outcome = replay(
+        &STORE.store,
+        &identity(Harness::OpenCode, &session),
+        &records,
+        &harness_adapter,
+        1,
+    );
+    assert_eq!(outcome.passes.len(), 1);
+    assert_eq!(reconcile(&records, &outcome).admitted, 2);
 }
 
 #[test]
