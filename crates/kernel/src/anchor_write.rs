@@ -19,7 +19,8 @@ use super::anchor::{
 use super::applicability::anchor_row_exceeds_bounds;
 use super::envelope::{Envelope, ObjectRow, PendingChange};
 use super::object_write::{insert_registry, map_write_error, record_registry_fields};
-use super::redaction::{identity, identity_field, payload_has_secret};
+use super::redaction::{RedactedField, identity, payload_has_secret};
+use super::slice::require_live;
 use super::{CachedSql, KernelError, Sensitivity};
 
 /// Change kind recorded for every anchor insert.
@@ -108,6 +109,22 @@ impl AnchorValue {
             }
         }
         row
+    }
+
+    fn has_unanchored_capture(&self) -> bool {
+        match self {
+            Self::ReachableFrom { oid, captures } => {
+                captures.iter().any(|capture| capture.commit_oid != *oid)
+            }
+            Self::ReachableBetween {
+                start_oid,
+                end_oid,
+                captures,
+            } => captures
+                .iter()
+                .any(|capture| capture.commit_oid != *start_oid && capture.commit_oid != *end_oid),
+            _ => false,
+        }
     }
 
     /// Whether `decoded` is the condition this value requested.
@@ -212,12 +229,18 @@ pub enum AnchorValidationError {
     ExceedsBounds,
     #[error(transparent)]
     Decode(#[from] AnchorDecodeError),
-    /// The row decodes to a condition other than the requested one.
+    /// The row decodes to a condition other than the requested one. The
+    /// typed builder and the decoder agree for every value, so this check
+    /// catches a later change to either one.
     #[error("anchor row decodes to a different condition")]
     RoundTrip,
+    /// A capture names a commit other than the anchor's own oids. The
+    /// resolution ladder reads captures by anchored oid only.
+    #[error("anchor capture names a commit the anchor does not name")]
+    UnanchoredCapture,
     /// A value column or the capture payload holds a detected secret, or the
-    /// payload could not be scanned.
-    #[error("anchor value holds a detected secret")]
+    /// scanner could not read it, as for a value above its input bound.
+    #[error("anchor value holds a detected secret or could not be scanned")]
     SecretValue,
 }
 
@@ -251,6 +274,9 @@ pub fn validate_anchor(spec: &AnchorSpec) -> Result<AnchorRowSpec, AnchorValidat
     let decoded = validate_anchor_row(&row)?;
     if !spec.value.matches(&decoded) {
         return Err(AnchorValidationError::RoundTrip);
+    }
+    if spec.value.has_unanchored_capture() {
+        return Err(AnchorValidationError::UnanchoredCapture);
     }
     let values = [
         &row.exact_value,
@@ -288,18 +314,7 @@ impl Envelope<'_> {
 
     fn insert_anchor_inner(&mut self, spec: AnchorSpec) -> Result<AnchorWriteOutcome, KernelError> {
         let row = validate_anchor(&spec).map_err(|_| KernelError::InvalidInput)?;
-        let domain_live: bool = self
-            .tx
-            .query_row_cached(
-                "SELECT EXISTS(SELECT 1 FROM domains
-                               WHERE domain_id=?1 AND invalidated_commit_seq IS NULL)",
-                [&spec.domain_id],
-                |row| row.get(0),
-            )
-            .map_err(map_write_error)?;
-        if !domain_live {
-            return Err(KernelError::NotFound);
-        }
+        require_live(self.tx, "domains", "domain_id", &spec.domain_id)?;
         let object = ObjectRow {
             object_id: spec.object_id.clone(),
             object_kind: "anchor".to_string(),
@@ -313,13 +328,18 @@ impl Envelope<'_> {
             sensitivity: spec.sensitivity,
         };
         insert_registry(self.tx, self.commit_seq, &object)?;
+        // `validate_anchor` refused every identity field holding a detection.
+        let field = |text: &str| RedactedField {
+            text: text.to_string(),
+            detections: Vec::new(),
+        };
         record_registry_fields(
             self.tx,
             &spec.object_id,
-            &identity_field(&spec.domain_id)?,
-            &identity_field(&spec.object_id)?,
-            &identity_field(&spec.source_kind)?,
-            &identity_field(&spec.source_id)?,
+            &field(&spec.domain_id),
+            &field(&spec.object_id),
+            &field(&spec.source_kind),
+            &field(&spec.source_id),
             self.commit_seq,
         )?;
         self.tx
