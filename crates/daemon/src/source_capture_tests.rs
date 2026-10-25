@@ -3942,9 +3942,13 @@ fn park_source_publish(handler: &Handler) -> (mpsc::Receiver<()>, mpsc::Sender<(
 }
 
 async fn wait_parked(entered: mpsc::Receiver<()>) {
-    tokio::task::spawn_blocking(move || entered.recv().unwrap())
-        .await
-        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        entered
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the source job parks before it ends")
+    })
+    .await
+    .unwrap();
 }
 
 /// A handler whose project is a one-commit repository, bound for Pi capture
@@ -4003,6 +4007,10 @@ async fn a_submit_after_the_publish_ended_arms_no_wait_and_cites() {
 #[tokio::test(start_paused = true)]
 async fn on_the_paused_clock_the_wait_is_zero_when_settled_and_ends_exactly_at_the_deadline() {
     let (handler, dir, project) = settling_handler().await;
+    // Each job's std budget starts from its tokio acceptance instant, which
+    // the paused clock places this far past the test's real start, so a slow
+    // setup cannot spend a budget before its job runs.
+    tokio::time::advance(Duration::from_secs(120)).await;
     pass(
         &handler,
         pi_request(&[user_row(OTHER.0, OTHER.1, 0)], "base-0"),
@@ -4018,6 +4026,10 @@ async fn on_the_paused_clock_the_wait_is_zero_when_settled_and_ends_exactly_at_t
         tokio::time::Instant::now(),
         started,
         "no virtual time elapsed"
+    );
+    assert_eq!(
+        captured_decisions(dir.path())[OTHER.0].rationale["citation"],
+        "cited"
     );
 
     let publishes = handler

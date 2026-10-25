@@ -448,17 +448,40 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn sessions_observed_together_settle_by_the_one_running_deadline() {
-        let mut settlements = Settlements::default();
-        let running = settlements.accept(&key("a"), Instant::now());
-        let observed = [key("a"), key("b")].map(|session| settlements.observe(&session));
-        settlements.end(&key("a"), running, Count::Completed);
-        // A later pass of the second session runs after the observation.
-        settlements.accept(&key("b"), Instant::now());
+        let settlements = std::sync::Arc::new(std::sync::Mutex::new(Settlements::default()));
+        let running = settlements
+            .lock()
+            .unwrap()
+            .accept(&key("a"), Instant::now());
+        let observed = {
+            let settlements = settlements.lock().unwrap();
+            [key("a"), key("b")].map(|session| settlements.observe(&session))
+        };
         let started = Instant::now();
-        for observed in observed {
-            assert_eq!(settle(observed).await, SettlementOutcome::Settled);
+        let waiter = tokio::spawn(async move {
+            let mut outcomes = Vec::new();
+            for observed in observed {
+                outcomes.push(settle(observed).await);
+            }
+            outcomes
+        });
+        tokio::time::advance(Duration::from_secs(1)).await;
+        {
+            // The running job ends and a later pass of the second session
+            // takes the slot, both after the observation.
+            let mut settlements = settlements.lock().unwrap();
+            settlements.end(&key("a"), running, Count::Completed);
+            settlements.accept(&key("b"), Instant::now());
         }
-        assert_eq!(Instant::now(), started, "the later pass arms no wait");
+        assert_eq!(
+            waiter.await.unwrap(),
+            [SettlementOutcome::Settled, SettlementOutcome::Settled]
+        );
+        assert_eq!(
+            Instant::now() - started,
+            Duration::from_secs(1),
+            "the later pass arms no wait"
+        );
     }
 
     /// Measurement, run by hand: `cargo nextest run -p daemon --all-features
