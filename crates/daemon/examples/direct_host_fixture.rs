@@ -881,12 +881,10 @@ mod unix {
         stream: &mut UnixStream,
         response: &ControlResponse<T>,
     ) -> io::Result<()> {
-        let bytes = serde_json::to_vec(response).expect("fixture response serializes");
+        let mut bytes = serde_json::to_vec(response).expect("fixture response serializes");
         if bytes.len() > MAX_CONTROL_LINE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "fixture response exceeded control cap",
-            ));
+            bytes = serde_json::to_vec(&rejected(response.id, "response_too_large"))
+                .expect("fixture rejection serializes");
         }
         stream.write_all(&bytes).await?;
         stream.write_all(b"\n").await
@@ -1667,6 +1665,32 @@ mod unix {
                 assert!(emit_summary(&sink(status), summary, "x", &script, &counters).is_ok());
                 assert_eq!(lock_script(&script).status().filled, filled, "{status:?}");
             }
+        }
+
+        #[tokio::test]
+        async fn an_oversized_response_reaches_the_client_as_a_typed_rejection() {
+            let (mut server, mut client) = UnixStream::pair().unwrap();
+            let response = ControlResponse {
+                id: Some(7),
+                ok: true,
+                result: Some(serde_json::Value::String("x".repeat(MAX_CONTROL_LINE))),
+                error: None,
+            };
+            write_response(&mut server, &response).await.unwrap();
+            let line = match read_bounded_line(&mut client).await.unwrap() {
+                Some(BoundedLine::Line(line)) => line,
+                Some(BoundedLine::Oversized) => panic!("the rejection line was oversized"),
+                None => panic!("the server closed the connection without a line"),
+            };
+            let rejection: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(
+                rejection,
+                serde_json::json!({
+                    "id": 7,
+                    "ok": false,
+                    "error": {"code": "response_too_large", "message": "control request rejected"},
+                })
+            );
         }
     }
 }

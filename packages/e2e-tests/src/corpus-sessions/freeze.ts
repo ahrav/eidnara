@@ -105,7 +105,9 @@ function stable(value: JsonValue): string {
 /**
  * The frozen form of one OpenCode session read from `opencode.db`: every `message` row with its
  * `part` rows in `(time_created, id)` order, `data` decoded, scratch paths and generated ids
- * replaced, canaries marked. The same store yields the same bytes.
+ * replaced, canaries marked. The same store yields the same bytes. A session without a message
+ * row is refused: it is what a stale `store.json` names after an interrupted `--run`, and
+ * freezing it would overwrite the committed fixture with an empty mix.
  */
 export function freezeOpenCode(
     db: Database,
@@ -117,6 +119,9 @@ export function freezeOpenCode(
             "SELECT id, time_created, data FROM message WHERE session_id = ? ORDER BY time_created, id",
         )
         .all(sessionId) as { id: string; time_created: number; data: string }[];
+    if (messages.length === 0) {
+        throw new Error(`opencode.db holds no message for session ${sessionId}`);
+    }
     const parts = db.prepare(
         "SELECT id, time_created, data FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created, id",
     );

@@ -106,6 +106,11 @@ describe("corpus session freeze", () => {
         expect(frozen.messages[1].parts[0].data.canary).toBeUndefined();
     });
 
+    it("refuses to freeze an OpenCode session the store does not hold", () => {
+        const absent = "ses_absent0123456789abcdefgh";
+        expect(() => freezeOpenCode(store(), absent, ROOTS)).toThrow(absent);
+    });
+
     it("freezes the same Pi file to the same bytes and decodes back to its entries", () => {
         const jsonl = [
             JSON.stringify({ type: "session", id: "3f2c-real", cwd: "/tmp/scratch-x/checkout" }),
