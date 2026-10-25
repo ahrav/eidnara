@@ -112,16 +112,22 @@ fn a_replacement_ref_leaves_the_recorded_root() {
     assert_eq!(derived(dir.path()), RepositoryIdentity::Git(recorded));
 }
 
-/// A `.git` entry that discovery cannot open is an unreadable repository, retried on the next
-/// pass, never a project without one.
 #[test]
 fn an_unopenable_git_entry_fails_the_derivation() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(".git"), "not a gitdir link").unwrap();
-    assert_eq!(
-        derive(dir.path(), &budget(), MAX_ROOT_WALK_COMMITS),
-        Err(DerivationFailure::Unreadable)
-    );
+    let alone = tempfile::tempdir().unwrap();
+    let enclosing = tempfile::tempdir().unwrap();
+    repository(enclosing.path(), 2);
+    let nested = enclosing.path().join("checkout");
+    std::fs::create_dir_all(&nested).unwrap();
+    for root in [alone.path(), &nested] {
+        std::fs::write(root.join(".git"), "not a gitdir link").unwrap();
+        assert_eq!(
+            derive(root, &budget(), MAX_ROOT_WALK_COMMITS),
+            Err(DerivationFailure::Unreadable),
+            "{}",
+            root.display()
+        );
+    }
 }
 
 /// Discovery searches upward, as the plugin's resolver does, so a project bound below the

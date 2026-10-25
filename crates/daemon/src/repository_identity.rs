@@ -66,19 +66,26 @@ pub(crate) fn derive(
 ) -> Result<RepositoryIdentity, DerivationFailure> {
     use gix::discover::upwards::Error as Upwards;
     let options = crate::git_sources::isolated_options(MAX_ROOT_WALK_OBJECT_BYTES);
-    // A `.git` entry at the root that discovery passes over could not be read, which the next pass
-    // retries; above the root, discovery skips an unusable candidate and so does this check.
-    let trust = gix::sec::trust::Mapping {
-        full: options.clone(),
-        reduced: options,
+    let dot_git = root.join(".git");
+    // Upward discovery skips a `.git` entry it cannot read. A root that holds one opens it directly,
+    // so a broken entry at the root fails the derivation; above the root, an unusable candidate is
+    // skipped.
+    let opened = if std::fs::symlink_metadata(&dot_git).is_ok() {
+        gix::ThreadSafeRepository::open_opts(dot_git, options).map_err(gix::discover::Error::Open)
+    } else {
+        let trust = gix::sec::trust::Mapping {
+            full: options.clone(),
+            reduced: options,
+        };
+        gix::ThreadSafeRepository::discover_opts(root, Default::default(), trust)
     };
-    let mut repo = match gix::ThreadSafeRepository::discover_opts(root, Default::default(), trust) {
+    let mut repo = match opened {
         Ok(repo) => repo.to_thread_local(),
         Err(gix::discover::Error::Discover(
             Upwards::NoGitRepository { .. }
             | Upwards::NoGitRepositoryWithinCeiling { .. }
             | Upwards::NoGitRepositoryWithinFs { .. },
-        )) if std::fs::symlink_metadata(root.join(".git")).is_err() => {
+        )) => {
             return Ok(RepositoryIdentity::Fallback);
         }
         Err(gix::discover::Error::Open(error))
