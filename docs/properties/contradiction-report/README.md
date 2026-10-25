@@ -18,7 +18,7 @@ proposed behavior describe obligations PR A and PR B must make checkable; none
 is exercised at HEAD.
 
 The published specification issue reference is recorded here after
-publication: <specification-issue-url>.
+publication: [https://github.com/ahrav/eidnara/issues/1159](https://github.com/ahrav/eidnara/issues/1159).
 
 The record contract is [`../METHOD.md`](../METHOD.md). The evidence scope was
 user-confirmed as: the plan set (`00-index`, P3, P4 plans) plus repository
