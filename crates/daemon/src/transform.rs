@@ -553,6 +553,8 @@ pub struct ProducerContext<'a> {
     pub user_profile_budget_tokens: f64,
     pub memory_enabled: bool,
     pub inject_docs: bool,
+    /// The configured documents the prompt block reads, in order.
+    pub project_doc_files: &'a [crate::project_docs::DocumentPath],
     /// Where the pass leaves the configured documents it reads, when source capture takes them.
     pub(crate) document_reads: Option<&'a crate::project_docs::DocumentReads>,
     pub temporal_awareness: bool,
@@ -2816,7 +2818,7 @@ fn compose_additive_m0(
         crate::decay_render::counting(estimate_tokens),
     );
     let mut docs = if ctx.inject_docs {
-        read_project_docs_canonical(ctx.project_directory)
+        read_project_docs_canonical(ctx.project_directory, ctx.project_doc_files)
     } else {
         crate::project_docs::ProjectDocs::default()
     };
@@ -4507,6 +4509,7 @@ fn apply_once(
                         memory_enabled: ctx.memory_enabled,
                         user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                         inject_docs: ctx.inject_docs,
+                        project_doc_files: ctx.project_doc_files,
                         document_reads: ctx.document_reads,
                         temporal_awareness: ctx.temporal_awareness,
                         legacy_history_segment_seqs: meta.legacy_history_segment_seqs.as_deref(),
@@ -4600,6 +4603,7 @@ fn apply_once(
                                     memory_enabled: ctx.memory_enabled,
                                     user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                                     inject_docs: ctx.inject_docs,
+                                    project_doc_files: ctx.project_doc_files,
                                     document_reads: ctx.document_reads,
                                     temporal_awareness: ctx.temporal_awareness,
                                     legacy_history_segment_seqs: meta
@@ -4795,6 +4799,7 @@ fn apply_once(
                             memory_enabled: ctx.memory_enabled,
                             user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                             inject_docs: ctx.inject_docs,
+                            project_doc_files: ctx.project_doc_files,
                             document_reads: ctx.document_reads,
                             temporal_awareness: ctx.temporal_awareness,
                             legacy_history_segment_seqs: meta
@@ -13811,6 +13816,7 @@ pub(crate) mod tests {
             user_profile_budget_tokens: 4_000.0,
             memory_enabled: true,
             inject_docs: true,
+            project_doc_files: crate::project_docs::default_document_paths_for_test(),
             document_reads: None,
             temporal_awareness: true,
             now_ms,

@@ -49,6 +49,19 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings[0]).toContain("prompt_surface.guidance_override_path/tool_descriptions");
     });
 
+    it("strips the project document list and warns when it names files", () => {
+        const named: Record<string, unknown> = { project_docs: { files: ["src/secrets.md"] } };
+        const warnings = stripUnsafeProjectConfigFields(named);
+        expect("project_docs" in named).toBe(false);
+        expect(warnings.filter((w) => w.includes("project_docs"))).toHaveLength(1);
+
+        const empty: Record<string, unknown> = { project_docs: {} };
+        expect(stripUnsafeProjectConfigFields(empty).some((w) => w.includes("project_docs"))).toBe(
+            false,
+        );
+        expect("project_docs" in empty).toBe(false);
+    });
+
     it("strips project host routing", () => {
         const raw: Record<string, unknown> = {
             protected_tags: 3,

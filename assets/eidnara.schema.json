@@ -643,6 +643,20 @@
       },
       "additionalProperties": false
     },
+    "project_docs": {
+      "description": "User-only repository documents Eidnara reads and, with source capture, retains.",
+      "type": "object",
+      "properties": {
+        "files": {
+          "description": "User-only: the repository documents, as paths relative to the project root, that Eidnara reads for the prompt block and, when source_capture.enabled is set, retains as Kernel source descriptors (default: [\"ARCHITECTURE.md\", \"STRUCTURE.md\"]). At most 8 entries, each 1 to 1024 bytes of at most 16 '/'-separated components with no '.', '..', '.eidnara', or '.git' component and no leading '/'; a refused entry or a duplicate keeps the default. Each path resolves beneath the root without following a symlink. Project values are ignored with a warning.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "temporal_awareness": {
       "default": true,
       "description": "Inject wall-clock gap markers (<!-- +Xm -->) between user messages where > 5 min elapsed since the previous message, and add compact date ranges to history_segment headings. Gives the agent a sense of session pacing and \"how long ago\" across multi-day sessions. Graduated from experimental.temporal_awareness; default: true (set false to opt out).",

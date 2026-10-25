@@ -26,7 +26,7 @@ use crate::harness_sources::{
 };
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
-use crate::project_docs::DocumentRead;
+use crate::project_docs::{DocumentPath, DocumentRead};
 use crate::repository_identity::{
     DerivationFailure, MAX_ROOT_WALK_COMMITS, RepositoryIdentity, derive,
 };
@@ -331,7 +331,7 @@ pub(crate) struct CaptureHandoff {
 /// The document reads a capture holds until its documents batch takes them. A handoff or job dropped with reads still held dropped them before the batch, so the drop counts them as `documents_refused`; the reads wait for the next pass that composes the block.
 struct PendingDocuments {
     capture: Arc<SourceCapture>,
-    reads: Vec<(&'static str, DocumentRead)>,
+    reads: Vec<(DocumentPath, DocumentRead)>,
     /// The project's repository identity, derived before the commit gate so a slow walk holds no other capture or session deletion.
     identity: Option<Derivation>,
 }
@@ -340,7 +340,7 @@ struct PendingDocuments {
 type Derivation = Result<RepositoryIdentity, DerivationFailure>;
 
 impl PendingDocuments {
-    fn take(mut self) -> (Vec<(&'static str, DocumentRead)>, Option<Derivation>) {
+    fn take(mut self) -> (Vec<(DocumentPath, DocumentRead)>, Option<Derivation>) {
         (std::mem::take(&mut self.reads), self.identity.take())
     }
 }
@@ -985,16 +985,17 @@ impl CaptureJob {
         &self,
         store: &KernelStore,
         repository_id: &str,
-        documents: Vec<(&'static str, DocumentRead)>,
+        documents: Vec<(DocumentPath, DocumentRead)>,
     ) -> Result<(Vec<String>, Vec<DocumentStep>), KernelError> {
         let project_id = self.session.project_id.as_str();
         let (_, planned) = store.preview(self.preview_deadline(), |preview| {
             let mut settled_paths = Vec::new();
             let mut steps = Vec::with_capacity(documents.len());
-            for (path, read) in documents {
-                let step = self.plan_document(preview, repository_id, path, read)?;
+            for (path, read) in &documents {
+                let step =
+                    self.plan_document(preview, repository_id, path.as_str(), read.clone())?;
                 if step.settles_lineage() {
-                    settled_paths.push(path);
+                    settled_paths.push(path.as_str());
                 }
                 steps.push(step);
             }
@@ -1037,7 +1038,7 @@ impl CaptureJob {
         &self,
         preview: &kernel::Preview<'_>,
         repository_id: &str,
-        path: &'static str,
+        path: &str,
         read: DocumentRead,
     ) -> Result<DocumentStep, KernelError> {
         let text = match read {

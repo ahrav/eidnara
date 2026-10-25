@@ -288,6 +288,12 @@ export interface EidnaraConfig {
      * `memory.enabled`, and subagent sessions never capture. Defaults to off.
      */
     source_capture?: { enabled: boolean };
+    /**
+     * User-only list of repository documents the daemon reads for the prompt block and, when
+     * `source_capture.enabled` is set, retains. The daemon reads and validates this key itself;
+     * a project value is ignored.
+     */
+    project_docs?: { files?: string[] };
     memory: {
         enabled: boolean;
         injection_budget_tokens: number;
@@ -572,6 +578,17 @@ export const EidnaraConfigSchema = z
             })
             .default({ enabled: false })
             .describe("User-only exact source capture of message text and tool results."),
+        project_docs: z
+            .strictObject({
+                files: z
+                    .array(z.string())
+                    .optional()
+                    .describe(
+                        "User-only: the repository documents, as paths relative to the project root, that Eidnara reads for the prompt block and, when source_capture.enabled is set, retains as Kernel source descriptors (default: [\"ARCHITECTURE.md\", \"STRUCTURE.md\"]). At most 8 entries, each 1 to 1024 bytes of at most 16 '/'-separated components with no '.', '..', '.eidnara', or '.git' component and no leading '/'; a refused entry or a duplicate keeps the default. Each path resolves beneath the root without following a symlink. Project values are ignored with a warning.",
+                    ),
+            })
+            .optional()
+            .describe("User-only repository documents Eidnara reads and, with source capture, retains."),
         temporal_awareness: z
             .boolean()
             .default(true)

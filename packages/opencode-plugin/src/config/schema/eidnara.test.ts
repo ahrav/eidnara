@@ -42,6 +42,22 @@ describe("EidnaraConfigSchema", () => {
             expect(result.pi).toBeUndefined();
         });
 
+        it("accepts a project_docs.files list of strings and nothing else in the block", () => {
+            expect(EidnaraConfigSchema.parse({}).project_docs).toBeUndefined();
+            expect(
+                EidnaraConfigSchema.parse({ project_docs: { files: ["docs/A.md"] } }).project_docs,
+            ).toEqual({ files: ["docs/A.md"] });
+            expect(
+                EidnaraConfigSchema.safeParse({ project_docs: { files: "docs/A.md" } }).success,
+            ).toBe(false);
+            expect(EidnaraConfigSchema.safeParse({ project_docs: { files: [1] } }).success).toBe(
+                false,
+            );
+            expect(
+                EidnaraConfigSchema.safeParse({ project_docs: { files: [], extra: 1 } }).success,
+            ).toBe(false);
+        });
+
         it("keeps source capture off unless the key enables it", () => {
             expect(EidnaraConfigSchema.parse({}).source_capture).toEqual({ enabled: false });
             expect(EidnaraConfigSchema.parse({ source_capture: {} }).source_capture).toEqual({
