@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-U3 derives `anchor_id` and `object_id` from `(job_id, head_oid)` and inserts one `reachable_from` anchor per job through `insert_anchor`. The job id is stable (`crates/memory-store/src/memory_capture.rs:112`) and the oid is frozen in the plan (U2). The Kernel half holds today: a second insert of one `anchor_id` is `Conflict` (`crates/kernel/tests/kernel_anchor_write.rs:643`), and a rolled-back commit stores nothing, so a retry writes the same row once.
+U3 derives `anchor_id` and `object_id` from `(job_id, head_oid)` and inserts one `reachable_from` anchor per job through `insert_anchor`. The job id is stable (`crates/memory-store/src/memory_capture.rs:112`) and the oid is frozen in the plan (U2). The Kernel half holds today: a second insert of one `anchor_id` is `Conflict` (`crates/kernel/tests/kernel_anchor_write.rs:648`), and a rolled-back commit stores nothing, so a retry writes the same row once.
 
 ## Failure scenario
 

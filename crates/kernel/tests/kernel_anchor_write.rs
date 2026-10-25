@@ -323,6 +323,11 @@ fn every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_referen
 
         let connection = read_only(directory.path());
         let row = stored_row(&connection, &anchor_id).expect("anchor row committed");
+        assert_eq!(
+            row,
+            validate_anchor(&spec).unwrap(),
+            "{name}: the stored row is the validated row"
+        );
         let decoded = AnchorCondition::decode(&row).expect("stored anchor decodes");
         assert_eq!(
             decoded, expected,
