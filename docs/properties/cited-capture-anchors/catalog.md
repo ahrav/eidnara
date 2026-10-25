@@ -308,7 +308,7 @@ Check: `sometimes` - a campaign constructs a window whose memo holds a `Pending`
 Fault/timing angle: the Kernel is starting or the window exceeds one pass's unit bound
 Required faults and enabling state: a 33-unit window; a Kernel still starting during the first pass
 Confidence: high - [evidence](evidence/p2-deferred-source-units-publish-on-a-later-pass.md). Read `Disposition::Pending` at `crates/daemon/src/source_capture.rs:183`
-Existing check: `crates/daemon/src/source_capture_tests.rs:181`, `:429`, `:465`, `:1073`, `:1234`; `crates/daemon/src/source_capture_tests.rs:4471` for the settlement witness (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:181`, `:429`, `:465`, `:1073`, `:1234`; `crates/daemon/src/source_capture_tests.rs:4483` for the settlement witness (unaudited)
 Impact: without the witness, U4's rule that settlement means job end rather than descriptor presence is untested
 Open questions: None.
 
@@ -460,7 +460,7 @@ Check: `always` - the wait returns within the bound measured from the record's `
 Fault/timing angle: a source job that stalls past its budget
 Required faults and enabling state: a parked source job under a paused tokio clock; a parked job with a real clock
 Confidence: high - [evidence](evidence/p2-new-settlement-wait-is-bounded-and-gate-free.md). Read `settle` at `crates/daemon/src/source_capture/settlement.rs:204` and `capture_settlements` at `crates/daemon/src/memory_capture/native.rs:124`
-Existing check: `crates/daemon/src/source_capture/settlement.rs:269`; `crates/daemon/src/source_capture_tests.rs:4004`, `:4081`, `:4193`; `crates/daemon/src/source_capture/settlement.rs:450` (sessions observed together) (unaudited)
+Existing check: `crates/daemon/src/source_capture/settlement.rs:269`; `crates/daemon/src/source_capture_tests.rs:4008`, `:4093`, `:4205`; `crates/daemon/src/source_capture/settlement.rs:450` (sessions observed together) (unaudited)
 Impact: the native lease is consumed by waits, or the daemon deadlocks on the capture gate
 Open questions: None.
 
@@ -475,7 +475,7 @@ Check: `always` - at the instant the publish envelope opens for a job, the recor
 Fault/timing angle: a slow source job and a fast harness submit, including a submit on another session whose lease carries the job
 Required faults and enabling state: a parked source job and a submit inside its window; a second session bound to the same project
 Confidence: high - [evidence](evidence/p2-new-lookup-runs-only-after-settlement.md). Read the wait at `crates/daemon/src/memory_capture/native.rs:394`, before `kernel_routes::blocking`, and `settlement_key` at `crates/daemon/src/memory_capture/cite.rs:119`
-Existing check: `crates/daemon/src/source_capture_tests.rs:4081`, `:4146`, `:4471`; `crates/daemon/src/source_capture/settlement.rs:241`, `:393`, `:432` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:4093`, `:4158`, `:4483`; `crates/daemon/src/source_capture/settlement.rs:241`, `:393`, `:432` (unaudited)
 Impact: avoidable `descriptor_not_found` misses that hide a race as a missing source
 Open questions: None.
 
@@ -490,7 +490,7 @@ Check: `always` - for every capture decision, `(no citation event) == (citation 
 Fault/timing angle: a source publish refused or past its budget at submit time
 Required faults and enabling state: source capture off; a hashed source id; an unpublished message; a plain and an unborn root; a parked source job; a refused handoff; a 33-unit window
 Confidence: high - [evidence](evidence/p2-new-miss-reason-matches-outcome.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:260`, `is_hashed_source_id` at `:132`, and `settle` at `crates/daemon/src/source_capture/settlement.rs:204`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3646`, `:4193`, `:4247`, `:4471`; `crates/daemon/src/memory_capture/cite.rs:439`; `crates/daemon/src/memory_capture.rs:1587`; `crates/daemon/src/source_capture/settlement.rs:241` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3646`, `:4205`, `:4259`, `:4483`; `crates/daemon/src/memory_capture/cite.rs:439`; `crates/daemon/src/memory_capture.rs:1587`; `crates/daemon/src/source_capture/settlement.rs:241` (unaudited)
 Impact: revalidation cannot tell "never captured" from "captured late" from "lookup failed"
 Open questions: None.
 
@@ -535,7 +535,7 @@ Check: `sometimes` - states, not code points: a committed decision with an ancho
 Fault/timing angle: none
 Required faults and enabling state: a published message and a repository fixture with one commit; source capture off; a hashed id; a plain root; a parked source job past its budget
 Confidence: high - [evidence](evidence/p2-new-cited-decision-pair-observed.md)
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3646`, `:4193`, `:4247` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3646`, `:4205`, `:4259` (unaudited)
 Impact: without these witnesses, the safety records above are vacuous
 Open questions: None.
 

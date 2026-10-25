@@ -24,15 +24,15 @@ A slow source job and a fast submit; a submit on another session of the same pro
 
 ## What a test must construct
 
-- `a_submit_during_the_publish_waits_outside_the_gate_and_then_cites` (`crates/daemon/src/source_capture_tests.rs:4081`): with the source job parked, the submit waits, the test-only `citation_publishes` counter stays 0 and no decision row exists while the entry is `Running`; after release the decision is `cited`.
-- `a_submit_on_another_session_waits_on_each_job_session_it_carries` (`crates/daemon/src/source_capture_tests.rs:4146`): a second session's submit whose batch carries the parked session's job waits on that session's entry and cites the job after release.
-- `a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found` (`crates/daemon/src/source_capture_tests.rs:4471`): a 33-unit window ends `Ended { Completed }` with one unit deferred; the submit arms no wait, the published unit cites, and the deferred unit reports `descriptor_not_found`.
+- `a_submit_during_the_publish_waits_outside_the_gate_and_then_cites` (`crates/daemon/src/source_capture_tests.rs:4093`): with the source job parked, the submit waits, the test-only `citation_publishes` counter stays 0 and no decision row exists while the entry is `Running`; after release the decision is `cited`.
+- `a_submit_on_another_session_waits_on_each_job_session_it_carries` (`crates/daemon/src/source_capture_tests.rs:4158`): a second session's submit whose batch carries the parked session's job waits on that session's entry and cites the job after release.
+- `a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found` (`crates/daemon/src/source_capture_tests.rs:4483`): a 33-unit window ends `Ended { Completed }` with one unit deferred; the submit arms no wait, the published unit cites, and the deferred unit reports `descriptor_not_found`.
 - `a_terminal_or_absent_entry_settles_without_waiting` (`crates/daemon/src/source_capture/settlement.rs:241`) and `a_later_acceptance_after_the_awaited_end_reads_as_settled` (`crates/daemon/src/source_capture/settlement.rs:393`): absent, terminal, and superseded entries return without advancing the paused clock.
 
 ## Investigation log
 
 ### Q: Can the lookup run while the entry is Running within its deadline?
 
-- Sources examined: the submit handler, `settle`, the counter assertion in `crates/daemon/src/source_capture_tests.rs:4081`, the cross-session test.
+- Sources examined: the submit handler, `settle`, the counter assertion in `crates/daemon/src/source_capture_tests.rs:4093`, the cross-session test.
 - Findings: no for a submitted job; the blocking hop starts only after every job session's `settle` returns, and `settle` returns for an unchanged `Running` entry only at the deadline. A replayed prepared plan runs its lookup at once and reads a `Running` entry as `BudgetExpired` (`Settlements::now`, `the_current_outcome_reads_a_running_publish_as_budget_expired`), so its empty lookup reports `publish_budget_expired`, which the guarantee states.
 - Conclusion: resolved.

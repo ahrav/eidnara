@@ -23,9 +23,9 @@ A source job stalled past its budget; a submit that arrives while the job runs.
 ## What a test must construct
 
 - `a_running_entry_waits_for_its_end_or_its_budget_deadline` (`crates/daemon/src/source_capture/settlement.rs:269`): under `start_paused`, a waiter on a `Running` entry is pending at `accepted_at + 5 s - 1 ms` and returns `BudgetExpired` at exactly `accepted_at + 5 s`; a waiter whose job ends after 1 s returns `Settled` at 1 s.
-- `on_the_paused_clock_the_wait_is_zero_when_settled_and_ends_exactly_at_the_deadline` (`crates/daemon/src/source_capture_tests.rs:4004`): through the handler on a paused current-thread runtime, a submit after the publish ended advances no virtual time, and a submit against a parked publish is pending 1 ms before the deadline with no lookup, then returns `publish_budget_expired` with the clock exactly at the deadline.
-- `a_publish_past_its_budget_releases_the_submit_at_the_deadline` (`crates/daemon/src/source_capture_tests.rs:4193`): the publish hook parks a real source job; the submit returns between 5 s and 7 s after the entry's `accepted_at`, and the parked job later ends as `Deadline` on its own budget.
-- `a_submit_during_the_publish_waits_outside_the_gate_and_then_cites` (`crates/daemon/src/source_capture_tests.rs:4081`): while the submit is parked in the wait, the test acquires `capture_commit_gate` with `try_lock`. The hook parks the job before it takes the gate, so a free gate shows the submit holds none at its await point.
+- `on_the_paused_clock_the_wait_is_zero_when_settled_and_ends_exactly_at_the_deadline` (`crates/daemon/src/source_capture_tests.rs:4008`): through the handler on a paused current-thread runtime, a submit after the publish ended advances no virtual time, and a submit against a parked publish is pending 1 ms before the deadline with no lookup, then returns `publish_budget_expired` with the clock exactly at the deadline.
+- `a_publish_past_its_budget_releases_the_submit_at_the_deadline` (`crates/daemon/src/source_capture_tests.rs:4205`): the publish hook parks a real source job; the submit returns between 5 s and 7 s after the entry's `accepted_at`, and the parked job later ends as `Deadline` on its own budget.
+- `a_submit_during_the_publish_waits_outside_the_gate_and_then_cites` (`crates/daemon/src/source_capture_tests.rs:4093`): while the submit is parked in the wait, the test acquires `capture_commit_gate` with `try_lock`. The hook parks the job before it takes the gate, so a free gate shows the submit holds none at its await point.
 
 ## Investigation log
 
@@ -37,6 +37,6 @@ A source job stalled past its budget; a submit that arrives while the job runs.
 
 ### Q: Is the gate free while a waiter is parked?
 
-- Sources examined: `capture_settlements`, `CaptureWork::publish`, the gate assertion in `crates/daemon/src/source_capture_tests.rs:4081`.
+- Sources examined: `capture_settlements`, `CaptureWork::publish`, the gate assertion in `crates/daemon/src/source_capture_tests.rs:4093`.
 - Findings: the gate is taken only inside the blocking hop, which starts after the wait; the test takes the gate while the submit waits.
 - Conclusion: resolved.
