@@ -4,8 +4,9 @@ use serde_json::{Value, json};
 
 use super::source_corpus::{
     CORPUS_SHA256, ExpectedRecord, ExpectedTool, ExpectedUnit, Instructions, Layout, LossCondition,
-    Manifest, NonUnit, NonUnitReason, corpus_digest, corpus_dir, corpus_files, generated_bytes,
-    git, manifests, materialize, read_pi_session, redaction_violations, verify_corpus_digest,
+    Manifest, NonUnit, NonUnitReason, corpus_digest, corpus_dir, corpus_files, frozen_pi_jsonl,
+    generated_bytes, git, load_frozen_opencode, manifests, materialize, read_opencode_session,
+    read_pi_session, redaction_violations, verify_corpus_digest,
 };
 
 /// The root commit materializing `repos/ripgrep.json` yields under the fixed git identity and dates.
@@ -20,7 +21,7 @@ const TYPESCRIPT_PEER: &str = concat!(
 
 const TYPESCRIPT_READER: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../packages/e2e-tests/src/source-corpus/opencode-db-reader.ts"
+    "/../../packages/e2e-tests/src/source-corpus/expected.ts"
 );
 
 fn manifest(name: &str) -> Manifest {
@@ -372,8 +373,10 @@ fn the_pi_reader_classifies_an_image_bearing_tool_result_whole() {
     ]
     .join("\n");
     let records = read_pi_session(&session).unwrap();
-    let text = |index, byte_len| ExpectedUnit {
+    let text = |index, byte_len, revision: &str| ExpectedUnit {
         index,
+        block: index,
+        revision: Some(revision.to_owned()),
         byte_len,
         tool: None,
     };
@@ -388,9 +391,9 @@ fn the_pi_reader_classifies_an_image_bearing_tool_result_whole() {
         kind: "session".to_owned(),
     };
     assert_eq!(records[0].non_units, [header]);
-    assert_eq!(records[1].units, [text(0, 4)]);
+    assert_eq!(records[1].units, [text(0, 4, "1")]);
     assert_eq!(records[1].non_units, [skipped(Some(1), "image")]);
-    assert_eq!(records[2].units, [text(1, 7)]);
+    assert_eq!(records[2].units, [text(1, 7, "2")]);
     assert_eq!(
         records[2].non_units,
         [skipped(Some(0), "thinking"), skipped(Some(2), "toolCall")]
@@ -413,17 +416,20 @@ fn the_pi_reader_classifies_an_image_bearing_tool_result_whole() {
         records[4].units,
         [ExpectedUnit {
             index: 0,
+            block: 0,
+            revision: Some("4".to_owned()),
             byte_len: 4,
             tool: Some(ExpectedTool {
                 name: "bash".to_owned(),
                 call_id: "c2".to_owned(),
+                parent: "p".to_owned(),
                 is_error: true,
                 exit: None,
                 truncated: Some(true),
             }),
         }]
     );
-    assert_eq!(records[5].units, [text(0, 5)]);
+    assert_eq!(records[5].units, [text(0, 5, "5")]);
     assert_eq!(records[7].non_units[0].reason, NonUnitReason::NonTextItem);
     assert!(records[7].units.is_empty());
     assert_eq!(
@@ -503,8 +509,26 @@ fn a_credential_shape_fails_the_redaction_scan_unless_its_unit_is_a_canary() {
     assert_eq!(redaction_violations("f", &plain).len(), 1);
     let canary = json!({"units": [{"canary": true, "text": CANARY, "id": "u"}]});
     assert_eq!(redaction_violations("f", &canary), Vec::<String>::new());
-    let elsewhere = json!({"units": [{"canary": true, "text": CANARY, "note": CANARY}]});
-    assert_eq!(redaction_violations("f", &elsewhere).len(), 1);
+    let preview = json!({"units": [{"canary": true, "text": CANARY, "note": CANARY}]});
+    assert_eq!(redaction_violations("f", &preview), Vec::<String>::new());
+    let tool_part = json!({"parts": [{"canary": true, "type": "tool",
+        "state": {"output": CANARY, "metadata": {"output": CANARY}}}]});
+    assert_eq!(redaction_violations("f", &tool_part), Vec::<String>::new());
+    let beside = json!({"units": [{"canary": true, "text": CANARY}, {"text": CANARY}]});
+    assert_eq!(redaction_violations("f", &beside).len(), 1);
+    let other_secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
+    let inside = json!({"parts": [{"canary": true, "state": {"output": CANARY,
+        "input": {"command": other_secret}}}]});
+    assert_eq!(redaction_violations("f", &inside).len(), 1);
+    let truncated_preview = json!({"parts": [{"canary": true, "state": {
+        "output": format!("token {CANARY}\n"), "metadata": {"output": CANARY}}}]});
+    assert_eq!(
+        redaction_violations("f", &truncated_preview),
+        Vec::<String>::new()
+    );
+    let embedding = json!({"parts": [{"canary": true, "state": {"output": CANARY,
+        "metadata": {"output": format!("{CANARY} {other_secret}")}}}]});
+    assert_eq!(redaction_violations("f", &embedding).len(), 1);
     let negative_canary = json!({"units": [{"canary": true, "text": "ordinary"}]});
     assert_eq!(redaction_violations("f", &negative_canary).len(), 1);
     let textless = json!({"units": [{"canary": true}]});
@@ -544,4 +568,49 @@ fn both_readers_name_the_same_closed_non_unit_reasons() {
     let typescript: Vec<&str> = union.split('"').skip(1).step_by(2).collect();
     let rust: Vec<&str> = NonUnitReason::ALL.iter().map(|r| r.name()).collect();
     assert_eq!(typescript, rust);
+}
+
+/// The frozen Pi session decoded back to its JSONL lines.
+fn frozen_pi() -> String {
+    let path = corpus_dir().join("sessions/pi-0.80.2/mix.json");
+    let fixture: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    frozen_pi_jsonl(&fixture).unwrap()
+}
+
+/// `packages/e2e-tests/src/corpus-sessions/census.test.ts` pins the same totals from the TypeScript reader.
+#[test]
+fn the_pi_reader_reads_the_frozen_pi_session() {
+    let records = read_pi_session(&frozen_pi()).unwrap();
+    let units: Vec<&ExpectedUnit> = records.iter().flat_map(|r| &r.units).collect();
+    assert_eq!(records.len(), 57);
+    assert_eq!(units.len(), 39);
+    assert_eq!(units.iter().filter(|u| u.tool.is_some()).count(), 12);
+    let refused: Vec<&str> = records
+        .iter()
+        .filter(|r| {
+            r.non_units
+                .iter()
+                .any(|n| n.reason == NonUnitReason::NonTextItem)
+        })
+        .map(|r| r.id.as_str())
+        .collect();
+    assert_eq!(refused, ["e0041"]);
+}
+
+/// `packages/e2e-tests/src/corpus-sessions/census.test.ts` pins the same totals from the TypeScript
+/// SQL reader over the same fixture.
+#[test]
+fn the_opencode_reader_reads_the_frozen_opencode_session() {
+    let path = corpus_dir().join("sessions/opencode-1.18.22/mix.json");
+    let fixture: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let session = load_frozen_opencode(&conn, &fixture).unwrap();
+    let records = read_opencode_session(&conn, &session).unwrap();
+    let units: Vec<&ExpectedUnit> = records.iter().flat_map(|r| &r.units).collect();
+    let non_units: Vec<&NonUnit> = records.iter().flat_map(|r| &r.non_units).collect();
+    assert_eq!(records.len(), 42);
+    assert_eq!(units.len(), 42);
+    assert_eq!(units.iter().filter(|u| u.tool.is_some()).count(), 13);
+    assert_eq!(non_units.len(), 56);
+    assert_eq!(non_units.iter().filter(|n| n.kind == "file").count(), 1);
 }

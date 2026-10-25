@@ -106,6 +106,17 @@ describe("forbiddenTypeScriptReaderLines fails closed", () => {
     });
 });
 
+describe("forbiddenTypeScriptReaderLines on calls named like keywords", () => {
+    test("accepts a .from call and side-effect imports of allowed specifiers", () => {
+        const text =
+            'const b = Buffer.from("text");\nimport "./corpus.ts";\nconst a = Array.from("ab");\n';
+        expect(forbiddenTypeScriptReaderLines("r.ts", text)).toEqual([]);
+        expect(forbiddenTypeScriptReaderLines("r.ts", 'import "../x.ts";\n')).toEqual([
+            "r.ts:1: imports ../x.ts",
+        ]);
+    });
+});
+
 describe("forbiddenReaderSources", () => {
     test("reports an empty scan as a finding", () => {
         expect(forbiddenReaderSources({}, {})).toHaveLength(2);

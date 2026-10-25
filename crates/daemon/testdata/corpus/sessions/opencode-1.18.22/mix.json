@@ -1,0 +1,2679 @@
+{
+  "schema": "eidnara.source-corpus/v1",
+  "harness": "opencode",
+  "closure": "opencode-1.18.22",
+  "session_id": "ses_corpus0002",
+  "messages": [
+    {
+      "id": "msg_corpus0001",
+      "time_created": 1792878817108,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878817108
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0001",
+          "time_created": 1792878817122,
+          "data": {
+            "type": "text",
+            "text": "run read"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0002",
+      "time_created": 1792878817138,
+      "data": {
+        "parentID": "msg_corpus0001",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878817138,
+          "completed": 1792878818112
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0002",
+          "time_created": 1792878818023,
+          "data": {
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0003",
+          "time_created": 1792878818027,
+          "data": {
+            "type": "tool",
+            "tool": "read",
+            "callID": "toolu_scripted_1",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/corpus/ripgrep/README.md"
+              },
+              "output": "<path>/corpus/ripgrep/README.md</path>\n<type>file</type>\n<content>\n1: source corpus filler\n2: source corpus filler\n3: source corpus filler\n4: source corpus filler\n5: source corpus filler\n6: source corpus filler\n7: source corpus filler\n8: source corpus filler\n9: source corpus filler\n10: source corpus filler\n11: source corpus filler\n12: source corpus filler\n13: source corpus filler\n14: source corpus filler\n15: source corpus filler\n16: source corpus filler\n17: source corpus filler\n18: source corpus filler\n19: source corpus filler\n20: source corpus filler\n21: source corpus filler\n22: source corpus filler\n23: source corpus filler\n24: source corpus filler\n25: source corpus filler\n26: source corpus filler\n27: source corpus filler\n28: source corpus filler\n29: source corpus filler\n30: source corpus filler\n31: source corpus filler\n32: source corpus filler\n33: source corpus filler\n34: source corpus filler\n35: source corpus filler\n36: source corpus filler\n37: source corpus filler\n38: source corpus filler\n39: source corpus filler\n40: source corpus filler\n41: source corpus filler\n42: source corpus filler\n43: source corpus filler\n44: source corpus filler\n45: source corpus filler\n46: source corpus filler\n47: source corpus filler\n48: source corpus filler\n49: source corpus filler\n50: source corpus filler\n51: source corpus filler\n52: source corpus filler\n53: source corpus filler\n54: source corpus filler\n55: source corpus filler\n56: source corpus filler\n57: source corpus filler\n58: source corpus filler\n59: source corpus filler\n60: source corpus filler\n61: source corpus filler\n62: source corpus filler\n63: source corpus filler\n64: source corpus filler\n65: source corpus filler\n66: source corpus filler\n67: source corpus filler\n68: source corpus filler\n69: source corpus filler\n70: source corpus filler\n71: source corpus filler\n72: source corpus filler\n73: source corpus filler\n74: source corpus filler\n75: source corpus filler\n76: source corpus filler\n77: source corpus filler\n78: source corpus filler\n79: source corpus filler\n80: source corpus filler\n81: source corpus filler\n82: source corpus filler\n83: source corpus filler\n84: source corpus filler\n85: source corpus filler\n86: source corpus filler\n87: source corpus filler\n88: source corpus filler\n89: source corpus filler\n90: source corpus filler\n91: source corpus filler\n92: source corpus filler\n93: source corpus filler\n94: source corpus filler\n95: source corpus filler\n96: source corpus filler\n97: source corpus filler\n98: source corpus filler\n99: source corpus filler\n100: source corpus filler\n101: source corpus filler\n102: source corpus filler\n103: source corpus filler\n104: source corpus filler\n105: source corpus filler\n106: source corpus filler\n107: source corpus filler\n108: source corpus filler\n109: source corpus filler\n110: source corpus filler\n111: source corpus filler\n112: source corpus filler\n113: source corpus filler\n114: source corpus filler\n115: source corpus filler\n116: source corpus filler\n117: source corpus filler\n118: source corpus filler\n119: source corpus filler\n120: source corpus filler\n121: source corpus filler\n122: source corpus filler\n123: source corpus filler\n124: source corpus filler\n125: source corpus filler\n126: source corpus filler\n127: source corpus filler\n128: source corpus filler\n129: source corpus filler\n130: source corpus filler\n131: source corpus filler\n132: source corpus filler\n133: source corpus filler\n134: source corpus filler\n135: source corpus filler\n136: source corpus filler\n137: source corpus filler\n138: source corpus filler\n139: source corpus filler\n140: source corpus filler\n141: source corpus filler\n142: source corpus filler\n143: source corpus filler\n144: source corpus filler\n145: source corpus filler\n146: source corpus filler\n147: source corpus filler\n148: source corpus filler\n149: source corpus filler\n150: source corpus filler\n151: source corpus filler\n152: source corpus filler\n153: source corpus filler\n154: source corpus filler\n155: source corpus filler\n156: source corpus filler\n157: source corpus filler\n158: source corpus filler\n159: source corpus filler\n160: source corpus filler\n161: source corpus filler\n162: source corpus filler\n163: source corpus filler\n164: source corpus filler\n165: source corpus filler\n166: source corpus filler\n167: source corpus filler\n168: source corpus filler\n169: source corpus filler\n170: source corpus filler\n171: source corpus filler\n172: source corpus filler\n173: source corpus filler\n174: source corpus filler\n175: source corpus filler\n176: source corpus filler\n177: source corpus filler\n178: source corpus filler\n179: source corpus filler\n180: source corpus filler\n181: source corpus filler\n182: source corpus filler\n183: source corpus filler\n184: source corpus filler\n185: source corpus filler\n186: source corpus filler\n187: source corpus filler\n188: source corpus filler\n189: source corpus filler\n190: source corpus filler\n191: source corpus filler\n192: source corpus filler\n193: source corpus filler\n194: source corpus filler\n195: source corpus filler\n196: source corpus filler\n197: source corpus filler\n198: source corpus filler\n199: source corpus filler\n200: source corpus filler\n201: source corpus filler\n202: source corpus filler\n203: source corpus filler\n204: source corpus filler\n205: source corpus filler\n206: source corpus filler\n207: source corpus filler\n208: source corpus filler\n209: source corpus filler\n210: source corpus filler\n211: source corpus filler\n212: source corpus filler\n213: source corpus filler\n214: source corpus filler\n215: source corpus filler\n216: source corpus filler\n217: source corpus filler\n218: source corpus filler\n219: source corpus filler\n220: source corpus filler\n221: source corpus filler\n222: source corpus filler\n223: source corpus filler\n224: source corpus filler\n225: source corpus filler\n226: source corpus filler\n227: source corpus filler\n228: source corpus filler\n229: source corpus filler\n230: source corpus filler\n231: source corpus filler\n232: source corpus filler\n233: source corpus filler\n234: source corpus filler\n235: source corpus filler\n236: source corpus filler\n237: source corpus filler\n238: source corpus filler\n239: source corpus filler\n240: source corpus filler\n241: source corpus filler\n242: source corpus filler\n243: source corpus filler\n244: source corpus filler\n245: source corpus filler\n246: source corpus filler\n247: source corpus filler\n248: source corpus filler\n249: source corpus filler\n250: source corpus filler\n251: source corpus filler\n252: source corpus filler\n253: source corpus filler\n254: source corpus filler\n255: source corpus filler\n256: source corpus filler\n257: source corpus filler\n258: source corpus filler\n259: source corpus filler\n260: source corpus filler\n261: source corpus filler\n262: source corpus filler\n263: source corpus filler\n264: source corpus filler\n265: source corpus filler\n266: source corpus filler\n267: source corpus filler\n268: source corpus filler\n269: source corpus filler\n270: source corpus filler\n271: source corpus filler\n272: source corpus filler\n273: source corpus filler\n274: source corpus filler\n275: source corpus filler\n276: source corpus filler\n277: source corpus filler\n278: source corpus filler\n279: source corpus filler\n280: source corpus filler\n281: source corpus filler\n282: source corpus filler\n283: source corpus filler\n284: source corpus filler\n285: source corpus filler\n286: source corpus filler\n287: source corpus filler\n288: source corpus filler\n289: source corpus filler\n290: source corpus filler\n291: source corpus filler\n292: source corpus filler\n293: source corpus filler\n294: source corpus filler\n295: source corpus filler\n296: source corpus filler\n297: source corpus filler\n298: source corpus filler\n299: source corpus filler\n300: source corpus filler\n301: source corpus filler\n302: source corpus filler\n303: source corpus filler\n304: source corpus filler\n305: source corpus filler\n306: source corpus filler\n307: source corpus filler\n308: source corpus filler\n309: source corpus filler\n310: source corpus filler\n311: source corpus filler\n312: source corpus filler\n313: source corpus filler\n314: source corpus filler\n315: source corpus filler\n316: source corpus filler\n317: source corpus filler\n318: source corpus filler\n319: source corpus filler\n320: source corpus filler\n321: source corpus filler\n322: source corpus filler\n323: source corpus filler\n324: source corpus filler\n325: source corpus filler\n326: source corpus filler\n327: source corpus filler\n328: source corpus filler\n329: source corpus filler\n330: source corpus filler\n331: source corpus filler\n332: source corpus filler\n333: source corpus filler\n334: source corpus filler\n335: source corpus filler\n336: source corpus filler\n337: source corpus filler\n338: source corpus filler\n339: source corpus filler\n340: source corpus filler\n341: source corpus filler\n342: source corpus filler\n343: source corpus filler\n344: source corpus filler\n345: source corpus filler\n346: source corpus filler\n347: source corpus filler\n348: source corpus filler\n349: source corpus filler\n350: source corpus filler\n351: source corpus filler\n352: source corpus filler\n353: source corpus filler\n354: source corpus filler\n355: source corpus filler\n356: source corpus filler\n357: source corpus filler\n358: source corpus filler\n359: source corpus filler\n360: source corpus filler\n361: source corpus filler\n362: source corpus filler\n363: source corpus filler\n364: source corpus filler\n365: source corpus filler\n366: source corpus filler\n367: source corpus filler\n368: source corpus filler\n369: source corpus filler\n370: source corpus filler\n371: source corpus filler\n372: source corpus filler\n373: source corpus filler\n374: source corpus filler\n375: source corpus filler\n376: source corpus filler\n377: source corpus filler\n378: source corpus filler\n379: source corpus filler\n380: source corpus filler\n381: source corpus filler\n382: source corpus filler\n383: source corpus filler\n384: source corpus filler\n385: source corpus filler\n386: source corpus filler\n387: source corpus filler\n388: source corpus filler\n389: source corpus filler\n390: source corpus filler\n391: source corpus filler\n392: source corpus filler\n393: source corpus filler\n394: source corpus filler\n395: source corpus filler\n396: source corpus filler\n397: source corpus filler\n398: source corpus filler\n399: source corpus filler\n400: source corpus filler\n401: source corpus filler\n402: source corpus filler\n403: source corpus filler\n404: source corpus filler\n405: source corpus filler\n406: source corpus filler\n407: source corpus filler\n408: source corpus filler\n409: source corpus filler\n410: source corpus filler\n411: source corpus filler\n412: source corpus filler\n413: source corpus filler\n414: source corpus filler\n415: source corpus filler\n416: source corpus filler\n417: source corpus filler\n418: source corpus filler\n419: source corpus filler\n420: source corpus filler\n421: source corpus filler\n422: source corpus filler\n423: source corpus filler\n424: source corpus filler\n425: source corpus filler\n426: source corpus filler\n427: source corpus filler\n428: source corpus filler\n429: source corpus filler\n430: source corpus filler\n431: source corpus filler\n432: source corpus filler\n433: source corpus filler\n434: source corpus filler\n435: source corpus filler\n436: source corpus filler\n437: source corpus filler\n438: source corpus filler\n439: source corpus filler\n440: source corpus filler\n441: source corpus filler\n442: source corpus filler\n443: source corpus filler\n444: source corpus filler\n445: source corpus filler\n446: source corpus filler\n447: source corpus filler\n448: source corpus filler\n449: source corpus filler\n450: source corpus filler\n451: source corpus filler\n452: source corpus filler\n453: source corpus filler\n454: source corpus filler\n455: source corpus filler\n456: source corpus filler\n457: source corpus filler\n458: source corpus filler\n459: source corpus filler\n460: source corpus filler\n461: source corpus filler\n462: source corpus filler\n463: source corpus filler\n464: source corpus filler\n465: source corpus filler\n466: source corpus filler\n467: source corpus filler\n468: source corpus filler\n469: source corpus filler\n470: source corpus filler\n471: source corpus filler\n472: source corpus filler\n473: source corpus filler\n474: source corpus filler\n475: source corpus filler\n476: source corpus filler\n477: source corpus filler\n478: source corpus filler\n479: source corpus filler\n480: source corpus filler\n481: source corpus filler\n482: source corpus filler\n483: source corpus filler\n484: source corpus filler\n485: source corpus filler\n486: source corpus filler\n487: source corpus filler\n488: source corpus filler\n489: source corpus filler\n490: source corpus filler\n491: source corpus filler\n492: source corpus filler\n493: source corpus filler\n494: source corpus filler\n495: source corpus filler\n496: source corpus filler\n497: source corpus filler\n498: source corpus filler\n499: source corpus filler\n500: source corpus filler\n501: source corpus filler\n502: source corpus filler\n503: source corpus filler\n504: source corpus filler\n505: source corpus filler\n506: source corpus filler\n507: source corpus filler\n508: source corpus filler\n509: source corpus filler\n510: source corpus filler\n511: source corpus filler\n512: source corpus filler\n513: source corpus filler\n514: source corpus filler\n515: source corpus filler\n516: source corpus filler\n517: source corpus filler\n518: source corpus filler\n519: source corpus filler\n520: source corpus filler\n521: source corpus filler\n522: source corpus filler\n523: source corpus filler\n524: source corpus filler\n525: source corpus filler\n526: source corpus filler\n527: source corpus filler\n528: source corpus filler\n529: source corpus filler\n530: source corpus filler\n531: source corpus filler\n532: source corpus filler\n533: source corpus filler\n534: source corpus filler\n535: source corpus filler\n536: source corpus filler\n537: source corpus filler\n538: source corpus filler\n539: source corpus filler\n540: source corpus filler\n541: source corpus filler\n542: source corpus filler\n543: source corpus filler\n544: source corpus filler\n545: source corpus filler\n546: source corpus filler\n547: source corpus filler\n548: source corpus filler\n549: source corpus filler\n550: source corpus filler\n551: source corpus filler\n552: source corpus filler\n553: source corpus filler\n554: source corpus filler\n555: source corpus filler\n556: source corpus filler\n557: source corpus filler\n558: source corpus filler\n559: source corpus filler\n560: source corpus filler\n561: source corpus filler\n562: source corpus filler\n563: source corpus filler\n564: source corpus filler\n565: source corpus filler\n566: source corpus filler\n567: source corpus filler\n568: source corpus filler\n569: source corpus filler\n570: source corpus filler\n571: source corpus filler\n572: source corpus filler\n573: source corpus filler\n574: source corpus filler\n575: source corpus filler\n576: source corpus filler\n577: source corpus filler\n578: source corpus filler\n579: source corpus filler\n580: source corpus filler\n581: source corpus filler\n582: source corpus filler\n583: source corpus filler\n584: source corpus filler\n585: source corpus filler\n586: source corpus filler\n587: source corpus filler\n588: source corpus filler\n589: source corpus filler\n590: source corpus filler\n591: source corpus filler\n592: source corpus filler\n593: source corpus filler\n594: source corpus filler\n595: source corpus filler\n596: source corpus filler\n597: source corpus filler\n598: source corpus filler\n599: source corpus filler\n600: source corpus filler\n601: source corpus filler\n602: source corpus filler\n603: source corpus filler\n604: source corpus filler\n605: source corpus filler\n606: source corpus filler\n607: source corpus filler\n608: source corpus filler\n609: source corpus filler\n610: source corpus filler\n611: source corpus filler\n612: source corpus filler\n613: source corpus filler\n614: source corpus filler\n615: source corpus filler\n616: source corpus filler\n617: source corpus filler\n618: source corpus filler\n619: source corpus filler\n620: source corpus filler\n621: source corpus filler\n622: source corpus filler\n623: source corpus filler\n624: source corpus filler\n625: source corpus filler\n626: source corpus filler\n627: source corpus filler\n628: source corpus filler\n629: source corpus filler\n630: source corpus filler\n631: source corpus filler\n632: source corpus filler\n633: source corpus filler\n634: source corpus filler\n635: source corpus filler\n636: source corpus filler\n637: source corpus filler\n638: source corpus filler\n639: source corpus filler\n640: source corpus filler\n641: source corpus filler\n642: source corpus filler\n643: source corpus filler\n644: source corpus filler\n645: source corpus filler\n646: source corpus filler\n647: source corpus filler\n648: source corpus filler\n649: source corpus filler\n650: source corpus filler\n651: source corpus filler\n652: source corpus filler\n653: source corpus filler\n654: source corpus filler\n655: source corpus filler\n656: source corpus filler\n657: source corpus filler\n658: source corpus filler\n659: source corpus filler\n660: source corpus filler\n661: source corpus filler\n662: source corpus filler\n663: source corpus filler\n664: source corpus filler\n665: source corpus filler\n666: source corpus filler\n667: source corpus filler\n668: source corpus filler\n669: source corpus filler\n670: source corpus filler\n671: source corpus filler\n672: source corpus filler\n673: source corpus filler\n674: source corpus filler\n675: source corpus filler\n676: source corpus filler\n677: source corpus filler\n678: source corpus filler\n679: source corpus filler\n680: source corpus filler\n681: source corpus filler\n682: source corpus filler\n683: source corpus filler\n684: source corpus filler\n685: source corpus filler\n686: source corpus filler\n687: source corpus filler\n688: source corpus filler\n689: source corpus filler\n690: source corpus filler\n691: source corpus filler\n692: source corpus filler\n693: source corpus filler\n694: source corpus filler\n695: source corpus filler\n696: source corpus filler\n697: source corpus filler\n698: source corpus filler\n699: source corpus filler\n700: source corpus filler\n701: source corpus filler\n702: source corpus filler\n703: source corpus filler\n704: source corpus filler\n705: source corpus filler\n706: source corpus filler\n707: source corpus filler\n708: source corpus filler\n709: source corpus filler\n710: source corpus filler\n711: source corpus filler\n712: source corpus filler\n713: source corpus filler\n714: source corpus filler\n715: source corpus filler\n716: source corpus filler\n717: source corpus filler\n718: source corpus filler\n719: source corpus filler\n720: source corpus filler\n721: source corpus filler\n722: source corpus filler\n723: source corpus filler\n724: source corpus filler\n725: source corpus filler\n726: source corpus filler\n727: source corpus filler\n728: source corpus filler\n729: source corpus filler\n730: source corpus filler\n731: source corpus filler\n732: source corpus filler\n733: source corpus filler\n734: source corpus filler\n735: source corpus filler\n736: source corpus filler\n737: source corpus filler\n738: source corpus filler\n739: source corpus filler\n740: source corpus filler\n741: source corpus filler\n742: source corpus filler\n743: source corpus filler\n744: source corpus filler\n745: source corpus filler\n746: source corpus filler\n747: source corpus filler\n748: source corpus filler\n749: source corpus filler\n750: source corpus filler\n751: source corpus filler\n752: source corpus filler\n753: source corpus filler\n754: source corpus filler\n755: source corpus filler\n756: source corpus filler\n757: source corpus filler\n758: source corpus filler\n759: source corpus filler\n760: source corpus filler\n761: source corpus filler\n762: source corpus filler\n763: source corpus filler\n764: source corpus filler\n765: source corpus filler\n766: source corpus filler\n767: source corpus filler\n768: source corpus filler\n769: source corpus filler\n770: source corpus filler\n771: source corpus filler\n772: source corpus filler\n773: source corpus filler\n774: source corpus filler\n775: source corpus filler\n776: source corpus filler\n777: source corpus filler\n778: source corpus filler\n779: source corpus filler\n780: source corpus filler\n781: source corpus filler\n782: source corpus filler\n783: source corpus filler\n784: source corpus filler\n785: source corpus filler\n786: source corpus filler\n787: source corpus filler\n788: source corpus filler\n789: source corpus filler\n790: source corpus filler\n791: source corpus filler\n792: source corpus filler\n793: source corpus filler\n794: source corpus filler\n795: source corpus filler\n796: source corpus filler\n797: source corpus filler\n798: source corpus filler\n799: source corpus filler\n800: source corpus filler\n801: source corpus filler\n802: source corpus filler\n803: source corpus filler\n804: source corpus filler\n805: source corpus filler\n806: source corpus filler\n807: source corpus filler\n808: source corpus filler\n809: source corpus filler\n810: source corpus filler\n811: source corpus filler\n812: source corpus filler\n813: source corpus filler\n814: source corpus filler\n815: source corpus filler\n816: source corpus filler\n817: source corpus filler\n818: source corpus filler\n819: source corpus filler\n820: source corpus filler\n821: source corpus filler\n822: source corpus filler\n823: source corpus filler\n824: source corpus filler\n825: source corpus filler\n826: source corpus filler\n827: source corpus filler\n828: source corpus filler\n829: source corpus filler\n830: source corpus filler\n831: source corpus filler\n832: source corpus filler\n833: source corpus filler\n834: source corpus filler\n835: source corpus filler\n836: source corpus filler\n837: source corpus filler\n838: source corpus filler\n839: source corpus filler\n840: source corpus filler\n841: source corpus filler\n842: source corpus filler\n843: source corpus filler\n844: source corpus filler\n845: source corpus filler\n846: source corpus filler\n847: source corpus filler\n848: source corpus filler\n849: source corpus filler\n850: source corpus filler\n851: source corpus filler\n852: source corpus filler\n853: source corpus filler\n854: source corpus filler\n855: source corpus filler\n856: source corpus filler\n857: source corpus filler\n858: source corpus filler\n859: source corpus filler\n860: source corpus filler\n861: source corpus filler\n862: source corpus filler\n863: source corpus filler\n864: source corpus filler\n865: source corpus filler\n866: source corpus filler\n867: source corpus filler\n868: source corpus filler\n869: source corpus filler\n870: source corpus filler\n871: source corpus filler\n872: source corpus filler\n873: source corpus filler\n874: source corpus filler\n875: source corpus filler\n876: source corpus filler\n877: source corpus filler\n878: source corpus filler\n879: source corpus filler\n880: source corpus filler\n881: source corpus filler\n882: source corpus filler\n883: source corpus filler\n884: source corpus filler\n885: source corpus filler\n886: source corpus filler\n887: source corpus filler\n888: source corpus filler\n889: source corpus filler\n890: source corpus filler\n891: source corpus filler\n892: source corpus filler\n893: source corpus filler\n894: source corpus filler\n895: source corpus filler\n896: source corpus filler\n897: source corpus filler\n898: source corpus filler\n899: source corpus filler\n900: source corpus filler\n901: source corpus filler\n902: source corpus filler\n903: source corpus filler\n904: source corpus filler\n905: source corpus filler\n906: source corpus filler\n907: source corpus filler\n908: source corpus filler\n909: source corpus filler\n910: source corpus filler\n911: source corpus filler\n912: source corpus filler\n913: source corpus filler\n914: source corpus filler\n915: source corpus filler\n916: source corpus filler\n917: source corpus filler\n918: source corpus filler\n919: source corpus filler\n920: source corpus filler\n921: source corpus filler\n922: source corpus filler\n923: source corpus filler\n924: source corpus filler\n925: source corpus filler\n926: source corpus filler\n927: source corpus filler\n928: source corpus filler\n929: source corpus filler\n930: source corpus filler\n931: source corpus filler\n932: source corpus filler\n933: source corpus filler\n934: source corpus filler\n935: source corpus filler\n936: source corpus filler\n937: source corpus filler\n938: source corpus filler\n939: source corpus filler\n940: source corpus filler\n941: source corpus filler\n942: source corpus filler\n943: source corpus filler\n944: source corpus filler\n945: source corpus filler\n946: source corpus filler\n947: source corpus filler\n948: source corpus filler\n949: source corpus filler\n950: source corpus filler\n951: source corpus filler\n952: source corpus filler\n953: source corpus filler\n954: source corpus filler\n955: source corpus filler\n956: source corpus filler\n957: source corpus filler\n958: source corpus filler\n959: source corpus filler\n960: source corpus filler\n961: source corpus filler\n962: source corpus filler\n963: source corpus filler\n964: source corpus filler\n965: source corpus filler\n966: source corpus filler\n967: source corpus filler\n968: source corpus filler\n969: source corpus filler\n970: source corpus filler\n971: source corpus filler\n972: source corpus filler\n973: source corpus filler\n974: source corpus filler\n975: source corpus filler\n976: source corpus filler\n977: source corpus filler\n978: source corpus filler\n979: source corpus filler\n980: source corpus filler\n981: source corpus filler\n982: source corpus filler\n983: source corpus filler\n984: source corpus filler\n985: source corpus filler\n986: source corpus filler\n987: source corpus filler\n988: source corpus filler\n989: source corpus filler\n990: source corpus filler\n991: source corpus filler\n992: source corpus filler\n993: source corpus filler\n994: source corpus filler\n995: source corpus filler\n996: source corpus filler\n997: source corpus filler\n998: source corpus filler\n999: source corpus filler\n1000: source corpus filler\n1001: source corpus filler\n1002: source corpus filler\n1003: source corpus filler\n1004: source corpus filler\n1005: source corpus filler\n1006: source corpus filler\n1007: source corpus filler\n1008: source corpus filler\n1009: source corpus filler\n1010: source corpus filler\n1011: source corpus filler\n1012: source corpus filler\n1013: source corpus filler\n1014: source corpus filler\n1015: source corpus filler\n1016: source corpus filler\n1017: source corpus filler\n1018: source corpus filler\n1019: source corpus filler\n1020: source corpus filler\n1021: source corpus filler\n1022: source corpus filler\n1023: source corpus filler\n1024: source corpus filler\n1025: source corpus filler\n1026: source corpus filler\n1027: source corpus filler\n1028: source corpus filler\n1029: source corpus filler\n1030: source\n\n(End of file - total 1030 lines)\n</content>",
+              "metadata": {
+                "preview": "source corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler",
+                "truncated": false,
+                "loaded": [],
+                "display": {
+                  "type": "file",
+                  "path": "/corpus/ripgrep/README.md",
+                  "text": "source corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource corpus filler\nsource",
+                  "lineStart": 1,
+                  "lineEnd": 1030,
+                  "totalLines": 1030,
+                  "truncated": false
+                }
+              },
+              "title": "README.md",
+              "time": {
+                "start": 1792878818035,
+                "end": 1792878818055
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0004",
+          "time_created": 1792878818077,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0003",
+      "time_created": 1792878818116,
+      "data": {
+        "parentID": "msg_corpus0001",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878818116,
+          "completed": 1792878818254
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0005",
+          "time_created": 1792878818202,
+          "data": {
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0006",
+          "time_created": 1792878818204,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878818204,
+              "end": 1792878818208
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0007",
+          "time_created": 1792878818234,
+          "data": {
+            "reason": "stop",
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0004",
+      "time_created": 1792878818269,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878818269
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0008",
+          "time_created": 1792878818272,
+          "data": {
+            "type": "text",
+            "text": "run bash"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0005",
+      "time_created": 1792878818289,
+      "data": {
+        "parentID": "msg_corpus0004",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878818289,
+          "completed": 1792878818521
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0009",
+          "time_created": 1792878818359,
+          "data": {
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0010",
+          "time_created": 1792878818361,
+          "data": {
+            "type": "tool",
+            "tool": "bash",
+            "callID": "toolu_scripted_2",
+            "state": {
+              "status": "completed",
+              "input": {
+                "command": "cat canary.txt",
+                "description": "Read the canary"
+              },
+              "output": "token sk-ant-api03-Zk9Qw2Lm7Pv4Rt8Zw1Yc6Nb3Hd5Kf0JgAbCdEfGh\n",
+              "metadata": {
+                "output": "token sk-ant-api03-Zk9Qw2Lm7Pv4Rt8Zw1Yc6Nb3Hd5Kf0JgAbCdEfGh\n",
+                "exit": 0,
+                "truncated": false
+              },
+              "title": "cat canary.txt",
+              "time": {
+                "start": 1792878818455,
+                "end": 1792878818460
+              }
+            },
+            "canary": true
+          }
+        },
+        {
+          "id": "prt_corpus0011",
+          "time_created": 1792878818493,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0006",
+      "time_created": 1792878818524,
+      "data": {
+        "parentID": "msg_corpus0004",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878818524,
+          "completed": 1792878818638
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0012",
+          "time_created": 1792878818587,
+          "data": {
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0013",
+          "time_created": 1792878818589,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878818589,
+              "end": 1792878818591
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0014",
+          "time_created": 1792878818618,
+          "data": {
+            "reason": "stop",
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0007",
+      "time_created": 1792878818651,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878818651
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0015",
+          "time_created": 1792878818653,
+          "data": {
+            "type": "text",
+            "text": "run bash"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0008",
+      "time_created": 1792878818671,
+      "data": {
+        "parentID": "msg_corpus0007",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878818671,
+          "completed": 1792878818809
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0016",
+          "time_created": 1792878818750,
+          "data": {
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0017",
+          "time_created": 1792878818752,
+          "data": {
+            "type": "tool",
+            "tool": "bash",
+            "callID": "toolu_scripted_3",
+            "state": {
+              "status": "completed",
+              "input": {
+                "command": "cat data.json",
+                "description": "Read JSON"
+              },
+              "output": "{\"status\":\"ok\",\"items\":[1,2,3]}\n",
+              "metadata": {
+                "output": "{\"status\":\"ok\",\"items\":[1,2,3]}\n",
+                "exit": 0,
+                "truncated": false
+              },
+              "title": "cat data.json",
+              "time": {
+                "start": 1792878818771,
+                "end": 1792878818774
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0018",
+          "time_created": 1792878818791,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0009",
+      "time_created": 1792878818812,
+      "data": {
+        "parentID": "msg_corpus0007",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878818812,
+          "completed": 1792878818919
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0019",
+          "time_created": 1792878818878,
+          "data": {
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0020",
+          "time_created": 1792878818880,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878818880,
+              "end": 1792878818882
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0021",
+          "time_created": 1792878818902,
+          "data": {
+            "reason": "stop",
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0010",
+      "time_created": 1792878818931,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878818931
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0022",
+          "time_created": 1792878818933,
+          "data": {
+            "type": "text",
+            "text": "run bash"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0011",
+      "time_created": 1792878818957,
+      "data": {
+        "parentID": "msg_corpus0010",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878818957,
+          "completed": 1792878819082
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0023",
+          "time_created": 1792878819024,
+          "data": {
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0024",
+          "time_created": 1792878819026,
+          "data": {
+            "type": "tool",
+            "tool": "bash",
+            "callID": "toolu_scripted_4",
+            "state": {
+              "status": "completed",
+              "input": {
+                "command": "printf 'a\\377b'",
+                "description": "Print invalid UTF-8"
+              },
+              "output": "a�b",
+              "metadata": {
+                "output": "a�b",
+                "exit": 0,
+                "truncated": false
+              },
+              "title": "printf 'a\\377b'",
+              "time": {
+                "start": 1792878819042,
+                "end": 1792878819046
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0025",
+          "time_created": 1792878819065,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0012",
+      "time_created": 1792878819085,
+      "data": {
+        "parentID": "msg_corpus0010",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878819085,
+          "completed": 1792878819193
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0026",
+          "time_created": 1792878819150,
+          "data": {
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0027",
+          "time_created": 1792878819151,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878819151,
+              "end": 1792878819154
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0028",
+          "time_created": 1792878819173,
+          "data": {
+            "reason": "stop",
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0013",
+      "time_created": 1792878819206,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878819206
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": [
+            {
+              "file": "notes.txt",
+              "patch": "Index: notes.txt\n===================================================================\n--- notes.txt\t\n+++ notes.txt\t\n@@ -1,1 +1,1 @@\n-alpha line\n+beta line\n",
+              "additions": 1,
+              "deletions": 1,
+              "status": "modified"
+            }
+          ]
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0029",
+          "time_created": 1792878819208,
+          "data": {
+            "type": "text",
+            "text": "run edit"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0014",
+      "time_created": 1792878819225,
+      "data": {
+        "parentID": "msg_corpus0013",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878819225,
+          "completed": 1792878819368
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0030",
+          "time_created": 1792878819290,
+          "data": {
+            "snapshot": "216ce4449db526a24433d65622acd79866eea4d4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0031",
+          "time_created": 1792878819292,
+          "data": {
+            "type": "tool",
+            "tool": "edit",
+            "callID": "toolu_scripted_5",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/corpus/ripgrep/notes.txt",
+                "oldString": "alpha",
+                "newString": "beta"
+              },
+              "output": "Edit applied successfully.",
+              "metadata": {
+                "diagnostics": {},
+                "diff": "Index: /corpus/ripgrep/notes.txt\n===================================================================\n--- /corpus/ripgrep/notes.txt\n+++ /corpus/ripgrep/notes.txt\n@@ -1,1 +1,1 @@\n-alpha line\n+beta line\n",
+                "filediff": {
+                  "file": "/corpus/ripgrep/notes.txt",
+                  "patch": "Index: /corpus/ripgrep/notes.txt\n===================================================================\n--- /corpus/ripgrep/notes.txt\n+++ /corpus/ripgrep/notes.txt\n@@ -1,1 +1,1 @@\n-alpha line\n+beta line\n",
+                  "additions": 1,
+                  "deletions": 1
+                },
+                "truncated": false
+              },
+              "title": "notes.txt",
+              "time": {
+                "start": 1792878819312,
+                "end": 1792878819316
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0032",
+          "time_created": 1792878819346,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "0fe6957b06340c8dee3d234c87c33c4246de57e8",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        },
+        {
+          "id": "prt_corpus0033",
+          "time_created": 1792878819365,
+          "data": {
+            "type": "patch",
+            "hash": "216ce4449db526a24433d65622acd79866eea4d4",
+            "files": [
+              "/corpus/ripgrep/notes.txt"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0015",
+      "time_created": 1792878819371,
+      "data": {
+        "parentID": "msg_corpus0013",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878819371,
+          "completed": 1792878819490
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0034",
+          "time_created": 1792878819440,
+          "data": {
+            "snapshot": "0fe6957b06340c8dee3d234c87c33c4246de57e8",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0035",
+          "time_created": 1792878819442,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878819442,
+              "end": 1792878819444
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0036",
+          "time_created": 1792878819472,
+          "data": {
+            "reason": "stop",
+            "snapshot": "0fe6957b06340c8dee3d234c87c33c4246de57e8",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0016",
+      "time_created": 1792878819502,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878819502
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": [
+            {
+              "file": "out.txt",
+              "patch": "Index: out.txt\n===================================================================\n--- out.txt\t\n+++ out.txt\t\n@@ -0,0 +1,1 @@\n+written by the mix\n",
+              "additions": 1,
+              "deletions": 0,
+              "status": "added"
+            }
+          ]
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0037",
+          "time_created": 1792878819504,
+          "data": {
+            "type": "text",
+            "text": "run write"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0017",
+      "time_created": 1792878819521,
+      "data": {
+        "parentID": "msg_corpus0016",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878819521,
+          "completed": 1792878819661
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0038",
+          "time_created": 1792878819595,
+          "data": {
+            "snapshot": "0fe6957b06340c8dee3d234c87c33c4246de57e8",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0039",
+          "time_created": 1792878819597,
+          "data": {
+            "type": "tool",
+            "tool": "write",
+            "callID": "toolu_scripted_6",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/corpus/ripgrep/out.txt",
+                "content": "written by the mix\n"
+              },
+              "output": "Wrote file successfully.",
+              "metadata": {
+                "diagnostics": {},
+                "filepath": "/corpus/ripgrep/out.txt",
+                "exists": false,
+                "truncated": false
+              },
+              "title": "out.txt",
+              "time": {
+                "start": 1792878819601,
+                "end": 1792878819612
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0040",
+          "time_created": 1792878819641,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        },
+        {
+          "id": "prt_corpus0041",
+          "time_created": 1792878819659,
+          "data": {
+            "type": "patch",
+            "hash": "0fe6957b06340c8dee3d234c87c33c4246de57e8",
+            "files": [
+              "/corpus/ripgrep/out.txt"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0018",
+      "time_created": 1792878819664,
+      "data": {
+        "parentID": "msg_corpus0016",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878819664,
+          "completed": 1792878819770
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0042",
+          "time_created": 1792878819732,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0043",
+          "time_created": 1792878819734,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878819734,
+              "end": 1792878819736
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0044",
+          "time_created": 1792878819753,
+          "data": {
+            "reason": "stop",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0019",
+      "time_created": 1792878819782,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878819782
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0045",
+          "time_created": 1792878819784,
+          "data": {
+            "type": "text",
+            "text": "run grep"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0020",
+      "time_created": 1792878819801,
+      "data": {
+        "parentID": "msg_corpus0019",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878819801,
+          "completed": 1792878819940
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0046",
+          "time_created": 1792878819869,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0047",
+          "time_created": 1792878819871,
+          "data": {
+            "type": "tool",
+            "tool": "grep",
+            "callID": "toolu_scripted_7",
+            "state": {
+              "status": "completed",
+              "input": {
+                "pattern": "filler",
+                "include": "*.md"
+              },
+              "output": "Found 100 matches (more matches available)\n/corpus/ripgrep/.github/ISSUE_TEMPLATE/feature_request.md:\n  Line 1: source corpus filler\n\n  Line 2: source corpus filler\n\n  Line 3: source corpus filler\n\n  Line 4: source corpus filler\n\n  Line 5: source corpus filler\n\n  Line 6: source corpus filler\n\n  Line 7: source corpus filler\n\n  Line 8: source corpus filler\n\n  Line 9: source corpus filler\n\n  Line 10: source corpus filler\n\n  Line 11: source corpus filler\n\n  Line 12: source corpus filler\n\n  Line 13: source corpus filler\n\n  Line 14: source corpus filler\n\n  Line 15: source corpus filler\n\n  Line 16: source corpus filler\n\n  Line 17: source corpus filler\n\n  Line 18: source corpus filler\n\n  Line 19: source corpus filler\n\n  Line 20: source corpus filler\n\n  Line 21: source corpus filler\n\n  Line 22: source corpus filler\n\n  Line 23: source corpus filler\n\n  Line 24: source corpus filler\n\n  Line 25: source corpus filler\n\n  Line 26: source corpus filler\n\n  Line 27: source corpus filler\n\n  Line 28: source corpus filler\n\n\n/corpus/ripgrep/pkg/windows/README.md:\n  Line 1: source corpus filler\n\n  Line 2: source corpus filler\n\n  Line 3: source corpus filler\n\n  Line 4: source corpus filler\n\n  Line 5: source corpus filler\n\n  Line 6: source corpus filler\n\n  Line 7: source corpus filler\n\n  Line 8: source corpus filler\n\n  Line 9: source corpus filler\n\n  Line 10: source corpus filler\n\n  Line 11: source corpus filler\n\n  Line 12: source corpus filler\n\n  Line 13: source corpus filler\n\n  Line 14: source corpus filler\n\n  Line 15: source corpus filler\n\n  Line 16: source corpus filler\n\n  Line 17: source corpus filler\n\n  Line 18: source corpus filler\n\n  Line 19: source corpus filler\n\n  Line 20: source corpus filler\n\n  Line 21: source corpus filler\n\n  Line 22: source corpus filler\n\n  Line 23: source corpus filler\n\n  Line 24: source corpus filler\n\n  Line 25: source corpus filler\n\n  Line 26: source corpus filler\n\n  Line 27: source corpus filler\n\n  Line 28: source corpus filler\n\n  Line 29: source corpus filler\n\n  Line 30: source corpus filler\n\n  Line 31: source corpus filler\n\n  Line 32: source corpus filler\n\n  Line 33: source corpus filler\n\n\n/corpus/ripgrep/AI_POLICY.md:\n  Line 1: source corpus filler\n\n  Line 2: source corpus filler\n\n  Line 3: source corpus filler\n\n  Line 4: source corpus filler\n\n  Line 5: source corpus filler\n\n  Line 6: source corpus filler\n\n  Line 7: source corpus filler\n\n  Line 8: source corpus filler\n\n  Line 9: source corpus filler\n\n  Line 10: source corpus filler\n\n  Line 11: source corpus filler\n\n  Line 12: source corpus filler\n\n  Line 13: source corpus filler\n\n  Line 14: source corpus filler\n\n  Line 15: source corpus filler\n\n  Line 16: source corpus filler\n\n  Line 17: source corpus filler\n\n  Line 18: source corpus filler\n\n  Line 19: source corpus filler\n\n  Line 20: source corpus filler\n\n  Line 21: source corpus filler\n\n  Line 22: source corpus filler\n\n  Line 23: source corpus filler\n\n  Line 24: source corpus filler\n\n  Line 25: source corpus filler\n\n  Line 26: source corpus filler\n\n  Line 27: source corpus filler\n\n  Line 28: source corpus filler\n\n  Line 29: source corpus filler\n\n  Line 30: source corpus filler\n\n  Line 31: source corpus filler\n\n  Line 32: source corpus filler\n\n  Line 33: source corpus filler\n\n  Line 34: source corpus filler\n\n  Line 35: source corpus filler\n\n  Line 36: source corpus filler\n\n  Line 37: source corpus filler\n\n  Line 38: source corpus filler\n\n  Line 39: source corpus filler\n\n\n(Results truncated. Consider using a more specific path or pattern.)",
+              "metadata": {
+                "matches": 100,
+                "truncated": true
+              },
+              "title": "filler",
+              "time": {
+                "start": 1792878819875,
+                "end": 1792878819905
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0048",
+          "time_created": 1792878819923,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0021",
+      "time_created": 1792878819943,
+      "data": {
+        "parentID": "msg_corpus0019",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878819943,
+          "completed": 1792878820045
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0049",
+          "time_created": 1792878820010,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0050",
+          "time_created": 1792878820011,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878820011,
+              "end": 1792878820013
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0051",
+          "time_created": 1792878820029,
+          "data": {
+            "reason": "stop",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0022",
+      "time_created": 1792878820057,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878820057
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0052",
+          "time_created": 1792878820059,
+          "data": {
+            "type": "text",
+            "text": "run glob"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0023",
+      "time_created": 1792878820076,
+      "data": {
+        "parentID": "msg_corpus0022",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878820076,
+          "completed": 1792878820200
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0053",
+          "time_created": 1792878820143,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0054",
+          "time_created": 1792878820145,
+          "data": {
+            "type": "tool",
+            "tool": "glob",
+            "callID": "toolu_scripted_8",
+            "state": {
+              "status": "completed",
+              "input": {
+                "pattern": "*.md"
+              },
+              "output": "/corpus/ripgrep/AI_POLICY.md\n/corpus/ripgrep/CHANGELOG.md\n/corpus/ripgrep/CONTRIBUTING.md\n/corpus/ripgrep/FAQ.md\n/corpus/ripgrep/GUIDE.md\n/corpus/ripgrep/README.md\n/corpus/ripgrep/RELEASE-CHECKLIST.md\n/corpus/ripgrep/pkg/windows/README.md\n/corpus/ripgrep/ARCHITECTURE.md\n/corpus/ripgrep/benchsuite/runs/2020-10-14-archlinux-frink/README.md\n/corpus/ripgrep/fuzz/README.md\n/corpus/ripgrep/benchsuite/runs/2022-12-16-archlinux-duff/README.md\n/corpus/ripgrep/crates/matcher/README.md\n/corpus/ripgrep/crates/cli/README.md\n/corpus/ripgrep/crates/regex/README.md\n/corpus/ripgrep/crates/core/README.md\n/corpus/ripgrep/crates/pcre2/README.md\n/corpus/ripgrep/crates/searcher/README.md\n/corpus/ripgrep/crates/printer/README.md\n/corpus/ripgrep/crates/grep/README.md\n/corpus/ripgrep/crates/ignore/README.md\n/corpus/ripgrep/crates/globset/README.md",
+              "metadata": {
+                "count": 22,
+                "truncated": false
+              },
+              "title": "",
+              "time": {
+                "start": 1792878820150,
+                "end": 1792878820166
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0055",
+          "time_created": 1792878820183,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0024",
+      "time_created": 1792878820203,
+      "data": {
+        "parentID": "msg_corpus0022",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878820203,
+          "completed": 1792878820314
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0056",
+          "time_created": 1792878820265,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0057",
+          "time_created": 1792878820266,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878820266,
+              "end": 1792878820268
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0058",
+          "time_created": 1792878820295,
+          "data": {
+            "reason": "stop",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0025",
+      "time_created": 1792878820326,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878820326
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0059",
+          "time_created": 1792878820328,
+          "data": {
+            "type": "text",
+            "text": "run todowrite"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0026",
+      "time_created": 1792878820343,
+      "data": {
+        "parentID": "msg_corpus0025",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878820343,
+          "completed": 1792878820462
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0060",
+          "time_created": 1792878820406,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0061",
+          "time_created": 1792878820408,
+          "data": {
+            "type": "tool",
+            "tool": "todowrite",
+            "callID": "toolu_scripted_9",
+            "state": {
+              "status": "completed",
+              "input": {
+                "todos": [
+                  {
+                    "content": "Check the corpus",
+                    "status": "pending",
+                    "priority": "medium",
+                    "id": "t1"
+                  }
+                ]
+              },
+              "output": "[\n  {\n    \"content\": \"Check the corpus\",\n    \"status\": \"pending\",\n    \"priority\": \"medium\"\n  }\n]",
+              "metadata": {
+                "todos": [
+                  {
+                    "content": "Check the corpus",
+                    "status": "pending",
+                    "priority": "medium"
+                  }
+                ],
+                "truncated": false
+              },
+              "title": "1 todos",
+              "time": {
+                "start": 1792878820416,
+                "end": 1792878820429
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0062",
+          "time_created": 1792878820446,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0027",
+      "time_created": 1792878820466,
+      "data": {
+        "parentID": "msg_corpus0025",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878820466,
+          "completed": 1792878820570
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0063",
+          "time_created": 1792878820534,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0064",
+          "time_created": 1792878820536,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878820536,
+              "end": 1792878820538
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0065",
+          "time_created": 1792878820554,
+          "data": {
+            "reason": "stop",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0028",
+      "time_created": 1792878820582,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878820582
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0066",
+          "time_created": 1792878820584,
+          "data": {
+            "type": "text",
+            "text": "run task"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0029",
+      "time_created": 1792878820599,
+      "data": {
+        "parentID": "msg_corpus0028",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878820599,
+          "completed": 1792878820837
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0067",
+          "time_created": 1792878820659,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0068",
+          "time_created": 1792878820660,
+          "data": {
+            "type": "tool",
+            "tool": "task",
+            "callID": "toolu_scripted_10",
+            "state": {
+              "status": "completed",
+              "input": {
+                "description": "Inspect crates",
+                "prompt": "List the crates directory.",
+                "subagent_type": "general"
+              },
+              "output": "<task id=\"ses_corpus0001\" state=\"completed\">\n<task_result>\nscripted tool follow-up\n</task_result>\n</task>",
+              "metadata": {
+                "parentSessionId": "ses_corpus0002",
+                "sessionId": "ses_corpus0001",
+                "model": {
+                  "modelID": "mock-sonnet",
+                  "providerID": "mock-anthropic"
+                },
+                "truncated": false
+              },
+              "title": "Inspect crates",
+              "time": {
+                "start": 1792878820668,
+                "end": 1792878820801
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0069",
+          "time_created": 1792878820822,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0030",
+      "time_created": 1792878820840,
+      "data": {
+        "parentID": "msg_corpus0028",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878820840,
+          "completed": 1792878820946
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0070",
+          "time_created": 1792878820909,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0071",
+          "time_created": 1792878820911,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878820911,
+              "end": 1792878820913
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0072",
+          "time_created": 1792878820930,
+          "data": {
+            "reason": "stop",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0031",
+      "time_created": 1792878820957,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878820957
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0073",
+          "time_created": 1792878820959,
+          "data": {
+            "type": "text",
+            "text": "run corpus_probe"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0032",
+      "time_created": 1792878820975,
+      "data": {
+        "parentID": "msg_corpus0031",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878820975,
+          "completed": 1792878821087
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0074",
+          "time_created": 1792878821037,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0075",
+          "time_created": 1792878821038,
+          "data": {
+            "type": "tool",
+            "tool": "corpus_probe",
+            "callID": "toolu_scripted_11",
+            "state": {
+              "status": "completed",
+              "input": {
+                "kind": "text",
+                "bytes": 70000
+              },
+              "output": "\n\n...70000 bytes truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: /corpus/opencode/data/opencode/tool-output/tool_corpus0001\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.",
+              "metadata": {
+                "truncated": true,
+                "outputPath": "/corpus/opencode/data/opencode/tool-output/tool_corpus0001"
+              },
+              "title": "",
+              "time": {
+                "start": 1792878821043,
+                "end": 1792878821056
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0076",
+          "time_created": 1792878821071,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0033",
+      "time_created": 1792878821090,
+      "data": {
+        "parentID": "msg_corpus0031",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878821090,
+          "completed": 1792878821195
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0077",
+          "time_created": 1792878821160,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0078",
+          "time_created": 1792878821161,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878821161,
+              "end": 1792878821163
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0079",
+          "time_created": 1792878821179,
+          "data": {
+            "reason": "stop",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0034",
+      "time_created": 1792878821207,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878821207
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0080",
+          "time_created": 1792878821209,
+          "data": {
+            "type": "text",
+            "text": "run corpus_probe"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0035",
+      "time_created": 1792878821224,
+      "data": {
+        "parentID": "msg_corpus0034",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878821224,
+          "completed": 1792878821336
+        },
+        "finish": "tool-calls"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0081",
+          "time_created": 1792878821294,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0082",
+          "time_created": 1792878821296,
+          "data": {
+            "type": "tool",
+            "tool": "corpus_probe",
+            "callID": "toolu_scripted_12",
+            "state": {
+              "status": "completed",
+              "input": {
+                "kind": "json"
+              },
+              "output": "{\"status\":\"ok\",\"items\":[1,2,3]}",
+              "metadata": {
+                "truncated": false
+              },
+              "title": "",
+              "time": {
+                "start": 1792878821299,
+                "end": 1792878821303
+              }
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0083",
+          "time_created": 1792878821319,
+          "data": {
+            "reason": "tool-calls",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0036",
+      "time_created": 1792878821339,
+      "data": {
+        "parentID": "msg_corpus0034",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 4020,
+          "input": 2000,
+          "output": 20,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 2000
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878821339,
+          "completed": 1792878821440
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0084",
+          "time_created": 1792878821406,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0085",
+          "time_created": 1792878821408,
+          "data": {
+            "type": "text",
+            "text": "scripted tool follow-up",
+            "time": {
+              "start": 1792878821407,
+              "end": 1792878821409
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0086",
+          "time_created": 1792878821424,
+          "data": {
+            "reason": "stop",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 4020,
+              "input": 2000,
+              "output": 20,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 2000
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0037",
+      "time_created": 1792878821452,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878821452
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0087",
+          "time_created": 1792878821454,
+          "data": {
+            "type": "text",
+            "text": "run a long command"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0038",
+      "time_created": 1792878821479,
+      "data": {
+        "parentID": "msg_corpus0037",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878821479,
+          "completed": 1792878821603
+        },
+        "error": {
+          "name": "MessageAbortedError",
+          "data": {
+            "message": "Aborted"
+          }
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0088",
+          "time_created": 1792878821546,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0089",
+          "time_created": 1792878821548,
+          "data": {
+            "type": "tool",
+            "tool": "bash",
+            "callID": "toolu_corpus_aborted",
+            "state": {
+              "status": "completed",
+              "input": {
+                "command": "sleep 30",
+                "description": "Wait"
+              },
+              "output": "(no output)\n\n<shell_metadata>\nUser aborted the command\n</shell_metadata>",
+              "metadata": {
+                "output": "(no output)\n\n<shell_metadata>\nUser aborted the command\n</shell_metadata>",
+                "exit": null,
+                "truncated": false
+              },
+              "title": "sleep 30",
+              "time": {
+                "start": 1792878821552,
+                "end": 1792878821587
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0039",
+      "time_created": 1792878821623,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878821623
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0090",
+          "time_created": 1792878821643,
+          "data": {
+            "type": "text",
+            "text": "describe this image"
+          }
+        },
+        {
+          "id": "prt_corpus0091",
+          "time_created": 1792878821644,
+          "data": {
+            "type": "file",
+            "mime": "image/png",
+            "filename": "pixel.png",
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0040",
+      "time_created": 1792878821650,
+      "data": {
+        "parentID": "msg_corpus0039",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 105,
+          "input": 100,
+          "output": 5,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878821650,
+          "completed": 1792878821766
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0092",
+          "time_created": 1792878821730,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0093",
+          "time_created": 1792878821732,
+          "data": {
+            "type": "text",
+            "text": "an image",
+            "time": {
+              "start": 1792878821732,
+              "end": 1792878821734
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0094",
+          "time_created": 1792878821750,
+          "data": {
+            "reason": "stop",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 105,
+              "input": 100,
+              "output": 5,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 0
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0041",
+      "time_created": 1792878821778,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1792878821778
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock-anthropic",
+          "modelID": "mock-sonnet"
+        },
+        "summary": {
+          "diffs": []
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0095",
+          "time_created": 1792878821780,
+          "data": {
+            "type": "text",
+            "text": "close the session"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_corpus0042",
+      "time_created": 1792878821795,
+      "data": {
+        "parentID": "msg_corpus0041",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/corpus/ripgrep",
+          "root": "/corpus/ripgrep"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 105,
+          "input": 100,
+          "output": 5,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "mock-sonnet",
+        "providerID": "mock-anthropic",
+        "time": {
+          "created": 1792878821795,
+          "completed": 1792878821906
+        },
+        "finish": "stop"
+      },
+      "parts": [
+        {
+          "id": "prt_corpus0096",
+          "time_created": 1792878821870,
+          "data": {
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-start"
+          }
+        },
+        {
+          "id": "prt_corpus0097",
+          "time_created": 1792878821872,
+          "data": {
+            "type": "text",
+            "text": "closing",
+            "time": {
+              "start": 1792878821871,
+              "end": 1792878821873
+            }
+          }
+        },
+        {
+          "id": "prt_corpus0098",
+          "time_created": 1792878821890,
+          "data": {
+            "reason": "stop",
+            "snapshot": "c47d8e25229070515af3f23ca28129568c77b4a4",
+            "type": "step-finish",
+            "tokens": {
+              "total": 105,
+              "input": 100,
+              "output": 5,
+              "reasoning": 0,
+              "cache": {
+                "write": 0,
+                "read": 0
+              }
+            },
+            "cost": 0
+          }
+        }
+      ]
+    }
+  ]
+}
