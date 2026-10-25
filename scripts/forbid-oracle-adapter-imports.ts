@@ -35,8 +35,9 @@ function allowedSpecifier(specifier: string): boolean {
     return /^(?:bun|node):/.test(specifier) || /^\.\/[^/]+\.ts$/.test(specifier);
 }
 
+/** `from "x"` and `import "x"` as keywords, or `import(`, `require(`, `getBuiltinModule(` calls. */
 const TYPESCRIPT_SPECIFIER =
-    /\b(?:from|import|require|getBuiltinModule)\s*\(?\s*["'`]([^"'`]+)["'`]/g;
+    /(?:\b(?:from|import)\s*|\b(?:import|require|getBuiltinModule)\s*\(\s*)["'`]([^"'`]+)["'`]/g;
 
 export function forbiddenRustReaderLines(path: string, text: string): string[] {
     const findings: string[] = [];

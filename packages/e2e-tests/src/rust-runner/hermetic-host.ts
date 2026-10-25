@@ -190,6 +190,8 @@ type ControlCommand =
     | "memory-seed"
     | "user-hint-outcome"
     | "review-witness"
+    | "live-source-descriptors"
+    | "source-capture-report"
     | "graceful-shutdown";
 
 type PendingControl = {
@@ -871,6 +873,44 @@ class FixtureControlClient {
         );
     }
 
+    /** Every live message, tool, and repository-document descriptor at the kernel tip. */
+    async liveSourceDescriptors(): Promise<LiveSourceDescriptor[]> {
+        const rows = await this.request("live-source-descriptors");
+        if (!Array.isArray(rows)) throw new Error("fixture control descriptors were malformed");
+        return rows.map((row) => {
+            const object = record(row);
+            if (!object || typeof object.class !== "string" || !Array.isArray(object.identity)) {
+                throw new Error("fixture control descriptor row was malformed");
+            }
+            const pairs = object.identity as unknown[];
+            const valid = pairs.every(
+                (pair) =>
+                    Array.isArray(pair) &&
+                    pair.length === 2 &&
+                    pair.every((part) => typeof part === "string"),
+            );
+            if (!valid) throw new Error("fixture control descriptor identity was malformed");
+            return {
+                class: object.class,
+                identity: Object.fromEntries(pairs as [string, string][]),
+            };
+        });
+    }
+
+    /** The live `source_capture` metrics block the next health report renders, and whether capture has settled. */
+    async sourceCaptureReport(): Promise<{ counters: Record<string, number>; idle: boolean }> {
+        const object = record(await this.request("source-capture-report"));
+        const report = record(object?.report);
+        if (!object || !report || typeof object.idle !== "boolean") {
+            throw new Error("fixture control source capture report was malformed");
+        }
+        const counters: Record<string, number> = {};
+        for (const [name, value] of Object.entries(report)) {
+            if (typeof value === "number" && Number.isFinite(value)) counters[name] = value;
+        }
+        return { counters, idle: object.idle };
+    }
+
     gracefulShutdown(): Promise<void> {
         return this.ack("graceful-shutdown");
     }
@@ -1065,6 +1105,12 @@ export interface HermeticHostOptions {
     credentialSource?: Record<string, string>;
 }
 
+/** One live source descriptor as the fixture reports it. */
+export interface LiveSourceDescriptor {
+    readonly class: string;
+    readonly identity: Readonly<Record<string, string>>;
+}
+
 /** The direct-host fixture starts no provider or module subprocess. */
 export class HermeticHostStack {
     readonly connectionFile: string;
@@ -1188,6 +1234,24 @@ export class HermeticHostStack {
     /** Runs a fixture-class and a production-class MemoryReviewer job over the host's stores for the MODULE root `projectRoot`. */
     reviewWitness(projectRoot: string): Promise<ReviewWitness> {
         return this.requireControl().reviewWitness(projectRoot);
+    }
+
+    liveSourceDescriptors(): Promise<LiveSourceDescriptor[]> {
+        return this.requireControl().liveSourceDescriptors();
+    }
+
+    /**
+     * Waits until every capture job has settled and returns the `source_capture` counters the
+     * health report renders under `metrics.source_capture`.
+     */
+    async settledSourceCapture(timeoutMs = 30_000): Promise<Record<string, number>> {
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+            const { counters, idle } = await this.requireControl().sourceCaptureReport();
+            if (idle) return counters;
+            if (Date.now() > deadline) throw new Error("source capture never settled");
+            await Bun.sleep(50);
+        }
     }
 
     async backendRequestCount(): Promise<number> {

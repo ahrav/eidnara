@@ -66,12 +66,23 @@ incident-pool-green         rust-fm-oc-5                 rust-smoke
 rust-eidnara-reduce-roundtrip   rust-fold-under-pressure     rust-steady-state-byte-identity
 rust-duplicate-tool-use-id  rust-history_summarizer-producer      rust-tail-mutation-readopt
 rust-multi-frame-delta      rust-stale-preference        thinking-block-safety
-pi-smoke
+pi-smoke                    source-capture-opencode      source-capture-pi
 ```
 
 Twenty-one Rust-mode tests plus `compression-fidelity-pi` and `pi-smoke`.
 `rust-stale-preference` runs only
 under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign.
+
+## Source capture reconciliation
+
+`source-capture-opencode` (tier `rust-only`) and `source-capture-pi` (tier `pi-rust`) run the
+scripted source-corpus mix (`src/corpus-sessions/`) with `source_capture.enabled` over a
+materialized `crates/daemon/testdata/corpus/repos/ripgrep.json` checkout. Each reads its
+harness's own store with the independent reader (`src/source-corpus/`), and requires every
+expected unit to be a live source descriptor or a predicted loss (`unit_too_large`,
+`secret_bearing`), with no unclassified unit and no descriptor the reader does not name. Both
+files also run the capture-off control, and the Pi file runs the cross-harness check.
+`bun scripts/freeze-source-corpus.ts` freezes the same mix into the corpus.
 
 ## Compression fidelity delivery
 

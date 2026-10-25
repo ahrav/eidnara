@@ -697,6 +697,11 @@ mod unix {
         ReviewWitness {
             project_root: String,
         },
+        /// Every live message, tool, and repository-document descriptor at the kernel tip: its
+        /// class and identity fields.
+        LiveSourceDescriptors,
+        /// The live `source_capture` metrics block and whether every capture job has settled.
+        SourceCaptureReport,
         GracefulShutdown,
     }
 
@@ -876,12 +881,10 @@ mod unix {
         stream: &mut UnixStream,
         response: &ControlResponse<T>,
     ) -> io::Result<()> {
-        let bytes = serde_json::to_vec(response).expect("fixture response serializes");
+        let mut bytes = serde_json::to_vec(response).expect("fixture response serializes");
         if bytes.len() > MAX_CONTROL_LINE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "fixture response exceeded control cap",
-            ));
+            bytes = serde_json::to_vec(&rejected(response.id, "response_too_large"))
+                .expect("fixture rejection serializes");
         }
         stream.write_all(&bytes).await?;
         stream.write_all(b"\n").await
@@ -897,6 +900,42 @@ mod unix {
                 message: "control request rejected",
             }),
         }
+    }
+
+    fn live_source_descriptors(
+        kernel: &kernel::KernelStore,
+    ) -> Result<serde_json::Value, &'static str> {
+        use kernel::source_identity::OccurrenceClass;
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + Duration::from_secs(5)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let tip = kernel.tip().map_err(|_| "kernel_unavailable")?;
+        let page_rows = std::num::NonZeroUsize::new(256).expect("nonzero");
+        let mut rows = Vec::new();
+        for class in [
+            OccurrenceClass::Messages,
+            OccurrenceClass::RawToolSpans,
+            OccurrenceClass::RepositoryDocuments,
+        ] {
+            let mut after: Option<String> = None;
+            loop {
+                let page = kernel
+                    .live_source_descriptors(class, tip, after.as_deref(), page_rows, &budget)
+                    .map_err(|_| "kernel_unavailable")?;
+                for row in page.rows {
+                    rows.push(serde_json::json!({
+                        "class": row.detail.class,
+                        "identity": row.detail.identity,
+                    }));
+                }
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+            }
+        }
+        Ok(serde_json::Value::Array(rows))
     }
 
     async fn handle_control_connection(
@@ -1004,6 +1043,20 @@ mod unix {
                                 crate::case_script::source_records(&scenario)
                                     .map(|records| (ControlResult::Source(records), false))
                                     .map_err(|error| error.code())
+                            }
+                            ControlCommand::LiveSourceDescriptors => core
+                                .kernel_store_for_test()
+                                .ok_or("kernel_unavailable")
+                                .and_then(|kernel| live_source_descriptors(&kernel))
+                                .map(|rows| (ControlResult::Source(rows), false)),
+                            ControlCommand::SourceCaptureReport => {
+                                let (report, idle) = core.source_capture_report_for_test();
+                                Ok((
+                                    ControlResult::Source(
+                                        serde_json::json!({ "report": report, "idle": idle }),
+                                    ),
+                                    false,
+                                ))
                             }
                             ControlCommand::ReviewWitness { project_root } => {
                                 crate::review_witness::run(&core, &project_root)
@@ -1612,6 +1665,32 @@ mod unix {
                 assert!(emit_summary(&sink(status), summary, "x", &script, &counters).is_ok());
                 assert_eq!(lock_script(&script).status().filled, filled, "{status:?}");
             }
+        }
+
+        #[tokio::test]
+        async fn an_oversized_response_reaches_the_client_as_a_typed_rejection() {
+            let (mut server, mut client) = UnixStream::pair().unwrap();
+            let response = ControlResponse {
+                id: Some(7),
+                ok: true,
+                result: Some(serde_json::Value::String("x".repeat(MAX_CONTROL_LINE))),
+                error: None,
+            };
+            write_response(&mut server, &response).await.unwrap();
+            let line = match read_bounded_line(&mut client).await.unwrap() {
+                Some(BoundedLine::Line(line)) => line,
+                Some(BoundedLine::Oversized) => panic!("the rejection line was oversized"),
+                None => panic!("the server closed the connection without a line"),
+            };
+            let rejection: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(
+                rejection,
+                serde_json::json!({
+                    "id": 7,
+                    "ok": false,
+                    "error": {"code": "response_too_large", "message": "control request rejected"},
+                })
+            );
         }
     }
 }

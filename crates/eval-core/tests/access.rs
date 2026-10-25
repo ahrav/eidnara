@@ -26,7 +26,7 @@ fn sample(id: &str, task: &str, arm: ArmKind, lineage: &[&str]) -> SampleRecord 
 fn ledger() -> SampleLedger {
     let samples = [
         sample("s1", "t1", ArmKind::Fresh, &[PRIOR]),
-        sample("s2", "t1", ArmKind::Aged, &[]),
+        sample("s2", "t1", ArmKind::Aged, &[PRIOR, OTHER]),
         sample("s3", "t2", ArmKind::Aged, &[OTHER]),
     ];
     SampleLedger {
@@ -144,8 +144,6 @@ fn a_read_of_an_own_task_write_is_refused_naming_sample_read_and_key() {
         record(prior, vec![read("s1", "w7")]).check_disjoint(&ledger, RUN),
         own
     );
-    // `OTHER` belongs to `s3`'s lineage, so its writes come from an attempt
-    // separate from `s1`.
     let other = vec![write("w7", "s2", key("t1", ArmKind::Aged), OTHER)];
     record(other, vec![read("s1", "w7")])
         .check_disjoint(&ledger, RUN)
@@ -187,6 +185,25 @@ fn dangling_references_and_attestation_gaps_are_refused_by_name() {
         Some(AccessError::UnknownRun {
             write_id: "w7".to_string(),
             eval_run_id: "dd".repeat(32),
+        })
+    );
+    // A write's run is the current run or a run in its writer's lineage,
+    // including when the writer reads its own write.
+    let mut borrowed = writes();
+    borrowed[0].eval_run_id = PRIOR.to_string();
+    assert_eq!(
+        refused(record(borrowed, vec![])),
+        Some(AccessError::UnknownRun {
+            write_id: "w3".to_string(),
+            eval_run_id: PRIOR.to_string(),
+        })
+    );
+    let own_write = vec![write("w1", "s1", key("t1", ArmKind::Fresh), OTHER)];
+    assert_eq!(
+        refused(record(own_write, vec![read("s1", "w1")])),
+        Some(AccessError::UnknownRun {
+            write_id: "w1".to_string(),
+            eval_run_id: OTHER.to_string(),
         })
     );
     let mut repeated = writes();

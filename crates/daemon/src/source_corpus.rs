@@ -20,7 +20,7 @@ pub(crate) const SCHEMA: &str = "eidnara.source-corpus/v1";
 /// SHA-256 of the corpus fixture files in the canonical form [`corpus_digest`] computes.
 /// `packages/e2e-tests/src/source-corpus/corpus.ts` holds the same value.
 pub(crate) const CORPUS_SHA256: &str =
-    "7724a1dd6e2ba19b13f8a08c8d9c7f7170faef24ccaa84b34b13c986f01dea44";
+    "940e47f1a69126fee50848c75a0fdfd5b77328239c53c554f6991abd66b61be6";
 
 /// The corpus directory; its top-level `README.md` is documentation and stays outside the digest.
 pub(crate) fn corpus_dir() -> PathBuf {
@@ -513,6 +513,13 @@ pub(crate) struct ExpectedRecord {
 pub(crate) struct ExpectedUnit {
     /// Position of the part or content item within its record.
     pub index: usize,
+    /// The block index capture publishes the unit under: the part or item position for text, the
+    /// output block within a tool result.
+    pub block: usize,
+    /// The settled timestamp the harness wrote for the unit, as a decimal string: OpenCode
+    /// `time.completed` (else `time.created`) for text and `state.time.end` for a tool, Pi
+    /// `message.timestamp`; `None` when the record carries none.
+    pub revision: Option<String>,
     pub byte_len: usize,
     pub tool: Option<ExpectedTool>,
 }
@@ -521,6 +528,8 @@ pub(crate) struct ExpectedUnit {
 pub(crate) struct ExpectedTool {
     pub name: String,
     pub call_id: String,
+    /// The OpenCode tool part's message id, or the Pi `toolResult` entry's `parentId`.
+    pub parent: String,
     pub is_error: bool,
     /// OpenCode `state.metadata.exit` when the harness wrote an integer; Pi writes none.
     pub exit: Option<i64>,
@@ -666,6 +675,7 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
         .ok_or_else(|| format!("{at}: no `message`"))?;
     let role = string(message, "role", at)?;
     record.role = Some(role.to_owned());
+    let revision = millis(message.get("timestamp"));
     if !matches!(role, "user" | "assistant" | "toolResult") {
         record.non_units.push(NonUnit {
             index: None,
@@ -678,6 +688,8 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
         Some(Value::String(text)) if role != "toolResult" => {
             record.units.push(ExpectedUnit {
                 index: 0,
+                block: 0,
+                revision,
                 byte_len: text.len(),
                 tool: None,
             });
@@ -694,6 +706,8 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
             match item_kind(item, at)? {
                 "text" => record.units.push(ExpectedUnit {
                     index,
+                    block: index,
+                    revision: revision.clone(),
                     byte_len: string(item, "text", at)?.len(),
                     tool: None,
                 }),
@@ -720,6 +734,7 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
     let tool = ExpectedTool {
         name: string(message, "toolName", at)?.to_owned(),
         call_id: string(message, "toolCallId", at)?.to_owned(),
+        parent: string(entry, "parentId", at)?.to_owned(),
         is_error: message
             .get("isError")
             .and_then(Value::as_bool)
@@ -732,6 +747,8 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
     for (index, item) in items.iter().enumerate() {
         record.units.push(ExpectedUnit {
             index,
+            block: index,
+            revision: revision.clone(),
             byte_len: string(item, "text", at)?.len(),
             tool: Some(tool.clone()),
         });
@@ -739,51 +756,286 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
     Ok(record)
 }
 
-/// Every string or object key in `value` whose redaction verdict is wrong: each is negative
-/// unless it is the `text` member of an object carrying `"canary": true`, which must be positive. `at` names
-/// the fixture in each finding.
+fn object<'v>(value: &'v Value, at: &str) -> Result<&'v serde_json::Map<String, Value>, String> {
+    value
+        .as_object()
+        .ok_or_else(|| format!("{at}: not an object"))
+}
+
+fn millis(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_u64)
+        .map(|millis| millis.to_string())
+}
+
+/// The expected-unit table of one OpenCode session, read by SQL from the `message` and `part`
+/// tables of `conn`: messages in `(time_created, id)` order, each message's parts in
+/// `(time_created, id)` order. The classification is the TypeScript reader's
+/// (`packages/e2e-tests/src/source-corpus/opencode-db-reader.ts`): a completed compaction summary
+/// is left out, a part neither `text` nor `tool` is `non_text_part`, ignored text is
+/// `ignored_text`, assistant text of an unsettled message is `unsettled_text`, and a tool not yet
+/// settled, or interrupted in an unsettled message, is `unsettled_tool`.
+///
+/// # Errors
+///
+/// A SQL failure, a row whose `data` is not JSON, or a record missing a field OpenCode always
+/// writes.
+pub(crate) fn read_opencode_session(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Vec<ExpectedRecord>, String> {
+    let sql = |error: rusqlite::Error| error.to_string();
+    let mut messages = conn
+        .prepare("SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created, id")
+        .map_err(sql)?;
+    let mut parts = conn
+        .prepare(
+            "SELECT id, data FROM part WHERE session_id = ?1 AND message_id = ?2 \
+             ORDER BY time_created, id",
+        )
+        .map_err(sql)?;
+    let rows: Vec<(String, String)> = messages
+        .query_map([session_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(sql)?
+        .collect::<Result<_, _>>()
+        .map_err(sql)?;
+    let mut records = Vec::new();
+    for (id, data) in rows {
+        let at = format!("message {id}");
+        let info: Value = serde_json::from_str(&data).map_err(|error| format!("{at}: {error}"))?;
+        if info.get("summary") == Some(&Value::Bool(true))
+            && info.get("finish").and_then(Value::as_str) == Some("stop")
+        {
+            continue;
+        }
+        let role = string(&info, "role", &at)?.to_owned();
+        let time = object(info.get("time").unwrap_or(&Value::Null), &at)?;
+        let completed = time.get("completed").filter(|value| !value.is_null());
+        let settled = completed.is_some();
+        let text_revision = millis(completed.or_else(|| time.get("created")));
+        let mut record = ExpectedRecord {
+            id: id.clone(),
+            role: Some(role.clone()),
+            units: Vec::new(),
+            non_units: Vec::new(),
+        };
+        let part_rows: Vec<(String, String)> = parts
+            .query_map([session_id, id.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(sql)?
+            .collect::<Result<_, _>>()
+            .map_err(sql)?;
+        for (index, (part_id, data)) in part_rows.into_iter().enumerate() {
+            let at = format!("part {part_id}");
+            let part: Value =
+                serde_json::from_str(&data).map_err(|error| format!("{at}: {error}"))?;
+            let kind = string(&part, "type", &at)?.to_owned();
+            let mut non_unit = |reason| {
+                record.non_units.push(NonUnit {
+                    index: Some(index),
+                    reason,
+                    kind: kind.clone(),
+                });
+            };
+            match kind.as_str() {
+                "text" => {
+                    let body = string(&part, "text", &at)?;
+                    if part.get("ignored") == Some(&Value::Bool(true)) {
+                        non_unit(NonUnitReason::IgnoredText);
+                    } else if role == "assistant" && !settled {
+                        non_unit(NonUnitReason::UnsettledText);
+                    } else {
+                        record.units.push(ExpectedUnit {
+                            index,
+                            block: index,
+                            revision: text_revision.clone(),
+                            byte_len: body.len(),
+                            tool: None,
+                        });
+                    }
+                }
+                "tool" => {
+                    let state = part
+                        .get("state")
+                        .ok_or_else(|| format!("{at}: no `state`"))?;
+                    let status = string(state, "status", &at)?;
+                    let metadata = state.get("metadata").filter(|value| value.is_object());
+                    let interrupted = metadata
+                        .and_then(|metadata| metadata.get("interrupted"))
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                    if !matches!(status, "completed" | "error") || (interrupted && !settled) {
+                        non_unit(NonUnitReason::UnsettledTool);
+                        continue;
+                    }
+                    let is_error = status == "error";
+                    let output = string(state, if is_error { "error" } else { "output" }, &at)?;
+                    let name = string(&part, "tool", &at)?.to_owned();
+                    let exit = metadata
+                        .and_then(|metadata| metadata.get("exit"))
+                        .and_then(Value::as_i64)
+                        .filter(|_| name == "bash");
+                    record.units.push(ExpectedUnit {
+                        index,
+                        block: 0,
+                        revision: millis(state.get("time").and_then(|time| time.get("end"))),
+                        byte_len: output.len(),
+                        tool: Some(ExpectedTool {
+                            call_id: string(&part, "callID", &at)?.to_owned(),
+                            parent: id.clone(),
+                            name,
+                            is_error,
+                            exit,
+                            truncated: metadata
+                                .and_then(|metadata| metadata.get("truncated"))
+                                .and_then(Value::as_bool),
+                        }),
+                    });
+                }
+                _ => non_unit(NonUnitReason::NonTextPart),
+            }
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// Loads a frozen OpenCode session fixture into `conn` as `message` and `part` rows, so
+/// [`read_opencode_session`] reads it as it reads a live store. Returns the session id.
+///
+/// # Errors
+///
+/// A fixture missing a field the freeze writes, or a SQL failure.
+pub(crate) fn load_frozen_opencode(
+    conn: &rusqlite::Connection,
+    fixture: &Value,
+) -> Result<String, String> {
+    let sql = |error: rusqlite::Error| error.to_string();
+    let session = string(fixture, "session_id", "fixture")?.to_owned();
+    conn.execute_batch(
+        "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, \
+           time_created INTEGER NOT NULL, data TEXT NOT NULL); \
+         CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, \
+           session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+    )
+    .map_err(sql)?;
+    let messages = fixture
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or("fixture: no `messages` array")?;
+    for message in messages {
+        let id = string(message, "id", "message")?;
+        let created = message.get("time_created").and_then(Value::as_i64);
+        conn.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                id,
+                session,
+                created,
+                message.get("data").ok_or("message: no `data`")?.to_string()
+            ],
+        )
+        .map_err(sql)?;
+        for part in message["parts"]
+            .as_array()
+            .ok_or("message: no `parts` array")?
+        {
+            conn.execute(
+                "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    string(part, "id", "part")?,
+                    id,
+                    session,
+                    part.get("time_created").and_then(Value::as_i64),
+                    part.get("data").ok_or("part: no `data`")?.to_string()
+                ],
+            )
+            .map_err(sql)?;
+        }
+    }
+    Ok(session)
+}
+
+/// The JSONL lines a frozen Pi session fixture decodes back to.
+///
+/// # Errors
+///
+/// A fixture without an `entries` array.
+pub(crate) fn frozen_pi_jsonl(fixture: &Value) -> Result<String, String> {
+    Ok(fixture
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or("fixture: no `entries` array")?
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// The unit content of a canary record: its `text`, or for an OpenCode tool part its
+/// `state.output` or `state.error`.
+fn canary_content(members: &serde_json::Map<String, Value>) -> Option<&str> {
+    let state = members.get("state");
+    [
+        members.get("text"),
+        state.and_then(|state| state.get("output")),
+        state.and_then(|state| state.get("error")),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(Value::as_str)
+}
+
+fn detects(text: &str) -> Result<bool, context_core::redaction::RedactionError> {
+    context_core::redaction::detect_windowed_durable_text(text)
+}
+
+/// Every string or object key in `value` whose redaction verdict is wrong. A string must be
+/// negative, except inside an object carrying `"canary": true`: there the unit content
+/// ([`canary_content`]) must be positive, and a string that lies within that content, such as a
+/// harness's preview copy of the same output, is exempt. `at` names the fixture in each finding.
 pub(crate) fn redaction_violations(at: &str, value: &Value) -> Vec<String> {
     fn walk(
         at: &str,
         pointer: &mut String,
         value: &Value,
-        canary_text: bool,
+        canary: Option<&str>,
         out: &mut Vec<String>,
     ) {
         match value {
             Value::String(text) => {
-                let verdict = context_core::redaction::detect_windowed_durable_text(text);
-                match (canary_text, verdict) {
-                    (false, Ok(false)) | (true, Ok(true)) => {}
-                    (false, verdict) => {
-                        out.push(format!("{at}{pointer}: not negative ({verdict:?})"))
-                    }
-                    (true, verdict) => {
-                        out.push(format!("{at}{pointer}: canary not positive ({verdict:?})"))
-                    }
+                let exempt = canary.is_some_and(|content| content.contains(text.as_str()));
+                let verdict = detects(text);
+                if !exempt && verdict != Ok(false) {
+                    out.push(format!("{at}{pointer}: not negative ({verdict:?})"));
                 }
             }
             Value::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
                     let len = pointer.len();
                     pointer.push_str(&format!("/{index}"));
-                    walk(at, pointer, item, false, out);
+                    walk(at, pointer, item, canary, out);
                     pointer.truncate(len);
                 }
             }
             Value::Object(members) => {
-                let canary = members.get("canary") == Some(&Value::Bool(true));
-                if canary && !members.get("text").is_some_and(Value::is_string) {
-                    out.push(format!("{at}{pointer}: canary unit has no `text` string"));
+                let mut canary = canary;
+                if members.get("canary") == Some(&Value::Bool(true)) {
+                    match canary_content(members) {
+                        Some(content) if detects(content) == Ok(true) => canary = Some(content),
+                        Some(_) => out.push(format!("{at}{pointer}: canary not positive")),
+                        None => out.push(format!("{at}{pointer}: canary unit has no content")),
+                    }
                 }
                 for (key, member) in members {
                     let len = pointer.len();
                     pointer.push('/');
                     pointer.push_str(key);
-                    if context_core::redaction::detect_windowed_durable_text(key) != Ok(false) {
+                    if detects(key) != Ok(false) {
                         out.push(format!("{at}{pointer}: key not negative"));
                     }
-                    walk(at, pointer, member, canary && key == "text", out);
+                    walk(at, pointer, member, canary, out);
                     pointer.truncate(len);
                 }
             }
@@ -791,6 +1043,6 @@ pub(crate) fn redaction_violations(at: &str, value: &Value) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    walk(at, &mut String::new(), value, false, &mut out);
+    walk(at, &mut String::new(), value, None, &mut out);
     out
 }

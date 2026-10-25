@@ -21,6 +21,11 @@ path = "examples/search_admission_records.rs"
 required-features = ["direct-host-fixture"]
 
 [[example]]
+name = "source_corpus_report"
+path = "examples/source_corpus_report.rs"
+required-features = ["test-support"]
+
+[[example]]
 name = "eval_runner"
 path = "examples/eval_runner/main.rs"
 required-features = ["eval-runner"]
