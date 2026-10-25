@@ -9,14 +9,17 @@ Record kind: proposed obligation; its owning ticket #1157 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
 - The counts derive from `served_sessions_for`.
 
 - Guarantee under test: Served and disputed-after-serve counts per decision are
   exact unsigned integers at one Kernel snapshot; a Kernel that is not Ready
   answers unavailable with no integer.
-- Existing check: none; proposed.
+- Existing check: Kernel half only:
+  `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
+  (`crates/kernel/tests/kernel_use_outcome.rs:337`). The routed read is
+  proposed. Status: unaudited.
 
 ## Failure scenario
 

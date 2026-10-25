@@ -9,14 +9,19 @@ Record kind: proposed obligation; its owning ticket #1155 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
 - Slug kept; the guarantee names the served-set digest (OQ3-12).
 
 - Guarantee under test: For one (project digest, harness, session, served-set
   digest), at most one serve commit exists; a later fold at an equal digest
   replays and writes nothing.
-- Existing check: none; proposed.
+- Existing check: Kernel half only:
+  `duplicate_and_malformed_serves_are_refused_without_rows`
+  (`crates/kernel/tests/kernel_use_outcome.rs:210`);
+  `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
+  (`crates/kernel/tests/kernel_use_outcome.rs:677`). The writer is proposed.
+  Status: unaudited.
 
 ## Failure scenario
 

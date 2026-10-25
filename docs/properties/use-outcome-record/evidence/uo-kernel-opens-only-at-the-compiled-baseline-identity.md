@@ -10,9 +10,9 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
-- Pinned digest: `crates/kernel/tests/kernel_schema.rs:181`.
+- Pinned digest: `crates/kernel/tests/kernel_schema.rs:183`.
 - Previous-baseline fixture:
   `crates/kernel/tests/fixtures/prior_kernel_baseline.sql`, digest
   `crates/kernel/tests/kernel_open.rs:577`.
@@ -27,9 +27,9 @@ its parent is `1c56ba033`).
   `a_family_created_under_the_previous_baseline_is_refused_untouched`
   (`crates/kernel/tests/kernel_open.rs:582`);
   `kernel_schema_digest_is_pinned_to_the_frozen_v1_shape`
-  (`crates/kernel/tests/kernel_schema.rs:597`);
+  (`crates/kernel/tests/kernel_schema.rs:599`);
   `kernel_schema_object_inventory_is_pinned_by_kind_and_name`
-  (`crates/kernel/tests/kernel_schema.rs:1898`). Status: unaudited.
+  (`crates/kernel/tests/kernel_schema.rs:1900`). Status: unaudited.
 
 ## Failure scenario
 

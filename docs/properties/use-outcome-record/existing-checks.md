@@ -13,9 +13,12 @@ Every location was read at the #1154 branch tip.
 | `visibility_matrix_and_sensitivity_ceiling_are_total` | `crates/kernel/src/admission.rs:4915` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
 | `an_event_that_names_a_disposition_keeps_its_own_outcome` | `crates/kernel/src/admission.rs:5245` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
 | `unrecognized_stored_classes_read_back_restrictive` | `crates/kernel/src/cas/mod.rs:797` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only` | unaudited |
-| `a_replayed_expiry_receipt_is_not_counted_as_a_retirement` | `crates/kernel/src/local_file.rs:722` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
-| `a_capture_pinned_after_it_was_selected_for_expiry_is_kept` | `crates/kernel/src/local_file.rs:745` | `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
-| `a_record_cited_after_selection_is_kept` | `crates/kernel/src/use_outcome.rs:541` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_replayed_expiry_receipt_is_not_counted_as_a_retirement` | `crates/kernel/src/local_file.rs:728` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
+| `a_capture_pinned_after_it_was_selected_for_expiry_is_kept` | `crates/kernel/src/local_file.rs:751` | `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
+| `a_record_cited_after_selection_is_kept` | `crates/kernel/src/use_outcome.rs:596` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_page_another_sweep_committed_at_the_same_cutoff_replays` | `crates/kernel/src/use_outcome.rs:640` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_record_retired_after_selection_at_another_cutoff_is_skipped` | `crates/kernel/src/use_outcome.rs:661` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `the_sweep_and_the_by_decision_read_use_their_indexes` | `crates/kernel/src/use_outcome.rs:675` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
 | `both_latest_decision_formulations_choose_the_same_row` | `crates/kernel/tests/kernel_admission.rs:2252` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
 | `dispositions_and_sensitivity_only_reduce_visibility` | `crates/kernel/tests/kernel_admission.rs:2735` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
 | `every_non_active_disposition_has_the_contracted_surface_row` | `crates/kernel/tests/kernel_admission.rs:2890` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
@@ -24,17 +27,22 @@ Every location was read at the #1154 branch tip.
 | `egress_facts_carry_the_eligibility_verdict_and_the_stored_class` | `crates/kernel/tests/kernel_cas.rs:545` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only` | unaudited |
 | `every_conclusive_kernel_mismatch_is_refused_and_left_untouched` | `crates/kernel/tests/kernel_open.rs:183` | `uo-kernel-opens-only-at-the-compiled-baseline-identity` | unaudited |
 | `a_family_created_under_the_previous_baseline_is_refused_untouched` | `crates/kernel/tests/kernel_open.rs:582` | `uo-kernel-opens-only-at-the-compiled-baseline-identity`, `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
-| `kernel_schema_has_one_ordered_full_shape` | `crates/kernel/tests/kernel_schema.rs:149` | `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
-| `kernel_schema_object_inventory_is_pinned_by_kind_and_name` | `crates/kernel/tests/kernel_schema.rs:1898` | `uo-kernel-opens-only-at-the-compiled-baseline-identity`, `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
-| `use_outcome_identity_and_served_set_are_never_rewritten` | `crates/kernel/tests/kernel_schema.rs:2171` | `uo-p-served-set-and-identity-never-rewritten`, `uo-p-record-survives-session-delete` | unaudited |
-| `use_outcome_classification_and_identity_shapes_are_checked` | `crates/kernel/tests/kernel_schema.rs:2282` | `uo-p-classification-sensitive-local-only-no-remote-egress` | unaudited |
-| `kernel_schema_digest_is_pinned_to_the_frozen_v1_shape` | `crates/kernel/tests/kernel_schema.rs:597` | `uo-kernel-opens-only-at-the-compiled-baseline-identity`, `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
+| `kernel_schema_has_one_ordered_full_shape` | `crates/kernel/tests/kernel_schema.rs:151` | `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
+| `kernel_schema_object_inventory_is_pinned_by_kind_and_name` | `crates/kernel/tests/kernel_schema.rs:1900` | `uo-kernel-opens-only-at-the-compiled-baseline-identity`, `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
+| `use_outcome_identity_and_served_set_are_never_rewritten` | `crates/kernel/tests/kernel_schema.rs:2174` | `uo-p-served-set-and-identity-never-rewritten`, `uo-p-record-survives-session-delete`, `uo-p-deleted-at-iff-session-delete-kernel-step`, `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `use_outcome_classification_and_identity_shapes_are_checked` | `crates/kernel/tests/kernel_schema.rs:2288` | `uo-p-served-set-and-identity-never-rewritten`, `uo-p-classification-sensitive-local-only-no-remote-egress` | unaudited |
+| `an_admission_citation_names_a_recorded_use_outcome_and_is_set_once` | `crates/kernel/tests/kernel_schema.rs:2364` | `uo-p-served-set-and-identity-never-rewritten` | unaudited |
+| `kernel_schema_digest_is_pinned_to_the_frozen_v1_shape` | `crates/kernel/tests/kernel_schema.rs:599` | `uo-kernel-opens-only-at-the-compiled-baseline-identity`, `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
 | `retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence` | `crates/kernel/tests/kernel_source_descriptors.rs:1895` | `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
-| `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote` | `crates/kernel/tests/kernel_use_outcome.rs:269` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only`, `uo-p-classification-sensitive-local-only-no-remote-egress` | unaudited |
-| `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage` | `crates/kernel/tests/kernel_use_outcome.rs:288` | `uo-admission-reads-require-a-non-null-commit-seq`, `uo-p-disputed-after-serve-from-committed-events-only`, `uo-p-record-survives-session-delete` | unaudited |
-| `expiry_retires_an_expired_record_under_a_reserved_receipt` | `crates/kernel/tests/kernel_use_outcome.rs:374` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `an_expiry_backlog_drains_one_page_per_call` | `crates/kernel/tests/kernel_use_outcome.rs:433` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `an_expired_record_cited_by_a_live_report_is_retained` | `crates/kernel/tests/kernel_use_outcome.rs:490` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve` | `crates/kernel/tests/kernel_use_outcome.rs:163` | `uo-p-no-row-for-withheld-composition` | unaudited |
+| `duplicate_and_malformed_serves_are_refused_without_rows` | `crates/kernel/tests/kernel_use_outcome.rs:210` | `uo-p-served-set-once-per-session-revision`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote` | `crates/kernel/tests/kernel_use_outcome.rs:318` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only`, `uo-p-classification-sensitive-local-only-no-remote-egress` | unaudited |
+| `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage` | `crates/kernel/tests/kernel_use_outcome.rs:337` | `uo-admission-reads-require-a-non-null-commit-seq`, `uo-p-disputed-after-serve-from-committed-events-only`, `uo-p-record-survives-session-delete`, `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
+| `expiry_retires_an_expired_record_under_a_reserved_receipt` | `crates/kernel/tests/kernel_use_outcome.rs:470` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `an_expiry_backlog_drains_one_page_per_call` | `crates/kernel/tests/kernel_use_outcome.rs:530` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `an_expired_record_cited_by_a_live_report_is_retained` | `crates/kernel/tests/kernel_use_outcome.rs:587` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts` | `crates/kernel/tests/kernel_use_outcome.rs:677` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `session_roles_round_trip_and_the_served_set_digest_is_order_free` | `crates/kernel/tests/kernel_use_outcome.rs:698` | `uo-p-served-ids-equal-frozen-composition`, `uo-p-producer-matches-request-subagent-flag` | unaudited |
 
 ## Daemon
 
@@ -50,7 +58,8 @@ Every location was read at the #1154 branch tip.
 | `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired` | `crates/daemon/src/lib.rs:39447` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
 | `the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair` | `crates/daemon/src/memory_reviewer/activation.rs:385` | `uo-activation-gate-closes-on-kernel-baseline-or-incarnation-change` | unaudited |
 | `the_gate_opens_only_for_a_matching_attested_owner_only_record` | `crates/daemon/src/memory_reviewer/activation.rs:448` | `uo-activation-gate-closes-on-kernel-baseline-or-incarnation-change` | unaudited |
-| `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed` | `crates/daemon/src/memory_reviewer/lifecycle.rs:790` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed` | `crates/daemon/src/memory_reviewer/lifecycle.rs:829` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_cancelled_slice_stops_before_the_use_outcome_sweep` | `crates/daemon/src/memory_reviewer/lifecycle.rs:859` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
 | `session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores` | `crates/daemon/src/source_capture_tests.rs:1547` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
 | `session_delete_with_the_kernel_starting_deletes_nothing` | `crates/daemon/src/source_capture_tests.rs:1617` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
 | `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages` | `crates/daemon/src/source_capture_tests.rs:1689` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |

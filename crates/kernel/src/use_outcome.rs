@@ -8,21 +8,23 @@ use std::sync::LazyLock;
 use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
-use super::envelope::commit_with_writer;
+use super::envelope::{PreparedIntent, commit_with_writer, recorded_receipt};
+use super::local_file::reserved_expiry_intent;
 use super::redaction::identity;
-use super::{CachedSql, CommitIntent, Envelope, EventKind, KernelError, KernelStore, map_sqlite};
+use super::{CachedSql, Envelope, EventKind, KernelError, KernelStore, map_sqlite};
 
 /// The retention class every serving record carries.
 pub const USE_OUTCOME_RETENTION_CLASS: &str = "use_outcome_capture";
 /// How long an uncited serving record is kept after it was recorded: 30 days, the harness-capture window.
 pub const USE_OUTCOME_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
-/// Serving records one expiry sweep retires per call.
+/// Serving records one expiry sweep retires per call, all in one commit.
 pub const MAX_EXPIRED_USE_OUTCOMES_PER_CALL: usize = 64;
 
 const SERVED_SET_DOMAIN: &[u8] = b"eidnara-served-set-v1\n";
 const USE_OUTCOME_ID_DOMAIN: &[u8] = b"eidnara-use-outcome-v1\n";
 /// The reserved producer suffix of expiry commits, also their actor.
 const EXPIRY_PRODUCER: &str = "use-outcome-expiry";
+const EXPIRY_CAUSE: &str = "use outcome retention expired";
 
 /// Whether the served session was a primary session or a subagent session at the serve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -82,7 +84,7 @@ fn length_prefixed(hash: &mut Sha256, field: &str) {
     hash.update(b"\n");
 }
 
-/// One serve to record. `decision_object_ids` are the served registry object ids in strictly ascending order, and `served_set_digest` is [`served_set_digest`] over them. `served_commit_seq` is the composition's `known_as_of`, a committed sequence. `composition_revision` is the daemon's informational revision, stored bit for bit.
+/// One serve to record. `decision_object_ids` are the served registry object ids in strictly ascending order. `served_set_digest` is the writer's own [`served_set_digest`] over them; the insert recomputes it and refuses a mismatch, so the stored digest always names the stored set. `served_commit_seq` is the composition's `known_as_of`, a committed sequence before the recording commit; a composition read at sequence 0 has no commit to name and is not recordable. `composition_revision` is the daemon's informational revision, stored bit for bit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseOutcomeSpec {
     pub project_digest: String,
@@ -130,11 +132,11 @@ pub struct ServedSession {
     pub disputed_after_serve: bool,
 }
 
-/// What one use-outcome expiry sweep did: `retired` records were retired; `retained` expired records stayed because a committed admission row with a live subject cites them.
+/// What one use-outcome expiry sweep did: `retired` records were retired by this call; `cited` expired records were kept because a committed admission row with a live subject cites them, counted among the rows the call read while filling its page. A cited record is kept, so a later call counts it again while its citation holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UseOutcomeExpiry {
     pub retired: usize,
-    pub retained: usize,
+    pub cited: usize,
 }
 
 const SERVE_COLUMNS: &str =
@@ -142,11 +144,19 @@ const SERVE_COLUMNS: &str =
      u.composition_revision,u.served_commit_seq,u.session_role,u.recorded_at,u.created_commit_seq,
      u.invalidated_commit_seq,u.deleted_at,u.last_transform_at,u.retain_until";
 
-/// SQL predicate over a `use_outcomes` row aliased `u`: a committed admission row cites the record and its subject decision object is live. The candidate query and the per-record recheck evaluate this same text.
+/// SQL predicate over a `use_outcomes` row aliased `u`: a committed admission row cites the record and its subject decision object is live. The candidate scan and the per-record recheck evaluate this same text.
 const USE_OUTCOME_CITED_SQL: &str = "EXISTS(SELECT 1 FROM admission_decisions a
                JOIN object_registry s ON s.object_id=a.subject_object_id
                WHERE a.use_outcome_id=u.use_outcome_id AND a.commit_seq IS NOT NULL
                  AND s.invalidated_commit_seq IS NULL)";
+
+static SERVED_SET_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT {SERVE_COLUMNS} FROM use_outcomes u
+         WHERE u.project_digest=?1 AND u.harness=?2 AND u.session_id=?3
+         ORDER BY u.created_commit_seq,u.use_outcome_id"
+    )
+});
 
 /// The unretired serves of `?1` with the disputed-after-serve flag: a committed `mark_disputed` or `contradict` on the same object and lineage at a sequence strictly after the serve.
 static SERVED_SESSIONS_SQL: LazyLock<String> = LazyLock::new(|| {
@@ -157,7 +167,7 @@ static SERVED_SESSIONS_SQL: LazyLock<String> = LazyLock::new(|| {
                          AND a.event_kind IN ('{disputed}','{contradict}')
                          AND {lineage}
                          AND a.commit_seq IS NOT NULL
-                         AND a.commit_seq>u.served_commit_seq)
+                         AND a.commit_seq>u.served_commit_seq) AS disputed_after_serve
          FROM use_outcome_decisions d
          JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
          JOIN object_registry o ON o.object_id=d.object_id
@@ -169,44 +179,41 @@ static SERVED_SESSIONS_SQL: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-fn is_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
+/// Unretired records whose deadline is before `?1`, oldest deadline first, each with whether a citation keeps it. The scan reads cited rows ahead of the page, so its read work grows with the cited expired records while its writes stay bounded by the page.
+static EXPIRED_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT u.use_outcome_id,{USE_OUTCOME_CITED_SQL} AS cited FROM use_outcomes u
+         WHERE u.invalidated_commit_seq IS NULL AND u.retain_until<?1
+         ORDER BY u.retain_until,u.use_outcome_id"
+    )
+});
 
-fn revision_to_stored(revision: u64) -> i64 {
-    i64::from_ne_bytes(revision.to_ne_bytes())
-}
-
-fn revision_from_stored(stored: i64) -> u64 {
-    u64::from_ne_bytes(stored.to_ne_bytes())
-}
+static RECHECK_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT u.invalidated_commit_seq IS NULL AND u.retain_until<?2 AS due,
+                {USE_OUTCOME_CITED_SQL} AS cited
+         FROM use_outcomes u WHERE u.use_outcome_id=?1"
+    )
+});
 
 impl UseOutcomeSpec {
-    /// Refuses a spec whose identity fields are empty, carry a detected secret, or are not 64 lowercase hex where a digest is required; whose decision ids are not strictly ascending or disagree with the digest; whose recorded time is negative or leaves no room for the retention window; or whose served sequence is not a committed sequence before `commit_seq`.
-    fn validate(&self, commit_seq: i64) -> Result<i64, KernelError> {
+    /// Refuses a malformed spec with `InvalidInput` and returns the record's `retain_until`. Checks run cheapest first: field shape, sequence and time range, the decision set and its digest, then the secret scan of every identity field.
+    fn retain_until(&self, commit_seq: i64) -> Result<i64, KernelError> {
         let identity_fields = [self.harness.as_str(), self.session_id.as_str()];
-        if !is_digest(&self.project_digest)
-            || !is_digest(&self.served_set_digest)
-            || identity_fields.iter().any(|field| field.is_empty())
-            || self.recorded_at < 0
-            || self.served_commit_seq < 1
-            || self.served_commit_seq >= commit_seq
-            || !self
-                .decision_object_ids
-                .windows(2)
-                .all(|pair| pair[0] < pair[1])
-            || self.decision_object_ids.iter().any(String::is_empty)
-            || served_set_digest(self.decision_object_ids.iter().map(String::as_str))
-                != self.served_set_digest
-        {
+        let well_formed = crate::cas::is_artifact_digest(&self.project_digest)
+            && crate::cas::is_artifact_digest(&self.served_set_digest)
+            && identity_fields.iter().all(|field| !field.trim().is_empty());
+        let in_range = self.recorded_at >= 0 && (1..commit_seq).contains(&self.served_commit_seq);
+        let ids = &self.decision_object_ids;
+        let set_agrees = ids.windows(2).all(|pair| pair[0] < pair[1])
+            && ids.iter().all(|id| !id.trim().is_empty())
+            && served_set_digest(ids.iter().map(String::as_str)) == self.served_set_digest;
+        if !(well_formed && in_range && set_agrees) {
             return Err(KernelError::InvalidInput);
         }
         for field in identity_fields
             .into_iter()
-            .chain(self.decision_object_ids.iter().map(String::as_str))
+            .chain(ids.iter().map(String::as_str))
         {
             identity(field)?;
         }
@@ -221,13 +228,26 @@ impl Envelope<'_> {
     ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` for a malformed spec (see [`UseOutcomeSpec`]), `Conflict` when the identity is already recorded or a decision id names no registry object, and mapped storage errors otherwise.
+    /// Returns `InvalidInput` for a malformed spec (see [`UseOutcomeSpec`]), `NotFound` when a decision id names no registry object, `Conflict` when the identity is already recorded, and mapped storage errors otherwise.
     pub fn insert_use_outcome(&mut self, spec: UseOutcomeSpec) -> Result<String, KernelError> {
         self.guarded(|envelope| envelope.insert_use_outcome_inner(&spec))
     }
 
     fn insert_use_outcome_inner(&mut self, spec: &UseOutcomeSpec) -> Result<String, KernelError> {
-        let retain_until = spec.validate(self.commit_seq)?;
+        let retain_until = spec.retain_until(self.commit_seq)?;
+        for object_id in &spec.decision_object_ids {
+            let registered: bool = self
+                .tx
+                .query_row_cached(
+                    "SELECT EXISTS(SELECT 1 FROM object_registry WHERE object_id=?1)",
+                    [object_id],
+                    |row| row.get(0),
+                )
+                .map_err(map_sqlite)?;
+            if !registered {
+                return Err(KernelError::NotFound);
+            }
+        }
         let id = use_outcome_id(
             &spec.project_digest,
             &spec.harness,
@@ -248,7 +268,7 @@ impl Envelope<'_> {
                     spec.harness,
                     spec.session_id,
                     spec.served_set_digest,
-                    revision_to_stored(spec.composition_revision),
+                    spec.composition_revision.cast_signed(),
                     spec.served_commit_seq,
                     spec.session_role.as_str(),
                     spec.recorded_at,
@@ -271,28 +291,28 @@ impl Envelope<'_> {
 }
 
 fn serve_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<UseOutcomeServe> {
-    let role: String = row.get(7)?;
+    let role: String = row.get("session_role")?;
     Ok(UseOutcomeServe {
-        use_outcome_id: row.get(0)?,
-        project_digest: row.get(1)?,
-        harness: row.get(2)?,
-        session_id: row.get(3)?,
-        served_set_digest: row.get(4)?,
-        composition_revision: revision_from_stored(row.get(5)?),
-        served_commit_seq: row.get(6)?,
+        use_outcome_id: row.get("use_outcome_id")?,
+        project_digest: row.get("project_digest")?,
+        harness: row.get("harness")?,
+        session_id: row.get("session_id")?,
+        served_set_digest: row.get("served_set_digest")?,
+        composition_revision: row.get::<_, i64>("composition_revision")?.cast_unsigned(),
+        served_commit_seq: row.get("served_commit_seq")?,
         session_role: SessionRole::from_stored(&role).ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                7,
+            rusqlite::Error::InvalidColumnType(
+                0,
+                "session_role".to_string(),
                 rusqlite::types::Type::Text,
-                "unknown session role".into(),
             )
         })?,
-        recorded_at: row.get(8)?,
-        created_commit_seq: row.get(9)?,
-        invalidated_commit_seq: row.get(10)?,
-        deleted_at: row.get(11)?,
-        last_transform_at: row.get(12)?,
-        retain_until: row.get(13)?,
+        recorded_at: row.get("recorded_at")?,
+        created_commit_seq: row.get("created_commit_seq")?,
+        invalidated_commit_seq: row.get("invalidated_commit_seq")?,
+        deleted_at: row.get("deleted_at")?,
+        last_transform_at: row.get("last_transform_at")?,
+        retain_until: row.get("retain_until")?,
     })
 }
 
@@ -322,13 +342,7 @@ impl KernelStore {
         session_id: &str,
     ) -> Result<Option<Vec<UseOutcomeRecord>>, KernelError> {
         let (_, records) = self.read_snapshot(0, |tx, _| {
-            let mut statement = tx
-                .prepare_cached(&format!(
-                    "SELECT {SERVE_COLUMNS} FROM use_outcomes u
-                     WHERE u.project_digest=?1 AND u.harness=?2 AND u.session_id=?3
-                     ORDER BY u.created_commit_seq,u.use_outcome_id"
-                ))
-                .map_err(map_sqlite)?;
+            let mut statement = tx.prepare_cached(&SERVED_SET_SQL).map_err(map_sqlite)?;
             let serves = statement
                 .query_map(params![project_digest, harness, session_id], serve_from)
                 .map_err(map_sqlite)?
@@ -347,7 +361,7 @@ impl KernelStore {
         Ok((!records.is_empty()).then_some(records))
     }
 
-    /// The unretired serves of `object_id`, oldest first, each with `disputed_after_serve` derived at this read: a committed `mark_disputed` or `contradict` admission row on the object and its registry lineage at a commit sequence strictly greater than the serve's `served_commit_seq`. The flag is never stored and changes no visibility.
+    /// The unretired serves of `object_id`, oldest first, each with `disputed_after_serve` derived at this read: a committed `mark_disputed` or `contradict` admission row on the object and its registry lineage at a commit sequence strictly greater than the serve's `served_commit_seq`. The flag is never stored and changes no visibility. The answer holds one entry per unretired serve of the object, so its size is bounded by the sessions served the object within the retention window plus cited records.
     ///
     /// # Errors
     ///
@@ -361,7 +375,7 @@ impl KernelStore {
                 .query_map([object_id], |row| {
                     Ok(ServedSession {
                         serve: serve_from(row)?,
-                        disputed_after_serve: row.get(14)?,
+                        disputed_after_serve: row.get("disputed_after_serve")?,
                     })
                 })
                 .map_err(map_sqlite)?
@@ -371,11 +385,11 @@ impl KernelStore {
         Ok(sessions)
     }
 
-    /// Retires every serving record whose `retain_until` is before `now` and that no committed admission row with a live subject cites, at most [`MAX_EXPIRED_USE_OUTCOMES_PER_CALL`] per call, oldest deadline first, one commit per record under a reserved receipt keyed by `now` and the record id. Each commit rechecks the deadline, the retirement, and the citation under the writer, so a citation committed after selection keeps its record. Returns how many records were retired and how many expired records a citation keeps.
+    /// Retires serving records whose `retain_until` is before `now` and that no committed admission row with a live subject cites: at most [`MAX_EXPIRED_USE_OUTCOMES_PER_CALL`] per call, oldest deadline first, in one commit. Each record gets its own reserved receipt keyed by `now` and its id, and is rechecked under the writer, so a citation committed after selection keeps it and a record another sweep already retired at this cutoff is skipped. The commit's own receipt is keyed by `now` and the page's first id, so a repeat of the same page replays and retires nothing.
     ///
     /// # Errors
     ///
-    /// Returns the first storage, lock, or fence error; records retired before it stay retired.
+    /// Returns the first storage, lock, or fence error; nothing in its page is retired.
     pub fn expire_use_outcomes(&self, now: i64) -> Result<UseOutcomeExpiry, KernelError> {
         self.expire_use_outcomes_after_selection(now, || {})
     }
@@ -385,125 +399,113 @@ impl KernelStore {
         now: i64,
         after_selection: impl FnOnce(),
     ) -> Result<UseOutcomeExpiry, KernelError> {
-        let (page, cited) = {
+        let (page, mut sweep) = {
             let reader = self.lock_reader()?;
-            expired_use_outcomes(&reader, now)?
+            expired_page(&reader, now)?
         };
         after_selection();
-        let mut sweep = UseOutcomeExpiry {
-            retired: 0,
-            retained: cited,
+        let Some(first) = page.first() else {
+            return Ok(sweep);
         };
-        for id in page {
-            let mut cited_since_selection = false;
-            let mut writer = self.lock_writer()?;
-            let outcome = commit_with_writer(
-                &mut writer,
-                self.lease_epoch(),
-                expiry_intent(now, &id),
-                |envelope| {
-                    let retired = retire_due_use_outcome(envelope, now, &id);
-                    cited_since_selection = retired == Err(KernelError::Conflict);
-                    retired
-                },
-                || Ok(()),
-            );
-            drop(writer);
-            match outcome {
-                // Another sweep at this cutoff committed this record's receipt first.
-                Ok(receipt) if receipt.replayed => {}
-                Ok(_) => sweep.retired += 1,
-                Err(KernelError::Conflict) if cited_since_selection => sweep.retained += 1,
-                Err(KernelError::NotFound | KernelError::Conflict | KernelError::InvalidInput) => {}
-                Err(error) => return Err(error),
-            }
+        let mut tally = UseOutcomeExpiry::default();
+        let mut writer = self.lock_writer()?;
+        let receipt = commit_with_writer(
+            &mut writer,
+            self.lease_epoch(),
+            reserved_expiry_intent(EXPIRY_PRODUCER, EXPIRY_CAUSE, now, &format!("page:{first}")),
+            |envelope| {
+                for id in &page {
+                    tally.count(retire_due_use_outcome(envelope, now, id)?);
+                }
+                Ok(tally.retired.to_string())
+            },
+            || Ok(()),
+        )?;
+        if !receipt.replayed {
+            sweep.retired += tally.retired;
+            sweep.cited += tally.cited;
         }
         Ok(sweep)
     }
 }
 
+/// What the recheck under the writer found for one selected record.
+enum Recheck {
+    Retired,
+    Cited,
+    /// Retired by another sweep since selection.
+    Gone,
+}
+
+impl UseOutcomeExpiry {
+    fn count(&mut self, recheck: Recheck) {
+        match recheck {
+            Recheck::Retired => self.retired += 1,
+            Recheck::Cited => self.cited += 1,
+            Recheck::Gone => {}
+        }
+    }
+}
+
 fn map_read(error: rusqlite::Error) -> KernelError {
     match error {
-        rusqlite::Error::FromSqlConversionFailure(..) => KernelError::CorruptCanonicalRow,
+        rusqlite::Error::InvalidColumnType(..) | rusqlite::Error::FromSqlConversionFailure(..) => {
+            KernelError::CorruptCanonicalRow
+        }
         other => map_sqlite(other),
     }
 }
 
-/// The intent of one record's expiry commit, keyed by the cutoff and the record id under the reserved producer.
-fn expiry_intent(now: i64, id: &str) -> CommitIntent {
-    CommitIntent {
-        producer: format!(
-            "{}{EXPIRY_PRODUCER}",
-            CommitIntent::RESERVED_PRODUCER_PREFIX
-        ),
-        operation_key: format!("{now}:{id}"),
-        request_digest: format!("{:x}", Sha256::digest(id.as_bytes())),
-        actor: EXPIRY_PRODUCER.to_string(),
-        cause: "use outcome retention expired".to_string(),
-    }
-}
-
-/// Up to one page of unretired, uncited records whose deadline is before `now`, oldest deadline first, and the number of unretired expired records a citation keeps.
-fn expired_use_outcomes(
+/// One statement, so one snapshot: up to one page of uncited expired record ids, oldest deadline first, and the count of cited expired records the scan read before the page filled.
+fn expired_page(
     connection: &rusqlite::Connection,
     now: i64,
-) -> Result<(Vec<String>, usize), KernelError> {
+) -> Result<(Vec<String>, UseOutcomeExpiry), KernelError> {
     let mut statement = connection
-        .prepare_cached(&format!(
-            "SELECT u.use_outcome_id FROM use_outcomes u
-             WHERE u.invalidated_commit_seq IS NULL AND u.retain_until<?1
-               AND NOT {USE_OUTCOME_CITED_SQL}
-             ORDER BY u.retain_until,u.use_outcome_id
-             LIMIT ?2"
-        ))
+        .prepare_cached(&EXPIRED_SQL)
         .map_err(map_sqlite)?;
-    let page = statement
-        .query_map(
-            params![
-                now,
-                i64::try_from(MAX_EXPIRED_USE_OUTCOMES_PER_CALL).unwrap_or(i64::MAX)
-            ],
-            |row| row.get(0),
-        )
-        .map_err(map_sqlite)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(map_sqlite)?;
-    let cited: i64 = connection
-        .query_row_cached(
-            &format!(
-                "SELECT COUNT(*) FROM use_outcomes u
-                 WHERE u.invalidated_commit_seq IS NULL AND u.retain_until<?1
-                   AND {USE_OUTCOME_CITED_SQL}"
-            ),
-            [now],
-            |row| row.get(0),
-        )
-        .map_err(map_sqlite)?;
-    Ok((page, usize::try_from(cited).unwrap_or(usize::MAX)))
+    let mut rows = statement.query([now]).map_err(map_sqlite)?;
+    let mut page = Vec::new();
+    let mut sweep = UseOutcomeExpiry::default();
+    while page.len() < MAX_EXPIRED_USE_OUTCOMES_PER_CALL {
+        let Some(row) = rows.next().map_err(map_sqlite)? else {
+            break;
+        };
+        if row.get::<_, bool>("cited").map_err(map_sqlite)? {
+            sweep.cited += 1;
+        } else {
+            page.push(row.get("use_outcome_id").map_err(map_sqlite)?);
+        }
+    }
+    Ok((page, sweep))
 }
 
-/// Retires record `id` when, under the writer, it is unretired, its deadline is before `now`, and no citation keeps it. Returns `Conflict` when a citation keeps it and `NotFound` when it is gone or not due.
+/// Retires record `id` when, under the writer, it is unretired, past its deadline at `now`, and uncited, and records its reserved receipt. A record whose receipt at this cutoff exists was retired by another sweep.
 fn retire_due_use_outcome(
     envelope: &mut Envelope<'_>,
     now: i64,
     id: &str,
-) -> Result<String, KernelError> {
+) -> Result<Recheck, KernelError> {
+    let intent = PreparedIntent::new(reserved_expiry_intent(
+        EXPIRY_PRODUCER,
+        EXPIRY_CAUSE,
+        now,
+        id,
+    ))?;
+    if recorded_receipt(envelope.tx, &intent)?.is_some() {
+        return Ok(Recheck::Gone);
+    }
     let state: Option<(bool, bool)> = envelope
         .tx
-        .query_row_cached(
-            &format!(
-                "SELECT u.invalidated_commit_seq IS NULL AND u.retain_until<?2,{USE_OUTCOME_CITED_SQL}
-                 FROM use_outcomes u WHERE u.use_outcome_id=?1"
-            ),
-            params![id, now],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+        .query_row_cached(&RECHECK_SQL, params![id, now], |row| {
+            Ok((row.get("due")?, row.get("cited")?))
+        })
         .optional()
         .map_err(map_sqlite)?;
     match state {
         Some((true, false)) => {}
-        Some((true, true)) => return Err(KernelError::Conflict),
-        _ => return Err(KernelError::NotFound),
+        Some((true, true)) => return Ok(Recheck::Cited),
+        Some((false, _)) | None => return Ok(Recheck::Gone),
     }
     let retired = envelope
         .tx
@@ -514,17 +516,23 @@ fn retire_due_use_outcome(
         )
         .map_err(map_sqlite)?;
     if retired != 1 {
-        return Err(KernelError::NotFound);
+        return Ok(Recheck::Gone);
     }
-    Ok("retired".to_string())
+    envelope.record_reserved_receipt(&intent, "retired")?;
+    Ok(Recheck::Retired)
 }
 
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, params};
 
-    use super::{SessionRole, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec};
+    use super::{
+        EXPIRED_SQL, SERVED_SESSIONS_SQL, SessionRole, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry,
+        UseOutcomeSpec,
+    };
     use crate::{CommitIntent, DomainSpec, KernelStore, Sensitivity, served_set_digest};
+
+    const NOW: i64 = USE_OUTCOME_RETENTION_MS + 1;
 
     fn intent(key: &str) -> CommitIntent {
         CommitIntent {
@@ -536,11 +544,9 @@ mod tests {
         }
     }
 
-    /// A citation committed after the sweep chose its page and before the retiring commit is seen by the recheck under the writer: the record stays unretired and is counted retained.
-    #[test]
-    fn a_record_cited_after_selection_is_kept() {
-        let root = tempfile::tempdir().unwrap();
-        let store = KernelStore::open(root.path()).unwrap();
+    /// A store holding one expired serve of the domain object `decision`, and that serve's id.
+    fn store_with_expired_serve(root: &std::path::Path) -> (KernelStore, String) {
+        let store = KernelStore::open(root).unwrap();
         store
             .commit(intent("domain"), |envelope| {
                 envelope.insert_domain(DomainSpec {
@@ -572,7 +578,24 @@ mod tests {
                 Ok(String::new())
             })
             .unwrap();
-        let id = id.into_inner();
+        (store, id.into_inner())
+    }
+
+    fn retired(store: &KernelStore) -> bool {
+        store
+            .served_set(&"a".repeat(64), "opencode", "session")
+            .unwrap()
+            .unwrap()[0]
+            .serve
+            .invalidated_commit_seq
+            .is_some()
+    }
+
+    /// A citation committed after the sweep chose its page and before the retiring commit is seen by the recheck under the writer: the record stays unretired and is counted cited.
+    #[test]
+    fn a_record_cited_after_selection_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, id) = store_with_expired_serve(root.path());
         let cite = || {
             let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
             connection
@@ -591,20 +614,92 @@ mod tests {
         };
 
         let sweep = store
-            .expire_use_outcomes_after_selection(USE_OUTCOME_RETENTION_MS + 1, cite)
+            .expire_use_outcomes_after_selection(NOW, cite)
             .unwrap();
         assert_eq!(
             sweep,
             UseOutcomeExpiry {
                 retired: 0,
-                retained: 1
+                cited: 1
             }
         );
-        let records = store
-            .served_set(&"a".repeat(64), "opencode", "session")
-            .unwrap()
+        assert!(!retired(&store));
+        assert_eq!(
+            store
+                .served_set(&"a".repeat(64), "opencode", "session")
+                .unwrap()
+                .unwrap()[0]
+                .serve
+                .session_role,
+            SessionRole::Subagent
+        );
+    }
+
+    /// A sweep racing another at the same cutoff finds the other's page receipt and replays it: it reports nothing and commits nothing.
+    #[test]
+    fn a_page_another_sweep_committed_at_the_same_cutoff_replays() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, _) = store_with_expired_serve(root.path());
+        let tip = std::cell::Cell::new(0);
+        let sweep = store
+            .expire_use_outcomes_after_selection(NOW, || {
+                assert_eq!(store.expire_use_outcomes(NOW).unwrap().retired, 1);
+                tip.set(store.tip().unwrap());
+            })
             .unwrap();
-        assert_eq!(records[0].serve.invalidated_commit_seq, None);
-        assert_eq!(records[0].serve.session_role, SessionRole::Subagent);
+        assert_eq!(sweep, UseOutcomeExpiry::default());
+        assert_eq!(
+            store.tip().unwrap(),
+            tip.get(),
+            "the replayed page commits nothing"
+        );
+        assert!(retired(&store));
+    }
+
+    /// A record another sweep retired at a different cutoff after this sweep selected it is skipped inside this sweep's commit.
+    #[test]
+    fn a_record_retired_after_selection_at_another_cutoff_is_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, _) = store_with_expired_serve(root.path());
+        let sweep = store
+            .expire_use_outcomes_after_selection(NOW, || {
+                assert_eq!(store.expire_use_outcomes(NOW + 1).unwrap().retired, 1);
+            })
+            .unwrap();
+        assert_eq!(sweep, UseOutcomeExpiry::default());
+        assert!(retired(&store));
+    }
+
+    /// The sweep scan reads the live-retention index and the citation probe the citing index; the by-decision read starts from the decision-row index.
+    #[test]
+    fn the_sweep_and_the_by_decision_read_use_their_indexes() {
+        let root = tempfile::tempdir().unwrap();
+        let _ = store_with_expired_serve(root.path());
+        let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
+        let plan = |sql: &str| -> String {
+            let mut statement = connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            statement
+                .query_map([NOW.to_string()], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join("\n")
+        };
+        let expired = plan(&EXPIRED_SQL);
+        assert!(
+            expired.contains("idx_use_outcomes_live_retention"),
+            "{expired}"
+        );
+        assert!(
+            expired.contains("idx_admission_use_outcome_fk"),
+            "{expired}"
+        );
+        let served = plan(&SERVED_SESSIONS_SQL);
+        assert!(
+            served.contains("idx_use_outcome_decisions_object_fk"),
+            "{served}"
+        );
     }
 }

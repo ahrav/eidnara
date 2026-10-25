@@ -330,7 +330,7 @@ fn kernel_slice(
     if cancelled() {
         return Ok(None);
     }
-    // A retained use outcome changes nothing and stays retained while its citation holds, so only retirements earn the next pass without the idle interval.
+    // A cited use outcome is kept and counted again on every pass while its citation holds, so only retirements earn the next pass without the idle interval.
     advanced |= kernel.expire_use_outcomes(now_ms)?.retired > 0;
     Ok(
         maintenance_slice(cancelled, || kernel.run_staging_maintenance(now_ms))?
@@ -785,17 +785,7 @@ mod tests {
         );
     }
 
-    /// The maintenance slice runs the use-outcome sweep whenever it is handed a Ready Kernel, with no activation record in place: an expired serving record is retired by one pass that counts as advancing, and the pass after it idles.
-    #[test]
-    fn the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed() {
-        let store_dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&MemoryStore::test_descriptor(
-            store_dir.path(),
-            "eidnara-memory_reviewer-lifecycle-test",
-        ))
-        .unwrap();
-        let kernel_dir = tempfile::tempdir().unwrap();
-        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+    fn seed_expired_use_outcome(kernel_store: &kernel::KernelStore) {
         let intent = |key: &str| kernel::CommitIntent {
             producer: "lifecycle-test".to_string(),
             operation_key: key.to_string(),
@@ -822,6 +812,30 @@ mod tests {
                 })
             })
             .unwrap();
+    }
+
+    fn use_outcome_retired(kernel_store: &kernel::KernelStore) -> bool {
+        kernel_store
+            .served_set(&"a".repeat(64), "opencode", "session")
+            .unwrap()
+            .unwrap()[0]
+            .serve
+            .invalidated_commit_seq
+            .is_some()
+    }
+
+    /// The maintenance slice runs the use-outcome sweep whenever it is handed a Ready Kernel, with no activation record in place: an expired serving record is retired by one pass that counts as advancing, and the pass after it idles.
+    #[test]
+    fn the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&MemoryStore::test_descriptor(
+            store_dir.path(),
+            "eidnara-memory_reviewer-lifecycle-test",
+        ))
+        .unwrap();
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+        seed_expired_use_outcome(&kernel_store);
         let sweep_at = kernel::USE_OUTCOME_RETENTION_MS + 1;
         let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &|| false)
             .expect("not cancelled");
@@ -834,14 +848,35 @@ mod tests {
             pass.advanced,
             "retiring an expired serving record is progress"
         );
-        let records = kernel_store
-            .served_set(&"a".repeat(64), "opencode", "session")
-            .unwrap()
-            .unwrap();
-        assert!(records[0].serve.invalidated_commit_seq.is_some());
+        assert!(use_outcome_retired(&kernel_store));
         let again = sweep_and_sample(&store, Some(&kernel_store), sweep_at + 1, None, &|| false)
             .expect("not cancelled");
         assert!(!again.advanced, "nothing was left to retire");
+    }
+
+    /// A cancellation observed after the capture sweeps stops the slice before the use-outcome sweep starts.
+    #[test]
+    fn a_cancelled_slice_stops_before_the_use_outcome_sweep() {
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+        seed_expired_use_outcome(&kernel_store);
+        let checks = std::cell::Cell::new(0);
+        let after_the_capture_sweeps = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 2
+        };
+        let harness = std::cell::Cell::new(kernel::CaptureExpiry::default());
+        assert_eq!(
+            kernel_slice(
+                &kernel_store,
+                kernel::USE_OUTCOME_RETENTION_MS + 1,
+                &after_the_capture_sweeps,
+                &harness,
+            ),
+            Ok(None)
+        );
+        assert_eq!(checks.get(), 3, "the capture sweeps ran");
+        assert!(!use_outcome_retired(&kernel_store));
     }
 
     fn maintenance(

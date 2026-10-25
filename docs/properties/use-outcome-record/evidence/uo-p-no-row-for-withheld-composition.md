@@ -9,14 +9,17 @@ Record kind: proposed obligation; its owning ticket #1155 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
 - The writer distinguishes withheld from empty.
 
 - Guarantee under test: A fold that persists a withheld composition writes no
   serving record; an Available snapshot with zero rows writes a record with zero
   decision rows.
-- Existing check: none; proposed.
+- Existing check: Kernel half only:
+  `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
+  (`crates/kernel/tests/kernel_use_outcome.rs:163`). The writer is proposed.
+  Status: unaudited.
 
 ## Failure scenario
 

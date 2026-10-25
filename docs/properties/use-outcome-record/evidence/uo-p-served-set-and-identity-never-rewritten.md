@@ -9,22 +9,34 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
-- Trigger set: `use_outcomes_identity_immutable`,
+- Record triggers: `use_outcomes_identity_immutable`,
   `use_outcomes_deleted_at_set_once`,
   `use_outcomes_last_transform_at_monotonic`, `use_outcomes_retire_once`,
-  `use_outcomes_no_delete`, `use_outcome_decisions_no_update`,
-  `use_outcome_decisions_no_delete` (`crates/kernel/src/schema.rs:187`).
+  `use_outcomes_no_delete` in the `use_outcomes` component
+  (`crates/kernel/src/schema.rs:187`); decision-row triggers
+  `use_outcome_decisions_no_update` and `use_outcome_decisions_no_delete` in the
+  `use_outcome_decisions` component (`crates/kernel/src/schema.rs:191`).
+- Citation rule: the `admission_decisions.use_outcome_id` foreign key and the
+  `admission_decisions_use_outcome_set_once` trigger
+  (`crates/kernel/src/schema.rs:163`). P4 U3 writes the value once; a cleared
+  citation would release a cited record to the sweep.
 - An equal rewrite of `deleted_at` or `last_transform_at` is accepted; the test
   asserts both.
 
 - Guarantee under test: After commit, the identity columns, `served_commit_seq`,
   `session_role`, `recorded_at`, the classification columns, and the decision
   rows never change; `deleted_at` is set once, `last_transform_at` never
-  decreases, retirement is set once, and no row is deleted.
+  decreases, retirement is set once, no row is deleted, a record is served at a
+  commit before the one that records it, and an admission citation names a
+  recorded serve and is set once.
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-  (`crates/kernel/tests/kernel_schema.rs:2171`). Status: unaudited.
+  (`crates/kernel/tests/kernel_schema.rs:2174`);
+  `use_outcome_classification_and_identity_shapes_are_checked`
+  (`crates/kernel/tests/kernel_schema.rs:2288`);
+  `an_admission_citation_names_a_recorded_use_outcome_and_is_set_once`
+  (`crates/kernel/tests/kernel_schema.rs:2364`). Status: unaudited.
 
 ## Failure scenario
 

@@ -6,7 +6,9 @@ use kernel::schema::{
     verify_kernel_connection_contract,
 };
 use kernel::sqlite_runtime::DIRECT_FORMAT_EPOCH;
-use rusqlite::ffi::{SQLITE_CONSTRAINT_CHECK, SQLITE_CONSTRAINT_UNIQUE};
+use rusqlite::ffi::{
+    SQLITE_CONSTRAINT_CHECK, SQLITE_CONSTRAINT_FOREIGNKEY, SQLITE_CONSTRAINT_UNIQUE,
+};
 use rusqlite::{Connection, ErrorCode, params};
 
 const EXPECTED_COMPONENTS: &[&str] = &[
@@ -179,7 +181,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "be46244f5cddf052d7d2c9e7137165bed494015b509680dcd495de30f3a9aea9";
+    "3297302983814b847c24cc5beaf9d29e684077e2174c3925410d13c0f98bb5bd";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -2041,6 +2043,7 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("table", "use_outcome_decisions"),
         ("table", "use_outcomes"),
         ("table", "writer_fence"),
+        ("trigger", "admission_decisions_use_outcome_set_once"),
         (
             "trigger",
             "artifact_ingestion_reservations_identity_immutable",
@@ -2147,16 +2150,16 @@ fn a_nonpositive_busy_timeout_is_refused_instead_of_removing_the_busy_handler() 
     }
 }
 
-/// Inserts one serving record `id` with one decision row naming `object_id`, at `commit_seq`.
-fn seed_use_outcome(conn: &Connection, id: &str, object_id: &str, commit_seq: i64) {
+/// Inserts one serving record `id` served at `served` and created at `created`, with one decision row naming `object_id`.
+fn seed_use_outcome(conn: &Connection, id: &str, object_id: &str, served: i64, created: i64) {
     conn.execute(
         "INSERT INTO use_outcomes(
              use_outcome_id,project_digest,harness,session_id,served_set_digest,
              composition_revision,served_commit_seq,session_role,recorded_at,created_commit_seq,
              retention_class,retain_until,sensitivity_class,provider_egress_class
-         ) VALUES (?1,?2,'opencode','session-1',?3,7,?4,'primary',10,?4,
+         ) VALUES (?1,?2,'opencode','session-1',?3,7,?4,'primary',10,?5,
                    'use_outcome_capture',20,'sensitive','local_only')",
-        params![id, "a".repeat(64), "b".repeat(64), commit_seq],
+        params![id, "a".repeat(64), "b".repeat(64), served, created],
     )
     .unwrap();
     conn.execute(
@@ -2175,7 +2178,8 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
     seed_object(&conn, "decision-1", "decision", root);
     seed_object(&conn, "decision-2", "decision", root);
     let id = "c".repeat(64);
-    seed_use_outcome(&conn, &id, "decision-1", root);
+    let created = next_commit(&conn, "tx-created");
+    seed_use_outcome(&conn, &id, "decision-1", root, created);
     let later = next_commit(&conn, "tx-later");
 
     for (column, value) in [
@@ -2230,11 +2234,13 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
     conn.execute("UPDATE use_outcomes SET invalidated_commit_seq=?1", [later])
         .unwrap();
     let again = next_commit(&conn, "tx-again");
-    assert_aborts_with(
-        &conn,
-        &format!("UPDATE use_outcomes SET invalidated_commit_seq={again}"),
-        "a retired use outcome stays retired",
-    );
+    for value in [again.to_string(), "NULL".to_string()] {
+        assert_aborts_with(
+            &conn,
+            &format!("UPDATE use_outcomes SET invalidated_commit_seq={value}"),
+            "a retired use outcome stays retired",
+        );
+    }
 
     for (sql, guard) in [
         (
@@ -2260,7 +2266,7 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
                  composition_revision,served_commit_seq,session_role,recorded_at,
                  created_commit_seq,retention_class,retain_until,sensitivity_class,
                  provider_egress_class
-             ) VALUES ('{id}','{}','opencode','session-1','{}',7,{root},'primary',10,{root},
+             ) VALUES ('{id}','{}','opencode','session-1','{}',7,{root},'primary',10,{created},
                        'use_outcome_capture',20,'sensitive','local_only')",
             "a".repeat(64),
             "b".repeat(64)
@@ -2277,173 +2283,121 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
     );
 }
 
-/// A class other than `sensitive`, `local_only`, or `use_outcome_capture`, a role outside `primary` and `subagent`, a malformed digest, and a retirement at or before creation all fail a CHECK; a duplicate identity fails the UNIQUE constraint.
+/// A class other than `sensitive`, `local_only`, or `use_outcome_capture`, a role outside `primary` and `subagent`, a malformed digest, an empty identity field, a serve at or after its recording commit, and a retirement at or before creation all fail a CHECK; a duplicate identity fails the UNIQUE constraint.
 #[test]
 fn use_outcome_classification_and_identity_shapes_are_checked() {
     let (_dir, mut conn) = open_profiled();
     apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
-    let root = seed_root_domain(&mut conn);
-    let insert = |id: &str,
-                  digest: &str,
-                  role: &str,
-                  retention: &str,
-                  sensitivity: &str,
-                  egress: &str,
-                  retired: Option<i64>| {
+    let served = seed_root_domain(&mut conn);
+    let created = next_commit(&conn, "tx-created");
+    let digest = format!("'{}'", "a".repeat(64));
+    let defaults = [
+        ("use_outcome_id", format!("'{}'", "c".repeat(64))),
+        ("project_digest", digest.clone()),
+        ("harness", "'opencode'".to_string()),
+        ("session_id", "'session-1'".to_string()),
+        ("served_set_digest", digest.clone()),
+        ("composition_revision", "7".to_string()),
+        ("served_commit_seq", served.to_string()),
+        ("session_role", "'primary'".to_string()),
+        ("recorded_at", "10".to_string()),
+        ("created_commit_seq", created.to_string()),
+        ("invalidated_commit_seq", "NULL".to_string()),
+        ("retention_class", "'use_outcome_capture'".to_string()),
+        ("retain_until", "20".to_string()),
+        ("sensitivity_class", "'sensitive'".to_string()),
+        ("provider_egress_class", "'local_only'".to_string()),
+    ];
+    let insert = |column: &str, value: &str| {
+        let (columns, values): (Vec<&str>, Vec<&str>) = defaults
+            .iter()
+            .map(|(name, default)| {
+                (
+                    *name,
+                    if *name == column {
+                        value
+                    } else {
+                        default.as_str()
+                    },
+                )
+            })
+            .unzip();
         conn.execute(
-            "INSERT INTO use_outcomes(
-                 use_outcome_id,project_digest,harness,session_id,served_set_digest,
-                 composition_revision,served_commit_seq,session_role,recorded_at,
-                 created_commit_seq,invalidated_commit_seq,retention_class,retain_until,
-                 sensitivity_class,provider_egress_class
-             ) VALUES (?1,?2,'opencode','session-1',?2,7,?3,?4,10,?3,?5,?6,20,?7,?8)",
-            params![
-                id,
-                digest,
-                root,
-                role,
-                retired,
-                retention,
-                sensitivity,
-                egress
-            ],
+            &format!(
+                "INSERT INTO use_outcomes({}) VALUES ({})",
+                columns.join(","),
+                values.join(",")
+            ),
+            [],
         )
     };
-    let id = "c".repeat(64);
-    let digest = "a".repeat(64);
-    for (context, result) in [
-        (
-            "normal sensitivity",
-            insert(
-                &id,
-                &digest,
-                "primary",
-                "use_outcome_capture",
-                "normal",
-                "local_only",
-                None,
-            ),
-        ),
-        (
-            "secret sensitivity",
-            insert(
-                &id,
-                &digest,
-                "primary",
-                "use_outcome_capture",
-                "secret",
-                "local_only",
-                None,
-            ),
-        ),
-        (
-            "remote egress",
-            insert(
-                &id,
-                &digest,
-                "primary",
-                "use_outcome_capture",
-                "sensitive",
-                "remote_allowed",
-                None,
-            ),
-        ),
-        (
-            "canonical retention",
-            insert(
-                &id,
-                &digest,
-                "primary",
-                "canonical",
-                "sensitive",
-                "local_only",
-                None,
-            ),
-        ),
-        (
-            "unknown role",
-            insert(
-                &id,
-                &digest,
-                "producer",
-                "use_outcome_capture",
-                "sensitive",
-                "local_only",
-                None,
-            ),
-        ),
-        (
-            "uppercase digest",
-            insert(
-                &id,
-                &"A".repeat(64),
-                "primary",
-                "use_outcome_capture",
-                "sensitive",
-                "local_only",
-                None,
-            ),
-        ),
-        (
-            "short digest",
-            insert(
-                &id,
-                &"a".repeat(63),
-                "primary",
-                "use_outcome_capture",
-                "sensitive",
-                "local_only",
-                None,
-            ),
-        ),
-        (
-            "non-hex id",
-            insert(
-                &"g".repeat(64),
-                &digest,
-                "primary",
-                "use_outcome_capture",
-                "sensitive",
-                "local_only",
-                None,
-            ),
-        ),
-        (
-            "retired at creation",
-            insert(
-                &id,
-                &digest,
-                "primary",
-                "use_outcome_capture",
-                "sensitive",
-                "local_only",
-                Some(root),
-            ),
-        ),
+    for (column, value) in [
+        ("sensitivity_class", "'normal'".to_string()),
+        ("sensitivity_class", "'secret'".to_string()),
+        ("provider_egress_class", "'remote_allowed'".to_string()),
+        ("retention_class", "'canonical'".to_string()),
+        ("session_role", "'producer'".to_string()),
+        ("project_digest", format!("'{}'", "A".repeat(64))),
+        ("served_set_digest", format!("'{}'", "a".repeat(63))),
+        ("use_outcome_id", format!("'{}'", "g".repeat(64))),
+        ("harness", "''".to_string()),
+        ("session_id", "''".to_string()),
+        ("served_commit_seq", created.to_string()),
+        ("invalidated_commit_seq", created.to_string()),
     ] {
-        assert_constraint_violation(result, SQLITE_CONSTRAINT_CHECK, context);
+        assert_constraint_violation(
+            insert(column, &value),
+            SQLITE_CONSTRAINT_CHECK,
+            &format!("{column}={value}"),
+        );
     }
-    insert(
-        &id,
-        &digest,
-        "subagent",
-        "use_outcome_capture",
-        "sensitive",
-        "local_only",
-        None,
-    )
-    .expect("a well-formed subagent serve inserts");
+    insert("session_role", "'subagent'").expect("a well-formed subagent serve inserts");
     assert_constraint_violation(
-        insert(
-            &"d".repeat(64),
-            &digest,
-            "primary",
-            "use_outcome_capture",
-            "sensitive",
-            "local_only",
-            None,
-        ),
+        insert("use_outcome_id", &format!("'{}'", "d".repeat(64))),
         SQLITE_CONSTRAINT_UNIQUE,
         "a second record for one identity tuple",
     );
+}
+
+/// An admission row can cite only a recorded use outcome, and a citation once set never changes or clears.
+#[test]
+fn an_admission_citation_names_a_recorded_use_outcome_and_is_set_once() {
+    let (_dir, mut conn) = open_profiled();
+    apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
+    let root = seed_root_domain(&mut conn);
+    seed_object(&conn, "decision-1", "decision", root);
+    let created = next_commit(&conn, "tx-created");
+    let id = "c".repeat(64);
+    seed_use_outcome(&conn, &id, "decision-1", root, created);
+    let cite = |row: &str, use_outcome: &str| {
+        conn.execute(
+            "INSERT INTO admission_decisions(
+                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,
+                 decided_at,use_outcome_id
+             ) VALUES (?1,'decision-1','test','decision-1',1,'explicit_user','user_explicit',
+                       'contradict','candidate','candidate','contradicted','automatic','admit',
+                       'normal',1,'fixture',?2,1,?3)",
+            params![row, created, use_outcome],
+        )
+    };
+    assert_constraint_violation(
+        cite("dangling", &"d".repeat(64)),
+        SQLITE_CONSTRAINT_FOREIGNKEY,
+        "a citation of an unrecorded use outcome",
+    );
+    cite("report", &id).expect("a citation of a recorded use outcome inserts");
+    for value in ["NULL".to_string(), format!("'{}'", "d".repeat(64))] {
+        assert_aborts_with(
+            &conn,
+            &format!("UPDATE admission_decisions SET use_outcome_id={value}"),
+            "an admission citation of a use outcome is set once",
+        );
+    }
+    conn.execute(
+        &format!("UPDATE admission_decisions SET use_outcome_id='{id}'"),
+        [],
+    )
+    .expect("rewriting the same citation changes nothing");
 }

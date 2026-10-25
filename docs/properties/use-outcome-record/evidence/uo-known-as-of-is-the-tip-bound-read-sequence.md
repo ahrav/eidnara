@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
 - Tip capture and bound read: `read_project_memory`
   (`crates/daemon/src/canonical_memory.rs:141`).
@@ -28,7 +28,7 @@ its parent is `1c56ba033`).
   `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
   (`crates/daemon/tests/transform_canonical_memory.rs:46`) (assertions
   `crates/daemon/tests/transform_canonical_memory.rs:159` and
-  `crates/daemon/tests/transform_canonical_memory.rs:179`). Status: unaudited.
+  `crates/daemon/tests/transform_canonical_memory.rs:196`). Status: unaudited.
 
 ## Failure scenario
 

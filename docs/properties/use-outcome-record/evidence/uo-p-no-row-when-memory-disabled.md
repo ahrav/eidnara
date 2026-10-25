@@ -9,13 +9,13 @@ Record kind: proposed obligation; its owning ticket #1155 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
 - The writer reads only the composition the pass froze.
 
 - Guarantee under test: A route bound with `memory.enabled` off produces no
   serving record on any pass.
-- Existing check: none; proposed.
+- Existing check: none; proposed. The writer lands with #1155.
 
 ## Failure scenario
 

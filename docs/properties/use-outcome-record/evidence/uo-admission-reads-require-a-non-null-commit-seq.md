@@ -10,12 +10,12 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
-- Writer binding: `crates/kernel/src/admission.rs:1748`; `commit_seq` is
-  `self.commit_seq`.
+- Writer binding: the INSERT at `crates/kernel/src/admission.rs:1748` binds
+  `self.commit_seq` at `crates/kernel/src/admission.rs:1781`.
 - Reader filters: `crates/kernel/src/admission.rs:675`; the new reader
-  `crates/kernel/src/use_outcome.rs:152`.
+  `crates/kernel/src/use_outcome.rs:162`.
 - Reachability: a null-commit row exists only after direct SQL, so the label is
   test-only.
 
@@ -25,7 +25,7 @@ its parent is `1c56ba033`).
   `malformed_stored_policy_and_sensitivity_fail_closed_without_read_error`
   (`crates/kernel/tests/kernel_admission.rs:2935`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:288`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:337`). Status: unaudited.
 
 ## Failure scenario
 

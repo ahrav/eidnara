@@ -9,17 +9,17 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
 - Components: `crates/kernel/src/schema.rs:187` and
   `crates/kernel/src/schema.rs:191`; the admission citing column and
   `idx_admission_use_outcome_fk` in the `admission_decisions` component
   (`crates/kernel/src/schema.rs:163`).
-- Pinned digest: `crates/kernel/tests/kernel_schema.rs:181`
-  (`be46244f5cddf052d7d2c9e7137165bed494015b509680dcd495de30f3a9aea9`).
-- Component-name list: `crates/kernel/tests/kernel_schema.rs:12`; object
+- Pinned digest: `crates/kernel/tests/kernel_schema.rs:183`
+  (`3297302983814b847c24cc5beaf9d29e684077e2174c3925410d13c0f98bb5bd`).
+- Component-name list: `crates/kernel/tests/kernel_schema.rs:14`; object
   inventory: `kernel_schema_object_inventory_is_pinned_by_kind_and_name`
-  (`crates/kernel/tests/kernel_schema.rs:1898`).
+  (`crates/kernel/tests/kernel_schema.rs:1900`).
 - Refusal: `classify_existing_family` (`crates/kernel/src/open.rs:796`).
 
 - Guarantee under test: A Kernel family at the previous baseline opens as
@@ -29,11 +29,11 @@ its parent is `1c56ba033`).
   `a_family_created_under_the_previous_baseline_is_refused_untouched`
   (`crates/kernel/tests/kernel_open.rs:582`);
   `kernel_schema_digest_is_pinned_to_the_frozen_v1_shape`
-  (`crates/kernel/tests/kernel_schema.rs:597`);
+  (`crates/kernel/tests/kernel_schema.rs:599`);
   `kernel_schema_object_inventory_is_pinned_by_kind_and_name`
-  (`crates/kernel/tests/kernel_schema.rs:1898`);
+  (`crates/kernel/tests/kernel_schema.rs:1900`);
   `kernel_schema_has_one_ordered_full_shape`
-  (`crates/kernel/tests/kernel_schema.rs:149`). Status: unaudited.
+  (`crates/kernel/tests/kernel_schema.rs:151`). Status: unaudited.
 
 ## Failure scenario
 

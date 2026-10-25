@@ -9,13 +9,18 @@ Record kind: proposed obligation; its owning ticket #1155 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
-- Digest: `served_set_digest` (`crates/kernel/src/use_outcome.rs:53`).
+- Digest: `served_set_digest` (`crates/kernel/src/use_outcome.rs:55`).
 
 - Guarantee under test: The stored decision set equals, as a set, the object ids
   of the snapshot rows whose composition the same fold persisted.
-- Existing check: none; proposed.
+- Existing check: Kernel half only:
+  `duplicate_and_malformed_serves_are_refused_without_rows`
+  (`crates/kernel/tests/kernel_use_outcome.rs:210`);
+  `session_roles_round_trip_and_the_served_set_digest_is_order_free`
+  (`crates/kernel/tests/kernel_use_outcome.rs:698`). The writer is proposed.
+  Status: unaudited.
 
 ## Failure scenario
 

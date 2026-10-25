@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `1c56ba033`).
+its parent is `5830fe82a`).
 
 - Bind: `crates/daemon/src/lib.rs:13260`.
 - Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:5970`) reads
@@ -54,8 +54,12 @@ that turns it off (and the reverse), then a pass and a wrapup.
 ### Q: Gap G4
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
-- Findings: Gap G4: does the summarizer restart reattach read consent from a
-  third source? Unresolved, needs a read of the reattach path; recorded as an
-  open question, not a fix.
-- Missing evidence: none beyond what the question names.
-- Conclusion: unresolved, needs a read of the named path.
+- Findings: Gap G4: the summarizer reattach path reads `memory_enabled` from the
+  live effective config (`crates/daemon/src/lib.rs:5197`, used at
+  `crates/daemon/src/lib.rs:5344`), a third consent source beside the frozen
+  binding and the live wrapup config; the fire path states the frozen-config
+  rule in its own comment (`crates/daemon/src/lib.rs:5854`). Recorded, not
+  fixed; whether the reattach should follow the frozen config is an owner
+  decision (needs human input).
+- Missing evidence: an owner decision or the named read.
+- Conclusion: needs human input.

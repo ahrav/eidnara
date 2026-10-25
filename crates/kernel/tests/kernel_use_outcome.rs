@@ -7,6 +7,7 @@ use kernel::{
 use rusqlite::{Connection, params};
 
 const HARNESS: &str = "opencode";
+const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
 
 fn project() -> String {
     "a".repeat(64)
@@ -114,6 +115,26 @@ fn admission(
     commit_seq: Option<i64>,
     use_outcome: Option<&str>,
 ) {
+    admission_on(
+        root,
+        id,
+        subject,
+        event_kind,
+        ("fixture", subject, revision),
+        commit_seq,
+        use_outcome,
+    );
+}
+
+fn admission_on(
+    root: &std::path::Path,
+    id: &str,
+    subject: &str,
+    event_kind: &str,
+    (source_kind, source_id, revision): (&str, &str, i64),
+    commit_seq: Option<i64>,
+    use_outcome: Option<&str>,
+) {
     writer(root)
         .execute(
             "INSERT INTO admission_decisions(
@@ -121,9 +142,18 @@ fn admission(
                  source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
                  visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,
                  decided_at,use_outcome_id
-             ) VALUES (?1,?2,'fixture',?2,?3,'explicit_user','user_explicit',?4,'candidate',
+             ) VALUES (?1,?2,?7,?8,?3,'explicit_user','user_explicit',?4,'candidate',
                        'candidate','disputed','automatic','admit','normal',1,'fixture',?5,1,?6)",
-            params![id, subject, revision, event_kind, commit_seq, use_outcome],
+            params![
+                id,
+                subject,
+                revision,
+                event_kind,
+                commit_seq,
+                use_outcome,
+                source_kind,
+                source_id
+            ],
         )
         .unwrap();
 }
@@ -175,7 +205,7 @@ fn served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve() 
     assert_eq!(USE_OUTCOME_RETENTION_CLASS, "use_outcome_capture");
 }
 
-/// A duplicate identity is `Conflict`, a malformed spec is `InvalidInput`, and a refused commit leaves no row in either table.
+/// A duplicate identity is `Conflict`, an unregistered decision is `NotFound`, a malformed or secret-bearing spec is `InvalidInput`, and a refused commit leaves no row in either table.
 #[test]
 fn duplicate_and_malformed_serves_are_refused_without_rows() {
     let root = tempfile::tempdir().unwrap();
@@ -197,13 +227,32 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
     );
     assert_eq!(
         insert(&store, "unknown", spec("s3", &["missing"], served_at, 100)),
-        Err(KernelError::Conflict),
+        Err(KernelError::NotFound),
         "a decision row names a registry object"
     );
+    let next = store.tip().unwrap() + 1;
+    let with_secret_id = || {
+        let mut ids = vec!["d1".to_string(), SECRET.to_string()];
+        ids.sort();
+        ids
+    };
     type Corrupt = Box<dyn Fn(&mut UseOutcomeSpec)>;
     let malformed: Vec<(&str, Corrupt)> = vec![
         ("empty harness", Box::new(|s| s.harness.clear())),
         ("empty session", Box::new(|s| s.session_id.clear())),
+        ("blank harness", Box::new(|s| s.harness = " \t".to_string())),
+        (
+            "secret session",
+            Box::new(|s| s.session_id = SECRET.to_string()),
+        ),
+        (
+            "secret decision id",
+            Box::new(move |s| {
+                s.decision_object_ids = with_secret_id();
+                s.served_set_digest =
+                    served_set_digest(s.decision_object_ids.iter().map(String::as_str));
+            }),
+        ),
         (
             "non-hex project",
             Box::new(|s| s.project_digest = "z".repeat(64)),
@@ -238,7 +287,7 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
         ),
         (
             "future served sequence",
-            Box::new(|s| s.served_commit_seq = 1_000),
+            Box::new(move |s| s.served_commit_seq = next),
         ),
         ("negative recorded time", Box::new(|s| s.recorded_at = -1)),
         ("retention overflow", Box::new(|s| s.recorded_at = i64::MAX)),
@@ -283,10 +332,13 @@ fn a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote() {
     );
 }
 
-/// For a serve at `known_as_of = n`, `mark_disputed` or `contradict` committed after n sets the flag; an event at or before n, a `mark_stale`, a null-commit-sequence row, and another lineage do not; two qualifying events in one commit count once; a retired record is not answered.
+/// For a serve at `known_as_of = n`, `mark_disputed` or `contradict` committed after n sets the flag and a later approval does not clear it; an event at or before n, a `mark_stale`, a null-commit-sequence row, and another source kind, source id, or revision do not; two qualifying events in one commit count once; a retired record is not answered.
 #[test]
 fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage() {
     let objects = [
+        "other-source-id",
+        "other-source-kind",
+        "re-approved",
         "later-dispute",
         "later-contradict",
         "at-serve",
@@ -316,6 +368,43 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
     ] {
         admission(root.path(), row, subject, kind, revision, commit_seq, None);
     }
+    admission_on(
+        root.path(),
+        "b1",
+        "other-source-id",
+        "mark_disputed",
+        ("fixture", "elsewhere", 1),
+        Some(after),
+        None,
+    );
+    admission_on(
+        root.path(),
+        "b2",
+        "other-source-kind",
+        "contradict",
+        ("elsewhere", "other-source-kind", 1),
+        Some(after),
+        None,
+    );
+    admission(
+        root.path(),
+        "b3",
+        "re-approved",
+        "mark_disputed",
+        1,
+        Some(after),
+        None,
+    );
+    let approved_at = tick(&store, "approved");
+    admission(
+        root.path(),
+        "b4",
+        "re-approved",
+        "approve",
+        1,
+        Some(approved_at),
+        None,
+    );
     assert_eq!(
         count(
             root.path(),
@@ -333,10 +422,17 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
         assert_eq!(sessions[0].serve.use_outcome_id, id);
         sessions[0].disputed_after_serve
     };
-    for object in ["later-dispute", "later-contradict", "two-in-one"] {
+    for object in [
+        "later-dispute",
+        "later-contradict",
+        "two-in-one",
+        "re-approved",
+    ] {
         assert!(disputed(object), "{object}");
     }
     for object in [
+        "other-source-id",
+        "other-source-kind",
         "at-serve",
         "before-serve",
         "stale",
@@ -369,7 +465,7 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
     );
 }
 
-/// An expired record is retired under a reserved-producer receipt keyed by the cutoff and its id and stays readable; a repeat at the same cutoff retires nothing; a record whose deadline equals the cutoff is kept.
+/// An expired record is retired in a page commit under the reserved producer with its own receipt keyed by the cutoff and its id, and stays readable; a repeat at the same cutoff retires nothing; a record whose deadline equals the cutoff is kept.
 #[test]
 fn expiry_retires_an_expired_record_under_a_reserved_receipt() {
     let root = tempfile::tempdir().unwrap();
@@ -383,18 +479,19 @@ fn expiry_retires_an_expired_record_under_a_reserved_receipt() {
         store.expire_use_outcomes(now).unwrap(),
         UseOutcomeExpiry {
             retired: 1,
-            retained: 0
+            cited: 0
         }
     );
     assert_eq!(
         count(
             root.path(),
             &format!(
-                "SELECT COUNT(*) FROM commit_log c
-                 JOIN operation_receipts r ON r.commit_seq=c.commit_seq
-                 JOIN use_outcomes u ON u.invalidated_commit_seq=c.commit_seq
-                 WHERE c.producer='eidnara-kernel/use-outcome-expiry'
-                   AND c.operation_key='{now}:{expired}' AND r.producer=c.producer
+                "SELECT COUNT(*) FROM operation_receipts r
+                 JOIN use_outcomes u ON u.invalidated_commit_seq=r.commit_seq
+                 JOIN commit_log c ON c.commit_seq=r.commit_seq
+                 WHERE r.producer='eidnara-kernel/use-outcome-expiry'
+                   AND r.operation_key='{now}:{expired}' AND c.producer=r.producer
+                   AND c.operation_key='{now}:page:{expired}'
                    AND u.use_outcome_id='{expired}'"
             )
         ),
@@ -485,7 +582,7 @@ fn an_expiry_backlog_drains_one_page_per_call() {
     );
 }
 
-/// An expired record cited by a committed admission row whose subject is live survives and is counted retained; a citation by an uncommitted row or with a retired subject keeps nothing; once the cited subject is retired the record retires.
+/// An expired record cited by a committed admission row whose subject is live survives and is counted cited; a citation by an uncommitted row or with a retired subject keeps nothing; once the cited subject is retired the record retires.
 #[test]
 fn an_expired_record_cited_by_a_live_report_is_retained() {
     let root = tempfile::tempdir().unwrap();
@@ -548,7 +645,7 @@ fn an_expired_record_cited_by_a_live_report_is_retained() {
         store.expire_use_outcomes(now).unwrap(),
         UseOutcomeExpiry {
             retired: 2,
-            retained: 1
+            cited: 1
         }
     );
     let live = |session: &str| {
