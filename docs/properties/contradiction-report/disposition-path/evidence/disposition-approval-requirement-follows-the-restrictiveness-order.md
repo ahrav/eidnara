@@ -1,0 +1,83 @@
+# disposition-approval-requirement-follows-the-restrictiveness-order
+
+Catalog record: [catalog.md](../catalog.md#disposition-approval-requirement-follows-the-restrictiveness-order).
+HEAD `3a3b916b7`, 2026-10-25.
+
+## Discovery trigger
+
+Plan P4 R4: "Active to Disputed needs no approval" and "never relaxes a
+disposition". The `Operation::Disposition` doc (`commit.rs:98-100`): "a
+transition toward a less restrictive disposition needs a valid approval".
+Lens: security boundaries (authorization by disposition order), then
+lifecycle transitions.
+
+## Evidence trail
+
+- `disposition_restrictiveness`: Active 0; Stale, Disputed, Superseded 1;
+  Rejected 2; Contradicted, Quarantined 3
+  (`crates/kernel/src/admission.rs:4163-4170`).
+- `relaxes_disposition = restrictiveness(requested) <
+  restrictiveness(current_disposition)` (`:321-323`);
+  `requires_approval = (...) || relaxes_disposition` (`:324-329`);
+  `denied = requires_approval && !input.approval_valid` (`:330`); the
+  disposition is `requested` when not denied, else `current` (`:331-334`).
+- Equal rank is not a relaxation: Stale to Disputed, Disputed to Stale,
+  and any X to X land without approval. Route test `:4545-4557` covers
+  Stale to Stale ("admitted, not denied"); no test covers Stale to
+  Disputed.
+- `approval_valid` comes from `validate_approval` over the cited or
+  back-filled stored approval (`:1569-1586`); the route scopes the same
+  approval (`commit.rs:580-583`) so an out-of-scope approval is
+  `not_found` before evaluation (`kernel_routes.rs:4502-4513`).
+- The route derives `denied` as `requested_disposition() != disposition`
+  (`commit.rs:610-613`); `requested_disposition` reads the same
+  `event_effect` table (`admission.rs:4306-4308`).
+- A denial still writes one `admission_decisions` row with
+  `outcome = deny` (`kernel_routes.rs:4494-4497`).
+- Tests: route `:4392` (Active to each), `:4452` (Quarantined to Stale
+  both ways); evaluator `:5135` (Rejected, Contradicted, Quarantined to
+  Stale and Disputed), `:5334`.
+
+## Failure scenario
+
+A rank table edit that places Disputed above Stale would make Stale to
+Disputed require approval and block the P4 report on stale findings; one
+that places Contradicted at 1 would let `mark_disputed` relax a
+contradiction without approval. A `validate_approval` regression that
+returns true for a quarantined approval would let a plugin relax any
+disposition by citing it.
+
+## Timing windows and dependencies
+
+The approval's authority is read at evaluation time inside the writer
+transaction. In one envelope, an earlier operation that quarantines the
+approval changes the later operation's answer; the preview refuses that
+combination (`commit.rs:1030-1036`) while the commit judges it
+(`kernel_routes.rs:5487`).
+
+## What a test must construct
+
+- Subjects in each of the six non-Active dispositions (Superseded via
+  `supersede_decision`).
+- Every ordered pair (prior disposition, event), 7 x 5, with no approval,
+  an invalid approval (revoked, out of scope, wrong kind), and a valid
+  approval.
+- Assert `disposition`, `outcome`, `denied`, and the row count delta.
+- Pure-function form over `EvaluationInputs` for the same grid.
+- Coverage markers `disposition_relaxation_attempted`,
+  `disposition_lateral_move_attempted`,
+  `disposition_relaxation_with_valid_approval`.
+
+## Investigation log
+
+### Q: Is a lateral move at equal rank (Stale to Disputed) the intended contract for a consumer-filed report on a stale finding?
+
+- Sources examined: `admission.rs:4163-4170`, `:321-330`; P4 R4 and KTD4
+  ("tightening semantics unchanged"); route test `:4545-4557`.
+- Findings: the code lands the move without approval and records
+  `Disputed`; R4's "tightening only" does not name the equal-rank case.
+  No test pins it either way.
+- Missing evidence: an owner statement whether a stale finding may be
+  re-labelled disputed by a plugin, and whether Disputed to Stale (the
+  reverse lateral) should be allowed from a plugin.
+- Conclusion: needs human input.
