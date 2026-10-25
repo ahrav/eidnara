@@ -4,11 +4,10 @@
 //!
 //! A replay pass offers every unit not yet settled to [`publish_screened`] as one batch; a unit
 //! the batch defers is offered again by the next pass, and a unit still deferred after the last
-//! pass is the `deferred` loss. Shared by `tests/source_corpus_replay.rs` and the
-//! `source_corpus_report` example.
+//! pass is the `deferred` loss. A refused batch settles only its conflicting unit, as
+//! `identity_conflict`; a unit still open when the last pass is refused is the `pass_failed` loss.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -34,14 +33,18 @@ pub const PROJECT: &str = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c
 const DOMAIN: &str = "corpus-domain";
 const SCOPE: &str = "project:corpus";
 
-/// A kernel with one scoped project, the store every replay in a process publishes into.
+/// Dropping `ReplayStore` removes its temporary directory.
 pub struct ReplayStore {
-    pub kernel: Arc<KernelStore>,
+    kernel: Arc<KernelStore>,
+    // Fields drop in declaration order, so `kernel` releases its `Arc` before `_dir` removes the
+    // temporary directory.
+    _dir: tempfile::TempDir,
 }
 
 impl ReplayStore {
-    pub fn open(root: &Path) -> Self {
-        let kernel = Arc::new(KernelStore::open(root.join("kernel")).expect("kernel opens"));
+    pub fn temporary() -> Self {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let kernel = Arc::new(KernelStore::open(dir.path().join("kernel")).expect("kernel opens"));
         let intent = CommitIntent {
             producer: "source-corpus-replay".to_owned(),
             operation_key: "seed".to_owned(),
@@ -78,7 +81,7 @@ impl ReplayStore {
                 Ok(String::new())
             })
             .expect("seed commits");
-        Self { kernel }
+        Self { kernel, _dir: dir }
     }
 
     fn publisher(&self) -> SourcePublisher<'_> {
@@ -147,12 +150,21 @@ fn native_id(native: &Value) -> &str {
 
 /// Pairs native records with their expected records by native id; a native record the reader
 /// left out (an OpenCode compaction summary) is replayed with no expected unit.
+///
+/// # Panics
+///
+/// When two expected records share an id or an expected record has no native record: either
+/// would leave its units outside the reconciliation.
 pub fn pair(natives: Vec<Value>, expected: Vec<ExpectedRecord>) -> Vec<ReplayRecord> {
-    let mut by_id: BTreeMap<String, ExpectedRecord> = expected
-        .into_iter()
-        .map(|record| (record.id.clone(), record))
-        .collect();
-    natives
+    let mut by_id: BTreeMap<String, ExpectedRecord> = BTreeMap::new();
+    for record in expected {
+        let id = record.id.clone();
+        assert!(
+            by_id.insert(id.clone(), record).is_none(),
+            "two expected records carry id {id}"
+        );
+    }
+    let records = natives
         .into_iter()
         .map(|native| {
             let id = native_id(&native).to_owned();
@@ -164,7 +176,13 @@ pub fn pair(natives: Vec<Value>, expected: Vec<ExpectedRecord>) -> Vec<ReplayRec
             });
             ReplayRecord { native, expected }
         })
-        .collect()
+        .collect();
+    assert!(
+        by_id.is_empty(),
+        "expected records with no native record: {:?}",
+        by_id.keys().collect::<Vec<_>>()
+    );
+    records
 }
 
 /// A frozen OpenCode session: its id and its records paired with the SQL reader's expected table.
@@ -261,9 +279,7 @@ fn settled(disposition: &UnitDisposition) -> Option<Settled> {
             PublishError::Artifact(ArtifactErrorKind::ReAdmissionBlocked) => {
                 Settled::Lost(LossCondition::ReAdmissionBlocked)
             }
-            PublishError::IdentityReused | PublishError::Descriptor { .. } => {
-                Settled::Lost(LossCondition::IdentityConflict)
-            }
+            PublishError::IdentityReused => Settled::Lost(LossCondition::IdentityConflict),
             _ => Settled::Unnamed,
         },
     })
@@ -317,6 +333,7 @@ pub fn replay(
     }
     let publisher = store.publisher();
     let mut passes = Vec::new();
+    let mut last_pass_failed = false;
     for _ in 0..max_passes {
         let open: Vec<usize> = (0..units.len())
             .filter(|&index| units[index].1.is_none())
@@ -340,6 +357,7 @@ pub fn replay(
             admitted_bytes: 0,
             elapsed_ms,
         };
+        last_pass_failed = outcome.is_err();
         match outcome {
             Ok(dispositions) => {
                 for (&index, disposition) in open.iter().zip(&dispositions) {
@@ -352,9 +370,11 @@ pub fn replay(
                     units[index].2 = matches!(disposition, UnitDisposition::Refused(_));
                 }
             }
-            Err(_) => {
-                for &index in &open {
-                    units[index].1 = Some(Settled::Lost(LossCondition::PassFailed));
+            // A batch refusal makes any identified conflicting unit terminal and leaves the
+            // remaining units eligible for retry.
+            Err(refusal) => {
+                if let Some(position) = refusal.conflicting_unit() {
+                    units[open[position]].1 = Some(Settled::Lost(LossCondition::IdentityConflict));
                 }
             }
         }
@@ -367,7 +387,9 @@ pub fn replay(
                 key: unit_key(&unit),
                 revision: unit.revision.clone(),
                 bytes: unit.text.len(),
-                settled: outcome.unwrap_or(Settled::Lost(if refused {
+                settled: outcome.unwrap_or(Settled::Lost(if last_pass_failed {
+                    LossCondition::PassFailed
+                } else if refused {
                     LossCondition::RefusedRetryable
                 } else {
                     LossCondition::Deferred
