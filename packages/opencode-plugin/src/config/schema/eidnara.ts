@@ -588,7 +588,9 @@ export const EidnaraConfigSchema = z
                     ),
             })
             .optional()
-            .describe("User-only repository documents Eidnara reads and, with source capture, retains."),
+            .describe(
+                "User-only repository documents Eidnara reads and, with source capture, retains.",
+            ),
         temporal_awareness: z
             .boolean()
             .default(true)
