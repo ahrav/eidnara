@@ -1813,6 +1813,10 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         ),
         envelope: charges.envelope.clone(),
         ceilings: vec![],
+        // The example's arms admit no memory writes.
+        prefix_rebill: ["aged", "fresh"]
+            .map(|arm| (arm.to_string(), eval_core::PrefixRebill::default()))
+            .into(),
     };
     // The publish root, the artifact's bytes, and the retained artifact are
     // charged before the envelope is copied into the report, so the published

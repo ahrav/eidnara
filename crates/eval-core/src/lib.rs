@@ -70,7 +70,7 @@ pub use anchor::{
     classify_control, future_answers, time_study,
 };
 pub use campaign::{
-    Approval, Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError,
+    Approval, Ceilings, DisabledReason, Envelope, EnvelopeExceeded, PrefixRebill, ProfileError,
     RUN_PROFILE_DIGEST_PROTOCOL, RUN_PROFILE_SCHEMA, Resource, RunProfile, SampleError,
     SampleLedger, SampleRecord, Scale, SkipReason, TaskBudgets, TaskUsage, Terminal, TerminalRates,
     UnsupportedReason, parse_run_profile,
@@ -177,7 +177,7 @@ pub use qualification::{
 pub use reducer::*;
 pub use render::*;
 pub use report::{
-    CampaignGates, Claims, Established, GatedBlocks, ReportError, ReportOutcome,
+    CampaignGates, Claims, Established, GatedBlocks, PREFIX_REBILL_KEY, ReportError, ReportOutcome,
     SUITE_B_REPORT_SCHEMA, SuiteBReport, Suppression, parse_report, reachability_of,
 };
 pub use residue::{
