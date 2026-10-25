@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
-use super::envelope::{PreparedIntent, commit_with_writer, recorded_receipt};
+use super::envelope::{PreparedIntent, commit_with_writer};
 use super::local_file::reserved_expiry_intent;
 use super::redaction::identity;
 use super::{CachedSql, Envelope, EventKind, KernelError, KernelStore, map_sqlite};
@@ -190,15 +190,14 @@ static EXPIRED_SQL: LazyLock<String> = LazyLock::new(|| {
 
 static RECHECK_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "SELECT u.invalidated_commit_seq IS NULL AND u.retain_until<?2 AS due,
-                {USE_OUTCOME_CITED_SQL} AS cited
+        "SELECT u.invalidated_commit_seq IS NULL AS live,{USE_OUTCOME_CITED_SQL} AS cited
          FROM use_outcomes u WHERE u.use_outcome_id=?1"
     )
 });
 
 impl UseOutcomeSpec {
     /// Refuses a malformed spec with `InvalidInput` and returns the record's `retain_until`. Checks run cheapest first: field shape, sequence and time range, the decision set and its digest, then the secret scan of every identity field.
-    fn retain_until(&self, commit_seq: i64) -> Result<i64, KernelError> {
+    fn validated_retain_until(&self, commit_seq: i64) -> Result<i64, KernelError> {
         let identity_fields = [self.harness.as_str(), self.session_id.as_str()];
         let well_formed = crate::cas::is_artifact_digest(&self.project_digest)
             && crate::cas::is_artifact_digest(&self.served_set_digest)
@@ -234,7 +233,8 @@ impl Envelope<'_> {
     }
 
     fn insert_use_outcome_inner(&mut self, spec: &UseOutcomeSpec) -> Result<String, KernelError> {
-        let retain_until = spec.retain_until(self.commit_seq)?;
+        let retain_until = spec.validated_retain_until(self.commit_seq)?;
+        // Every id is checked before the record is written, so a missing object is `NotFound` rather than a foreign-key `Conflict`.
         for object_id in &spec.decision_object_ids {
             let registered: bool = self
                 .tx
@@ -301,10 +301,10 @@ fn serve_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<UseOutcomeServe> {
         composition_revision: row.get::<_, i64>("composition_revision")?.cast_unsigned(),
         served_commit_seq: row.get("served_commit_seq")?,
         session_role: SessionRole::from_stored(&role).ok_or_else(|| {
-            rusqlite::Error::InvalidColumnType(
-                0,
-                "session_role".to_string(),
+            rusqlite::Error::FromSqlConversionFailure(
+                row.as_ref().column_index("session_role").unwrap_or(0),
                 rusqlite::types::Type::Text,
+                "unknown session role".into(),
             )
         })?,
         recorded_at: row.get("recorded_at")?,
@@ -385,7 +385,7 @@ impl KernelStore {
         Ok(sessions)
     }
 
-    /// Retires serving records whose `retain_until` is before `now` and that no committed admission row with a live subject cites: at most [`MAX_EXPIRED_USE_OUTCOMES_PER_CALL`] per call, oldest deadline first, in one commit. Each record gets its own reserved receipt keyed by `now` and its id, and is rechecked under the writer, so a citation committed after selection keeps it and a record another sweep already retired at this cutoff is skipped. The commit's own receipt is keyed by `now` and the page's first id, so a repeat of the same page replays and retires nothing.
+    /// Retires serving records whose `retain_until` is before `now` and that no committed admission row with a live subject cites: at most [`MAX_EXPIRED_USE_OUTCOMES_PER_CALL`] per call, oldest deadline first, in one commit. Each record is rechecked under the writer and gets its own reserved receipt keyed by `now` and its id, so a citation committed after selection keeps it and a record another sweep retired since selection is skipped. The commit's own receipt is keyed by `now` and a digest of the page's ids, so only a repeat of the same page at this cutoff replays, and it reports nothing; a page that retires nothing commits nothing.
     ///
     /// # Errors
     ///
@@ -404,29 +404,50 @@ impl KernelStore {
             expired_page(&reader, now)?
         };
         after_selection();
-        let Some(first) = page.first() else {
+        if page.is_empty() {
             return Ok(sweep);
-        };
+        }
         let mut tally = UseOutcomeExpiry::default();
         let mut writer = self.lock_writer()?;
-        let receipt = commit_with_writer(
+        let outcome = commit_with_writer(
             &mut writer,
             self.lease_epoch(),
-            reserved_expiry_intent(EXPIRY_PRODUCER, EXPIRY_CAUSE, now, &format!("page:{first}")),
+            reserved_expiry_intent(EXPIRY_PRODUCER, EXPIRY_CAUSE, now, &page_key(&page)),
             |envelope| {
                 for id in &page {
                     tally.count(retire_due_use_outcome(envelope, now, id)?);
                 }
+                // A page that retires nothing rolls back, so it leaves no receipt a later call at this cutoff would replay.
+                if tally.retired == 0 {
+                    return Err(KernelError::NotFound);
+                }
                 Ok(tally.retired.to_string())
             },
             || Ok(()),
-        )?;
-        if !receipt.replayed {
-            sweep.retired += tally.retired;
-            sweep.cited += tally.cited;
+        );
+        match outcome {
+            Ok(receipt) if receipt.replayed => Ok(UseOutcomeExpiry::default()),
+            Ok(_) => {
+                sweep.retired += tally.retired;
+                sweep.cited += tally.cited;
+                Ok(sweep)
+            }
+            Err(KernelError::NotFound) if tally.retired == 0 => {
+                sweep.cited += tally.cited;
+                Ok(sweep)
+            }
+            Err(error) => Err(error),
         }
-        Ok(sweep)
     }
+}
+
+/// The page commit's key: a digest over the page's ids in order, so only a repeat of this exact page at this cutoff replays its receipt.
+fn page_key(page: &[String]) -> String {
+    let mut hash = Sha256::new();
+    for id in page {
+        length_prefixed(&mut hash, id);
+    }
+    format!("page:{:x}", hash.finalize())
 }
 
 /// What the recheck under the writer found for one selected record.
@@ -449,9 +470,7 @@ impl UseOutcomeExpiry {
 
 fn map_read(error: rusqlite::Error) -> KernelError {
     match error {
-        rusqlite::Error::InvalidColumnType(..) | rusqlite::Error::FromSqlConversionFailure(..) => {
-            KernelError::CorruptCanonicalRow
-        }
+        rusqlite::Error::FromSqlConversionFailure(..) => KernelError::CorruptCanonicalRow,
         other => map_sqlite(other),
     }
 }
@@ -480,25 +499,16 @@ fn expired_page(
     Ok((page, sweep))
 }
 
-/// Retires record `id` when, under the writer, it is unretired, past its deadline at `now`, and uncited, and records its reserved receipt. A record whose receipt at this cutoff exists was retired by another sweep.
+/// Retires record `id` when, under the writer, it is unretired and uncited, and records its reserved receipt keyed by `now` and the id. Its deadline is immutable and was before `now` at selection. The writer holds the transaction from this recheck through the update, so a live record's update affects exactly that row.
 fn retire_due_use_outcome(
     envelope: &mut Envelope<'_>,
     now: i64,
     id: &str,
 ) -> Result<Recheck, KernelError> {
-    let intent = PreparedIntent::new(reserved_expiry_intent(
-        EXPIRY_PRODUCER,
-        EXPIRY_CAUSE,
-        now,
-        id,
-    ))?;
-    if recorded_receipt(envelope.tx, &intent)?.is_some() {
-        return Ok(Recheck::Gone);
-    }
     let state: Option<(bool, bool)> = envelope
         .tx
-        .query_row_cached(&RECHECK_SQL, params![id, now], |row| {
-            Ok((row.get("due")?, row.get("cited")?))
+        .query_row_cached(&RECHECK_SQL, [id], |row| {
+            Ok((row.get("live")?, row.get("cited")?))
         })
         .optional()
         .map_err(map_sqlite)?;
@@ -507,17 +517,19 @@ fn retire_due_use_outcome(
         Some((true, true)) => return Ok(Recheck::Cited),
         Some((false, _)) | None => return Ok(Recheck::Gone),
     }
-    let retired = envelope
+    envelope
         .tx
         .execute_cached(
-            "UPDATE use_outcomes SET invalidated_commit_seq=?1
-             WHERE use_outcome_id=?2 AND invalidated_commit_seq IS NULL",
+            "UPDATE use_outcomes SET invalidated_commit_seq=?1 WHERE use_outcome_id=?2",
             params![envelope.commit_seq, id],
         )
         .map_err(map_sqlite)?;
-    if retired != 1 {
-        return Ok(Recheck::Gone);
-    }
+    let intent = PreparedIntent::new(reserved_expiry_intent(
+        EXPIRY_PRODUCER,
+        EXPIRY_CAUSE,
+        now,
+        id,
+    ))?;
     envelope.record_reserved_receipt(&intent, "retired")?;
     Ok(Recheck::Retired)
 }
@@ -656,17 +668,62 @@ mod tests {
         assert!(retired(&store));
     }
 
-    /// A record another sweep retired at a different cutoff after this sweep selected it is skipped inside this sweep's commit.
+    /// A record another sweep retired at a different cutoff after this sweep selected it is skipped, and a page that retires nothing commits nothing.
     #[test]
     fn a_record_retired_after_selection_at_another_cutoff_is_skipped() {
         let root = tempfile::tempdir().unwrap();
         let (store, _) = store_with_expired_serve(root.path());
+        let tip = std::cell::Cell::new(0);
         let sweep = store
             .expire_use_outcomes_after_selection(NOW, || {
                 assert_eq!(store.expire_use_outcomes(NOW + 1).unwrap().retired, 1);
+                tip.set(store.tip().unwrap());
             })
             .unwrap();
         assert_eq!(sweep, UseOutcomeExpiry::default());
+        assert_eq!(
+            store.tip().unwrap(),
+            tip.get(),
+            "an empty page commits nothing"
+        );
+        assert!(retired(&store));
+    }
+
+    /// A record kept by a citation committed after selection retires at the same cutoff once the citation's subject is retired: the kept page left no receipt to replay.
+    #[test]
+    fn a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, id) = store_with_expired_serve(root.path());
+        let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
+        let cite = || {
+            connection
+                .execute(
+                    "INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,
+                         source_revision,source_class,taint_class,event_kind,maturity,
+                         effective_maturity,disposition,visibility,outcome,sensitivity_class,
+                         policy_revision,reason,commit_seq,decided_at,use_outcome_id
+                     ) VALUES ('report','decision','fixture','decision',1,'explicit_user',
+                               'user_explicit','contradict','candidate','candidate',
+                               'contradicted','automatic','admit','normal',1,'fixture',2,1,?1)",
+                    params![id],
+                )
+                .unwrap();
+        };
+        assert_eq!(
+            store
+                .expire_use_outcomes_after_selection(NOW, cite)
+                .unwrap()
+                .cited,
+            1
+        );
+        connection
+            .execute(
+                "UPDATE object_registry SET invalidated_commit_seq=2 WHERE object_id='decision'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.expire_use_outcomes(NOW).unwrap().retired, 1);
         assert!(retired(&store));
     }
 

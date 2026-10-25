@@ -11,7 +11,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5830fe82a`).
+its parent is `5dc8c8480`).
 
 - The additive engine composes m0 from the pinned read inside its HARD arm and
   assigns the composition at `crates/daemon/src/transform.rs:3112`.

@@ -181,7 +181,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "3297302983814b847c24cc5beaf9d29e684077e2174c3925410d13c0f98bb5bd";
+    "054583feb016773a8e481dc079851761b3fef41fecbd2d48a93ea59dfd002989";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -2043,7 +2043,7 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("table", "use_outcome_decisions"),
         ("table", "use_outcomes"),
         ("table", "writer_fence"),
-        ("trigger", "admission_decisions_use_outcome_set_once"),
+        ("trigger", "admission_decisions_use_outcome_immutable"),
         (
             "trigger",
             "artifact_ingestion_reservations_identity_immutable",
@@ -2096,6 +2096,7 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("trigger", "outbox_consumers_checkpoint_monotonic"),
         ("trigger", "use_outcome_decisions_no_delete"),
         ("trigger", "use_outcome_decisions_no_update"),
+        ("trigger", "use_outcome_decisions_written_with_record"),
         ("trigger", "use_outcomes_deleted_at_set_once"),
         ("trigger", "use_outcomes_identity_immutable"),
         ("trigger", "use_outcomes_last_transform_at_monotonic"),
@@ -2242,6 +2243,14 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
         );
     }
 
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT INTO use_outcome_decisions(use_outcome_id,object_id)
+             VALUES ('{id}','decision-2')"
+        ),
+        "use_outcome_decisions are written with their record",
+    );
     for (sql, guard) in [
         (
             "DELETE FROM use_outcomes",
@@ -2279,7 +2288,7 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
             "INSERT OR REPLACE INTO use_outcome_decisions(use_outcome_id,object_id)
              VALUES ('{id}','decision-1')"
         ),
-        "use_outcome_decisions are retained history",
+        "use_outcome_decisions are written with their record",
     );
 }
 
@@ -2359,9 +2368,9 @@ fn use_outcome_classification_and_identity_shapes_are_checked() {
     );
 }
 
-/// An admission row can cite only a recorded use outcome, and a citation once set never changes or clears.
+/// An admission row can cite only a recorded use outcome, names it when the row is written, and never sets, changes, or clears it afterwards.
 #[test]
-fn an_admission_citation_names_a_recorded_use_outcome_and_is_set_once() {
+fn an_admission_citation_names_a_recorded_use_outcome_and_never_changes() {
     let (_dir, mut conn) = open_profiled();
     apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
     let root = seed_root_domain(&mut conn);
@@ -2391,12 +2400,37 @@ fn an_admission_citation_names_a_recorded_use_outcome_and_is_set_once() {
     for value in ["NULL".to_string(), format!("'{}'", "d".repeat(64))] {
         assert_aborts_with(
             &conn,
-            &format!("UPDATE admission_decisions SET use_outcome_id={value}"),
-            "an admission citation of a use outcome is set once",
+            &format!(
+                "UPDATE admission_decisions SET use_outcome_id={value}
+                 WHERE admission_decision_id='report'"
+            ),
+            "an admission citation of a use outcome is written with its row",
         );
     }
     conn.execute(
-        &format!("UPDATE admission_decisions SET use_outcome_id='{id}'"),
+        "INSERT INTO admission_decisions(
+             admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+             source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+             visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+         ) VALUES ('uncited','decision-1','test','decision-1',1,'explicit_user','user_explicit',
+                   'contradict','candidate','candidate','contradicted','automatic','admit',
+                   'normal',1,'fixture',?1,1)",
+        [created],
+    )
+    .unwrap();
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "UPDATE admission_decisions SET use_outcome_id='{id}'
+             WHERE admission_decision_id='uncited'"
+        ),
+        "an admission citation of a use outcome is written with its row",
+    );
+    conn.execute(
+        &format!(
+            "UPDATE admission_decisions SET use_outcome_id='{id}'
+             WHERE admission_decision_id='report'"
+        ),
         [],
     )
     .expect("rewriting the same citation changes nothing");

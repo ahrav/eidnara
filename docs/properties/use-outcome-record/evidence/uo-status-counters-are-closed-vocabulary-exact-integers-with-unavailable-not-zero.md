@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5830fe82a`).
+its parent is `5dc8c8480`).
 
 - Ready gate: `packages/cli/src/commands/review-wire.ts:401`.
 - Exact bound:

@@ -9,7 +9,7 @@ Record kind: proposed obligation; its owning ticket #1156 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5830fe82a`).
+its parent is `5dc8c8480`).
 
 - The update is `MAX(last_transform_at, now)` over live records.
 
@@ -17,7 +17,7 @@ its parent is `5830fe82a`).
   serving record, and only a pass whose response committed updates it.
 - Existing check: Kernel half only:
   `use_outcome_identity_and_served_set_are_never_rewritten`
-  (`crates/kernel/tests/kernel_schema.rs:2174`). The pass hook is proposed.
+  (`crates/kernel/tests/kernel_schema.rs:2175`). The pass hook is proposed.
   Status: unaudited.
 
 ## Failure scenario

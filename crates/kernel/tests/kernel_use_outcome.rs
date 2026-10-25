@@ -194,6 +194,10 @@ fn served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve() 
     assert_eq!(store.served_set(&project(), HARNESS, "s2").unwrap(), None);
     assert_eq!(store.served_set(&project(), "pi", "s1").unwrap(), None);
     assert_eq!(
+        store.served_set(&"b".repeat(64), HARNESS, "s1").unwrap(),
+        None
+    );
+    assert_eq!(
         count(
             root.path(),
             "SELECT COUNT(*) FROM use_outcomes
@@ -491,7 +495,7 @@ fn expiry_retires_an_expired_record_under_a_reserved_receipt() {
                  JOIN commit_log c ON c.commit_seq=r.commit_seq
                  WHERE r.producer='eidnara-kernel/use-outcome-expiry'
                    AND r.operation_key='{now}:{expired}' AND c.producer=r.producer
-                   AND c.operation_key='{now}:page:{expired}'
+                   AND c.operation_key GLOB '{now}:page:*'
                    AND u.use_outcome_id='{expired}'"
             )
         ),
@@ -706,4 +710,86 @@ fn session_roles_round_trip_and_the_served_set_digest_is_order_free() {
     );
     assert_ne!(served_set_digest(["ab"]), served_set_digest(["a", "b"]));
     assert_ne!(served_set_digest([]), served_set_digest([""]));
+}
+
+/// The dispute comparison is per serve: a dispute between two serves of one object counts for the earlier serve only, and retiring one serve leaves the other answered.
+#[test]
+fn disputed_after_serve_is_judged_against_each_serve() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["x"]);
+    let first_at = tick(&store, "first");
+    let first = insert(&store, "serve-1", spec("s1", &["x"], first_at, 100)).unwrap();
+    let disputed_at = tick(&store, "disputed");
+    admission(
+        root.path(),
+        "d1",
+        "x",
+        "mark_disputed",
+        1,
+        Some(disputed_at),
+        None,
+    );
+    let second_at = tick(&store, "second");
+    let second = insert(&store, "serve-2", spec("s2", &["x"], second_at, 100)).unwrap();
+    let answer = |store: &KernelStore| {
+        store
+            .served_sessions_for("x")
+            .unwrap()
+            .into_iter()
+            .map(|session| (session.serve.use_outcome_id, session.disputed_after_serve))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        answer(&store),
+        [(first.clone(), true), (second.clone(), false)]
+    );
+    writer(root.path())
+        .execute(
+            "UPDATE use_outcomes SET invalidated_commit_seq=?1 WHERE use_outcome_id=?2",
+            params![tick(&store, "retire"), first],
+        )
+        .unwrap();
+    assert_eq!(answer(&store), [(second, false)]);
+}
+
+/// A cited record whose deadline is later than a full page of uncited records is not read by the call that fills the page, and is counted by the call that reaches it.
+#[test]
+fn the_cited_count_covers_the_rows_read_before_the_page_fills() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    let page = i64::try_from(MAX_EXPIRED_USE_OUTCOMES_PER_CALL).unwrap();
+    for index in 0..page {
+        insert(
+            &store,
+            &format!("serve-{index}"),
+            spec(&format!("s{index}"), &["d1"], served_at, index),
+        )
+        .unwrap();
+    }
+    let cited = insert(&store, "cited", spec("late", &["d1"], served_at, page)).unwrap();
+    admission(
+        root.path(),
+        "report",
+        "d1",
+        "contradict",
+        1,
+        Some(tick(&store, "report")),
+        Some(&cited),
+    );
+    let now = 2 * USE_OUTCOME_RETENTION_MS;
+    assert_eq!(
+        store.expire_use_outcomes(now).unwrap(),
+        UseOutcomeExpiry {
+            retired: MAX_EXPIRED_USE_OUTCOMES_PER_CALL,
+            cited: 0
+        }
+    );
+    assert_eq!(
+        store.expire_use_outcomes(now).unwrap(),
+        UseOutcomeExpiry {
+            retired: 0,
+            cited: 1
+        }
+    );
 }

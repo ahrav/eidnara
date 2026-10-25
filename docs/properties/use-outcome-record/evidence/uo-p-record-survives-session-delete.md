@@ -10,7 +10,7 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5830fe82a`).
+its parent is `5dc8c8480`).
 
 - Delete triggers: `crates/kernel/src/schema.rs:187`.
 - Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:338`) answers
@@ -20,9 +20,9 @@ its parent is `5830fe82a`).
   serving records and decision rows are readable, equal in count and ids to
   before.
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-  (`crates/kernel/tests/kernel_schema.rs:2174`);
+  (`crates/kernel/tests/kernel_schema.rs:2175`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:337`) (a retired record stays
+  (`crates/kernel/tests/kernel_use_outcome.rs:341`) (a retired record stays
   readable). Status: unaudited.
 
 ## Failure scenario

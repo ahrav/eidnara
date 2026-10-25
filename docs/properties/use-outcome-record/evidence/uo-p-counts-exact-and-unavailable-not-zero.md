@@ -9,7 +9,7 @@ Record kind: proposed obligation; its owning ticket #1157 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5830fe82a`).
+its parent is `5dc8c8480`).
 
 - The counts derive from `served_sessions_for`.
 
@@ -18,7 +18,7 @@ its parent is `5830fe82a`).
   answers unavailable with no integer.
 - Existing check: Kernel half only:
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:337`). The routed read is
+  (`crates/kernel/tests/kernel_use_outcome.rs:341`). The routed read is
   proposed. Status: unaudited.
 
 ## Failure scenario
