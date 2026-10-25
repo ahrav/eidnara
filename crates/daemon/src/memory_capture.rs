@@ -5,7 +5,11 @@
 //! durable facts. Coverage proves that a response addressed the batch, not that
 //! the model found every fact. Exact quotations prove provenance, not entailment.
 
+mod head;
 mod native;
+#[cfg(test)]
+pub(crate) use head::tests as head_fixtures;
+pub(crate) use head::{FrozenHead, observe_head};
 #[cfg(test)]
 pub(crate) use native::LEASE_DURATION;
 pub(crate) use native::NativeCaptureState;
@@ -912,6 +916,10 @@ struct PreparedCapture {
     #[serde(default)]
     existing: Vec<ExistingCaptureMemory>,
     memories: Vec<CapturedMemory>,
+    /// Absent from plans frozen without a head observation, which read as
+    /// `HeadUnavailable`.
+    #[serde(default)]
+    head: FrozenHead,
 }
 
 // Unknown outcomes retain their failure allowance, but repeated dispatches still back off.
@@ -1636,9 +1644,30 @@ mod tests {
             model: "test/model".into(),
             memories: vec![memory],
             existing,
+            head: FrozenHead::HeadUnavailable,
         };
         let frozen = serde_json::to_string(&output).unwrap();
         publish_captured_memories(kernel, project, &job(key), &output, &frozen)
+    }
+
+    #[test]
+    fn a_plan_frozen_without_a_head_reads_as_head_unavailable() {
+        let legacy: PreparedCapture = serde_json::from_value(json!({
+            "version": CAPTURE_SCHEMA_VERSION,
+            "model": "test/model",
+            "existing": [],
+            "memories": [],
+        }))
+        .unwrap();
+        assert_eq!(legacy.head, FrozenHead::HeadUnavailable);
+        let frozen = PreparedCapture {
+            head: FrozenHead::Commit("ab".repeat(20)),
+            ..legacy
+        };
+        let text = serde_json::to_string(&frozen).unwrap();
+        let read: PreparedCapture = serde_json::from_str(&text).unwrap();
+        assert_eq!(read.head, frozen.head);
+        assert_eq!(read.version, CAPTURE_SCHEMA_VERSION);
     }
 
     #[test]
@@ -1827,6 +1856,7 @@ mod tests {
             model: "test/model".into(),
             existing: vec![previous],
             memories: vec![proposed],
+            head: FrozenHead::HeadUnavailable,
         };
         let mut source = job("assistant");
         source.role = "assistant".into();

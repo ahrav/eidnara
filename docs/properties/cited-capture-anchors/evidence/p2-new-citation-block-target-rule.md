@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-The job text is the `\n`-join of the message's text blocks (`crates/daemon/src/memory_capture.rs:311`), and each descriptor's artifact bytes equal one block's text. U3 locates blocks by digest and cites `block`, `span`, or `first`.
+The job text is the `\n`-join of the message's text blocks (`crates/daemon/src/memory_capture.rs:315`), and each descriptor's artifact bytes equal one block's text. U3 locates blocks by digest and cites `block`, `span`, or `first`.
 
 ## Failure scenario
 

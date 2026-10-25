@@ -28,7 +28,7 @@ that order and splits the fixture-rows item into its two tables.
 | R5 | Give the serialization record a gate-hold observation method | applied to `p2-capture-publish-and-session-delete-are-serialized` |
 | R6 | Narrow the deferred-unit record to "can publish from the memo's `Pending` entry" | applied to `p2-deferred-source-units-publish-on-a-later-pass` |
 | R7 | Mark the receipt-conflict coverage marker test-only | applied to `p2-capture-commit-replays-by-job-key-and-frozen-digest` |
-| R8 | Fix the offset `memory_capture.rs:126` | applied: the prompt's quote rule is at `crates/daemon/src/memory_capture.rs:126` at the branch tip |
+| R8 | Fix the offset `memory_capture.rs:126` | applied: the prompt's quote rule is at `crates/daemon/src/memory_capture.rs:130` at the branch tip |
 | R9 | Fix the offset `anchor.rs:329` | applied: references to the decoder use `crates/kernel/src/anchor.rs:272` (`AnchorCondition::decode`) and the interval check inside it |
 | R10 | Fix the offset `source_capture.rs:598` | applied: `into_job` is `crates/daemon/src/source_capture.rs:596` and `CAPTURE_BUDGET` is `:35` at the branch tip |
 
@@ -46,7 +46,7 @@ match the specification's.
 | G2 | Cross-pipeline text identity: redacted job text versus retained descriptor bytes (OQ2-13) | U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135)) |
 | G3 | Fragment-id derivation versus descriptor entry id and `block_index` (OQ2-3, OQ2-12) | U3 |
 | G4 | Lineage succession of a re-published message revision and what a narrowed read returns | U3 |
-| G5 | `snapshot_checkout` HEAD semantics: detached accepted, unborn `NoHead` (OQ2-11) | U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)) |
+| G5 | `snapshot_checkout` HEAD semantics: detached accepted, unborn `NoHead` (OQ2-11) | U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)) reads HEAD through `git_sources::open` instead and matches the owner decision: detached anchors, unborn is `head_unavailable`; the engine's `snapshot_checkout` stays as it was |
 | G6 | Memo eviction of `Pending` units | U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136)) |
 | G7 | `Deadline` and `InvalidInput` publish failures mapped to `kernel_write_failed` | unassigned |
 

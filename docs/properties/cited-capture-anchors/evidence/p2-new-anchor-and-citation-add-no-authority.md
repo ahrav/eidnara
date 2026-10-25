@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-Admission classes are fixed at `(ModelInference, AssistantInference)` (`crates/daemon/src/memory_capture.rs:1201`); neither the anchor nor the event citation is an admission input.
+Admission classes are fixed at `(ModelInference, AssistantInference)` (`crates/daemon/src/memory_capture.rs:1209`); neither the anchor nor the event citation is an admission input.
 
 ## Failure scenario
 

@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-U3 writes one `citation` and one `anchor` value into the rationale JSON (`crates/daemon/src/memory_capture.rs:1154` builds it today without either).
+U3 writes one `citation` and one `anchor` value into the rationale JSON (`crates/daemon/src/memory_capture.rs:1162` builds it today without either).
 
 ## Failure scenario
 
