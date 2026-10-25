@@ -309,7 +309,7 @@ pub fn reconcile_review_holds(
     Ok(Some(released))
 }
 
-/// Returns whether capture expiry or staging maintenance advanced, or `None` when `cancelled` fired before a step. The MemoryReviewer and harness capture sweeps run first, so the artifact walk in staging maintenance sees the references they retired; the harness sweep's progress is stored in `harness_expiry` as soon as it returns.
+/// Returns whether capture expiry, use-outcome expiry, or staging maintenance advanced, or `None` when `cancelled` fired before a step. The MemoryReviewer and harness capture sweeps run first, so the artifact walk in staging maintenance sees the references they retired; the harness sweep's progress is stored in `harness_expiry` as soon as it returns. The use-outcome sweep runs after the capture sweeps.
 fn kernel_slice(
     kernel: &kernel::KernelStore,
     now_ms: i64,
@@ -327,6 +327,11 @@ fn kernel_slice(
     let harness = kernel.expire_harness_captures(now_ms)?;
     harness_expiry.set(harness);
     advanced |= harness.retired + harness.retained > 0;
+    if cancelled() {
+        return Ok(None);
+    }
+    // A retained use outcome changes nothing and stays retained while its citation holds, so only retirements earn the next pass without the idle interval.
+    advanced |= kernel.expire_use_outcomes(now_ms)?.retired > 0;
     Ok(
         maintenance_slice(cancelled, || kernel.run_staging_maintenance(now_ms))?
             .map(|maintained| advanced || maintained),
@@ -778,6 +783,65 @@ mod tests {
                 .is_some_and(|state| state.object.invalidated_commit_seq.is_some()),
             "the expired evidence is retired"
         );
+    }
+
+    /// The maintenance slice runs the use-outcome sweep whenever it is handed a Ready Kernel, with no activation record in place: an expired serving record is retired by one pass that counts as advancing, and the pass after it idles.
+    #[test]
+    fn the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&MemoryStore::test_descriptor(
+            store_dir.path(),
+            "eidnara-memory_reviewer-lifecycle-test",
+        ))
+        .unwrap();
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+        let intent = |key: &str| kernel::CommitIntent {
+            producer: "lifecycle-test".to_string(),
+            operation_key: key.to_string(),
+            request_digest: "d".repeat(64),
+            actor: "test".to_string(),
+            cause: "proof".to_string(),
+        };
+        let served_at = kernel_store
+            .commit(intent("tick"), |_| Ok(String::new()))
+            .unwrap()
+            .commit_seq;
+        kernel_store
+            .commit(intent("serve"), |envelope| {
+                envelope.insert_use_outcome(kernel::UseOutcomeSpec {
+                    project_digest: "a".repeat(64),
+                    harness: "opencode".to_string(),
+                    session_id: "session".to_string(),
+                    served_set_digest: kernel::served_set_digest([]),
+                    composition_revision: 1,
+                    served_commit_seq: served_at,
+                    session_role: kernel::SessionRole::Primary,
+                    recorded_at: 0,
+                    decision_object_ids: Vec::new(),
+                })
+            })
+            .unwrap();
+        let sweep_at = kernel::USE_OUTCOME_RETENTION_MS + 1;
+        let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &|| false)
+            .expect("not cancelled");
+        assert!(pass.healthy);
+        assert_eq!(
+            pass.block.activation_state,
+            ActivationStateText(ActivationState::Closed("unknown"))
+        );
+        assert!(
+            pass.advanced,
+            "retiring an expired serving record is progress"
+        );
+        let records = kernel_store
+            .served_set(&"a".repeat(64), "opencode", "session")
+            .unwrap()
+            .unwrap();
+        assert!(records[0].serve.invalidated_commit_seq.is_some());
+        let again = sweep_and_sample(&store, Some(&kernel_store), sweep_at + 1, None, &|| false)
+            .expect("not cancelled");
+        assert!(!again.advanced, "nothing was left to retire");
     }
 
     fn maintenance(

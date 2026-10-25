@@ -906,6 +906,11 @@ fn approval_qualifies_predicate(object_column: &str, as_of: AuthorityAsOf<'_>) -
 
 // policy-digest:authority-end
 
+/// [`same_lineage_as_object`] for a reader outside the admission policy: the use-outcome dispute join ties an admission row to its served object's registry lineage by this same text.
+pub(crate) fn same_lineage_as_registry_object(alias: &str) -> String {
+    same_lineage_as_object(alias)
+}
+
 impl Envelope<'_> {
     #[cfg(feature = "test-support")]
     pub fn insert_admission_observation_for_test(

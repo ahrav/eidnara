@@ -1,0 +1,612 @@
+use kernel::{
+    ArtifactDestination, CommitIntent, DomainSpec, EligibilityDeniedReason, KernelError,
+    KernelStore, MAX_EXPIRED_USE_OUTCOMES_PER_CALL, Sensitivity, SessionRole,
+    USE_OUTCOME_RETENTION_CLASS, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
+    served_set_digest, use_outcome_id,
+};
+use rusqlite::{Connection, params};
+
+const HARNESS: &str = "opencode";
+
+fn project() -> String {
+    "a".repeat(64)
+}
+
+fn intent(key: &str) -> CommitIntent {
+    CommitIntent {
+        producer: "use-outcome-test".to_string(),
+        operation_key: key.to_string(),
+        request_digest: "d".repeat(64),
+        actor: "test".to_string(),
+        cause: "proof".to_string(),
+    }
+}
+
+fn writer(root: &std::path::Path) -> Connection {
+    let connection = Connection::open(root.join("kernel.sqlite")).unwrap();
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    connection
+}
+
+fn count(root: &std::path::Path, sql: &str) -> i64 {
+    writer(root).query_row(sql, [], |row| row.get(0)).unwrap()
+}
+
+fn store_with_objects(root: &std::path::Path, objects: &[&str]) -> KernelStore {
+    let store = KernelStore::open(root).unwrap();
+    store
+        .commit(intent("domain"), |envelope| {
+            envelope.insert_domain(DomainSpec {
+                domain_id: "domain".to_string(),
+                object_id: "domain-object".to_string(),
+                name: "domain".to_string(),
+                source_kind: "fixture".to_string(),
+                source_id: "domain".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let connection = writer(root);
+    for object in objects {
+        connection
+            .execute(
+                "INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 ) VALUES (?1,'decision','domain','fixture',?1,1,1,'normal')",
+                [object],
+            )
+            .unwrap();
+    }
+    store
+}
+
+fn tick(store: &KernelStore, key: &str) -> i64 {
+    store
+        .commit(intent(key), |_| Ok(String::new()))
+        .unwrap()
+        .commit_seq
+}
+
+fn spec(
+    session: &str,
+    objects: &[&str],
+    served_commit_seq: i64,
+    recorded_at: i64,
+) -> UseOutcomeSpec {
+    let mut decision_object_ids: Vec<String> = objects.iter().map(|id| (*id).to_string()).collect();
+    decision_object_ids.sort();
+    UseOutcomeSpec {
+        project_digest: project(),
+        harness: HARNESS.to_string(),
+        session_id: session.to_string(),
+        served_set_digest: served_set_digest(objects.iter().copied()),
+        composition_revision: u64::MAX - 1,
+        served_commit_seq,
+        session_role: SessionRole::Primary,
+        recorded_at,
+        decision_object_ids,
+    }
+}
+
+fn insert(store: &KernelStore, key: &str, spec: UseOutcomeSpec) -> Result<String, KernelError> {
+    let id = std::cell::RefCell::new(String::new());
+    store.commit(intent(key), |envelope| {
+        *id.borrow_mut() = envelope.insert_use_outcome(spec)?;
+        Ok(String::new())
+    })?;
+    Ok(id.into_inner())
+}
+
+fn admission(
+    root: &std::path::Path,
+    id: &str,
+    subject: &str,
+    event_kind: &str,
+    revision: i64,
+    commit_seq: Option<i64>,
+    use_outcome: Option<&str>,
+) {
+    writer(root)
+        .execute(
+            "INSERT INTO admission_decisions(
+                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,
+                 decided_at,use_outcome_id
+             ) VALUES (?1,?2,'fixture',?2,?3,'explicit_user','user_explicit',?4,'candidate',
+                       'candidate','disputed','automatic','admit','normal',1,'fixture',?5,1,?6)",
+            params![id, subject, revision, event_kind, commit_seq, use_outcome],
+        )
+        .unwrap();
+}
+
+/// The served-set read answers every record of the session with its ids, digest, revision, served sequence, outcome columns, and retirement state; a session with no record answers `None`, distinct from a record of an empty composition.
+#[test]
+fn served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1", "d2"]);
+    let served_at = tick(&store, "tick");
+    let first = insert(&store, "serve-1", spec("s1", &["d2", "d1"], served_at, 100)).unwrap();
+    let empty = insert(&store, "serve-2", spec("s1", &[], served_at, 200)).unwrap();
+    assert_eq!(
+        first,
+        use_outcome_id(&project(), HARNESS, "s1", &served_set_digest(["d1", "d2"]))
+    );
+
+    let records = store
+        .served_set(&project(), HARNESS, "s1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(records.len(), 2);
+    let serve = &records[0].serve;
+    assert_eq!(serve.use_outcome_id, first);
+    assert_eq!(records[0].decision_object_ids, ["d1", "d2"]);
+    assert_eq!(serve.served_set_digest, served_set_digest(["d1", "d2"]));
+    assert_eq!(serve.composition_revision, u64::MAX - 1);
+    assert_eq!(serve.served_commit_seq, served_at);
+    assert_eq!(serve.session_role, SessionRole::Primary);
+    assert_eq!(serve.recorded_at, 100);
+    assert_eq!(serve.retain_until, 100 + USE_OUTCOME_RETENTION_MS);
+    assert_eq!(serve.invalidated_commit_seq, None);
+    assert_eq!(serve.deleted_at, None);
+    assert_eq!(serve.last_transform_at, None);
+    assert_eq!(records[1].serve.use_outcome_id, empty);
+    assert!(records[1].decision_object_ids.is_empty());
+
+    assert_eq!(store.served_set(&project(), HARNESS, "s2").unwrap(), None);
+    assert_eq!(store.served_set(&project(), "pi", "s1").unwrap(), None);
+    assert_eq!(
+        count(
+            root.path(),
+            "SELECT COUNT(*) FROM use_outcomes
+             WHERE retention_class='use_outcome_capture' AND sensitivity_class='sensitive'
+               AND provider_egress_class='local_only'"
+        ),
+        2
+    );
+    assert_eq!(USE_OUTCOME_RETENTION_CLASS, "use_outcome_capture");
+}
+
+/// A duplicate identity is `Conflict`, a malformed spec is `InvalidInput`, and a refused commit leaves no row in either table.
+#[test]
+fn duplicate_and_malformed_serves_are_refused_without_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1", "d2"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "serve", spec("s1", &["d1"], served_at, 100)).unwrap();
+    let rows = || {
+        (
+            count(root.path(), "SELECT COUNT(*) FROM use_outcomes"),
+            count(root.path(), "SELECT COUNT(*) FROM use_outcome_decisions"),
+        )
+    };
+    assert_eq!(rows(), (1, 1));
+
+    assert_eq!(
+        insert(&store, "again", spec("s1", &["d1"], served_at, 300)),
+        Err(KernelError::Conflict),
+        "one identity tuple has one record"
+    );
+    assert_eq!(
+        insert(&store, "unknown", spec("s3", &["missing"], served_at, 100)),
+        Err(KernelError::Conflict),
+        "a decision row names a registry object"
+    );
+    type Corrupt = Box<dyn Fn(&mut UseOutcomeSpec)>;
+    let malformed: Vec<(&str, Corrupt)> = vec![
+        ("empty harness", Box::new(|s| s.harness.clear())),
+        ("empty session", Box::new(|s| s.session_id.clear())),
+        (
+            "non-hex project",
+            Box::new(|s| s.project_digest = "z".repeat(64)),
+        ),
+        (
+            "uppercase digest",
+            Box::new(|s| s.served_set_digest = s.served_set_digest.to_uppercase()),
+        ),
+        (
+            "short digest",
+            Box::new(|s| s.served_set_digest.truncate(63)),
+        ),
+        (
+            "digest of another set",
+            Box::new(|s| s.served_set_digest = served_set_digest(["d1"])),
+        ),
+        (
+            "unsorted ids",
+            Box::new(|s| s.decision_object_ids.reverse()),
+        ),
+        (
+            "repeated id",
+            Box::new(|s| s.decision_object_ids = vec!["d1".into(), "d1".into()]),
+        ),
+        (
+            "negative served sequence",
+            Box::new(|s| s.served_commit_seq = -1),
+        ),
+        (
+            "zero served sequence",
+            Box::new(|s| s.served_commit_seq = 0),
+        ),
+        (
+            "future served sequence",
+            Box::new(|s| s.served_commit_seq = 1_000),
+        ),
+        ("negative recorded time", Box::new(|s| s.recorded_at = -1)),
+        ("retention overflow", Box::new(|s| s.recorded_at = i64::MAX)),
+    ];
+    for (index, (context, corrupt)) in malformed.into_iter().enumerate() {
+        let mut bad = spec("s2", &["d1", "d2"], served_at, 100);
+        corrupt(&mut bad);
+        assert_eq!(
+            insert(&store, &format!("bad-{index}"), bad),
+            Err(KernelError::InvalidInput),
+            "{context}"
+        );
+    }
+    assert_eq!(rows(), (1, 1));
+    assert_eq!(
+        count(
+            root.path(),
+            "SELECT COUNT(*) FROM commit_log
+             WHERE operation_key GLOB 'bad-*' OR operation_key IN ('again','unknown')"
+        ),
+        0,
+        "a refused commit appends no commit-log row"
+    );
+}
+
+/// A serve creates no registry object, evidence row, change event, or outbox entry, and the egress rule denies Remote for the record's class.
+#[test]
+fn a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    let totals = || {
+        ["object_registry", "evidence_meta", "change_event", "outbox"]
+            .map(|table| count(root.path(), &format!("SELECT COUNT(*) FROM {table}")))
+    };
+    let before = totals();
+    insert(&store, "serve", spec("s1", &["d1"], served_at, 100)).unwrap();
+    assert_eq!(totals(), before);
+    assert_eq!(
+        Sensitivity::Sensitive.denies_destination(ArtifactDestination::Remote),
+        Some(EligibilityDeniedReason::SensitiveRemote)
+    );
+}
+
+/// For a serve at `known_as_of = n`, `mark_disputed` or `contradict` committed after n sets the flag; an event at or before n, a `mark_stale`, a null-commit-sequence row, and another lineage do not; two qualifying events in one commit count once; a retired record is not answered.
+#[test]
+fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage() {
+    let objects = [
+        "later-dispute",
+        "later-contradict",
+        "at-serve",
+        "before-serve",
+        "stale",
+        "uncommitted",
+        "other-lineage",
+        "two-in-one",
+        "never",
+    ];
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &objects);
+    let before = tick(&store, "before");
+    let served_at = tick(&store, "served");
+    let id = insert(&store, "serve", spec("s1", &objects, served_at, 100)).unwrap();
+    let after = tick(&store, "after");
+    for (row, subject, kind, revision, commit_seq) in [
+        ("a1", "later-dispute", "mark_disputed", 1, Some(after)),
+        ("a2", "later-contradict", "contradict", 1, Some(after)),
+        ("a3", "at-serve", "mark_disputed", 1, Some(served_at)),
+        ("a4", "before-serve", "contradict", 1, Some(before)),
+        ("a5", "stale", "mark_stale", 1, Some(after)),
+        ("a6", "uncommitted", "mark_disputed", 1, None),
+        ("a7", "other-lineage", "mark_disputed", 2, Some(after)),
+        ("a8", "two-in-one", "mark_disputed", 1, Some(after)),
+        ("a9", "two-in-one", "contradict", 1, Some(after)),
+    ] {
+        admission(root.path(), row, subject, kind, revision, commit_seq, None);
+    }
+    assert_eq!(
+        count(
+            root.path(),
+            &format!(
+                "SELECT COUNT(*) FROM admission_decisions
+                 WHERE subject_object_id='two-in-one' AND commit_seq={after}"
+            )
+        ),
+        2,
+        "two qualifying events share one commit"
+    );
+    let disputed = |object: &str| {
+        let sessions = store.served_sessions_for(object).unwrap();
+        assert_eq!(sessions.len(), 1, "{object} has one serve");
+        assert_eq!(sessions[0].serve.use_outcome_id, id);
+        sessions[0].disputed_after_serve
+    };
+    for object in ["later-dispute", "later-contradict", "two-in-one"] {
+        assert!(disputed(object), "{object}");
+    }
+    for object in [
+        "at-serve",
+        "before-serve",
+        "stale",
+        "uncommitted",
+        "other-lineage",
+        "never",
+    ] {
+        assert!(!disputed(object), "{object}");
+    }
+    assert!(store.served_sessions_for("unserved").unwrap().is_empty());
+
+    writer(root.path())
+        .execute("UPDATE use_outcomes SET invalidated_commit_seq=?1", [after])
+        .unwrap();
+    assert!(
+        store
+            .served_sessions_for("later-dispute")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .served_set(&project(), HARNESS, "s1")
+            .unwrap()
+            .unwrap()[0]
+            .serve
+            .invalidated_commit_seq,
+        Some(after),
+        "a retired record stays readable by session"
+    );
+}
+
+/// An expired record is retired under a reserved-producer receipt keyed by the cutoff and its id and stays readable; a repeat at the same cutoff retires nothing; a record whose deadline equals the cutoff is kept.
+#[test]
+fn expiry_retires_an_expired_record_under_a_reserved_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    let expired = insert(&store, "old", spec("s1", &["d1"], served_at, 0)).unwrap();
+    let due = insert(&store, "due", spec("s2", &["d1"], served_at, 1)).unwrap();
+    let now = USE_OUTCOME_RETENTION_MS + 1;
+
+    assert_eq!(
+        store.expire_use_outcomes(now).unwrap(),
+        UseOutcomeExpiry {
+            retired: 1,
+            retained: 0
+        }
+    );
+    assert_eq!(
+        count(
+            root.path(),
+            &format!(
+                "SELECT COUNT(*) FROM commit_log c
+                 JOIN operation_receipts r ON r.commit_seq=c.commit_seq
+                 JOIN use_outcomes u ON u.invalidated_commit_seq=c.commit_seq
+                 WHERE c.producer='eidnara-kernel/use-outcome-expiry'
+                   AND c.operation_key='{now}:{expired}' AND r.producer=c.producer
+                   AND u.use_outcome_id='{expired}'"
+            )
+        ),
+        1
+    );
+    let records = store
+        .served_set(&project(), HARNESS, "s1")
+        .unwrap()
+        .unwrap();
+    assert!(records[0].serve.invalidated_commit_seq.is_some());
+    assert_eq!(records[0].decision_object_ids, ["d1"]);
+    let kept = store
+        .served_set(&project(), HARNESS, "s2")
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept[0].serve.use_outcome_id, due);
+    assert_eq!(
+        kept[0].serve.invalidated_commit_seq, None,
+        "a deadline equal to the cutoff has not passed"
+    );
+
+    let tip = store.tip().unwrap();
+    assert_eq!(
+        store.expire_use_outcomes(now).unwrap(),
+        UseOutcomeExpiry::default()
+    );
+    assert_eq!(
+        store.tip().unwrap(),
+        tip,
+        "a repeat at the same cutoff commits nothing"
+    );
+}
+
+/// N eligible records drain in ceil(N / 64) calls, oldest deadline first.
+#[test]
+fn an_expiry_backlog_drains_one_page_per_call() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    let total = MAX_EXPIRED_USE_OUTCOMES_PER_CALL + 6;
+    for index in 0..total {
+        insert(
+            &store,
+            &format!("serve-{index}"),
+            spec(
+                &format!("s{index}"),
+                &["d1"],
+                served_at,
+                i64::try_from(index).unwrap(),
+            ),
+        )
+        .unwrap();
+    }
+    let now = 2 * USE_OUTCOME_RETENTION_MS;
+    assert!(
+        count(
+            root.path(),
+            &format!(
+                "SELECT COUNT(*) FROM use_outcomes
+                 WHERE invalidated_commit_seq IS NULL AND retain_until<{now}"
+            )
+        ) > i64::try_from(MAX_EXPIRED_USE_OUTCOMES_PER_CALL).unwrap(),
+        "more eligible records than one page holds"
+    );
+    assert_eq!(
+        store.expire_use_outcomes(now).unwrap().retired,
+        MAX_EXPIRED_USE_OUTCOMES_PER_CALL
+    );
+    assert_eq!(
+        count(
+            root.path(),
+            "SELECT MAX(recorded_at) FROM use_outcomes WHERE invalidated_commit_seq IS NOT NULL"
+        ),
+        i64::try_from(MAX_EXPIRED_USE_OUTCOMES_PER_CALL).unwrap() - 1,
+        "the oldest deadlines retire first"
+    );
+    assert_eq!(store.expire_use_outcomes(now).unwrap().retired, 6);
+    assert_eq!(
+        store.expire_use_outcomes(now).unwrap(),
+        UseOutcomeExpiry::default()
+    );
+    assert_eq!(
+        count(
+            root.path(),
+            "SELECT COUNT(*) FROM use_outcomes WHERE invalidated_commit_seq IS NULL"
+        ),
+        0
+    );
+}
+
+/// An expired record cited by a committed admission row whose subject is live survives and is counted retained; a citation by an uncommitted row or with a retired subject keeps nothing; once the cited subject is retired the record retires.
+#[test]
+fn an_expired_record_cited_by_a_live_report_is_retained() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1", "d2", "gone"]);
+    let served_at = tick(&store, "tick");
+    let cited = insert(&store, "cited", spec("s1", &["d1"], served_at, 0)).unwrap();
+    let uncommitted = insert(&store, "uncommitted", spec("s2", &["d1"], served_at, 0)).unwrap();
+    let dead_subject = insert(&store, "dead", spec("s3", &["d1"], served_at, 0)).unwrap();
+    let report_at = tick(&store, "report");
+    admission(
+        root.path(),
+        "r1",
+        "d1",
+        "contradict",
+        1,
+        Some(report_at),
+        Some(&cited),
+    );
+    admission(
+        root.path(),
+        "r2",
+        "d2",
+        "contradict",
+        1,
+        None,
+        Some(&uncommitted),
+    );
+    admission(
+        root.path(),
+        "r3",
+        "gone",
+        "contradict",
+        1,
+        Some(report_at),
+        Some(&dead_subject),
+    );
+    writer(root.path())
+        .execute(
+            "UPDATE object_registry SET invalidated_commit_seq=?1 WHERE object_id='gone'",
+            [report_at],
+        )
+        .unwrap();
+    let now = USE_OUTCOME_RETENTION_MS + 1;
+    assert_eq!(
+        count(
+            root.path(),
+            &format!(
+                "SELECT COUNT(*) FROM use_outcomes u
+                 JOIN admission_decisions a ON a.use_outcome_id=u.use_outcome_id
+                 JOIN object_registry o ON o.object_id=a.subject_object_id
+                 WHERE u.use_outcome_id='{cited}' AND u.retain_until<{now}
+                   AND a.commit_seq IS NOT NULL AND o.invalidated_commit_seq IS NULL"
+            )
+        ),
+        1,
+        "an expired record with a committed citation whose subject is live"
+    );
+
+    assert_eq!(
+        store.expire_use_outcomes(now).unwrap(),
+        UseOutcomeExpiry {
+            retired: 2,
+            retained: 1
+        }
+    );
+    let live = |session: &str| {
+        store
+            .served_set(&project(), HARNESS, session)
+            .unwrap()
+            .unwrap()[0]
+            .serve
+            .invalidated_commit_seq
+            .is_none()
+    };
+    assert!(live("s1"));
+    assert!(!live("s2"));
+    assert!(!live("s3"));
+
+    let retire_at = tick(&store, "retire-subject");
+    writer(root.path())
+        .execute(
+            "UPDATE object_registry SET invalidated_commit_seq=?1 WHERE object_id='d1'",
+            [retire_at],
+        )
+        .unwrap();
+    assert_eq!(store.expire_use_outcomes(now + 1).unwrap().retired, 1);
+    assert!(!live("s1"));
+}
+
+/// The caller's receipt makes an equal repeat of a serve a replay that writes nothing, and the same key under another digest a conflict.
+#[test]
+fn a_repeated_serve_intent_replays_and_a_rebound_key_conflicts() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    let serve = |digest: &str| {
+        let mut intent = intent("serve");
+        intent.request_digest = digest.to_string();
+        store.commit(intent, |envelope| {
+            envelope.insert_use_outcome(spec("s1", &["d1"], served_at, 100))
+        })
+    };
+    let first = serve(&"1".repeat(64)).unwrap();
+    assert!(!first.replayed);
+    let again = serve(&"1".repeat(64)).unwrap();
+    assert!(again.replayed);
+    assert_eq!(again.commit_seq, first.commit_seq);
+    assert_eq!(serve(&"2".repeat(64)), Err(KernelError::Conflict));
+    assert_eq!(count(root.path(), "SELECT COUNT(*) FROM use_outcomes"), 1);
+}
+
+#[test]
+fn session_roles_round_trip_and_the_served_set_digest_is_order_free() {
+    for role in [SessionRole::Primary, SessionRole::Subagent] {
+        assert_eq!(SessionRole::from_stored(role.as_str()), Some(role));
+    }
+    assert_eq!(SessionRole::from_stored("producer"), None);
+    assert_eq!(
+        served_set_digest(["b", "a", "a"]),
+        served_set_digest(["a", "b"])
+    );
+    assert_ne!(served_set_digest(["ab"]), served_set_digest(["a", "b"]));
+    assert_ne!(served_set_digest([]), served_set_digest([""]));
+}
