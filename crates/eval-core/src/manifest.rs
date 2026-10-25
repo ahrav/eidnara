@@ -7,6 +7,7 @@ use context_core::canonical_json::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::capture::{CAPTURE_CONFIG_KEY, CaptureDeclaration};
 use crate::census::{Construction, EvaluatedSurface, Reachability};
 use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::pairs::{RECENCY_BASELINE_VERSION, recency_bound};
@@ -305,6 +306,12 @@ pub enum ManifestError {
     RecencyBaselineMismatch {
         field: &'static str,
     },
+    /// `run_identity.config.capture` failed to decode as a
+    /// `CaptureDeclaration`; the message is the decoder's.
+    MalformedCapture(String),
+    /// `config.capture` declares a switch `on` and `analysis_family_digest`
+    /// is null; an undeclared run counts as both switches `off`.
+    CaptureOnWithoutFrozenFamily,
     Identity(IdentityError),
     Residue(ResidueError),
     NotCanonical(ContractError),
@@ -348,6 +355,26 @@ pub fn is_canonical_decimal(text: &str) -> bool {
     digits(integer)
         && (integer == "0" || !integer.starts_with('0'))
         && fraction.is_none_or(|fraction| digits(fraction) && !fraction.ends_with('0'))
+}
+
+/// Admits exactly the object spelling `{"memory_capture", "source_capture",
+/// "write_key"}` with string variants: the decoded declaration must encode
+/// back to the input's canonical bytes, so the decoder's array and
+/// single-key-map forms are `MalformedCapture` and one declaration has one
+/// spelling in `eval_run_id`.
+pub fn parse_capture_declaration(value: &Value) -> Result<CaptureDeclaration, ManifestError> {
+    let malformed = |reason: String| ManifestError::MalformedCapture(reason);
+    let declaration: CaptureDeclaration =
+        serde_json::from_value(value.clone()).map_err(|error| malformed(error.to_string()))?;
+    let spelled = canonical_json_encode(value).map_err(|error| malformed(format!("{error:?}")))?;
+    let canonical = canonical_json_encode(&serde_json::to_value(declaration).expect("serializes"))
+        .expect("a declaration holds only enum strings");
+    if spelled != canonical {
+        return Err(malformed(format!(
+            "{spelled} is not the spelling {canonical}"
+        )));
+    }
+    Ok(declaration)
 }
 
 pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
@@ -528,11 +555,29 @@ impl Manifest {
                 }
             }
         }
+        if self
+            .capture_declaration()?
+            .unwrap_or(CaptureDeclaration::OFF)
+            .any_on()
+            && self.analysis_family_digest.is_none()
+        {
+            return Err(ManifestError::CaptureOnWithoutFrozenFamily);
+        }
         Ok(())
     }
 
     pub fn to_value(&self) -> Value {
         serde_json::to_value(self).expect("manifest serializes")
+    }
+
+    /// The single reader of `run_identity.config.capture`; `Ok(None)` means
+    /// the key is absent and the run undeclared.
+    pub fn capture_declaration(&self) -> Result<Option<CaptureDeclaration>, ManifestError> {
+        self.run_identity
+            .config
+            .get(CAPTURE_CONFIG_KEY)
+            .map(parse_capture_declaration)
+            .transpose()
     }
 
     /// Manifest residue rules keep every field except [`DROPPED_FIELDS`].
