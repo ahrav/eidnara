@@ -5,7 +5,7 @@ Ticket #765: promote the executed properties "including ingestion
 reachability gaps, the Pi coverage gap, and coverage witnesses".
 
 ## Evidence trail
-- `crates/daemon/src/harness_sources.rs:314` `pi_units` is the Pi adapter.
+- `crates/daemon/src/harness_sources.rs:368` `pi_units` is the Pi adapter.
 - `crates/daemon/examples/eval_runner/campaign.rs` renders one OpenCode
   session per arm; no Pi session is rendered anywhere under
   `crates/daemon/examples/eval_runner/` or `crates/daemon/tests/eval_*.rs`.

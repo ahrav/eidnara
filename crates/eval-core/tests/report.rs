@@ -10,17 +10,17 @@ use context_core::canonical_json::ContractError;
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmResult,
     AxisValue, BaselineContrast, BaselineFailure, BlockedReason, CLAIM_BOUNDARY_SCHEMA,
-    CampaignGates, CampaignProfile, CeilingDeclaration, CeilingError, CeilingKind, Ceilings,
-    CensorReason, ClaimBoundary, ClaimClass, Claims, ClusterKey, ClusteringUnit, Cut, Envelope,
-    EnvelopeExceeded, Established, EvaluatedSurface, FrozenFamily, GATE_ENDPOINTS, GatedBlocks,
-    HistoryPolicy, ITEM_COUNT_THRESHOLD, IccPilot, InjectionScore, IntervalMethod, IntervalOutcome,
-    IntervalWithheld, LivenessBounds, Manifest, MultiplicityCorrection, PairOutcome, PairedReport,
-    ProfileError, RECENCY_BASELINE_VERSION, RUN_PROFILE_SCHEMA, Ratio, Reachability,
-    RecencyBaseline, ReportError, ReportOutcome, Resource, ResourceLimits, RunProfile,
-    SUITE_B_REPORT_SCHEMA, SampleError, SampleLedger, SampleRecord, Scale, SkipReason,
-    StatisticsError, StopCondition, StoppingRule, SuiteBReport, Suppression, TaskBudgets, Terminal,
-    WorldProvenance, analyze, pair_table_digest, parse_ceiling_declaration, parse_report,
-    reachability_of,
+    CampaignGates, CampaignProfile, CaptureSwitch, CeilingDeclaration, CeilingError, CeilingKind,
+    Ceilings, CensorReason, ClaimBoundary, ClaimClass, Claims, ClusterKey, ClusteringUnit, Cut,
+    Envelope, EnvelopeExceeded, Established, EvaluatedSurface, FrozenFamily, GATE_ENDPOINTS,
+    GatedBlocks, HistoryPolicy, ITEM_COUNT_THRESHOLD, IccPilot, InjectionScore, IntervalMethod,
+    IntervalOutcome, IntervalWithheld, LivenessBounds, Manifest, MultiplicityCorrection,
+    PREFIX_REBILL_KEY, PairOutcome, PairedReport, PrefixRebill, ProfileError,
+    RECENCY_BASELINE_VERSION, RUN_PROFILE_SCHEMA, Ratio, Reachability, RecencyBaseline,
+    ReportError, ReportOutcome, Resource, ResourceLimits, RunProfile, SUITE_B_REPORT_SCHEMA,
+    SampleError, SampleLedger, SampleRecord, Scale, SkipReason, StatisticsError, StopCondition,
+    StoppingRule, SuiteBReport, Suppression, TaskBudgets, Terminal, WorldProvenance, analyze,
+    pair_table_digest, parse_ceiling_declaration, parse_report, reachability_of,
 };
 use serde_json::json;
 
@@ -317,6 +317,7 @@ fn open_report() -> SuiteBReport {
         injection: vec![],
         envelope: Envelope::new(limits()),
         ceilings: vec![],
+        prefix_rebill: zero_rebill(),
     }
 }
 
@@ -601,10 +602,15 @@ fn a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive()
     for block in full.as_object().unwrap().keys() {
         let mut missing = full.clone();
         missing.as_object_mut().unwrap().remove(block);
-        assert!(
-            matches!(parse_report(&missing), Err(ReportError::Shape(_))),
-            "{block} is a required block"
-        );
+        let refused = parse_report(&missing);
+        if block == PREFIX_REBILL_KEY {
+            assert_eq!(refused, Err(ReportError::PrefixRebillMissing));
+        } else {
+            assert!(
+                matches!(refused, Err(ReportError::Shape(_))),
+                "{block} is a required block"
+            );
+        }
     }
     let mut extra = full.clone();
     extra["summary_score"] = json!("0.98");
@@ -2208,10 +2214,12 @@ fn an_invalid_or_repeated_ceiling_refuses_the_report_by_name() {
     );
     let mut v1_document = serde_json::to_value(&v1).unwrap();
     v1_document.as_object_mut().unwrap().remove("ceilings");
-    assert!(matches!(
+    assert_eq!(
         parse_report(&v1_document),
-        Err(ReportError::Shape(_))
-    ));
+        Err(ReportError::SchemaMismatch {
+            found: "eval-suite-b-report/v1".to_string()
+        })
+    );
 }
 
 /// `docs/evaluator.md` is a test input: every `eval-suite-b-report/vN`
@@ -2244,4 +2252,155 @@ fn evaluator_document_names_the_current_report_literal() {
         "evaluator document lacks the version {version} history"
     );
     assert!(doc.contains("version 2 added `ceilings`"));
+    assert!(doc.contains("version 3 added `prefix_rebill`"));
+}
+
+fn zero_rebill() -> BTreeMap<String, PrefixRebill> {
+    eval_core::PAIRED_ARMS
+        .map(|arm| (arm.to_string(), PrefixRebill::default()))
+        .into()
+}
+
+fn rebill(accepted_writes: u32, live_sessions: u32, frozen_prefix_tokens: u64) -> PrefixRebill {
+    PrefixRebill {
+        accepted_writes,
+        live_sessions,
+        frozen_prefix_tokens,
+    }
+}
+
+#[test]
+fn the_prefix_rebill_total_is_the_checked_product() {
+    assert_eq!(rebill(3, 4, 1000).total(), Ok(12_000));
+    for zeroed in [rebill(0, 4, 1000), rebill(3, 0, 1000), rebill(3, 4, 0)] {
+        assert_eq!(zeroed.total(), Ok(0), "{zeroed:?}");
+    }
+    assert_eq!(rebill(0, 0, u64::MAX).total(), Ok(0));
+    assert_eq!(rebill(1, 1, u64::MAX).total(), Ok(u64::MAX));
+    assert_eq!(rebill(2, 1, u64::MAX).total(), Err(SampleError::Overflow));
+    assert_eq!(
+        rebill(u32::MAX, u32::MAX, 2).total(),
+        Err(SampleError::Overflow)
+    );
+    // The re-bill is a sibling of `TaskUsage`: the usage keeps its six fields.
+    let usage = serde_json::to_value(eval_core::TaskUsage::default()).unwrap();
+    assert_eq!(usage.as_object().unwrap().len(), 6);
+}
+
+#[test]
+fn a_report_records_the_rebill_per_paired_arm_and_never_drops_it() {
+    // Zeros for both paired arms parse.
+    let value = open_report().serialize().unwrap();
+    assert_eq!(
+        value[PREFIX_REBILL_KEY],
+        json!({
+            "aged": {"accepted_writes": 0, "live_sessions": 0, "frozen_prefix_tokens": 0},
+            "fresh": {"accepted_writes": 0, "live_sessions": 0, "frozen_prefix_tokens": 0},
+        })
+    );
+    assert_eq!(parse_report(&value).unwrap(), open_report());
+    let mut memory = open_report();
+    memory
+        .prefix_rebill
+        .insert("aged".to_string(), rebill(3, 4, 1000));
+    let parsed = parse_report(&memory.serialize().unwrap()).unwrap();
+    assert_eq!(parsed.prefix_rebill["aged"].total(), Ok(12_000));
+
+    // An omitted record is refused by name, not read as zero cost, under a
+    // family that captures memory as under one that does not.
+    let mut captured = open_report();
+    captured.family.capture.memory_capture = CaptureSwitch::On;
+    let captured_value = serde_json::to_value(&captured).unwrap();
+    for document in [value.clone(), captured_value] {
+        let mut omitted = document;
+        omitted.as_object_mut().unwrap().remove(PREFIX_REBILL_KEY);
+        assert_eq!(
+            parse_report(&omitted),
+            Err(ReportError::PrefixRebillMissing)
+        );
+    }
+
+    // The record is keyed by exactly the paired arms.
+    let keyed = |arms: &[&str]| {
+        let mut report = open_report();
+        report.prefix_rebill = arms
+            .iter()
+            .map(|arm| (arm.to_string(), PrefixRebill::default()))
+            .collect();
+        report
+    };
+    for arms in [
+        &["aged"][..],
+        &["aged", "fresh", "fresh_minimal"][..],
+        &["aged", "oracle"][..],
+        &[][..],
+    ] {
+        let report = keyed(arms);
+        let expected = ReportError::RebillArmsNotPaired {
+            found: report.prefix_rebill.keys().cloned().collect(),
+        };
+        assert_eq!(report.validate(), Err(expected.clone()), "{arms:?}");
+        assert_eq!(
+            parse_report(&serde_json::to_value(&report).unwrap()),
+            Err(expected),
+            "{arms:?}"
+        );
+    }
+    // A record whose product leaves `u64` is refused rather than wrapped.
+    let mut overflowing = open_report();
+    // `fresh` at 2^53 tokens fits `u64`; only `aged` overflows.
+    overflowing
+        .prefix_rebill
+        .insert("fresh".to_string(), rebill(2, 1, 1 << 52));
+    overflowing
+        .prefix_rebill
+        .insert("aged".to_string(), rebill(u32::MAX, u32::MAX, 1 << 30));
+    let expected = ReportError::RebillOverflow {
+        arm: "aged".to_string(),
+    };
+    assert_eq!(overflowing.validate(), Err(expected.clone()));
+    assert_eq!(
+        parse_report(&serde_json::to_value(&overflowing).unwrap()),
+        Err(expected)
+    );
+    let mut fresh_overflow = open_report();
+    fresh_overflow
+        .prefix_rebill
+        .insert("fresh".to_string(), rebill(u32::MAX, u32::MAX, 1 << 52));
+    fresh_overflow
+        .prefix_rebill
+        .insert("aged".to_string(), rebill(3, 4, 1000));
+    assert_eq!(
+        fresh_overflow.validate(),
+        Err(ReportError::RebillOverflow {
+            arm: "fresh".to_string()
+        })
+    );
+    // A token count past the canonical safe range is refused at the wire.
+    let mut wide = open_report();
+    wide.prefix_rebill
+        .insert("aged".to_string(), rebill(1, 1, 1 << 53));
+    assert!(matches!(wide.validate(), Err(ReportError::NotCanonical(_))));
+    // A document that is no object is a shape error.
+    assert!(matches!(
+        parse_report(&json!([])),
+        Err(ReportError::Shape(_))
+    ));
+    // A previous-version document is refused.
+    let mut v2 = value.clone();
+    v2["schema"] = json!("eval-suite-b-report/v2");
+    assert_eq!(
+        parse_report(&v2),
+        Err(ReportError::SchemaMismatch {
+            found: "eval-suite-b-report/v2".to_string()
+        })
+    );
+    let mut v2_shaped = v2;
+    v2_shaped.as_object_mut().unwrap().remove(PREFIX_REBILL_KEY);
+    assert_eq!(
+        parse_report(&v2_shaped),
+        Err(ReportError::SchemaMismatch {
+            found: "eval-suite-b-report/v2".to_string()
+        })
+    );
 }

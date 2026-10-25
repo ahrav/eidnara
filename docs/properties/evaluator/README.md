@@ -137,6 +137,23 @@ Placement fences (`scripts/forbid-test-support-dependencies.ts`, run in the
   package's `default` feature enables its own
   `test-support` or reaches a `*/*test-support` entry.
 
+Capture declaration, run copy (`crates/eval-core/tests/manifest.rs`, #1121;
+records in [`catalog.md`](catalog.md)):
+
+- `a_capture_declaration_is_closed_total_and_canonical`
+  (`cap-declaration-canonical-and-total`): the object spelling parses to
+  pinned key-sorted bytes; an unknown variant, an unknown scheme, a missing
+  field, an unknown field, a non-object, and the array and map spellings are
+  `MalformedCapture`.
+- `a_capture_on_run_without_a_frozen_family_is_refused_by_name`
+  (`cap-capture-on-requires-frozen-family`): each on-combination with a null
+  family digest is `CaptureOnWithoutFrozenFamily` through `validate` and
+  `parse_manifest`; all-off and absent declarations validate; a malformed copy
+  is `MalformedCapture` with or without a frozen family.
+- `a_capture_declaring_fixture_pins_its_own_digests`: the capture-declaring
+  fixture pins its own run id and manifest digest beside the capture-free
+  fixture's unchanged constants.
+
 ## Phase 1 executed checks: generated worlds
 
 World generation, choice replay, and the event log
@@ -896,13 +913,14 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   integer refuses.
 - `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
   (`mtr-analysis-family-frozen-before-results`): the frozen digest accepts the
-  unchanged family; an edit to any of nine components (endpoints, families,
-  exclusions, stopping rule, margin, floor, threshold, seed, pilot) is
-  `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
-  below 300, fewer than 40 or more than 10,000 replicates, an empty endpoint
-  list, an endpoint list that is not exactly the three gates
-  (`UnsupportedEndpoints`), and an unknown field refuse; a version-1 document
-  is `SchemaMismatch`, not a shape error; a manifest without a
+  unchanged family; an edit to any of eleven components (endpoints, families,
+  exclusions, stopping rule, margin, floor, threshold, seed, pilot, transfer
+  criterion, capture) is `FamilyChangedAfterResults`, from `check` and from
+  `analyze`; a threshold below 300, fewer than 40 or more than 10,000
+  replicates, an empty endpoint list, an endpoint list that is not exactly the
+  three gates (`UnsupportedEndpoints`), and an unknown field refuse; a
+  version-1 or version-2 document is `SchemaMismatch`, not a shape error; a
+  manifest without a
   recorded digest is `FamilyNotRecorded`, and one with a digest and no recency
   baseline is `InvalidManifest(RecencyBaselineMismatch {recency_baseline})`
   until the baseline is recorded.
@@ -1010,6 +1028,31 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   names no judge, so no judge verdict type can be an input to a gate.
 - `crates/eval-core/tests/manifest.rs` pins `analysis_family_digest` as a
   required manifest field (schema v6) that enters the digest.
+
+Capture declaration, family copy (`crates/eval-core/tests/statistics.rs`,
+#1121; records in [`catalog.md`](catalog.md)):
+
+- `runs_under_different_capture_declarations_never_read_under_each_other`
+  (`cap-family-digest-separates-declarations`): manifests differing only in
+  `memory_capture` have different run ids, their families different digests,
+  and each is `FamilyChangedAfterResults` under the other's family. The
+  `capture`-only edit and the version-2 `SchemaMismatch` are in
+  `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
+  above.
+- `the_run_copy_of_the_capture_declaration_must_equal_the_family_copy`
+  (`cap-config-and-family-declaration-agree`): five run copies against four
+  family declarations; a report exactly when they agree, with absent read as
+  all off, and the freeze check first.
+- `a_capture_on_run_without_a_frozen_family_never_reaches_the_family_gate`
+  (`cap-capture-on-requires-frozen-family`): a capture-on run with no frozen
+  family reaches `analyze` only as `InvalidManifest`, and an undeclared or
+  all-off one still reads as `FamilyNotRecorded`.
+- `a_family_document_declaration_is_closed`
+  (`cap-declaration-canonical-and-total`): a family document with an unknown
+  variant or no `capture` is a shape error.
+- `evaluator_document_names_the_current_analysis_family_literal`: every
+  `eval-analysis-family/vN` literal in `docs/evaluator.md` names the current
+  version and its history line.
 
 ## Phase 3 executed checks: censored outcomes
 
@@ -1383,6 +1426,43 @@ Report (`crates/eval-core/tests/report.rs`):
   under condition (a), while a skip under (b) beside it refuses; whether any
   sample may be attempted after such a skip is the runner's ordering
   contract, not tested here.
+
+Write key and pool disjointness (`crates/eval-core/tests/access.rs`, #1122;
+records in [`catalog.md`](catalog.md)):
+
+- `the_write_key_is_task_and_arm_and_retries_share_it`
+  (`wk-key-is-task-arm-and-lineage-invariant`) and
+  `excludes_names_the_own_task_under_every_arm_and_nothing_else`
+  (`wk-excludes-names-own-task-only`).
+- `a_clean_or_write_only_record_proves_the_pools_disjoint`,
+  `a_read_of_an_own_task_write_is_refused_naming_sample_read_and_key`,
+  `dangling_references_and_attestation_gaps_are_refused_by_name`,
+  `an_invalid_ledger_is_refused_before_the_record_is_read`,
+  `the_access_record_round_trips_canonically_and_refuses_unknown_fields`
+  (`wk-ledger-pool-disjoint-from-own-task-writes`): every `AccessError`
+  variant, own-task reads under the current run and under the reader's
+  lineage, a write under a run in its writer's lineage outside the reader's
+  left unattributed, a write under a run outside its writer's lineage refused
+  as `UnknownRun`, and a read sequenced before its write.
+
+Oracle ceilings and the prefix re-bill on the report
+(`crates/eval-core/tests/report.rs`, #1123 and #1124; records in
+[`catalog.md`](catalog.md)):
+
+- `a_ceiling_declaration_names_its_kind_task_pair_and_pinned_revision`,
+  `an_invalid_or_repeated_ceiling_refuses_the_report_by_name`
+  (`ceil-declaration-kind-task-relation`).
+- `a_declared_ceiling_leaves_the_claim_marginals_rates_and_gates_unchanged`
+  (`ceil-arm-leaves-claim-class-unchanged`).
+- `the_prefix_rebill_total_is_the_checked_product`
+  (`rebill-total-checked-multiplication`) and
+  `a_report_records_the_rebill_per_paired_arm_and_never_drops_it`
+  (`rebill-recorded-and-never-dropped`); the missing-block loop in
+  `a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive`
+  maps the removed `prefix_rebill` key to `PrefixRebillMissing`.
+- `evaluator_document_names_the_current_report_literal` pins every
+  `eval-suite-b-report` literal in `docs/evaluator.md` to the current version
+  and its history lines.
 
 ## Phase 3 executed checks: campaign shell
 

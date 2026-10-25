@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use crate::blank;
 use crate::campaign::{
-    Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError, RunProfile, SampleError,
-    SampleLedger, SkipReason, Terminal, TerminalRates, UnsupportedReason,
+    Ceilings, DisabledReason, Envelope, EnvelopeExceeded, PrefixRebill, ProfileError, RunProfile,
+    SampleError, SampleLedger, SkipReason, Terminal, TerminalRates, UnsupportedReason,
 };
 use crate::ceiling::{CeilingDeclaration, CeilingError};
 use crate::census::{EvaluatedSurface, Reachability};
@@ -27,11 +27,13 @@ use crate::pairs::{
 };
 use crate::statistics::{
     AnalysisFamily, BlockedReason, ClusteringUnit, FrozenFamily, GateVerdict, Gates,
-    IntervalOutcome, IntervalWithheld, PairedReport, Ratio, StatisticsError, StoppingRule,
-    arm_miss_asymmetry, balanced_mean_cluster, deflate, lopsided_mean_cluster,
+    IntervalOutcome, IntervalWithheld, PAIRED_ARMS, PairedReport, Ratio, StatisticsError,
+    StoppingRule, arm_miss_asymmetry, balanced_mean_cluster, deflate, lopsided_mean_cluster,
 };
 
-pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v2";
+pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v3";
+/// The report key whose absence `parse_report` refuses by name.
+pub const PREFIX_REBILL_KEY: &str = "prefix_rebill";
 
 /// The query route and the packer carry the label `ChainStage::REACHABILITY`
 /// gives them: no production caller.
@@ -202,6 +204,9 @@ pub struct SuiteBReport {
     /// with its full declaration. `derive_claim_class`, the paired
     /// marginals, the per-arm rates, and the run gates read none of them.
     pub ceilings: Vec<CeilingDeclaration>,
+    /// Each paired arm's prefix re-bill, keyed exactly as `arm_rates` is;
+    /// outside the manifest and its digest.
+    pub prefix_rebill: BTreeMap<String, PrefixRebill>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +311,18 @@ pub enum ReportError {
     /// A declaration equal in all four fields to an earlier one; the same
     /// task pair pinned at another revision is a separate declaration.
     RepeatedCeiling(CeilingDeclaration),
+    /// The document carries no `prefix_rebill` record, which would otherwise
+    /// read as zero memory-arm cost.
+    PrefixRebillMissing,
+    /// `prefix_rebill` is keyed by other arms than exactly `aged` and
+    /// `fresh`.
+    RebillArmsNotPaired {
+        found: Vec<String>,
+    },
+    /// An arm's re-bill total leaves `u64`.
+    RebillOverflow {
+        arm: String,
+    },
     Profile(ProfileError),
     Samples(SampleError),
     Statistics(StatisticsError),
@@ -353,6 +370,25 @@ impl SuiteBReport {
                 .map_err(|error| ReportError::Ceiling { index, error })?;
             if self.ceilings[..index].contains(ceiling) {
                 return Err(ReportError::RepeatedCeiling(ceiling.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_rebill(&self) -> Result<(), ReportError> {
+        if self
+            .prefix_rebill
+            .keys()
+            .map(String::as_str)
+            .ne(PAIRED_ARMS)
+        {
+            return Err(ReportError::RebillArmsNotPaired {
+                found: self.prefix_rebill.keys().cloned().collect(),
+            });
+        }
+        for (arm, rebill) in &self.prefix_rebill {
+            if rebill.total().is_err() {
+                return Err(ReportError::RebillOverflow { arm: arm.clone() });
             }
         }
         Ok(())
@@ -987,6 +1023,7 @@ impl SuiteBReport {
         canonical_json_encode(&value).map_err(ReportError::NotCanonical)?;
         self.check_identity()?;
         self.check_ceilings()?;
+        self.check_rebill()?;
         self.check_claims()?;
         self.check_accounting()
     }
@@ -998,9 +1035,25 @@ impl SuiteBReport {
     }
 }
 
-/// Refuses a missing block by name, a field the type would drop, then
+/// Refuses a stale schema literal and an absent `prefix_rebill` record by
+/// name, any other missing block by shape, a field the type would drop, then
 /// everything `validate` refuses.
 pub fn parse_report(value: &Value) -> Result<SuiteBReport, ReportError> {
+    // A stale literal is named before the field it would lack, and only an
+    // object can omit a key.
+    if let Some(fields) = value.as_object() {
+        match fields.get("schema").and_then(Value::as_str) {
+            Some(found) if found != SUITE_B_REPORT_SCHEMA => {
+                return Err(ReportError::SchemaMismatch {
+                    found: found.to_string(),
+                });
+            }
+            _ => {}
+        }
+        if !fields.contains_key(PREFIX_REBILL_KEY) {
+            return Err(ReportError::PrefixRebillMissing);
+        }
+    }
     let report =
         SuiteBReport::deserialize(value).map_err(|error| ReportError::Shape(error.to_string()))?;
     report.validate()?;

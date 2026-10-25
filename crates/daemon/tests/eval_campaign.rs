@@ -95,6 +95,13 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
     );
     let published: serde_json::Value = serde_json::from_slice(&report_bytes).unwrap();
     assert_eq!(parse_report(&published).unwrap(), run.report);
+    // The example's arms admit no memory writes, so both re-bills are zero.
+    assert!(
+        run.report
+            .prefix_rebill
+            .values()
+            .all(|rebill| *rebill == eval_core::PrefixRebill::default())
+    );
     let peaks = &published["envelope"]["peaks"];
     for resource in ["store_bytes", "elapsed_ms", "artifact_bytes"] {
         assert!(

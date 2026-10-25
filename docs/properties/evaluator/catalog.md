@@ -16,7 +16,11 @@ witnesses). Phase 6, Suite D: contained generated tasks, hidden-test
 authority, adequacy, and injection scoring. Phase 6, real history: cutoff
 audits, insufficiency proofs, no-repository controls, and the claim class.
 Phase 6, residual judge: blinded, order-swapped, versioned judge calls and
-identity-bound residual comparison. Each record names the entry point that
+identity-bound residual comparison. The evaluator contract delta (#1119): the
+capture declaration frozen into the analysis family and its run copy, the
+write key and the pool-disjointness check over a runner-supplied access
+record, oracle ceiling declarations on the Suite B report, and the per-arm
+prefix re-bill with its checked total. Each record names the entry point that
 reaches it in its `Reachability` field.
 
 ## Part artifacts
@@ -54,6 +58,17 @@ the verified trail is short; none was padded.
 | [`mtr-skipped-cases-carry-closed-vocabulary-reason`](#mtr-skipped-cases-carry-closed-vocabulary-reason) | safety | `always` | yes |
 | [`mtr-judge-calls-blinded-order-swapped-versioned`](#mtr-judge-calls-blinded-order-swapped-versioned) | safety | `always` | yes |
 | [`rid-tokenizer-accounting-profile-bound-per-run`](#rid-tokenizer-accounting-profile-bound-per-run) | safety | `always` | partial |
+| [`cap-declaration-canonical-and-total`](#cap-declaration-canonical-and-total) | safety | `always` | yes |
+| [`cap-family-digest-separates-declarations`](#cap-family-digest-separates-declarations) | safety | `always` | yes |
+| [`cap-capture-on-requires-frozen-family`](#cap-capture-on-requires-frozen-family) | safety | `always` | yes |
+| [`cap-config-and-family-declaration-agree`](#cap-config-and-family-declaration-agree) | safety | `always` | yes |
+| [`wk-key-is-task-arm-and-lineage-invariant`](#wk-key-is-task-arm-and-lineage-invariant) | safety | `always` | yes |
+| [`wk-excludes-names-own-task-only`](#wk-excludes-names-own-task-only) | safety | `always` | yes |
+| [`wk-ledger-pool-disjoint-from-own-task-writes`](#wk-ledger-pool-disjoint-from-own-task-writes) | safety | `always` | yes |
+| [`ceil-declaration-kind-task-relation`](#ceil-declaration-kind-task-relation) | safety | `always` | yes |
+| [`ceil-arm-leaves-claim-class-unchanged`](#ceil-arm-leaves-claim-class-unchanged) | safety | `always` | yes |
+| [`rebill-total-checked-multiplication`](#rebill-total-checked-multiplication) | safety | `always` | yes |
+| [`rebill-recorded-and-never-dropped`](#rebill-recorded-and-never-dropped) | safety | `always` | yes |
 
 ## Records
 
@@ -709,8 +724,8 @@ Impact: An agent could read the runner's files or credentials, reach the
 Open questions:
 - Every mount is read-only inside and `/run` is masked, but the host
   filesystem stays readable and a pathname socket outside `/run` stays
-  connectable; hiding both needs a `pivot_root` into a curated root. (needs
-  human input)
+  connectable; hiding both needs a `pivot_root` into a root built for the run.
+  (needs human input)
 - `$HOME` is read-only inside, not masked: the agent can read the host user's
   files under it (dotfiles, credentials) even though it cannot write them or
   reach the network. A masked home needs its own tmpfs. (needs human input)
@@ -1013,6 +1028,415 @@ Open questions:
   carries name, revision, and digest and is the candidate replacement, in the
   anchor shell that defines the type (needs human input).
 
+### cap-declaration-canonical-and-total
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate, and the `eval_runner` example, which writes an all-off family
+  copy and an undeclared run that `crates/daemon/tests/eval_campaign.rs`
+  analyzes; the out-of-tree runner (#1007) is the intended producer of
+  capture-on declarations
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/manifest.rs::a_capture_declaration_is_closed_total_and_canonical`,
+  `crates/eval-core/tests/statistics.rs::a_family_document_declaration_is_closed`
+Guarantee: A `CaptureDeclaration` admits only `source_capture` and
+  `memory_capture` in {`on`, `off`} and `write_key` = `task_arm`, all three
+  required, and the run's copy has exactly one spelling, so it encodes to one
+  canonical byte string.
+Check: `always` - `parse_capture_declaration` returns the declaration for the
+  object spelling and `MalformedCapture` for an unknown variant (`On`), an
+  unknown scheme (`pair`), a missing field, an unknown field, a non-object, the
+  array form, and the single-key-map variant form; the canonical encoding of a
+  declaration is the pinned key-sorted bytes; a family document with an unknown
+  variant or no `capture` is `Shape`. Must hold on every parse, so `always`.
+Fault/timing angle: None.
+Required faults and enabling state: An unknown variant, `write_key: "pair"`, a
+  missing `memory_capture`, and the decoder's array and map spellings.
+Confidence: high - [evidence](evidence/cap-declaration-canonical-and-total.md).
+  Ran the cited tests at HEAD; read `parse_capture_declaration`
+  (`crates/eval-core/src/manifest.rs:365`), which refuses any input whose
+  decoded value encodes to other bytes than the input's.
+Existing check: `crates/eval-core/src/capture.rs:29` (`CaptureDeclaration`,
+  `deny_unknown_fields`); `crates/eval-core/src/manifest.rs:365`
+  (`parse_capture_declaration`); tests above.
+Impact: Two spellings of one declaration would give comparable runs two run ids.
+Open questions:
+- The family copy decodes with plain serde, so it admits the array spelling; the
+  family digest hashes the re-serialized value, so identity is unaffected (needs
+  human input on whether to tighten it).
+
+### cap-family-digest-separates-declarations
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate, and the `eval_runner` example, which writes an all-off family
+  copy and an undeclared run that `crates/daemon/tests/eval_campaign.rs`
+  analyzes; the out-of-tree runner (#1007) is the intended producer of
+  capture-on declarations
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/statistics.rs::runs_under_different_capture_declarations_never_read_under_each_other`,
+  `crates/eval-core/tests/statistics.rs::the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
+Guarantee: Two `AnalysisFamily` values equal except in `capture` have different
+  digests, so `FrozenFamily::check` and `analyze` refuse a report read under the
+  other declaration with `FamilyChangedAfterResults` naming both digests.
+Check: `always` - for families `{off, on}` and `{off, off}` (the cited tests
+  vary `memory_capture`; `source_capture` enters the digest the same way, read
+  from `digest`, which serializes the whole family), the digests differ, the run
+  ids of manifests differing only in `memory_capture` differ, and `analyze` of
+  either manifest under the other family is `FamilyChangedAfterResults
+  {recorded, found}` with `recorded` the manifest's digest and `found !=
+  recorded`; the post-hoc edit table's `capture`-only edit is refused the same
+  way. Must hold on every check, so `always`.
+Fault/timing angle: A family edited after results, the window the freeze gate
+  guards.
+Required faults and enabling state: A manifest frozen under one declaration and
+  a family presented with another.
+Confidence: high -
+  [evidence](evidence/cap-family-digest-separates-declarations.md). Ran the
+  cited tests at HEAD; read `AnalysisFamily::digest`
+  (`crates/eval-core/src/statistics.rs:732`), which digests the whole serialized
+  value, `capture` included (`:602`).
+Existing check: `crates/eval-core/src/statistics.rs:732` (`digest`), `:795`
+  (`FrozenFamily::check`); tests above.
+Impact: Capture-on and capture-off runs would pool as one family, and a
+  self-task leak would be invisible in comparison.
+Open questions: None.
+
+### cap-capture-on-requires-frozen-family
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate, and the `eval_runner` example, which writes an all-off family
+  copy and an undeclared run that `crates/daemon/tests/eval_campaign.rs`
+  analyzes; the out-of-tree runner (#1007) is the intended producer of
+  capture-on declarations
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/manifest.rs::a_capture_on_run_without_a_frozen_family_is_refused_by_name`,
+  `crates/eval-core/tests/statistics.rs::a_capture_on_run_without_a_frozen_family_never_reaches_the_family_gate`
+Guarantee: A manifest whose `config.capture` declares `source_capture` or
+  `memory_capture` `on` while `analysis_family_digest` is null is refused by
+  `Manifest::validate` as `CaptureOnWithoutFrozenFamily`; an undeclared run
+  counts as both switches `off`; a present but malformed copy is
+  `MalformedCapture` whether or not a family was frozen.
+Check: `always` - for each of `{off, on}`, `{on, off}`, `{on, on}` with a null
+  digest, `validate` and `parse_manifest` return `CaptureOnWithoutFrozenFamily`;
+  an all-off or absent declaration with a null digest validates and `analyze`
+  returns `FamilyNotRecorded`; a capture-on run reaches `analyze` only as
+  `InvalidManifest(CaptureOnWithoutFrozenFamily)`; a malformed copy is
+  `MalformedCapture`. Must hold wherever a manifest is validated, so `always`.
+Fault/timing angle: None.
+Required faults and enabling state: A manifest with `capture {off, on}` and
+  `analysis_family_digest: null`; a malformed `config.capture` beside a frozen
+  family.
+Confidence: high -
+  [evidence](evidence/cap-capture-on-requires-frozen-family.md). Ran the cited
+  tests at HEAD; read `Manifest::validate`
+  (`crates/eval-core/src/manifest.rs:405`), its refusal (`:564`), and the
+  accessor `capture_declaration` (`:575`).
+Existing check: `crates/eval-core/src/manifest.rs:564`, `:575`; tests above.
+Impact: A capture-on run with no frozen family would escape the family gate
+  entirely.
+Open questions: None.
+
+### cap-config-and-family-declaration-agree
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate, and the `eval_runner` example, which writes an all-off family
+  copy and an undeclared run that `crates/daemon/tests/eval_campaign.rs`
+  analyzes; the out-of-tree runner (#1007) is the intended producer of
+  capture-on declarations
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/statistics.rs::the_run_copy_of_the_capture_declaration_must_equal_the_family_copy`
+Guarantee: At paired analysis, after the frozen-digest check, the run's
+  `config.capture` copy equals `family.capture`, with an absent copy read as
+  both switches `off`; any other pair is `CaptureDeclarationMismatch {config,
+  family}`.
+Check: `always` - over every run copy (absent and the four declarations) against
+  every family declaration, `analyze` returns a report exactly when
+  `copy.unwrap_or(OFF) == family.capture` and `CaptureDeclarationMismatch`
+  naming both copies otherwise; an edited family with a disagreeing copy is
+  `FamilyChangedAfterResults`, so the freeze check runs first. Must hold on
+  every paired analysis, so `always`.
+Fault/timing angle: None.
+Required faults and enabling state: A manifest declaring `{on, off}` whose
+  frozen family carries `{off, off}`; an absent key beside a family declaring
+  any `on`.
+Confidence: high -
+  [evidence](evidence/cap-config-and-family-declaration-agree.md). Ran the cited
+  test at HEAD; read `analyze` (`crates/eval-core/src/statistics.rs:1188-1195`).
+Existing check: `crates/eval-core/src/statistics.rs:1189` (agreement check),
+  `:1347` (`CaptureDeclarationMismatch`); test above.
+Impact: Run identity and family would describe different runs while the report
+  passes the family gate.
+Open questions:
+- `FrozenFamily::check` and `AnalysisFamily::claim_class` do not compare the
+  copies; a consumer pairing a manifest with a family outside `analyze` must
+  repeat the comparison (needs human input).
+
+### wk-key-is-task-arm-and-lineage-invariant
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/access.rs::the_write_key_is_task_and_arm_and_retries_share_it`
+Guarantee: `WriteKey::from(&SampleRecord)` equals `(task, arm)`; two records
+  equal in `task` and `arm` share a key whatever their `id`, `lineage`,
+  `policy`, `cut`, or `terminal`.
+Check: `always` - one task under `Aged` and `Fresh` gives two keys; a retry
+  differing in `id`, `policy`, `cut`, a non-empty `lineage`, and `terminal`
+  gives the original's key; another task gives another key. The key is a pure
+  function of two fields, so `always`.
+Fault/timing angle: None.
+Required faults and enabling state: Two records of one task under `Aged` and
+  `Fresh`; a retry record with a non-empty lineage.
+Confidence: high -
+  [evidence](evidence/wk-key-is-task-arm-and-lineage-invariant.md). Ran the
+  cited test at HEAD; read `WriteKey` and its `From` impl
+  (`crates/eval-core/src/access.rs:15-29`).
+Existing check: `crates/eval-core/src/access.rs:22` (`From<&SampleRecord>`);
+  test above.
+Impact: A key that read `id` or `lineage` would give each retry its own pool and
+  hide the self-task leak.
+Open questions:
+- Two history policies of one arm share one key, as #1122 resolved OQ7-4; a
+  `task_arm_policy` scheme would be a new `WriteKeyScheme` variant and a new
+  family digest (needs human input).
+- The lineage fixtures are hand-built;
+  `led-non-empty-lineage-reachable-from-a-producer` (#1119 Part A) stays
+  unexercised until a producer retries a sample (unresolved, needs the runner,
+  #1007).
+
+### wk-excludes-names-own-task-only
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/access.rs::excludes_names_the_own_task_under_every_arm_and_nothing_else`
+Guarantee: `excludes(target, key)` is true exactly when `key.task ==
+  target.task`, under every arm in the key.
+Check: `always` - over two tasks and the three `ArmKind` values, `excludes` is
+  true for the target's task under every arm and false for the other task. A
+  pure predicate, so `always`.
+Fault/timing angle: None.
+Required faults and enabling state: Key `(t1, Fresh)` against target `(t1,
+  Aged)`; key `(t2, Aged)` against the same target.
+Confidence: high - [evidence](evidence/wk-excludes-names-own-task-only.md). Ran
+  the cited test at HEAD; read `excludes` (`crates/eval-core/src/access.rs:33`).
+Existing check: `crates/eval-core/src/access.rs:33`; test above.
+Impact: An arm-sensitive `excludes` would let a task's `Fresh` writes reach its
+  own `Aged` sample.
+Open questions: None.
+
+### wk-ledger-pool-disjoint-from-own-task-writes
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate; the out-of-tree runner (#1007) is the intended producer
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/access.rs::a_clean_or_write_only_record_proves_the_pools_disjoint`,
+  `crates/eval-core/tests/access.rs::a_read_of_an_own_task_write_is_refused_naming_sample_read_and_key`,
+  `crates/eval-core/tests/access.rs::dangling_references_and_attestation_gaps_are_refused_by_name`,
+  `crates/eval-core/tests/access.rs::an_invalid_ledger_is_refused_before_the_record_is_read`,
+  `crates/eval-core/tests/access.rs::the_access_record_round_trips_canonically_and_refuses_unknown_fields`
+Guarantee: Given a validated `SampleLedger` and an `AccessRecord`,
+  `check_disjoint` passes exactly when the current run id is well formed;
+  every write has a non-blank, unique `write_id`, a non-blank `pool`, a ledger
+  writer, that writer's key, and a run that is the current run or in the
+  writer's lineage; every read names a ledger reader and a recorded write in
+  the same pool; `read_counts` names only ledger samples and equals the
+  recorded reads for every one; and no recorded read served a sample a write
+  in its pool under its own task made by the current run or a run in its own
+  lineage. An own-task read is refused naming the sample, the read, and the
+  key; every other failure names the input it refuses.
+Check: `always` - a clean record and a write-only record pass; a read of an
+  own-task write under the current run, under a run in the reader's lineage, or
+  sequenced before its write is `OwnTaskRead {sample, read, key}`; a write
+  under a run in its writer's lineage that the reader's lineage lacks is not
+  the reader's; a write under a run outside its writer's lineage is
+  `UnknownRun`, also when its writer reads it; an invalid ledger is
+  `Ledger` before the record is read; each dangling or inconsistent input has
+  its own variant (`MalformedRun`, `Blank`, `RepeatedWrite`, `UnknownWriter`,
+  `KeyDisagreesWithWriter`, `UnknownRun`, `UnknownReader`,
+  `UnknownAttestedSample`, `UnknownWrite`, `CrossPoolRead`,
+  `ReadCountMismatch`). The check is a pure predicate over the supplied record,
+  so `always`.
+Fault/timing angle: Order-free: sequences are carried for audit and never
+  compared, so a read before its write in one pool is refused the same way.
+Required faults and enabling state: Sample `s1` (task t1, Fresh) reads `w7`
+  written under `(t1, Aged)` in the same pool; the same write made under a run
+  in both `s1.lineage` and the writer's lineage; a write under a run in
+  another sample's lineage but not its writer's; a dangling reader, writer,
+  write, and run id; a read count off by one.
+Confidence: high -
+  [evidence](evidence/wk-ledger-pool-disjoint-from-own-task-writes.md). Ran the
+  cited tests at HEAD; read `check_disjoint`
+  (`crates/eval-core/src/access.rs:153-264`); the proof covers the supplied
+  record only.
+Existing check: `crates/eval-core/src/access.rs:153` (`check_disjoint`), `:227`
+  (own-run attribution); tests above.
+Impact: A task's own artifacts in its own pool would inflate every memory-arm
+  result unseen.
+Open questions:
+- Recording completeness is the runner's attestation in `read_counts`; the
+  evaluator cannot observe a read the runner did not record (needs human input
+  on a runner-side audit, #1007).
+
+### ceil-declaration-kind-task-relation
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate, and the `eval_runner` example, whose empty `ceilings`
+  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
+  is the intended producer of declared ceilings
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/report.rs::a_ceiling_declaration_names_its_kind_task_pair_and_pinned_revision`,
+  `crates/eval-core/tests/report.rs::an_invalid_or_repeated_ceiling_refuses_the_report_by_name`
+Guarantee: A `CeilingDeclaration` admits only a 40-character lowercase hex
+  `revision_sha`, `transfer` only across two tasks, `project_knowledge` only
+  within one, and non-blank task ids; a report refuses an invalid entry by its
+  position and a repeated one by name.
+Check: `always` - `validate` and `parse_ceiling_declaration` return
+  `TransferWithinOneTask`, `ProjectKnowledgeAcrossTasks`, `MalformedRevision`
+  (upper-case and 64-hex), and `BlankTask {field}` for the respective defect,
+  and `Shape` for an unknown field, an unknown kind, a missing field, or the
+  array form; a valid declaration round-trips to pinned canonical bytes; a
+  report holding an invalid entry is `Ceiling {index, error}` and a four-field
+  repeat is `RepeatedCeiling` through `validate` and `parse_report`. Must hold
+  on every declaration, so `always`.
+Fault/timing angle: None.
+Required faults and enabling state: `Transfer` with equal tasks;
+  `ProjectKnowledge` with different tasks; an upper-case sha; a 64-hex sha; a
+  blank task; a repeated declaration.
+Confidence: high - [evidence](evidence/ceil-declaration-kind-task-relation.md).
+  Ran the cited tests at HEAD; read `CeilingDeclaration::validate`
+  (`crates/eval-core/src/ceiling.rs:50`) and `check_ceilings`
+  (`crates/eval-core/src/report.rs:366`).
+Existing check: `crates/eval-core/src/ceiling.rs:50`, `:83`;
+  `crates/eval-core/src/report.rs:366`; tests above.
+Impact: A mislabeled ceiling would bound the wrong quantity.
+Open questions:
+- Task ids are compared untrimmed, as the own-task exclusion compares ledger
+  tasks (`crates/eval-core/src/access.rs:33`); `t1` and `t1 ` are two tasks
+  (needs human input on canonical task ids).
+
+### ceil-arm-leaves-claim-class-unchanged
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate, and the `eval_runner` example, whose empty `ceilings`
+  `crates/daemon/tests/eval_campaign.rs` parses; the out-of-tree runner (#1007)
+  is the intended producer of declared ceilings
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/report.rs::a_declared_ceiling_leaves_the_claim_marginals_rates_and_gates_unchanged`
+Guarantee: A ceiling declared on a report changes none of the inputs of
+  `derive_claim_class`, the paired marginals, the per-arm rate keys, or the run
+  gates, so the report validates with the same `claims.derivation` with and
+  without it.
+Check: `always` - a report carrying a valid `Transfer` ceiling (the kind the
+  cited test declares) parses with the same derivation as the fixture without
+  one (`GeneratedPhase1`), the same `rates` and run gates, and arm-rate keys
+  exactly `aged` and `fresh`; two mutations that make `PairsExceedSamples`
+  refuse identically with and without the ceiling. A ceiling is a declaration
+  block, so no input can change, hence `always`.
+Fault/timing angle: None.
+Required faults and enabling state: A run with a valid `Transfer` ceiling beside
+  a `GeneratedPhase1` derivation.
+Confidence: high -
+  [evidence](evidence/ceil-arm-leaves-claim-class-unchanged.md). Ran the cited
+  test at HEAD; read `derive_claim_class` (`crates/eval-core/src/claim.rs:138`),
+  whose three arguments carry no ceiling, the per-arm reads in
+  `check_pairs_backed` (`crates/eval-core/src/report.rs:903`), and the
+  suppression-branch loop over `ArmKind::Aged` and `ArmKind::Fresh` (`:706`).
+  The oracle is the validator's re-derivation: `parse_report` recomputes the
+  claim class, rates, and gates, so a ceiling that moved any of them would
+  refuse. The cited test declares a `Transfer` ceiling; a `ProjectKnowledge`
+  ceiling reaches the same code by reading.
+Existing check: `crates/eval-core/src/claim.rs:138`;
+  `crates/eval-core/src/report.rs:64` (`CampaignGates::of`), `:706`, `:903`;
+  test above.
+Impact: An injected-evidence ceiling counted as `transfer` would turn a bound
+  into a real-history claim.
+Open questions: None.
+
+### rebill-total-checked-multiplication
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate, and the `eval_runner` example, whose zero re-bills
+  `crates/daemon/tests/eval_campaign.rs` parses and asserts; the out-of-tree
+  runner (#1007) is the intended producer of non-zero re-bills
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/report.rs::the_prefix_rebill_total_is_the_checked_product`,
+  `crates/eval-core/tests/report.rs::a_report_records_the_rebill_per_paired_arm_and_never_drops_it`
+Guarantee: `PrefixRebill::total()` returns `accepted_writes * live_sessions *
+  frozen_prefix_tokens` in `u64` when the product fits and
+  `SampleError::Overflow` otherwise; it never wraps or saturates, and a zero
+  field yields zero.
+Check: `always` - `{3, 4, 1000}.total()` is 12000; any zero field gives 0; `(1,
+  1, u64::MAX)` is `u64::MAX`; `(2, 1, u64::MAX)` and `(u32::MAX, u32::MAX, 2)`
+  are `Overflow`; a report record whose product overflows is `RebillOverflow
+  {arm}` for `aged` and for `fresh`. Pure arithmetic, so `always`.
+Fault/timing angle: None.
+Required faults and enabling state: Inputs whose product exceeds `u64`, inside
+  the canonical safe range field by field.
+Confidence: high - [evidence](evidence/rebill-total-checked-multiplication.md).
+  Ran the cited tests at HEAD; read `total`
+  (`crates/eval-core/src/campaign.rs:125`) and `check_rebill`
+  (`crates/eval-core/src/report.rs:378`).
+Existing check: `crates/eval-core/src/campaign.rs:125`;
+  `crates/eval-core/src/report.rs:378`; tests above.
+Impact: A wrapped cost would under-report memory-arm cost by an arbitrary
+  amount.
+Open questions: None.
+
+### rebill-recorded-and-never-dropped
+
+Type: safety
+Reachability: test-only - `crates/eval-core/tests/` integration tests over the
+  sans-I/O crate, and the `eval_runner` example, whose zero re-bills
+  `crates/daemon/tests/eval_campaign.rs` parses and asserts; the out-of-tree
+  runner (#1007) is the intended producer of non-zero re-bills
+Status: active
+Exercised: yes -
+  `crates/eval-core/tests/report.rs::a_report_records_the_rebill_per_paired_arm_and_never_drops_it`,
+  `crates/eval-core/tests/report.rs::a_report_refuses_missing_blocks_forbidden_claims_and_what_it_did_not_derive`,
+  `crates/eval-core/tests/manifest.rs::fixture_digests_are_frozen`,
+  `crates/eval-core/tests/manifest.rs::required_fields_are_sorted_and_equal_the_struct_field_set`
+Guarantee: Each paired arm's `PrefixRebill` is a required record on the Suite B
+  report, outside the manifest and its digest, and a report document without it
+  is refused by name rather than parsed as zero cost.
+Check: `always` - `parse_report` of a document without the `prefix_rebill` key
+  is `PrefixRebillMissing` under a `memory_capture: on` family and under the
+  fixture family; a key set other than `aged`, `fresh` is `RebillArmsNotPaired`;
+  zeros for both arms parse; `REQUIRED_FIELDS` keeps 30 entries and the manifest
+  fixture digests are unchanged. Must hold on every parse, so `always`.
+Fault/timing angle: None.
+Required faults and enabling state: A report document with `prefix_rebill`
+  removed under a capture-on family; a key set other than `aged`, `fresh`.
+Confidence: high - [evidence](evidence/rebill-recorded-and-never-dropped.md).
+  Ran the cited tests at HEAD; read `parse_report`
+  (`crates/eval-core/src/report.rs:1041-1056`), which checks the schema literal
+  and then the key before decoding.
+Existing check: `crates/eval-core/src/report.rs:209` (`prefix_rebill`), `:1041`
+  (`parse_report`); `crates/eval-core/src/manifest.rs:22` (`REQUIRED_FIELDS`);
+  tests above.
+Impact: A silently absent re-bill reads as zero cost and the memory arm looks
+  cheaper than it is.
+Open questions: None.
+
 ## Relationship map
 
 - `flt-shrink-preserves-precise-failure-predicate` depends on
@@ -1048,3 +1472,24 @@ Open questions:
   and the live slice inherits `rid-live-runs-labeled-nondeterministic-pass-k`.
   Those two ids have executed checks listed in [`README.md`](README.md) and no
   record in this catalog yet.
+- `cap-family-digest-separates-declarations` rides on the freeze check every
+  family edit meets; `cap-capture-on-requires-frozen-family` tightens the
+  `FamilyNotRecorded` refusal so a capture-on run cannot skip that check, and
+  `cap-config-and-family-declaration-agree` holds the run's copy to the
+  family's, whose spelling `cap-declaration-canonical-and-total` closes.
+- `wk-ledger-pool-disjoint-from-own-task-writes` attributes writes through
+  `wk-key-is-task-arm-and-lineage-invariant` and
+  `wk-excludes-names-own-task-only`, after the sample ledger's own order, key,
+  and lineage checks pass; the `write_key` scheme it keys by is part of the
+  capture declaration.
+- `ceil-arm-leaves-claim-class-unchanged` keeps
+  `mtr-generated-world-claims-phase1-only` and the report's paired-marginal
+  and run-gate checks as they were; `ceil-declaration-kind-task-relation`
+  fixes what each declared ceiling bounds.
+- `rebill-recorded-and-never-dropped` sits on the report, outside the manifest
+  field set and digest, and `rebill-total-checked-multiplication` is the
+  arithmetic it validates; neither touches the per-task budgets' censor order.
+- The parent specification (#1119) also names the existing behaviour these
+  records extend (its Part A: the `fam-*`, `led-*`, `clm-*`, `arm-*`, `man-*`,
+  and `use-*` records and `rid-run-id-covers-config-canonically`). They are
+  documented there; adding them here is an owner decision.

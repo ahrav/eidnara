@@ -104,6 +104,32 @@ impl TaskBudgets {
     }
 }
 
+/// The prefix tokens an arm's accepted memory writes force every live
+/// session on the project to re-bill: each accepted write hard-folds every
+/// open session, and each fold re-bills that session's frozen prefix. The
+/// runner measures the three counts; a non-memory arm records zeros.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrefixRebill {
+    /// Memory writes admitted during the arm's attempt.
+    pub accepted_writes: u32,
+    /// Sessions open on the project at acceptance, the writer's included.
+    pub live_sessions: u32,
+    /// Prefix tokens one hard fold re-bills per session.
+    pub frozen_prefix_tokens: u64,
+}
+
+impl PrefixRebill {
+    /// The exact product of the three counts; `Overflow` when it leaves
+    /// `u64`.
+    pub fn total(self) -> Result<u64, SampleError> {
+        u64::from(self.accepted_writes)
+            .checked_mul(u64::from(self.live_sessions))
+            .and_then(|folds| folds.checked_mul(self.frozen_prefix_tokens))
+            .ok_or(SampleError::Overflow)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Approval {
