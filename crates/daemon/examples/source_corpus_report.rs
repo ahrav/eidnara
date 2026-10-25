@@ -392,7 +392,8 @@ fn shapes(session: &Session) -> BTreeMap<&'static str, Vec<OutputShape>> {
                             .into_iter()
                             .flatten()
                             .map(|item| ResultBlock {
-                                kind: match item["text"].as_str().filter(|_| item["type"] == "text")
+                                kind: match (item["type"] == "text")
+                                    .then(|| item["text"].as_str().unwrap_or_default())
                                 {
                                     Some(text) => ResultBlockKind::Text {
                                         text: text.to_owned(),
@@ -464,12 +465,13 @@ fn shape_section(out: &mut String, session: &Session) {
         for shape in OutputShape::ALL {
             let k = shapes.iter().filter(|&&found| found == shape).count();
             let (lower, upper) = exact_interval(k, shapes.len());
-            // An OpenCode tool output is one string; its non-text content is a separate part.
+            // The OpenCode arm reads `output` and `error` only; the corpus tool parts carry no
+            // `attachments`, the field the codec decodes into media blocks.
             let structural = session.harness == Harness::OpenCode
                 && shape == OutputShape::NonTextBlocks
                 && kind == "tool";
             let note = if structural {
-                " (zero by construction: an OpenCode tool output is text)"
+                " (zero by construction: the corpus OpenCode tool parts carry no attachments)"
             } else {
                 ""
             };
@@ -514,11 +516,11 @@ fn question_set(out: &mut String) -> bool {
         .expect("C5.V1 holds the wave-1 bash result");
     // Authored from the full output: its second line reports the failure and names the cause.
     let cause = "billing-worker: error: connection refused (10.4.2.17:5433)";
-    assert_eq!(output.lines().nth(1), Some(cause), "C5.V1 output changed");
     let output = ToolOutput::bare(OutputKind::Text {
         text: output.to_owned(),
     });
     let digest = output_outcome(&output);
+    // The cause line reports the failure, so its presence answers Q1 and Q2 together.
     let answered = digest.contains(&format!("\"{cause}\""));
     let answers = if answered {
         "answerable"
@@ -646,9 +648,10 @@ fn main() -> ExitCode {
     let _ = writeln!(out, "# Source corpus measurement report\n");
     let _ = writeln!(
         out,
-        "Estimand: every figure is a population fact about the frozen corpus \
+        "Estimand: every count is a population fact about the frozen corpus \
          (crates/daemon/testdata/corpus/sessions), computed exhaustively; none estimates real \
-         sessions. No figure is compared to a threshold. The replay offers every record, the \
+         sessions. The output-shape intervals alone model the scripted-mix process (see that \
+         section). No figure is compared to a threshold. The replay offers every record, the \
          final assistant reply included, which live capture never offers; live reconciliation \
          (the corpus README) counts one unit fewer per session.\n"
     );

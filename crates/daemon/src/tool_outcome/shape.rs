@@ -178,24 +178,38 @@ mod tests {
         }
     }
 
-    /// Whether `source` names the classifier or its shape through any path or import form.
+    /// Whether `source` names the classifier or its shape through any path, alias, or import form.
     fn names_the_classifier(source: &str) -> bool {
         [
             "OutputShape",
             "tool_outcome::shape",
-            "shape::classify",
-            "shape::{",
-            "shape::*",
+            "self::shape",
+            "super::shape",
+            "shape::",
+            "::shape as ",
         ]
         .iter()
         .any(|needle| source.contains(needle))
-            || source.match_indices("tool_outcome::{").any(|(start, _)| {
-                let group = &source[start..];
-                let group = &group[..group.find('}').unwrap_or(group.len())];
-                group
-                    .split(|byte: char| !byte.is_alphanumeric() && byte != '_')
-                    .any(|word| word == "shape")
-            })
+            || source
+                .match_indices("tool_outcome::{")
+                .any(|(start, needle)| {
+                    let group = &source[start + needle.len()..];
+                    let mut depth = 1_usize;
+                    let end = group
+                        .char_indices()
+                        .find(|&(_, found)| {
+                            match found {
+                                '{' => depth += 1,
+                                '}' => depth -= 1,
+                                _ => {}
+                            }
+                            depth == 0
+                        })
+                        .map_or(group.len(), |(end, _)| end);
+                    group[..end]
+                        .split(|found: char| !found.is_alphanumeric() && found != '_')
+                        .any(|word| word == "shape")
+                })
     }
 
     /// The scan flags every path and import form that reaches the classifier, and passes the
@@ -208,6 +222,9 @@ mod tests {
             "use crate::tool_outcome::{\n    ToolBlock,\n    shape::{OutputShape, classify},\n};",
             "let shape = crate::tool_outcome::shape::classify(&text);",
             "use self::shape::*;",
+            "use super::shape as s;",
+            "pub use self::shape as output_shape;",
+            "use crate::tool_outcome::{a::{b}, shape};",
             "if matches!(found, OutputShape::UnifiedDiff) {}",
         ] {
             assert!(names_the_classifier(reaching), "{reaching}");
