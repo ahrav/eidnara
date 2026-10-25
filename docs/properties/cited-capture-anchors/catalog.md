@@ -456,11 +456,11 @@ Reachability: explicit-config-only - the wait runs only with source and memory c
 Status: active - activated by U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136))
 Exercised: yes - `a_running_entry_waits_for_its_end_or_its_budget_deadline` releases a waiter exactly at `accepted_at + 5 s`; `on_the_paused_clock_the_wait_is_zero_when_settled_and_ends_exactly_at_the_deadline` holds a real submit pending at the deadline minus 1 ms and releases it exactly at the deadline on the paused tokio clock; `a_publish_past_its_budget_releases_the_submit_at_the_deadline` does so on the real clock; `a_submit_during_the_publish_waits_outside_the_gate_and_then_cites` takes the capture commit gate from the test while the submit waits
 Guarantee: With source capture enabled, the submit path proceeds to publish within `accepted_at + 5 s` plus one blocking-pool scheduling slack, whatever the source job does, and never holds the capture commit gate while waiting.
-Check: `always` - the wait returns within the bound measured from the record's `accepted_at`, the bound being `CAPTURE_BUDGET` (`crates/daemon/src/source_capture.rs:41`), which also seeds the job's `EvalBudget` from the same instant in `into_job` (`:710`); a submit observes every distinct job session's entry under one lock, and one publication slot means at most one of them is `Running`, so the waits end by that entry's deadline; the commit gate is acquired only after the waits return, in the blocking hop, and the job records its end after releasing the gate
+Check: `always` - the wait returns within the bound measured from the record's `accepted_at`, the bound being `CAPTURE_BUDGET` (`crates/daemon/src/source_capture.rs:41`), which also seeds the job's `EvalBudget` from the same instant in `into_job` (`:708`); a submit observes every distinct job session's entry under one lock, and one publication slot means at most one of them is `Running`, so the waits end by that entry's deadline; the commit gate is acquired only after the waits return, in the blocking hop, and the job records its end after releasing the gate
 Fault/timing angle: a source job that stalls past its budget
 Required faults and enabling state: a parked source job under a paused tokio clock; a parked job with a real clock
-Confidence: high - [evidence](evidence/p2-new-settlement-wait-is-bounded-and-gate-free.md). Read `settle` at `crates/daemon/src/source_capture/settlement.rs:204` and `capture_settlements` at `crates/daemon/src/memory_capture/native.rs:124`
-Existing check: `crates/daemon/src/source_capture/settlement.rs:269`; `crates/daemon/src/source_capture_tests.rs:4008`, `:4093`, `:4205`; `crates/daemon/src/source_capture/settlement.rs:450` (sessions observed together) (unaudited)
+Confidence: high - [evidence](evidence/p2-new-settlement-wait-is-bounded-and-gate-free.md). Read `settle` at `crates/daemon/src/source_capture/settlement.rs:272` and `capture_settlements` at `crates/daemon/src/memory_capture/native.rs:124`
+Existing check: `crates/daemon/src/source_capture/settlement.rs:340`; `crates/daemon/src/source_capture_tests.rs:4008`, `:4093`, `:4205`; `crates/daemon/src/source_capture/settlement.rs:518` (sessions observed together), `:556` (shared waiter channel), `:586` (a waiter reads the write after its observation) (unaudited)
 Impact: the native lease is consumed by waits, or the daemon deadlocks on the capture gate
 Open questions: None.
 
@@ -475,7 +475,7 @@ Check: `always` - at the instant the publish envelope opens for a job, the recor
 Fault/timing angle: a slow source job and a fast harness submit, including a submit on another session whose lease carries the job
 Required faults and enabling state: a parked source job and a submit inside its window; a second session bound to the same project
 Confidence: high - [evidence](evidence/p2-new-lookup-runs-only-after-settlement.md). Read the wait at `crates/daemon/src/memory_capture/native.rs:394`, before `kernel_routes::blocking`, and `settlement_key` at `crates/daemon/src/memory_capture/cite.rs:119`
-Existing check: `crates/daemon/src/source_capture_tests.rs:4093`, `:4158`, `:4483`; `crates/daemon/src/source_capture/settlement.rs:241`, `:393`, `:432` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:4093`, `:4158`, `:4483`; `crates/daemon/src/source_capture/settlement.rs:312`, `:461`, `:500`, `:598`, `:886`, `:895` (unaudited)
 Impact: avoidable `descriptor_not_found` misses that hide a race as a missing source
 Open questions: None.
 
@@ -489,8 +489,8 @@ Guarantee: Every capture decision carries exactly one `citation` value from `cit
 Check: `always` - for every capture decision, `(no citation event) == (citation != "cited")` and `(anchor_id IS NULL) == (anchor == "head_unavailable")`; consent off gives `source_capture_off` with no lookup, an empty lookup for a hashed id gives `source_id_unjoinable`, an empty lookup after a refused, deadlined, or still-running publish gives `publish_budget_expired`, and any other empty lookup gives `descriptor_not_found`
 Fault/timing angle: a source publish refused or past its budget at submit time
 Required faults and enabling state: source capture off; a hashed source id; an unpublished message; a plain and an unborn root; a parked source job; a refused handoff; a 33-unit window
-Confidence: high - [evidence](evidence/p2-new-miss-reason-matches-outcome.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:260`, `is_hashed_source_id` at `:132`, and `settle` at `crates/daemon/src/source_capture/settlement.rs:204`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3646`, `:4205`, `:4259`, `:4483`; `crates/daemon/src/memory_capture/cite.rs:439`; `crates/daemon/src/memory_capture.rs:1587`; `crates/daemon/src/source_capture/settlement.rs:241` (unaudited)
+Confidence: high - [evidence](evidence/p2-new-miss-reason-matches-outcome.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:260`, `is_hashed_source_id` at `:132`, and `settle` at `crates/daemon/src/source_capture/settlement.rs:272`
+Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3646`, `:4205`, `:4259`, `:4483`; `crates/daemon/src/memory_capture/cite.rs:439`; `crates/daemon/src/memory_capture.rs:1587`; `crates/daemon/src/source_capture/settlement.rs:312` (unaudited)
 Impact: revalidation cannot tell "never captured" from "captured late" from "lookup failed"
 Open questions: None.
 
@@ -504,7 +504,7 @@ Guarantee: Within one daemon process, each of the seven capture-decision counter
 Check: `always` - after each publish settles, `counter[reason] == committed(reason)` in this process; the closure records the reasons, and `record_capture_decisions` adds them only after `commit_before` returns a receipt that was not replayed, so `committed <= counter <= attempted` holds under loss per METHOD effect accounting
 Fault/timing angle: a publish that rolls back after its reasons were computed; a replayed receipt
 Required faults and enabling state: a replayed publish; a refused commit
-Confidence: high - [evidence](evidence/p2-new-miss-counters-track-rationale.md). Read `record_capture_decisions` at `crates/daemon/src/source_capture.rs:661` and its call in `CaptureWork::publish`
+Confidence: high - [evidence](evidence/p2-new-miss-counters-track-rationale.md). Read `record_capture_decisions` at `crates/daemon/src/source_capture.rs:659` and its call in `CaptureWork::publish`
 Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3646`, `:3822`; `crates/host-runtime/src/control.rs:1960` for the wire allowlist (unaudited)
 Impact: operators tune the budget on numbers that count failures as misses
 Open questions: None.
