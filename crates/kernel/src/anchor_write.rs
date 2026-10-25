@@ -19,7 +19,7 @@ use super::anchor::{
 use super::applicability::anchor_row_exceeds_bounds;
 use super::envelope::{Envelope, ObjectRow, PendingChange};
 use super::object_write::{insert_registry, map_write_error};
-use super::redaction::{is_clean_identity, payload_has_secret};
+use super::redaction::is_clean_identity;
 use super::slice::require_live;
 use super::{CachedSql, KernelError, Sensitivity};
 
@@ -111,6 +111,19 @@ impl AnchorValue {
         row
     }
 
+    fn captures(&self) -> &[AnchorCapture] {
+        match self {
+            Self::ReachableFrom { captures, .. } | Self::ReachableBetween { captures, .. } => {
+                captures
+            }
+            Self::Exact { .. }
+            | Self::DeploymentRevision { .. }
+            | Self::ConfigRevision { .. }
+            | Self::PlatformVersion { .. }
+            | Self::WallClockInterval { .. } => &[],
+        }
+    }
+
     /// Whether a capture's `commit_oid` is outside this value's anchored oids.
     fn has_unanchored_capture(&self) -> bool {
         match self {
@@ -191,6 +204,24 @@ fn same_captures(requested: &[AnchorCapture], stored: &BTreeMap<String, AnchorCa
             .all(|capture| stored.get(&capture.commit_oid) == Some(capture))
 }
 
+/// The scanner checks each present field value before JSON encoding adds
+/// escape sequences or `null` placeholders.
+fn capture_holds_secret(capture: &AnchorCapture) -> bool {
+    let AnchorCapture {
+        commit_oid,
+        tree_oid,
+        patch_id,
+        changed_paths,
+    } = capture;
+    let holds = |text: &str| !is_clean_identity(text);
+    holds(commit_oid)
+        || tree_oid.as_deref().is_some_and(holds)
+        || patch_id
+            .as_ref()
+            .is_some_and(|patch| holds(&patch.algorithm) || holds(&patch.value))
+        || changed_paths.iter().any(|path| holds(path))
+}
+
 /// Complete input for inserting one anchor and its object identity. The
 /// registry fields match [`crate::DecisionSpec`]'s.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,8 +274,10 @@ pub enum AnchorValidationError {
     /// resolution ladder reads captures by anchored oid only.
     #[error("anchor capture names a commit the anchor does not name")]
     UnanchoredCapture,
-    /// A value column or the capture payload holds a detected secret, or the
-    /// scanner could not read it, as for a value above its input bound.
+    /// A value column or a string field of an [`AnchorCapture`] holds a
+    /// detected secret, or the scanner could not read that column or field. A
+    /// value column or capture field longer than `MAX_REDACTABLE_BYTES`
+    /// produces this error.
     #[error("anchor value holds a detected secret or could not be scanned")]
     SecretValue,
 }
@@ -296,10 +329,7 @@ pub fn validate_anchor(spec: &AnchorSpec) -> Result<AnchorRowSpec, AnchorValidat
         .into_iter()
         .flatten()
         .any(|value| !is_clean_identity(value))
-        || row
-            .payload
-            .as_deref()
-            .is_some_and(|payload| payload_has_secret(payload).unwrap_or(true))
+        || spec.value.captures().iter().any(capture_holds_secret)
     {
         return Err(AnchorValidationError::SecretValue);
     }

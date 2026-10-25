@@ -171,16 +171,16 @@ Open questions: None. The source's question (daemon counter or oracle-side class
 ### il-exit-code-only-for-opencode-bash
 
 Type: safety
-Reachability: explicit-config-only - `to.rs:21` `opencode` and `to.rs:59` `pi` have production callers only in the capture adapters (`hs.rs:350`, `:432`); the record enters a capture unit's request digest.
+Reachability: explicit-config-only - `to.rs:23` `opencode` and `to.rs:61` `pi` have production callers only in the capture adapters (`hs.rs:350`, `:432`); the record enters a capture unit's request digest.
 Status: active
 Exercised: yes - `tv-tests:145` `exit_codes_come_only_from_opencode_bash_integers` runs every case of `crates/daemon/testdata/opencode-tool-outcome-trace.json` (OpenCode 1.19.0) and the string, float, `read`, and Pi cases; `tv-tests:17` `each_consumer_keeps_its_name_rule` holds `Bash` and every other spelling to `None`; `hs-tests:3619` `opencode_tool_outcomes_follow_the_pinned_trace`; `sc-tests:224-227` reads `exit_code` through the capture path.
 Guarantee: `ToolOutcome.exit_code` is `Some(n)` only when the record is an OpenCode `tool` part whose `tool` equals `"bash"` exactly and whose `state.metadata.exit` is a JSON integer; every Pi record and every other OpenCode tool leaves it `None`.
-Check: `always` - `to.rs:31` calls `tool_vocabulary::exit_code(Harness::OpenCode, tool_name, metadata)`, which matches `EXIT_CODE_TOOL` exactly and reads `exit` with `as_i64` (`tv.rs:200-207`, the name at `tv.rs:35`); `to.rs:72` sets `exit_code: None` for Pi. `always` because the functions are pure over one record.
+Check: `always` - `to.rs:33` calls `tool_vocabulary::exit_code(Harness::OpenCode, tool_name, metadata)`, which matches `EXIT_CODE_TOOL` exactly and reads `exit` with `as_i64` (`tv.rs:200-207`, the name at `tv.rs:35`); `to.rs:74` sets `exit_code: None` for Pi. `always` because the functions are pure over one record.
 Fault/timing angle: none.
 Required faults and enabling state: a `bash` part with an integer `exit`; with a null, string, or float `exit`; a non-`bash` part carrying `exit`.
 Confidence: high - [evidence](evidence/il-exit-code-only-for-opencode-bash.md). Code and tests read; the frozen OpenCode 1.18.22 session's four `bash` parts carry `exit` 0 three times and `exit: null` once.
 Existing check: `tv-tests:17`, `:145`; `hs-tests:3619`; `sc-tests:224`; unaudited.
-Impact: an exit code attributed to a tool whose `exit` means something else would enter the frozen request digest. The digest grammar's `[; exit=N]` (#1066 D9) is still not emitted (`to.rs:156-176`).
+Impact: an exit code attributed to a tool whose `exit` means something else would enter the frozen request digest. The digest grammar's `[; exit=N]` (#1066 D9) is still not emitted (`to.rs:158-178`).
 Open questions: None. The source asked whether OpenCode 1.18.22 writes `metadata.exit` for `bash`; the frozen session (`crates/daemon/testdata/corpus/sessions/opencode-1.18.22/mix.json`) shows it does.
 
 ### il-truncated-flag-read-per-harness
@@ -190,7 +190,7 @@ Reachability: explicit-config-only - same callers as the record above.
 Status: active
 Exercised: partial - `tv-tests:185` `truncation_flags_are_read_from_each_harness_field` reads both paths, a non-boolean value, and a missing flag on synthetic records; `hs-tests:3619` covers the OpenCode trace. No corpus session holds a Pi `details.truncation.truncated` value: none of the frozen Pi session's thirteen tool results (twelve captured; the image-bearing one is refused) has the flag.
 Guarantee: `ToolOutcome.truncated` is read only as the boolean `state.metadata.truncated` on an OpenCode `tool` part and only as the boolean `details.truncation.truncated` on a Pi `toolResult`; any other shape leaves it unset.
-Check: `always` - `to.rs:37` and `to.rs:71` call `tool_vocabulary::truncated_flag`, which reads the pointer `/metadata/truncated` under `state` or `/details/truncation/truncated` under the message with `as_bool` (`tv.rs:212-218`). `always` because the functions are pure over one record.
+Check: `always` - `to.rs:39` and `to.rs:73` call `tool_vocabulary::truncated_flag`, which reads the pointer `/metadata/truncated` under `state` or `/details/truncation/truncated` under the message with `as_bool` (`tv.rs:212-218`). `always` because the functions are pure over one record.
 Fault/timing angle: none.
 Required faults and enabling state: an OpenCode `bash` part with `truncated: true`; a Pi `bash` `toolResult` with `details.truncation.truncated: true`; a non-boolean value at either path.
 Confidence: high - [evidence](evidence/il-truncated-flag-read-per-harness.md). Code read; the Pi side has no harness-produced fixture.
@@ -234,7 +234,7 @@ Open questions:
 ### il-tool-name-matching-differs-across-consumers
 
 Type: safety
-Reachability: explicit-config-only - selection's `classify` (`sel.rs:645`) and tier lookup (`sel.rs:749-755`) and the injection read-back (`injection.rs:435`) run only on the fold path (see Reachability classes); `exit_code` (`to.rs:31`) is capture-only. The source labelled this record default-production.
+Reachability: explicit-config-only - selection's `classify` (`sel.rs:645`) and tier lookup (`sel.rs:749-755`) and the injection read-back (`injection.rs:435`) run only on the fold path (see Reachability classes); `exit_code` (`to.rs:33`) is capture-only. The source labelled this record default-production.
 Status: active
 Exercised: yes - `tv-tests:17` `each_consumer_keeps_its_name_rule` pins `Edit`, `mcp_edit`, `MCP_TodoWrite`, `Bash`, `MCP_READ`, `mcp_mcp_edit`, and every tabled name at each consumer; `tv-tests:257` holds every tabled name under any ASCII case and one `mcp_` prefix.
 Guarantee: Three name rules apply: selection evaluates the name lowercased with one leading `mcp_` removed (`tv.rs:78-84` `normalize`, applied in `classify` at `tv.rs:107` and `tier` at `tv.rs:137`); the injection read-back compares the raw name ignoring ASCII case (`tv.rs:156-158`); `exit_code` compares the raw name exactly (`tv.rs:202`). The summary formatter shows the raw name and matches nothing (`history_summarizer_chunk.rs:1290-1302`).
@@ -294,7 +294,7 @@ Open questions: None.
 ### il-tool-summary-description-precedes-key-arg
 
 Type: safety
-Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1254` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:251`, `:270`) at `history_summarizer_chunk.rs:1259` and `boundary.rs:1867`.
+Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1254` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:254`, `:273`) at `history_summarizer_chunk.rs:1259` and `boundary.rs:1867`.
 Status: active
 Exercised: partial - `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:19641` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:19927-19932`, the input at `lib.rs:26292`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. No test gives one input both a description and a key argument, so the precedence between the first two arms is not asserted.
 Guarantee: A non-empty string `description` renders `TC: {description}`; otherwise `extract_key_arg` supplies the argument, cut to 60 scalar values plus `…` for a path-like key, and renders `TC: {name}({key_arg})`; otherwise `TC: {name}`; the result passes through `normalize_text`.
@@ -407,7 +407,7 @@ Falsifier or legal witness: Falsifier: `selection-golden.json` differs after U4 
 ### il-exit-code-only-for-named-tool-and-harness
 
 Type: safety
-Reachability: explicit-config-only - `exit_code` has one production caller, `to.rs:31`, reached only from the capture adapter (`hs.rs:350`). The source labelled this record default-production; the callers at `41d889ea4` say otherwise.
+Reachability: explicit-config-only - `exit_code` has one production caller, `to.rs:33`, reached only from the capture adapter (`hs.rs:350`). The source labelled this record default-production; the callers at `41d889ea4` say otherwise.
 Status: active
 Exercised: yes - `tv-tests:145`, `tv-tests:17`, `tv-tests:133`.
 Guarantee: `exit_code(harness, name, metadata)` returns `Some` only when the module's table marks the tool as carrying an exit code (`bash`, `tv.rs:35`), the harness is OpenCode, and the integer `state.metadata.exit` is present; every other tool, `Unknown` included, returns `None`; a Pi record always returns `None`.
