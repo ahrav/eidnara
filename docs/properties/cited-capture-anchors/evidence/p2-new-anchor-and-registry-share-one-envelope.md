@@ -24,7 +24,7 @@ An anchor insert followed by a refused decision insert in one closure; a duplica
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/kernel/tests/kernel_anchor_write.rs:388`, `:418`, `:643`; `crates/daemon/tests/claim_sources.rs:1508`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/kernel/tests/kernel_anchor_write.rs:399`, `:429`, `:654`; `crates/daemon/tests/claim_sources.rs:1508`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

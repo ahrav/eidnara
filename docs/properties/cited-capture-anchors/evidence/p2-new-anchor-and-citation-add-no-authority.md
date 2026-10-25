@@ -2,15 +2,15 @@
 
 ## Discovery trigger
 
-Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed obligation. Constraint C2. Owner: the U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135).
+Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed obligation for N6 and constraint C2, activated by the U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135).
 
 ## Evidence trail
 
-Admission classes are fixed at `(ModelInference, AssistantInference)` (`crates/daemon/src/memory_capture.rs:1209`); neither the anchor nor the event citation is an admission input.
+Admission is `(ModelInference, AssistantInference)` for every capture decision (`crates/daemon/src/memory_capture.rs:1286`). The anchor is a parent row and the citation is a decision event; neither is an input to `record_admission`, and the decision row's class stays its own because `decisions.evidence_id` is empty.
 
 ## Failure scenario
 
-A cited decision with higher effective maturity than an uncited sibling.
+A citation that raised maturity would let a model raise its own authority by quoting a captured message.
 
 ## Timing windows and dependencies
 
@@ -18,13 +18,13 @@ None.
 
 ## What a test must construct
 
-One cited and one uncited job in one session, comparing admission rows.
+Four cited decisions and one uncited sibling in one session, compared on admission columns and served visibility (`crates/daemon/src/source_capture_tests.rs:3466`).
 
 ## Investigation log
 
-### Q: Does code for this obligation exist at the branch tip?
+### Q: Do the admission rows differ between cited and uncited decisions?
 
-- Sources examined: the surfaces named in the trail, read at the branch that adds this part.
-- Findings: No. The record stays `proposed` until its owner lands the behavior and the check.
-- Missing evidence: the implementation.
-- Conclusion: unresolved, needs the U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135).
+- Sources examined: `admission_decisions` rows in the end-to-end test.
+- Findings: The distinct set of (source, taint, maturity, effective maturity, elevated support) has one member.
+- Missing evidence: none.
+- Conclusion: resolved with answer.

@@ -665,7 +665,9 @@ lifetime.
 The `context` component MAY also carry a sanitized `metrics.source_capture`
 object describing source capture (Section 7.9), the background publication of
 consented message text, tool results, and configured repository documents as
-Kernel source descriptors. The
+Kernel source descriptors. The block also counts the memory-capture
+decisions each committed capture publish wrote, by citation reason and by
+anchor reason; a replayed publish adds nothing. The
 counters are process-local and start at zero when the daemon starts. The block
 is sanitized field by field: any object survives, a non-object drops the block
 whole, and every field is kept or dropped on its own. Every field is
@@ -684,6 +686,8 @@ text, an identity, a path, a digest, or a project.
 | `publish_ms_last`, `publish_ms_max` | unsigned integer | wall time of the last and the longest publication |
 | `documents_unchanged`, `documents_retired`, `documents_missing`, `documents_not_regular`, `documents_oversize`, `documents_not_utf8`, `documents_unreadable`, `documents_refused` | unsigned integer | configured repository documents a pass read for its prompt block, by outcome: unchanged against the live revision; retired after a verified removal; missing with no live revision; skipped as not a regular file, past a size cap, not UTF-8, or unreadable; and reads a refusal, a deadline, or a failed commit dropped |
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
+| `decisions_cited`, `decisions_source_capture_off`, `decisions_source_id_unjoinable`, `decisions_publish_budget_expired`, `decisions_descriptor_not_found` | unsigned integer | memory-capture decisions committed, by citation reason: cited a captured message; source or memory consent off; a hashed source id that names no descriptor; the source publish missed its budget; no live descriptor of the message |
+| `decisions_anchored`, `decisions_head_unavailable` | unsigned integer | memory-capture decisions committed, by anchor reason: anchored at the frozen checkout HEAD; no readable HEAD |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater

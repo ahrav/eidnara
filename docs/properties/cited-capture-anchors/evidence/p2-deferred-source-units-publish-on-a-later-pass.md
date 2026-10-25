@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-The source-capture memo records `Disposition::Pending { since_ms }` (`crates/daemon/src/source_capture.rs:158`) for a unit that did not publish in its pass. The module documentation states that pending units are offered ahead of units the memo does not know. `crates/daemon/src/source_capture_tests.rs:428` publishes 32 units of a 33-unit window and the deferred unit on the next pass; `:464` publishes a unit pending behind a starting Kernel.
+The source-capture memo records `Disposition::Pending { since_ms }` (`crates/daemon/src/source_capture.rs:165`) for a unit that did not publish in its pass. The module documentation states that pending units are offered ahead of units the memo does not know. `crates/daemon/src/source_capture_tests.rs:428` publishes 32 units of a 33-unit window and the deferred unit on the next pass; `:464` publishes a unit pending behind a starting Kernel.
 
 ## Failure scenario
 

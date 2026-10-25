@@ -3248,3 +3248,539 @@ async fn a_project_keyed_row_beside_the_derived_row_retires_at_the_next_incarnat
         crate::project_docs::sha256_hex(edited.as_bytes())
     );
 }
+
+/// The configuration the citation tests submit capture work under: memory
+/// capture on, and source capture as given.
+fn citing_config(source_capture: bool) -> DaemonConfig {
+    let mut config = capture_config(source_capture);
+    config.memory_auto_capture = true;
+    config
+}
+
+fn bind_pi(handler: &Handler, project: &Path, config: DaemonConfig) {
+    let mut bound = binding_with_harness(project.to_str().unwrap(), "pi", SESSION);
+    bound.config = config;
+    handler.bind_route(test_route(7), bound);
+}
+
+/// Captures `messages` as `(id, text)` user sources and submits one memory per
+/// source quoting `quotes[i]`; returns the submission's state.
+async fn capture_quotes(handler: &Handler, messages: &[(&str, &str)], quotes: &[&str]) -> Value {
+    let request = json!({"method":"memory.capture","session_id":SESSION,"messages":messages.iter().map(|(id, text)| json!({"id":id,"role":"user","text":text})).collect::<Vec<_>>()});
+    assert_eq!(
+        tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+        "accepted"
+    );
+    let next =
+        json!({"method":"memory.capture.next","session_id":SESSION,"model":"custom-native/model"});
+    let work = tool_body(
+        handler
+            .handle_native_capture_next(test_route(7), &next)
+            .await,
+    );
+    assert_eq!(work["state"], "work", "{work}");
+    let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+    let decisions: Vec<Value> = prompt["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| {
+            let text = message["text"].as_str().unwrap();
+            let index = messages.iter().position(|(_, source)| *source == text).unwrap();
+            json!({"message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":quotes[index],"quote":quotes[index]}]})
+        })
+        .collect();
+    let output = json!({"version":1,"decisions":decisions});
+    let submission = json!({"method":"memory.capture.submit","session_id":SESSION,"lease":work["lease"],"model":work["model"],"output":output.to_string()});
+    tool_body(
+        handler
+            .handle_native_capture_submit(test_route(7), &submission)
+            .await,
+    )["state"]
+        .clone()
+}
+
+/// One committed capture decision as the Kernel stores it.
+#[derive(Debug)]
+struct CapturedDecision {
+    decision_id: String,
+    object_id: String,
+    anchor_id: Option<String>,
+    evidence_id: Option<String>,
+    sensitivity: String,
+    rationale: Value,
+    events: Vec<(String, Option<String>)>,
+}
+
+fn kernel_db(dir: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open_with_flags(
+        dir.join("kernel/kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+}
+
+/// Every live capture decision keyed by the message its rationale names.
+fn captured_decisions(dir: &Path) -> BTreeMap<String, CapturedDecision> {
+    let db = kernel_db(dir);
+    let mut statement = db
+        .prepare(
+            "SELECT d.decision_id,d.object_id,d.anchor_id,d.evidence_id,d.sensitivity_class,
+                    d.decision_payload
+             FROM decisions d JOIN object_registry r ON r.object_id=d.object_id
+             WHERE r.source_id='memory_capture' AND d.invalidated_commit_seq IS NULL",
+        )
+        .unwrap();
+    let rows: Vec<CapturedDecision> = statement
+        .query_map([], |row| {
+            let payload: Vec<u8> = row.get(5)?;
+            let payload: Value = serde_json::from_slice(&payload).unwrap();
+            Ok(CapturedDecision {
+                decision_id: row.get(0)?,
+                object_id: row.get(1)?,
+                anchor_id: row.get(2)?,
+                evidence_id: row.get(3)?,
+                sensitivity: row.get(4)?,
+                rationale: serde_json::from_str(payload["rationale"].as_str().unwrap()).unwrap(),
+                events: Vec::new(),
+            })
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    rows.into_iter()
+        .map(|mut decision| {
+            decision.events = db
+                .prepare(
+                    "SELECT event_kind,evidence_id FROM decision_events
+                     WHERE decision_id=?1 ORDER BY event_ordinal",
+                )
+                .unwrap()
+                .query_map([&decision.decision_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            (
+                decision.rationale["message"].as_str().unwrap().to_owned(),
+                decision,
+            )
+        })
+        .collect()
+}
+
+/// The oid of each anchor row, by anchor id.
+fn anchor_oids(dir: &Path) -> BTreeMap<String, String> {
+    kernel_db(dir)
+        .prepare("SELECT anchor_id,reachable_from_oid FROM anchors")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// The evidence id of each live `messages` descriptor, by message id and block index.
+fn message_evidence(store: &KernelStore) -> BTreeMap<(String, usize), String> {
+    live(store, OccurrenceClass::Messages)
+        .iter()
+        .map(|row| {
+            let identity = identity_of(row);
+            let field = |name: &str| {
+                identity
+                    .iter()
+                    .find(|(field, _)| *field == name)
+                    .unwrap()
+                    .1
+                    .to_owned()
+            };
+            (
+                (field("message_id"), field("block_index").parse().unwrap()),
+                row.detail.evidence_id.clone(),
+            )
+        })
+        .collect()
+}
+
+fn counter(handler: &Handler, name: &str) -> u64 {
+    handler.source_capture.report(false, 0)[name]
+        .as_u64()
+        .unwrap()
+}
+
+const CITED_SOURCES: [(&str, &str); 5] = [
+    ("pi-one", "Use port 4321 for staging."),
+    (
+        "pi-four",
+        "The build uses cargo.\nTests run on nextest.\nDeploys go to region us-west-2.\nLogs ship to the collector.",
+    ),
+    ("pi-span", "The cache lives in\nthe shared volume."),
+    (
+        "pi-first",
+        "Retries are capped.\nBackoff doubles each time.",
+    ),
+    ("pi-absent", "The staging host is blue."),
+];
+const CITED_QUOTES: [&str; 5] = [
+    "Use port 4321 for staging.",
+    "Deploys go to region us-west-2.",
+    "lives in\nthe shared",
+    "\nBackoff doubles",
+    "The staging host is blue.",
+];
+
+/// Publishes every source but the last as a Pi window of text items, one
+/// item per `\n`-separated line, and returns the HEAD commit of the project
+/// repository.
+async fn publish_cited_sources(handler: &Handler, project: &Path) -> String {
+    let head = crate::memory_capture::head_fixtures::repository(project, 1).remove(0);
+    let rows: Vec<Value> = CITED_SOURCES[..4]
+        .iter()
+        .enumerate()
+        .map(|(index, (id, text))| {
+            let content: Vec<Value> = text
+                .split('\n')
+                .map(|item| json!({"type":"text","text":item}))
+                .collect();
+            pi_row(
+                id,
+                None,
+                json!({"role":"user","content":content,"timestamp":1_700_000_000_000u64 + index as u64}),
+            )
+        })
+        .collect();
+    bind_pi(handler, project, capture_config(true));
+    pass(handler, pi_request(&rows, "base-1")).await;
+    settle(handler).await;
+    bind_pi(handler, project, citing_config(true));
+    head
+}
+
+/// AC3 (anchor), AC4, AC11, and the counters: four published messages cite
+/// by `block`, `block` in the third of four items, `span`, and `first`; an
+/// unpublished sibling reports `descriptor_not_found`. Every decision of a job
+/// names the job's anchor at the submit-time HEAD, and no admission or class
+/// differs between cited and uncited decisions.
+#[tokio::test]
+async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_head() {
+    let (handler, dir, project) = capture_handler(citing_config(true), true).await;
+    let head = publish_cited_sources(&handler, &project).await;
+    let store = kernel_store(&handler);
+    let evidence = message_evidence(&store);
+    assert_eq!(evidence.len(), 1 + 4 + 2 + 2);
+    assert_eq!(
+        capture_quotes(&handler, &CITED_SOURCES, &CITED_QUOTES).await,
+        "processed"
+    );
+    let decisions = captured_decisions(dir.path());
+    assert_eq!(decisions.len(), 5);
+    let cited = |message: &str, rule: &str, blocks: &[usize]| {
+        let decision = &decisions[message];
+        let expected: Vec<String> = blocks
+            .iter()
+            .map(|block| evidence[&(message.to_owned(), *block)].clone())
+            .collect();
+        assert_eq!(decision.rationale["citation"], "cited", "{message}");
+        assert_eq!(decision.rationale["citation_block"], rule, "{message}");
+        assert_eq!(
+            decision.rationale["citation_blocks"],
+            json!(blocks),
+            "{message}"
+        );
+        assert_eq!(
+            decision.rationale["citation_evidence"],
+            json!(expected),
+            "{message}"
+        );
+        assert_eq!(
+            decision.events,
+            expected
+                .into_iter()
+                .map(|id| (
+                    crate::memory_capture::CITATION_EVENT_KIND.to_owned(),
+                    Some(id)
+                ))
+                .collect::<Vec<_>>(),
+            "{message}"
+        );
+    };
+    cited("pi-one", "block", &[0]);
+    cited("pi-four", "block", &[2]);
+    cited("pi-span", "span", &[0, 1]);
+    cited("pi-first", "first", &[0]);
+    let absent = &decisions["pi-absent"];
+    assert_eq!(absent.rationale["citation"], "descriptor_not_found");
+    assert!(absent.events.is_empty());
+    assert!(absent.rationale.get("citation_evidence").is_none());
+
+    let anchors = anchor_oids(dir.path());
+    assert_eq!(anchors.len(), 5, "one anchor per job");
+    for decision in decisions.values() {
+        assert_eq!(decision.rationale["anchor"], "anchored");
+        assert_eq!(anchors[decision.anchor_id.as_ref().unwrap()], head);
+        assert_eq!(decision.evidence_id, None);
+        assert_eq!(decision.sensitivity, "normal");
+    }
+    let admissions: BTreeSet<(String, String, String, String, i64)> = kernel_db(dir.path())
+        .prepare(
+            "SELECT a.source_class,a.taint_class,a.maturity,a.effective_maturity,a.elevated_support
+             FROM admission_decisions a JOIN object_registry r ON r.object_id=a.subject_object_id
+             WHERE r.source_id='memory_capture' AND r.object_kind='decision'",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(admissions.len(), 1, "{admissions:?}");
+    let (source, taint, ..) = admissions.into_iter().next().unwrap();
+    assert_eq!(
+        (source.as_str(), taint.as_str()),
+        ("model_inference", "assistant_inference")
+    );
+    let object_ids: Vec<&str> = decisions
+        .values()
+        .map(|decision| decision.object_id.as_str())
+        .collect();
+    let served = store
+        .commit(
+            kernel::CommitIntent {
+                producer: "citation-test".into(),
+                operation_key: "served".into(),
+                request_digest: "0".repeat(64),
+                actor: "test".into(),
+                cause: "read".into(),
+            },
+            |envelope| {
+                let rows = envelope.served_rows_for(&object_ids, None)?;
+                let visibility: BTreeSet<String> = rows
+                    .values()
+                    .map(|row| {
+                        format!(
+                            "{:?}/{:?}/{:?}",
+                            row.visibility(Surface::AutoInject),
+                            row.visibility(Surface::ExplicitSearch),
+                            row.object.sensitivity
+                        )
+                    })
+                    .collect();
+                Ok(serde_json::to_string(&visibility).unwrap())
+            },
+        )
+        .unwrap();
+    let visibility: BTreeSet<String> = serde_json::from_str(&served.result).unwrap();
+    assert_eq!(visibility.len(), 1, "{visibility:?}");
+
+    assert_eq!(counter(&handler, "decisions_cited"), 4);
+    assert_eq!(counter(&handler, "decisions_descriptor_not_found"), 1);
+    assert_eq!(counter(&handler, "decisions_anchored"), 5);
+    for name in [
+        "decisions_source_capture_off",
+        "decisions_source_id_unjoinable",
+        "decisions_publish_budget_expired",
+        "decisions_head_unavailable",
+    ] {
+        assert_eq!(counter(&handler, name), 0, "{name}");
+    }
+}
+
+/// AC6, AC7, and the hashed-id reason: with source capture off no lookup
+/// cites; a hashed source id reports `source_id_unjoinable`; a plain
+/// directory and an unborn repository write no anchor and count
+/// `head_unavailable`; a detached HEAD anchors at its commit.
+#[tokio::test]
+async fn misses_carry_one_closed_reason_each_and_the_counters_follow_them() {
+    let hashed = format!("{}:0", "c".repeat(64));
+    for (fixture, source_capture) in [("plain", false), ("unborn", true), ("detached", true)] {
+        let (handler, dir, project) = capture_handler(citing_config(source_capture), true).await;
+        let expected_oid = match fixture {
+            "unborn" => {
+                gix::init(&project).unwrap();
+                None
+            }
+            "detached" => {
+                let first = crate::memory_capture::head_fixtures::repository(&project, 2).remove(0);
+                crate::memory_capture::head_fixtures::detach(&project, &first);
+                Some(first)
+            }
+            _ => None,
+        };
+        bind_pi(&handler, &project, citing_config(source_capture));
+        let sources = [
+            ("native-user-1", "Use port 4321 for staging."),
+            (hashed.as_str(), "Production listens on 8080."),
+        ];
+        let quotes = ["Use port 4321 for staging.", "Production listens on 8080."];
+        assert_eq!(
+            capture_quotes(&handler, &sources, &quotes).await,
+            "processed",
+            "{fixture}"
+        );
+        let decisions = captured_decisions(dir.path());
+        let reason = |message: &str| decisions[message].rationale["citation"].clone();
+        if source_capture {
+            assert_eq!(reason("native-user-1"), "descriptor_not_found", "{fixture}");
+            assert_eq!(reason(&hashed), "source_id_unjoinable", "{fixture}");
+            assert_eq!(counter(&handler, "decisions_source_id_unjoinable"), 1);
+        } else {
+            assert_eq!(reason("native-user-1"), "source_capture_off");
+            assert_eq!(reason(&hashed), "source_capture_off");
+            assert_eq!(counter(&handler, "decisions_source_capture_off"), 2);
+        }
+        for decision in decisions.values() {
+            assert!(decision.events.is_empty(), "{fixture}");
+            match &expected_oid {
+                Some(oid) => {
+                    assert_eq!(decision.rationale["anchor"], "anchored");
+                    assert_eq!(
+                        &anchor_oids(dir.path())[decision.anchor_id.as_ref().unwrap()],
+                        oid
+                    );
+                }
+                None => {
+                    assert_eq!(
+                        decision.rationale["anchor"], "head_unavailable",
+                        "{fixture}"
+                    );
+                    assert_eq!(decision.anchor_id, None);
+                }
+            }
+        }
+        let (anchored, unavailable) = if expected_oid.is_some() {
+            (2, 0)
+        } else {
+            (0, 2)
+        };
+        assert_eq!(
+            counter(&handler, "decisions_anchored"),
+            anchored,
+            "{fixture}"
+        );
+        assert_eq!(
+            counter(&handler, "decisions_head_unavailable"),
+            unavailable,
+            "{fixture}"
+        );
+        if expected_oid.is_none() {
+            assert!(anchor_oids(dir.path()).is_empty(), "{fixture}");
+        }
+    }
+}
+
+/// AC5: an output naming a source outside the batch is refused before any
+/// publish, so no lookup, anchor, or decision runs for it.
+#[tokio::test]
+async fn an_invented_source_id_is_refused_before_any_citation_lookup() {
+    let (handler, dir, project) = capture_handler(citing_config(true), true).await;
+    publish_cited_sources(&handler, &project).await;
+    let request = json!({"method":"memory.capture","session_id":SESSION,"messages":[{"id":"pi-one","role":"user","text":CITED_SOURCES[0].1}]});
+    tool_body(handler.handle_memory_capture(test_route(7), &request).await);
+    let next =
+        json!({"method":"memory.capture.next","session_id":SESSION,"model":"custom-native/model"});
+    let work = tool_body(
+        handler
+            .handle_native_capture_next(test_route(7), &next)
+            .await,
+    );
+    let output = json!({"version":1,"decisions":[{"message_id":"pi-one","memories":[{"category":"CONFIG_VALUES","content":"x","quote":"Use port"}]}]});
+    let submission = json!({"method":"memory.capture.submit","session_id":SESSION,"lease":work["lease"],"model":work["model"],"output":output.to_string()});
+    tool_body(
+        handler
+            .handle_native_capture_submit(test_route(7), &submission)
+            .await,
+    );
+    assert!(captured_decisions(dir.path()).is_empty());
+    assert!(anchor_oids(dir.path()).is_empty());
+    assert_eq!(counter(&handler, "decisions_anchored"), 0);
+}
+
+/// AC12: the cited message's `harness_capture` evidence survives the expiry
+/// sweep past its retention deadline while the citing decision is live, and
+/// retiring it is refused.
+#[tokio::test]
+async fn cited_capture_evidence_survives_expiry_and_refuses_retirement() {
+    let (handler, dir, project) = capture_handler(citing_config(true), true).await;
+    publish_cited_sources(&handler, &project).await;
+    assert_eq!(
+        capture_quotes(&handler, &CITED_SOURCES[..1], &CITED_QUOTES[..1]).await,
+        "processed"
+    );
+    let decisions = captured_decisions(dir.path());
+    let cited = decisions["pi-one"].events[0].1.clone().unwrap();
+    let store = kernel_store(&handler);
+    store.expire_harness_captures(i64::MAX / 2).unwrap();
+    let db = kernel_db(dir.path());
+    let (object_id, live): (String, bool) = db
+        .query_row(
+            "SELECT object_id,invalidated_commit_seq IS NULL FROM evidence_meta WHERE evidence_id=?1",
+            [&cited],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(live, "a cited capture outlives its retention deadline");
+    let refused = store
+        .commit(
+            kernel::CommitIntent {
+                producer: "citation-test".into(),
+                operation_key: "retire".into(),
+                request_digest: "1".repeat(64),
+                actor: "test".into(),
+                cause: "retire".into(),
+            },
+            |envelope| Ok(envelope.retire_evidence(&object_id)?.result_json()),
+        )
+        .unwrap_err();
+    assert_eq!(refused, kernel::KernelError::Conflict);
+}
+
+/// AC13 and the replay clause of the counters: a publish whose completion the
+/// store refuses replays its receipt on the retry, leaving one anchor row per
+/// job, one decision per memory, the same events, and the counters unchanged.
+#[tokio::test]
+async fn a_replayed_publish_adds_no_rows_and_no_counts() {
+    let (handler, dir, project) = capture_handler(citing_config(true), true).await;
+    publish_cited_sources(&handler, &project).await;
+    let store = handler.store().unwrap();
+    store
+        .execute_tag_sql_for_test(
+            "CREATE TRIGGER hold_plans BEFORE UPDATE ON memory_capture_jobs
+             WHEN NEW.commit_seq IS NOT NULL BEGIN SELECT RAISE(ABORT,'held'); END",
+        )
+        .unwrap();
+    assert_eq!(
+        capture_quotes(&handler, &CITED_SOURCES[..2], &CITED_QUOTES[..2]).await,
+        "processed"
+    );
+    let first = format!("{:?}", captured_decisions(dir.path()));
+    let anchors = anchor_oids(dir.path());
+    let cited = counter(&handler, "decisions_cited");
+    assert_eq!(cited, 2);
+    store
+        .execute_tag_sql_for_test(
+            "DROP TRIGGER hold_plans; UPDATE memory_capture_jobs SET retry_at_ms=0",
+        )
+        .unwrap();
+    let next =
+        json!({"method":"memory.capture.next","session_id":SESSION,"model":"custom-native/model"});
+    assert_eq!(
+        tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await
+        )["state"],
+        "ready"
+    );
+    assert_eq!(format!("{:?}", captured_decisions(dir.path())), first);
+    assert_eq!(anchor_oids(dir.path()), anchors);
+    assert_eq!(counter(&handler, "decisions_cited"), cited);
+    assert_eq!(counter(&handler, "decisions_anchored"), 2);
+}

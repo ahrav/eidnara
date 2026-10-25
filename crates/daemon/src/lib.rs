@@ -24771,6 +24771,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(memories.rows.len(), 1);
+        let decision = memories.decisions.values().next().unwrap();
+        assert_eq!(decision.anchor_id, None);
+        let rationale: Value = serde_json::from_str(&decision.payload.rationale).unwrap();
+        assert_eq!(rationale["anchor"], "head_unavailable");
     }
 
     #[tokio::test]

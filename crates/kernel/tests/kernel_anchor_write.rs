@@ -3,16 +3,27 @@
 //! the engine's decoder and shares its envelope with its registry row, and a
 //! refused anchor keeps both tables at their prior rows.
 
+#[path = "support/applicability_fixtures.rs"]
+mod applicability_fixtures;
+#[path = "support/git_fixtures.rs"]
+mod git_fixtures;
+
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use kernel::applicability::MAX_OBJECT_PAYLOAD_BYTES;
+use applicability_fixtures::{candidate, checkout};
+use git_fixtures::{commit_snapshot, init_repo};
+use kernel::applicability::{
+    ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityState, EvalBudget,
+    MAX_OBJECT_PAYLOAD_BYTES,
+};
 use kernel::{
     ANCHOR_INSERT_KIND, AnchorCapture, AnchorCondition, AnchorDecodeError, AnchorKind,
     AnchorRowSpec, AnchorSpec, AnchorValidationError, AnchorValue, CommitIntent, DecisionPayload,
     DecisionSpec, DomainSpec, GitCondition, KernelError, KernelStore, PatchIdCapture, Sensitivity,
     validate_anchor, validate_anchor_row,
 };
+use kernel::{QueryContext, ScopeMatchContext};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
@@ -699,4 +710,75 @@ fn a_duplicate_anchor_id_is_a_conflict_within_and_across_commits() {
     );
     assert!(stored_row(&connection, &same_object.anchor_id).is_none());
     assert_anchor_rows_well_formed(directory.path());
+}
+
+/// A `reachable_from` row written through `insert_anchor` with no capture
+/// payload evaluates `Current` at its commit and at a descendant, and
+/// `Historical` once HEAD moves to a rewrite that drops the commit.
+#[test]
+fn a_written_reachable_from_anchor_holds_through_descendants_and_not_after_a_rewrite() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = init_repo(&directory.path().join("repo"));
+    let base = commit_snapshot(&fixture.repo, "main", &[], &[("a.txt", "a\n")], "base", 1);
+    let anchored = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[base],
+        &[("a.txt", "b\n")],
+        "anchored",
+        2,
+    );
+    let descendant = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[anchored],
+        &[("a.txt", "c\n")],
+        "descendant",
+        3,
+    );
+    let rewritten = commit_snapshot(
+        &fixture.repo,
+        "rewrite",
+        &[base],
+        &[("a.txt", "d\n")],
+        "rewritten",
+        4,
+    );
+    let store = seeded_store(&directory.path().join("kernel"));
+    let spec = spec(
+        "capture",
+        AnchorValue::ReachableFrom {
+            oid: anchored.to_string(),
+            captures: Vec::new(),
+        },
+    );
+    store
+        .commit_before(deadline(), intent("capture"), |envelope| {
+            Ok(envelope.insert_anchor(spec.clone())?.result_json())
+        })
+        .unwrap();
+    let row = stored_row(
+        &read_only(&directory.path().join("kernel")),
+        &spec.anchor_id,
+    )
+    .unwrap();
+    let object = ApplicabilityCandidate {
+        anchor: Some(row),
+        ..candidate("captured-memory")
+    };
+    for (head, state) in [
+        (anchored, ApplicabilityState::Current),
+        (descendant, ApplicabilityState::Current),
+        (rewritten, ApplicabilityState::Historical),
+    ] {
+        let snapshot = checkout(&fixture, head);
+        let batch = ApplicabilityEngine::new().evaluate_batch(
+            &snapshot,
+            &QueryContext::default(),
+            &ScopeMatchContext::new(),
+            std::slice::from_ref(&object),
+            &EvalBudget::unbounded(),
+        );
+        assert_eq!(batch.objects[0].state, state, "HEAD {head}");
+    }
 }
