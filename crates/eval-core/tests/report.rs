@@ -81,6 +81,7 @@ fn family() -> AnalysisFamily {
         trials_k: 3,
         icc_pilot: pilot(),
         transfer_criterion: None,
+        capture: eval_core::CaptureDeclaration::OFF,
     }
 }
 

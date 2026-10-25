@@ -402,6 +402,7 @@ pub fn family(profile: &RunProfile) -> AnalysisFamily {
             required_n_for_margin: pairs,
         },
         transfer_criterion: None,
+        capture: eval_core::CaptureDeclaration::OFF,
     }
 }
 

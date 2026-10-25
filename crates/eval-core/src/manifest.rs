@@ -7,6 +7,7 @@ use context_core::canonical_json::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::capture::{CAPTURE_CONFIG_KEY, CaptureDeclaration};
 use crate::census::{Construction, EvaluatedSurface, Reachability};
 use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::pairs::{RECENCY_BASELINE_VERSION, recency_bound};
@@ -305,6 +306,10 @@ pub enum ManifestError {
     RecencyBaselineMismatch {
         field: &'static str,
     },
+    /// `run_identity.config.capture` failed to decode as a
+    /// `CaptureDeclaration`; the message is the decoder's.
+    MalformedCapture(String),
+    CaptureOnWithoutFrozenFamily,
     Identity(IdentityError),
     Residue(ResidueError),
     NotCanonical(ContractError),
@@ -348,6 +353,11 @@ pub fn is_canonical_decimal(text: &str) -> bool {
     digits(integer)
         && (integer == "0" || !integer.starts_with('0'))
         && fraction.is_none_or(|fraction| digits(fraction) && !fraction.ends_with('0'))
+}
+
+pub fn parse_capture_declaration(value: &Value) -> Result<CaptureDeclaration, ManifestError> {
+    serde_json::from_value(value.clone())
+        .map_err(|error| ManifestError::MalformedCapture(error.to_string()))
 }
 
 pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
@@ -514,6 +524,13 @@ impl Manifest {
                 field: "recency_baseline",
             });
         }
+        if self
+            .capture_declaration()?
+            .is_some_and(|capture| capture.captures())
+            && self.analysis_family_digest.is_none()
+        {
+            return Err(ManifestError::CaptureOnWithoutFrozenFamily);
+        }
         if let Some(baseline) = &self.recency_baseline {
             if baseline.version != RECENCY_BASELINE_VERSION {
                 return Err(ManifestError::RecencyBaselineMismatch { field: "version" });
@@ -533,6 +550,14 @@ impl Manifest {
 
     pub fn to_value(&self) -> Value {
         serde_json::to_value(self).expect("manifest serializes")
+    }
+
+    pub fn capture_declaration(&self) -> Result<Option<CaptureDeclaration>, ManifestError> {
+        self.run_identity
+            .config
+            .get(CAPTURE_CONFIG_KEY)
+            .map(parse_capture_declaration)
+            .transpose()
     }
 
     /// Manifest residue rules keep every field except [`DROPPED_FIELDS`].

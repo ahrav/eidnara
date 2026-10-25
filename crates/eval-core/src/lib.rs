@@ -22,6 +22,7 @@ macro_rules! debug_display {
 
 mod anchor;
 mod campaign;
+mod capture;
 mod cassette;
 mod censoring;
 mod census;
@@ -71,6 +72,7 @@ pub use campaign::{
     SampleLedger, SampleRecord, Scale, SkipReason, TaskBudgets, TaskUsage, Terminal, TerminalRates,
     UnsupportedReason, parse_run_profile,
 };
+pub use capture::{CAPTURE_CONFIG_KEY, CaptureDeclaration, CaptureSwitch, WriteKeyScheme};
 pub use cassette::{
     BACKEND_COVERED_FIELDS, BackendRecord, Boundary, CASSETTE_GENERATOR_VERSION, CASSETTE_SCHEMA,
     COVERED_FIELDS_VERSION, Cassette, CassetteError, CassetteFile, CassetteMiss, Entry, Location,
@@ -151,7 +153,7 @@ pub use manifest::{
     ComponentVersions, Cut, CutOutcome, CutReceipt, DROPPED_FIELDS, ExecutionMode, Ingestion,
     MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError, MemoryReviewerModelCalls,
     REQUIRED_FIELDS, RecencyBaseline, ResourceLimits, RunStatus, TokenizerProfile,
-    is_canonical_decimal, parse_manifest,
+    is_canonical_decimal, parse_capture_declaration, parse_manifest,
 };
 pub use markers::*;
 pub use occurrence::*;
