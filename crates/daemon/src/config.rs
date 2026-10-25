@@ -1302,8 +1302,7 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
                 // The warning names the pointer and an index only: a configured path is the user's own text and stays out of logs.
                 let entries: Option<Vec<&str>> = value
                     .as_array()
-                    .map(|items| items.iter().map(Value::as_str).collect::<Option<_>>())
-                    .unwrap_or(None);
+                    .and_then(|items| items.iter().map(Value::as_str).collect());
                 match entries {
                     None => warnings.push(format!(
                         "ignoring {pointer}: not an array of strings; the default documents are read"
@@ -1377,7 +1376,7 @@ fn literal_chain_model(value: &str) -> Option<&str> {
     (!value.is_empty() && !has_variable_reference(value)).then_some(value)
 }
 
-fn has_variable_reference(text: &str) -> bool {
+pub(crate) fn has_variable_reference(text: &str) -> bool {
     text.contains("{env:") || text.contains("{file:")
 }
 

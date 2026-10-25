@@ -959,7 +959,8 @@ through `metrics.source_capture`. Source capture runs only when
 marked `is_subagent` never captures. The configured repository documents are
 the user-only `project_docs.files` list (default `["ARCHITECTURE.md",
 "STRUCTURE.md"]`): the daemon reads each path beneath the project root for the
-prompt block and, under `source_capture.enabled`, retains it. A project-tier
+prompt block and, under `source_capture.enabled`, retains it; an empty list
+reads no documents. A project-tier
 list is ignored with a warning, and each plugin strips it from the project
 tier. `memory.auto_capture` and
 `memory.auto_promote` gate only model-extracted facts from redacted text.

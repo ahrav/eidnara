@@ -3,7 +3,8 @@
     "contract": [
         "A row's user tier is written as eidnara.jsonc under the user config directory and its project tier as <project>/.eidnara/eidnara.jsonc; an empty object writes an empty document.",
         "expected_files is the effective list: the user tier's admissible list, or the default [\"ARCHITECTURE.md\", \"STRUCTURE.md\"] when the user tier sets none. The key is user-only, so the project tier never changes it.",
-        "expected_project_warning is true when the project tier sets project_docs.files; every loader then reports, exactly once, that it ignored the key from the project tier. A project block that leaves the list unset changes nothing and draws no warning."
+        "expected_project_warning is true when the project tier sets project_docs.files; every loader then reports, exactly once, that it ignored the key from the project tier. A project block that leaves the list unset changes nothing and draws no warning.",
+        "The plugins pass the user tier's list through without admission, so every row's user list is admissible; refused entries are the daemon's alone and are covered by its configuration tests."
     ],
     "rows": [
         {

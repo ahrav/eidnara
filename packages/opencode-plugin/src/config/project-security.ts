@@ -515,7 +515,8 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         }
     }
 
-    // The daemon reads the document list from the user tier only, so the strip removes the block and warns when it sets the list, as the daemon's tier merge does.
+    // The daemon reads the document list from the user tier only, so the strip removes the
+    // block and warns when it sets the list, as the daemon's tier merge does.
     if ("project_docs" in projectRaw) {
         const projectDocs = projectRaw.project_docs;
         delete projectRaw.project_docs;

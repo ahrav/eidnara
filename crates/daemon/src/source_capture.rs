@@ -989,16 +989,16 @@ impl CaptureJob {
     ) -> Result<(Vec<String>, Vec<DocumentStep>), KernelError> {
         let project_id = self.session.project_id.as_str();
         let (_, planned) = store.preview(self.preview_deadline(), |preview| {
-            let mut settled_paths = Vec::new();
+            let mut settled = Vec::new();
             let mut steps = Vec::with_capacity(documents.len());
-            for (path, read) in &documents {
-                let step =
-                    self.plan_document(preview, repository_id, path.as_str(), read.clone())?;
+            for (path, read) in documents {
+                let step = self.plan_document(preview, repository_id, path.as_str(), read)?;
                 if step.settles_lineage() {
-                    settled_paths.push(path.as_str());
+                    settled.push(path);
                 }
                 steps.push(step);
             }
+            let settled_paths: Vec<&str> = settled.iter().map(DocumentPath::as_str).collect();
             let stale = stale_documents(
                 preview,
                 &self.budget,
