@@ -368,3 +368,33 @@ fn the_access_record_round_trips_canonically_and_refuses_unknown_fields() {
     missing.as_object_mut().unwrap().remove("read_counts");
     assert!(serde_json::from_value::<AccessRecord>(missing).is_err());
 }
+
+/// `docs/evaluator.md` is a test input: its `check_disjoint` refusal list
+/// states the run rule `dangling_references_and_attestation_gaps_are_refused_by_name`
+/// pins, under which a write's run is the current run or one in its writer's
+/// lineage.
+#[test]
+fn evaluator_document_holds_each_write_to_its_writers_runs() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/evaluator.md");
+    let doc = std::fs::read_to_string(&path).expect("read docs/evaluator.md");
+    let start = doc
+        .find("**Write key and pool disjointness.**")
+        .expect("a write-key section");
+    let end = start
+        + doc[start..]
+            .find("**Envelope.**")
+            .expect("the write-key section ends at the envelope");
+    let section = doc[start..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        section
+            .contains("a run that is neither this run nor in its writer's lineage (`UnknownRun`"),
+        "the write-key section states the writer-lineage run rule"
+    );
+    assert!(
+        !section.contains("any sample's lineage"),
+        "the write-key section holds a write to its writer's runs only"
+    );
+}

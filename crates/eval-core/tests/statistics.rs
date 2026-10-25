@@ -2120,3 +2120,29 @@ fn evaluator_document_names_the_current_analysis_family_literal() {
         "evaluator document lacks the version {version} history"
     );
 }
+
+#[test]
+fn evaluator_document_orders_the_analyze_checks_as_analyze_runs_them() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/evaluator.md");
+    let doc = std::fs::read_to_string(&path).expect("read docs/evaluator.md");
+    let start = doc
+        .find("**Report.** `analyze(")
+        .expect("a Report paragraph");
+    let end = start + doc[start..].find("\n\n").expect("the paragraph ends");
+    let paragraph = doc[start..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let at = |needle: &str| {
+        paragraph
+            .find(needle)
+            .unwrap_or_else(|| panic!("the Report paragraph lacks {needle:?}"))
+    };
+    let freeze = at("`FamilyNotRecorded`");
+    let capture = at("`CaptureDeclarationMismatch`");
+    let pilot = at("then the pilot's block");
+    assert!(
+        freeze < capture && capture < pilot,
+        "the Report paragraph orders the freeze, capture agreement, and pilot block as `analyze` does"
+    );
+}

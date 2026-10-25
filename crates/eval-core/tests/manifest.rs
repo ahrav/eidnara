@@ -56,7 +56,9 @@ fn fixture_digests_are_frozen() {
 }
 
 /// `docs/evaluator.md` is a test input: its schema literal, digest protocol,
-/// field count, and version history must match the manifest constants.
+/// field count, and version history must match the manifest constants, and
+/// the `analysis_family_digest` row names the refusal `validate` raises for a
+/// capture-on run without a frozen family.
 #[test]
 fn evaluator_document_agrees_with_the_manifest_constants() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/evaluator.md");
@@ -97,6 +99,14 @@ fn evaluator_document_agrees_with_the_manifest_constants() {
     row(&format!(
         "version {version} added the `prefix_then_generate`\nexecution mode"
     ));
+    let digest_row = doc
+        .lines()
+        .find(|line| line.starts_with("| `analysis_family_digest` |"))
+        .expect("an `analysis_family_digest` row");
+    assert!(
+        digest_row.contains("`CaptureOnWithoutFrozenFamily`"),
+        "the `analysis_family_digest` row names the capture-on refusal: {digest_row}"
+    );
 }
 
 #[test]

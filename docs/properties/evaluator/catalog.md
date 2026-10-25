@@ -724,8 +724,8 @@ Impact: An agent could read the runner's files or credentials, reach the
 Open questions:
 - Every mount is read-only inside and `/run` is masked, but the host
   filesystem stays readable and a pathname socket outside `/run` stays
-  connectable; hiding both needs a `pivot_root` into a curated root. (needs
-  human input)
+  connectable; hiding both needs a `pivot_root` into a root built for the run.
+  (needs human input)
 - `$HOME` is read-only inside, not masked: the agent can read the host user's
   files under it (dotfiles, credentials) even though it cannot write them or
   reach the network. A masked home needs its own tmpfs. (needs human input)
@@ -1249,14 +1249,21 @@ Exercised: yes -
   `crates/eval-core/tests/access.rs::an_invalid_ledger_is_refused_before_the_record_is_read`,
   `crates/eval-core/tests/access.rs::the_access_record_round_trips_canonically_and_refuses_unknown_fields`
 Guarantee: Given a validated `SampleLedger` and an `AccessRecord`,
-  `check_disjoint` passes exactly when no recorded read served a sample a write
+  `check_disjoint` passes exactly when the current run id is well formed;
+  every write has a non-blank, unique `write_id`, a non-blank `pool`, a ledger
+  writer, that writer's key, and a run that is the current run or in the
+  writer's lineage; every read names a ledger reader and a recorded write in
+  the same pool; `read_counts` names only ledger samples and equals the
+  recorded reads for every one; and no recorded read served a sample a write
   in its pool under its own task made by the current run or a run in its own
-  lineage, and every reference in the record resolves; a failure names the
-  sample, the read, and the key, or the dangling reference.
+  lineage. An own-task read is refused naming the sample, the read, and the
+  key; every other failure names the input it refuses.
 Check: `always` - a clean record and a write-only record pass; a read of an
   own-task write under the current run, under a run in the reader's lineage, or
-  sequenced before its write is `OwnTaskRead {sample, read, key}`; a write under
-  a run in another sample's lineage is not the reader's; an invalid ledger is
+  sequenced before its write is `OwnTaskRead {sample, read, key}`; a write
+  under a run in its writer's lineage that the reader's lineage lacks is not
+  the reader's; a write under a run outside its writer's lineage is
+  `UnknownRun`, also when its writer reads it; an invalid ledger is
   `Ledger` before the record is read; each dangling or inconsistent input has
   its own variant (`MalformedRun`, `Blank`, `RepeatedWrite`, `UnknownWriter`,
   `KeyDisagreesWithWriter`, `UnknownRun`, `UnknownReader`,
@@ -1267,14 +1274,15 @@ Fault/timing angle: Order-free: sequences are carried for audit and never
   compared, so a read before its write in one pool is refused the same way.
 Required faults and enabling state: Sample `s1` (task t1, Fresh) reads `w7`
   written under `(t1, Aged)` in the same pool; the same write made under a run
-  in `s1.lineage`; a dangling reader, writer, write, and run id; a read count
-  off by one.
+  in `s1.lineage`; a write under a run in another sample's lineage but not its
+  writer's; a dangling reader, writer, write, and run id; a read count off by
+  one.
 Confidence: high -
   [evidence](evidence/wk-ledger-pool-disjoint-from-own-task-writes.md). Ran the
   cited tests at HEAD; read `check_disjoint`
-  (`crates/eval-core/src/access.rs:152-269`); the proof covers the supplied
+  (`crates/eval-core/src/access.rs:153-264`); the proof covers the supplied
   record only.
-Existing check: `crates/eval-core/src/access.rs:152` (`check_disjoint`), `:232`
+Existing check: `crates/eval-core/src/access.rs:153` (`check_disjoint`), `:227`
   (own-run attribution); tests above.
 Impact: A task's own artifacts in its own pool would inflate every memory-arm
   result unseen.

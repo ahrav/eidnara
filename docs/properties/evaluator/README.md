@@ -913,13 +913,14 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   integer refuses.
 - `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
   (`mtr-analysis-family-frozen-before-results`): the frozen digest accepts the
-  unchanged family; an edit to any of nine components (endpoints, families,
-  exclusions, stopping rule, margin, floor, threshold, seed, pilot) is
-  `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
-  below 300, fewer than 40 or more than 10,000 replicates, an empty endpoint
-  list, an endpoint list that is not exactly the three gates
-  (`UnsupportedEndpoints`), and an unknown field refuse; a version-1 document
-  is `SchemaMismatch`, not a shape error; a manifest without a
+  unchanged family; an edit to any of eleven components (endpoints, families,
+  exclusions, stopping rule, margin, floor, threshold, seed, pilot, transfer
+  criterion, capture) is `FamilyChangedAfterResults`, from `check` and from
+  `analyze`; a threshold below 300, fewer than 40 or more than 10,000
+  replicates, an empty endpoint list, an endpoint list that is not exactly the
+  three gates (`UnsupportedEndpoints`), and an unknown field refuse; a
+  version-1 or version-2 document is `SchemaMismatch`, not a shape error; a
+  manifest without a
   recorded digest is `FamilyNotRecorded`, and one with a digest and no recency
   baseline is `InvalidManifest(RecencyBaselineMismatch {recency_baseline})`
   until the baseline is recorded.
@@ -1035,9 +1036,9 @@ Capture declaration, family copy (`crates/eval-core/tests/statistics.rs`,
   (`cap-family-digest-separates-declarations`): manifests differing only in
   `memory_capture` have different run ids, their families different digests,
   and each is `FamilyChangedAfterResults` under the other's family. The
-  post-hoc edit table in
-  `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses` has a
-  `capture`-only edit, and a version-2 family document is `SchemaMismatch`.
+  `capture`-only edit and the version-2 `SchemaMismatch` are in
+  `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
+  above.
 - `the_run_copy_of_the_capture_declaration_must_equal_the_family_copy`
   (`cap-config-and-family-declaration-agree`): five run copies against four
   family declarations; a report exactly when they agree, with absent read as
@@ -1440,8 +1441,9 @@ records in [`catalog.md`](catalog.md)):
   `the_access_record_round_trips_canonically_and_refuses_unknown_fields`
   (`wk-ledger-pool-disjoint-from-own-task-writes`): every `AccessError`
   variant, own-task reads under the current run and under the reader's
-  lineage, a write under another sample's lineage left unattributed, and a
-  read sequenced before its write.
+  lineage, a write under a run in its writer's lineage outside the reader's
+  left unattributed, a write under a run outside its writer's lineage refused
+  as `UnknownRun`, and a read sequenced before its write.
 
 Oracle ceilings and the prefix re-bill on the report
 (`crates/eval-core/tests/report.rs`, #1123 and #1124; records in

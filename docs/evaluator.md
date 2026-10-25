@@ -49,7 +49,7 @@ The 30 required fields, sorted:
 
 | Field | Content |
 | --- | --- |
-| `analysis_family_digest` | The `eval-analysis-family-digest/v1` digest of the frozen analysis family a paired campaign is read under, recorded before its first outcome; `null` for a run that reports no paired statistics. |
+| `analysis_family_digest` | The `eval-analysis-family-digest/v1` digest of the frozen analysis family a paired campaign is read under, recorded before its first outcome; `null` for a run that reports no paired statistics and declares no capture switch `on`; `validate` refuses `null` on a capture-on run (`CaptureOnWithoutFrozenFamily`). |
 | `arm_rates` | Per-arm miss and refusal rates as exact decimal strings. |
 | `attestation` | Tagged: `{"kind": "none"}` or `{"kind": "signed", ...}`. |
 | `claim_boundary` | The `claim-boundary/v1` block with the four exclusions. |
@@ -1142,7 +1142,9 @@ the freeze check and the two pre-outcome blocks below read no pair. It
 checks the freeze (`FrozenFamily::from_manifest` validates the manifest itself
 and reads the recorded digest, so a paired report cannot be authorized
 without the recency baseline its pairs were judged against even on the
-in-memory path; a manifest without a digest is `FamilyNotRecorded`), then the
+in-memory path; a manifest without a digest is `FamilyNotRecorded`), then
+agreement of `config.capture` with `family.capture`
+(`CaptureDeclarationMismatch`, see "Capture declaration"), then the
 pilot's block, then the
 per-arm cassette-miss asymmetry (the gap between the manifest's `aged` and
 `fresh` arms' `miss_rate`, the two arms every pair has; both rates of both arms are
@@ -2008,15 +2010,16 @@ in this order:
 - each write: a blank `write_id` or `pool` (`Blank`), a repeated write id
   (`RepeatedWrite`), a writer outside the ledger (`UnknownWriter`), a key
   that is not its writer's (`KeyDisagreesWithWriter`, since attribution reads
-  the key), and a run that is neither this run nor in any sample's lineage
-  (`UnknownRun`);
+  the key), and a run that is neither this run nor in its writer's lineage
+  (`UnknownRun`, since own-task attribution by run would name the wrong
+  attempt), including a write its own writer reads;
 - each read: a blank `pool` (`Blank`), a reader outside the ledger
   (`UnknownReader`), a write the record lacks (`UnknownWrite`), a pool other
   than its write's (`CrossPoolRead`), and a read by a sample of one of its
   own writes, a write in its pool whose key task is its task, made by this
   run or by a run in that sample's own lineage (`OwnTaskRead {sample, read,
-  key}`); a write made under a run in another sample's lineage belongs to
-  that sample's attempt and passes;
+  key}`); a write made under a run in its writer's lineage that the reader's
+  lineage lacks belongs to the writer's attempt and passes;
 - the attestation: a `read_counts` entry for a sample the ledger lacks
   (`UnknownAttestedSample`), and a count that differs from the reads recorded
   for a sample, or a missing entry (`ReadCountMismatch {sample, attested,
