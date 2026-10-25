@@ -9,8 +9,8 @@ Issue #1105 Part B S2 (R6): the `bash` literal moves into the module's
 
 - `crates/daemon/src/tool_vocabulary.rs:35` `EXIT_CODE_TOOL`; `:200-207`
   `exit_code`.
-- One production caller: `crates/daemon/src/tool_outcome.rs:31`, inside
-  `opencode` (`tool_outcome.rs:21`), whose production caller is the capture
+- One production caller: `crates/daemon/src/tool_outcome.rs:33`, inside
+  `opencode` (`tool_outcome.rs:23`), whose production caller is the capture
   adapter (`crates/daemon/src/harness_sources.rs:350`).
 - The request digest format `source-request.v2` binds the outcome record
   (`harness_sources.rs:600`).

@@ -14,6 +14,8 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
+pub mod shape;
+
 /// The longest exception name the record keeps; a longer one is unknown.
 const MAX_EXCEPTION_NAME_BYTES: usize = 64;
 
@@ -84,7 +86,7 @@ fn is_exception_name(name: &str) -> bool {
 }
 
 /// The summarizer interprets a content list's text blocks as newline-separated output.
-pub(crate) enum OutputText<'a> {
+pub enum OutputText<'a> {
     Text(&'a str),
     Json(String),
     Blocks(&'a [memory_store::ResultBlock]),
@@ -130,7 +132,7 @@ impl OutputText<'_> {
 }
 
 /// The status and output text of a tool result as its wire block holds it, the shape the summarizer reads. An error output variant or a denied execution is `error`. The text is the output variant's text as is, its JSON serialized, the text of its content blocks joined by newlines, or a denial's reason.
-pub(crate) fn from_output(output: &memory_store::ToolOutput) -> (ToolStatus, OutputText<'_>) {
+pub fn from_output(output: &memory_store::ToolOutput) -> (ToolStatus, OutputText<'_>) {
     use memory_store::OutputKind;
     match &output.kind {
         OutputKind::Text { text } => (ToolStatus::Completed, OutputText::Text(text)),
@@ -175,7 +177,8 @@ pub(crate) fn outcome_digest(status: ToolStatus, text: &OutputText<'_>) -> Strin
     digest
 }
 
-pub(crate) fn output_outcome(output: &memory_store::ToolOutput) -> String {
+/// The outcome half of the digest of `output`, read through [`from_output`].
+pub fn output_outcome(output: &memory_store::ToolOutput) -> String {
     let (status, text) = from_output(output);
     outcome_digest(status, &text)
 }

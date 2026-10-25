@@ -334,6 +334,11 @@ fn every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_referen
 
         let connection = read_only(directory.path());
         let row = stored_row(&connection, &anchor_id).expect("anchor row committed");
+        assert_eq!(
+            row,
+            validate_anchor(&spec).unwrap(),
+            "{name}: the stored row is the validated row"
+        );
         let decoded = AnchorCondition::decode(&row).expect("stored anchor decodes");
         assert_eq!(
             decoded, expected,
@@ -548,6 +553,79 @@ fn invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause() {
                     captures: vec![AnchorCapture {
                         changed_paths: vec![SECRET.to_string()],
                         ..capture(0x26)
+                    }],
+                },
+            ),
+            AnchorValidationError::SecretValue,
+        ),
+        (
+            spec(
+                "secret-capture-without-patch-id",
+                AnchorValue::ReachableFrom {
+                    oid: oid(0x27),
+                    captures: vec![AnchorCapture {
+                        patch_id: None,
+                        changed_paths: vec![SECRET.to_string()],
+                        ..capture(0x27)
+                    }],
+                },
+            ),
+            AnchorValidationError::SecretValue,
+        ),
+        (
+            spec(
+                "secret-capture-without-tree",
+                AnchorValue::ReachableBetween {
+                    start_oid: oid(0x28),
+                    end_oid: oid(0x29),
+                    captures: vec![AnchorCapture {
+                        tree_oid: None,
+                        changed_paths: vec!["src/lib.rs".to_string(), SECRET.to_string()],
+                        ..capture(0x29)
+                    }],
+                },
+            ),
+            AnchorValidationError::SecretValue,
+        ),
+        (
+            spec(
+                "secret-tree-oid",
+                AnchorValue::ReachableFrom {
+                    oid: oid(0x2b),
+                    captures: vec![AnchorCapture {
+                        tree_oid: Some(SECRET.to_string()),
+                        patch_id: None,
+                        ..capture(0x2b)
+                    }],
+                },
+            ),
+            AnchorValidationError::SecretValue,
+        ),
+        (
+            spec(
+                "secret-patch-id",
+                AnchorValue::ReachableFrom {
+                    oid: oid(0x2c),
+                    captures: vec![AnchorCapture {
+                        tree_oid: None,
+                        patch_id: Some(PatchIdCapture {
+                            algorithm: "eidnara.patch-id.v1".to_string(),
+                            value: SECRET.to_string(),
+                        }),
+                        ..capture(0x2c)
+                    }],
+                },
+            ),
+            AnchorValidationError::SecretValue,
+        ),
+        (
+            spec(
+                "escaped-secret-capture",
+                AnchorValue::ReachableFrom {
+                    oid: oid(0x2d),
+                    captures: vec![AnchorCapture {
+                        changed_paths: vec!["password\t=hunter2hunter2hunter2".to_string()],
+                        ..capture(0x2d)
                     }],
                 },
             ),

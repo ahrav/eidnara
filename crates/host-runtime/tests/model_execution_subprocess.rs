@@ -206,6 +206,18 @@ fn main() {
             output_flood_stopped_and_redacted,
         ),
         (
+            "pi_quadratic_update_stream_completes_within_the_retained_bound",
+            pi_quadratic_update_stream_completes_within_the_retained_bound,
+        ),
+        (
+            "pi_runaway_update_stream_stopped_by_the_streamed_bound",
+            pi_runaway_update_stream_stopped_by_the_streamed_bound,
+        ),
+        (
+            "pi_oversized_final_answer_refused",
+            pi_oversized_final_answer_refused,
+        ),
+        (
             "timeout_reaps_leader_and_grandchild",
             timeout_reaps_leader_and_grandchild,
         ),
@@ -751,8 +763,7 @@ mod fixture {
         stdout.flush().expect("flush lines");
     }
 
-    fn flood(secret: &str, to_stderr: bool) -> ! {
-        let line = format!("{{\"type\":\"noise\",\"secret\":\"{secret}\"}}\n");
+    fn flood(line: &str, to_stderr: bool) -> ! {
         let stdout = std::io::stdout();
         let stderr = std::io::stderr();
         loop {
@@ -852,11 +863,17 @@ mod fixture {
             sabotage_record(&argv());
         }
         match std::env::var(BEHAVIOR_ENV).as_deref() {
-            Ok("flood_stdout") => {
-                flood(&std::env::var(SECRET_ENV).unwrap_or_default(), false);
+            Ok(behavior @ ("flood_stdout" | "flood_stderr")) => {
+                let secret = std::env::var(SECRET_ENV).unwrap_or_default();
+                let line = format!("{{\"type\":\"noise\",\"secret\":\"{secret}\"}}\n");
+                flood(&line, behavior == "flood_stderr");
             }
-            Ok("flood_stderr") => {
-                flood(&std::env::var(SECRET_ENV).unwrap_or_default(), true);
+            Ok("flood_message_update") => {
+                let secret = std::env::var(SECRET_ENV).unwrap_or_default();
+                let line = format!(
+                    "{{\"type\":\"message_update\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{secret}\"}}]}}}}\n"
+                );
+                flood(&line, false);
             }
             Ok("hang") => hang(),
             Ok("transcript_then_hang") => print_transcript_then_hang(),
@@ -1133,6 +1150,8 @@ fn quick_limits() -> SubprocessLimits {
         termination_grace: Duration::from_secs(2),
         drain_grace: Duration::from_secs(2),
         max_stdout_bytes: 4 * 1024 * 1024,
+        max_streamed_stdout_bytes:
+            host_runtime::model_execution::config::MAX_BACKEND_STREAMED_STDOUT_BYTES,
         max_stderr_bytes: 64 * 1024,
     }
 }
@@ -2426,6 +2445,39 @@ fn malformed_outputs_one_bounded_failure() {
         &terminal,
         "tool execution event in a tool-less run at line 3",
     );
+
+    // Discarded update lines keep their line numbers, and a malformed or unknown line after them is still rejected.
+    let updates = pi_quadratic_lines("abcdef", 2);
+    let mut head = String::new();
+    for line in &updates[..8] {
+        head.push_str(&serde_json::to_string(line).expect("line"));
+        head.push('\n');
+    }
+    for (tail, needle) in [
+        (
+            format!("{{\"type\":\"message_update\",\"note\":\"{LINE_SECRET}\"\n"),
+            "malformed json at line 9",
+        ),
+        (
+            format!("{{\"type\":\"message_update\",\"type\":\"{LINE_SECRET}\"}}\n"),
+            "unknown event type at line 9",
+        ),
+    ] {
+        let setup = RunSetup::new();
+        let path = setup.scratch.path().join("update.ndjson");
+        fs::write(&path, format!("{head}{tail}")).expect("transcript");
+        let backend = pi_backend(
+            &setup,
+            &[(TRANSCRIPT_FILE_ENV, &path.to_string_lossy())],
+            Vec::new(),
+            None,
+        );
+        let (terminal, _) = execute(
+            &backend,
+            request(setup.project.path(), Harness::Pi, "anthropic/m", None),
+        );
+        assert_bounded(&terminal, needle);
+    }
 }
 
 fn output_flood_stopped_and_redacted() {
@@ -2437,6 +2489,8 @@ fn output_flood_stopped_and_redacted() {
             termination_grace: Duration::from_secs(2),
             drain_grace: Duration::from_millis(200),
             max_stdout_bytes: 64 * 1024,
+            max_streamed_stdout_bytes:
+                host_runtime::model_execution::config::MAX_BACKEND_STREAMED_STDOUT_BYTES,
             max_stderr_bytes: 16 * 1024,
         };
         let backend = pi_backend_with_limits(
@@ -2469,6 +2523,171 @@ fn output_flood_stopped_and_redacted() {
     }
 }
 
+/// Repeated partial assistant messages make the stream size quadratic in the answer length for fixed `delta_chars`.
+fn pi_quadratic_lines(answer: &str, delta_chars: usize) -> Vec<serde_json::Value> {
+    let assistant = |text: &str, stop_reason: Option<&str>| {
+        let mut message = serde_json::json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": text}],
+            "api": "bedrock-converse-stream",
+            "provider": "amazon-bedrock",
+            "model": "m",
+        });
+        if let Some(reason) = stop_reason {
+            message["stopReason"] = serde_json::json!(reason);
+        }
+        message
+    };
+    let user = serde_json::json!({"role": "user", "content": [{"type": "text", "text": "prompt"}]});
+    let mut lines = vec![
+        serde_json::json!({"type": "session", "version": 3, "id": "s", "timestamp": "t", "cwd": "/"}),
+        serde_json::json!({"type": "agent_start"}),
+        serde_json::json!({"type": "turn_start"}),
+        serde_json::json!({"type": "message_start", "message": user}),
+        serde_json::json!({"type": "message_end", "message": user}),
+        serde_json::json!({"type": "message_start", "message": {"role": "assistant", "content": []}}),
+    ];
+    let chars: Vec<char> = answer.chars().collect();
+    for end in (delta_chars..=chars.len()).step_by(delta_chars) {
+        let partial: String = chars[..end].iter().collect();
+        let delta: String = chars[end - delta_chars..end].iter().collect();
+        lines.push(serde_json::json!({
+            "type": "message_update",
+            "message": assistant(&partial, None),
+            "assistantMessageEvent": {
+                "type": "text_delta",
+                "contentIndex": 0,
+                "delta": delta,
+                "partial": assistant(&partial, None),
+            },
+        }));
+    }
+    let last = assistant(answer, Some("stop"));
+    lines.push(serde_json::json!({"type": "message_end", "message": last}));
+    lines.push(serde_json::json!({"type": "turn_end", "message": last, "toolResults": []}));
+    lines.push(serde_json::json!({"type": "agent_end", "messages": [user, last]}));
+    lines
+}
+
+fn pi_quadratic_update_stream_completes_within_the_retained_bound() {
+    let answer: String = (0..24_000)
+        .map(|index| char::from(b'a' + (index % 26) as u8))
+        .collect();
+    let lines = pi_quadratic_lines(&answer, 50);
+    let setup = RunSetup::new();
+    let transcript = write_transcript(setup.scratch.path(), "quadratic.ndjson", &lines);
+    let streamed = fs::metadata(&transcript).expect("transcript size").len();
+    let limits = quick_limits();
+    assert!(
+        streamed > 2 * limits.max_stdout_bytes as u64,
+        "the stream must exceed the retained bound: {streamed}"
+    );
+    let backend = pi_backend_with_limits(
+        &setup,
+        &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
+        Vec::new(),
+        None,
+        limits,
+    );
+    let (terminal, events) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "anthropic/m", None),
+    );
+    assert!(
+        matches!(
+            terminal,
+            BackendTerminal::Completed {
+                finish_reason: FinishReason::Completed
+            }
+        ),
+        "{terminal:?}"
+    );
+    assert!(
+        events.iter().any(
+            |event| matches!(event, BackendEvent::AssistantText { text, .. } if *text == answer)
+        ),
+        "the final answer is published whole"
+    );
+}
+
+fn pi_runaway_update_stream_stopped_by_the_streamed_bound() {
+    const FLOOD_SECRET: &str = "UPDATE-FLOOD-SENTINEL";
+    let setup = RunSetup::new();
+    let limits = SubprocessLimits {
+        run_timeout: Duration::from_secs(30),
+        termination_grace: Duration::from_secs(2),
+        drain_grace: Duration::from_millis(200),
+        max_stdout_bytes: 64 * 1024,
+        max_streamed_stdout_bytes: 8 * 1024 * 1024,
+        max_stderr_bytes: 16 * 1024,
+    };
+    let backend = pi_backend_with_limits(
+        &setup,
+        &[
+            (BEHAVIOR_ENV, "flood_message_update"),
+            (SECRET_ENV, FLOOD_SECRET),
+        ],
+        Vec::new(),
+        None,
+        limits,
+    );
+    let started = Instant::now();
+    let (terminal, _) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "anthropic/m", None),
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "the streamed bound, not the timeout, stopped the flood ({elapsed:?})"
+    );
+    let error = failed(&terminal);
+    assert!(
+        error.message.contains("bounded output limit"),
+        "{:?}",
+        error.message
+    );
+    assert!(!error.message.contains(FLOOD_SECRET));
+    assert_leader_already_reaped(read_pid(&setup.out.path().join("leader.pid")));
+}
+
+fn pi_oversized_final_answer_refused() {
+    let answer = "x".repeat(96 * 1024);
+    let setup = RunSetup::new();
+    let transcript = write_transcript(
+        setup.scratch.path(),
+        "oversized.ndjson",
+        &pi_success_lines(&answer, "stop"),
+    );
+    let limits = SubprocessLimits {
+        max_stdout_bytes: 64 * 1024,
+        ..quick_limits()
+    };
+    let backend = pi_backend_with_limits(
+        &setup,
+        &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
+        Vec::new(),
+        None,
+        limits,
+    );
+    let (terminal, events) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "anthropic/m", None),
+    );
+    let error = failed(&terminal);
+    assert!(
+        error.message.contains("bounded output limit"),
+        "{:?}",
+        error.message
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BackendEvent::AssistantText { .. })),
+        "{events:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Process-group lifecycle.
 // ---------------------------------------------------------------------------
@@ -2480,6 +2699,8 @@ fn timeout_reaps_leader_and_grandchild() {
         termination_grace: Duration::from_secs(2),
         drain_grace: Duration::from_millis(200),
         max_stdout_bytes: 1024 * 1024,
+        max_streamed_stdout_bytes:
+            host_runtime::model_execution::config::MAX_BACKEND_STREAMED_STDOUT_BYTES,
         max_stderr_bytes: 64 * 1024,
     };
     let backend = pi_backend_with_limits(
@@ -2512,6 +2733,8 @@ fn pi_lingering_child_drained_after_terminal() {
         termination_grace: Duration::from_secs(2),
         drain_grace: Duration::from_millis(200),
         max_stdout_bytes: 1024 * 1024,
+        max_streamed_stdout_bytes:
+            host_runtime::model_execution::config::MAX_BACKEND_STREAMED_STDOUT_BYTES,
         max_stderr_bytes: 64 * 1024,
     };
     let backend = pi_backend_with_limits(
@@ -2841,6 +3064,8 @@ fn pi_lingering_credential_failure_still_retries_canonical_provider() {
         termination_grace: Duration::from_secs(2),
         drain_grace: Duration::from_millis(200),
         max_stdout_bytes: 1024 * 1024,
+        max_streamed_stdout_bytes:
+            host_runtime::model_execution::config::MAX_BACKEND_STREAMED_STDOUT_BYTES,
         max_stderr_bytes: 64 * 1024,
     };
     let backend = pi_backend_with_limits(
@@ -2883,6 +3108,8 @@ fn pi_self_retry_revokes_the_drain_arming() {
         termination_grace: Duration::from_secs(2),
         drain_grace: grace,
         max_stdout_bytes: 1024 * 1024,
+        max_streamed_stdout_bytes:
+            host_runtime::model_execution::config::MAX_BACKEND_STREAMED_STDOUT_BYTES,
         max_stderr_bytes: 64 * 1024,
     };
     let backend = pi_backend_with_limits(
@@ -3029,6 +3256,8 @@ fn sigkill_escalation_when_term_ignored() {
         termination_grace: Duration::from_millis(500),
         drain_grace: Duration::from_millis(200),
         max_stdout_bytes: 1024 * 1024,
+        max_streamed_stdout_bytes:
+            host_runtime::model_execution::config::MAX_BACKEND_STREAMED_STDOUT_BYTES,
         max_stderr_bytes: 64 * 1024,
     };
     let backend = pi_backend_with_limits(
