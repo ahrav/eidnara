@@ -23,7 +23,7 @@ use super::backend::{
 use super::config::MAX_PI_PROVIDER_EXTENSIONS;
 use super::subprocess::group_registry::StateRoot;
 use super::subprocess::{
-    self, EnvSnapshot, PrivateDir, ProbeSignal, SubprocessLimits, SubprocessSpec,
+    self, EnvSnapshot, PrivateDir, ProbeSignal, StdoutFilter, SubprocessLimits, SubprocessSpec,
 };
 use crate::harness_closure::ValidatedHarnessClosure;
 
@@ -560,7 +560,7 @@ async fn run_pi(
         );
     }
 
-    let result = match subprocess::run(spec, &limits, &cancel, Some(pi_terminal_probe)).await {
+    let result = match subprocess::run(spec, &limits, &cancel, PI_STDOUT_FILTER).await {
         Ok(result) => result,
         Err(err) => {
             return subprocess::merge_cleanup(
@@ -573,6 +573,39 @@ async fn run_pi(
     let parsed = subprocess::parse_clean_transcript(&result, &events, parse_pi_transcript);
     let cleanup = subprocess::bounded_cleanup(dir, limits.termination_grace).await;
     subprocess::finalize(Harness::Pi, &result, parsed, &limits, cleanup)
+}
+
+const PI_STDOUT_FILTER: StdoutFilter = StdoutFilter {
+    terminal_probe: Some(pi_terminal_probe),
+    discard_line: Some(pi_line_discardable),
+};
+
+/// `parse_pi_transcript` skips the content of these event types.
+const PI_IGNORED_EVENT_TYPES: [&str; 8] = [
+    "session",
+    "turn_end",
+    "message_update",
+    "compaction_start",
+    "compaction_end",
+    "queue_update",
+    "session_info_changed",
+    "thinking_level_changed",
+];
+
+fn pi_line_discardable(line: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(line) else {
+        return false;
+    };
+    if !subprocess::json_nodes_within_bound(text) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| PI_IGNORED_EVENT_TYPES.contains(&kind))
 }
 
 /// The probe starts the drain grace after a terminal stdout event.
@@ -692,14 +725,7 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
             return Err(format!("missing event type at line {line_no}"));
         };
         match event_type {
-            "session"
-            | "turn_end"
-            | "message_update"
-            | "compaction_start"
-            | "compaction_end"
-            | "queue_update"
-            | "session_info_changed"
-            | "thinking_level_changed" => {}
+            ignored if PI_IGNORED_EVENT_TYPES.contains(&ignored) => {}
             // Resumed lifecycle output invalidates every stored decision: without a later terminal, parsing returns a missing-terminal error rather than an answer the transcript itself moved past.
             "agent_start" | "turn_start" | "message_start" | "auto_retry_start"
             | "auto_retry_end" => {
@@ -884,6 +910,37 @@ fn message_requests_tools(message: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_well_formed_ignored_events_are_discardable() {
+        for line in [
+            r#"{"type":"message_update","message":{"role":"assistant","content":[]}}"#,
+            r#"{"type":"turn_end","message":{},"toolResults":[]}"#,
+            r#"{"type":"session","version":3}"#,
+            r#"  {"type":"message_\u0075pdate"}"#,
+        ] {
+            assert!(pi_line_discardable(line.as_bytes()), "{line}");
+        }
+        for line in [
+            r#"{"type":"message_end","message":{}}"#,
+            r#"{"type":"agent_end","messages":[]}"#,
+            r#"{"type":"message_update","message":"#,
+            r#"{"type":"message_update","type":"message_end"}"#,
+            r#"{"type":7}"#,
+            r#"{"message":{}}"#,
+            r#"{"type":"message_update"} trailing"#,
+            "",
+        ] {
+            assert!(!pi_line_discardable(line.as_bytes()), "{line}");
+        }
+        assert!(!pi_line_discardable(&[0xFF, b'{']));
+        let deep = format!(
+            r#"{{"type":"message_update","n":{}0{}}}"#,
+            "[".repeat(200),
+            "]".repeat(200)
+        );
+        assert!(!pi_line_discardable(deep.as_bytes()));
+    }
 
     #[test]
     fn temperature_refusals_stay_within_their_bound() {
