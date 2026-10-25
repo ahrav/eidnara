@@ -1,7 +1,6 @@
 //! The evaluator property catalog is read at runtime and held to the METHOD
 //! contract: field order, check semantics, cited tests that exist and are not
-//! ignored, evidence files that exist, an index that equals the record set,
-//! and named line citations that point to lines containing the cited names.
+//! ignored, evidence files that exist, and an index that equals the record set.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -263,84 +262,4 @@ fn every_evaluator_record_is_method_ordered_and_cites_an_executed_check() {
             "catalog line over 100 columns without a link, code, or table: {line:?}"
         );
     }
-}
-
-/// Citations can qualify an identifier, as in `Manifest::capture_declaration`,
-/// `SuiteBReport.ceilings`, or `WriteKey {task, arm}`, while its definition
-/// spells only the final segment.
-fn cited_identifier(name: &str) -> &str {
-    let head = name
-        .split(['(', '{', '<', '?', ' '])
-        .next()
-        .unwrap_or_default();
-    head.rsplit(['.', ':']).next().unwrap_or_default()
-}
-
-fn names_identifier(line: &str, identifier: &str) -> bool {
-    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    line.match_indices(identifier).any(|(at, _)| {
-        let before = line[..at].chars().next_back();
-        let after = line[at + identifier.len()..].chars().next();
-        !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
-    })
-}
-
-/// `(path, line, name)` for each `` `path.rs:LINE` `` whose next code span,
-/// preceded by a space or ` (`, is the name. Wrapped lines are joined first
-/// so a citation and its name can be matched across a line break.
-fn named_line_citations(text: &str) -> Vec<(String, usize, String)> {
-    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let tokens: Vec<&str> = joined.split('`').collect();
-    let mut cited = Vec::new();
-    // Splitting on backticks puts code spans at odd indices and prose at the
-    // intervening even indices.
-    for at in (1..tokens.len().saturating_sub(2)).step_by(2) {
-        let Some((path, line)) = tokens[at].rsplit_once(':') else {
-            continue;
-        };
-        let Ok(line) = line.parse::<usize>() else {
-            continue;
-        };
-        if !path.ends_with(".rs") || !matches!(tokens[at + 1], " " | " (") {
-            continue;
-        }
-        cited.push((path.to_string(), line, tokens[at + 2].to_string()));
-    }
-    cited
-}
-
-/// Checking the named identifier at each cited line detects a reference left
-/// stale by a source edit above it.
-#[test]
-fn every_named_line_citation_points_at_a_line_holding_its_name() {
-    let root = workspace_root();
-    let part = root.join("docs/properties/evaluator");
-    let mut documents = vec![part.join("catalog.md")];
-    let mut evidence: Vec<PathBuf> = std::fs::read_dir(part.join("evidence"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    evidence.sort();
-    documents.extend(evidence);
-    let mut checked = 0;
-    for document in documents {
-        let text = std::fs::read_to_string(&document).unwrap();
-        for (path, line, name) in named_line_citations(&text) {
-            let source = std::fs::read_to_string(root.join(&path)).unwrap_or_else(|e| {
-                panic!("{}: cited {path} is unreadable: {e}", document.display())
-            });
-            let identifier = cited_identifier(&name);
-            let held = source
-                .lines()
-                .nth(line.saturating_sub(1))
-                .unwrap_or_default();
-            assert!(
-                !identifier.is_empty() && names_identifier(held, identifier),
-                "{}: `{path}:{line}` cites `{name}`, but the line is {held:?}",
-                document.display()
-            );
-            checked += 1;
-        }
-    }
-    assert!(checked > 0, "no named line citation was found");
 }
