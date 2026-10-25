@@ -48,7 +48,7 @@ Covered: the trace cases and the mutated cases in `tool_vocabulary_tests.rs:145`
 
 ### Q: Does the digest emit the exit code?
 
-- Sources examined: `tool_outcome.rs:156-176` `outcome_digest`.
+- Sources examined: `tool_outcome.rs:227-247` `outcome_digest`.
 - Findings: the digest holds status, bytes, head, and tail; no exit field.
 - Missing evidence: none.
 - Conclusion: resolved with answer: lead L3 (#1066 D9's `[; exit=N]`) stands.

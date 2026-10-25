@@ -273,7 +273,7 @@ or rendered output text carries no interpretation of a harness record.
 | Literal | Reason | Locations |
 | --- | --- | --- |
 | <code> commits: {}</code> | format template | `chunk_text.rs:113` |
-| <code>; bytes={}</code> | format template | `tool_outcome.rs:165` |
+| <code>; bytes={}</code> | format template | `tool_outcome.rs:236` |
 | <code>&lt;output&gt;&lt;history_segments&gt;\n&lt;history_segment ...</code> | format template | `history_summarizer_chunk.rs:729` |
 | <code>Messages {start}-{end} were not summarized: {...</code> | format template | `history_summarizer_chunk.rs:726` |
 | <code>OpenCode serialization produced duplicate too...</code> | format template | `codec/opencode.rs:470` |
@@ -336,7 +336,7 @@ or rendered output text carries no interpretation of a harness record.
 | <code>\s{2,}</code> | regular expression or replacement | `chunk_text.rs:221` |
 | <code>(empty)</code> | rendered text, marker, separator, or value | `selection.rs:234`; `chunk_text.rs:40, 41, 144, 146`; `codec/opencode.rs:520, 997, 1168`; `codec/pi.rs:368, 907, 1463, 1521, 1522, 1523, 1581` |
 | <code> </code> | rendered text, marker, separator, or value | `chunk_text.rs:44` |
-| <code> / </code> | rendered text, marker, separator, or value | `chunk_text.rs:115`; `tool_outcome.rs:196`; `history_summarizer_chunk.rs:1162, 1174` |
+| <code> / </code> | rendered text, marker, separator, or value | `chunk_text.rs:115`; `tool_outcome.rs:267`; `history_summarizer_chunk.rs:1162, 1174` |
 | <code>%Y-%m-%d</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1117` |
 | <code>(no output)</code> | rendered text, marker, separator, or value | `codec/pi.rs:344` |
 | <code>+</code> | rendered text, marker, separator, or value | `codec/pi.rs:368` |
@@ -344,9 +344,9 @@ or rendered output text carries no interpretation of a harness record.
 | <code>, </code> | rendered text, marker, separator, or value | `chunk_text.rs:43, 113` |
 | <code>...[truncated]</code> | rendered text, marker, separator, or value | `selection.rs:36` |
 | <code>0123456789abcdef</code> | rendered text, marker, separator, or value | `wire.rs:651` |
-| <code>; </code> | rendered text, marker, separator, or value | `tool_outcome.rs:158` |
-| <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:168` |
-| <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:168` |
+| <code>; </code> | rendered text, marker, separator, or value | `tool_outcome.rs:229` |
+| <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:239` |
+| <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:239` |
 | <code>&lt;!-- OMO_INTERNAL_INITIATOR --&gt;</code> | rendered text, marker, separator, or value | `chunk_text.rs:14` |
 | <code>&lt;/summary&gt;</code> | rendered text, marker, separator, or value | `codec/pi.rs:48` |
 | <code>Execution denied</code> | rendered text, marker, separator, or value | `codec/opencode.rs:1273`; `codec/pi.rs:1773, 1823` |

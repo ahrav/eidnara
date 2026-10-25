@@ -2,7 +2,8 @@
 //! kind, capture completeness, loss by named condition, tool-result byte-length quantiles
 //! stratified by the harness `truncated` flag, the share of units and bytes above the 64 KiB unit
 //! cap, per-pass batch fill against the 32-unit and 64 KiB batch bounds, publish time against
-//! admitted bytes, and the R1 cell census.
+//! admitted bytes, the R1 cell census, output-shape shares per harness and content kind with exact
+//! intervals, and the "answerable from digest" question set with its positive control.
 //!
 //! Every figure describes the frozen corpus population, computed exhaustively. The exit status is
 //! non-zero only when `unclassified_loss` is: an expected unit neither admitted nor lost under a
@@ -26,6 +27,7 @@ use std::process::ExitCode;
 use daemon::harness_sources::{
     Harness, MAX_SOURCE_BATCH_BYTES, MAX_SOURCE_BATCH_UNITS, MAX_SOURCE_UNIT_BYTES, SessionIdentity,
 };
+use daemon::tool_outcome::{OutputShape, OutputText, classify, outcome_digest};
 use serde_json::Value;
 
 use corpus_replay::{
@@ -306,6 +308,208 @@ fn host() -> String {
     format!("{name}; {cpu}; {cpus} CPUs")
 }
 
+/// The 95 percent Clopper-Pearson interval of `k` successes in `n` trials, by bisection on the
+/// binomial tails.
+fn exact_interval(k: usize, n: usize) -> (f64, f64) {
+    let tail_at_least = |p: f64| -> f64 {
+        // P(X >= k) for X ~ Binomial(n, p), summed from the pmf in log space.
+        (k..=n)
+            .map(|x| {
+                let ln_choose: f64 = (1..=x)
+                    .map(|i| ((n - x + i) as f64).ln() - (i as f64).ln())
+                    .sum();
+                (ln_choose + x as f64 * p.ln() + (n - x) as f64 * (1.0 - p).ln()).exp()
+            })
+            .sum()
+    };
+    let solve = |target: f64, increasing: bool, f: &dyn Fn(f64) -> f64| {
+        let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+        for _ in 0..100 {
+            let mid = f64::midpoint(lo, hi);
+            if (f(mid) < target) == increasing {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        f64::midpoint(lo, hi)
+    };
+    let lower = if k == 0 {
+        0.0
+    } else {
+        solve(0.025, true, &tail_at_least)
+    };
+    let upper = if k == n {
+        1.0
+    } else {
+        solve(0.025, false, &|p| {
+            1.0 - tail_at_least(p) + binomial_pmf(n, k, p)
+        })
+    };
+    (lower, upper)
+}
+
+fn binomial_pmf(n: usize, k: usize, p: f64) -> f64 {
+    let ln_choose: f64 = (1..=k)
+        .map(|i| ((n - k + i) as f64).ln() - (i as f64).ln())
+        .sum();
+    (ln_choose + k as f64 * p.ln() + (n - k) as f64 * (1.0 - p).ln()).exp()
+}
+
+/// Every text unit and settled tool result of `session`, by content kind, as the shape the
+/// classifier gives its output: a Pi tool result is classified whole over its content items, so
+/// one holding an image is `non_text_blocks`.
+fn shapes(session: &Session) -> BTreeMap<&'static str, Vec<OutputShape>> {
+    let mut shapes: BTreeMap<&'static str, Vec<OutputShape>> = BTreeMap::new();
+    let mut push = |kind: &'static str, shape| shapes.entry(kind).or_default().push(shape);
+    match session.harness {
+        Harness::OpenCode => {
+            for message in session.fixture["messages"].as_array().into_iter().flatten() {
+                for part in message["parts"].as_array().into_iter().flatten() {
+                    let data = &part["data"];
+                    match data["type"].as_str() {
+                        Some("text") if data["ignored"] != Value::Bool(true) => push(
+                            "text",
+                            classify(&OutputText::Text(data["text"].as_str().unwrap_or_default())),
+                        ),
+                        Some("tool") => {
+                            let state = &data["state"];
+                            let output = match state["status"].as_str() {
+                                Some("completed") => state["output"].as_str(),
+                                Some("error") => state["error"].as_str(),
+                                _ => None,
+                            };
+                            if let Some(output) = output {
+                                push("tool", classify(&OutputText::Text(output)));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Harness::Pi => {
+            for entry in session.fixture["entries"].as_array().into_iter().flatten() {
+                let message = &entry["message"];
+                let content = &message["content"];
+                match message["role"].as_str() {
+                    Some("toolResult") => {
+                        let blocks: Vec<memory_store::ResultBlock> = content
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|item| memory_store::ResultBlock {
+                                kind: match item["text"].as_str().filter(|_| item["type"] == "text")
+                                {
+                                    Some(text) => memory_store::ResultBlockKind::Text {
+                                        text: text.to_owned(),
+                                    },
+                                    None => memory_store::ResultBlockKind::Opaque {
+                                        opaque: memory_store::OpaqueBlock {
+                                            source: Value::Null,
+                                            kind: item["type"]
+                                                .as_str()
+                                                .unwrap_or("unknown")
+                                                .to_owned(),
+                                            raw: item.clone(),
+                                            arc: None,
+                                        },
+                                    },
+                                },
+                                provider_extras: memory_store::ProviderExtras::new(),
+                            })
+                            .collect();
+                        push("tool", classify(&OutputText::Blocks(&blocks)));
+                    }
+                    Some("user" | "assistant") => match content {
+                        Value::String(text) => push("text", classify(&OutputText::Text(text))),
+                        _ => {
+                            for item in content.as_array().into_iter().flatten() {
+                                if let Some(text) =
+                                    item["text"].as_str().filter(|_| item["type"] == "text")
+                                {
+                                    push("text", classify(&OutputText::Text(text)));
+                                }
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+    shapes
+}
+
+/// Shape shares per content kind, each a count over the kind's total with its exact 95 percent
+/// interval. The figures describe the frozen corpus only; no threshold applies to them.
+fn shape_section(out: &mut String, session: &Session) {
+    let _ = writeln!(out, "- output shapes (count / total, exact 95% interval):");
+    for (kind, shapes) in shapes(session) {
+        let _ = writeln!(out, "    content kind `{kind}` (n={}):", shapes.len());
+        for shape in OutputShape::ALL {
+            let k = shapes.iter().filter(|&&found| found == shape).count();
+            let (lower, upper) = exact_interval(k, shapes.len());
+            let _ = writeln!(
+                out,
+                "      {}: {k}/{} [{lower:.4}, {upper:.4}]",
+                shape.name(),
+                shapes.len()
+            );
+        }
+    }
+}
+
+/// The questions a reader asks of a tool result, authored from the full output before its digest
+/// is seen, and the compression-fidelity case C5.V1 as the positive control: its digest answers
+/// the first two.
+fn question_set(out: &mut String) {
+    let _ = writeln!(
+        out,
+        "## Answerable from digest\n\nFor each sampled tool result, author the answers from the \
+         full output before reading its digest, then mark each answerable from the digest alone \
+         or not:\n\n1. Did it fail?\n2. Which line names the cause?\n3. What did it touch?\n"
+    );
+    let fidelity: Value = serde_json::from_slice(
+        &std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("testdata/compression-fidelity.json"),
+        )
+        .expect("the compression-fidelity cases read"),
+    )
+    .expect("the compression-fidelity cases parse");
+    let output = fidelity["cases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|case| case["sources"].as_array().into_iter().flatten())
+        .filter(|source| source["id"] == "C5.V1")
+        .flat_map(|source| source["messages"].as_array().into_iter().flatten())
+        .flat_map(|message| message["parts"].as_array().into_iter().flatten())
+        .find(|part| part["callID"] == "call_cf_504")
+        .and_then(|part| part["state"]["output"].as_str())
+        .expect("C5.V1 holds the wave-1 bash result");
+    // Authored from the full output: the second line reports the failure and names its cause.
+    let cause = "billing-worker: error: connection refused (10.4.2.17:5433)";
+    let digest = outcome_digest(kernel::ToolStatus::Completed, &OutputText::Text(output));
+    let answers = |found: bool| {
+        if found {
+            "answerable"
+        } else {
+            "not answerable"
+        }
+    };
+    let _ = writeln!(
+        out,
+        "Positive control C5.V1 (`bash`, shape {}): digest `{digest}`\n- Q1 did it fail: yes, \
+         billing-worker failed; {} from the digest\n- Q2 which line names the cause: `{cause}`; \
+         {} from the digest\n",
+        classify(&OutputText::Text(output)).name(),
+        answers(digest.contains("error")),
+        answers(digest.contains(cause)),
+    );
+}
+
 /// Writes one session's section and returns its unclassified loss count.
 fn session_section(out: &mut String, session: &Session) -> usize {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -391,6 +595,7 @@ fn session_section(out: &mut String, session: &Session) -> usize {
         };
         let _ = writeln!(out, "    {cell}: {shown}");
     }
+    shape_section(out, session);
     let _ = writeln!(out);
     all.unclassified.len()
 }
@@ -422,6 +627,7 @@ fn main() -> ExitCode {
         .iter()
         .map(|session| session_section(&mut out, session))
         .sum();
+    question_set(&mut out);
     let _ = writeln!(
         out,
         "## Publish time against admitted bytes\n\nHost: {}. Runs: {runs}, one after another \
