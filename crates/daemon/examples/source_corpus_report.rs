@@ -451,14 +451,15 @@ fn text_shape(text: &str) -> OutputShape {
 }
 
 /// Shape shares per content kind, each a count over the kind's total with its pointwise exact 95
-/// percent interval. The count is a population fact about the frozen corpus; the interval treats
-/// the kind's results as independent draws from the scripted-mix process that produced them, so
-/// it bounds the share that corpus size can resolve. No threshold applies.
+/// percent interval. The count describes the frozen corpus. The interval measures the hypothetical
+/// sampling resolution of a sample that size under independent draws; the scripted mix runs a fixed
+/// tool sequence against a mock provider.
 fn shape_section(out: &mut String, session: &Session) {
     let _ = writeln!(
         out,
-        "- output shapes (count / total, pointwise exact 95% interval over the scripted-mix \
-         process; every text block and every settled tool result, units and non-units):"
+        "- output shapes (count / total, pointwise exact 95% interval as the resolution of a sample \
+         this size under independent draws, not coverage over the scripted mix; every text block and \
+         every settled tool result, units and non-units):"
     );
     for (kind, shapes) in shapes(session) {
         let _ = writeln!(out, "    content kind `{kind}` (n={}):", shapes.len());
@@ -651,8 +652,9 @@ fn main() -> ExitCode {
         out,
         "Estimand: every count is a population fact about the frozen corpus \
          (crates/daemon/testdata/corpus/sessions), computed exhaustively; none estimates real \
-         sessions. The output-shape intervals alone model the scripted-mix process (see that \
-         section). No figure is compared to a threshold. The replay offers every record, the \
+         sessions. The output-shape intervals alone are hypothetical: the resolution a sample of \
+         each kind's size would have under independent draws (see that section). No figure is \
+         compared to a threshold. The replay offers every record, the \
          final assistant reply included, which live capture never offers; live reconciliation \
          (the corpus README) counts one unit fewer per session.\n"
     );
