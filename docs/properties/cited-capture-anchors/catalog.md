@@ -230,7 +230,7 @@ Check: `always` - for every receipt of producer `memory_capture`, a second commi
 Fault/timing angle: the first commit's reply is lost and the job is retried
 Required faults and enabling state: a publish retried after success; a frozen plan altered under the same key
 Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:1176` and the frozen-plan read in `publish` at `:980`
-Existing check: `crates/daemon/src/memory_capture.rs:1967`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24489` (unaudited)
+Existing check: `crates/daemon/src/memory_capture.rs:1969`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24489` (unaudited)
 Impact: a non-replaying retry would duplicate memories; a digest that omitted plan fields would let a changed plan replay the old receipt
 Open questions: None.
 
@@ -260,7 +260,7 @@ Check: `always` - for every capture job, `job_id == job_id(source, redacted_text
 Fault/timing angle: none
 Required faults and enabling state: the same source enqueued twice; a fragment id outside the store grammar
 Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:112`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:318`, and the object id at `:1241`
-Existing check: `crates/memory-store/src/memory_capture.rs:755`; `crates/daemon/src/memory_capture.rs:1499`, `:1548`, `:1851`, `:1873`, `:1967`; `crates/daemon/src/lib.rs:24489`, `:25800` (unaudited)
+Existing check: `crates/memory-store/src/memory_capture.rs:755`; `crates/daemon/src/memory_capture.rs:1499`, `:1548`, `:1853`, `:1875`, `:1969`; `crates/daemon/src/lib.rs:24489`, `:25800` (unaudited)
 Impact: unstable ids would duplicate memories on retry and break the deterministic anchor id U3 derives from the job id
 Open questions: None.
 
@@ -365,7 +365,7 @@ Guarantee: The anchor id for a capture job is a pure function of `(job_id, head_
 Check: `always` - for every capture decision with `anchor_id = Some(a)`, `a == "anchor_" + sha256(job_id + ":" + oid)[..32]` for the job's frozen head, every decision of the job names `a`, and exactly one live `anchors` row has that id; a retry rebuilds byte-identical anchor and decision rows, and its citation events match in kind and evidence id while `recorded_at` is the retry's clock
 Fault/timing angle: a retry after a rolled-back or lost commit
 Required faults and enabling state: the same job and plan published into two fresh Kernels; a committed publish whose completion the store refuses, then a retry
-Confidence: high - [evidence](evidence/p2-new-capture-anchor-identity-is-deterministic.md). Read `anchor_spec` at `crates/daemon/src/memory_capture/cite.rs:341` and the lazy insert in `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:1176`
+Confidence: high - [evidence](evidence/p2-new-capture-anchor-identity-is-deterministic.md). Read `anchor_spec` at `crates/daemon/src/memory_capture/cite.rs:382` and the lazy insert in `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:1176`
 Existing check: `crates/daemon/src/memory_capture.rs:1700`, `:1738`; `crates/daemon/src/source_capture_tests.rs:3800`; `crates/daemon/src/source_capture_tests.rs:3474` (one anchor per job); `crates/kernel/tests/kernel_anchor_write.rs:654` for the Kernel refusal of a second row (unaudited)
 Impact: duplicate anchors per job, or `Conflict` on retry that permanently fails the job
 Open questions:
@@ -411,7 +411,7 @@ Guarantee: Every citation a capture decision carries is the `detail.evidence_id`
 Check: `always` - for every capture citation event, the evidence id equals the `detail.evidence_id` of a descriptor of the job's lineage tuple live at the decision's commit, and `PreparedCapture` (which denies unknown fields) has no evidence field
 Fault/timing angle: none
 Required faults and enabling state: model output naming a source outside the batch; a message published in another session with the same id
-Confidence: high - [evidence](evidence/p2-new-citation-is-alias-only.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:241`, which derives each lineage from the job row alone (`message_lineage`, `:130`), and the call inside the publish envelope at `crates/daemon/src/memory_capture.rs:1239`
+Confidence: high - [evidence](evidence/p2-new-citation-is-alias-only.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:282`, which derives each lineage from the job row alone (`message_lineages`, `:134`, which validates the shared identity fields and hashes their encoding once through the Kernel's `lineage_ids_varying_last_field`), and the call inside the publish envelope at `crates/daemon/src/memory_capture.rs:1239`
 Existing check: `crates/daemon/src/source_capture_tests.rs:3474`, `:3715` (unaudited)
 Impact: a model-emitted id would let the extraction forge its own evidence link
 Open questions: None.
@@ -426,8 +426,8 @@ Guarantee: A cited capture decision cites the located block holding the first oc
 Check: `always` - for every cited capture decision, `citation_block` is `block` or `span` exactly when the cited blocks' bytes joined with `\n` contain the quote's first occurrence, `first` cites the lowest live `block_index`, and `citation_blocks` and `citation_evidence` list the cited blocks in ascending order, parallel to the citation events
 Fault/timing angle: none
 Required faults and enabling state: a multi-block message with the quote in a later item; a quote across the `\n` join; a quote starting at a separator; a block source capture refused, so the redacted job text locates no block
-Confidence: high - [evidence](evidence/p2-new-citation-block-target-rule.md). Read `locate` at `crates/daemon/src/memory_capture/cite.rs:178` and `target` at `:208`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3474`; `crates/daemon/src/memory_capture/cite.rs:380`, `:391`, `:483`, `:497` (unaudited)
+Confidence: high - [evidence](evidence/p2-new-citation-block-target-rule.md). Read `locate` at `crates/daemon/src/memory_capture/cite.rs:180` and `target` at `:212`
+Existing check: `crates/daemon/src/source_capture_tests.rs:3474`; `crates/daemon/src/memory_capture/cite.rs:451`, `:481`, `:864`, `:878` (unaudited)
 Impact: revalidation reports a false mismatch for correctly captured memories
 Open questions: None.
 
@@ -441,7 +441,7 @@ Guarantee: The evidence a capture decision cites survives `expire_harness_captur
 Check: `always` - for every live cited capture decision, each cited evidence row is live after every sweep, `retire_evidence` on it returns `Conflict`, `decisions.evidence_id IS NULL`, and `sensitivity_class` is the class the capture asserted
 Fault/timing angle: a sweep running after the evidence's `retain_until`
 Required faults and enabling state: cited evidence past `retain_until` with one live citing decision; a retirement attempt
-Confidence: high - [evidence](evidence/p2-new-citation-folds-sensitivity-and-pins-evidence.md). `append_citations` (`crates/daemon/src/memory_capture/cite.rs:317`) writes decision events, which `EVIDENCE_CITED_SQL` counts (`crates/kernel/src/slice/write.rs:42`)
+Confidence: high - [evidence](evidence/p2-new-citation-folds-sensitivity-and-pins-evidence.md). `append_citations` (`crates/daemon/src/memory_capture/cite.rs:358`) writes decision events, which `EVIDENCE_CITED_SQL` counts (`crates/kernel/src/slice/write.rs:42`)
 Existing check: `crates/daemon/src/source_capture_tests.rs:3761`, `:3474` (unaudited)
 Impact: retired evidence breaks every citation
 Open questions: None.
@@ -486,8 +486,8 @@ Guarantee: Every capture decision carries exactly one `citation` value from `cit
 Check: `always` - for every capture decision, `(no citation event) == (citation != "cited")` and `(anchor_id IS NULL) == (anchor == "head_unavailable")`; consent off gives `source_capture_off` with no lookup, an empty lookup for a hashed id gives `source_id_unjoinable`, and any other empty lookup gives `descriptor_not_found`
 Fault/timing angle: none
 Required faults and enabling state: source capture off; a hashed source id; an unpublished message; a plain and an unborn root
-Confidence: high - [evidence](evidence/p2-new-miss-reason-matches-outcome.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:241` and `is_hashed_source_id` at `:114`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3474`, `:3624`; `crates/daemon/src/memory_capture/cite.rs:418`; `crates/daemon/src/memory_capture.rs:1548` (unaudited)
+Confidence: high - [evidence](evidence/p2-new-miss-reason-matches-outcome.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:282` and `is_hashed_source_id` at `:118`
+Existing check: `crates/daemon/src/source_capture_tests.rs:3474`, `:3624`; `crates/daemon/src/memory_capture/cite.rs:508`; `crates/daemon/src/memory_capture.rs:1548` (unaudited)
 Impact: revalidation cannot tell "never captured" from "captured late" from "lookup failed"
 Open questions: None.
 

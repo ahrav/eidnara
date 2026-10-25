@@ -1,6 +1,8 @@
 use std::ops::Range;
 
-use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span, lower_hex};
+use kernel::source_identity::{
+    Occurrence, OccurrenceClass, lineage_ids_varying_last_field, lower_hex,
+};
 use kernel::{
     AnchorSpec, AnchorValue, DecisionEventPayload, DecisionEventSpec, Envelope, KernelError,
     Sensitivity,
@@ -76,6 +78,8 @@ impl AnchorReason {
 pub(super) struct Block {
     pub(super) index: usize,
     pub(super) digest: String,
+    /// The byte length of the block's artifact, its item text.
+    pub(super) length: u64,
     pub(super) evidence_id: String,
 }
 
@@ -124,30 +128,32 @@ pub(super) fn is_hashed_source_id(id: &str) -> bool {
         && (offset == "0" || !offset.starts_with('0'))
 }
 
-/// The lineage of one block of the job's message, or `None` for an identity
-/// the encoder refuses, which no descriptor can hold. A lineage omits the
-/// revision, so any revision encodes it.
-fn message_lineage(job: &CaptureJob, block: usize) -> Option<String> {
+/// The lineages of the job's message blocks `blocks`, ending before the first
+/// block whose identity the encoder refuses, which no descriptor can hold. A
+/// lineage omits the revision, so any revision encodes it.
+fn message_lineages(job: &CaptureJob, blocks: Range<usize>) -> Vec<String> {
+    let indexes: Vec<String> = blocks.clone().map(|block| block.to_string()).collect();
     let identity = crate::harness_sources::message_identity(
         &job.project,
         &job.harness,
         &job.session_id,
         &job.message_id,
-        block,
+        blocks.start,
     );
     let identity: Vec<(&str, &str)> = identity
         .iter()
         .map(|(name, value)| (*name, value.as_str()))
         .collect();
-    encode_preserving_span(&Occurrence {
-        class: OccurrenceClass::Messages.code(),
-        identity: &identity,
-        revision: "1",
-        representation: crate::harness_sources::Representation::Text.as_str(),
-        span: None,
-    })
-    .ok()
-    .map(|encoded| encoded.lineage_id)
+    lineage_ids_varying_last_field(
+        &Occurrence {
+            class: OccurrenceClass::Messages.code(),
+            identity: &identity,
+            revision: "1",
+            representation: crate::harness_sources::Representation::Text.as_str(),
+            span: None,
+        },
+        indexes.iter().map(String::as_str),
+    )
 }
 
 /// The 32 bytes a lowercase hex SHA-256 digest names, or `None` for any other
@@ -170,37 +176,35 @@ fn digest_bytes(hex: &str) -> Option<[u8; 32]> {
     Some(bytes)
 }
 
-/// Byte ranges of the leading `blocks` in `text`, which joins the message's
-/// text blocks with `\n`. One SHA-256 runs over the text and is finalized at
-/// each `\n` and at the end; a segment whose digest equals the next block's
-/// artifact digest locates that block. The walk stops at the first block it
-/// cannot locate.
+#[cfg(test)]
 pub(super) fn locate(text: &str, blocks: &[Block]) -> Vec<Range<usize>> {
-    let bytes = text.as_bytes();
     let mut located = Vec::new();
-    let mut targets = blocks.iter().map(|block| digest_bytes(&block.digest));
-    let Some(Some(mut target)) = targets.next() else {
-        return located;
-    };
-    let mut hasher = Sha256::new();
-    let mut start = 0;
-    let mut fed = 0;
-    let ends = memchr::memchr_iter(b'\n', bytes).chain(std::iter::once(bytes.len()));
-    for end in ends {
-        hasher.update(&bytes[fed..end]);
-        fed = end;
-        if hasher.clone().finalize().as_slice() == target {
-            located.push(start..end);
-            start = end + 1;
-            fed = start.min(bytes.len());
-            hasher = Sha256::new();
-            match targets.next() {
-                Some(Some(next)) => target = next,
-                _ => break,
-            }
+    for block in blocks {
+        if !extend(text, &mut located, block) {
+            break;
         }
     }
     located
+}
+
+/// `extend` appends the range `block` occupies in `text`, which joins the
+/// message's text blocks with `\n`, after the `located` prefix, and returns
+/// whether it was located. The block starts after the last located block's
+/// separator and spans its artifact's byte length; it is located when that
+/// range ends at a `\n` or at the end of the text and its SHA-256 equals the
+/// block's artifact digest, so each text byte is hashed at most once.
+fn extend(text: &str, located: &mut Vec<Range<usize>>, block: &Block) -> bool {
+    let bytes = text.as_bytes();
+    let start = located.last().map_or(0, |range| range.end + 1);
+    let range = digest_bytes(&block.digest).and_then(|digest| {
+        let end = start.checked_add(usize::try_from(block.length).ok()?)?;
+        let segment = bytes.get(start..end)?;
+        if bytes.get(end).is_some_and(|byte| *byte != b'\n') {
+            return None;
+        }
+        (Sha256::digest(segment).as_slice() == digest).then_some(start..end)
+    });
+    range.map(|range| located.push(range)).is_some()
 }
 
 /// The blocks a memory cites: the located block holding the first occurrence
@@ -234,6 +238,43 @@ pub(super) fn target<'b>(
     }
 }
 
+/// Ends of the block-index chunks a lookup reads, one statement each: 4, 12,
+/// 48, and 192 indexes, so a message of a few blocks costs one read and a
+/// message with no descriptor costs four.
+const CHUNK_ENDS: [usize; 4] = [4, 16, 64, MAX_CITATION_BLOCKS];
+
+/// The live blocks of indexes `0..MAX_CITATION_BLOCKS` in ascending order,
+/// each located on arrival, and their located ranges. `read` returns one slot
+/// per index of the chunk it is given, `None` for an index with no live
+/// descriptor, and ends early at an index whose identity has no lineage.
+/// Reading stops there, at a block the walk cannot locate, and at a block
+/// that ends the text, after which the walk locates no block; [`target`]
+/// reads only the lowest live block and the located ones.
+fn read_blocks(
+    text: &str,
+    mut read: impl FnMut(Range<usize>) -> Result<Vec<Option<Block>>, KernelError>,
+) -> Result<(Vec<Block>, Vec<Range<usize>>), KernelError> {
+    let mut blocks = Vec::new();
+    let mut located = Vec::new();
+    let mut start = 0;
+    for end in CHUNK_ENDS {
+        let chunk = read(start..end)?;
+        let short = chunk.len() < end - start;
+        for block in chunk.into_iter().flatten() {
+            let extended = extend(text, &mut located, &block);
+            blocks.push(block);
+            if !extended || located.last().is_some_and(|range| range.end == text.len()) {
+                return Ok((blocks, located));
+            }
+        }
+        if short {
+            break;
+        }
+        start = end;
+    }
+    Ok((blocks, located))
+}
+
 impl Citation {
     /// Reads the live descriptors of the job's message inside `envelope`, so
     /// the read, the anchor, the decisions, and their citation events share
@@ -251,21 +292,22 @@ impl Citation {
         if !consent {
             return Ok(empty(CitationReason::SourceCaptureOff));
         }
-        let mut blocks = Vec::new();
-        for index in 0..MAX_CITATION_BLOCKS {
-            let Some(lineage) = message_lineage(job, index) else {
-                break;
-            };
-            if let Some(row) =
-                envelope.live_source_descriptor_of_lineage(OccurrenceClass::Messages, &lineage)?
-            {
-                blocks.push(Block {
-                    index,
-                    digest: row.detail.artifact_digest,
-                    evidence_id: row.detail.evidence_id,
-                });
-            }
-        }
+        let (blocks, located) = read_blocks(&job.text, |indexes| {
+            let lineages = message_lineages(job, indexes.clone());
+            Ok(envelope
+                .live_source_descriptors_of_lineages(OccurrenceClass::Messages, &lineages)?
+                .into_iter()
+                .zip(indexes)
+                .map(|(row, index)| {
+                    row.map(|row| Block {
+                        index,
+                        digest: row.detail.artifact_digest,
+                        length: row.byte_length,
+                        evidence_id: row.detail.evidence_id,
+                    })
+                })
+                .collect())
+        })?;
         if blocks.is_empty() {
             return Ok(empty(if is_hashed_source_id(&job.message_id) {
                 CitationReason::SourceIdUnjoinable
@@ -273,7 +315,6 @@ impl Citation {
                 CitationReason::DescriptorNotFound
             }));
         }
-        let located = locate(&job.text, &blocks);
         Ok(Self {
             reason: CitationReason::Cited,
             blocks,
@@ -371,9 +412,39 @@ mod tests {
             .map(|(index, text)| Block {
                 index: index * 2,
                 digest: lower_hex(&Sha256::digest(text.as_bytes())),
+                length: text.len() as u64,
                 evidence_id: format!("srcev:{index}"),
             })
             .collect()
+    }
+
+    /// The reference location rule `locate` must reproduce.
+    fn newline_walk(text: &str, blocks: &[Block]) -> Vec<Range<usize>> {
+        let bytes = text.as_bytes();
+        let mut located = Vec::new();
+        let mut targets = blocks.iter().map(|block| digest_bytes(&block.digest));
+        let Some(Some(mut target)) = targets.next() else {
+            return located;
+        };
+        let mut hasher = Sha256::new();
+        let mut start = 0;
+        let mut fed = 0;
+        let ends = memchr::memchr_iter(b'\n', bytes).chain(std::iter::once(bytes.len()));
+        for end in ends {
+            hasher.update(&bytes[fed..end]);
+            fed = end;
+            if hasher.clone().finalize().as_slice() == target {
+                located.push(start..end);
+                start = end + 1;
+                fed = start.min(bytes.len());
+                hasher = Sha256::new();
+                match targets.next() {
+                    Some(Some(next)) => target = next,
+                    _ => break,
+                }
+            }
+        }
+        located
     }
 
     #[test]
@@ -385,6 +456,25 @@ mod tests {
         changed[1].digest = lower_hex(&Sha256::digest(b"other"));
         assert_eq!(locate(&text, &changed), vec![0..22]);
         assert!(locate("redacted\nthird", &blocks(&["first", "third"])).is_empty());
+    }
+
+    #[test]
+    fn an_empty_block_a_block_past_the_text_and_a_malformed_digest_match_the_newline_walk() {
+        let mut malformed = blocks(&["first"]);
+        malformed[0].digest = "zz".repeat(32);
+        for (text, blocks) in [
+            ("", blocks(&[""])),
+            ("first", blocks(&["first\nsecond"])),
+            ("first", malformed),
+        ] {
+            assert_eq!(
+                locate(text, &blocks),
+                newline_walk(text, &blocks),
+                "{text:?}"
+            );
+        }
+        assert_eq!(locate("", &blocks(&[""])), vec![0..0]);
+        assert!(locate("first", &blocks(&["first\nsecond"])).is_empty());
     }
 
     #[test]
@@ -449,7 +539,7 @@ mod tests {
             attempts: 0,
             failures: 0,
         };
-        assert_eq!(message_lineage(&job, 0), None);
+        assert!(message_lineages(&job, 0..MAX_CITATION_BLOCKS).is_empty());
         let dir = tempfile::tempdir().unwrap();
         let kernel = kernel::KernelStore::open(dir.path()).unwrap();
         kernel
@@ -478,7 +568,298 @@ mod tests {
             .unwrap();
     }
 
+    fn intent(key: &str) -> kernel::CommitIntent {
+        kernel::CommitIntent {
+            producer: "cite-test".into(),
+            operation_key: key.into(),
+            request_digest: lower_hex(&Sha256::digest(key.as_bytes())),
+            actor: "test".into(),
+            cause: "lookup".into(),
+        }
+    }
+
+    fn publish_blocks(kernel: &kernel::KernelStore, job: &CaptureJob, blocks: &[(usize, String)]) {
+        kernel
+            .commit(intent("domain"), |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "source".into(),
+                    object_id: "source-domain".into(),
+                    name: "source".into(),
+                    source_kind: "test".into(),
+                    source_id: "source".into(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let requests = blocks
+            .iter()
+            .map(|(index, text)| kernel::ArtifactIngestRequest {
+                intent: intent(&format!("artifact-{index}")),
+                payload: text.as_bytes().to_vec(),
+                evidence_id: format!("srcev:{index}"),
+                object_id: format!("evidence-{index}"),
+                object_kind: "evidence".into(),
+                domain_id: "source".into(),
+                source_kind: "test".into(),
+                source_id: format!("block/{index}"),
+                source_revision: 1,
+                media_type: "text/plain".into(),
+                retention_class: "canonical".into(),
+                retain_until: None,
+                asserted_sensitivity: Sensitivity::Normal,
+                provider_egress: kernel::ProviderEgress::RemoteAllowed,
+                provenance: None,
+            })
+            .collect();
+        kernel
+            .ingest_exact_artifacts_with(
+                intent("descriptors"),
+                requests,
+                None,
+                |envelope, handles| {
+                    for ((index, text), handle) in blocks.iter().zip(handles) {
+                        let identity = crate::harness_sources::message_identity(
+                            &job.project,
+                            &job.harness,
+                            &job.session_id,
+                            &job.message_id,
+                            *index,
+                        );
+                        let identity: Vec<(&str, &str)> = identity
+                            .iter()
+                            .map(|(name, value)| (*name, value.as_str()))
+                            .collect();
+                        envelope
+                            .publish_source_descriptor(&kernel::SourceDescriptorRequest {
+                                occurrence: Occurrence {
+                                    class: OccurrenceClass::Messages.code(),
+                                    identity: &identity,
+                                    revision: "1",
+                                    representation: "text",
+                                    span: None,
+                                },
+                                source_policy: kernel::SourceDescriptorPolicy::Native,
+                                domain_id: "source",
+                                scope_id: None,
+                                evidence_id: &handle.evidence_id,
+                                artifact_digest: &handle.digest,
+                                buffer: text,
+                                sensitivity: Sensitivity::Normal,
+                                observed_at: 1,
+                                expected_head: None,
+                                outcome: None,
+                            })
+                            .map_err(|_| KernelError::InvalidInput)?;
+                    }
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_chunked_lookup_cites_what_reading_every_index_one_by_one_cites() {
+        // Descriptor lookup misses at indexes 4 and 16, the starts of two chunks.
+        let published: Vec<(usize, String)> = (0..=70)
+            .filter(|index| ![4, 16].contains(index))
+            .map(|index| (index, format!("block {index} text")))
+            .collect();
+        let joined = |edited: Option<usize>| {
+            published
+                .iter()
+                .map(|(index, text)| match edited {
+                    Some(edited) if edited == *index => "edited".to_owned(),
+                    _ => text.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut job = CaptureJob {
+            job_id: "job".into(),
+            project: "/project".into(),
+            harness: "pi".into(),
+            session_id: "session".into(),
+            message_id: "message".into(),
+            role: "user".into(),
+            text: joined(None),
+            prepared: None,
+            attempts: 0,
+            failures: 0,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = kernel::KernelStore::open(dir.path()).unwrap();
+        publish_blocks(&kernel, &job, &published);
+        let quotes = [
+            "block 3 text\nblock 5",
+            "block 15 text\nblock 17",
+            "block 17 text",
+            "block 63 text\nblock 64",
+            "block 66 text",
+            "block 70 text",
+            "absent",
+        ];
+        for edited in [None, Some(20)] {
+            job.text = joined(edited);
+            kernel
+                .commit(intent(&format!("lookup-{edited:?}")), |envelope| {
+                    let mut every = Vec::new();
+                    for index in 0..MAX_CITATION_BLOCKS {
+                        let identity = crate::harness_sources::message_identity(
+                            &job.project,
+                            &job.harness,
+                            &job.session_id,
+                            &job.message_id,
+                            index,
+                        );
+                        let identity: Vec<(&str, &str)> = identity
+                            .iter()
+                            .map(|(name, value)| (*name, value.as_str()))
+                            .collect();
+                        let lineage =
+                            kernel::source_identity::encode_preserving_span(&Occurrence {
+                                class: OccurrenceClass::Messages.code(),
+                                identity: &identity,
+                                revision: "1",
+                                representation: "text",
+                                span: None,
+                            })
+                            .unwrap()
+                            .lineage_id;
+                        if let Some(row) = envelope.live_source_descriptor_of_lineage(
+                            OccurrenceClass::Messages,
+                            &lineage,
+                        )? {
+                            every.push(Block {
+                                index,
+                                digest: row.detail.artifact_digest,
+                                length: row.byte_length,
+                                evidence_id: row.detail.evidence_id,
+                            });
+                        }
+                    }
+                    assert_eq!(every.len(), published.len());
+                    let every_located = locate(&job.text, &every);
+                    let citation = Citation::lookup(envelope, &job, true)?;
+                    assert_eq!(citation.located, every_located, "{edited:?}");
+                    assert_eq!(
+                        citation.located.len(),
+                        if edited.is_some() {
+                            18
+                        } else {
+                            published.len()
+                        }
+                    );
+                    assert_eq!(citation.blocks[..], every[..citation.blocks.len()]);
+                    for quote in quotes {
+                        let (rule, cited) =
+                            target(&job.text, quote, &citation.blocks, &citation.located);
+                        let (every_rule, every_cited) =
+                            target(&job.text, quote, &every, &every_located);
+                        assert_eq!(
+                            (rule, cited),
+                            (every_rule, every_cited),
+                            "{quote:?} {edited:?}"
+                        );
+                    }
+                    Ok(String::new())
+                })
+                .unwrap();
+        }
+    }
+
     proptest! {
+        #[test]
+        fn stopping_at_the_walk_cites_what_reading_every_index_cites(
+            items in proptest::collection::vec("[ab\n]{0,4}", 1..6),
+            offset in proptest::sample::select(vec![0usize, 2, 3, 14, 15, 62, 63]),
+            published in proptest::collection::vec(0u8..4, 1..12),
+            refused in proptest::option::of(0usize..80),
+            quotes in proptest::collection::vec((any::<proptest::sample::Index>(), 0usize..8), 1..4),
+        ) {
+            let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+            let text = refs.join("\n");
+            let live = |index: usize| -> Option<Block> {
+                let position = index.checked_sub(offset)?;
+                let item = refs[position % refs.len()];
+                let artifact = match published.get(position)? {
+                    1 => item.to_owned(),
+                    2 => format!("{item}b"),
+                    _ => return None,
+                };
+                Some(Block {
+                    index,
+                    digest: lower_hex(&Sha256::digest(artifact.as_bytes())),
+                    length: artifact.len() as u64,
+                    evidence_id: format!("srcev:{index}"),
+                })
+            };
+            let readable = |index: &usize| refused.is_none_or(|refused| *index < refused);
+            let every: Vec<Block> = (0..MAX_CITATION_BLOCKS)
+                .take_while(readable)
+                .filter_map(live)
+                .collect();
+            let every_located = locate(&text, &every);
+            let mut requested = Vec::new();
+            let (blocks, located) = read_blocks(&text, |indexes| {
+                requested.push(indexes.clone());
+                Ok(indexes.take_while(readable).map(live).collect())
+            })
+            .unwrap();
+            prop_assert_eq!(&located, &every_located);
+            prop_assert_eq!(blocks.is_empty(), every.is_empty());
+            prop_assert_eq!(blocks.first(), every.first());
+            let stopped = blocks.len() > located.len()
+                || located.last().is_some_and(|range| range.end == text.len());
+            let mut expected = Vec::new();
+            let mut start = 0;
+            for end in CHUNK_ENDS {
+                expected.push(start..end);
+                let holds = |index: usize| (start..end).contains(&index);
+                if (stopped && blocks.last().is_some_and(|block| holds(block.index)))
+                    || refused.is_some_and(holds)
+                {
+                    break;
+                }
+                start = end;
+            }
+            prop_assert_eq!(requested, expected);
+            for (from, length) in quotes {
+                if text.is_empty() || blocks.is_empty() {
+                    break;
+                }
+                let start = from.index(text.len());
+                let quote = &text[start..(start + length).min(text.len())];
+                let (rule, cited) = target(&text, quote, &blocks, &located);
+                let (every_rule, every_cited) = target(&text, quote, &every, &every_located);
+                prop_assert_eq!(rule, every_rule);
+                prop_assert_eq!(cited, every_cited);
+            }
+        }
+
+        #[test]
+        fn locating_by_length_matches_the_newline_walk(
+            items in proptest::collection::vec("[ab\n]{0,5}", 1..6),
+            artifacts in proptest::collection::vec(proptest::option::of("[ab\n]{0,5}"), 1..6),
+            cut in proptest::option::of(0usize..32),
+        ) {
+            let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+            let mut text = refs.join("\n");
+            if let Some(cut) = cut {
+                text.truncate(cut.min(text.len()));
+            }
+            // An artifact other than its item stands for a redacted or
+            // edited item.
+            let published: Vec<&str> = refs
+                .iter()
+                .zip(artifacts.iter().chain(std::iter::repeat(&None)))
+                .map(|(item, artifact)| artifact.as_deref().unwrap_or(item))
+                .collect();
+            let blocks = blocks(&published);
+            prop_assert_eq!(locate(&text, &blocks), newline_walk(&text, &blocks));
+        }
+
         #[test]
         fn every_block_of_a_joined_message_is_located_at_its_own_bytes(
             texts in proptest::collection::vec("[a-c\n]{0,6}", 1..6),

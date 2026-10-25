@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-`Citation::lookup` (`crates/daemon/src/memory_capture/cite.rs:241`) returns `source_capture_off` without reading when the binding's `source_capture_enabled` or `memory_enabled` is off; otherwise it reads the message's blocks and, when none is live, returns `source_id_unjoinable` for a message id of the hashed shape (`is_hashed_source_id`, `:114`: 64 lowercase hex, `:`, canonical decimal) and `descriptor_not_found` otherwise. `publish_captured_memories` writes exactly one `citation` and one `anchor` value per decision and pushes the matching count. `publish_budget_expired` has a counter and a wire name but no producer until U4.
+`Citation::lookup` (`crates/daemon/src/memory_capture/cite.rs:282`) returns `source_capture_off` without reading when the binding's `source_capture_enabled` or `memory_enabled` is off; otherwise it reads the message's blocks and, when none is live, returns `source_id_unjoinable` for a message id of the hashed shape (`is_hashed_source_id`, `:118`: 64 lowercase hex, `:`, canonical decimal) and `descriptor_not_found` otherwise. `publish_captured_memories` writes exactly one `citation` and one `anchor` value per decision and pushes the matching count. `publish_budget_expired` has a counter and a wire name but no producer until U4.
 
 ## Failure scenario
 

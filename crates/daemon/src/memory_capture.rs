@@ -1786,8 +1786,9 @@ mod tests {
     /// The #1135 probe-bound measurement, run by hand:
     /// `cargo nextest run -p daemon --all-features --run-ignored only -E 'test(citation_cost)' --no-capture`.
     /// Times the whole publish closure of one 3-memory job whose lookup runs
-    /// all 256 lineage probes, and the digest walk over a 64 KiB job text of
-    /// 64 Ki newlines against a block it never locates, the walk's worst case.
+    /// all 256 lineage probes, and the location walk over a 64 KiB job text of
+    /// 64 Ki newlines against one block that spans the whole text and never
+    /// matches.
     #[test]
     #[ignore = "measurement"]
     fn citation_cost_measurement() {
@@ -1828,6 +1829,7 @@ mod tests {
         let block = cite::Block {
             index: 0,
             digest: "0".repeat(64),
+            length: text.len() as u64,
             evidence_id: "srcev:measure".into(),
         };
         let mut walks = Vec::new();
