@@ -55,31 +55,31 @@ content that is never a unit, so it is neither admitted nor lost.
 
 The user-tier `project_docs.files` list names the documents
 (`crates/daemon/src/config.rs:1300`), admitted by `admit_document_paths`
-(`crates/daemon/src/project_docs.rs:65`) and defaulting to
-`DEFAULT_PROJECT_DOC_FILES` (`project_docs.rs:16`). Admission requires each
+(`crates/daemon/src/project_docs.rs:56`) and defaulting to
+`DEFAULT_PROJECT_DOC_FILES` (`project_docs.rs:19`). Admission requires each
 entry to be a well-formed Kernel identity value
 (`crates/kernel/src/source_identity.rs:283`: 1 to 512 bytes, no control
 character), so every admitted path can key its document lineage.
-`read_document` (`project_docs.rs:192`, through `read_beneath` at `:235`
-against one root descriptor per pass from `open_root` at `:201`) opens the
+`read_document` (`project_docs.rs:177`, through `read_beneath` at `:216`
+against one root descriptor per pass from `open_root` at `:186`) opens the
 parent and then the final component with `openat2` under `RESOLVE`
-(`project_docs.rs:29`: beneath the root, no symlinks, no magic links, no mount
-crossing) and checks the type, size, and UTF-8 on the opened descriptor. When
-the host refuses `openat2` itself (`openat2_refused`, `project_docs.rs:216`:
+(`crates/daemon/src/confined_path.rs:5`: beneath the root, no symlinks, no magic
+links, no mount crossing) and checks the type, size, and UTF-8 on the opened descriptor. When
+the host refuses `openat2` itself (`openat2_refused`, `project_docs.rs:197`:
 `ENOSYS`, `EPERM`, `EINVAL`, or `EOPNOTSUPP`), a top-level path opens with a
-no-follow `openat` relative to the root descriptor (`project_docs.rs:259-261`)
+no-follow `openat` relative to the root descriptor (`project_docs.rs:240-242`)
 and a nested path is `Unreadable`.
 `plan_document` (`source_capture.rs:1037`) maps each read to one capture step.
 
 | Read | Arm | Capture step |
 | --- | --- | --- |
-| `Text` within the unit cap | `project_docs.rs:287` | publish head plus one, or `documents_unchanged` when the live digest matches |
+| `Text` within the unit cap | `project_docs.rs:268` | publish head plus one, or `documents_unchanged` when the live digest matches |
 | `Text` past the unit cap | `plan_document` | skip, `documents_oversize` |
-| `Missing` | `project_docs.rs:266`: `ENOENT` on the final component in a parent that resolved beneath the root | retire the live capture-domain row, else `documents_missing` |
-| `Unreadable` | `project_docs.rs:252` (the parent is absent, a symlink, across a mount, or unopenable, a nested path on a host that refuses `openat2` included), `:268` (any other final-component failure) | skip, `documents_unreadable` |
-| `NotRegular` | `project_docs.rs:267` (`ELOOP`: a final-component symlink), `:274` (the descriptor is not a regular file) | skip, `documents_not_regular` |
-| `Oversize` | `project_docs.rs:277` | skip, `documents_oversize` |
-| `NotUtf8` | `project_docs.rs:287` | skip, `documents_not_utf8` |
+| `Missing` | `project_docs.rs:247`: `ENOENT` on the final component in a parent that resolved beneath the root | retire the live capture-domain row, else `documents_missing` |
+| `Unreadable` | `project_docs.rs:233` (the parent is absent, a symlink, across a mount, or unopenable, a nested path on a host that refuses `openat2` included), `:249` (any other final-component failure) | skip, `documents_unreadable` |
+| `NotRegular` | `project_docs.rs:248` (`ELOOP`: a final-component symlink), `:255` (the descriptor is not a regular file) | skip, `documents_not_regular` |
+| `Oversize` | `project_docs.rs:258` | skip, `documents_oversize` |
+| `NotUtf8` | `project_docs.rs:268` | skip, `documents_not_utf8` |
 
 A path that leaves the list is neither read nor retired.
 

@@ -12,6 +12,7 @@ pub mod codec;
 mod commit_stream;
 pub(crate) mod conditional_note_evaluation;
 pub(crate) mod config;
+pub(crate) mod confined_path;
 pub mod context_capabilities;
 pub mod coverage;
 pub mod decay_render;

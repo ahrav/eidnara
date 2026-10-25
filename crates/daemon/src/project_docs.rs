@@ -2,34 +2,25 @@
 //!
 //! The user-tier `project_docs.files` list names the documents, in order; its default is
 //! `ARCHITECTURE.md`, then `STRUCTURE.md`. Each path is resolved beneath the project root with
-//! `openat2` under [`RESOLVE`]. A host that refuses `openat2` reads with a no-follow `openat`
-//! relative to the root descriptor, restricting reads to top-level paths. Each file is limited to
-//! 256 KiB, checked on the opened descriptor.
+//! `openat2` under [`RESOLVE`](crate::confined_path::RESOLVE). When `openat2` itself fails with
+//! `ENOSYS`, `EPERM`, `EINVAL`, or `EOPNOTSUPP`, [`read_beneath`] opens a top-level path with a
+//! no-follow `openat` relative to the root descriptor and reports a nested path `Unreadable`. Each
+//! file is limited to 256 KiB, checked on the opened descriptor.
 
 use std::io::Read as _;
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::Path;
 
-use rustix::fs::{Mode, OFlags, ResolveFlags};
+use rustix::fs::{Mode, OFlags};
+
+use crate::confined_path::open_beneath;
 
 /// The documents read when the user tier names none.
 const DEFAULT_PROJECT_DOC_FILES: [&str; 2] = ["ARCHITECTURE.md", "STRUCTURE.md"];
 /// Entries one `project_docs.files` list may hold.
 const MAX_PROJECT_DOC_FILES: usize = 8;
-const MAX_DOCUMENT_PATH_COMPONENTS: usize = 16;
-/// Components that name no ordinary file of the tree.
-const REFUSED_COMPONENTS: [&str; 3] = ["", ".", ".."];
-/// The project's own Eidnara directory and its repository metadata, refused in any ASCII case so a
-/// case-folding filesystem reaches neither.
-const REFUSED_DIRECTORIES: [&str; 2] = [".eidnara", ".git"];
 const PROJECT_DOCS_DELIMITER: &str = "\n\n---\n\n";
 const MAX_PROJECT_DOC_BYTES: u64 = 256 * 1024;
-/// Every component of a document path resolves as an ordinary name beneath the root, on the
-/// root's device.
-const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
-    .union(ResolveFlags::NO_SYMLINKS)
-    .union(ResolveFlags::NO_MAGICLINKS)
-    .union(ResolveFlags::NO_XDEV);
 
 /// A configured document's path relative to the project root: `/`-separated ordinary components,
 /// at most 16, none of them `.`, `..`, `.eidnara`, or `.git`, with no variable reference. The path
@@ -79,13 +70,7 @@ pub(crate) fn admit_document_paths(entries: &[&str]) -> Result<Vec<DocumentPath>
 fn admissible(entry: &str) -> bool {
     kernel::source_identity::well_formed_value(entry)
         && !crate::config::has_variable_reference(entry)
-        && entry.split('/').enumerate().all(|(index, component)| {
-            index < MAX_DOCUMENT_PATH_COMPONENTS
-                && !REFUSED_COMPONENTS.contains(&component)
-                && !REFUSED_DIRECTORIES
-                    .iter()
-                    .any(|refused| component.eq_ignore_ascii_case(refused))
-        })
+        && crate::confined_path::check(entry).is_ok()
 }
 
 /// Both fields are empty when neither configured document is included.
@@ -207,10 +192,6 @@ fn open_root(root: &Path) -> Option<OwnedFd> {
     .ok()
 }
 
-fn open_beneath(dir: BorrowedFd<'_>, name: &str, flags: OFlags) -> rustix::io::Result<OwnedFd> {
-    rustix::fs::openat2(dir, name, flags, Mode::empty(), RESOLVE)
-}
-
 /// Treats errors consistent with syscall unavailability, unsupported resolve flags, or seccomp
 /// denial as a host-level refusal of `openat2`. These error codes can also arise from other causes.
 fn openat2_refused(errno: rustix::io::Errno) -> bool {
@@ -227,11 +208,11 @@ type OpenBeneath<'a> = &'a dyn Fn(BorrowedFd<'_>, &str, OFlags) -> rustix::io::R
 /// Reads `path` beneath `root`.
 ///
 /// The parent directory is opened first and the final component relative to it, both under
-/// [`RESOLVE`], so `Missing` means the final component is absent from a parent that resolves
-/// beneath the root. A parent that is absent, a symlink, across a mount, or unopenable is
-/// `Unreadable`; a final-component symlink is `NotRegular`. On a host that refuses `openat2`
-/// itself, a top-level path opens with `openat` relative to the root descriptor and every nested
-/// path is `Unreadable`.
+/// [`RESOLVE`](crate::confined_path::RESOLVE). `Missing` means the final component is absent and
+/// its parent resolves beneath the root. A parent that is absent, a symlink, across a mount, or
+/// unopenable is `Unreadable`; a final-component symlink is `NotRegular`. On a host that refuses
+/// `openat2` itself, a top-level path opens with `openat` relative to the root descriptor and
+/// every nested path is `Unreadable`.
 fn read_beneath(root: BorrowedFd<'_>, path: &DocumentPath, open: OpenBeneath<'_>) -> DocumentRead {
     let (parent, name) = match path.as_str().rsplit_once('/') {
         Some((parent, name)) => (Some(parent), name),
@@ -745,19 +726,6 @@ mod tests {
         assert_eq!(
             read_document(dir.path(), &doc("ARCHITECTURE.md")),
             DocumentRead::NotRegular
-        );
-    }
-
-    /// Every component resolves beneath the root with no symlink, magic link, or mount crossing; a
-    /// mount inside the root needs privileges a test host lacks, so the flag set is pinned here.
-    #[test]
-    fn reads_resolve_with_every_confinement_flag() {
-        assert_eq!(
-            RESOLVE,
-            ResolveFlags::BENEATH
-                | ResolveFlags::NO_SYMLINKS
-                | ResolveFlags::NO_MAGICLINKS
-                | ResolveFlags::NO_XDEV
         );
     }
 
