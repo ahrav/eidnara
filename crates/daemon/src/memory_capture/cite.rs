@@ -453,6 +453,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_settlement_key_names_the_jobs_own_session_and_skips_unjoinable_jobs() {
+        let job = |harness: &str, message_id: &str| CaptureJob {
+            job_id: "job".into(),
+            project: "p".repeat(64),
+            harness: harness.into(),
+            session_id: "ses-a".into(),
+            message_id: message_id.into(),
+            role: "user".into(),
+            text: "text".into(),
+            prepared: None,
+            attempts: 0,
+            failures: 0,
+        };
+        assert_eq!(
+            settlement_key(&job("pi", "pi-1")),
+            Some(SessionIdentity {
+                project_id: "p".repeat(64),
+                harness: Harness::Pi,
+                session_id: "ses-a".into(),
+            })
+        );
+        assert_eq!(
+            settlement_key(&job("opencode", "msg_1")).map(|key| key.harness),
+            Some(Harness::OpenCode)
+        );
+        assert_eq!(settlement_key(&job("codex", "msg_1")), None);
+        assert_eq!(
+            settlement_key(&job("pi", &format!("{}:0", "a".repeat(64)))),
+            None
+        );
+    }
+
     /// An identity the source-identity encoder refuses can hold no
     /// descriptor, so the lookup reads nothing and the memory reports a miss
     /// instead of failing its publish.
