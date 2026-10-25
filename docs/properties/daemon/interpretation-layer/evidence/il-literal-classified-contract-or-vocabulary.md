@@ -12,7 +12,6 @@ identifiers.
   occurrences in the production source of nine files. 156 name a field, a
   tool, an argument key, or a discriminator value, in 167 rows (39
   vocabulary, 34 Eidnara-owned, 94 contract); 100 are excluded with a reason.
-  One row is one literal under one class and one meaning.
 - The table was built by extracting every string literal outside top-level
   `#[cfg(test)]` regions and items, assigning each occurrence to one row, and
   checking that every occurrence appears in exactly one row.

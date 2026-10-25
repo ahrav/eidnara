@@ -14,7 +14,7 @@ Part A (existing behavior) and Part B S2 (the vocabulary module and its gate).
 U5 ([#1110](https://github.com/ahrav/eidnara/issues/1110)) lands them; the
 provenance and verification commit are stated in
 [`catalog.md`](catalog.md#scope). The ten #1104 records this work touches are
-linked, not revised.
+[linked, not revised](catalog.md#1104-records-this-work-touches).
 
 ## Layout
 
