@@ -179,37 +179,40 @@ mod tests {
     }
 
     /// Whether `source` names the classifier or its shape through any path, alias, or import form.
+    /// Grouped imports can reach `shape` through an aliased parent: `use outcome::{shape as classifier};`.
     fn names_the_classifier(source: &str) -> bool {
-        [
-            "OutputShape",
-            "tool_outcome::shape",
-            "self::shape",
-            "super::shape",
-            "shape::",
-            "::shape as ",
-        ]
-        .iter()
-        .any(|needle| source.contains(needle))
-            || source
-                .match_indices("tool_outcome::{")
-                .any(|(start, needle)| {
-                    let group = &source[start + needle.len()..];
-                    let mut depth = 1_usize;
-                    let end = group
-                        .char_indices()
-                        .find(|&(_, found)| {
-                            match found {
-                                '{' => depth += 1,
-                                '}' => depth -= 1,
-                                _ => {}
-                            }
-                            depth == 0
-                        })
-                        .map_or(group.len(), |(end, _)| end);
-                    group[..end]
-                        .split(|found: char| !found.is_alphanumeric() && found != '_')
-                        .any(|word| word == "shape")
-                })
+        fn is_ident(found: char) -> bool {
+            found.is_alphanumeric() || found == '_'
+        }
+        fn starts_use_item(line: &str) -> bool {
+            let mut rest = line.trim_start();
+            if let Some(after) = rest.strip_prefix("pub") {
+                rest = after.trim_start();
+                if let Some(after) = rest.strip_prefix('(') {
+                    rest = after.split_once(')').map_or("", |(_, after)| after);
+                }
+            }
+            rest.trim_start()
+                .strip_prefix("use")
+                .is_some_and(|after| after.starts_with(char::is_whitespace))
+        }
+        let mut offset = 0;
+        let mut use_items = source.split_inclusive('\n').filter_map(|line| {
+            let start = offset;
+            offset += line.len();
+            starts_use_item(line).then(|| source[start..].split(';').next().unwrap_or_default())
+        });
+        source.contains("OutputShape")
+            || source.match_indices("shape").any(|(at, found)| {
+                let (before, after) = (&source[..at], &source[at + found.len()..]);
+                !before.chars().next_back().is_some_and(is_ident)
+                    && !after.chars().next().is_some_and(is_ident)
+                    && (before.ends_with("::") || after.starts_with("::"))
+            })
+            || use_items.any(|item| {
+                item.split(|found: char| !is_ident(found))
+                    .any(|word| word == "shape")
+            })
     }
 
     /// The scan flags every path and import form that reaches the classifier, and passes the
@@ -226,6 +229,9 @@ mod tests {
             "pub use self::shape as output_shape;",
             "use crate::tool_outcome::{a::{b}, shape};",
             "if matches!(found, OutputShape::UnifiedDiff) {}",
+            "use crate::tool_outcome as outcome;\nuse outcome::{shape as classifier};\nclassifier::classify(&text);",
+            "use crate::tool_outcome::*;\nuse shape as classifier;",
+            "pub(crate) use crate::tool_outcome::{\n    shape,\n};",
         ] {
             assert!(names_the_classifier(reaching), "{reaching}");
         }
@@ -233,6 +239,8 @@ mod tests {
             "pub mod shape;",
             "use crate::tool_outcome::{ToolBlock, ToolPairs};",
             "let shape = classify(&node);",
+            "use crate::reshape::classify;",
+            "/// The shape the summarizer reads.",
         ] {
             assert!(!names_the_classifier(clear), "{clear}");
         }
