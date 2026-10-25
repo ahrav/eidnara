@@ -26,9 +26,14 @@ yield one key. Smallest falsifier: a key that compares `lineage`.
 
 ## Investigation log
 ### Q: Does this record discharge `led-non-empty-lineage-reachable-from-a-producer` (#1119 Part A)?
-- Sources examined: the fixtures in `crates/eval-core/tests/access.rs`
-- Findings: the lineage values are hand-built; no in-tree producer writes a
-  non-empty lineage
+- Sources examined: the fixtures in `crates/eval-core/tests/access.rs`; every
+  `SampleRecord {` construction under `crates/` outside tests, which is the
+  example runner's `sample`
+  (`crates/daemon/examples/eval_runner/campaign.rs:1316`)
+- Findings: the fixtures' lineage values are hand-built; the example runner
+  writes `lineage: vec![]`
+  (`crates/daemon/examples/eval_runner/campaign.rs:1323`), so no in-tree
+  producer writes a non-empty lineage
 - Missing evidence: a runner (#1007) that retries a sample.
 - Conclusion: unresolved, needs a runner (#1007) that retries a sample
 ### Q: Catalog open question: Two history policies of one arm share one key, as #1122 resolved OQ7-4

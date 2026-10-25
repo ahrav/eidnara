@@ -1326,8 +1326,9 @@ Existing check: `crates/eval-core/src/ceiling.rs:50`, `:83`;
   `crates/eval-core/src/report.rs:366`; tests above.
 Impact: A mislabeled ceiling would bound the wrong quantity.
 Open questions:
-- Task ids are compared untrimmed, as the sample ledger compares them; `t1` and
-  `t1 ` are two tasks (needs human input on canonical task ids).
+- Task ids are compared untrimmed, as the own-task exclusion compares ledger
+  tasks (`crates/eval-core/src/access.rs:33`); `t1` and `t1 ` are two tasks
+  (needs human input on canonical task ids).
 
 ### ceil-arm-leaves-claim-class-unchanged
 

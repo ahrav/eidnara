@@ -27,10 +27,15 @@ Legal witness: `{Transfer, "t1", "t2", <40 lower hex>}` round-trips. Smallest
 falsifier: `{ProjectKnowledge, "t1", "t2", <sha>}` admitted.
 
 ## Investigation log
-### Q: Catalog open question: Task ids are compared untrimmed, as the sample ledger compares them
-- Sources examined: `crates/eval-core/src/ceiling.rs:50`, `:83`
-- Findings: Task ids are compared untrimmed, as the sample ledger compares
-  them; `t1` and `t1 ` are two tasks; `validate` tests tasks with `blank` and
-  compares them with plain `==` (`crates/eval-core/src/ceiling.rs:50`)
+### Q: Catalog open question: Task ids are compared untrimmed, as the own-task exclusion compares ledger tasks
+- Sources examined: `crates/eval-core/src/ceiling.rs:50`, `:65`, `:70`;
+  `crates/eval-core/src/access.rs:33` (`excludes`);
+  `crates/eval-core/src/campaign.rs:502` (`SampleLedger::validate`)
+- Findings: Task ids are compared untrimmed; `t1` and `t1 ` are two tasks.
+  `validate` tests each task with `blank` and compares the pair with plain
+  `==` (`crates/eval-core/src/ceiling.rs:65`, `:70`); the own-task exclusion
+  over ledger records compares `key.task == target.task` the same way
+  (`crates/eval-core/src/access.rs:33`); `SampleLedger::validate` checks a
+  task for blankness only (`crates/eval-core/src/campaign.rs:502`)
 - Missing evidence: an owner decision.
 - Conclusion: needs human input

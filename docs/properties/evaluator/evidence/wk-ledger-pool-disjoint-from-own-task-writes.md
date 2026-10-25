@@ -37,8 +37,11 @@ Legal witness: reads(s1) = {w3 keyed (t2, Aged)} with writes {w3, w7 keyed
 ## Investigation log
 ### Q: Why refuse a key that is not the writer's?
 - Sources examined: the attribution rule in `check_disjoint`
-- Findings: attribution reads `write.key`; a t1 writer's write stored under a
-  t2 key would pass a t1 reader's check
+  (`crates/eval-core/src/access.rs:229`) and the key refusal (`:188`)
+- Findings: attribution reads `write.key`; the write pass refuses a key that
+  is not its writer's (`KeyDisagreesWithWriter`, `:188`) before any read is
+  checked, so a t1 writer's write stored under a t2 key is refused; absent
+  that refusal it would pass a t1 reader's check
 - Missing evidence: none.
 - Conclusion: resolved with answer - `KeyDisagreesWithWriter` keeps key-based
   attribution sound, added in #1122 beyond the spec's list
