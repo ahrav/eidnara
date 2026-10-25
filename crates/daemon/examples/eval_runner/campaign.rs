@@ -1812,6 +1812,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
             &structured_aged_runs,
         ),
         envelope: charges.envelope.clone(),
+        ceilings: vec![],
     };
     // The publish root, the artifact's bytes, and the retained artifact are
     // charged before the envelope is copied into the report, so the published

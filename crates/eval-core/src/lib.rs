@@ -25,6 +25,7 @@ mod anchor;
 mod campaign;
 mod capture;
 mod cassette;
+mod ceiling;
 mod censoring;
 mod census;
 mod checkpoint;
@@ -81,6 +82,7 @@ pub use cassette::{
     Lookup, MissClass, OPENCODE_COVERED_FIELDS, OPENCODE_HEADER_ALLOWLIST, OpenCodeRequest,
     canonical_decimal_f64, request_digest,
 };
+pub use ceiling::{CeilingDeclaration, CeilingError, CeilingKind, parse_ceiling_declaration};
 pub use censoring::{
     Attempt, BoundMethod, Counter, FailureRate, LatencySummary, P99_MIN_RUNS, PassK, PassKBounds,
     Percentile, PercentileBound, pass_k,
