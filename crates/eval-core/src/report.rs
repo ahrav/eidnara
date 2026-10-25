@@ -61,7 +61,7 @@ impl CampaignGates {
     /// and every gate would pass with nothing behind it.
     pub fn of(
         samples: &SampleLedger,
-        ceilings: &Ceilings,
+        rate_ceilings: &Ceilings,
         family: &AnalysisFamily,
         arm_rates: &BTreeMap<String, ArmRates>,
     ) -> Result<Self, ReportError> {
@@ -91,11 +91,14 @@ impl CampaignGates {
             .map_err(ReportError::Statistics)?
             .miss_asymmetry_bound;
         Ok(Self {
-            indeterminate: gate(share(indeterminate, attempted)?, ceilings.indeterminate),
-            censoring: gate(share(censored, attempted)?, ceilings.censoring),
+            indeterminate: gate(
+                share(indeterminate, attempted)?,
+                rate_ceilings.indeterminate,
+            ),
+            censoring: gate(share(censored, attempted)?, rate_ceilings.censoring),
             redaction_refusals: gate(
                 share(refused, samples.samples.len())?,
-                ceilings.redaction_refusals,
+                rate_ceilings.redaction_refusals,
             ),
             arm_miss_asymmetry: gate(
                 arm_miss_asymmetry(arm_rates).map_err(ReportError::Statistics)?,
@@ -295,7 +298,13 @@ pub enum ReportError {
     },
     /// The parsed value drops a field the input carried.
     Lossy,
-    Ceiling(CeilingError),
+    /// The ceiling at `index` fails `CeilingDeclaration::validate`.
+    Ceiling {
+        index: usize,
+        error: CeilingError,
+    },
+    /// A declaration equal in all four fields to an earlier one; the same
+    /// task pair pinned at another revision is a separate declaration.
     RepeatedCeiling(CeilingDeclaration),
     Profile(ProfileError),
     Samples(SampleError),
@@ -334,8 +343,14 @@ impl SuiteBReport {
         // The retained arm rates parse whatever the outcome; a suppression
         // that never reads them still publishes them.
         arm_miss_asymmetry(&self.arm_rates).map_err(ReportError::Statistics)?;
+        Ok(())
+    }
+
+    fn check_ceilings(&self) -> Result<(), ReportError> {
         for (index, ceiling) in self.ceilings.iter().enumerate() {
-            ceiling.validate().map_err(ReportError::Ceiling)?;
+            ceiling
+                .validate()
+                .map_err(|error| ReportError::Ceiling { index, error })?;
             if self.ceilings[..index].contains(ceiling) {
                 return Err(ReportError::RepeatedCeiling(ceiling.clone()));
             }
@@ -941,8 +956,9 @@ impl SuiteBReport {
         }
         self.check_interval(&gated.analysis)?;
         self.check_pairs_backed(&gated.analysis)?;
-        let ceilings = self.profile.ceilings().map_err(ReportError::Profile)?;
-        let gates = CampaignGates::of(&self.samples, &ceilings, &self.family, &self.arm_rates)?;
+        let rate_ceilings = self.profile.ceilings().map_err(ReportError::Profile)?;
+        let gates =
+            CampaignGates::of(&self.samples, &rate_ceilings, &self.family, &self.arm_rates)?;
         if gates != gated.gates {
             return Err(ReportError::GatesNotDerived);
         }
@@ -970,6 +986,7 @@ impl SuiteBReport {
         let value = serde_json::to_value(self).map_err(|e| ReportError::Shape(e.to_string()))?;
         canonical_json_encode(&value).map_err(ReportError::NotCanonical)?;
         self.check_identity()?;
+        self.check_ceilings()?;
         self.check_claims()?;
         self.check_accounting()
     }

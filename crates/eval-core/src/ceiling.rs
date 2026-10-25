@@ -1,4 +1,4 @@
-use context_core::canonical_json::is_lower_hex;
+use context_core::canonical_json::{canonical_json_encode, is_lower_hex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -78,9 +78,19 @@ impl CeilingDeclaration {
     }
 }
 
+/// Admits exactly the object spelling: the decoded declaration must encode
+/// back to the input's canonical bytes, so the decoder's array form is
+/// `Shape`.
 pub fn parse_ceiling_declaration(value: &Value) -> Result<CeilingDeclaration, CeilingError> {
-    let declaration: CeilingDeclaration = serde_json::from_value(value.clone())
-        .map_err(|error| CeilingError::Shape(error.to_string()))?;
+    let shape = |reason: String| CeilingError::Shape(reason);
+    let declaration =
+        CeilingDeclaration::deserialize(value).map_err(|error| shape(error.to_string()))?;
+    let spelled = canonical_json_encode(value).map_err(|error| shape(format!("{error:?}")))?;
+    let canonical = canonical_json_encode(&serde_json::to_value(&declaration).expect("serializes"))
+        .expect("a declaration holds only strings");
+    if spelled != canonical {
+        return Err(shape(format!("{spelled} is not the spelling {canonical}")));
+    }
     declaration.validate()?;
     Ok(declaration)
 }
