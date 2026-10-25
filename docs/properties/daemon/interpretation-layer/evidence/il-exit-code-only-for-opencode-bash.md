@@ -19,7 +19,7 @@
 - Tests: `crates/daemon/src/tool_vocabulary_tests.rs:145` over the OpenCode
   1.19.0 trace fixture (`bash` exit 1 and 0, four `bash` cases without an
   integer exit, one `read`) and the string, float, `read`, and Pi cases;
-  `tool_vocabulary_tests.rs:17` over 25 names; `crates/daemon/tests/harness_sources.rs:3468`.
+  `tool_vocabulary_tests.rs:17` over 25 names; `crates/daemon/tests/harness_sources.rs:3619`.
 - Frozen OpenCode 1.18.22 session: four `bash` parts, three with
   `metadata.exit == 0` and one with `metadata.exit == null`.
 

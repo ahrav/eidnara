@@ -15,7 +15,7 @@ truncation flag comes from a different field than the OpenCode one.
   and `tool_outcome.rs:71` (Pi, passing the message).
 - Tests: `crates/daemon/src/tool_vocabulary_tests.rs:185` covers both pointers,
   a string value, a missing flag, and a Pi message read as OpenCode;
-  `crates/daemon/tests/harness_sources.rs:3468` covers the OpenCode trace.
+  `crates/daemon/tests/harness_sources.rs:3619` covers the OpenCode trace.
 - The U3 report (posted with #1109) stratifies tool-result byte lengths by
   the flag: OpenCode 2 `true`, 11 `false`; Pi 12 `unknown`.
 

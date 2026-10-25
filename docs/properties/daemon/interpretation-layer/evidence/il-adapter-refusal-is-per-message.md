@@ -19,9 +19,9 @@ every sibling unit of its message.
 - Budget stop: `Kept::keep` (`harness_sources.rs:463-482`) returns `false`
   when the copy budget refuses; the adapter returns `Ok(None)` at `:321`,
   `:354`, `:435`, `:443`, or `:454`.
-- Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1011-1041`)
-  counts each `Err` once (`:1033`) and adds the count to `adapter_refused`
-  (`:1036-1039`), also when a later record stops the pass (`:1029-1032`).
+- Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1033-1063`)
+  counts each `Err` once (`:1055`) and adds the count to `adapter_refused`
+  (`:1058-1061`), also when a later record stops the pass (`:1051-1054`).
 - Pi shape: `crates/daemon/tests/harness_sources.rs:757-762` sets the second
   content item of a `toolResult` whose first item is text (`TOOL_BYTES`,
   `harness_sources.rs:433`) to an `image` item and asserts the whole record
@@ -30,11 +30,11 @@ every sibling unit of its message.
   the settled tool part's `state.output` to an object in a record whose text
   parts sit at `harness_sources.rs:388` and `:393`, and asserts the whole
   record refuses as `UnsupportedShape("tool output")`.
-- U3: `crates/daemon/tests/source_corpus_replay.rs:80` asserts that the frozen
-  Pi session's image-bearing tool result (entry `e0041`, a text item then an
-  `image` item) is among `refused_records` and that the reader classifies it
+- U3: `crates/daemon/tests/source_corpus_replay.rs:139-141` asserts that the
+  frozen Pi session's image-bearing tool result (a text item then an `image`
+  item) is among `refused_records` and that the reader classifies it
   `non_text_item`. The reader classifies the whole record as a non-unit
-  (`crates/daemon/src/source_corpus.rs:720-729`), so the pass expects no unit
+  (`crates/daemon/src/source_corpus.rs:723-731`), so the pass expects no unit
   from it and the refusal reconciles as no loss, not as `adapter_refused`.
 
 ## Failure scenario

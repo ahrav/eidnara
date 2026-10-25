@@ -18,7 +18,7 @@ updated for the checks U1 to U4 landed; code references verified at
 | F-b2 OpenCode message with text parts beside a settled tool whose output is not a string | hand-built JSON | il-adapter-refusal-is-per-message | yes at the adapter: `hs-tests:681-686`; not through a capture pass |
 | F-b3 `step-start`, `reasoning`, `file`, `ignored` text, running or pending tool, interrupted tool | frozen OpenCode session; synthetic sessions in `replay` | il-unknown-part-kind-skipped-uncounted | partly: `replay:80`, `:213`, `:336` |
 | F-b4 second pass after the turn completes (unfinished text, interrupted tool) or after a pending or running tool settles | two-pass capture test | il-unknown-part-kind-skipped-uncounted | yes for text: `hs-tests:922`; no for a settled tool or an interrupted tool |
-| F-b5 purged digest re-offered beside a sibling | Kernel purge, then a capture pass | il-readmission-block-ends-batch-unnamed-at-head | no |
+| F-b5 purged digest re-offered beside a sibling | Kernel purge, then a capture pass | il-readmission-block-ends-batch-unnamed-at-head | yes, by U6: `sc-tests:2514`, `:2561`, `:2607`, `:2631`; `hs-tests:2555`, `:2607`, `:2664` |
 | F-c1 legacy `(P, P, path)` live row, then a derived-identity pass | seeded Kernel row plus a `git init` root | il-repository-id-equals-project-id-at-head | no (U7) |
 | F-c2 two worktrees of one repository | the U1 materializer with a worktree | il-repository-id-equals-project-id-at-head | no (U7) |
 | F-c3 symlinked intermediate directory with and without a target; no `openat2` | U8 fixtures; a mocked syscall | il-doc-read-nofollow-final-component-flat-list | no (U8) |
@@ -57,9 +57,6 @@ Each marker asserts preconditions, never the violation.
    call alone: closes the round-trip half of
    il-synthetic-todowrite-round-trips-under-one-name. Selection never sees the
    synthetic pair, so a selection-only input cannot construct it.
-6. A daemon capture test that purges a captured digest and re-offers it beside
-   a sibling: pins il-readmission-block-ends-batch-unnamed-at-head before U6
-   changes it.
-7. A Pi session whose tool output passes the harness's own limit: gives
+6. A Pi session whose tool output passes the harness's own limit: gives
    il-truncated-flag-read-per-harness a harness-produced witness.
-8. The U7 and U8 fixtures (F-c1 to F-c3): owned by those units.
+7. The U7 and U8 fixtures (F-c1 to F-c3): owned by those units.

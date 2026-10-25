@@ -7,21 +7,20 @@ unnamed batch conflict, which the plan's R16 replaces.
 
 ## Evidence trail
 
-- The pre-screen (`crates/daemon/src/harness_sources.rs:1511-1580`) holds no
-  re-admission check.
+- At `41d889ea4` the pre-screen held no re-admission check.
 - Batch ingest refuses a reclaiming or blocked digest with
   `KernelError::Conflict` (`crates/kernel/src/cas/ingest.rs:822-827`); the
   batch contract says the error names no request
   (`crates/kernel/src/cas/ingest.rs:693`). The single ingest names
   `ReAdmissionBlocked` (`crates/kernel/src/cas/ingest.rs:461-468`, `:1151-1153`).
-- `BatchRefusal::conflicting_unit` (`harness_sources.rs:1468-1470`) is `None`
+- `BatchRefusal::conflicting_unit` (`harness_sources.rs:1491-1493`) is `None`
   when `unit` is `None`.
-- `publish_locked` (`crates/daemon/src/source_capture.rs:811-836`) records
+- `publish_locked` (`crates/daemon/src/source_capture.rs:833-858`) records
   every keyed unit `Pending` and ends with `kernel_end`, which counts
-  `kernel_error` (`source_capture.rs:1296-1301`).
+  `kernel_error` (`source_capture.rs:1318-1323`).
 - `is_permanent` lists `ReAdmissionBlocked` (`harness_sources.rs:578`), and
   `classify` maps a permanent refusal to `units_refused_terminal`
-  (`source_capture.rs:1095-1097`); neither is reached on this path.
+  (`source_capture.rs:1117-1119`); neither is reached on this path.
 
 ## Failure scenario
 
@@ -56,3 +55,15 @@ pending, nothing retained.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where
   the record names one, stays open.
 - Conclusion: resolved with answer.
+
+### Q: What does U6 change?
+- Sources examined: `crates/daemon/src/harness_sources.rs:1613-1619`,
+  `:1635-1670`, and `:1160-1180`; `crates/kernel/src/cas/ingest.rs:1470-1475`; the U6 tests.
+- Findings: screening refuses a unit with no stored descriptor receipt, no
+  evidence receipt under another request, and a payload digest that is
+  tombstoned or pending unlink, before the commit and without an admission
+  slot. A purge that commits after that screening read still reaches batch
+  ingest and ends one pass `kernel_error`
+  (`crates/daemon/src/source_capture_tests.rs:2561`).
+- Missing evidence: none.
+- Conclusion: resolved with answer: the record is invalidated.

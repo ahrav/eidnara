@@ -1156,6 +1156,29 @@ fn stored_receipt(
     }
 }
 
+/// Identity conflicts and descriptor replays take precedence over purge refusal, which applies only when the commit would ingest the unit's bytes.
+fn readmission_blocked(
+    preview: &kernel::Preview<'_>,
+    publisher: &SourcePublisher<'_>,
+    unit: &Prepared<'_>,
+) -> Result<bool, KernelError> {
+    match stored_receipt(preview, publisher.descriptor_intent(unit), unit, publisher) {
+        Ok(None) => {}
+        Ok(Some(_)) | Err(KernelError::Conflict) => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    if !preview.artifact_readmission_blocked(&kernel::source_identity::payload_id(
+        unit.unit.text.as_bytes(),
+    ))? {
+        return Ok(false);
+    }
+    match stored_receipt(preview, publisher.evidence_intent(unit), unit, publisher) {
+        Ok(_) => Ok(true),
+        Err(KernelError::Conflict) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Both receipts of `unit` share this key, or `None` when its identity does not encode.
 pub(crate) fn receipt_key_of(unit: &SourceUnit) -> Option<String> {
     let identity: Vec<(&str, &str)> = unit
@@ -1489,16 +1512,27 @@ pub enum UnitDisposition {
 ///
 /// [`publish_screened`] reconciles tool results by call (project, harness, session, parent message, tool call). Each call's newest generation in the batch retires its older live generations in the same commit; `Reruns::apply` validates the retirement plan inside that commit. Stored-receipt replays keep their recorded disposition; other units older than the call's head are [`UnitDisposition::Superseded`]. Stale and first-generation decisions remain valid when every publication to the store's `raw_tool_spans` is serialized from preview through commit. Capture's commit gate provides this serialization. [`SourcePublisher::publish`] and [`publish_batch`] publish tool units as given.
 ///
-/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit within the bounds whose text exact retention refuses, such as text holding a recognized secret, is [`UnitDisposition::Refused`] with that [`PublishError::Artifact`] kind and takes no admission slot. A unit that replays a stored receipt counts toward the batch bounds. A later unit of an admitted unit's lineage is [`UnitDisposition::Deferred`], except a changed request under the admitted unit's key, which is [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`]. When the commit refuses an admitted unit's descriptor, that unit is [`UnitDisposition::Refused`] with [`PublishError::Descriptor`], and the remaining admitted units are committed in another attempt. A batch with no admitted unit commits nothing. The scope read and the batch's receipt preview each wait at most the receipt wait, or until `budget`'s deadline.
+/// Screening keeps the units' order. A unit over [`MAX_SOURCE_UNIT_BYTES`] is [`UnitDisposition::UnitTooLarge`]. A unit [`SourcePublisher::publish`] would refuse before retention, or whose project the publisher's stored scope does not name, is [`UnitDisposition::Refused`]. Neither counts toward the batch bounds. The remaining units are admitted until the next one would exceed [`MAX_SOURCE_BATCH_UNITS`] units or [`MAX_SOURCE_BATCH_BYTES`] of text; that unit and every later unit within the size cap are [`UnitDisposition::Deferred`] without further screening. A unit within the bounds whose text exact retention refuses, such as text holding a recognized secret, is [`UnitDisposition::Refused`] with that [`PublishError::Artifact`] kind and takes no admission slot. A unit within the bounds whose key holds no stored descriptor receipt, whose evidence receipt is absent or matches its request, and whose payload digest a purge tombstone or a pending unlink names is [`UnitDisposition::Refused`] with [`ArtifactErrorKind::ReAdmissionBlocked`] and takes no admission slot; a digest under reclamation alone reaches ingest, which refuses it retryably. A unit that replays a stored receipt counts toward the batch bounds. A later unit of an admitted unit's lineage is [`UnitDisposition::Deferred`], except a changed request under the admitted unit's key, which is [`UnitDisposition::Refused`] with [`PublishError::IdentityReused`]. When the commit refuses an admitted unit's descriptor, that unit is [`UnitDisposition::Refused`] with [`PublishError::Descriptor`], and the remaining admitted units are committed in another attempt. A batch with no admitted unit commits nothing. Units are prepared and scanned with no kernel reader held. The scope is read in one preview, and the admitted units' receipts and re-admission states are read together in another; when that read blocks a unit, screening resumes at the first blocked unit with its slot released, and reads only the units it newly admits. The screening reads together, and the batch's receipt preview, each wait at most the receipt wait, or until `budget`'s deadline.
 ///
 /// # Errors
 ///
-/// Returns the scope read's failure with no unit, or [`publish_batch`]'s refusal of the admitted units, whose `unit` is the position in `units`. Nothing commits.
+/// A screening read's failure returns with no unit. A refusal from [`publish_batch`] identifies the admitted unit by its position in `units`.
 pub fn publish_screened(
     publisher: &SourcePublisher<'_>,
     units: &[SourceUnit],
     observed_at: i64,
     budget: Option<&kernel::applicability::EvalBudget>,
+) -> Result<Vec<UnitDisposition>, BatchRefusal> {
+    publish_screened_between(publisher, units, observed_at, budget, || {})
+}
+
+/// [`publish_screened`] that runs `between` after screening and before the batch commit begins.
+pub(crate) fn publish_screened_between(
+    publisher: &SourcePublisher<'_>,
+    units: &[SourceUnit],
+    observed_at: i64,
+    budget: Option<&kernel::applicability::EvalBudget>,
+    between: impl FnOnce(),
 ) -> Result<Vec<UnitDisposition>, BatchRefusal> {
     let mut dispositions: Vec<Option<UnitDisposition>> = Vec::with_capacity(units.len());
     let mut terms: Option<Option<Vec<kernel::ScopeTermSpec>>> = None;
@@ -1508,76 +1542,134 @@ pub fn publish_screened(
         std::collections::HashMap::new();
     let mut admitted_bytes = 0usize;
     let mut full = false;
-    for (index, unit) in units.iter().enumerate() {
-        let len = unit.text.len();
-        if len > MAX_SOURCE_UNIT_BYTES {
-            dispositions.push(Some(UnitDisposition::UnitTooLarge));
-            continue;
-        }
-        if full {
-            dispositions.push(Some(UnitDisposition::Deferred));
-            continue;
-        }
-        let prepared = match publisher.prepare(unit, observed_at) {
-            Ok(prepared) => prepared,
-            Err(refusal) => {
-                dispositions.push(Some(UnitDisposition::Refused(refusal)));
+    let deadline = preview_deadline(budget);
+    let screening_refusal = |error| BatchRefusal {
+        error,
+        unit: None,
+        refusal: None,
+    };
+    let mut blocked: Vec<Option<bool>> = vec![None; units.len()];
+    let mut next = 0;
+    loop {
+        let mut unchecked = Vec::new();
+        for (index, unit) in units.iter().enumerate().skip(next) {
+            let len = unit.text.len();
+            if len > MAX_SOURCE_UNIT_BYTES {
+                dispositions.push(Some(UnitDisposition::UnitTooLarge));
                 continue;
             }
-        };
-        if let (Some(_), Some(scope_id)) = (&prepared.project, publisher.scope_id) {
-            if terms.is_none() {
-                let (_, read) = publisher
-                    .kernel
-                    .preview(preview_deadline(budget), |preview| {
-                        preview.scope_terms(scope_id)
-                    })
-                    .map_err(|error| BatchRefusal {
-                        error,
-                        unit: None,
-                        refusal: None,
-                    })?;
-                terms = Some(read);
+            if full {
+                dispositions.push(Some(UnitDisposition::Deferred));
+                continue;
             }
-            if !SourcePublisher::scope_admits(&prepared, terms.as_ref().and_then(Option::as_deref))
+            let prepared = match publisher.prepare(unit, observed_at) {
+                Ok(prepared) => prepared,
+                Err(refusal) => {
+                    dispositions.push(Some(UnitDisposition::Refused(refusal)));
+                    continue;
+                }
+            };
+            if let (Some(_), Some(scope_id)) = (&prepared.project, publisher.scope_id) {
+                if terms.is_none() {
+                    let (_, read) = publisher
+                        .kernel
+                        .preview(deadline, |preview| preview.scope_terms(scope_id))
+                        .map_err(screening_refusal)?;
+                    terms = Some(read);
+                }
+                if !SourcePublisher::scope_admits(
+                    &prepared,
+                    terms.as_ref().and_then(Option::as_deref),
+                ) {
+                    dispositions.push(Some(UnitDisposition::Refused(PublishError::Kernel {
+                        error: KernelError::NotFound,
+                        evidence: None,
+                    })));
+                    continue;
+                }
+            }
+            // Each commit publishes at most one revision per lineage, so additional nonconflicting units in an admitted lineage wait for another pass.
+            if let Some((key, digest)) = admitted_lineages.get(prepared.lineage_id.as_str()) {
+                dispositions.push(Some(
+                    if *key == prepared.key && *digest != prepared.request_digest {
+                        UnitDisposition::Refused(PublishError::IdentityReused)
+                    } else {
+                        UnitDisposition::Deferred
+                    },
+                ));
+                continue;
+            }
+            if admitted.len() == MAX_SOURCE_BATCH_UNITS
+                || admitted_bytes + len > MAX_SOURCE_BATCH_BYTES
             {
-                dispositions.push(Some(UnitDisposition::Refused(PublishError::Kernel {
-                    error: KernelError::NotFound,
-                    evidence: None,
-                })));
+                full = true;
+                dispositions.push(Some(UnitDisposition::Deferred));
                 continue;
             }
+            if let Some(kind) = kernel::exact_text_refusal(&unit.text) {
+                dispositions.push(Some(UnitDisposition::Refused(PublishError::Artifact(kind))));
+                continue;
+            }
+            match blocked[index] {
+                Some(true) => {
+                    dispositions.push(Some(UnitDisposition::Refused(PublishError::Artifact(
+                        ArtifactErrorKind::ReAdmissionBlocked,
+                    ))));
+                    continue;
+                }
+                Some(false) => {}
+                None => unchecked.push(admitted.len()),
+            }
+            admitted_lineages.insert(
+                prepared.lineage_id.clone(),
+                (prepared.key.clone(), prepared.request_digest.clone()),
+            );
+            admitted_prepared.push(prepared);
+            admitted.push(index);
+            admitted_bytes += len;
+            dispositions.push(None);
         }
-        // Each commit publishes at most one revision per lineage, so additional nonconflicting units in an admitted lineage wait for another pass.
-        if let Some((key, digest)) = admitted_lineages.get(prepared.lineage_id.as_str()) {
-            dispositions.push(Some(
-                if *key == prepared.key && *digest != prepared.request_digest {
-                    UnitDisposition::Refused(PublishError::IdentityReused)
-                } else {
-                    UnitDisposition::Deferred
-                },
-            ));
-            continue;
+        if unchecked.is_empty() {
+            break;
         }
-        if admitted.len() == MAX_SOURCE_BATCH_UNITS || admitted_bytes + len > MAX_SOURCE_BATCH_BYTES
-        {
-            full = true;
-            dispositions.push(Some(UnitDisposition::Deferred));
-            continue;
+        let (_, answers) = publisher
+            .kernel
+            .preview(deadline, |preview| {
+                unchecked
+                    .iter()
+                    .map(|&position| {
+                        readmission_blocked(preview, publisher, &admitted_prepared[position])
+                    })
+                    .collect::<Result<Vec<bool>, KernelError>>()
+            })
+            .map_err(screening_refusal)?;
+        for (&position, &answer) in unchecked.iter().zip(&answers) {
+            blocked[admitted[position]] = Some(answer);
         }
-        if let Some(kind) = kernel::exact_text_refusal(&unit.text) {
-            dispositions.push(Some(UnitDisposition::Refused(PublishError::Artifact(kind))));
-            continue;
-        }
-        admitted_lineages.insert(
-            prepared.lineage_id.clone(),
-            (prepared.key.clone(), prepared.request_digest.clone()),
-        );
-        admitted_prepared.push(prepared);
-        admitted.push(index);
-        admitted_bytes += len;
-        dispositions.push(None);
+        let Some(first) = unchecked
+            .iter()
+            .zip(&answers)
+            .find_map(|(&position, &answer)| answer.then_some(position))
+        else {
+            break;
+        };
+        next = admitted[first];
+        dispositions.truncate(next);
+        admitted.truncate(first);
+        admitted_prepared.truncate(first);
+        admitted_lineages = admitted_prepared
+            .iter()
+            .map(|prepared| {
+                (
+                    prepared.lineage_id.clone(),
+                    (prepared.key.clone(), prepared.request_digest.clone()),
+                )
+            })
+            .collect();
+        admitted_bytes = admitted.iter().map(|&index| units[index].text.len()).sum();
+        full = false;
     }
+    between();
     // Each retry removes one admitted unit, so publish attempts are bounded by the initial admitted count. Each attempt plans the batch's re-runs over the units it still holds, so a removed head generation retires nothing.
     while !admitted.is_empty() {
         let (reconciled, reruns) =
