@@ -7,13 +7,13 @@ Issue #1105 Part A lens pass (claimed guarantees): `tool_outcome` reads
 
 ## Evidence trail
 
-- `crates/daemon/src/tool_outcome.rs:21-48` `opencode`: `exit_code` comes from
+- `crates/daemon/src/tool_outcome.rs:23-50` `opencode`: `exit_code` comes from
   `crate::tool_vocabulary::exit_code(Harness::OpenCode, tool_name, metadata)`
-  (`:31`).
+  (`:33`).
 - `crates/daemon/src/tool_vocabulary.rs:200-207`: OpenCode with a name equal
   to `EXIT_CODE_TOOL` (`tv.rs:35`, `"bash"`) under `NameRule::Exact` reads
   `metadata.exit` with `as_i64`; every other case is `None`.
-- `tool_outcome.rs:59-76` `pi`: `exit_code: None` at `:72`.
+- `tool_outcome.rs:61-78` `pi`: `exit_code: None` at `:74`.
 - Callers: `crates/daemon/src/harness_sources.rs:350` and `:432`, both inside
   the capture adapters.
 - Tests: `crates/daemon/src/tool_vocabulary_tests.rs:145` over the OpenCode
@@ -48,7 +48,7 @@ Covered: the trace cases and the mutated cases in `tool_vocabulary_tests.rs:145`
 
 ### Q: Does the digest emit the exit code?
 
-- Sources examined: `tool_outcome.rs:227-247` `outcome_digest`.
+- Sources examined: `tool_outcome.rs:158-178` `outcome_digest`.
 - Findings: the digest holds status, bytes, head, and tail; no exit field.
 - Missing evidence: none.
 - Conclusion: resolved with answer: lead L3 (#1066 D9's `[; exit=N]`) stands.

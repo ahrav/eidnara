@@ -14,6 +14,8 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
+pub mod shape;
+
 /// The longest exception name the record keeps; a longer one is unknown.
 const MAX_EXCEPTION_NAME_BYTES: usize = 64;
 
@@ -130,7 +132,7 @@ impl OutputText<'_> {
 }
 
 /// The status and output text of a tool result as its wire block holds it, the shape the summarizer reads. An error output variant or a denied execution is `error`. The text is the output variant's text as is, its JSON serialized, the text of its content blocks joined by newlines, or a denial's reason.
-pub(crate) fn from_output(output: &memory_store::ToolOutput) -> (ToolStatus, OutputText<'_>) {
+pub fn from_output(output: &memory_store::ToolOutput) -> (ToolStatus, OutputText<'_>) {
     use memory_store::OutputKind;
     match &output.kind {
         OutputKind::Text { text } => (ToolStatus::Completed, OutputText::Text(text)),
@@ -152,79 +154,8 @@ pub(crate) const MAX_DIGEST_BYTES: usize = 1024;
 const CLIP_MARKER: &str = "…";
 const OUTCOME_CAPACITY: usize = 2 * crate::history_summarizer_citations::CLAIM_VALUE_MAX_BYTES + 96;
 
-/// The shape of a tool result's output, an instrument for corpus measurement: no digest, summary, or selection rule reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum OutputShape {
-    /// No nonblank line.
-    Empty,
-    /// A content list holding at least one block that is not text.
-    NonTextBlocks,
-    /// The wire's JSON output variant, whatever its value.
-    StructuredValue,
-    /// Exactly one nonblank line.
-    SingleLine,
-    /// A line starting `diff --git `, or a line starting `--- ` directly followed by one starting `+++ `.
-    UnifiedDiff,
-    /// Any other text.
-    MultiLine,
-}
-
-impl OutputShape {
-    pub const ALL: [Self; 6] = [
-        Self::Empty,
-        Self::NonTextBlocks,
-        Self::StructuredValue,
-        Self::SingleLine,
-        Self::UnifiedDiff,
-        Self::MultiLine,
-    ];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Empty => "empty",
-            Self::NonTextBlocks => "non_text_blocks",
-            Self::StructuredValue => "structured_value",
-            Self::SingleLine => "single_line",
-            Self::UnifiedDiff => "unified_diff",
-            Self::MultiLine => "multi_line",
-        }
-    }
-}
-
-/// Classifies `text` from its bytes alone, deciding in a fixed order so overlapping inputs have one
-/// answer: a non-text block, then the JSON variant (never parsed text), then no nonblank line, then
-/// a diff marker, then one nonblank line. The lines are those of the joined view, so a content list
-/// of text blocks and its joined text classify alike.
-pub fn classify(text: &OutputText<'_>) -> OutputShape {
-    match text {
-        OutputText::Blocks(blocks)
-            if blocks
-                .iter()
-                .any(|block| !matches!(block.kind, memory_store::ResultBlockKind::Text { .. })) =>
-        {
-            return OutputShape::NonTextBlocks;
-        }
-        OutputText::Json(_) => return OutputShape::StructuredValue,
-        OutputText::Text(_) | OutputText::Blocks(_) => {}
-    }
-    let mut nonblank = 0_usize;
-    let mut diff = false;
-    let mut after_minus = false;
-    for line in text.pieces().flat_map(|piece| piece.split('\n')) {
-        diff |= line.starts_with("diff --git ") || (after_minus && line.starts_with("+++ "));
-        after_minus = line.starts_with("--- ");
-        nonblank += usize::from(!line.trim().is_empty());
-    }
-    match (nonblank, diff) {
-        (0, _) => OutputShape::Empty,
-        (_, true) => OutputShape::UnifiedDiff,
-        (1, false) => OutputShape::SingleLine,
-        _ => OutputShape::MultiLine,
-    }
-}
-
 /// The outcome half of a tool result's digest: `; <status>; bytes=N[; head="…"][; tail="…"]`. `bytes` is the byte length of `text`. `head` and `tail` are its first and last nonblank lines with trailing whitespace trimmed; a single nonblank line is `head` alone. Each excerpt is rewritten and clipped by [`push_excerpt`].
-pub fn outcome_digest(status: ToolStatus, text: &OutputText<'_>) -> String {
+pub(crate) fn outcome_digest(status: ToolStatus, text: &OutputText<'_>) -> String {
     let mut digest = String::with_capacity(OUTCOME_CAPACITY);
     digest.push_str("; ");
     digest.push_str(status.as_str());
@@ -246,7 +177,8 @@ pub fn outcome_digest(status: ToolStatus, text: &OutputText<'_>) -> String {
     digest
 }
 
-pub(crate) fn output_outcome(output: &memory_store::ToolOutput) -> String {
+/// The outcome half of the digest of `output`, read through [`from_output`].
+pub fn output_outcome(output: &memory_store::ToolOutput) -> String {
     let (status, text) = from_output(output);
     outcome_digest(status, &text)
 }
@@ -690,171 +622,6 @@ mod digest_tests {
                 outcome_digest(ToolStatus::Completed, &OutputText::Blocks(&blocks)),
                 outcome_digest(ToolStatus::Completed, &OutputText::Text(&joined))
             );
-        }
-    }
-
-    fn text_block(text: &str) -> memory_store::ResultBlock {
-        memory_store::ResultBlock {
-            kind: memory_store::ResultBlockKind::Text {
-                text: text.to_owned(),
-            },
-            provider_extras: memory_store::ProviderExtras::new(),
-        }
-    }
-
-    fn media_block() -> memory_store::ResultBlock {
-        memory_store::ResultBlock {
-            kind: memory_store::ResultBlockKind::Media {
-                media: memory_store::MediaBlock {
-                    kind: memory_store::MediaKind::Image,
-                    media_type: "image/png".to_owned(),
-                    filename: None,
-                    source: serde_json::json!({}),
-                },
-            },
-            provider_extras: memory_store::ProviderExtras::new(),
-        }
-    }
-
-    /// The six classes, each from its example, and the overlaps the fixed order decides.
-    #[test]
-    fn each_shape_has_its_example_and_overlaps_have_one_answer() {
-        let media = [text_block("ok"), media_block()];
-        for (text, shape) in [
-            (
-                OutputText::Json("{\"a\":1}".to_owned()),
-                OutputShape::StructuredValue,
-            ),
-            (
-                OutputText::Text("diff --git a/x b/x\nindex 1..2\n"),
-                OutputShape::UnifiedDiff,
-            ),
-            (OutputText::Text("\n \n"), OutputShape::Empty),
-            (OutputText::Blocks(&media), OutputShape::NonTextBlocks),
-            (OutputText::Text("ok"), OutputShape::SingleLine),
-            (
-                OutputText::Text("first line\nsecond line"),
-                OutputShape::MultiLine,
-            ),
-            (
-                OutputText::Json("{}".to_owned()),
-                OutputShape::StructuredValue,
-            ),
-            (OutputText::Text("--- a\n+++ b\n"), OutputShape::UnifiedDiff),
-            (OutputText::Text("{\"a\":1}"), OutputShape::SingleLine),
-            (
-                OutputText::Text("--- a\nmiddle\n+++ b"),
-                OutputShape::MultiLine,
-            ),
-            (OutputText::Blocks(&[]), OutputShape::Empty),
-            (
-                OutputText::Blocks(&[media_block()]),
-                OutputShape::NonTextBlocks,
-            ),
-            (OutputText::Text(""), OutputShape::Empty),
-        ] {
-            assert_eq!(
-                classify(&text),
-                shape,
-                "{:?}",
-                text.pieces().collect::<Vec<_>>()
-            );
-        }
-        let long = "x".repeat(1 << 20);
-        assert_eq!(classify(&OutputText::Text(&long)), OutputShape::SingleLine);
-        assert_eq!(
-            OutputShape::ALL.map(OutputShape::name),
-            [
-                "empty",
-                "non_text_blocks",
-                "structured_value",
-                "single_line",
-                "unified_diff",
-                "multi_line"
-            ]
-        );
-    }
-
-    /// A diff split across two text blocks, two empty blocks, and one block classify as their joined text.
-    #[test]
-    fn text_blocks_classify_as_their_joined_text() {
-        for pieces in [vec!["--- a", "+++ b"], vec!["", ""], vec!["ok"]] {
-            let blocks: Vec<memory_store::ResultBlock> =
-                pieces.iter().map(|piece| text_block(piece)).collect();
-            let joined = pieces.join("\n");
-            assert_eq!(
-                classify(&OutputText::Blocks(&blocks)),
-                classify(&OutputText::Text(&joined)),
-                "{pieces:?}"
-            );
-        }
-        assert_eq!(
-            classify(&OutputText::Blocks(&[
-                text_block("--- a"),
-                text_block("+++ b")
-            ])),
-            OutputShape::UnifiedDiff
-        );
-    }
-
-    /// The classifier is a measurement instrument: no daemon production source names the shape or
-    /// calls the classifier, so no digest, summary, or selection rule can read it.
-    #[test]
-    fn no_production_path_reads_the_output_shape() {
-        fn production(source: &str) -> &str {
-            source
-                .find("#[cfg(test)]\nmod ")
-                .map_or(source, |end| &source[..end])
-        }
-        fn visit(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    visit(&path, files);
-                } else if path.extension().is_some_and(|extension| extension == "rs")
-                    && !path.to_string_lossy().ends_with("_tests.rs")
-                {
-                    files.push(path);
-                }
-            }
-        }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        visit(&root, &mut files);
-        assert!(files.len() > 50);
-        for file in files {
-            let source = std::fs::read_to_string(&file).unwrap();
-            let source = production(&source);
-            if file.ends_with("tool_outcome.rs") {
-                assert_eq!(
-                    source.matches("classify(").count(),
-                    1,
-                    "only the definition"
-                );
-                continue;
-            }
-            for name in ["OutputShape", "tool_outcome::classify"] {
-                assert!(!source.contains(name), "{} names {name}", file.display());
-            }
-        }
-    }
-
-    proptest! {
-        #[test]
-        fn classify_is_total_deterministic_and_agrees_on_joined_text(
-            pieces in proptest::collection::vec("[a-z+\\- \\n]{0,12}", 0..6),
-            text in any::<String>(),
-        ) {
-            prop_assert_eq!(classify(&OutputText::Text(&text)), classify(&OutputText::Text(&text)));
-            let blocks: Vec<memory_store::ResultBlock> =
-                pieces.iter().map(|piece| text_block(piece)).collect();
-            let joined = pieces.join("\n");
-            let expected = if pieces.is_empty() {
-                OutputShape::Empty
-            } else {
-                classify(&OutputText::Text(&joined))
-            };
-            prop_assert_eq!(classify(&OutputText::Blocks(&blocks)), expected);
         }
     }
 }

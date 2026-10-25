@@ -186,14 +186,14 @@ not defined once:
 | `command` | contract | Pi `bashExecution` field | - | `codec/pi.rs:328` |
 | `compaction` | contract | OpenCode part type | - | `codec/opencode.rs:228, 835` |
 | `compactionSummary` | contract | Pi role value | - | `codec/pi.rs:82, 95` |
-| `completed` | contract | OpenCode tool status value | - | `tool_outcome.rs:25`; `codec/opencode.rs:514, 1265, 1266, 1287` |
+| `completed` | contract | OpenCode tool status value | - | `tool_outcome.rs:27`; `codec/opencode.rs:514, 1265, 1266, 1287` |
 | `content` | contract | message content field | - | `codec/pi.rs:459, 464, 466, 467, 471, 492, 493, 520, 584, 585, 689, 747, 1012, 1050, 1219, 1224, 1227, 1238, 1316, 1354, 1396, 1434, 1503, 1520, 1536, 1690` |
 | `cost` | contract | Pi usage field | - | `codec/pi.rs:1530` |
 | `created` | contract | OpenCode time field | - | `codec/opencode.rs:126` |
 | `custom` | contract | Pi role value | - | `codec/pi.rs:80, 93` |
 | `data` | contract | part data field | - | `codec/opencode.rs:210, 636, 637, 642, 1244, 1326, 1357`; `codec/pi.rs:741, 969, 1805, 1839, 1840, 1865, 1866` |
 | `end` | contract | OpenCode tool time field | - | `codec/opencode.rs:1229` |
-| `error` | contract | OpenCode status value or error field | - | `tool_outcome.rs:26`; `codec/opencode.rs:267, 514, 517, 518, 522, 893, 1267, 1268, 1270, 1285, 1339, 1340`; `codec/pi.rs:219` |
+| `error` | contract | OpenCode status value or error field | - | `tool_outcome.rs:28`; `codec/opencode.rs:267, 514, 517, 518, 522, 893, 1267, 1268, 1270, 1285, 1339, 1340`; `codec/pi.rs:219` |
 | `excludeFromContext` | contract | Pi `bashExecution` field | - | `codec/pi.rs:265` |
 | `exitCode` | contract | Pi `bashExecution` field | - | `codec/pi.rs:330` |
 | `file` | contract | part or content item type | - | `codec/opencode.rs:219, 222, 683, 968, 1235`; `codec/pi.rs:927, 930, 1730, 1857` |
@@ -205,15 +205,15 @@ not defined once:
 | `image` | contract | part or content item type | - | `codec/opencode.rs:219, 683`; `codec/pi.rs:599, 633, 779, 927, 930, 1025, 1027, 1730, 1855` |
 | `info` | contract | OpenCode message info field | - | `codec/opencode.rs:101, 111, 398, 847, 848, 850, 861, 931, 1154` |
 | `input` | contract | call input field or Pi usage field | - | `codec/opencode.rs:485, 486, 890, 1011, 1182, 1202`; `codec/pi.rs:1525, 1530` |
-| `interrupted` | contract | OpenCode abort flag in tool metadata | - | `tool_outcome.rs:53` |
-| `isError` | contract | Pi tool result field | - | `tool_outcome.rs:61`; `codec/pi.rs:746, 1131, 1431` |
+| `interrupted` | contract | OpenCode abort flag in tool metadata | - | `tool_outcome.rs:55` |
+| `isError` | contract | Pi tool result field | - | `tool_outcome.rs:63`; `codec/pi.rs:746, 1131, 1431` |
 | `message` | contract | Pi entry field | - | `codec/pi.rs:300, 499, 587, 1208, 1244, 1556` |
 | `metadata` | contract | OpenCode tool or part metadata container | - | `tool_outcome.rs:29, 52`; `codec/opencode.rs:201, 498, 589, 981, 983, 989, 992, 998, 999, 1013, 1163, 1168, 1187, 1360` |
 | `mime` | contract | file part field | - | `codec/opencode.rs:622, 679, 1236, 1326`; `codec/pi.rs:740, 1805, 1837` |
 | `mimeType` | contract | file part field | - | `codec/opencode.rs:623, 680, 1326`; `codec/pi.rs:739, 1805, 1836, 1855` |
 | `model` | contract | model field | - | `codec/opencode.rs:605, 611, 613`; `codec/pi.rs:1523, 1615` |
 | `modelID` | contract | OpenCode model field | - | `codec/opencode.rs:610, 612` |
-| `name` | contract | error name or file part name field | - | `tool_outcome.rs:42`; `codec/opencode.rs:625, 1326, 1381`; `codec/pi.rs:738, 1477, 1589, 1885` |
+| `name` | contract | error name or file part name field | - | `tool_outcome.rs:44`; `codec/opencode.rs:625, 1326, 1381`; `codec/pi.rs:738, 1477, 1589, 1885` |
 | `output` | contract | tool output field or Pi usage field | - | `codec/opencode.rs:517, 518, 893, 1339, 1340`; `codec/pi.rs:329, 1526, 1530` |
 | `parts` | contract | OpenCode parts field | - | `codec/opencode.rs:167, 399, 410, 447, 757, 843, 846, 862, 935, 1154` |
 | `patch` | contract | OpenCode part type | - | `codec/opencode.rs:238` |
@@ -231,8 +231,8 @@ not defined once:
 | `signature` | contract | reasoning signature field | - | `codec/opencode.rs:203, 992, 1163, 1368` |
 | `snapshot` | contract | OpenCode part type | - | `codec/opencode.rs:238` |
 | `start` | contract | OpenCode tool time field | - | `codec/opencode.rs:1228` |
-| `state` | contract | OpenCode tool part field | - | `tool_outcome.rs:23`; `codec/opencode.rs:484, 516, 651, 904, 1011, 1084, 1180, 1201, 1222, 1338, 1341, 1342, 1346, 1348, 1386` |
-| `status` | contract | tool state or Pi result status field | - | `tool_outcome.rs:24`; `codec/opencode.rs:893, 1181, 1338, 1387, 1388` |
+| `state` | contract | OpenCode tool part field | - | `tool_outcome.rs:25`; `codec/opencode.rs:484, 516, 651, 904, 1011, 1084, 1180, 1201, 1222, 1338, 1341, 1342, 1346, 1348, 1386` |
+| `status` | contract | tool state or Pi result status field | - | `tool_outcome.rs:26`; `codec/opencode.rs:893, 1181, 1338, 1387, 1388` |
 | `step-finish` | contract | OpenCode part type | - | `codec/opencode.rs:224` |
 | `step-start` | contract | OpenCode part type | - | `codec/opencode.rs:224` |
 | `stop` | contract | OpenCode finish value or Pi stop reason value | - | `codec/opencode.rs:105`; `codec/pi.rs:1516` |
@@ -250,10 +250,10 @@ not defined once:
 | `time_created` | contract | OpenCode store column | - | `codec/opencode.rs:127` |
 | `timeCreated` | contract | OpenCode time field | - | `codec/opencode.rs:128` |
 | `timestamp` | contract | Pi message field | - | `codec/pi.rs:220, 1235, 1239, 1503, 1533, 1536` |
-| `tool` | contract | role value, OpenCode part type, and the OpenCode part field naming the tool | - | `wire.rs:397`; `tool_outcome.rs:22`; `injection.rs:170`; `history_summarizer_chunk.rs:1152`; `codec/opencode.rs:216, 451, 890, 892, 1008, 1010, 1022, 1024, 1037, 1059, 1081, 1083, 1146, 1177, 1179, 1198, 1200, 1379, 1382`; `codec/pi.rs:111, 458, 862, 878, 889, 1127, 1129, 1501, 1885` |
+| `tool` | contract | role value, OpenCode part type, and the OpenCode part field naming the tool | - | `wire.rs:397`; `tool_outcome.rs:24`; `injection.rs:170`; `history_summarizer_chunk.rs:1152`; `codec/opencode.rs:216, 451, 890, 892, 1008, 1010, 1022, 1024, 1037, 1059, 1081, 1083, 1146, 1177, 1179, 1198, 1200, 1379, 1382`; `codec/pi.rs:111, 458, 862, 878, 889, 1127, 1129, 1501, 1885` |
 | `toolCall` | contract | Pi content item type | - | `codec/pi.rs:608, 808, 1086, 1471, 1513, 1587` |
 | `toolCallId` | contract | Pi tool result field | - | `codec/pi.rs:456, 744, 1127, 1178, 1415, 1420` |
-| `toolName` | contract | Pi tool result field | - | `tool_outcome.rs:60`; `codec/opencode.rs:1380`; `codec/pi.rs:745, 1129, 1423` |
+| `toolName` | contract | Pi tool result field | - | `tool_outcome.rs:62`; `codec/opencode.rs:1380`; `codec/pi.rs:745, 1129, 1423` |
 | `toolResult` | contract | Pi role value | - | `codec/pi.rs:78, 91, 1417, 1503` |
 | `toolUse` | contract | Pi stop reason value | - | `codec/pi.rs:1514` |
 | `total` | contract | Pi cost field | - | `codec/pi.rs:1530` |
@@ -273,7 +273,7 @@ or rendered output text carries no interpretation of a harness record.
 | Literal | Reason | Locations |
 | --- | --- | --- |
 | <code> commits: {}</code> | format template | `chunk_text.rs:113` |
-| <code>; bytes={}</code> | format template | `tool_outcome.rs:236` |
+| <code>; bytes={}</code> | format template | `tool_outcome.rs:167` |
 | <code>&lt;output&gt;&lt;history_segments&gt;\n&lt;history_segment ...</code> | format template | `history_summarizer_chunk.rs:729` |
 | <code>Messages {start}-{end} were not summarized: {...</code> | format template | `history_summarizer_chunk.rs:726` |
 | <code>OpenCode serialization produced duplicate too...</code> | format template | `codec/opencode.rs:470` |
@@ -336,7 +336,7 @@ or rendered output text carries no interpretation of a harness record.
 | <code>\s{2,}</code> | regular expression or replacement | `chunk_text.rs:221` |
 | <code>(empty)</code> | rendered text, marker, separator, or value | `selection.rs:234`; `chunk_text.rs:40, 41, 144, 146`; `codec/opencode.rs:520, 997, 1168`; `codec/pi.rs:368, 907, 1463, 1521, 1522, 1523, 1581` |
 | <code> </code> | rendered text, marker, separator, or value | `chunk_text.rs:44` |
-| <code> / </code> | rendered text, marker, separator, or value | `chunk_text.rs:115`; `tool_outcome.rs:267`; `history_summarizer_chunk.rs:1162, 1174` |
+| <code> / </code> | rendered text, marker, separator, or value | `chunk_text.rs:115`; `tool_outcome.rs:199`; `history_summarizer_chunk.rs:1162, 1174` |
 | <code>%Y-%m-%d</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1117` |
 | <code>(no output)</code> | rendered text, marker, separator, or value | `codec/pi.rs:344` |
 | <code>+</code> | rendered text, marker, separator, or value | `codec/pi.rs:368` |
@@ -344,9 +344,9 @@ or rendered output text carries no interpretation of a harness record.
 | <code>, </code> | rendered text, marker, separator, or value | `chunk_text.rs:43, 113` |
 | <code>...[truncated]</code> | rendered text, marker, separator, or value | `selection.rs:36` |
 | <code>0123456789abcdef</code> | rendered text, marker, separator, or value | `wire.rs:651` |
-| <code>; </code> | rendered text, marker, separator, or value | `tool_outcome.rs:229` |
-| <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:239` |
-| <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:239` |
+| <code>; </code> | rendered text, marker, separator, or value | `tool_outcome.rs:160` |
+| <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:170` |
+| <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:170` |
 | <code>&lt;!-- OMO_INTERNAL_INITIATOR --&gt;</code> | rendered text, marker, separator, or value | `chunk_text.rs:14` |
 | <code>&lt;/summary&gt;</code> | rendered text, marker, separator, or value | `codec/pi.rs:48` |
 | <code>Execution denied</code> | rendered text, marker, separator, or value | `codec/opencode.rs:1273`; `codec/pi.rs:1773, 1823` |
@@ -370,5 +370,5 @@ or rendered output text carries no interpretation of a harness record.
 | <code>&#96;&#96;&#96;\n</code> | rendered text, marker, separator, or value | `codec/pi.rs:343` |
 | <code>application/octet-stream</code> | rendered text, marker, separator, or value | `codec/opencode.rs:624`; `codec/pi.rs:960, 1838` |
 | <code>attachment</code> | rendered text, marker, separator, or value | `codec/opencode.rs:694` |
-| <code>…</code> | rendered text, marker, separator, or value | `tool_outcome.rs:152` |
+| <code>…</code> | rendered text, marker, separator, or value | `tool_outcome.rs:154` |
 | <code>Option::is_none</code> | serde attribute path | `wire.rs:128, 130, 133, 140, 142` |
