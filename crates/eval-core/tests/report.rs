@@ -2082,6 +2082,7 @@ fn a_ceiling_declaration_names_its_kind_task_pair_and_pinned_revision() {
         json!({"kind": "oracle", "source_task": "t1", "target_task": "t2",
                "revision_sha": "4f".repeat(20)}),
         json!({"kind": "transfer", "source_task": "t1", "target_task": "t2"}),
+        json!(["transfer", "t1", "t2", "4f".repeat(20)]),
     ] {
         assert!(
             matches!(
@@ -2151,10 +2152,16 @@ fn an_invalid_or_repeated_ceiling_refuses_the_report_by_name() {
     invalid
         .ceilings
         .push(ceiling(CeilingKind::ProjectKnowledge, "t1", "t2"));
-    let expected = ReportError::Ceiling(CeilingError::ProjectKnowledgeAcrossTasks {
-        source_task: "t1".to_string(),
-        target_task: "t2".to_string(),
-    });
+    invalid
+        .ceilings
+        .insert(0, ceiling(CeilingKind::Transfer, "t1", "t2"));
+    let expected = ReportError::Ceiling {
+        index: 1,
+        error: CeilingError::ProjectKnowledgeAcrossTasks {
+            source_task: "t1".to_string(),
+            target_task: "t2".to_string(),
+        },
+    };
     assert_eq!(invalid.validate(), Err(expected.clone()));
     assert_eq!(
         parse_report(&serde_json::to_value(&invalid).unwrap()),
@@ -2173,8 +2180,18 @@ fn an_invalid_or_repeated_ceiling_refuses_the_report_by_name() {
     );
     assert_eq!(
         parse_report(&serde_json::to_value(&repeated).unwrap()),
-        Err(ReportError::RepeatedCeiling(transfer))
+        Err(ReportError::RepeatedCeiling(transfer.clone()))
     );
+    // One task pair pinned at two revisions is two declarations.
+    let mut repinned = open_report();
+    repinned.ceilings = vec![
+        transfer.clone(),
+        CeilingDeclaration {
+            revision_sha: "5e".repeat(20),
+            ..transfer
+        },
+    ];
+    parse_report(&repinned.serialize().unwrap()).unwrap();
     // A previous-version document is refused by its literal.
     let mut v1 = open_report();
     v1.schema = "eval-suite-b-report/v1".to_string();
@@ -2186,7 +2203,10 @@ fn an_invalid_or_repeated_ceiling_refuses_the_report_by_name() {
     );
     let mut v1_document = serde_json::to_value(&v1).unwrap();
     v1_document.as_object_mut().unwrap().remove("ceilings");
-    assert!(parse_report(&v1_document).is_err());
+    assert!(matches!(
+        parse_report(&v1_document),
+        Err(ReportError::Shape(_))
+    ));
 }
 
 /// `docs/evaluator.md` is a test input: every `eval-suite-b-report/vN`
@@ -2195,7 +2215,7 @@ fn an_invalid_or_repeated_ceiling_refuses_the_report_by_name() {
 fn evaluator_document_names_the_current_report_literal() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/evaluator.md");
     let doc = std::fs::read_to_string(&path).expect("read docs/evaluator.md");
-    let (prefix, _) = SUITE_B_REPORT_SCHEMA
+    let (prefix, version) = SUITE_B_REPORT_SCHEMA
         .rsplit_once("/v")
         .expect("schema literal ends in a version");
     let mut named = 0;
@@ -2213,5 +2233,9 @@ fn evaluator_document_names_the_current_report_literal() {
     assert!(
         named > 0,
         "evaluator document names no `{SUITE_B_REPORT_SCHEMA}`"
+    );
+    assert!(
+        doc.contains(&format!("version {version} added `ceilings`")),
+        "evaluator document lacks the version {version} history"
     );
 }
