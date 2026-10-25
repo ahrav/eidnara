@@ -460,6 +460,12 @@ impl SourceCapture {
         self.slot.available_permits() == 1
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+    pub(crate) fn settled_report(&self, draining: bool, now_ms: i64) -> (Value, bool) {
+        let idle = self.is_idle();
+        (self.report(draining, now_ms), idle)
+    }
+
     /// Empties the memo and the ensured-scope record, as a restart does.
     #[cfg(test)]
     pub(crate) fn forget_memo_for_test(&self) {
@@ -1369,5 +1375,28 @@ mod tests {
                 .sum::<usize>()
         );
         assert!(memo.get("k").is_none(), "the oldest entries were evicted");
+    }
+
+    #[test]
+    fn a_settled_report_counts_the_job_that_released_the_slot() {
+        let capture = Arc::new(SourceCapture::default());
+        let job = Arc::clone(&capture.slot).try_acquire_owned().unwrap();
+        let memo = capture.memo();
+        let reader = {
+            let capture = Arc::clone(&capture);
+            std::thread::spawn(move || capture.settled_report(false, 0))
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        capture.counters.add(Count::UnitsPublished, 1);
+        drop(job);
+        drop(memo);
+        let (report, idle) = reader.join().unwrap();
+        if idle {
+            assert_eq!(
+                report["units_published"],
+                json!(1),
+                "an idle report missed the count of the job that released the slot while `report` waited on the memo lock"
+            );
+        }
     }
 }

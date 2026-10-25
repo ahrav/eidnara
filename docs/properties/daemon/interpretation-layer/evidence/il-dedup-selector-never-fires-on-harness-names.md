@@ -68,3 +68,17 @@ removal changed no output.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where
   the record names one, stays open.
 - Conclusion: resolved with answer.
+
+### Q: Does the record run under `DaemonConfig::default()`, as the source's label says?
+- Sources examined: `crates/daemon/src/config.rs:147`, `:187-191`;
+  `crates/daemon/src/transform.rs:3350-3351`, `:3364-3370`; `transform.rs` and `selection.rs` at `a0e3f2993`.
+- Findings: no. The default `model_chain` is empty, so `eidnara_folds()` is
+  false and `apply_once` hands the request to `apply_additive_only`, which
+  projects the window (`transform.rs:2852`) and composes m0
+  (`transform.rs:3061`) without selecting, injecting, or rendering a
+  reduced call. A switched-lineage subagent request passes the gate and
+  returns a passthrough. At `a0e3f2993` the same gate stood before `apply_once`, and
+  `select_tool_dedup` ran only from `select_reductions_with_outcome`,
+  unconditionally within selection.
+- Missing evidence: none.
+- Conclusion: resolved with answer: `explicit-config-only`.

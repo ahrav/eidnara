@@ -2,7 +2,10 @@
 
 This file mirrors two closed lists from the corpus module and records how the
 document reader and the capture pre-screen fail closed at HEAD. Code
-references are verified at `41d889ea4`.
+references were verified at `41d889ea4` and re-checked at `aff5a00e6`, the
+tip of the #1109 branch this part's branch starts from; the ranges in
+`source_capture.rs` and `corpus_replay.rs` that moved between the two are
+updated here.
 
 ## Loss-condition enumeration
 
@@ -15,23 +18,27 @@ variant one snake-case name and lists every variant once in `ALL`.
 
 | Name | Variant | What it accounts for | Daemon counter or adapter step |
 | --- | --- | --- | --- |
-| `adapter_refused` | `AdapterRefused` | the adapter refused the unit's whole native record | `adapter_refused`, added once per refused record by `CaptureJob::units` (`source_capture.rs:1027-1057`, the add at `:1052-1055`) |
-| `unit_too_large` | `UnitTooLarge` | the unit exceeds the per-unit byte cap | `units_unit_too_large`, from `UnitDisposition::UnitTooLarge` (`harness_sources.rs:1557-1560`, `source_capture.rs:1106`) |
-| `deferred` | `Deferred` | the unit was still deferred after the last replayed pass | `units_deferred` (`source_capture.rs:1107`) |
+| `adapter_refused` | `AdapterRefused` | the adapter refused the unit's whole native record | `adapter_refused`, added once per refused record by `CaptureJob::units` (`source_capture.rs:1033-1063`, the add at `:1058-1061`) |
+| `unit_too_large` | `UnitTooLarge` | the unit exceeds the per-unit byte cap | `units_unit_too_large`, from `UnitDisposition::UnitTooLarge` (`harness_sources.rs:1557-1560`, `source_capture.rs:1112`) |
+| `deferred` | `Deferred` | the unit was still deferred after the last replayed pass | `units_deferred` (`source_capture.rs:1113`) |
 | `secret_bearing` | `SecretBearing` | the Kernel refused the unit as secret-bearing | `units_refused_terminal`, from `exact_text_refusal` in the pre-screen (`harness_sources.rs:1609-1612`) |
 | `re_admission_blocked` | `ReAdmissionBlocked` | the Kernel refused the unit's artifact as re-admission blocked | `units_refused_terminal`, from the pre-screen's re-admission check (`harness_sources.rs:1613-1619`, answered at `:1635-1648`); a purge committed between the screening read and the commit reaches batch ingest, which reports `kernel_error` for that pass (below) |
-| `refused_retryable` | `RefusedRetryable` | the unit was refused with a retryable cause on the last pass | `units_refused_retryable` (`source_capture.rs:1114`) |
-| `identity_conflict` | `IdentityConflict` | the unit's identity held a different digest | `units_identity_conflict` (`source_capture.rs:1108-1110`, and `:833-836` for the unit a batch conflict names) |
-| `superseded` | `Superseded` | a later revision of the same identity replaced the unit | `units_superseded` (`source_capture.rs:1115`) |
+| `refused_retryable` | `RefusedRetryable` | the unit was refused with a retryable cause on the last pass | `units_refused_retryable` (`source_capture.rs:1120`) |
+| `identity_conflict` | `IdentityConflict` | the unit's identity held a different digest | `units_identity_conflict` (`source_capture.rs:1114-1116`, and `:839-842` for the unit a batch conflict names) |
+| `superseded` | `Superseded` | a later revision of the same identity replaced the unit | `units_superseded` (`source_capture.rs:1121`) |
 | `window_refused` | `WindowRefused` | the window was refused before any unit was read | `refused_queue_full`, `refused_resident_short`, `refused_window_too_large`, `refused_shutting_down` |
 | `pass_failed` | `PassFailed` | the pass ended before publication | `kernel_error`, `deadline`, `kernel_unavailable`, `worker_panicked`, `discarded`, `session_invalidated` |
 
 The replay oracle maps a screened disposition to a condition in
-`settled` (`crates/daemon/tests/support/corpus_replay.rs:245-270`): the four
+`settled` (`crates/daemon/tests/support/corpus_replay.rs:263-286`): the four
 secret-scan artifact kinds map to `secret_bearing`, `ReAdmissionBlocked` to
-`re_admission_blocked`, `IdentityReused` and descriptor refusals to
-`identity_conflict`, and any other permanent refusal to an unnamed outcome
-that the reconciliation reports as unclassified. A deferred unit, or one whose
+`re_admission_blocked`, `IdentityReused` to `identity_conflict`, and any
+other permanent refusal, a descriptor refusal included, to an unnamed outcome
+that the reconciliation reports as unclassified (`corpus_replay.rs:282-283`;
+`crates/daemon/tests/source_corpus_replay.rs:500`
+`a_refused_outcome_record_is_unclassified_loss` constructs one). This matches
+`classify` (`source_capture.rs:1092-1094`), which counts only
+`IdentityReused` as `units_identity_conflict`. A deferred unit, or one whose
 last refusal is retryable, stays open for the next pass and becomes `deferred`
 or `refused_retryable` only after the last pass.
 
@@ -58,13 +65,13 @@ fixed names in `PROJECT_DOC_FILES` (`project_docs.rs:9`) through
 `read_bounded_bytes` (`config.rs:688`), which opens with
 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC` and checks `is_file` on the
 opened descriptor (`config.rs:696-719`). `plan_document`
-(`source_capture.rs:945-996`) maps each read to one capture step.
+(`source_capture.rs:951-1002`) maps each read to one capture step.
 
 | Read | Arm | Capture step | Revised by |
 | --- | --- | --- | --- |
-| `Text` within the unit cap | `project_docs.rs:115` | publish head plus one, or `documents_unchanged` when the live digest matches (`source_capture.rs:981-995`) | U7 (#1112) changes `repository_id`; U8 (#1113) changes the name list |
-| `Text` past the unit cap | `source_capture.rs:953-955` | skip, `documents_oversize` | none |
-| `Missing` | `project_docs.rs:117-122`: `NotFound` and the parent's followed metadata is a directory | retire the live capture-domain row, else `documents_missing` (`source_capture.rs:974-980`) | U8 (#1113): beneath-root resolution must cover this classification, because `std::fs::metadata` follows a symlinked parent |
+| `Text` within the unit cap | `project_docs.rs:115` | publish head plus one, or `documents_unchanged` when the live digest matches (`source_capture.rs:987-1001`) | U7 (#1112) changes `repository_id`; U8 (#1113) changes the name list |
+| `Text` past the unit cap | `source_capture.rs:959-961` | skip, `documents_oversize` | none |
+| `Missing` | `project_docs.rs:117-122`: `NotFound` and the parent's followed metadata is a directory | retire the live capture-domain row, else `documents_missing` (`source_capture.rs:980-986`) | U8 (#1113): beneath-root resolution must cover this classification, because `std::fs::metadata` follows a symlinked parent |
 | `Unreadable` | `project_docs.rs:124`, `:130` | skip, `documents_unreadable` | U8 (#1113) |
 | `NotRegular` | `project_docs.rs:128`: `symlink_metadata` is not a regular file | skip, `documents_not_regular` | U8 (#1113): `openat2` with beneath-root flags replaces the final-component `NOFOLLOW` |
 | `Oversize` | `project_docs.rs:129` | skip, `documents_oversize` | none |
@@ -72,7 +79,7 @@ opened descriptor (`config.rs:696-719`). `plan_document`
 
 Every arm except `Text` and `Missing` skips and retires nothing. The identity
 is `[("project_id", P), ("repository_id", P), ("relative_path", name)]`
-(`source_capture.rs:964-968`); U7 (#1112) derives `repository_id` from the
+(`source_capture.rs:970-974`); U7 (#1112) derives `repository_id` from the
 repository instead and retires a live row whose `repository_id` differs.
 
 ## Capture pre-screen dispositions at HEAD
@@ -86,7 +93,7 @@ and re-admission states together in another (`:1635-1645`). When that read
 blocks a unit, screening resumes at the first blocked unit with its admission
 slot released (`:1649-1670`).
 
-| Check | Location | Disposition | Counter (`classify`, `source_capture.rs:1097-1117`) |
+| Check | Location | Disposition | Counter (`classify`, `source_capture.rs:1103-1123`) |
 | --- | --- | --- | --- |
 | text past `MAX_SOURCE_UNIT_BYTES` | `harness_sources.rs:1557-1560` | `UnitTooLarge` | `units_unit_too_large`, terminal |
 | batch already full | `:1561-1564` | `Deferred` | `units_deferred`, pending |
@@ -105,8 +112,8 @@ refuses it as an identity conflict (`harness_sources.rs:1294`, through
 a reclaiming reservation passes the check; batch ingest then refuses the whole
 batch with `KernelError::Conflict` naming no unit
 (`crates/kernel/src/cas/ingest.rs:822-827`; the batch contract at `:693`), the
-pass counts `kernel_error` (`source_capture.rs:1312-1317`), every keyed unit
-stays pending (`source_capture.rs:827-852`), so the reclaiming unit's siblings
+pass counts `kernel_error` (`source_capture.rs:1318-1323`), every keyed unit
+stays pending (`source_capture.rs:833-858`), so the reclaiming unit's siblings
 wait with it, and the units publish once reclamation finishes. A purge committed after the screening read and before
 the commit takes the same path for one pass; the next pass's screening read
 refuses the purged unit and its siblings publish. The test seam between the two

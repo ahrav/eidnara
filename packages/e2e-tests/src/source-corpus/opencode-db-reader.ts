@@ -87,6 +87,7 @@ export function readOpenCodeSession(db: Database, sessionId: string): ExpectedRe
                         tool: {
                             name,
                             callId: text(part.callID, `${at} callID`),
+                            parentMessageId: row.id,
                             isError,
                             exit:
                                 name === "bash" && Number.isInteger(metadata.exit)

@@ -43,3 +43,18 @@ A `reduced_block` test over a flattened call with an input under each key of
 - Missing evidence: none.
 - Conclusion: resolved with answer; confidence raised from the source's medium
   to high.
+
+### Q: Does the record run under `DaemonConfig::default()`, as the source's label says?
+- Sources examined: `crates/daemon/src/config.rs:147`, `:187-191`;
+  `crates/daemon/src/transform.rs:3350-3351`, `:3364-3370`, `:5196`, `:11890`.
+- Findings: no. The default `model_chain` is empty, so `eidnara_folds()` is
+  false and `apply_once` hands the request to `apply_additive_only`, which
+  projects the window (`transform.rs:2852`) and composes m0
+  (`transform.rs:3061`) without selecting, injecting, or rendering a
+  reduced call. A switched-lineage subagent request passes the gate and
+  returns a passthrough. Flattening runs on both paths, so every flat block carries its path,
+  but a reduced call renders only in `build_output_with_tags`
+  (`transform.rs:11890`), whose production caller is `apply_once`
+  (`transform.rs:5196`).
+- Missing evidence: none.
+- Conclusion: resolved with answer: `explicit-config-only`.

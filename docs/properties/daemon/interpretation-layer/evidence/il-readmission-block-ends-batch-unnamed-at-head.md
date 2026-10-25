@@ -15,12 +15,12 @@ unnamed batch conflict, which the plan's R16 replaces.
   `ReAdmissionBlocked` (`crates/kernel/src/cas/ingest.rs:461-468`, `:1151-1153`).
 - `BatchRefusal::conflicting_unit` (`harness_sources.rs:1491-1493`) is `None`
   when `unit` is `None`.
-- `publish_locked` (`crates/daemon/src/source_capture.rs:827-852`) records
+- `publish_locked` (`crates/daemon/src/source_capture.rs:833-858`) records
   every keyed unit `Pending` and ends with `kernel_end`, which counts
-  `kernel_error` (`source_capture.rs:1312-1317`).
+  `kernel_error` (`source_capture.rs:1318-1323`).
 - `is_permanent` lists `ReAdmissionBlocked` (`harness_sources.rs:578`), and
   `classify` maps a permanent refusal to `units_refused_terminal`
-  (`source_capture.rs:1111-1113`); neither is reached on this path.
+  (`source_capture.rs:1117-1119`); neither is reached on this path.
 
 ## Failure scenario
 
@@ -51,7 +51,7 @@ pending, nothing retained.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
 - Sources examined: the source record in #1105; the code and tests cited above.
-- Findings: the source left the trace pending; this pass followed the batch from the pre-screen through the Kernel batch ingest to `kernel_end` at `41d889ea4`, every step cited above.
+- Findings: the source left the trace pending; this pass followed the batch from the pre-screen through the Kernel batch ingest to `kernel_end` at `41d889ea4`, every step cited above; the `source_capture.rs` ranges were re-checked at `aff5a00e6`, where six lines inserted at `:458-463` moved them.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where
   the record names one, stays open.
 - Conclusion: resolved with answer.

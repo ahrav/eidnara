@@ -7,15 +7,20 @@ project digest into both identity fields.
 
 ## Evidence trail
 
-- `crates/daemon/src/source_capture.rs:945-996` `plan_document`; the identity
-  vector at `:964-968` holds `("project_id", P)`, `("repository_id", P)`, and
+- `crates/daemon/src/source_capture.rs:951-1002` `plan_document`; the identity
+  vector at `:970-974` holds `("project_id", P)`, `("repository_id", P)`, and
   `("relative_path", name)`.
-- `:969` derives the lineage from that identity; `:971-973` reads the live row
+- `:975` derives the lineage from that identity; `:977-979` reads the live row
   and keeps it only for `CAPTURE_DOMAIN_ID` (`source_capture.rs:48`).
-- A missing document retires the live row (`:974-980`) through
-  `retire_document` (`:999-1016`), called from `capture_documents` at `:902`.
+- A missing document retires the live row (`:980-986`) through
+  `retire_document` (`:1005-1022`), called from `capture_documents` at `:908`.
 - `crates/kernel/tests/eval_identity.rs` pins the identity encoding, not the
   values.
+- The document tests (`crates/daemon/src/source_capture_tests.rs:1964`,
+  `:2137`, `:2202`, `:2276`) read rows through `live_document`, which selects
+  by `relative_path` alone (`source_capture_tests.rs:1903-1909`). The
+  `project_id` and `repository_id` values at `source_capture_tests.rs:2164-2167`
+  build another producer's fixture; no test asserts the values capture writes.
 
 ## Failure scenario
 
@@ -41,6 +46,15 @@ assertion over both lineages' identities; the U7 tests replace it.
 - Findings: no; the value is the bound project digest.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
+
+### Q: Do the document tests assert the identity fields?
+- Sources examined: `source_capture_tests.rs:1903-1909`, `:1964`, `:2137`,
+  `:2164-2167`, `:2202`, `:2276`.
+- Findings: no. They assert revisions, retention, retirement, and counts;
+  the identity values they hold belong to a foreign fixture.
+- Missing evidence: none.
+- Conclusion: resolved with answer: corrected in the record's `Exercised`
+  line.
 
 ### Q: Can a cap on the history walk flip the derived identity?
 - Sources examined: #1105 OQ1 and U7's plan text.

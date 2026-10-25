@@ -16,12 +16,14 @@ Production source is every line outside a top-level `#[cfg(test)]` module
 region (the rule `scripts/forbid-tool-literals.sh` applies) and outside a
 top-level `#[cfg(test)]` item. Comment lines are skipped. A literal is one
 Rust string literal on one line; no production string literal in these files
-spans lines. Code references are verified at `41d889ea4`.
+spans lines. Code references were verified at `41d889ea4` and re-checked at
+`aff5a00e6`; the nine files are identical at both, and the two `lib.rs`
+references that moved are updated.
 
 The extraction finds 256 distinct string literals at 895 occurrences.
 156 of them name a field, a tool, an argument key, or a discriminator
-value; they fill the 167 rows below (39 vocabulary, 34 Eidnara-owned,
-94 contract) and cover 755 occurrences. The other 100 are listed under
+value; they fill the 173 rows below (39 vocabulary, 35 Eidnara-owned,
+99 contract) and cover 755 occurrences. The other 100 are listed under
 [Excluded literals](#excluded-literals) with the reason each is outside the rule.
 
 ## Classes
@@ -41,12 +43,15 @@ Where Eidnara's own media-source object reuses a harness spelling (`type`,
 `url`, `data`, `mime`, `filename`), the row takes the harness's class,
 contract, because the spelling originates in the harness record.
 
-One row is one literal under one class and one meaning. Ten spellings carry
-more than one meaning at different sites and so have more than one row:
-`action`, `cancelled`, `completed`, `file`, `image`, `path`, `read`,
-`status`, and `summary` have two rows each, and `content` has three (a diff
+One row is one literal under one class and one meaning. Thirteen spellings
+carry more than one meaning at different sites and so have more than one
+row: `action`, `cancelled`, `completed`, `file`, `image`, `input`, `output`,
+`path`, `read`, and `status` have two rows each; `content` has three (a diff
 key and a `todowrite` item key, both vocabulary, and the contract message
-field). Every occurrence of every in-scope literal appears in exactly one
+field); `summary` has three (the reduced-call key, the OpenCode flag, and the
+Pi field); and `tool` has four (a role value, an OpenCode part type, the
+OpenCode part field, and Eidnara's placeholder for a missing name or id).
+Every occurrence of every in-scope literal appears in exactly one
 row.
 
 ## Distinctive vocabulary and the gate
@@ -90,7 +95,10 @@ not defined once:
 - `synthetic_todo_` at `injection.rs:20` and `codec/opencode.rs:1074`.
 - The `eidnara_note` actions `read` and `dismiss` at `tool_vocabulary.rs:37`,
   beside the note handler's own spellings at `lib.rs:12853`, `:13170` and the
-  tool schema at `lib.rs:18608`, and `conditional_note_evaluation.rs:1905`.
+  tool schema at `lib.rs:18605`, and `conditional_note_evaluation.rs:1905`.
+- The placeholder `tool`, used for a missing native tool name or call id, at
+  `codec/opencode.rs:1382` and `codec/pi.rs:458`, `:862`, `:878`, `:889`,
+  `:1127`, `:1129`, `:1885`.
 
 ## Rows
 
@@ -164,6 +172,7 @@ not defined once:
 | `summary` | Eidnara-owned | key of the reduced call input | - | `wire.rs:486` |
 | `synthetic_todo_` | Eidnara-owned | reserved prefix of a synthetic to-do call id | - | `injection.rs:20`; `codec/opencode.rs:1074` |
 | `syntheticTodoMarker` | Eidnara-owned | extras key marking a synthetic to-do part | - | `codec/opencode.rs:1085` |
+| `tool` | Eidnara-owned | placeholder tool name or call id when the native field is missing | - | `codec/opencode.rs:1382`; `codec/pi.rs:458, 862, 878, 889, 1127, 1129, 1885` |
 | `tool_call` | Eidnara-owned | CK block kind tag | - | `history_summarizer_chunk.rs:398`; `codec/opencode.rs:510, 962`; `codec/pi.rs:609, 626, 1104` |
 | `tool_result` | Eidnara-owned | CK block kind tag | - | `history_summarizer_chunk.rs:399`; `codec/opencode.rs:529, 965`; `codec/pi.rs:630, 1153` |
 | `U` | Eidnara-owned | transcript role tag for user | - | `chunk_text.rs:174` |
@@ -204,7 +213,8 @@ not defined once:
 | `ignored` | contract | OpenCode text part flag | - | `codec/opencode.rs:180` |
 | `image` | contract | part or content item type | - | `codec/opencode.rs:219, 683`; `codec/pi.rs:599, 633, 779, 927, 930, 1025, 1027, 1730, 1855` |
 | `info` | contract | OpenCode message info field | - | `codec/opencode.rs:101, 111, 398, 847, 848, 850, 861, 931, 1154` |
-| `input` | contract | call input field or Pi usage field | - | `codec/opencode.rs:485, 486, 890, 1011, 1182, 1202`; `codec/pi.rs:1525, 1530` |
+| `input` | contract | tool call input field | - | `codec/opencode.rs:485, 486, 890, 1011, 1182, 1202` |
+| `input` | contract | Pi usage token-count field | - | `codec/pi.rs:1525, 1530` |
 | `interrupted` | contract | OpenCode abort flag in tool metadata | - | `tool_outcome.rs:53` |
 | `isError` | contract | Pi tool result field | - | `tool_outcome.rs:61`; `codec/pi.rs:746, 1131, 1431` |
 | `message` | contract | Pi entry field | - | `codec/pi.rs:300, 499, 587, 1208, 1244, 1556` |
@@ -214,7 +224,8 @@ not defined once:
 | `model` | contract | model field | - | `codec/opencode.rs:605, 611, 613`; `codec/pi.rs:1523, 1615` |
 | `modelID` | contract | OpenCode model field | - | `codec/opencode.rs:610, 612` |
 | `name` | contract | error name or file part name field | - | `tool_outcome.rs:42`; `codec/opencode.rs:625, 1326, 1381`; `codec/pi.rs:738, 1477, 1589, 1885` |
-| `output` | contract | tool output field or Pi usage field | - | `codec/opencode.rs:517, 518, 893, 1339, 1340`; `codec/pi.rs:329, 1526, 1530` |
+| `output` | contract | tool output field | - | `codec/opencode.rs:517, 518, 893, 1339, 1340`; `codec/pi.rs:329` |
+| `output` | contract | Pi usage token-count field | - | `codec/pi.rs:1526, 1530` |
 | `parts` | contract | OpenCode parts field | - | `codec/opencode.rs:167, 399, 410, 447, 757, 843, 846, 862, 935, 1154` |
 | `patch` | contract | OpenCode part type | - | `codec/opencode.rs:238` |
 | `provider` | contract | model provider field | - | `codec/opencode.rs:607, 609`; `codec/pi.rs:1522, 1614` |
@@ -232,13 +243,14 @@ not defined once:
 | `snapshot` | contract | OpenCode part type | - | `codec/opencode.rs:238` |
 | `start` | contract | OpenCode tool time field | - | `codec/opencode.rs:1228` |
 | `state` | contract | OpenCode tool part field | - | `tool_outcome.rs:23`; `codec/opencode.rs:484, 516, 651, 904, 1011, 1084, 1180, 1201, 1222, 1338, 1341, 1342, 1346, 1348, 1386` |
-| `status` | contract | tool state or Pi result status field | - | `tool_outcome.rs:24`; `codec/opencode.rs:893, 1181, 1338, 1387, 1388` |
+| `status` | contract | OpenCode tool state status field | - | `tool_outcome.rs:24`; `codec/opencode.rs:893, 1181, 1338, 1387, 1388` |
 | `step-finish` | contract | OpenCode part type | - | `codec/opencode.rs:224` |
 | `step-start` | contract | OpenCode part type | - | `codec/opencode.rs:224` |
 | `stop` | contract | OpenCode finish value or Pi stop reason value | - | `codec/opencode.rs:105`; `codec/pi.rs:1516` |
 | `stopReason` | contract | Pi message field | - | `codec/pi.rs:219, 1532` |
 | `subtask` | contract | OpenCode part type | - | `codec/opencode.rs:224` |
-| `summary` | contract | OpenCode `info.summary` flag or Pi summary field | - | `codec/opencode.rs:104, 266`; `codec/pi.rs:274, 284` |
+| `summary` | contract | OpenCode `info.summary` flag | - | `codec/opencode.rs:104, 266` |
+| `summary` | contract | Pi message summary field | - | `codec/pi.rs:274, 284` |
 | `synthetic` | contract | OpenCode part flag | - | `codec/opencode.rs:1130` |
 | `system` | contract | role value | - | `history_summarizer_chunk.rs:530, 899, 1149` |
 | `text` | contract | part type or text field | - | `codec/opencode.rs:180, 182, 186, 189, 889, 953, 976, 977, 988, 997, 1159, 1161, 1168`; `codec/pi.rs:598, 620, 729, 753, 778, 793, 911, 924, 930, 1017, 1018, 1023, 1055, 1056, 1059, 1163, 1275, 1327, 1443, 1444, 1562, 1603, 1604, 1706, 1708, 1709, 1727, 1728, 1766, 1769, 1772, 1773, 1789, 1790, 1791` |
@@ -250,7 +262,9 @@ not defined once:
 | `time_created` | contract | OpenCode store column | - | `codec/opencode.rs:127` |
 | `timeCreated` | contract | OpenCode time field | - | `codec/opencode.rs:128` |
 | `timestamp` | contract | Pi message field | - | `codec/pi.rs:220, 1235, 1239, 1503, 1533, 1536` |
-| `tool` | contract | role value, OpenCode part type, and the OpenCode part field naming the tool | - | `wire.rs:397`; `tool_outcome.rs:22`; `injection.rs:170`; `history_summarizer_chunk.rs:1152`; `codec/opencode.rs:216, 451, 890, 892, 1008, 1010, 1022, 1024, 1037, 1059, 1081, 1083, 1146, 1177, 1179, 1198, 1200, 1379, 1382`; `codec/pi.rs:111, 458, 862, 878, 889, 1127, 1129, 1501, 1885` |
+| `tool` | contract | message role value | - | `wire.rs:397`; `injection.rs:170`; `history_summarizer_chunk.rs:1152`; `codec/opencode.rs:1037, 1059, 1146`; `codec/pi.rs:111, 1501` |
+| `tool` | contract | OpenCode part type value | - | `codec/opencode.rs:216, 451, 1008, 1022, 1081, 1177, 1198` |
+| `tool` | contract | OpenCode part field naming the tool | - | `tool_outcome.rs:22`; `codec/opencode.rs:890, 892, 1010, 1024, 1083, 1179, 1200, 1379` |
 | `toolCall` | contract | Pi content item type | - | `codec/pi.rs:608, 808, 1086, 1471, 1513, 1587` |
 | `toolCallId` | contract | Pi tool result field | - | `codec/pi.rs:456, 744, 1127, 1178, 1415, 1420` |
 | `toolName` | contract | Pi tool result field | - | `tool_outcome.rs:60`; `codec/opencode.rs:1380`; `codec/pi.rs:745, 1129, 1423` |
@@ -259,7 +273,7 @@ not defined once:
 | `total` | contract | Pi cost field | - | `codec/pi.rs:1530` |
 | `totalTokens` | contract | Pi usage field | - | `codec/pi.rs:1529` |
 | `truncated` | contract | Pi `bashExecution` field | - | `codec/pi.rs:336` |
-| `type` | contract | part, item, or row type field | - | `codec/opencode.rs:176, 451, 637, 642, 644, 646, 682, 692, 693, 835, 889, 890, 892, 976, 987, 996, 1008, 1022, 1081, 1159, 1161, 1168, 1177, 1198, 1235, 1242, 1326`; `codec/pi.rs:728, 753, 951, 964, 1016, 1054, 1327, 1443, 1455, 1462, 1471, 1513, 1562, 1574, 1581, 1587, 1603, 1706, 1708, 1726, 1735, 1743, 1766, 1769, 1772, 1789, 1790, 1805, 1840, 1842, 1844, 1855, 1857, 1863` |
+| `type` | contract | type discriminator field of a part, a content item, a media source, or a store row | - | `codec/opencode.rs:176, 451, 637, 642, 644, 646, 682, 692, 693, 835, 889, 890, 892, 976, 987, 996, 1008, 1022, 1081, 1159, 1161, 1168, 1177, 1198, 1235, 1242, 1326`; `codec/pi.rs:728, 753, 951, 964, 1016, 1054, 1327, 1443, 1455, 1462, 1471, 1513, 1562, 1574, 1581, 1587, 1603, 1706, 1708, 1726, 1735, 1743, 1766, 1769, 1772, 1789, 1790, 1805, 1840, 1842, 1844, 1855, 1857, 1863` |
 | `url` | contract | file part field | - | `codec/opencode.rs:639, 644, 1247, 1252, 1253, 1254, 1326`; `codec/pi.rs:742, 971, 1805, 1841, 1842, 1869, 1870, 1871` |
 | `usage` | contract | Pi assistant field | - | `codec/pi.rs:1524` |
 | `user` | contract | role value | - | `chunk_text.rs:174`; `history_summarizer_chunk.rs:1153, 1204`; `codec/opencode.rs:165, 1128, 1133`; `codec/pi.rs:76, 89, 116, 1237, 1536` |
