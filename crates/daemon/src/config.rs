@@ -2395,7 +2395,7 @@ mod tests {
     #[test]
     fn a_refused_document_list_keeps_the_default_with_one_index_only_warning() {
         let default = crate::project_docs::default_document_paths();
-        let long = "a".repeat(1025);
+        let long = "a".repeat(513);
         let deep = vec!["d"; 17].join("/");
         let nine: Vec<String> = (0..9).map(|index| format!("d{index}.md")).collect();
         let mut cases: Vec<(Value, Option<usize>)> = [
@@ -2405,6 +2405,7 @@ mod tests {
             ".git/HEAD",
             ".eidnara/x",
             "a\0b",
+            "docs/a\tb.md",
             "{env:HOME}/x.md",
             long.as_str(),
             deep.as_str(),

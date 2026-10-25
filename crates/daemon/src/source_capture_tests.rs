@@ -3084,6 +3084,40 @@ async fn a_configured_document_list_captures_each_entry_under_its_configured_pat
     assert_eq!(document_identities(&store, "README.md").len(), 1);
 }
 
+fn nested_path_of(bytes: usize) -> String {
+    let mut path = String::new();
+    while path.len() + 201 < bytes {
+        path.push_str(&"d".repeat(200));
+        path.push('/');
+    }
+    path.push_str(&"f".repeat(bytes - path.len() - 3));
+    path.push_str(".md");
+    path
+}
+
+#[tokio::test]
+async fn the_longest_admissible_path_captures_beside_a_sibling() {
+    let long = nested_path_of(kernel::source_identity::MAX_IDENTITY_VALUE_BYTES);
+    assert_eq!(
+        long.len(),
+        kernel::source_identity::MAX_IDENTITY_VALUE_BYTES
+    );
+    let paths = ["ARCHITECTURE.md", long.as_str()];
+    let (handler, _dir, project) = capture_handler(docs_config(&paths), true).await;
+    rebind(&handler, &project, docs_config(&paths));
+    for path in paths {
+        let file = project.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "# document\n").unwrap();
+    }
+    let refused = count(&handler, "documents_refused");
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    assert_eq!(count(&handler, "documents_refused"), refused);
+    assert_eq!(document_identities(&store, "ARCHITECTURE.md").len(), 1);
+    assert_eq!(document_identities(&store, &long).len(), 1);
+}
+
 /// A configured path whose parent is a symlink out of the root is unreadable and captures nothing; a nested parent that vanishes is unreadable and leaves the live row live.
 #[cfg(unix)]
 #[tokio::test]

@@ -18,8 +18,8 @@ name sits directly under the project root.
   `std::fs::metadata(parent)` was a directory; `metadata` follows symlinks.
 - `plan_document` retires the live row on `Missing`
   (`crates/daemon/src/source_capture.rs:1067-1073`).
-- The hash covers `file:{name}\n{canonical}` (`project_docs.rs:356-359`).
-- Tests: `project_docs.rs:397`, `:423`, `:463`, `:477`, `:549`, `:560`, `:594`;
+- The hash covers `file:{name}\n{canonical}` (`project_docs.rs:369-372`).
+- Tests: `project_docs.rs:410`, `:436`, `:476`, `:490`, `:562`, `:573`, `:607`;
   `crates/daemon/src/source_capture_tests.rs:2322`.
 
 ## Failure scenario
@@ -57,13 +57,19 @@ kernel without `openat2`.
 
 ### Q: What does U8 change?
 
-- Sources examined: `crates/daemon/src/project_docs.rs:65`, `:193-275`;
+- Sources examined: `crates/daemon/src/project_docs.rs:65`, `:192-289`;
   `crates/daemon/src/config.rs:1300`; the U8 tests.
 - Findings: the document list is the user-tier `project_docs.files` key,
   admitted entry by entry with the default kept on any refusal. Each read opens
   the parent and then the final component with `openat2` beneath the root, so a
   symlinked or absent parent is `Unreadable`, a final-component symlink is
-  `NotRegular`, and a kernel without `openat2` makes every read `Unreadable`.
+  `NotRegular`. A host that refuses `openat2` itself (`ENOSYS`, `EPERM`,
+  `EINVAL`, or `EOPNOTSUPP`, `project_docs.rs:216`) reads a top-level path
+  with a no-follow `openat` relative to the root descriptor
+  (`project_docs.rs:257-263`), which keeps the pre-U8 behavior for the default
+  list, and reads every nested path as `Unreadable`. Admission also requires a
+  well-formed Kernel identity value (1 to 512 bytes, no control character),
+  because the path keys the document's lineage.
 - Missing evidence: a mount crossing inside the root, which needs privileges a
   test host lacks.
 - Conclusion: resolved with answer: the record is invalidated.
