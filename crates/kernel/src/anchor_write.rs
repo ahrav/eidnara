@@ -111,6 +111,7 @@ impl AnchorValue {
         row
     }
 
+    /// Whether a capture's `commit_oid` is outside this value's anchored oids.
     fn has_unanchored_capture(&self) -> bool {
         match self {
             Self::ReachableFrom { oid, captures } => {
@@ -123,7 +124,11 @@ impl AnchorValue {
             } => captures
                 .iter()
                 .any(|capture| capture.commit_oid != *start_oid && capture.commit_oid != *end_oid),
-            _ => false,
+            Self::Exact { .. }
+            | Self::DeploymentRevision { .. }
+            | Self::ConfigRevision { .. }
+            | Self::PlatformVersion { .. }
+            | Self::WallClockInterval { .. } => false,
         }
     }
 

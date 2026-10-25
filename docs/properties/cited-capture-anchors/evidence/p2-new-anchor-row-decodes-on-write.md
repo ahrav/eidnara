@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-`Envelope::insert_anchor` (`crates/kernel/src/anchor_write.rs:311`) calls `validate_anchor` (`:258`) and maps every refusal to `InvalidInput`. `validate_anchor` refuses blank, negative, or secret-bearing identity fields, builds the row from the typed `AnchorValue` (`:35`), and runs `validate_anchor_row` (`:249`): the engine's `anchor_row_exceeds_bounds` and then `AnchorCondition::decode`. It then compares the decoded condition to the request (`matches`, `:131`), refuses a capture naming a commit other than the anchor's own oids (`has_unanchored_capture`, `:114`), because the ladder reads captures by anchored oid only, and refuses value columns or a capture payload holding a detected secret or failing the scan. The stored row is the returned row, column for column. `AnchorValue` has one variant per kind and each variant fills only its kind's columns, so the unowned-column refusal is reachable only through `validate_anchor_row` on a raw row.
+`Envelope::insert_anchor` (`crates/kernel/src/anchor_write.rs:316`) calls `validate_anchor` (`:263`) and maps every refusal to `InvalidInput`. `validate_anchor` refuses blank, negative, or secret-bearing identity fields, builds the row from the typed `AnchorValue` (`:35`), and runs `validate_anchor_row` (`:254`): the engine's `anchor_row_exceeds_bounds` and then `AnchorCondition::decode`. It then compares the decoded condition to the request (`matches`, `:136`), refuses a capture naming a commit other than the anchor's own oids (`has_unanchored_capture`, `:115`), because the ladder reads captures by anchored oid only, and refuses value columns or a capture payload holding a detected secret or failing the scan. The stored row is the returned row, column for column. `AnchorValue` has one variant per kind and each variant fills only its kind's columns, so the unowned-column refusal is reachable only through `validate_anchor_row` on a raw row.
 
 ## Failure scenario
 
@@ -24,7 +24,7 @@ Every kind once, asserting the stored row decodes to a condition written out lit
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/kernel/tests/kernel_anchor_write.rs:285`, `:352`, `:428`, `:580`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/kernel/tests/kernel_anchor_write.rs:300`, `:367`, `:443`, `:595`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
