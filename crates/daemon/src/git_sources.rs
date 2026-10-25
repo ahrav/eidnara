@@ -201,12 +201,12 @@ fn sizing_inputs_readable(objects: &Path) -> bool {
 ///
 /// # Errors
 ///
-/// A delta chain that revisits a pack entry produces [`CyclicDeltaChain`].
+/// A pack whose index describes another pack, or whose delta chain revisits an entry, produces [`PackCorruption`].
 pub(crate) fn file_object_kind(
     repo: &gix::Repository,
     id: &gix::oid,
     hint: &Mutex<Option<PathBuf>>,
-) -> Result<Option<gix::object::Kind>, CyclicDeltaChain> {
+) -> Result<Option<gix::object::Kind>, PackCorruption> {
     let objects = repo.objects.store_ref().path();
     let hash = repo.object_hash();
     let loose = gix::odb::loose::Store::at(objects, hash)
@@ -225,7 +225,7 @@ fn packed_kind(
     hash: gix::hash::Kind,
     id: &gix::oid,
     hint: &Mutex<Option<PathBuf>>,
-) -> Result<Option<gix::object::Kind>, CyclicDeltaChain> {
+) -> Result<Option<gix::object::Kind>, PackCorruption> {
     let hinted = hint
         .lock()
         .ok()
@@ -263,9 +263,14 @@ fn packed_kind(
     Ok(None)
 }
 
-/// A pack stores the looked-up object in a delta chain that revisits one of the pack's entries, so its header cannot be decoded.
+/// A pack of the repository holds the looked-up object in a form whose header cannot be decoded.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct CyclicDeltaChain;
+pub(crate) enum PackCorruption {
+    /// The delta chain revisits one of the pack's entries.
+    CyclicDeltaChain,
+    /// The index's pack checksum differs from the pack file's trailer, so the index's offsets describe another pack.
+    MismatchedIndex,
+}
 
 fn is_regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
@@ -276,7 +281,7 @@ fn index_kind(
     path: &Path,
     hash: gix::hash::Kind,
     id: &gix::oid,
-) -> Result<Option<gix::object::Kind>, CyclicDeltaChain> {
+) -> Result<Option<gix::object::Kind>, PackCorruption> {
     use gix::odb::pack;
     let pack_path = path.with_extension("pack");
     if !is_regular_file(path) || !is_regular_file(&pack_path) {
@@ -291,6 +296,9 @@ fn index_kind(
     let Ok(data) = pack::data::File::at(pack_path, hash) else {
         return Ok(None);
     };
+    if index.pack_checksum() != data.checksum() {
+        return Err(PackCorruption::MismatchedIndex);
+    }
     let entry_at = |position| data.entry(index.pack_offset_at_index(position)).ok();
     let Some(entry) = entry_at(position) else {
         return Ok(None);
@@ -309,7 +317,7 @@ fn index_kind(
     let header = data.decode_header(entry, &mut gix::zlib::Inflate::default(), &in_pack);
     match header {
         Ok(header) => Ok(Some(header.kind)),
-        Err(_) if revisited.get() => Err(CyclicDeltaChain),
+        Err(_) if revisited.get() => Err(PackCorruption::CyclicDeltaChain),
         Err(_) => Ok(None),
     }
 }

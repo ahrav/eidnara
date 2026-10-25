@@ -16,8 +16,8 @@ parses the submission's output, then calls `observe_head` once
 builds and freezes one `PreparedCapture` per job. Each plan carries the
 same `head` value (`crates/daemon/src/memory_capture.rs:922`), serialized
 as `{"commit":"<40 hex>"}` or `"head_unavailable"`
-(`crates/daemon/src/memory_capture/head.rs:15`). `observe_head` (`:31`)
-resolves HEAD once through `head_id` (`:61`), which follows a branch that
+(`crates/daemon/src/memory_capture/head.rs:15`). `observe_head` (`:32`)
+resolves HEAD once through `head_id` (`:62`), which follows a branch that
 is itself symbolic, such as one `git symbolic-ref` aliases to another
 branch, to the end of its chain, as the Kernel's checkout snapshot
 (`head_id`, `crates/kernel/src/applicability/checkout.rs:699`) does; when its first store lookup exhausts the store's index
@@ -61,10 +61,10 @@ a drain that publishes the frozen plans. `a_submission_freezes_one_checkout_head
 commits, a detached HEAD, an unborn HEAD, a plain directory, and a
 repository declaring SHA-256. The head-observation tests freeze a HEAD
 commit stored whole, as an offset delta, and as an id delta in a pack
-(`crates/daemon/src/memory_capture/head.rs:516`), one stored as a delta
-whose base sits in another pack (`:533`), and one held only by an
-alternate behind more pack indices than the first slot count (`:667`).
-`a_head_through_a_branch_alias_freezes_the_aliased_commit` (`:372`) freezes
+(`crates/daemon/src/memory_capture/head.rs:517`), one stored as a delta
+whose base sits in another pack (`:534`), and one held only by an
+alternate behind more pack indices than the first slot count (`:690`).
+`a_head_through_a_branch_alias_freezes_the_aliased_commit` (`:373`) freezes
 the commit a HEAD reaches through one and two branch aliases, with the
 aliased branch loose and in `packed-refs`.
 

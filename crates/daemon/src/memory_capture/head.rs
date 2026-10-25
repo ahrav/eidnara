@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use gix::odb::store::init::Slots;
 use serde::{Deserialize, Serialize};
 
-use crate::git_sources::{self, CyclicDeltaChain, SlotsExhausted};
+use crate::git_sources::{self, PackCorruption, SlotsExhausted};
 
 const HEAD_OBJECT_BYTES: NonZeroU64 = NonZeroU64::new(1 << 20).unwrap();
 const HEAD_INDEX_SLOTS: u16 = 128;
@@ -17,8 +17,9 @@ pub(crate) enum FrozenHead {
     /// when detached or through its branch.
     Commit(String),
     /// `HeadUnavailable` indicates an unborn or unreadable HEAD, a HEAD naming
-    /// a non-commit or absent object, a HEAD stored in a pack whose delta
-    /// chain revisits an entry, an unsupported object format, or a root that
+    /// a non-commit or absent object, a HEAD held by a corrupt pack (an index
+    /// paired with another pack's data, or a delta chain that revisits an
+    /// entry), an unsupported object format, or a root that
     /// `git_sources::open_with_slots` refuses.
     #[default]
     HeadUnavailable,
@@ -44,7 +45,7 @@ pub(crate) fn observe_head(root: &Path) -> FrozenHead {
         Ok(Some(kind)) => Some(kind),
         Ok(None) => git_sources::store_object_kind(&repo, &id)
             .unwrap_or_else(|SlotsExhausted| reopened_kind(root, &id)),
-        Err(CyclicDeltaChain) => None,
+        Err(PackCorruption::CyclicDeltaChain | PackCorruption::MismatchedIndex) => None,
     };
     let hex = id.to_hex().to_string();
     if kind == Some(gix::object::Kind::Commit) && git_sources::parse_oid(&hex, hash).is_some() {
@@ -334,9 +335,9 @@ mod tests {
         gix::ObjectId::from_hex(hex.as_bytes()).unwrap()
     }
 
-    const COMMIT: Result<Option<gix::object::Kind>, CyclicDeltaChain> =
+    const COMMIT: Result<Option<gix::object::Kind>, PackCorruption> =
         Ok(Some(gix::object::Kind::Commit));
-    const ABSENT: Result<Option<gix::object::Kind>, CyclicDeltaChain> = Ok(None);
+    const ABSENT: Result<Option<gix::object::Kind>, PackCorruption> = Ok(None);
 
     fn head_id(root: &Path) -> String {
         gix::open_opts(root, gix::open::Options::isolated())
@@ -597,8 +598,30 @@ mod tests {
         pack_objects(dir.path(), &[&commits[0]], Some(Delta::SelfId));
         let none = Mutex::new(None);
         let kind = git_sources::file_object_kind(&open(dir.path()), &oid(&commits[0]), &none);
-        assert_eq!(kind, Err(CyclicDeltaChain));
+        assert_eq!(kind, Err(PackCorruption::CyclicDeltaChain));
         assert_eq!(observe_head(dir.path()), FrozenHead::HeadUnavailable);
+    }
+
+    /// Both packs hold one commit at the same offset, so the first index's
+    /// offsets land on the second pack's commit entry once the second pack's
+    /// data replaces the first's.
+    #[test]
+    fn an_index_paired_with_another_pack_is_unavailable_without_a_store_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let commits = repository(dir.path(), 2);
+        let first = pack_objects(dir.path(), &[&commits[0]], None);
+        let second = pack_objects(dir.path(), &[&commits[1]], None);
+        std::fs::copy(second.with_extension("pack"), first.with_extension("pack")).unwrap();
+        let none = Mutex::new(None);
+        let kind = git_sources::file_object_kind(&open(dir.path()), &oid(&commits[0]), &none);
+        assert_eq!(kind, Err(PackCorruption::MismatchedIndex));
+        detach(dir.path(), &commits[0]);
+        assert_eq!(observe_head(dir.path()), FrozenHead::HeadUnavailable);
+        assert_eq!(
+            git_sources::file_object_kind(&open(dir.path()), &oid(&commits[1]), &none),
+            COMMIT,
+            "the intact pair still answers"
+        );
     }
 
     /// The test adds the base pack and more packs than slots after the
