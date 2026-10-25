@@ -3,8 +3,8 @@
 The fresh-context evaluation of Part A ran during #1105's authoring, at
 `a0e3f2993`, through the four METHOD lenses (harness fit, coverage balance,
 implementability, wildcard). This file records its dispositions as carried
-into this part and what re-verification at `41d889ea4` and the re-check at
-`aff5a00e6` changed. Part B S2
+into this part and what re-verification at `41d889ea4`, the re-check at
+`aff5a00e6`, and the re-read after U6 changed. Part B S2
 records are proposed obligations and have no portfolio result of their own.
 
 ## Finding disposition
@@ -33,8 +33,7 @@ records are proposed obligations and have no portfolio result of their own.
 ## Re-verification at `41d889ea4`
 
 - Status changes: il-dedup-selector-never-fires-on-harness-names is
-  `invalidated` (U4 deleted the selector); il-readmission-block-ends-batch-unnamed-at-head
-  is `invalidated` by U6's per-unit pre-screen.
+  `invalidated` (U4 deleted the selector).
 - Reachability changes: il-exit-code-only-for-named-tool-and-harness is
   `explicit-config-only`; its only production caller is the capture adapter.
   Eight more records are `explicit-config-only` because selection, injection,
@@ -96,3 +95,14 @@ it. [`loss-conditions.md`](loss-conditions.md#loss-condition-enumeration)
 states the HEAD mapping. Reachability changes: the gate record and the literal
 classification record are `test-only`; their subjects are a CI step and an
 authoring-time artifact, not daemon code paths.
+
+## Re-read after U6
+
+U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) landed on this
+branch after `aff5a00e6`. Status change: il-readmission-block-ends-batch-unnamed-at-head
+is `invalidated`. The screening loop refuses a unit whose payload digest a
+purge tombstone or a pending unlink names before the batch commit
+(`harness_sources.rs:1613-1619`, answered at `:1635-1648`); the record's
+[evidence file](evidence/il-readmission-block-ends-batch-unnamed-at-head.md)
+records the re-read and the U6 checks that succeed it. No other record changed
+status.
