@@ -17,10 +17,10 @@ unnamed batch conflict, which the plan's R16 replaces.
   when `unit` is `None`.
 - `publish_locked` (`crates/daemon/src/source_capture.rs:845-870`) records
   every keyed unit `Pending` and ends with `kernel_end`, which counts
-  `kernel_error` (`source_capture.rs:1475-1480`).
+  `kernel_error` (`source_capture.rs:1476-1481`).
 - `is_permanent` lists `ReAdmissionBlocked` (`harness_sources.rs:578`), and
   `classify` maps a permanent refusal to `units_refused_terminal`
-  (`source_capture.rs:1208-1210`); neither is reached on this path.
+  (`source_capture.rs:1209-1211`); neither is reached on this path.
 
 ## Failure scenario
 
@@ -66,6 +66,6 @@ pending, nothing retained.
   receipt whose payload digest is tombstoned or pending unlink, before the
   commit and without an admission slot. A purge that commits after that
   preview still reaches batch ingest and ends one pass `kernel_error`
-  (`crates/daemon/src/source_capture_tests.rs:2561`).
+  (`crates/daemon/src/source_capture_tests.rs:2568`).
 - Missing evidence: none.
 - Conclusion: resolved with answer: the record is invalidated.

@@ -84,10 +84,10 @@ or whose check U4 deleted says so.
 
 | Check | Covers | Status |
 | --- | --- | --- |
-| `pd.rs:244`, `:267`, `:304`, `:318` | final-component symlink, growth under the read, `Missing` versus `Unreadable`, oversize | unaudited |
-| `pd.rs:387`, `:398` (proptests), `pd.rs:429` golden | canonical form, escape, rendered block, and hash | unaudited |
-| `sc-tests:1964`, `:2137`, `:2202`, `:2276`, `:2315` | document lineage, retirement, renames, project isolation, unreadable reads | unaudited |
-| `sc-tests:2739`, `:2780`, `:2814`, `:2863`, `:2938` | U7: the derived identity, stale-row retirement before publication, worktrees, a failed derivation, a shallow checkout | unaudited |
+| `pd.rs:379`, `:405`, `:445`, `:459` | final-component symlink, growth under the read, `Missing` versus `Unreadable`, oversize | unaudited |
+| `pd.rs:531`, `:542` (proptests), `pd.rs:576` golden | canonical form, escape, rendered block, and hash | unaudited |
+| `sc-tests:1964`, `:2144`, `:2209`, `:2283`, `:2322` | document lineage, retirement, renames, project isolation, unreadable reads | unaudited |
+| `sc-tests:2743`, `:2784`, `:2818`, `:2867`, `:2942` | U7: the derived identity, stale-row retirement before publication, worktrees, a failed derivation, a shallow checkout | unaudited |
 | `crates/daemon/src/repository_identity_tests.rs` | U7: the derivation against the plugin's rendering, two roots, a subdirectory, the fallbacks, the failures, the unchanged encoding | unaudited |
 | symlinked intermediate directory | none found; unreachable at HEAD because no name holds a separator | none |
 
@@ -95,10 +95,10 @@ or whose check U4 deleted says so.
 
 | Check | Covers | Status |
 | --- | --- | --- |
-| `sc-tests:2514` `a_blocked_digest_is_refused_alone_and_its_sibling_publishes` | AE5 for a tombstoned and a pending-unlink digest, and the pre-screen digest equal to the stored artifact digest | unaudited |
-| `sc-tests:2561` `a_purge_between_screen_and_commit_fails_one_pass_then_converges` | one `kernel_error` pass, then AE5 | unaudited |
-| `sc-tests:2607` `a_purged_unit_with_a_stored_receipt_replays` | receipt replay precedes the pre-screen | unaudited |
-| `sc-tests:2631` `a_reclaiming_digest_stays_pending_and_publishes_after_reclamation` | a reclaiming-only digest is never terminal | unaudited |
+| `sc-tests:2521` `a_blocked_digest_is_refused_alone_and_its_sibling_publishes` | AE5 for a tombstoned and a pending-unlink digest, and the pre-screen digest equal to the stored artifact digest | unaudited |
+| `sc-tests:2568` `a_purge_between_screen_and_commit_fails_one_pass_then_converges` | one `kernel_error` pass, then AE5 | unaudited |
+| `sc-tests:2614` `a_purged_unit_with_a_stored_receipt_replays` | receipt replay precedes the pre-screen | unaudited |
+| `sc-tests:2638` `a_reclaiming_digest_stays_pending_and_publishes_after_reclamation` | a reclaiming-only digest is never terminal | unaudited |
 | `hs-tests:2555` `a_purged_digest_is_refused_before_the_batch_and_takes_no_admission_slot` | the refused unit takes no admission slot | unaudited |
 | `crates/kernel/tests/cas_fault_injection.rs:589` `readmission_preview_names_tombstoned_and_pending_unlink_digests_and_writes_nothing` | the preview query's truth table and that it writes nothing | unaudited |
 

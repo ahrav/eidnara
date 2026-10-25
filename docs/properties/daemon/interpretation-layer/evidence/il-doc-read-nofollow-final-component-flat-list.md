@@ -8,21 +8,19 @@ name sits directly under the project root.
 
 ## Evidence trail
 
-- `crates/daemon/src/project_docs.rs:9` `PROJECT_DOC_FILES` holds
-  `ARCHITECTURE.md` and `STRUCTURE.md`, neither with a separator.
-- `read_project_docs_canonical` (`project_docs.rs:174`) reads each name at
-  `dir.join(filename)` (`:178`).
-- `read_document` (`project_docs.rs:113-133`) calls `read_bounded_bytes`
-  (`crates/daemon/src/config.rs:688`), which opens with `RDONLY | NOFOLLOW |
-  NONBLOCK | CLOEXEC` and checks `is_file` on the descriptor
-  (`config.rs:703-719`) and caps the bytes read.
-- The `NotFound` arm classifies `Missing` when `std::fs::metadata(parent)` is a
-  directory (`project_docs.rs:117-122`); `metadata` follows symlinks.
+- At `41d889ea4`, `PROJECT_DOC_FILES` held `ARCHITECTURE.md` and
+  `STRUCTURE.md`, neither with a separator, and `read_project_docs_canonical`
+  read each name at `dir.join(filename)`.
+- At `41d889ea4`, `read_document` called `read_bounded_bytes`, which opened
+  with `RDONLY | NOFOLLOW | NONBLOCK | CLOEXEC`, checked `is_file` on the
+  descriptor, and capped the bytes read.
+- At `41d889ea4`, the `NotFound` arm classified `Missing` when
+  `std::fs::metadata(parent)` was a directory; `metadata` follows symlinks.
 - `plan_document` retires the live row on `Missing`
-  (`crates/daemon/src/source_capture.rs:1066-1072`).
-- The hash covers `file:{name}\n{canonical}` (`project_docs.rs:208-211`).
-- Tests: `project_docs.rs:244`, `:267`, `:304`, `:318`, `:387`, `:398`, `:429`;
-  `crates/daemon/src/source_capture_tests.rs:2315`.
+  (`crates/daemon/src/source_capture.rs:1067-1073`).
+- The hash covers `file:{name}\n{canonical}` (`project_docs.rs:338-341`).
+- Tests: `project_docs.rs:379`, `:405`, `:445`, `:459`, `:531`, `:542`, `:576`;
+  `crates/daemon/src/source_capture_tests.rs:2322`.
 
 ## Failure scenario
 
@@ -45,14 +43,27 @@ kernel without `openat2`.
 
 ### Q: Is any HEAD name nested?
 
-- Sources examined: `project_docs.rs:9`; every caller of `PROJECT_DOC_FILES`.
+- Sources examined: the old reader; every caller of `PROJECT_DOC_FILES`.
 - Findings: no; the list is a fixed array of two bare names.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
 ### Q: Does the beneath-root resolver have to cover the `Missing` classification?
 
-- Sources examined: `project_docs.rs:117-122`; #1105 OQ15.
+- Sources examined: the old reader; #1105 OQ15.
 - Findings: yes; the classification reads the parent's followed metadata.
 - Missing evidence: U8's design.
 - Conclusion: unresolved, owned by U8 and OQ15.
+
+### Q: What does U8 change?
+
+- Sources examined: `crates/daemon/src/project_docs.rs:64`, `:196-262`;
+  `crates/daemon/src/config.rs:1300`; the U8 tests.
+- Findings: the document list is the user-tier `project_docs.files` key,
+  admitted entry by entry with the default kept on any refusal. Each read opens
+  the parent and then the final component with `openat2` beneath the root, so a
+  symlinked or absent parent is `Unreadable`, a final-component symlink is
+  `NotRegular`, and a kernel without `openat2` makes every read `Unreadable`.
+- Missing evidence: a mount crossing inside the root, which needs privileges a
+  test host lacks.
+- Conclusion: resolved with answer: the record is invalidated.

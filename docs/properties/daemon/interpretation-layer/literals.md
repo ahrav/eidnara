@@ -89,8 +89,8 @@ not defined once:
 
 - `synthetic_todo_` at `injection.rs:20` and `codec/opencode.rs:1074`.
 - The `eidnara_note` actions `read` and `dismiss` at `tool_vocabulary.rs:37`,
-  beside the note handler's own spellings at `lib.rs:12854`, `:13171` and the
-  tool schema at `lib.rs:18609`, and `conditional_note_evaluation.rs:1905`.
+  beside the note handler's own spellings at `lib.rs:12855`, `:13172` and the
+  tool schema at `lib.rs:18610`, and `conditional_note_evaluation.rs:1905`.
 
 ## Rows
 

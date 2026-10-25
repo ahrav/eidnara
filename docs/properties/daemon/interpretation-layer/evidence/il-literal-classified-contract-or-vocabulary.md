@@ -20,7 +20,7 @@ identifiers.
 - Eidnara-owned identifiers defined more than once: `synthetic_todo_`
   (`crates/daemon/src/injection.rs:20`, `crates/daemon/src/codec/opencode.rs:1074`);
   the `eidnara_note` actions (`crates/daemon/src/tool_vocabulary.rs:37`,
-  `crates/daemon/src/lib.rs:12854`, `:13171`, `:18609`,
+  `crates/daemon/src/lib.rs:12855`, `:13172`, `:18610`,
   `crates/daemon/src/conditional_note_evaluation.rs:1905`).
 
 ## Failure scenario
