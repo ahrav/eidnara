@@ -2,39 +2,30 @@
 //!
 //! The user-tier `project_docs.files` list names the documents, in order; its default is
 //! `ARCHITECTURE.md`, then `STRUCTURE.md`. Each path is resolved beneath the project root with
-//! `openat2` refusing every symlink, magic link, mount crossing, and escape, so a repository
-//! cannot route a read outside its own tree. Each file is limited to 256 KiB, checked on the
-//! opened descriptor.
+//! `openat2` under [`RESOLVE`](crate::confined_path::RESOLVE). When `openat2` itself fails with
+//! `ENOSYS`, `EPERM`, `EINVAL`, or `EOPNOTSUPP`, [`read_beneath`] opens a top-level path with a
+//! no-follow `openat` relative to the root descriptor and reports a nested path `Unreadable`. Each
+//! file is limited to 256 KiB, checked on the opened descriptor.
 
 use std::io::Read as _;
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::Path;
 
-use rustix::fs::{Mode, OFlags, ResolveFlags};
+use rustix::fs::{Mode, OFlags};
+
+use crate::confined_path::open_beneath;
 
 /// The documents read when the user tier names none.
 const DEFAULT_PROJECT_DOC_FILES: [&str; 2] = ["ARCHITECTURE.md", "STRUCTURE.md"];
 /// Entries one `project_docs.files` list may hold.
 const MAX_PROJECT_DOC_FILES: usize = 8;
-const MAX_DOCUMENT_PATH_BYTES: usize = 1024;
-const MAX_DOCUMENT_PATH_COMPONENTS: usize = 16;
-/// Components that name no ordinary file of the tree.
-const REFUSED_COMPONENTS: [&str; 3] = ["", ".", ".."];
-/// The project's own Eidnara directory and its repository metadata, refused in any ASCII case so a
-/// case-folding filesystem reaches neither.
-const REFUSED_DIRECTORIES: [&str; 2] = [".eidnara", ".git"];
 const PROJECT_DOCS_DELIMITER: &str = "\n\n---\n\n";
 const MAX_PROJECT_DOC_BYTES: u64 = 256 * 1024;
-/// Every component of a document path resolves as an ordinary name beneath the root, on the
-/// root's device.
-const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
-    .union(ResolveFlags::NO_SYMLINKS)
-    .union(ResolveFlags::NO_MAGICLINKS)
-    .union(ResolveFlags::NO_XDEV);
 
-/// A configured document's path relative to the project root: 1 to 1024 bytes of `/`-separated
-/// ordinary components, at most 16, none of them `.`, `..`, `.eidnara`, or `.git`, with no NUL and
-/// no variable reference. Only [`admit_document_paths`] and [`default_document_paths`] build one.
+/// A configured document's path relative to the project root: `/`-separated ordinary components,
+/// at most 16, none of them `.`, `..`, `.eidnara`, or `.git`, with no variable reference. The path
+/// is the `relative_path` identity value of the document's source lineage, so it is also a
+/// well-formed Kernel identity value: 1 to 512 bytes with no control character.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DocumentPath(String);
 
@@ -77,16 +68,9 @@ pub(crate) fn admit_document_paths(entries: &[&str]) -> Result<Vec<DocumentPath>
 }
 
 fn admissible(entry: &str) -> bool {
-    (1..=MAX_DOCUMENT_PATH_BYTES).contains(&entry.len())
-        && !entry.contains('\0')
+    kernel::source_identity::well_formed_value(entry)
         && !crate::config::has_variable_reference(entry)
-        && entry.split('/').enumerate().all(|(index, component)| {
-            index < MAX_DOCUMENT_PATH_COMPONENTS
-                && !REFUSED_COMPONENTS.contains(&component)
-                && !REFUSED_DIRECTORIES
-                    .iter()
-                    .any(|refused| component.eq_ignore_ascii_case(refused))
-        })
+        && crate::confined_path::check(entry).is_ok()
 }
 
 /// Both fields are empty when neither configured document is included.
@@ -208,8 +192,14 @@ fn open_root(root: &Path) -> Option<OwnedFd> {
     .ok()
 }
 
-fn open_beneath(dir: BorrowedFd<'_>, name: &str, flags: OFlags) -> rustix::io::Result<OwnedFd> {
-    rustix::fs::openat2(dir, name, flags, Mode::empty(), RESOLVE)
+/// Treats errors consistent with syscall unavailability, unsupported resolve flags, or seccomp
+/// denial as a host-level refusal of `openat2`. These error codes can also arise from other causes.
+fn openat2_refused(errno: rustix::io::Errno) -> bool {
+    use rustix::io::Errno;
+    matches!(
+        errno,
+        Errno::NOSYS | Errno::PERM | Errno::INVAL | Errno::OPNOTSUPP
+    )
 }
 
 /// An `openat2` call relative to a directory descriptor, replaceable in tests by one that fails.
@@ -218,11 +208,11 @@ type OpenBeneath<'a> = &'a dyn Fn(BorrowedFd<'_>, &str, OFlags) -> rustix::io::R
 /// Reads `path` beneath `root`.
 ///
 /// The parent directory is opened first and the final component relative to it, both under
-/// [`RESOLVE`], so `Missing` means the final component is absent from a parent that resolves
-/// beneath the root. A parent that is absent, a symlink, across a mount, or unopenable is
-/// `Unreadable`; a final-component symlink is `NotRegular`; a kernel without `openat2` makes every
-/// read `Unreadable`. The type, size, and UTF-8 checks run on the opened descriptor, so a swap or
-/// growth after the open cannot change what is read.
+/// [`RESOLVE`](crate::confined_path::RESOLVE). `Missing` means the final component is absent and
+/// its parent resolves beneath the root. A parent that is absent, a symlink, across a mount, or
+/// unopenable is `Unreadable`; a final-component symlink is `NotRegular`. On a host that refuses
+/// `openat2` itself, a top-level path opens with `openat` relative to the root descriptor and
+/// every nested path is `Unreadable`.
 fn read_beneath(root: BorrowedFd<'_>, path: &DocumentPath, open: OpenBeneath<'_>) -> DocumentRead {
     let (parent, name) = match path.as_str().rsplit_once('/') {
         Some((parent, name)) => (Some(parent), name),
@@ -244,11 +234,15 @@ fn read_beneath(root: BorrowedFd<'_>, path: &DocumentPath, open: OpenBeneath<'_>
         },
     };
     // A FIFO or device at a project-controlled path would block the open or the read; `NONBLOCK` keeps the open from waiting on a writer, and the descriptor's own type settles what was reached before any byte is read.
-    let file = match open(
-        dir,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-    ) {
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let opened = match open(dir, name, flags) {
+        // The single-component fallback resolves one ordinary entry relative to the root descriptor, and `NOFOLLOW` rejects a final symlink; a mount at that entry is crossed.
+        Err(errno) if parent.is_none() && openat2_refused(errno) => {
+            rustix::fs::openat(dir, name, flags, Mode::empty())
+        }
+        opened => opened,
+    };
+    let file = match opened {
         Ok(fd) => std::fs::File::from(fd),
         Err(rustix::io::Errno::NOENT) => return DocumentRead::Missing,
         Err(rustix::io::Errno::LOOP) => return DocumentRead::NotRegular,
@@ -621,7 +615,7 @@ mod tests {
     /// Every class the admission rule refuses, each in the first position the rule reaches it.
     #[test]
     fn admission_names_the_first_refused_entry() {
-        let long = "a".repeat(1025);
+        let long = "a".repeat(513);
         let deep = vec!["d"; 17].join("/");
         let nine: Vec<String> = (0..9).map(|index| format!("d{index}.md")).collect();
         let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
@@ -636,6 +630,9 @@ mod tests {
             (vec!["src/.git"], 0),
             (vec![".eidnara/x"], 0),
             (vec!["a\0b"], 0),
+            (vec!["docs/a\tb.md"], 0),
+            (vec!["a\u{7f}.md"], 0),
+            (vec!["a\u{85}.md"], 0),
             (vec!["{env:HOME}/x.md"], 0),
             (vec!["docs/{file:x}"], 0),
             (vec![""], 0),
@@ -657,6 +654,30 @@ mod tests {
         );
         assert_eq!(admit_document_paths(&nine[..8]).unwrap().len(), 8);
         assert_eq!(admit_document_paths(&[]).unwrap(), Vec::new());
+        assert_eq!(admit_document_paths(&[&"a".repeat(512)]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn every_admitted_path_is_a_kernel_identity_value() {
+        let candidates = [
+            "a".repeat(512),
+            "a".repeat(513),
+            "a".repeat(1024),
+            "docs/a\tb.md".to_owned(),
+            "a\nb.md".to_owned(),
+            "a\u{7f}.md".to_owned(),
+            "a\u{85}.md".to_owned(),
+            "docs/\u{e9}t\u{e9}.md".to_owned(),
+        ];
+        for candidate in &candidates {
+            if admit_document_paths(&[candidate]).is_ok() {
+                assert!(
+                    kernel::source_identity::well_formed_value(candidate),
+                    "admitted {candidate:?} is not a Kernel identity value"
+                );
+            }
+        }
+        assert!(admit_document_paths(&["docs/\u{e9}t\u{e9}.md"]).is_ok());
     }
 
     /// A symlinked or absent parent, or any path through one, is unreadable; a final-component
@@ -708,41 +729,39 @@ mod tests {
         );
     }
 
-    /// Every component resolves beneath the root with no symlink, magic link, or mount crossing; a
-    /// mount inside the root needs privileges a test host lacks, so the flag set is pinned here.
+    #[cfg(unix)]
     #[test]
-    fn reads_resolve_with_every_confinement_flag() {
-        assert_eq!(
-            RESOLVE,
-            ResolveFlags::BENEATH
-                | ResolveFlags::NO_SYMLINKS
-                | ResolveFlags::NO_MAGICLINKS
-                | ResolveFlags::NO_XDEV
-        );
-    }
-
-    /// A kernel without `openat2` fails closed: every read, top-level or nested, is unreadable.
-    #[test]
-    fn a_kernel_without_openat2_makes_every_read_unreadable() {
+    fn a_host_without_openat2_reads_top_level_documents_and_refuses_nested_ones() {
+        let outside = tempfile::tempdir().unwrap();
+        write_doc(outside.path(), "A.md", "OUTSIDE");
         let dir = tempfile::tempdir().unwrap();
         write_doc(dir.path(), "ARCHITECTURE.md", "text");
         write_doc(dir.path(), "docs/A.md", "text");
+        std::os::unix::fs::symlink(outside.path().join("A.md"), dir.path().join("LINK.md"))
+            .unwrap();
+        let root = open_root(dir.path()).unwrap();
         for errno in [
             rustix::io::Errno::NOSYS,
+            rustix::io::Errno::PERM,
             rustix::io::Errno::INVAL,
             rustix::io::Errno::OPNOTSUPP,
         ] {
-            for path in ["ARCHITECTURE.md", "docs/A.md"] {
-                assert_eq!(
-                    read_beneath(
-                        open_root(dir.path()).unwrap().as_fd(),
-                        &doc(path),
-                        &|_, _, _| Err(errno)
-                    ),
-                    DocumentRead::Unreadable,
-                    "{path} {errno:?}"
-                );
-            }
+            let read = |path: &str| read_beneath(root.as_fd(), &doc(path), &|_, _, _| Err(errno));
+            assert_eq!(
+                read("ARCHITECTURE.md"),
+                DocumentRead::Text("text".to_owned()),
+                "{errno:?}"
+            );
+            assert_eq!(read("STRUCTURE.md"), DocumentRead::Missing, "{errno:?}");
+            assert_eq!(read("LINK.md"), DocumentRead::NotRegular, "{errno:?}");
+            assert_eq!(read("docs/A.md"), DocumentRead::Unreadable, "{errno:?}");
         }
+        assert_eq!(
+            read_beneath(root.as_fd(), &doc("ARCHITECTURE.md"), &|_, _, _| Err(
+                rustix::io::Errno::XDEV
+            )),
+            DocumentRead::Unreadable,
+            "a refusal of the entry itself takes no fallback"
+        );
     }
 }

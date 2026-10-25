@@ -2558,19 +2558,93 @@ fn a_purged_digest_is_refused_before_the_batch_and_takes_no_admission_slot() {
     corpus.seed();
     let first = publish_screened(
         &corpus.publisher(),
-        &[pi_text_unit("pi-first", "purged text")],
+        &[
+            pi_text_unit("pi-first", "purged text"),
+            pi_text_unit("pi-second", "second purged text"),
+        ],
+        NOW,
+        None,
+    )
+    .unwrap();
+    assert!(
+        first
+            .iter()
+            .all(|disposition| matches!(disposition, UnitDisposition::Published(_)))
+    );
+    purge_text(&corpus, "purged text");
+    purge_text(&corpus, "second purged text");
+    let mut units: Vec<SourceUnit> = (0..MAX_SOURCE_BATCH_UNITS)
+        .map(|index| pi_text_unit(&format!("pi-{index}"), &format!("unit {index}")))
+        .collect();
+    units.insert(5, pi_text_unit("pi-again", "purged text"));
+    units.insert(20, pi_text_unit("pi-second-again", "second purged text"));
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    for index in [5, 20] {
+        assert!(
+            matches!(
+                dispositions[index],
+                UnitDisposition::Refused(PublishError::Artifact(
+                    ArtifactErrorKind::ReAdmissionBlocked
+                ))
+            ),
+            "{index}: {:?}",
+            dispositions[index]
+        );
+    }
+    let published = dispositions
+        .iter()
+        .filter(|disposition| matches!(disposition, UnitDisposition::Published(_)))
+        .count();
+    assert_eq!(published, MAX_SOURCE_BATCH_UNITS);
+    assert!(
+        !dispositions
+            .iter()
+            .any(|disposition| matches!(disposition, UnitDisposition::Deferred))
+    );
+}
+
+#[test]
+fn a_purged_revision_leaves_its_lineage_to_a_later_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let first = publish_screened(
+        &corpus.publisher(),
+        &[pi_text_unit("pi-other", "purged text")],
         NOW,
         None,
     )
     .unwrap();
     assert!(matches!(first[0], UnitDisposition::Published(_)));
-    let digest = kernel::source_identity::payload_id(b"purged text");
+    purge_text(&corpus, "purged text");
+    let units = [
+        pi_text_unit_at("pi-revised", "purged text", 100),
+        pi_text_unit_at("pi-revised", "revised text", 200),
+    ];
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    assert!(
+        matches!(
+            dispositions[0],
+            UnitDisposition::Refused(PublishError::Artifact(
+                ArtifactErrorKind::ReAdmissionBlocked
+            ))
+        ),
+        "{dispositions:?}"
+    );
+    assert!(
+        matches!(dispositions[1], UnitDisposition::Published(_)),
+        "{dispositions:?}"
+    );
+}
+
+fn purge_text(corpus: &Corpus, text: &str) {
+    let digest = kernel::source_identity::payload_id(text.as_bytes());
     corpus
         .kernel
         .delete_artifact(kernel::ArtifactDeletionRequest {
             intent: CommitIntent {
                 producer: "test".into(),
-                operation_key: "purge".into(),
+                operation_key: format!("purge:{digest}"),
                 request_digest: digest.clone(),
                 actor: "test".into(),
                 cause: "readmission".into(),
@@ -2583,27 +2657,48 @@ fn a_purged_digest_is_refused_before_the_batch_and_takes_no_admission_slot() {
             deleted_at: NOW,
         })
         .unwrap();
-    let mut units: Vec<SourceUnit> = (0..MAX_SOURCE_BATCH_UNITS)
-        .map(|index| pi_text_unit(&format!("pi-{index}"), &format!("unit {index}")))
-        .collect();
-    units.insert(5, pi_text_unit("pi-again", "purged text"));
-    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+}
+
+/// Reusing an evidence-receipt key with changed bytes yields an identity conflict both before and after the changed payload is purged.
+#[test]
+fn an_evidence_receipt_conflict_takes_precedence_over_a_purged_digest() {
+    const LATE_SCOPE: &str = "project:late";
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let late = SourcePublisher {
+        scope_id: Some(LATE_SCOPE),
+        ..corpus.publisher()
+    };
+    // The missing scope causes descriptor publication to fail after evidence retention, leaving the key bound to an evidence receipt.
+    let retained = pi_text_unit("pi-evidence-only", "retained text");
     assert!(matches!(
-        dispositions[5],
-        UnitDisposition::Refused(PublishError::Artifact(
-            ArtifactErrorKind::ReAdmissionBlocked
-        ))
+        late.publish(&retained, NOW),
+        Err(PublishError::Kernel {
+            error: kernel::KernelError::NotFound,
+            evidence: Some(_)
+        })
     ));
-    let published = dispositions
-        .iter()
-        .filter(|disposition| matches!(disposition, UnitDisposition::Published(_)))
-        .count();
-    assert_eq!(published, MAX_SOURCE_BATCH_UNITS);
-    assert!(
-        !dispositions
-            .iter()
-            .any(|disposition| matches!(disposition, UnitDisposition::Deferred))
-    );
+    let other = publish_screened(
+        &corpus.publisher(),
+        &[pi_text_unit("pi-other", "purged text")],
+        NOW,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(other[0], UnitDisposition::Published(_)));
+    let changed = SourceUnit {
+        text: "purged text".to_owned(),
+        ..retained.clone()
+    };
+    let unpurged = publish_screened(&late, std::slice::from_ref(&changed), NOW, None).unwrap_err();
+    assert_eq!(unpurged.conflicting_unit(), Some(0), "{unpurged:?}");
+
+    purge_text(&corpus, "purged text");
+    let tip = corpus.tip();
+    let refusal = publish_screened(&late, &[changed], NOW, None).unwrap_err();
+    assert_eq!(refusal.conflicting_unit(), Some(0), "{refusal:?}");
+    assert_eq!(corpus.tip(), tip, "a conflict commits nothing");
 }
 
 /// A unit whose project the publisher's stored scope does not name is refused on its own before the transaction; its sibling publishes.

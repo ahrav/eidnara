@@ -7,10 +7,13 @@
  * fixture, copies each harness's own store into `<store-dir>`, and freezes it. `--from` freezes the
  * stores a previous `--run` left in `<store-dir>`; the same stores yield the same fixture bytes.
  * Either mode writes `crates/daemon/testdata/corpus/sessions/<closure>/mix.json` and rewrites the
- * corpus digest pins in Rust and TypeScript. OpenCode must be the pinned 1.18.22 on `PATH`.
+ * corpus digest pins in Rust and TypeScript. `--run` requires the OpenCode on `PATH` to be the
+ * version `OPENCODE_CLOSURE` names and records it in `store.json`; `--from` requires the recorded
+ * version to match.
  */
 
 import { Database } from "bun:sqlite";
+import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -19,7 +22,9 @@ import {
     freezePi,
     OPENCODE_CLOSURE,
     PI_CLOSURE,
+    requireOpenCodeClosure,
     type ScratchRoot,
+    snapshotStore,
 } from "../src/corpus-sessions/freeze";
 import { openCodeWorkspace, startOpenCode, startPi } from "../src/corpus-sessions/harnesses";
 import { runOpenCodeMix } from "../src/corpus-sessions/opencode-mix";
@@ -34,19 +39,22 @@ const RUST_PIN = join(REPO, "crates/daemon/src/source_corpus.rs");
 const TS_PIN = join(REPO, "packages/e2e-tests/src/source-corpus/corpus.ts");
 
 interface StoreManifest {
-    opencode: { sessionId: string; roots: ScratchRoot[] };
+    opencode: { version: string; sessionId: string; roots: ScratchRoot[] };
     pi: { roots: ScratchRoot[] };
 }
 
 async function runOpenCode(store: string): Promise<StoreManifest["opencode"]> {
+    const reported = spawnSync("opencode", ["--version"], { encoding: "utf8" });
+    const version = requireOpenCodeClosure(`${reported.stdout ?? ""}${reported.stderr ?? ""}`);
     const h = await startOpenCode(true);
     try {
         const { root, sessionId } = await openCodeWorkspace(h);
         await runOpenCodeMix(h, sessionId, root);
         const db = new Database(join(h.env.dataDir, "opencode", "opencode.db"));
-        db.prepare("VACUUM INTO ?").run(join(store, "opencode.db"));
+        snapshotStore(db, join(store, "opencode.db"));
         db.close();
         return {
+            version,
             sessionId,
             roots: [
                 { path: realpathSync(root), as: "/corpus/ripgrep" },
@@ -89,6 +97,7 @@ function writePins(digest: string): void {
 }
 
 function freeze(store: string, manifest: StoreManifest): void {
+    requireOpenCodeClosure(manifest.opencode.version ?? "");
     const db = new Database(join(store, "opencode.db"), { readonly: true });
     const opencode = freezeOpenCode(db, manifest.opencode.sessionId, manifest.opencode.roots);
     db.close();

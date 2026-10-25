@@ -18,8 +18,8 @@ several part shapes with no unit, no refusal, and no counter.
 - The independent reader classifies every arm with a closed reason
   (`crates/daemon/src/source_corpus.rs:573-594`): `non_text_part`,
   `ignored_text`, `unsettled_text`, `unsettled_tool`, `skipped_item`.
-- U3 witnesses: `crates/daemon/tests/source_corpus_replay.rs:225` (an `image`
-  part), `:345` (a pending tool part), `:93` (the frozen OpenCode session
+- U3 witnesses: `crates/daemon/tests/source_corpus_replay.rs:215` (an `image`
+  part), `:338` (a pending tool part), `:82` (the frozen OpenCode session
   holds `non_text_part` records).
 
 ## Failure scenario
@@ -30,15 +30,24 @@ them as unexplained loss.
 
 ## Timing windows and dependencies
 
-The running, pending, and interrupted arms are time-dependent: the part
-becomes a unit on a later pass once the call settles or the turn completes.
-The other arms are permanent for the part.
+Three arms are time-dependent, each on its own condition. A running or
+pending tool part is skipped by status whether or not the turn has completed
+(`crates/daemon/src/harness_sources.rs:328-332`); it becomes a unit only on a
+pass after its status settles to `completed` or `error`.
+`crates/daemon/tests/source_corpus_replay.rs:338` holds a pending part in a
+completed turn and still expects `unsettled_tool`. An interrupted tool part
+(`harness_sources.rs:334-336`) and unfinished assistant text
+(`harness_sources.rs:308`) become units on a pass after the turn gains
+`time.completed`; `crates/daemon/tests/harness_sources.rs:922` shows the text
+case. The `ignored`, non-text, and unknown-kind arms are permanent for the
+part.
 
 ## What a test must construct
 
 A session holding one part per arm, the reader's expected table, and a replay
-asserting each class maps to one reason; for the time-dependent arms, a second
-pass after the turn completes.
+asserting each class maps to one reason; for the running or pending arm, a
+later pass after the part's status settles; for the interrupted and
+unfinished-text arms, a later pass after the turn completes.
 
 ## Investigation log
 

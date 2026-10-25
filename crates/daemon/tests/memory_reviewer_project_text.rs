@@ -1580,6 +1580,51 @@ fn a_root_inside_a_refused_component_is_protected() {
     .unwrap();
 }
 
+/// A case-folding filesystem resolves `.GIT` to the Git store, so protection applies across ASCII
+/// letter cases.
+#[test]
+fn a_refused_component_in_any_letter_case_is_protected() {
+    let fixture = Fixture::open();
+    fixture.write(".GIT/config", b"bun [core]\n");
+    fixture.write("src/.Eidnara/eidnara.jsonc", b"{\"bun\": 1}\n");
+    fixture.write("ok.txt", b"bun\n");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    for path in [".GIT/config", "src/.Eidnara/eidnara.jsonc"] {
+        assert_eq!(
+            text.read(&fixture.store, &mut broker, path, None, fixture.now)
+                .unwrap_err()
+                .code,
+            RefusalCode::Protected,
+            "{path}"
+        );
+    }
+    let content = text
+        .search(
+            &fixture.store,
+            &mut broker,
+            SearchQuery::Content("bun"),
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(content.hits.len(), 1, "only ok.txt is delivered");
+    assert!(content.withheld, "both refused directories are withheld");
+    for root in [".GIT", "src/.Eidnara"] {
+        assert_eq!(
+            ProjectText::open(
+                &fixture.project.path().join(root),
+                &protected,
+                fixture.binding()
+            )
+            .unwrap_err()
+            .code,
+            RefusalCode::Protected,
+            "{root}"
+        );
+    }
+}
+
 #[test]
 fn a_broker_of_another_project_is_refused_before_any_path_is_read() {
     let fixture = Fixture::open();

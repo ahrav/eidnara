@@ -11,7 +11,9 @@ Issue #1105 Part B S2 (R6): one path query for both harnesses' spellings.
 - `display_arg` (`tool_vocabulary.rs:187-191`) reads the two display lists
   (`:43`, `:45`).
 - Tests: `crates/daemon/src/tool_vocabulary_tests.rs:127` (Pi `path` and
-  OpenCode `filePath` yield `src/a.rs`); `:66` (the per-site table).
+  OpenCode `filePath` yield `src/a.rs`); `:66` (the per-site table, which
+  holds three of the record's four inputs; `pattern` appears alone at
+  `tool_vocabulary_tests.rs:88`, never beside `filePath`).
 - `git diff a91dbc2b6 97afdaff1 -- crates/daemon/testdata` is empty, so the
   selection, wire, and chunk goldens are unchanged.
 
@@ -26,7 +28,8 @@ None.
 
 ## What a test must construct
 
-Covered.
+A row `{"pattern": "p", "filePath": "f"}` in the per-site table, asserting
+`path_arg` yields `f` and `extract_key_arg` yields `f`.
 
 ## Investigation log
 

@@ -12,6 +12,7 @@ pub mod codec;
 mod commit_stream;
 pub(crate) mod conditional_note_evaluation;
 pub(crate) mod config;
+pub(crate) mod confined_path;
 pub mod context_capabilities;
 pub mod coverage;
 pub mod decay_render;
@@ -14137,14 +14138,11 @@ impl HandlerCore {
     }
 
     /// The `source_capture` health metrics block as the next health report renders it, and
-    /// whether no capture job is running or queued.
+    /// whether the publication slot was idle.
     #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
     pub fn source_capture_report_for_test(&self) -> (serde_json::Value, bool) {
-        (
-            self.source_capture
-                .report(self.cancel.is_cancelled(), now_ms()),
-            self.source_capture.is_idle(),
-        )
+        self.source_capture
+            .settled_report(self.cancel.is_cancelled(), now_ms())
     }
 
     /// Whether a history_summarizer firing or reattach is live for any session:

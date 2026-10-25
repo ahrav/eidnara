@@ -192,9 +192,12 @@ const CELLS: [&str; 17] = [
     "canary",
 ];
 
+/// The corpus canary, `CANARY` in `packages/e2e-tests/src/corpus-sessions/workspace.ts`.
+const CANARY: &str = "sk-ant-api03-Zk9Qw2Lm7Pv4Rt8Zw1Yc6Nb3Hd5Kf0JgAbCdEfGh";
+
 fn text_cells(text: &str, cells: &mut BTreeMap<&'static str, usize>) {
     *cells.entry("text").or_default() += 1;
-    if text.contains("sk-ant-api03-") {
+    if text.contains(CANARY) {
         *cells.entry("canary").or_default() += 1;
     }
     if text.contains('\u{FFFD}') {
@@ -295,9 +298,6 @@ fn census(session: &Session) -> BTreeMap<&'static str, usize> {
 }
 
 fn host() -> String {
-    let name = std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|name| name.trim().to_owned())
-        .unwrap_or_else(|_| "unknown".to_owned());
     let cpu = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
         .and_then(|info| {
@@ -308,7 +308,7 @@ fn host() -> String {
         })
         .unwrap_or_else(|| "unknown".to_owned());
     let cpus = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
-    format!("{name}; {cpu}; {cpus} CPUs")
+    format!("{cpu}; {cpus} CPUs")
 }
 
 /// The probability of exactly `k` successes in `n` trials of success probability `p`, from the log
@@ -539,8 +539,7 @@ fn question_set(out: &mut String) -> bool {
 
 /// Writes one session's section and returns its unclassified loss count.
 fn session_section(out: &mut String, session: &Session) -> usize {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let store = ReplayStore::open(dir.path());
+    let store = ReplayStore::temporary();
     let _ = writeln!(out, "## {}", session.closure);
     let outcome = replay(
         &store,
@@ -553,12 +552,14 @@ fn session_section(out: &mut String, session: &Session) -> usize {
     let _ = writeln!(
         out,
         "- all units: expected {}, admitted {}, unclassified_loss {}; oracle disagreements: \
-         phantom {}, revision_mismatch {}, duplicate {}",
+         phantom {}, revision_mismatch {}, byte_mismatch {}, outcome_mismatch {}, duplicate {}",
         all.expected,
         all.admitted,
         all.unclassified.len(),
         all.phantom.len(),
         all.revision_mismatch.len(),
+        all.byte_mismatch.len(),
+        all.outcome_mismatch.len(),
         all.duplicate.len(),
     );
     for wanted in ["text", "tool"] {
@@ -680,8 +681,7 @@ fn main() -> ExitCode {
     );
     for run in 1..=runs {
         for session in &sessions {
-            let dir = tempfile::tempdir().expect("temp dir");
-            let store = ReplayStore::open(dir.path());
+            let store = ReplayStore::temporary();
             let outcome = replay(
                 &store,
                 &identity(session),
@@ -703,5 +703,30 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::{CANARY, host, text_cells};
+
+    #[test]
+    fn the_canary_cell_counts_the_full_canary_only() {
+        let canary = |text: &str| {
+            let mut cells = BTreeMap::new();
+            text_cells(text, &mut cells);
+            cells.get("canary").copied().unwrap_or(0)
+        };
+        assert_eq!(canary("token sk-ant-api03-other"), 0);
+        assert_eq!(canary(&format!("token {CANARY}\n")), 1);
+    }
+
+    #[test]
+    fn the_host_line_omits_the_hostname() {
+        let name = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+        let name = name.trim();
+        assert!(name.is_empty() || !host().contains(name), "{}", host());
     }
 }

@@ -15,6 +15,7 @@ use crate::campaign::{
     Ceilings, DisabledReason, Envelope, EnvelopeExceeded, ProfileError, RunProfile, SampleError,
     SampleLedger, SkipReason, Terminal, TerminalRates, UnsupportedReason,
 };
+use crate::ceiling::{CeilingDeclaration, CeilingError};
 use crate::census::{EvaluatedSurface, Reachability};
 use crate::claim::{AnchorSet, ClaimDerivation, WorldProvenance};
 use crate::governance::HistoryPolicy;
@@ -30,7 +31,7 @@ use crate::statistics::{
     arm_miss_asymmetry, balanced_mean_cluster, deflate, lopsided_mean_cluster,
 };
 
-pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v1";
+pub const SUITE_B_REPORT_SCHEMA: &str = "eval-suite-b-report/v2";
 
 /// The query route and the packer carry the label `ChainStage::REACHABILITY`
 /// gives them: no production caller.
@@ -60,7 +61,7 @@ impl CampaignGates {
     /// and every gate would pass with nothing behind it.
     pub fn of(
         samples: &SampleLedger,
-        ceilings: &Ceilings,
+        rate_ceilings: &Ceilings,
         family: &AnalysisFamily,
         arm_rates: &BTreeMap<String, ArmRates>,
     ) -> Result<Self, ReportError> {
@@ -90,11 +91,14 @@ impl CampaignGates {
             .map_err(ReportError::Statistics)?
             .miss_asymmetry_bound;
         Ok(Self {
-            indeterminate: gate(share(indeterminate, attempted)?, ceilings.indeterminate),
-            censoring: gate(share(censored, attempted)?, ceilings.censoring),
+            indeterminate: gate(
+                share(indeterminate, attempted)?,
+                rate_ceilings.indeterminate,
+            ),
+            censoring: gate(share(censored, attempted)?, rate_ceilings.censoring),
             redaction_refusals: gate(
                 share(refused, samples.samples.len())?,
-                ceilings.redaction_refusals,
+                rate_ceilings.redaction_refusals,
             ),
             arm_miss_asymmetry: gate(
                 arm_miss_asymmetry(arm_rates).map_err(ReportError::Statistics)?,
@@ -194,6 +198,10 @@ pub struct SuiteBReport {
     pub arm_rates: BTreeMap<String, ArmRates>,
     pub injection: Vec<InjectionScore>,
     pub envelope: Envelope,
+    /// Oracle ceilings declared on the run, each a diagnostic that travels
+    /// with its full declaration. `derive_claim_class`, the paired
+    /// marginals, the per-arm rates, and the run gates read none of them.
+    pub ceilings: Vec<CeilingDeclaration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +298,14 @@ pub enum ReportError {
     },
     /// The parsed value drops a field the input carried.
     Lossy,
+    /// The ceiling at `index` fails `CeilingDeclaration::validate`.
+    Ceiling {
+        index: usize,
+        error: CeilingError,
+    },
+    /// A declaration equal in all four fields to an earlier one; the same
+    /// task pair pinned at another revision is a separate declaration.
+    RepeatedCeiling(CeilingDeclaration),
     Profile(ProfileError),
     Samples(SampleError),
     Statistics(StatisticsError),
@@ -327,6 +343,18 @@ impl SuiteBReport {
         // The retained arm rates parse whatever the outcome; a suppression
         // that never reads them still publishes them.
         arm_miss_asymmetry(&self.arm_rates).map_err(ReportError::Statistics)?;
+        Ok(())
+    }
+
+    fn check_ceilings(&self) -> Result<(), ReportError> {
+        for (index, ceiling) in self.ceilings.iter().enumerate() {
+            ceiling
+                .validate()
+                .map_err(|error| ReportError::Ceiling { index, error })?;
+            if self.ceilings[..index].contains(ceiling) {
+                return Err(ReportError::RepeatedCeiling(ceiling.clone()));
+            }
+        }
         Ok(())
     }
 
@@ -928,8 +956,9 @@ impl SuiteBReport {
         }
         self.check_interval(&gated.analysis)?;
         self.check_pairs_backed(&gated.analysis)?;
-        let ceilings = self.profile.ceilings().map_err(ReportError::Profile)?;
-        let gates = CampaignGates::of(&self.samples, &ceilings, &self.family, &self.arm_rates)?;
+        let rate_ceilings = self.profile.ceilings().map_err(ReportError::Profile)?;
+        let gates =
+            CampaignGates::of(&self.samples, &rate_ceilings, &self.family, &self.arm_rates)?;
         if gates != gated.gates {
             return Err(ReportError::GatesNotDerived);
         }
@@ -957,6 +986,7 @@ impl SuiteBReport {
         let value = serde_json::to_value(self).map_err(|e| ReportError::Shape(e.to_string()))?;
         canonical_json_encode(&value).map_err(ReportError::NotCanonical)?;
         self.check_identity()?;
+        self.check_ceilings()?;
         self.check_claims()?;
         self.check_accounting()
     }

@@ -112,16 +112,22 @@ fn a_replacement_ref_leaves_the_recorded_root() {
     assert_eq!(derived(dir.path()), RepositoryIdentity::Git(recorded));
 }
 
-/// A `.git` entry that discovery cannot open is an unreadable repository, retried on the next
-/// pass, never a project without one.
 #[test]
 fn an_unopenable_git_entry_fails_the_derivation() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(".git"), "not a gitdir link").unwrap();
-    assert_eq!(
-        derive(dir.path(), &budget(), MAX_ROOT_WALK_COMMITS),
-        Err(DerivationFailure::Unreadable)
-    );
+    let alone = tempfile::tempdir().unwrap();
+    let enclosing = tempfile::tempdir().unwrap();
+    repository(enclosing.path(), 2);
+    let nested = enclosing.path().join("checkout");
+    std::fs::create_dir_all(&nested).unwrap();
+    for root in [alone.path(), &nested] {
+        std::fs::write(root.join(".git"), "not a gitdir link").unwrap();
+        assert_eq!(
+            derive(root, &budget(), MAX_ROOT_WALK_COMMITS),
+            Err(DerivationFailure::Unreadable),
+            "{}",
+            root.display()
+        );
+    }
 }
 
 /// Discovery searches upward, as the plugin's resolver does, so a project bound below the
@@ -212,4 +218,27 @@ fn the_derived_value_fits_the_unchanged_identity_encoding() {
         "f".repeat(64)
     )));
     assert_eq!(RepositoryIdentity::Fallback.value("project"), "project");
+}
+
+/// The plugin's resolver recognizes a repository by a `.git` entry in the directory or an ancestor,
+/// so a bare repository takes its directory fallback there; the daemon falls back the same way,
+/// whether the bare repository is the root or an ancestor of it.
+#[test]
+fn a_bare_repository_falls_back_as_the_plugin_does() {
+    let source = tempfile::tempdir().unwrap();
+    repository(source.path(), 2);
+    let bare = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", source.path().display());
+    git(bare.path(), &["clone", "-q", "--bare", &url, "repo.git"]).unwrap();
+    let bare = bare.path().join("repo.git");
+    let nested = bare.join("docs");
+    std::fs::create_dir_all(&nested).unwrap();
+    for dir in [&bare, &nested] {
+        assert_eq!(
+            derived(dir),
+            RepositoryIdentity::Fallback,
+            "{}",
+            dir.display()
+        );
+    }
 }
