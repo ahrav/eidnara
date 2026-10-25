@@ -253,7 +253,22 @@ fn assert_anchor_rows_well_formed(root: &std::path::Path) {
         .unwrap();
     for id in ids {
         let row = stored_row(&connection, &id).unwrap();
-        validate_anchor_row(&row).expect("every stored anchor row passes the engine's checks");
+        let condition =
+            validate_anchor_row(&row).expect("every stored anchor row passes the engine's checks");
+        if let AnchorCondition::Git(git) = condition {
+            let (anchored, captures) = match &git {
+                GitCondition::ReachableFrom { oid, captures } => (vec![oid], captures),
+                GitCondition::ReachableBetween {
+                    start_oid,
+                    end_oid,
+                    captures,
+                } => (vec![start_oid, end_oid], captures),
+            };
+            assert!(
+                captures.keys().all(|commit| anchored.contains(&commit)),
+                "anchor {id} stores a capture of a commit it does not name"
+            );
+        }
         let orphaned: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM anchors a
