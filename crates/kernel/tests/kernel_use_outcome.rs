@@ -572,6 +572,19 @@ fn an_expiry_backlog_drains_one_page_per_call() {
         i64::try_from(MAX_EXPIRED_USE_OUTCOMES_PER_CALL).unwrap() - 1,
         "the oldest deadlines retire first"
     );
+    assert_eq!(
+        count(
+            root.path(),
+            &format!(
+                "SELECT COUNT(*) FROM operation_receipts r
+                 JOIN use_outcomes u ON u.invalidated_commit_seq=r.commit_seq
+                   AND r.operation_key='{now}:' || u.use_outcome_id
+                 WHERE r.producer='eidnara-kernel/use-outcome-expiry'"
+            )
+        ),
+        i64::try_from(MAX_EXPIRED_USE_OUTCOMES_PER_CALL).unwrap(),
+        "one page commit records one receipt per retired record"
+    );
     assert_eq!(store.expire_use_outcomes(now).unwrap().retired, 6);
     assert_eq!(
         store.expire_use_outcomes(now).unwrap(),

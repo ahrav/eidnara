@@ -22,6 +22,7 @@ pub const MAX_EXPIRED_USE_OUTCOMES_PER_CALL: usize = 64;
 
 const SERVED_SET_DOMAIN: &[u8] = b"eidnara-served-set-v1\n";
 const USE_OUTCOME_ID_DOMAIN: &[u8] = b"eidnara-use-outcome-v1\n";
+const PAGE_KEY_DOMAIN: &[u8] = b"eidnara-use-outcome-expiry-page-v1\n";
 /// The reserved producer suffix of expiry commits, also their actor.
 const EXPIRY_PRODUCER: &str = "use-outcome-expiry";
 const EXPIRY_CAUSE: &str = "use outcome retention expired";
@@ -291,7 +292,8 @@ impl Envelope<'_> {
 }
 
 fn serve_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<UseOutcomeServe> {
-    let role: String = row.get("session_role")?;
+    let role_index = row.as_ref().column_index("session_role")?;
+    let role: String = row.get(role_index)?;
     Ok(UseOutcomeServe {
         use_outcome_id: row.get("use_outcome_id")?,
         project_digest: row.get("project_digest")?,
@@ -302,7 +304,7 @@ fn serve_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<UseOutcomeServe> {
         served_commit_seq: row.get("served_commit_seq")?,
         session_role: SessionRole::from_stored(&role).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                row.as_ref().column_index("session_role").unwrap_or(0),
+                role_index,
                 rusqlite::types::Type::Text,
                 "unknown session role".into(),
             )
@@ -330,7 +332,7 @@ fn decision_object_ids(tx: &Transaction<'_>, id: &str) -> Result<Vec<String>, Ke
 }
 
 impl KernelStore {
-    /// Every serving record of one session, retired or not, oldest first, each with its decision ids; `None` when the session has no record. A record with no decision rows is a serve of an empty composition.
+    /// Every serving record of one session, retired or not, oldest first, each with its decision ids; `None` when the session has no record. A record with no decision rows is a serve of an empty composition. The read issues one decision-row query per record, so its cost follows the distinct compositions the session was served within the retention window.
     ///
     /// # Errors
     ///
@@ -385,7 +387,7 @@ impl KernelStore {
         Ok(sessions)
     }
 
-    /// Retires serving records whose `retain_until` is before `now` and that no committed admission row with a live subject cites: at most [`MAX_EXPIRED_USE_OUTCOMES_PER_CALL`] per call, oldest deadline first, in one commit. Each record is rechecked under the writer and gets its own reserved receipt keyed by `now` and its id, so a citation committed after selection keeps it and a record another sweep retired since selection is skipped. The commit's own receipt is keyed by `now` and a digest of the page's ids, so only a repeat of the same page at this cutoff replays, and it reports nothing; a page that retires nothing commits nothing.
+    /// Retires serving records whose `retain_until` is before `now` and that no committed admission row with a live subject cites: at most [`MAX_EXPIRED_USE_OUTCOMES_PER_CALL`] per call, oldest deadline first, in one commit. Each record is rechecked under the writer and gets its own reserved receipt keyed by `now` and its id, so a citation committed after selection keeps it and a record another sweep retired since selection is skipped. The commit's own receipt is keyed by `now` and a digest of the page's ids, so only a repeat of the same page at this cutoff replays; a replay retires nothing and reports the cited rows its scan read. A page that retires nothing commits nothing.
     ///
     /// # Errors
     ///
@@ -399,7 +401,7 @@ impl KernelStore {
         now: i64,
         after_selection: impl FnOnce(),
     ) -> Result<UseOutcomeExpiry, KernelError> {
-        let (page, mut sweep) = {
+        let (page, sweep) = {
             let reader = self.lock_reader()?;
             expired_page(&reader, now)?
         };
@@ -408,6 +410,7 @@ impl KernelStore {
             return Ok(sweep);
         }
         let mut tally = UseOutcomeExpiry::default();
+        let mut empty_page = false;
         let mut writer = self.lock_writer()?;
         let outcome = commit_with_writer(
             &mut writer,
@@ -418,7 +421,8 @@ impl KernelStore {
                     tally.count(retire_due_use_outcome(envelope, now, id)?);
                 }
                 // A page that retires nothing rolls back, so it leaves no receipt a later call at this cutoff would replay.
-                if tally.retired == 0 {
+                empty_page = tally.retired == 0;
+                if empty_page {
                     return Err(KernelError::NotFound);
                 }
                 Ok(tally.retired.to_string())
@@ -426,24 +430,19 @@ impl KernelStore {
             || Ok(()),
         );
         match outcome {
-            Ok(receipt) if receipt.replayed => Ok(UseOutcomeExpiry::default()),
-            Ok(_) => {
-                sweep.retired += tally.retired;
-                sweep.cited += tally.cited;
-                Ok(sweep)
-            }
-            Err(KernelError::NotFound) if tally.retired == 0 => {
-                sweep.cited += tally.cited;
-                Ok(sweep)
-            }
+            // Another sweep committed this exact page at this cutoff, so this call's commit did not run.
+            Ok(receipt) if receipt.replayed => Ok(sweep),
+            Ok(_) => Ok(sweep.merged(tally)),
+            Err(_) if empty_page => Ok(sweep.merged(tally)),
             Err(error) => Err(error),
         }
     }
 }
 
-/// The page commit's key: a digest over the page's ids in order, so only a repeat of this exact page at this cutoff replays its receipt.
+/// The page commit's key: a domain-separated digest over the page's ids in order, so only a repeat of this exact page at this cutoff replays its receipt.
 fn page_key(page: &[String]) -> String {
     let mut hash = Sha256::new();
+    hash.update(PAGE_KEY_DOMAIN);
     for id in page {
         length_prefixed(&mut hash, id);
     }
@@ -459,6 +458,13 @@ enum Recheck {
 }
 
 impl UseOutcomeExpiry {
+    fn merged(self, other: Self) -> Self {
+        Self {
+            retired: self.retired + other.retired,
+            cited: self.cited + other.cited,
+        }
+    }
+
     fn count(&mut self, recheck: Recheck) {
         match recheck {
             Recheck::Retired => self.retired += 1,
@@ -539,8 +545,8 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        EXPIRED_SQL, SERVED_SESSIONS_SQL, SessionRole, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry,
-        UseOutcomeSpec,
+        EXPIRED_SQL, SERVED_SESSIONS_SQL, SERVED_SET_SQL, SessionRole, USE_OUTCOME_RETENTION_MS,
+        UseOutcomeExpiry, UseOutcomeSpec,
     };
     use crate::{CommitIntent, DomainSpec, KernelStore, Sensitivity, served_set_digest};
 
@@ -556,8 +562,11 @@ mod tests {
         }
     }
 
-    /// A store holding one expired serve of the domain object `decision`, and that serve's id.
-    fn store_with_expired_serve(root: &std::path::Path) -> (KernelStore, String) {
+    /// A store holding one expired serve of the domain object `decision` per session in `sessions`, and their ids in order.
+    fn store_with_expired_serves(
+        root: &std::path::Path,
+        sessions: &[&str],
+    ) -> (KernelStore, Vec<String>) {
         let store = KernelStore::open(root).unwrap();
         store
             .commit(intent("domain"), |envelope| {
@@ -573,29 +582,62 @@ mod tests {
                 Ok(String::new())
             })
             .unwrap();
-        let id = std::cell::RefCell::new(String::new());
-        store
-            .commit(intent("serve"), |envelope| {
-                *id.borrow_mut() = envelope.insert_use_outcome(UseOutcomeSpec {
-                    project_digest: "a".repeat(64),
-                    harness: "opencode".to_string(),
-                    session_id: "session".to_string(),
-                    served_set_digest: served_set_digest(["decision"]),
-                    composition_revision: 1,
-                    served_commit_seq: 1,
-                    session_role: SessionRole::Subagent,
-                    recorded_at: 0,
-                    decision_object_ids: vec!["decision".to_string()],
-                })?;
-                Ok(String::new())
+        let ids = sessions
+            .iter()
+            .map(|session| {
+                let id = std::cell::RefCell::new(String::new());
+                store
+                    .commit(intent(session), |envelope| {
+                        *id.borrow_mut() = envelope.insert_use_outcome(UseOutcomeSpec {
+                            project_digest: "a".repeat(64),
+                            harness: "opencode".to_string(),
+                            session_id: (*session).to_string(),
+                            served_set_digest: served_set_digest(["decision"]),
+                            composition_revision: 1,
+                            served_commit_seq: 1,
+                            session_role: SessionRole::Subagent,
+                            recorded_at: 0,
+                            decision_object_ids: vec!["decision".to_string()],
+                        })?;
+                        Ok(String::new())
+                    })
+                    .unwrap();
+                id.into_inner()
             })
-            .unwrap();
-        (store, id.into_inner())
+            .collect();
+        (store, ids)
     }
 
-    fn retired(store: &KernelStore) -> bool {
+    fn cite(root: &std::path::Path, report: &str, use_outcome_id: &str) {
+        Connection::open(root.join("kernel.sqlite"))
+            .unwrap()
+            .execute(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,
+                     source_revision,source_class,taint_class,event_kind,maturity,
+                     effective_maturity,disposition,visibility,outcome,sensitivity_class,
+                     policy_revision,reason,commit_seq,decided_at,use_outcome_id
+                 ) VALUES (?1,'decision','fixture','decision',1,'explicit_user',
+                           'user_explicit','contradict','candidate','candidate',
+                           'contradicted','automatic','admit','normal',1,'fixture',2,1,?2)",
+                params![report, use_outcome_id],
+            )
+            .unwrap();
+    }
+
+    fn retire_the_cited_subject(root: &std::path::Path) {
+        Connection::open(root.join("kernel.sqlite"))
+            .unwrap()
+            .execute(
+                "UPDATE object_registry SET invalidated_commit_seq=2 WHERE object_id='decision'",
+                [],
+            )
+            .unwrap();
+    }
+
+    fn retired(store: &KernelStore, session: &str) -> bool {
         store
-            .served_set(&"a".repeat(64), "opencode", "session")
+            .served_set(&"a".repeat(64), "opencode", session)
             .unwrap()
             .unwrap()[0]
             .serve
@@ -603,42 +645,26 @@ mod tests {
             .is_some()
     }
 
-    /// A citation committed after the sweep chose its page and before the retiring commit is seen by the recheck under the writer: the record stays unretired and is counted cited.
+    /// A citation committed after the sweep chose its page and before the retiring commit is seen by the recheck under the writer: that record stays unretired and is counted cited, and the rest of the page retires in the same commit.
     #[test]
     fn a_record_cited_after_selection_is_kept() {
         let root = tempfile::tempdir().unwrap();
-        let (store, id) = store_with_expired_serve(root.path());
-        let cite = || {
-            let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
-            connection
-                .execute(
-                    "INSERT INTO admission_decisions(
-                         admission_decision_id,subject_object_id,source_kind,source_id,
-                         source_revision,source_class,taint_class,event_kind,maturity,
-                         effective_maturity,disposition,visibility,outcome,sensitivity_class,
-                         policy_revision,reason,commit_seq,decided_at,use_outcome_id
-                     ) VALUES ('report','decision','fixture','decision',1,'explicit_user',
-                               'user_explicit','contradict','candidate','candidate',
-                               'contradicted','automatic','admit','normal',1,'fixture',2,1,?1)",
-                    params![id],
-                )
-                .unwrap();
-        };
-
+        let (store, ids) = store_with_expired_serves(root.path(), &["kept", "due"]);
         let sweep = store
-            .expire_use_outcomes_after_selection(NOW, cite)
+            .expire_use_outcomes_after_selection(NOW, || cite(root.path(), "report", &ids[0]))
             .unwrap();
         assert_eq!(
             sweep,
             UseOutcomeExpiry {
-                retired: 0,
+                retired: 1,
                 cited: 1
             }
         );
-        assert!(!retired(&store));
+        assert!(!retired(&store, "kept"));
+        assert!(retired(&store, "due"));
         assert_eq!(
             store
-                .served_set(&"a".repeat(64), "opencode", "session")
+                .served_set(&"a".repeat(64), "opencode", "kept")
                 .unwrap()
                 .unwrap()[0]
                 .serve
@@ -647,15 +673,27 @@ mod tests {
         );
     }
 
-    /// A sweep racing another at the same cutoff finds the other's page receipt and replays it: it reports nothing and commits nothing.
+    /// A sweep racing another over the same page at the same cutoff replays the other's page receipt: its commit does not run, so a record the other sweep kept stays unretired even after its citation lapses, and a later call at the cutoff, whose page differs, retires it.
     #[test]
     fn a_page_another_sweep_committed_at_the_same_cutoff_replays() {
         let root = tempfile::tempdir().unwrap();
-        let (store, _) = store_with_expired_serve(root.path());
+        let (store, ids) = store_with_expired_serves(root.path(), &["first", "second"]);
         let tip = std::cell::Cell::new(0);
         let sweep = store
             .expire_use_outcomes_after_selection(NOW, || {
-                assert_eq!(store.expire_use_outcomes(NOW).unwrap().retired, 1);
+                let other = store
+                    .expire_use_outcomes_after_selection(NOW, || {
+                        cite(root.path(), "report", &ids[1]);
+                    })
+                    .unwrap();
+                assert_eq!(
+                    other,
+                    UseOutcomeExpiry {
+                        retired: 1,
+                        cited: 1
+                    }
+                );
+                retire_the_cited_subject(root.path());
                 tip.set(store.tip().unwrap());
             })
             .unwrap();
@@ -665,14 +703,16 @@ mod tests {
             tip.get(),
             "the replayed page commits nothing"
         );
-        assert!(retired(&store));
+        assert!(!retired(&store, "second"), "the replay ran no recheck");
+        assert_eq!(store.expire_use_outcomes(NOW).unwrap().retired, 1);
+        assert!(retired(&store, "second"));
     }
 
     /// A record another sweep retired at a different cutoff after this sweep selected it is skipped, and a page that retires nothing commits nothing.
     #[test]
     fn a_record_retired_after_selection_at_another_cutoff_is_skipped() {
         let root = tempfile::tempdir().unwrap();
-        let (store, _) = store_with_expired_serve(root.path());
+        let (store, _) = store_with_expired_serves(root.path(), &["session"]);
         let tip = std::cell::Cell::new(0);
         let sweep = store
             .expire_use_outcomes_after_selection(NOW, || {
@@ -686,65 +726,44 @@ mod tests {
             tip.get(),
             "an empty page commits nothing"
         );
-        assert!(retired(&store));
+        assert!(retired(&store, "session"));
     }
 
     /// A record kept by a citation committed after selection retires at the same cutoff once the citation's subject is retired: the kept page left no receipt to replay.
     #[test]
     fn a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited() {
         let root = tempfile::tempdir().unwrap();
-        let (store, id) = store_with_expired_serve(root.path());
-        let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
-        let cite = || {
-            connection
-                .execute(
-                    "INSERT INTO admission_decisions(
-                         admission_decision_id,subject_object_id,source_kind,source_id,
-                         source_revision,source_class,taint_class,event_kind,maturity,
-                         effective_maturity,disposition,visibility,outcome,sensitivity_class,
-                         policy_revision,reason,commit_seq,decided_at,use_outcome_id
-                     ) VALUES ('report','decision','fixture','decision',1,'explicit_user',
-                               'user_explicit','contradict','candidate','candidate',
-                               'contradicted','automatic','admit','normal',1,'fixture',2,1,?1)",
-                    params![id],
-                )
-                .unwrap();
-        };
+        let (store, ids) = store_with_expired_serves(root.path(), &["session"]);
         assert_eq!(
             store
-                .expire_use_outcomes_after_selection(NOW, cite)
+                .expire_use_outcomes_after_selection(NOW, || cite(root.path(), "report", &ids[0]))
                 .unwrap()
                 .cited,
             1
         );
-        connection
-            .execute(
-                "UPDATE object_registry SET invalidated_commit_seq=2 WHERE object_id='decision'",
-                [],
-            )
-            .unwrap();
+        retire_the_cited_subject(root.path());
         assert_eq!(store.expire_use_outcomes(NOW).unwrap().retired, 1);
-        assert!(retired(&store));
+        assert!(retired(&store, "session"));
     }
 
-    /// The sweep scan reads the live-retention index and the citation probe the citing index; the by-decision read starts from the decision-row index.
+    /// The sweep scan reads the live-retention index in its order with no temporary sort and probes citations through the citing index; the by-session read seeks the identity index; the by-decision read starts from the decision-row index and probes disputes through the subject index.
     #[test]
-    fn the_sweep_and_the_by_decision_read_use_their_indexes() {
+    fn the_sweep_and_the_reads_use_their_indexes() {
         let root = tempfile::tempdir().unwrap();
-        let _ = store_with_expired_serve(root.path());
+        let _ = store_with_expired_serves(root.path(), &["session"]);
         let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
-        let plan = |sql: &str| -> String {
+        let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> String {
             let mut statement = connection
                 .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
                 .unwrap();
             statement
-                .query_map([NOW.to_string()], |row| row.get::<_, String>(3))
+                .query_map(params, |row| row.get::<_, String>(3))
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap()
                 .join("\n")
         };
-        let expired = plan(&EXPIRED_SQL);
+        let expired = plan(&EXPIRED_SQL, &[&NOW]);
         assert!(
             expired.contains("idx_use_outcomes_live_retention"),
             "{expired}"
@@ -753,10 +772,21 @@ mod tests {
             expired.contains("idx_admission_use_outcome_fk"),
             "{expired}"
         );
-        let served = plan(&SERVED_SESSIONS_SQL);
+        assert!(!expired.contains("TEMP B-TREE"), "{expired}");
+        let digest = "a".repeat(64);
+        let by_session = plan(&SERVED_SET_SQL, &[&digest, &"opencode", &"session"]);
         assert!(
-            served.contains("idx_use_outcome_decisions_object_fk"),
-            "{served}"
+            by_session.contains("sqlite_autoindex_use_outcomes"),
+            "{by_session}"
+        );
+        let by_decision = plan(&SERVED_SESSIONS_SQL, &[&"decision"]);
+        assert!(
+            by_decision.contains("idx_use_outcome_decisions_object_fk"),
+            "{by_decision}"
+        );
+        assert!(
+            by_decision.contains("idx_admission_subject_latest"),
+            "{by_decision}"
         );
     }
 }
