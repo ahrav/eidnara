@@ -84,8 +84,8 @@ or whose check U4 deleted says so.
 
 | Check | Covers | Status |
 | --- | --- | --- |
-| `pd.rs:379`, `:405`, `:445`, `:459` | final-component symlink, growth under the read, `Missing` versus `Unreadable`, oversize | unaudited |
-| `pd.rs:531`, `:542` (proptests), `pd.rs:576` golden | canonical form, escape, rendered block, and hash | unaudited |
+| `pd.rs:397`, `:423`, `:463`, `:477` | final-component symlink, growth under the read, `Missing` versus `Unreadable`, oversize | unaudited |
+| `pd.rs:549`, `:560` (proptests), `pd.rs:594` golden | canonical form, escape, rendered block, and hash | unaudited |
 | `sc-tests:1964`, `:2144`, `:2209`, `:2283`, `:2322` | document lineage, retirement, renames, project isolation, unreadable reads | unaudited |
 | `sc-tests:2743`, `:2784`, `:2818`, `:2867`, `:2942` | U7: the derived identity, stale-row retirement before publication, worktrees, a failed derivation, a shallow checkout | unaudited |
 | `crates/daemon/src/repository_identity_tests.rs` | U7: the derivation against the plugin's rendering, two roots, a subdirectory, the fallbacks, the failures, the unchanged encoding | unaudited |

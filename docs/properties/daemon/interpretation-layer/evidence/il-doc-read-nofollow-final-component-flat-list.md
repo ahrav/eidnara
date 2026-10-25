@@ -18,8 +18,8 @@ name sits directly under the project root.
   `std::fs::metadata(parent)` was a directory; `metadata` follows symlinks.
 - `plan_document` retires the live row on `Missing`
   (`crates/daemon/src/source_capture.rs:1067-1073`).
-- The hash covers `file:{name}\n{canonical}` (`project_docs.rs:338-341`).
-- Tests: `project_docs.rs:379`, `:405`, `:445`, `:459`, `:531`, `:542`, `:576`;
+- The hash covers `file:{name}\n{canonical}` (`project_docs.rs:356-359`).
+- Tests: `project_docs.rs:397`, `:423`, `:463`, `:477`, `:549`, `:560`, `:594`;
   `crates/daemon/src/source_capture_tests.rs:2322`.
 
 ## Failure scenario
@@ -57,7 +57,7 @@ kernel without `openat2`.
 
 ### Q: What does U8 change?
 
-- Sources examined: `crates/daemon/src/project_docs.rs:64`, `:196-262`;
+- Sources examined: `crates/daemon/src/project_docs.rs:65`, `:193-275`;
   `crates/daemon/src/config.rs:1300`; the U8 tests.
 - Findings: the document list is the user-tier `project_docs.files` key,
   admitted entry by entry with the default kept on any refusal. Each read opens
