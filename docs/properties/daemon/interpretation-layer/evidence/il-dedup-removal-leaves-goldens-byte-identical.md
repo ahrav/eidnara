@@ -18,6 +18,11 @@ defect.
   (`selection_differential.rs:1389-1415`), including `mcp_read` and `mcp_grep`.
 - `crates/daemon/src/selection.rs:2828` asserts no decision for identical
   calls.
+- CI repeats no base comparison. Its test step
+  (`.github/workflows/ci.yml:690-694`) runs `selection.rs:1461`, which
+  compares current output with the current `selection-golden.json`
+  (`selection.rs:1462-1568`), and the differential, which compares two
+  current implementations (`crates/daemon/tests/selection_differential.rs:2252-2253`).
 
 ## Failure scenario
 
@@ -30,7 +35,9 @@ None.
 
 ## What a test must construct
 
-Covered.
+Covered for U4 by the one-time testdata diff. A recurring guarantee for later
+move-only changes needs a check that diffs `crates/daemon/testdata` against
+the PR base; none exists.
 
 ## Investigation log
 
@@ -42,6 +49,15 @@ Covered.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
+### Q: Does CI re-check the goldens against the PR base?
+- Sources examined: `.github/workflows/ci.yml:690-694`;
+  `selection.rs:1461-1568`; `selection_differential.rs:2248-2253`.
+- Findings: no. The tests compare against the checkout's own fixtures, so a
+  change that edits code and goldens together passes.
+- Missing evidence: an owner decision on a recurring base diff.
+- Conclusion: needs human input; the record states the U4 diff as a one-time
+  observation.
+
 ### Q: Why does confidence move from the source's `medium` to `high`?
 
 - Sources examined: the source record in #1105; the code and tests cited above.
@@ -49,3 +65,16 @@ Covered.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where
   the record names one, stays open.
 - Conclusion: resolved with answer.
+
+### Q: Does the record run under `DaemonConfig::default()`, as the source's label says?
+- Sources examined: `crates/daemon/src/config.rs:149`, `:190-194`;
+  `crates/daemon/src/transform.rs:3352-3353`, `:3366-3372`, `:4135`.
+- Findings: no. The default `model_chain` is empty, so `eidnara_folds()` is
+  false and `apply_once` hands the request to `apply_additive_only`, which
+  projects the window (`transform.rs:2854`) and composes m0
+  (`transform.rs:3063`) without selecting, injecting, or rendering a
+  reduced call. A switched-lineage subagent request passes the gate and
+  returns a passthrough. The removed selector ran inside selection, which runs from
+  `transform.rs:4135` inside `apply_once`.
+- Missing evidence: none.
+- Conclusion: resolved with answer: `explicit-config-only`.

@@ -17,8 +17,9 @@ name sits directly under the project root.
 - At `41d889ea4`, the `NotFound` arm classified `Missing` when
   `std::fs::metadata(parent)` was a directory; `metadata` follows symlinks.
 - `plan_document` retires the live row on `Missing`
-  (`crates/daemon/src/source_capture.rs:1067-1073`).
-- The hash covers `file:{name}\n{canonical}` (`project_docs.rs:350-353`).
+  (`crates/daemon/src/source_capture.rs:1108-1114`).
+- The hash covers `file:{name}
+{canonical}` (`project_docs.rs:350-353`).
 - Tests: `project_docs.rs:391`, `:417`, `:457`, `:471`, `:543`, `:554`, `:588`;
   `crates/daemon/src/source_capture_tests.rs:2322`.
 

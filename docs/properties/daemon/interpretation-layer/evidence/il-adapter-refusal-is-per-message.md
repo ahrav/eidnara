@@ -19,12 +19,23 @@ every sibling unit of its message.
 - Budget stop: `Kept::keep` (`harness_sources.rs:463-482`) returns `false`
   when the copy budget refuses; the adapter returns `Ok(None)` at `:321`,
   `:354`, `:435`, `:443`, or `:454`.
-- Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1125-1155`)
-  counts each `Err` once (`:1147`) and adds the count to `adapter_refused`
-  (`:1150-1153`), also when a later record stops the pass (`:1143-1146`).
-- U3: `crates/daemon/tests/source_corpus_replay.rs:93` asserts that the frozen
-  Pi session's image-bearing tool result is among `refused_records` and that
-  the reader classifies it `non_text_item`.
+- Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1166-1196`)
+  counts each `Err` once (`:1188`) and adds the count to `adapter_refused`
+  (`:1191-1194`), also when a later record stops the pass (`:1184-1187`).
+- Pi shape: `crates/daemon/tests/harness_sources.rs:757-762` sets the second
+  content item of a `toolResult` whose first item is text (`TOOL_BYTES`,
+  `harness_sources.rs:433`) to an `image` item and asserts the whole record
+  refuses as `UnsupportedShape("tool result item")`.
+- OpenCode shape: `crates/daemon/tests/harness_sources.rs:681-686` sets
+  the settled tool part's `state.output` to an object in a record whose text
+  parts sit at `harness_sources.rs:388` and `:393`, and asserts the whole
+  record refuses as `UnsupportedShape("tool output")`.
+- U3: `crates/daemon/tests/source_corpus_replay.rs:139-141` asserts that the
+  frozen Pi session's image-bearing tool result (a text item then an `image`
+  item) is among `refused_records` and that the reader classifies it
+  `non_text_item`. The reader classifies the whole record as a non-unit
+  (`crates/daemon/src/source_corpus.rs:723-731`), so the pass expects no unit
+  from it and the refusal reconciles as no loss, not as `adapter_refused`.
 
 ## Failure scenario
 
@@ -38,9 +49,17 @@ Shape-driven, not time-driven. The same record refuses on every pass.
 
 ## What a test must construct
 
-An OpenCode assistant message with two text parts and a settled tool part whose
-`state.output` is a number; assert zero units, `adapter_refused == 1`, and the
-reader's expected units all reconciled as `adapter_refused`.
+The adapter half exists for both shapes: the Pi `toolResult` with a text item
+then an `image` item (`harness_sources.rs:757-762`) and the OpenCode record
+with text parts beside an object `state.output` (`harness_sources.rs:681-686`).
+What remains is a capture pass over each: assert the daemon counter
+`adapter_refused == 1` and zero units from the record. For the OpenCode
+record the reader's expected text units then reconcile as `adapter_refused`.
+For the Pi record the reader classifies the whole record as a `non_text_item`
+non-unit (`source_corpus.rs:720-729`), so no expected text unit exists to
+reconcile; the Pi pass shows the counter and the lost text only through the
+daemon counter and the adapter's zero units, and the Pi asymmetry below is the
+discovery trigger, so the Pi fixture stays in the pass.
 
 ## Investigation log
 
@@ -56,7 +75,9 @@ reader's expected units all reconciled as `adapter_refused`.
 
 ### Q: Do the line references of the source hold at HEAD?
 
-- Sources examined: `harness_sources.rs` at `41d889ea4`.
+- Sources examined: `harness_sources.rs` at `41d889ea4`; unchanged at
+  `aff5a00e6`, where `source_capture.rs` and the replay test moved and the
+  references above were re-checked.
 - Findings: the arms moved by at most one line; the budget-stop returns are at
   `:321`, `:354`, `:435`, `:443`, `:454`.
 - Missing evidence: none.

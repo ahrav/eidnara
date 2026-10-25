@@ -96,8 +96,10 @@ bun packages/e2e-tests/scripts/freeze-source-corpus.ts --from <store-dir>
 
 `--run` drives the scripted mixes (`packages/e2e-tests/src/corpus-sessions/`) against the mock
 provider and the direct-host fixture over a materialized `repos/ripgrep.json` checkout, keeps
-each harness's own store (`opencode.db`, the Pi session JSONL) in `<store-dir>`, freezes it,
-and rewrites both digest pins.
+each harness's own store (`opencode.db`, the Pi session JSONL) in `<store-dir>`, replacing the
+stores an earlier run kept there, freezes it, and rewrites both digest pins. It first requires
+`opencode --version` to report 1.18.22 and records that version in `<store-dir>/store.json`;
+`--from` refuses a store whose recorded version differs.
 
 ## Session fixtures
 
@@ -161,6 +163,9 @@ Reconciliation of the frozen run (live counters and descriptors, both scenarios 
 | Pi 0.80.2 | 38 | 36 | 1 | 1 | 0 |
 
 Expected units exclude each session's final assistant reply, which no capture pass offers.
+A tool unit matches a descriptor on its parent message (the OpenCode message holding the part,
+or the Pi entry's `parentId`), call id, and block, and each descriptor admits one unit; a
+second live revision of one result is phantom.
 The Pi image-bearing `toolResult` is `non_text_item` in the reader and `adapter_refused` in
 the counters.
 
@@ -178,9 +183,10 @@ it, and a fixture change fails both until both pins move in the same change.
 Every string in every fixture is redaction-negative under
 `context_core::redaction::detect_windowed_durable_text`, except inside an object carrying
 `"canary": true`. That object's unit content (its `text`, or an OpenCode tool part's
-`state.output` or `state.error`) must be positive. A string inside the object that contains
-that content or lies within it, such as OpenCode's `state.metadata.output` preview of the same
-output, is exempt; every other string inside it must still be negative. Canary units use the fake credential
+`state.output` or `state.error`) must be positive. A string inside the object that lies within
+that content, such as OpenCode's `state.metadata.output` preview of the same output, is exempt;
+every other string inside it must still be negative, including one that embeds the content
+beside other text. Canary units use the fake credential
 shape of `packages/e2e-tests/tests/cassette-replay.test.ts`, so they keep exercising the
 Kernel's exact-text refusal.
 

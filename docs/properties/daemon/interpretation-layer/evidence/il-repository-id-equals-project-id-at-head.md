@@ -7,26 +7,36 @@ project digest into both identity fields.
 
 ## Evidence trail
 
-- `crates/daemon/src/source_capture.rs:1037-1089` `plan_document`; the identity
-  vector at `:1057-1061` holds `("project_id", P)`, `("repository_id", P)`, and
-  `("relative_path", name)`.
-- `:1062` derives the lineage from that identity; `:1064-1066` reads the live row
+- `crates/daemon/src/source_capture.rs:1078-1130` `plan_document`; the identity
+  vector at `:1098-1102` held `("project_id", P)`, `("repository_id", P)`, and
+  `("relative_path", name)` at `41d889ea4`. At HEAD it holds
+  `("repository_id", R)`, with `R` the derived repository identity
+  (`crates/daemon/src/repository_identity.rs:62`, memoized per project at
+  `source_capture.rs:1056`) or `P` as its fallback.
+- `:1103` derives the lineage from that identity; `:1105-1107` reads the live row
   and keeps it only for `CAPTURE_DOMAIN_ID` (`source_capture.rs:53`).
-- A missing document retires the live row (`:1067-1073`) through
-  `retire_document` (`:1092-1114`), called from `capture_documents` at `:940`.
+- A missing document retires the live row (`:1108-1114`) through
+  `retire_document` (`:1133-1155`), called from `capture_documents` at `:961`.
 - `crates/kernel/tests/eval_identity.rs` pins the identity encoding, not the
   values.
+- The document tests (`crates/daemon/src/source_capture_tests.rs:1964`,
+  `:2137`, `:2202`, `:2276`) read rows through `live_document`, which selects
+  by `relative_path` alone (`source_capture_tests.rs:1903-1909`). The
+  `project_id` and `repository_id` values at `source_capture_tests.rs:2171-2174`
+  build another producer's fixture; no test asserts the values capture writes.
 
 ## Failure scenario
 
-Two worktrees of one repository bind two project digests. Each captures
-`ARCHITECTURE.md` under its own `(P, P, path)` lineage; the two lineages never
-correlate, so a reader cannot tell they describe one repository's file.
+Before U7: two worktrees of one repository bind two project digests. Each
+captures `ARCHITECTURE.md` under its own `(P, P, path)` lineage; the two
+lineages never correlate, so a reader cannot tell they describe one
+repository's file. U7 closes this scenario (`sc-tests:2818`).
 
 ## Timing windows and dependencies
 
-None at HEAD. After U7, the derived `repository_id` depends on repository
-history, and a pass must retire a live row whose `repository_id` differs.
+None at `41d889ea4`. At HEAD, the derived `repository_id` depends on repository
+history, and a pass retires a live row whose `repository_id` differs before it
+publishes (`source_capture.rs:1485`, retired at `:943`).
 
 ## What a test must construct
 
@@ -35,13 +45,23 @@ assertion over both lineages' identities; the U7 tests replace it.
 
 ## Investigation log
 
-### Q: Does any HEAD code derive `repository_id` from the repository?
+### Q: Does any code at `41d889ea4` derive `repository_id` from the repository?
 
 - Sources examined: `source_capture.rs`, `project_docs.rs`, the capture
-  configuration.
-- Findings: no; the value is the bound project digest.
+  configuration, at `41d889ea4`.
+- Findings: no; the value is the bound project digest. U7 adds the derivation
+  (the last question below).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
+
+### Q: Do the document tests assert the identity fields?
+- Sources examined: `source_capture_tests.rs:1903-1909`, `:1964`, `:2144`,
+  `:2164-2167`, `:2202`, `:2276`.
+- Findings: no. They assert revisions, retention, retirement, and counts;
+  the identity values they hold belong to a foreign fixture.
+- Missing evidence: none.
+- Conclusion: resolved with answer: corrected in the record's `Exercised`
+  line.
 
 ### Q: Can a cap on the history walk flip the derived identity?
 
@@ -54,7 +74,7 @@ assertion over both lineages' identities; the U7 tests replace it.
 ### Q: What does U7 change?
 
 - Sources examined: `crates/daemon/src/repository_identity.rs:62`;
-  `crates/daemon/src/source_capture.rs:1015`, `:1002`, `:1059`, `:1435`; the U7 tests.
+  `crates/daemon/src/source_capture.rs:1056`, `:1039`, `:1100`, `:1485`; the U7 tests.
 - Findings: the identity's `repository_id` is `git:` and the smallest root
   commit reachable from HEAD, or the project digest as a deterministic
   fallback, memoized per project for the incarnation. A pass retires every

@@ -15,38 +15,25 @@ mod source_corpus;
 #[path = "support/corpus_replay.rs"]
 mod corpus_replay;
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock};
 
 use daemon::harness_sources::{
     Harness, MAX_SOURCE_BATCH_UNITS, MAX_SOURCE_UNIT_BYTES, SessionIdentity,
 };
 use kernel::source_identity::OccurrenceClass;
 use proptest::prelude::*;
+use proptest::test_runner::TestRunner;
 use serde_json::{Value, json};
 
 use corpus_replay::{
-    PROJECT, ReplayRecord, ReplayStore, Settled, harness_adapter, opencode_records, pi_records,
-    reconcile, replay,
+    Adapter, PROJECT, ReplayRecord, ReplayStore, Settled, harness_adapter, opencode_records,
+    pi_records, reconcile, replay,
 };
 use source_corpus::{LossCondition, NonUnitReason, corpus_dir};
 
 /// Passes a frozen session replays at most; each corpus session settles in fewer.
 const SETTLING_PASSES: usize = 8;
-
-struct Shared {
-    store: ReplayStore,
-    _dir: tempfile::TempDir,
-}
-
-/// One kernel for the whole binary; each case publishes under its own session id.
-static STORE: LazyLock<Arc<Shared>> = LazyLock::new(|| {
-    let dir = tempfile::tempdir().unwrap();
-    Arc::new(Shared {
-        store: ReplayStore::open(dir.path()),
-        _dir: dir,
-    })
-});
 
 static SESSIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -85,12 +72,15 @@ fn assert_partitioned(records: &[ReplayRecord], outcome: &corpus_replay::Replay)
     assert_eq!(result.unclassified, Vec::<String>::new());
     assert_eq!(result.phantom, Vec::<String>::new());
     assert_eq!(result.revision_mismatch, Vec::<String>::new());
+    assert_eq!(result.byte_mismatch, Vec::<String>::new());
+    assert_eq!(result.outcome_mismatch, Vec::<String>::new());
     assert_eq!(result.duplicate, Vec::<String>::new());
     assert_eq!(result.admitted + result.lost(), result.expected);
 }
 
 #[test]
 fn every_frozen_session_reconciles_with_no_unclassified_loss() {
+    let store = ReplayStore::temporary();
     let sessions = frozen_sessions();
     assert_eq!(
         sessions
@@ -106,7 +96,7 @@ fn every_frozen_session_reconciles_with_no_unclassified_loss() {
             (Harness::Pi, pi_records(fixture))
         };
         let outcome = replay(
-            &STORE.store,
+            &store,
             &identity(harness, &session),
             &records,
             &harness_adapter,
@@ -115,16 +105,18 @@ fn every_frozen_session_reconciles_with_no_unclassified_loss() {
         assert!(outcome.passes.len() < SETTLING_PASSES, "{closure} settles");
         assert_partitioned(&records, &outcome);
         let result = reconcile(&records, &outcome);
-        assert_eq!(
-            result.losses.get(&LossCondition::Deferred),
-            None,
-            "{closure}"
-        );
-        assert_eq!(
-            result.losses.get(&LossCondition::SecretBearing),
-            Some(&1),
-            "{closure}"
-        );
+        let (counts, losses) = match harness {
+            Harness::OpenCode => ((42, 41), vec![(LossCondition::SecretBearing, 1)]),
+            Harness::Pi => (
+                (39, 37),
+                vec![
+                    (LossCondition::UnitTooLarge, 1),
+                    (LossCondition::SecretBearing, 1),
+                ],
+            ),
+        };
+        assert_eq!((result.expected, result.admitted), counts, "{closure}");
+        assert_eq!(result.losses, BTreeMap::from_iter(losses), "{closure}");
         let with_reason = |reason| {
             records
                 .iter()
@@ -140,11 +132,9 @@ fn every_frozen_session_reconciles_with_no_unclassified_loss() {
         };
         match harness {
             Harness::OpenCode => {
-                assert_eq!(result.losses.get(&LossCondition::UnitTooLarge), None);
                 assert!(!with_reason(NonUnitReason::NonTextPart).is_empty());
             }
             Harness::Pi => {
-                assert_eq!(result.losses.get(&LossCondition::UnitTooLarge), Some(&1));
                 // The image-bearing toolResult is a reader non-unit: its refusal loses no unit.
                 let image = with_reason(NonUnitReason::NonTextItem);
                 assert_eq!(image.len(), 1);
@@ -223,10 +213,11 @@ fn ae1_parts() -> Vec<Part> {
 
 #[test]
 fn ae1_replays_nineteen_units_and_one_classified_skip() {
+    let store = ReplayStore::temporary();
     let session = fresh_session("ae1");
     let (_, records) = opencode_records(&synthetic_opencode(&session, &ae1_parts()));
     let outcome = replay(
-        &STORE.store,
+        &store,
         &identity(Harness::OpenCode, &session),
         &records,
         &harness_adapter,
@@ -245,6 +236,7 @@ fn ae1_replays_nineteen_units_and_one_classified_skip() {
 
 #[test]
 fn a_mutated_adapter_fails_the_replay_naming_the_part() {
+    let store = ReplayStore::temporary();
     let session = fresh_session("drop");
     let (_, records) = opencode_records(&synthetic_opencode(&session, &ae1_parts()));
     let drop_last_text = |identity: &SessionIdentity, native: &Value| {
@@ -258,7 +250,7 @@ fn a_mutated_adapter_fails_the_replay_naming_the_part() {
         Ok(units)
     };
     let outcome = replay(
-        &STORE.store,
+        &store,
         &identity(Harness::OpenCode, &session),
         &records,
         &drop_last_text,
@@ -287,7 +279,7 @@ fn a_mutated_adapter_fails_the_replay_naming_the_part() {
         harness_adapter(identity, &native)
     };
     let outcome = replay(
-        &STORE.store,
+        &store,
         &identity(Harness::OpenCode, &session),
         &records,
         &created_for_completed,
@@ -305,6 +297,7 @@ fn a_mutated_adapter_fails_the_replay_naming_the_part() {
 
 #[test]
 fn an_oversized_unit_and_a_33_unit_batch_reconcile_to_named_losses() {
+    let store = ReplayStore::temporary();
     let session = fresh_session("cap");
     let parts = [
         Part::Text(12),
@@ -313,7 +306,7 @@ fn an_oversized_unit_and_a_33_unit_batch_reconcile_to_named_losses() {
     ];
     let (_, records) = opencode_records(&synthetic_opencode(&session, &parts));
     let outcome = replay(
-        &STORE.store,
+        &store,
         &identity(Harness::OpenCode, &session),
         &records,
         &harness_adapter,
@@ -328,7 +321,7 @@ fn an_oversized_unit_and_a_33_unit_batch_reconcile_to_named_losses() {
     let parts: Vec<Part> = (0..MAX_SOURCE_BATCH_UNITS).map(|_| Part::Text(8)).collect();
     let (_, records) = opencode_records(&synthetic_opencode(&session, &parts));
     let outcome = replay(
-        &STORE.store,
+        &store,
         &identity(Harness::OpenCode, &session),
         &records,
         &harness_adapter,
@@ -343,11 +336,12 @@ fn an_oversized_unit_and_a_33_unit_batch_reconcile_to_named_losses() {
 
 #[test]
 fn a_pending_tool_part_is_a_non_unit_and_loses_no_unit() {
+    let store = ReplayStore::temporary();
     let session = fresh_session("pending");
     let parts = [Part::Text(12), Part::PendingTool, Part::Tool(40)];
     let (_, records) = opencode_records(&synthetic_opencode(&session, &parts));
     let outcome = replay(
-        &STORE.store,
+        &store,
         &identity(Harness::OpenCode, &session),
         &records,
         &harness_adapter,
@@ -378,23 +372,38 @@ fn part_strategy() -> impl Strategy<Value = Part> {
     ]
 }
 
-/// Runs one property case: `parts` created in `order`, replayed for `passes` passes.
-fn identity_case(parts: &[Part], order: &[usize], passes: usize) -> Result<(), TestCaseError> {
+fn identity_case(
+    store: &ReplayStore,
+    parts: &[Part],
+    order: &[usize],
+    passes: usize,
+    adapter: Adapter<'_>,
+) -> Result<(), TestCaseError> {
     let session = fresh_session("prop");
     let (_, records) = opencode_records(&synthetic_opencode_ordered(&session, parts, order));
     let outcome = replay(
-        &STORE.store,
+        store,
         &identity(Harness::OpenCode, &session),
         &records,
-        &harness_adapter,
+        adapter,
         passes,
     );
     let result = reconcile(&records, &outcome);
     prop_assert_eq!(&result.unclassified, &Vec::<String>::new());
     prop_assert_eq!(&result.phantom, &Vec::<String>::new());
     prop_assert_eq!(&result.revision_mismatch, &Vec::<String>::new());
+    prop_assert_eq!(&result.byte_mismatch, &Vec::<String>::new());
+    prop_assert_eq!(&result.outcome_mismatch, &Vec::<String>::new());
     prop_assert_eq!(&result.duplicate, &Vec::<String>::new());
     prop_assert_eq!(result.admitted + result.lost(), result.expected);
+    prop_assert!(
+        result.losses.keys().all(|condition| matches!(
+            condition,
+            LossCondition::UnitTooLarge | LossCondition::Deferred
+        )),
+        "{:?}",
+        result.losses
+    );
     let admitted = outcome
         .units
         .iter()
@@ -414,28 +423,125 @@ fn identity_case(parts: &[Part], order: &[usize], passes: usize) -> Result<(), T
     Ok(())
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
-    #[test]
-    fn admitted_plus_named_loss_equals_expected_for_any_order_split_and_size(
-        (parts, order) in proptest::collection::vec(part_strategy(), 1..40).prop_flat_map(|parts| {
+#[test]
+fn admitted_plus_named_loss_equals_expected_for_any_order_split_and_size() {
+    let store = ReplayStore::temporary();
+    let parts_and_order =
+        proptest::collection::vec(part_strategy(), 1..40).prop_flat_map(|parts| {
             let order = Just((0..parts.len()).collect::<Vec<usize>>()).prop_shuffle();
             (Just(parts), order)
-        }),
-        passes in 1usize..4,
-    ) {
-        identity_case(&parts, &order, passes)?;
+        });
+    let mut config = ProptestConfig::with_cases(256);
+    config.source_file = Some(file!());
+    let mut runner = TestRunner::new(config);
+    if let Err(error) = runner.run(&(parts_and_order, 1usize..4), |((parts, order), passes)| {
+        identity_case(&store, &parts, &order, passes, &harness_adapter)
+    }) {
+        panic!("{error}\n{runner}");
     }
+}
+
+/// Refusing every record violates the synthetic input's contract: each unit settles as admitted,
+/// `unit_too_large`, or `deferred`.
+#[test]
+fn the_identity_case_fails_when_the_adapter_refuses_every_record() {
+    let store = ReplayStore::temporary();
+    let refuse_all =
+        |identity: &SessionIdentity, _: &Value| harness_adapter(identity, &Value::Null);
+    let parts = [Part::Text(5), Part::Tool(9)];
+    assert!(identity_case(&store, &parts, &[0, 1], 1, &refuse_all).is_err());
+}
+
+#[test]
+fn the_identity_case_fails_when_the_adapter_truncates_an_admitted_unit() {
+    let store = ReplayStore::temporary();
+    let truncate_text = |identity: &SessionIdentity, native: &Value| {
+        let mut units = harness_adapter(identity, native)?;
+        for unit in units
+            .iter_mut()
+            .filter(|unit| unit.class == OccurrenceClass::Messages)
+        {
+            unit.text.pop();
+        }
+        Ok(units)
+    };
+    let parts = [Part::Text(5), Part::Tool(9)];
+    let error = identity_case(&store, &parts, &[0, 1], 1, &truncate_text)
+        .expect_err("a truncated admission is a disagreement");
+    assert!(
+        error.to_string().contains("expected 5 bytes, replayed 4"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_identity_case_fails_when_the_adapter_misreads_a_tool_outcome() {
+    let store = ReplayStore::temporary();
+    let rename_tool = |identity: &SessionIdentity, native: &Value| {
+        let mut units = harness_adapter(identity, native)?;
+        for outcome in units.iter_mut().filter_map(|unit| unit.outcome.as_mut()) {
+            outcome.tool_name = "grep".to_owned();
+        }
+        Ok(units)
+    };
+    let parts = [Part::Text(5), Part::Tool(9)];
+    let error = identity_case(&store, &parts, &[0, 1], 1, &rename_tool)
+        .expect_err("a misread outcome is a disagreement");
+    assert!(
+        error.to_string().contains("grep") && error.to_string().contains("bash"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_tool_result_under_another_parent_is_unclassified_and_phantom() {
+    let store = ReplayStore::temporary();
+    let (_, fixture) = frozen_sessions()
+        .into_iter()
+        .find(|(closure, _)| closure.starts_with("pi-"))
+        .unwrap();
+    let (session, records) = pi_records(&fixture);
+    let tool_units = records
+        .iter()
+        .flat_map(|record| &record.expected.units)
+        .filter(|unit| unit.tool.is_some())
+        .count();
+    assert!(tool_units > 0);
+    let reparent = |identity: &SessionIdentity, native: &Value| {
+        let mut units = harness_adapter(identity, native)?;
+        for (field, value) in units.iter_mut().flat_map(|unit| &mut unit.identity) {
+            if *field == "parent_message_id" {
+                value.push('x');
+            }
+        }
+        Ok(units)
+    };
+    let outcome = replay(
+        &store,
+        &identity(Harness::Pi, &session),
+        &records,
+        &reparent,
+        SETTLING_PASSES,
+    );
+    let result = reconcile(&records, &outcome);
+    assert_eq!(
+        result.unclassified.len(),
+        tool_units,
+        "{:?}",
+        result.unclassified
+    );
+    assert_eq!(result.phantom.len(), tool_units, "{:?}", result.phantom);
 }
 
 /// The case the property once shrank to, kept as a named example.
 #[test]
 fn a_single_text_part_replays_in_one_pass() {
-    identity_case(&[Part::Text(1)], &[0], 1).unwrap();
+    let store = ReplayStore::temporary();
+    identity_case(&store, &[Part::Text(1)], &[0], 1, &harness_adapter).unwrap();
     let session = fresh_session("single");
     let (_, records) = opencode_records(&synthetic_opencode(&session, &[Part::Text(1)]));
     let outcome = replay(
-        &STORE.store,
+        &store,
         &identity(Harness::OpenCode, &session),
         &records,
         &harness_adapter,
@@ -447,6 +553,7 @@ fn a_single_text_part_replays_in_one_pass() {
 
 #[test]
 fn a_seeded_dropped_unit_fails_the_identity_naming_the_unit() {
+    let store = ReplayStore::temporary();
     let session = fresh_session("seeded");
     let parts = [Part::Text(5), Part::Tool(9), Part::Text(7)];
     let (_, records) = opencode_records(&synthetic_opencode(&session, &parts));
@@ -458,7 +565,7 @@ fn a_seeded_dropped_unit_fails_the_identity_naming_the_unit() {
             .collect())
     };
     let outcome = replay(
-        &STORE.store,
+        &store,
         &identity(Harness::OpenCode, &session),
         &records,
         &drop_tool,
@@ -469,7 +576,98 @@ fn a_seeded_dropped_unit_fails_the_identity_naming_the_unit() {
     assert_eq!(
         result.unclassified,
         [format!(
-            "tool:call_{session}_1:0 (record msg_{session}_b, part 1)"
+            "tool:msg_{session}_b:call_{session}_1:0 (record msg_{session}_b, part 1)"
         )]
     );
+}
+
+#[test]
+fn a_refused_outcome_record_is_unclassified_loss() {
+    let store = ReplayStore::temporary();
+    let session = fresh_session("outcome");
+    let parts = [Part::Text(5), Part::Tool(9), Part::Text(7)];
+    let (_, records) = opencode_records(&synthetic_opencode(&session, &parts));
+    let misdescribe = |identity: &SessionIdentity, native: &Value| {
+        let mut units = harness_adapter(identity, native)?;
+        for outcome in units.iter_mut().filter_map(|unit| unit.outcome.as_mut()) {
+            outcome.byte_length += 1;
+        }
+        Ok(units)
+    };
+    let outcome = replay(
+        &store,
+        &identity(Harness::OpenCode, &session),
+        &records,
+        &misdescribe,
+        SETTLING_PASSES,
+    );
+    let result = reconcile(&records, &outcome);
+    assert_eq!(result.losses.get(&LossCondition::IdentityConflict), None);
+    assert_eq!(
+        result.unclassified,
+        [format!(
+            "tool:msg_{session}_b:call_{session}_1:0 (record msg_{session}_b, part 1): unnamed refusal"
+        )]
+    );
+}
+
+#[test]
+fn a_changed_unit_under_a_published_identity_conflicts_alone() {
+    let store = ReplayStore::temporary();
+    let session = fresh_session("conflict");
+    let parts = [Part::Text(5), Part::Tool(9), Part::Text(7)];
+    let (_, records) = opencode_records(&synthetic_opencode(&session, &parts));
+    let identity = identity(Harness::OpenCode, &session);
+    let first = replay(
+        &store,
+        &identity,
+        &records,
+        &harness_adapter,
+        SETTLING_PASSES,
+    );
+    assert_eq!(reconcile(&records, &first).admitted, 4);
+    let assistant = format!("msg_{session}_b");
+    let change_first_text = |identity: &SessionIdentity, native: &Value| {
+        let mut units = harness_adapter(identity, native)?;
+        for unit in &mut units {
+            let field = |name: &str| {
+                unit.identity
+                    .iter()
+                    .find(|(field, _)| *field == name)
+                    .map(|(_, value)| value.clone())
+            };
+            if field("message_id").as_deref() == Some(assistant.as_str())
+                && field("block_index").as_deref() == Some("0")
+            {
+                unit.text.push('x');
+            }
+        }
+        Ok(units)
+    };
+    let second = replay(
+        &store,
+        &identity,
+        &records,
+        &change_first_text,
+        SETTLING_PASSES,
+    );
+    assert_partitioned(&records, &second);
+    let result = reconcile(&records, &second);
+    assert_eq!(
+        result.losses,
+        std::collections::BTreeMap::from([(LossCondition::IdentityConflict, 1)])
+    );
+    assert_eq!((result.admitted, result.replayed), (3, 3));
+}
+
+#[test]
+#[should_panic(expected = "no native record")]
+fn pairing_refuses_an_expected_record_without_a_native_record() {
+    let session = fresh_session("unpaired");
+    let fixture = synthetic_opencode(&session, &[Part::Text(5)]);
+    let (_, records) = opencode_records(&fixture);
+    let expected = records.into_iter().map(|record| record.expected).collect();
+    let mut natives = corpus_replay::opencode_natives(&fixture);
+    natives.pop();
+    let _ = corpus_replay::pair(natives, expected);
 }

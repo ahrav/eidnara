@@ -3,7 +3,8 @@
 The fresh-context evaluation of Part A ran during #1105's authoring, at
 `a0e3f2993`, through the four METHOD lenses (harness fit, coverage balance,
 implementability, wildcard). This file records its dispositions as carried
-into this part and what re-verification at `41d889ea4` changed. Part B S2
+into this part and what re-verification at `41d889ea4`, the re-check at
+`aff5a00e6`, and the re-reads after U6 and U7 changed. Part B S2
 records are proposed obligations and have no portfolio result of their own.
 
 ## Finding disposition
@@ -32,20 +33,35 @@ records are proposed obligations and have no portfolio result of their own.
 ## Re-verification at `41d889ea4`
 
 - Status changes: il-dedup-selector-never-fires-on-harness-names is
-  `invalidated` (U4 deleted the selector); il-readmission-block-ends-batch-unnamed-at-head
-  is `invalidated` by U6's per-unit pre-screen; il-repository-id-equals-project-id-at-head
-  is `invalidated` by U7's derived repository identity.
+  `invalidated` (U4 deleted the selector).
 - Reachability changes: il-exit-code-only-for-named-tool-and-harness is
   `explicit-config-only`; its only production caller is the capture adapter.
-- `Exercised` changes: nine records moved to `yes` on U4's checks
+  Eight more records are `explicit-config-only` because selection, injection,
+  and reduced-call rendering run only on the fold path, which needs
+  `eidnara_folds()` and so a non-empty model chain
+  ([`catalog.md`](catalog.md#reachability-classes)):
+  il-dedup-selector-never-fires-on-harness-names,
+  il-tool-name-matching-differs-across-consumers,
+  il-reduced-tool-call-carries-extracted-path,
+  il-synthetic-todowrite-round-trips-under-one-name,
+  il-classify-total-with-unknown,
+  il-unknown-tool-never-dropped-deduped-or-edit-marked,
+  il-dedup-removal-leaves-goldens-byte-identical, and
+  il-classify-one-case-rule-per-query. Class-driven supersession also needs
+  `smart_drops`. il-path-arg-key-order-first-match and
+  il-path-arg-harness-neutral stay `default-production` through wire
+  extraction, which runs on every transform.
+- `Exercised` changes: seven records moved to `yes` on U4's checks
   (`crates/daemon/src/tool_vocabulary_tests.rs`,
   `scripts/forbid-tool-literals.test.ts`, `selection.rs:2828`):
-  il-path-arg-key-order-first-match, il-tool-name-matching-differs-across-consumers,
+  il-tool-name-matching-differs-across-consumers,
   il-classify-total-with-unknown, il-unknown-tool-never-dropped-deduped-or-edit-marked,
   il-gate-fails-on-distinctive-literal-outside-module,
   il-dedup-removal-leaves-goldens-byte-identical,
-  il-exit-code-only-for-named-tool-and-harness, il-path-arg-harness-neutral, and
-  il-classify-one-case-rule-per-query. il-exit-code-only-for-opencode-bash was
+  il-exit-code-only-for-named-tool-and-harness, and
+  il-classify-one-case-rule-per-query. il-path-arg-key-order-first-match and
+  il-path-arg-harness-neutral are `partial`: U4's per-site table holds no input
+  pairing `pattern` with `filePath`. il-exit-code-only-for-opencode-bash was
   already `yes`. il-literal-classified-contract-or-vocabulary is `partial` on
   this part's table. il-adapter-refusal-is-per-message and
   il-unknown-part-kind-skipped-uncounted gained U3 replay witnesses.
@@ -56,3 +72,50 @@ records are proposed obligations and have no portfolio result of their own.
   `history_summarizer_chunk.rs`, and the Eidnara-owned spellings defined more
   than once (records il-vocabulary-literals-live-in-one-module and
   il-literal-classified-contract-or-vocabulary).
+
+## Re-check at `aff5a00e6`
+
+The branch starts from `aff5a00e6`, the #1109 tip after `41d889ea4`. The nine
+interpretation-layer files, `harness_sources.rs`, `project_docs.rs`,
+`config.rs`, and `crates/kernel/src/cas/ingest.rs` are identical at both
+revisions. Three cited files moved:
+
+- `source_capture.rs`: six lines inserted at `:458-463` shift every later
+  reference by six.
+- `lib.rs`: three lines removed at `:14141-14145` shift every later reference
+  by three.
+- `tests/source_corpus_replay.rs` and `tests/support/corpus_replay.rs`: the
+  replay oracle gained tests and moved; every `replay:` reference is updated
+  in [`existing-checks.md`](existing-checks.md#corpus-oracle-landed-by-u1-to-u3).
+
+One claim changed: `settled` (`corpus_replay.rs:263-286`) now maps only
+`IdentityReused` to `identity_conflict`; a permanent descriptor refusal is an
+unnamed outcome, as `classify` (`source_capture.rs:1247-1249`) already counted
+it. [`loss-conditions.md`](loss-conditions.md#loss-condition-enumeration)
+states the HEAD mapping. Reachability changes: the gate record and the literal
+classification record are `test-only`; their subjects are a CI step and an
+authoring-time artifact, not daemon code paths.
+
+## Re-read after U6
+
+U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) landed on this
+branch after `aff5a00e6`. Status change: il-readmission-block-ends-batch-unnamed-at-head
+is `invalidated`. The screening loop refuses a unit whose payload digest a
+purge tombstone or a pending unlink names before the batch commit
+(`harness_sources.rs:1613-1619`, answered at `:1635-1648`); the record's
+[evidence file](evidence/il-readmission-block-ends-batch-unnamed-at-head.md)
+records the re-read and the U6 checks that succeed it. No other record changed
+status.
+
+## Re-read after U7
+
+U7 ([#1112](https://github.com/ahrav/eidnara/issues/1112)) landed on this
+branch after U6. Status change: il-repository-id-equals-project-id-at-head is
+`invalidated`. `plan_document` writes the derived repository identity into
+`repository_id` (`crates/daemon/src/repository_identity.rs:62`, used at
+`source_capture.rs:1100`), with the project digest only as the fallback, and a
+pass retires a live row under another `repository_id` before it publishes
+(`source_capture.rs:1485`, retired at `:943`); the record's
+[evidence file](evidence/il-repository-id-equals-project-id-at-head.md)
+records the re-read and the U7 checks that succeed it. No other record changed
+status.

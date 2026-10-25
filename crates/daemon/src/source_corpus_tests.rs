@@ -422,6 +422,7 @@ fn the_pi_reader_classifies_an_image_bearing_tool_result_whole() {
             tool: Some(ExpectedTool {
                 name: "bash".to_owned(),
                 call_id: "c2".to_owned(),
+                parent: "p".to_owned(),
                 is_error: true,
                 exit: None,
                 truncated: Some(true),
@@ -515,10 +516,19 @@ fn a_credential_shape_fails_the_redaction_scan_unless_its_unit_is_a_canary() {
     assert_eq!(redaction_violations("f", &tool_part), Vec::<String>::new());
     let beside = json!({"units": [{"canary": true, "text": CANARY}, {"text": CANARY}]});
     assert_eq!(redaction_violations("f", &beside).len(), 1);
-    let other_secret = "sk-ant-api03-Qq1Ww2Ee3Rr4Tt5Yy6Uu7Ii8Oo9Pp0AaSsDdFfGg";
+    let other_secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
     let inside = json!({"parts": [{"canary": true, "state": {"output": CANARY,
         "input": {"command": other_secret}}}]});
     assert_eq!(redaction_violations("f", &inside).len(), 1);
+    let truncated_preview = json!({"parts": [{"canary": true, "state": {
+        "output": format!("token {CANARY}\n"), "metadata": {"output": CANARY}}}]});
+    assert_eq!(
+        redaction_violations("f", &truncated_preview),
+        Vec::<String>::new()
+    );
+    let embedding = json!({"parts": [{"canary": true, "state": {"output": CANARY,
+        "metadata": {"output": format!("{CANARY} {other_secret}")}}}]});
+    assert_eq!(redaction_violations("f", &embedding).len(), 1);
     let negative_canary = json!({"units": [{"canary": true, "text": "ordinary"}]});
     assert_eq!(redaction_violations("f", &negative_canary).len(), 1);
     let textless = json!({"units": [{"canary": true}]});

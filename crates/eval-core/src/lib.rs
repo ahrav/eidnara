@@ -20,9 +20,12 @@ macro_rules! debug_display {
     )*};
 }
 
+mod access;
 mod anchor;
 mod campaign;
+mod capture;
 mod cassette;
+mod ceiling;
 mod censoring;
 mod census;
 mod checkpoint;
@@ -56,6 +59,7 @@ mod stream;
 mod task;
 mod witness;
 
+pub use access::{AccessError, AccessRecord, MemoryRead, MemoryWrite, WriteKey, excludes};
 pub use anchor::{
     ANCHOR_CORPUS_DIGEST_PROTOCOL, ANCHOR_CORPUS_SCHEMA, ANCHOR_ENTRY_DIGEST_PROTOCOL,
     Affordability, AnchorCorpus, AnchorEntry, AnchorError, ClassifiedControl, Contamination,
@@ -71,12 +75,14 @@ pub use campaign::{
     SampleLedger, SampleRecord, Scale, SkipReason, TaskBudgets, TaskUsage, Terminal, TerminalRates,
     UnsupportedReason, parse_run_profile,
 };
+pub use capture::{CAPTURE_CONFIG_KEY, CaptureDeclaration, CaptureSwitch, WriteKeyScheme};
 pub use cassette::{
     BACKEND_COVERED_FIELDS, BackendRecord, Boundary, CASSETTE_GENERATOR_VERSION, CASSETTE_SCHEMA,
     COVERED_FIELDS_VERSION, Cassette, CassetteError, CassetteFile, CassetteMiss, Entry, Location,
     Lookup, MissClass, OPENCODE_COVERED_FIELDS, OPENCODE_HEADER_ALLOWLIST, OpenCodeRequest,
     canonical_decimal_f64, request_digest,
 };
+pub use ceiling::{CeilingDeclaration, CeilingError, CeilingKind, parse_ceiling_declaration};
 pub use censoring::{
     Attempt, BoundMethod, Counter, FailureRate, LatencySummary, P99_MIN_RUNS, PassK, PassKBounds,
     Percentile, PercentileBound, pass_k,
@@ -151,7 +157,7 @@ pub use manifest::{
     ComponentVersions, Cut, CutOutcome, CutReceipt, DROPPED_FIELDS, ExecutionMode, Ingestion,
     MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError, MemoryReviewerModelCalls,
     REQUIRED_FIELDS, RecencyBaseline, ResourceLimits, RunStatus, TokenizerProfile,
-    is_canonical_decimal, parse_manifest,
+    is_canonical_decimal, parse_capture_declaration, parse_manifest,
 };
 pub use markers::*;
 pub use occurrence::*;

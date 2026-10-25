@@ -2563,7 +2563,7 @@ async fn a_blocked_digest_is_refused_alone_and_its_sibling_publishes() {
     }
 }
 
-/// A purge that commits after the screening preview and before the batch commit fails that one pass with the unnamed conflict; the next pass screens the unit out and publishes its sibling.
+/// A purge that commits after screening and before the batch commit fails that one pass with the unnamed conflict; the next pass screens the unit out and publishes its sibling.
 #[tokio::test]
 async fn a_purge_between_screen_and_commit_fails_one_pass_then_converges() {
     let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
@@ -3144,4 +3144,107 @@ async fn a_nested_document_through_a_symlink_or_an_absent_parent_is_unreadable()
     assert_eq!(count(&handler, "documents_unreadable") - unreadable, 3);
     assert_eq!(count(&handler, "documents_retired"), retired);
     assert_eq!(document_identities(&store, "notes/B.md").len(), 1);
+}
+
+#[tokio::test]
+async fn the_stale_identity_inventory_runs_once_per_path_and_incarnation() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    let repository = commit_repository(&project);
+    let sweeps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&sweeps);
+    *handler.source_capture.before_stale_sweep.lock().unwrap() = Some(Arc::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    let store = kernel_store(&handler);
+    document_pass(&handler, "base-1").await;
+    assert_eq!(sweeps.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let unchanged = count(&handler, "documents_unchanged");
+    for base in ["base-2", "base-3"] {
+        document_pass(&handler, base).await;
+    }
+    assert_eq!(count(&handler, "documents_unchanged") - unchanged, 2);
+    assert_eq!(sweeps.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    handler.source_capture.forget_memo_for_test();
+    document_pass(&handler, "base-4").await;
+    assert_eq!(sweeps.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository, "1".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn a_project_keyed_row_beside_the_derived_row_retires_at_the_next_incarnation() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    let project_id = identity_of(&live(&store, OccurrenceClass::RepositoryDocuments)[0])[0]
+        .1
+        .to_owned();
+    let repository = commit_repository(&project);
+    handler.source_capture.forget_memo_for_test();
+    document_pass(&handler, "base-2").await;
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository.clone(), "1".to_owned())]
+    );
+
+    let edited = "# Architecture\n\nEdited.\n";
+    std::fs::write(project.join("ARCHITECTURE.md"), edited).unwrap();
+    let scope_id = format!("project:{project_id}");
+    let publisher = crate::harness_sources::SourcePublisher {
+        kernel: &store,
+        domain_id: "harness-capture",
+        scope_id: Some(&scope_id),
+        egress: kernel::ProviderEgress::LocalOnly,
+        sensitivity: kernel::Sensitivity::Sensitive,
+    };
+    let unit = crate::harness_sources::SourceUnit {
+        class: OccurrenceClass::RepositoryDocuments,
+        identity: vec![
+            ("project_id", project_id.clone()),
+            ("repository_id", project_id.clone()),
+            ("relative_path", "ARCHITECTURE.md".to_owned()),
+        ],
+        revision: "2".to_owned(),
+        representation: crate::harness_sources::Representation::Text,
+        text: edited.to_owned(),
+        role: "document".to_owned(),
+        outcome: None,
+    };
+    let published =
+        crate::harness_sources::publish_screened(&publisher, &[unit], now_ms(), None).unwrap();
+    assert!(matches!(
+        published[0],
+        crate::harness_sources::UnitDisposition::Published(_)
+    ));
+    let mut both = document_identities(&store, "ARCHITECTURE.md");
+    both.sort_unstable();
+    let mut expected = vec![
+        (repository.clone(), "1".to_owned()),
+        (project_id, "2".to_owned()),
+    ];
+    expected.sort_unstable();
+    assert_eq!(both, expected);
+
+    handler.source_capture.forget_memo_for_test();
+    let (retired, units) = (
+        count(&handler, "documents_retired"),
+        count(&handler, "units_published"),
+    );
+    document_pass(&handler, "base-3").await;
+    assert_eq!(count(&handler, "documents_retired") - retired, 1);
+    assert_eq!(count(&handler, "units_published") - units, 1);
+    let rows = live(&store, OccurrenceClass::RepositoryDocuments);
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository, "2".to_owned())]
+    );
+    assert_eq!(
+        rows[0].detail.artifact_digest,
+        crate::project_docs::sha256_hex(edited.as_bytes())
+    );
 }

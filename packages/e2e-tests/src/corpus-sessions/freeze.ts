@@ -2,9 +2,23 @@ import type { Database } from "bun:sqlite";
 
 import { CANARY } from "./workspace.ts";
 
+const { renameSync, rmSync } = process.getBuiltinModule("node:fs");
+
 /** The pinned harness closures the frozen sessions come from. */
 export const OPENCODE_CLOSURE = "opencode-1.18.22";
 export const PI_CLOSURE = "pi-0.80.2";
+
+/** `reported` holds `opencode --version` output or a version recorded in a store manifest. */
+export function requireOpenCodeClosure(reported: string): string {
+    const pinned = OPENCODE_CLOSURE.slice("opencode-".length);
+    const found = /(?<![\d.])\d+\.\d+\.\d+(?![\d.])/.exec(reported)?.[0];
+    if (found !== pinned) {
+        throw new Error(
+            `${OPENCODE_CLOSURE} fixtures need OpenCode ${pinned}; found ${found ?? `no version in ${JSON.stringify(reported)}`}`,
+        );
+    }
+    return found;
+}
 
 /** A decoded JSON value. */
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
@@ -91,7 +105,9 @@ function stable(value: JsonValue): string {
 /**
  * The frozen form of one OpenCode session read from `opencode.db`: every `message` row with its
  * `part` rows in `(time_created, id)` order, `data` decoded, scratch paths and generated ids
- * replaced, canaries marked. The same store yields the same bytes.
+ * replaced, canaries marked. The same store yields the same bytes. A session without a message
+ * row is refused: it is what a stale `store.json` names after an interrupted `--run`, and
+ * freezing it would overwrite the committed fixture with an empty mix.
  */
 export function freezeOpenCode(
     db: Database,
@@ -103,6 +119,9 @@ export function freezeOpenCode(
             "SELECT id, time_created, data FROM message WHERE session_id = ? ORDER BY time_created, id",
         )
         .all(sessionId) as { id: string; time_created: number; data: string }[];
+    if (messages.length === 0) {
+        throw new Error(`opencode.db holds no message for session ${sessionId}`);
+    }
     const parts = db.prepare(
         "SELECT id, time_created, data FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created, id",
     );
@@ -159,6 +178,18 @@ export function freezePi(jsonl: string, scratchRoots: readonly ScratchRoot[]): s
 export function frozenPiJsonl(fixture: string): string {
     const frozen = parse(fixture, "fixture") as { entries: unknown[] };
     return frozen.entries.map((entry) => JSON.stringify(entry)).join("\n");
+}
+
+/**
+ * Writes a compacted copy of `db` to `target`, replacing any existing file. `VACUUM INTO` writes
+ * only to an absent or empty file, so the copy lands in a staging file that is renamed over
+ * `target`.
+ */
+export function snapshotStore(db: Database, target: string): void {
+    const staging = `${target}.staging`;
+    rmSync(staging, { force: true });
+    db.prepare("VACUUM INTO ?").run(staging);
+    renameSync(staging, target);
 }
 
 interface FrozenOpenCode {

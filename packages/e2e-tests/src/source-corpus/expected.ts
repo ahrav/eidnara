@@ -11,6 +11,8 @@ export type NonUnitReason =
 export interface ExpectedTool {
     readonly name: string;
     readonly callId: string;
+    /** The OpenCode message holding the tool part, or the Pi entry's `parentId`; `null` when the entry has none. */
+    readonly parentMessageId: string | null;
     readonly isError: boolean;
     readonly exit: number | null;
     readonly truncated: boolean | null;
