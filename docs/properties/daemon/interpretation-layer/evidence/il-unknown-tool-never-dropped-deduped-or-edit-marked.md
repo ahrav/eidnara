@@ -11,6 +11,10 @@
   (`selection.rs:669`).
 - No dedup selector exists (U4).
 - Tier: `tier` returns `T3` for any untabled name (`crates/daemon/src/tool_vocabulary.rs:136-145`).
+  Selection calls `selection_tier` (`crates/daemon/src/selection.rs:750`),
+  which normalizes before `tier` (`tool_vocabulary.rs:150-152`), so a doubly
+  prefixed name such as `mcp_mcp_edit` is `Unknown` for `classify` and tier 2
+  for selection (`crates/daemon/src/tool_vocabulary_tests.rs:44`, `:58`).
 - Display: `display_arg` reads the generic lists for any name
   (`tool_vocabulary.rs:187-191`).
 - Exit code: `exit_code` requires the exact name `bash`
@@ -50,6 +54,15 @@ Covered for class decisions.
   the record names one, stays open.
 - Conclusion: resolved with answer.
 
+### Q: Does every `Unknown` arc take selection tier 3?
+- Sources examined: `tool_vocabulary.rs:136-152`; `selection.rs:749-755`;
+  `tool_vocabulary_tests.rs:44`, `:58`.
+- Findings: no. A name carrying two `mcp_` prefixes over a tabled name takes
+  that name's tier, because selection normalizes it twice; `classify`
+  normalizes once and returns `Unknown`.
+- Missing evidence: none.
+- Conclusion: resolved with answer: the guarantee states the exception.
+
 ### Q: Why is the check `always(!X)` when the source's `Check` line opens with `always`?
 - Sources examined: the source record (#1105 Part B S2) and METHOD's
   check-semantics rules.
@@ -58,3 +71,18 @@ Covered for class decisions.
   assigns a forbidden state with no detection point to `always(!X)`.
 - Missing evidence: none.
 - Conclusion: resolved with answer: the label follows the source's rationale.
+
+### Q: Does the record run under `DaemonConfig::default()`, as the source's label says?
+- Sources examined: `crates/daemon/src/config.rs:147`, `:187-191`;
+  `crates/daemon/src/transform.rs:3350-3351`, `:3364-3370`, `:4133`; `crates/daemon/src/selection.rs:958`, `:980`; `config.rs:165`.
+- Findings: no. The default `model_chain` is empty, so `eidnara_folds()` is
+  false and `apply_once` hands the request to `apply_additive_only`, which
+  projects the window (`transform.rs:2852`) and composes m0
+  (`transform.rs:3061`) without selecting, injecting, or rendering a
+  reduced call. A switched-lineage subagent request passes the gate and
+  returns a passthrough. Selection runs from `transform.rs:4133` inside `apply_once`. The class
+  arms also need `smart_drops`, which defaults false (`config.rs:165`), and
+  an emergency or two-pass reclaim batch or an admitted ride
+  (`selection.rs:958`, `:980`).
+- Missing evidence: none.
+- Conclusion: resolved with answer: `explicit-config-only`.

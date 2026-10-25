@@ -35,15 +35,32 @@ records are proposed obligations and have no portfolio result of their own.
   `invalidated` (U4 deleted the selector).
 - Reachability changes: il-exit-code-only-for-named-tool-and-harness is
   `explicit-config-only`; its only production caller is the capture adapter.
-- `Exercised` changes: nine records moved to `yes` on U4's checks
+  Eight more records are `explicit-config-only` because selection, injection,
+  and reduced-call rendering run only on the fold path, which needs
+  `eidnara_folds()` and so a non-empty model chain
+  ([`catalog.md`](catalog.md#reachability-classes)):
+  il-dedup-selector-never-fires-on-harness-names,
+  il-tool-name-matching-differs-across-consumers,
+  il-reduced-tool-call-carries-extracted-path,
+  il-synthetic-todowrite-round-trips-under-one-name,
+  il-classify-total-with-unknown,
+  il-unknown-tool-never-dropped-deduped-or-edit-marked,
+  il-dedup-removal-leaves-goldens-byte-identical, and
+  il-classify-one-case-rule-per-query. Class-driven supersession also needs
+  `smart_drops`. il-path-arg-key-order-first-match and
+  il-path-arg-harness-neutral stay `default-production` through wire
+  extraction, which runs on every transform.
+- `Exercised` changes: seven records moved to `yes` on U4's checks
   (`crates/daemon/src/tool_vocabulary_tests.rs`,
   `scripts/forbid-tool-literals.test.ts`, `selection.rs:2828`):
-  il-path-arg-key-order-first-match, il-tool-name-matching-differs-across-consumers,
+  il-tool-name-matching-differs-across-consumers,
   il-classify-total-with-unknown, il-unknown-tool-never-dropped-deduped-or-edit-marked,
   il-gate-fails-on-distinctive-literal-outside-module,
   il-dedup-removal-leaves-goldens-byte-identical,
-  il-exit-code-only-for-named-tool-and-harness, il-path-arg-harness-neutral, and
-  il-classify-one-case-rule-per-query. il-exit-code-only-for-opencode-bash was
+  il-exit-code-only-for-named-tool-and-harness, and
+  il-classify-one-case-rule-per-query. il-path-arg-key-order-first-match and
+  il-path-arg-harness-neutral are `partial`: U4's per-site table holds no input
+  pairing `pattern` with `filePath`. il-exit-code-only-for-opencode-bash was
   already `yes`. il-literal-classified-contract-or-vocabulary is `partial` on
   this part's table. il-adapter-refusal-is-per-message and
   il-unknown-part-kind-skipped-uncounted gained U3 replay witnesses.

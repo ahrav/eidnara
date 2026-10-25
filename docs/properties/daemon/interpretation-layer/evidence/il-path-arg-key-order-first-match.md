@@ -51,3 +51,24 @@ Covered by `tool_vocabulary_tests.rs:66`.
 - Findings: no commit message or comment states a reason; U4 preserved it.
 - Missing evidence: an owner decision.
 - Conclusion: needs human input.
+
+### Q: Which of the three sites run under `DaemonConfig::default()`?
+- Sources examined: `crates/daemon/src/config.rs:147`, `:165`, `:187-191`;
+  `crates/daemon/src/transform.rs:2852`, `:3350-3351`;
+  `crates/daemon/src/selection.rs:958`, `:980`.
+- Findings: wire extraction only. `apply_additive_only` projects the window
+  (`transform.rs:2852`), which flattens every `ToolCall` through `path_arg`.
+  Edit supersession runs inside selection, on the fold path, and only with
+  `smart_drops` set (default false) and a reclaim batch or ride. The
+  summary line needs a model chain.
+- Missing evidence: none.
+- Conclusion: resolved with answer: `default-production` through wire
+  extraction; the record states each site's class.
+
+### Q: Does the per-site table pin every required input?
+- Sources examined: `crates/daemon/src/tool_vocabulary_tests.rs:69-100`.
+- Findings: no. The table holds `{"pattern": "x*"}` alone and no input that
+  pairs `pattern` with `filePath`, so the display precedence between them is
+  not asserted.
+- Missing evidence: a table row `{"pattern": "p", "filePath": "f"}`.
+- Conclusion: resolved with answer: `Exercised` is `partial`.

@@ -22,6 +22,10 @@ every sibling unit of its message.
 - Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1005-1035`)
   counts each `Err` once (`:1027`) and adds the count to `adapter_refused`
   (`:1030-1033`), also when a later record stops the pass (`:1023-1026`).
+- OpenCode shape: `crates/daemon/tests/harness_sources.rs:681-686` sets
+  the settled tool part's `state.output` to an object in a record whose text
+  parts sit at `harness_sources.rs:388` and `:393`, and asserts the whole
+  record refuses as `UnsupportedShape("tool output")`.
 - U3: `crates/daemon/tests/source_corpus_replay.rs:93` asserts that the frozen
   Pi session's image-bearing tool result is among `refused_records` and that
   the reader classifies it `non_text_item`.
@@ -38,8 +42,8 @@ Shape-driven, not time-driven. The same record refuses on every pass.
 
 ## What a test must construct
 
-An OpenCode assistant message with two text parts and a settled tool part whose
-`state.output` is a number; assert zero units, `adapter_refused == 1`, and the
+The adapter half exists (`harness_sources.rs:681-686`). What remains is a
+capture pass over that OpenCode record: assert `adapter_refused == 1` and the
 reader's expected units all reconciled as `adapter_refused`.
 
 ## Investigation log

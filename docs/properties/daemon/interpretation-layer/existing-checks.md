@@ -12,9 +12,9 @@ or whose check U4 deleted says so.
 | Check | Covers | Status |
 | --- | --- | --- |
 | `tv-tests:17` `each_consumer_keeps_its_name_rule` | 25 names, including `Edit`, `mcp_edit`, `MCP_TodoWrite`, `Bash`, `MCP_READ`, `mcp_mcp_edit`, through `classify`, `tier`, the injection read-back, and `exit_code` for both harnesses | unaudited |
-| `tv-tests:66` `each_site_keeps_its_key_order` | fourteen inputs through `path_arg` and `extract_key_arg`: two recognized keys, a non-string first key, `file_path` alone, the display-only keys, a 61-scalar path, `description` alone, a non-object; `diff_keys` order | unaudited |
+| `tv-tests:66` `each_site_keeps_its_key_order` | fourteen inputs through `path_arg` and `extract_key_arg`: two recognized keys, a non-string first key, `file_path` alone, the display-only keys each alone, a 61-scalar path, `description` alone, a non-object; `diff_keys` order. No input pairs `pattern` with `filePath` | unaudited |
 | `tv-tests:127` `pi_and_opencode_path_keys_name_one_path` | Pi `path` and OpenCode `filePath` yield one value | unaudited |
-| `tv-tests:133` `an_unknown_tool_takes_every_default` | `mcp_foo` is `Unknown`, tier 3, generic display argument, no exit code | unaudited |
+| `tv-tests:133` `an_unknown_tool_takes_every_default` | `mcp_foo` is `Unknown`, tier 3, generic display argument, no exit code; `tv-tests:44` and `:58` hold the doubly prefixed `mcp_mcp_edit`, `Unknown` with selection tier 2 | unaudited |
 | `tv-tests:145` `exit_codes_come_only_from_opencode_bash_integers` | the OpenCode 1.19.0 trace fixture cases plus `read`, string, float, and Pi cases | unaudited |
 | `tv-tests:185` `truncation_flags_are_read_from_each_harness_field` | both pointers, a non-boolean value, a missing flag, a Pi record read as OpenCode | unaudited |
 | `tv-tests:205` `zero_value_note_actions_are_read_and_dismiss` | the `eidnara_note` zero-value actions | unaudited |
@@ -33,7 +33,7 @@ or whose check U4 deleted says so.
 | the dedup selector tests in `selection.rs` naming `mcp_read` and `transform.rs` `duplicate_tool_full_drop_re_renders_byte_identically`, as Part A cited them at `a0e3f2993` | deleted by U4 with the selector (`97afdaff1`) | none at HEAD |
 | `crates/daemon/tests/selection_differential.rs` | production selection equals the frozen reference over generated mixes; the reference reads the module through `daemon::tool_vocabulary_evaluation` (`selection_differential.rs:39`) instead of mirrored constants; `TOOLS` (`selection_differential.rs:1389-1415`) holds `mcp_read`, `mcp_grep`, `MCP_READ`, `Edit`, `TodoWrite` | unaudited |
 | `selection_differential.rs:2248` `optimized_matches_frozen_reference_on_identical_calls` | identical calls under every tool name | unaudited |
-| `sel.rs:1461` `selection_golden_matches_ts_selectors` with `crates/daemon/testdata/selection-golden.json` | edit supersession on `filePath`, `todowrite` keep-one, zero-value meta drops | unaudited |
+| `sel.rs:1461` `selection_golden_matches_ts_selectors` with `crates/daemon/testdata/selection-golden.json` | edit supersession on `filePath`, `todowrite` keep-one, zero-value meta drops, against the checkout's own fixture; no CI step diffs the fixture against the PR base | unaudited |
 | `sel.rs:2229` `edit_marker_region_hint_clamps_utf16_and_trusts_only_hint_sized_sentinels`, `sel.rs:2571` `drop_wins_over_edit_marker` | the edit-marker payload (`sel.rs:478-492`) clamps `diff_keys` values | unaudited |
 
 ## Summary line and chunk text
@@ -41,7 +41,8 @@ or whose check U4 deleted says so.
 | Check | Covers | Status |
 | --- | --- | --- |
 | `history_summarizer_chunk.rs:3251` `repeated_call_ids_render_each_call_with_its_own_arguments` | `TC: read(one.rs)` from `filePath` | unaudited |
-| `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` | the description arm and a `filePath` key argument, with newlines collapsed | unaudited |
+| `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` | the description arm and a `filePath` key argument on separate inputs, with newlines collapsed | unaudited |
+| `crates/daemon/src/lib.rs:19639` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:19925-19930`, `:26289`) | unaudited |
 | `crates/daemon/testdata/history_summarizer-chunk-golden.json` | `TC:` lines from short arguments | unaudited |
 
 ## Wire and injection
@@ -51,12 +52,13 @@ or whose check U4 deleted says so.
 | `crates/daemon/testdata/wire-golden.json` | the flatten step, including `path` inputs | unaudited |
 | `wire.rs:1260` (inside a reduction test) | a reduced tool result keeps its output variant; no path | unaudited |
 | `injection.rs:553` `constants_match_ts_golden`, `:1047`, `:1052`, and `crates/daemon/testdata/injection-golden.json` | the synthetic `todowrite` round trip under `TODO_TOOL` | unaudited |
+| `crates/daemon/src/transform.rs:29645` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` | the echoed synthetic pair beside a native `todowrite` call produces no duplicate tool-use id | unaudited |
 
 ## Capture adapters and outcome records
 
 | Check | Covers | Status |
 | --- | --- | --- |
-| `hs-tests:445` `adapters_bind_native_identity_exactly_and_refuse_missing_identity` | 4 units from 7 parts; a Pi user `image` beside text yields one unit; a Pi `toolResult` with an `image` item is `UnsupportedShape("tool result item")` | unaudited |
+| `hs-tests:445` `adapters_bind_native_identity_exactly_and_refuse_missing_identity` | 4 units from 7 parts; a Pi user `image` beside text yields one unit; a Pi `toolResult` with an `image` item is `UnsupportedShape("tool result item")`; an OpenCode record whose settled tool output is an object, beside text parts, is `UnsupportedShape("tool output")` (`hs-tests:681-686`) | unaudited |
 | `hs-tests:782`, `:795`, `:866`, `:878`, `:1130` | refusal arms: Pi and OpenCode roles, harness namespaces, the first failing Pi field | unaudited |
 | `hs-tests:922` `unfinished_assistant_text_is_deferred_but_settled_tools_publish` | the unfinished-assistant-text arm | unaudited |
 | `hs-tests:2358`, `:2521` | a 65,537-byte unit is `UnitTooLarge`, siblings publish, no slot taken | unaudited |
@@ -84,9 +86,9 @@ or whose check U4 deleted says so.
 
 | Check | Covers | Status |
 | --- | --- | --- |
-| `pd.rs:244`, `:267`, `:304`, `:318` | final-component symlink, growth under the read, `Missing` versus `Unreadable`, oversize | unaudited |
+| `pd.rs:244`, `:267`, `:304`, `:318` | final-component symlink, a sparse file already past the cap and a FIFO, `Missing` versus `Unreadable`, oversize; no test grows a file during the read | unaudited |
 | `pd.rs:387`, `:398` (proptests), `pd.rs:429` golden | canonical form, escape, rendered block, and hash | unaudited |
-| `sc-tests:1964`, `:2137`, `:2202`, `:2276`, `:2315` | document lineage, retirement, renames, project isolation, unreadable reads | unaudited |
+| `sc-tests:1964`, `:2137`, `:2202`, `:2276`, `:2315` | document lineage, retirement, renames, project isolation, unreadable reads, with rows selected by `relative_path` (`sc-tests:1903-1909`); none asserts the identity values capture writes | unaudited |
 | `repository_id == project_id` | none found as an assertion; `crates/kernel/tests/eval_identity.rs` pins the encoding | none |
 | symlinked intermediate directory | none found; unreachable at HEAD because no name holds a separator | none |
 
@@ -98,10 +100,15 @@ or whose check U4 deleted says so.
 
 ## Suspiciously quiet areas
 
-- No test runs selection's `todowrite` keep-one rule over a window holding the
-  synthetic call beside a native one.
+- No test asserts that keep-one and the read-back act on the native
+  `todowrite` call alone when the echoed synthetic pair is present; selection
+  never sees the pair (`transform.rs:3467-3471`).
 - No test asserts a reduced `ToolCall` input's `path` against the original
   input's `path_arg`.
 - No harness-produced fixture holds a Pi `details.truncation.truncated` value.
-- No test holds an OpenCode message whose text parts sit beside a settled tool
-  part with a non-string output.
+- No capture-pass test counts an OpenCode record refused for a non-string
+  tool output in `adapter_refused`; the adapter refusal itself is
+  `hs-tests:681-686`.
+- No test gives the summary line one input holding both a description and a
+  key argument, and none pairs `pattern` with `filePath` at the display query.
+- No CI step diffs `crates/daemon/testdata` against the PR base.
