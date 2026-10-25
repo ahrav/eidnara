@@ -60,8 +60,11 @@ The user-tier `project_docs.files` list names the documents
 entry to be a well-formed Kernel identity value
 (`crates/kernel/src/source_identity.rs:283`: 1 to 512 bytes, no control
 character), so every admitted path can key its document lineage.
-`read_document` (`project_docs.rs:177`, through `read_beneath` at `:216`
-against one root descriptor per pass from `open_root` at `:186`) opens the
+`read_project_docs_canonical` (`project_docs.rs:311`) is the production
+reader: it reads each listed path through `read_beneath` (`project_docs.rs:216`)
+against one root descriptor per pass from `open_root` (`:186`), and
+`read_document` (`:177`) is the test-only wrapper over the same pair.
+`read_beneath` opens the
 parent and then the final component with `openat2` under `RESOLVE`
 (`crates/daemon/src/confined_path.rs:5`: beneath the root, no symlinks, no magic
 links, no mount crossing) and checks the type, size, and UTF-8 on the opened descriptor. When
