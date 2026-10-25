@@ -7,13 +7,13 @@ project digest into both identity fields.
 
 ## Evidence trail
 
-- `crates/daemon/src/source_capture.rs:923-974` `plan_document`; the identity
-  vector at `:942-946` holds `("project_id", P)`, `("repository_id", P)`, and
+- `crates/daemon/src/source_capture.rs:945-996` `plan_document`; the identity
+  vector at `:964-968` holds `("project_id", P)`, `("repository_id", P)`, and
   `("relative_path", name)`.
-- `:947` derives the lineage from that identity; `:949-951` reads the live row
+- `:969` derives the lineage from that identity; `:971-973` reads the live row
   and keeps it only for `CAPTURE_DOMAIN_ID` (`source_capture.rs:48`).
-- A missing document retires the live row (`:952-958`) through
-  `retire_document` (`:977-994`), called from `capture_documents` at `:880`.
+- A missing document retires the live row (`:974-980`) through
+  `retire_document` (`:999-1016`), called from `capture_documents` at `:902`.
 - `crates/kernel/tests/eval_identity.rs` pins the identity encoding, not the
   values.
 

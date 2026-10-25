@@ -56,7 +56,7 @@ evidence, not proof.
   `transform.rs:4067` and `:4451`). The m0 composer reads project documents with
   `inject_docs: true` (`config.rs:162`).
 - `explicit-config-only`: capture runs only when `source_capture_enabled` is
-  set (`config.rs:152` defaults it false; `sc.rs:262-273` gates on it). The
+  set (`config.rs:152` defaults it false; `sc.rs:267-278` gates on it). The
   summarizer `TC:` line runs only on the history-summarizer path, which needs a
   non-empty model chain: `model_chain` defaults empty (`config.rs:147`),
   `eidnara_folds` requires it (`config.rs:187-191`),
@@ -81,7 +81,7 @@ evidence, not proof.
 | [il-reduced-tool-call-carries-extracted-path](#il-reduced-tool-call-carries-extracted-path) | A (queued) | safety | default-production | always | not yet | active |
 | [il-synthetic-todowrite-round-trips-under-one-name](#il-synthetic-todowrite-round-trips-under-one-name) | A (queued) | safety | default-production | always | partial | active |
 | [il-tool-summary-description-precedes-key-arg](#il-tool-summary-description-precedes-key-arg) | A (queued) | safety | explicit-config-only | always | partial | active |
-| [il-readmission-block-ends-batch-unnamed-at-head](#il-readmission-block-ends-batch-unnamed-at-head) | A (queued) | safety | explicit-config-only | always | not yet | active |
+| [il-readmission-block-ends-batch-unnamed-at-head](#il-readmission-block-ends-batch-unnamed-at-head) | A (queued) | safety | explicit-config-only | always | not yet | invalidated |
 | [il-vocabulary-literals-live-in-one-module](#il-vocabulary-literals-live-in-one-module) | B S2 | safety | default-production | always | partial | active |
 | [il-classify-total-with-unknown](#il-classify-total-with-unknown) | B S2 | safety | default-production | always | yes | active |
 | [il-unknown-tool-never-dropped-deduped-or-edit-marked](#il-unknown-tool-never-dropped-deduped-or-edit-marked) | B S2 | safety | default-production | always(!X) | yes | active |
@@ -117,12 +117,12 @@ Open questions: None.
 ### il-adapter-refusal-is-per-message
 
 Type: safety
-Reachability: explicit-config-only - `opencode_units_within` and `pi_units_within` have one production caller, `CaptureJob::units` (`sc.rs:1005-1035`), behind `consents` (`sc.rs:262-273`).
+Reachability: explicit-config-only - `opencode_units_within` and `pi_units_within` have one production caller, `CaptureJob::units` (`sc.rs:1027-1057`), behind `consents` (`sc.rs:267-278`).
 Status: active
 Exercised: partial - `hs-tests:445` (Pi tool result with an `image` item refuses as `UnsupportedShape("tool result item")`), `:782`, `:795`, `:1130`; `sc-tests:820`, `:1316`, `:1319` count refused records; `replay:93` `every_frozen_session_reconciles_with_no_unclassified_loss` replays the frozen Pi session's image-bearing tool result, asserts the adapter refused it, and asserts the reader classifies it `non_text_item`. No test holds an OpenCode message whose text parts sit beside a settled tool part with a non-string output.
 Guarantee: An adapter decides a whole native record at once: any refusal arm reached while reading a record returns `Err(AdapterRefusal)` and the record yields zero units, including units already built from earlier parts, and the pass counts that record once in `adapter_refused`.
-Check: `always` - for every record the adapter returns `Ok(Some(units))`, `Ok(None)` (budget stop through `Kept::keep`, `hs.rs:321`, `:354`, `:435`, `:443`, `:454`), or `Err(_)` with no unit; the `?` arms at `hs.rs:313`, `:327`, `:340`, `:343`, `:351`, `:424`, `:431`, `:433`, `:452` return before `kept.units` is read, and `sc.rs:1027` counts each `Err` once, added at `:1030-1033`. `always` because each call is a pure function of one record.
-Fault/timing angle: shape-driven. A budget stop (`Ok(None)`) discards that record's earlier units and ends the pass; refusals seen earlier in the stopped pass are still counted (`sc.rs:1021-1033`).
+Check: `always` - for every record the adapter returns `Ok(Some(units))`, `Ok(None)` (budget stop through `Kept::keep`, `hs.rs:321`, `:354`, `:435`, `:443`, `:454`), or `Err(_)` with no unit; the `?` arms at `hs.rs:313`, `:327`, `:340`, `:343`, `:351`, `:424`, `:431`, `:433`, `:452` return before `kept.units` is read, and `sc.rs:1049` counts each `Err` once, added at `:1052-1055`. `always` because each call is a pure function of one record.
+Fault/timing angle: shape-driven. A budget stop (`Ok(None)`) discards that record's earlier units and ends the pass; refusals seen earlier in the stopped pass are still counted (`sc.rs:1043-1055`).
 Required faults and enabling state: a Pi `toolResult` with a text item and a non-text item; an OpenCode message with a text part and a settled tool part whose `state.output` is not a string; an OpenCode text part whose `text` is not a string beside other text parts.
 Confidence: high - [evidence](evidence/il-adapter-refusal-is-per-message.md). Code read in full at `41d889ea4`; both refusal shapes matched to tests.
 Existing check: `hs-tests:445`, `:782`, `:795`, `:1130`; `sc-tests:820`, `:1316`; `replay:93`; all unaudited.
@@ -150,13 +150,13 @@ Open questions: None. The source's question (daemon counter or oracle-side class
 Type: safety
 Reachability: explicit-config-only - `to.rs:21` `opencode` and `to.rs:59` `pi` have production callers only in the capture adapters (`hs.rs:350`, `:432`); the record enters a capture unit's request digest.
 Status: active
-Exercised: yes - `tv-tests:145` `exit_codes_come_only_from_opencode_bash_integers` runs every case of `crates/daemon/testdata/opencode-tool-outcome-trace.json` (OpenCode 1.19.0) and the string, float, `read`, and Pi cases; `tv-tests:17` `each_consumer_keeps_its_name_rule` holds `Bash` and every other spelling to `None`; `hs-tests:3468` `opencode_tool_outcomes_follow_the_pinned_trace`; `sc-tests:224-227` reads `exit_code` through the capture path.
+Exercised: yes - `tv-tests:145` `exit_codes_come_only_from_opencode_bash_integers` runs every case of `crates/daemon/testdata/opencode-tool-outcome-trace.json` (OpenCode 1.19.0) and the string, float, `read`, and Pi cases; `tv-tests:17` `each_consumer_keeps_its_name_rule` holds `Bash` and every other spelling to `None`; `hs-tests:3524` `opencode_tool_outcomes_follow_the_pinned_trace`; `sc-tests:224-227` reads `exit_code` through the capture path.
 Guarantee: `ToolOutcome.exit_code` is `Some(n)` only when the record is an OpenCode `tool` part whose `tool` equals `"bash"` exactly and whose `state.metadata.exit` is a JSON integer; every Pi record and every other OpenCode tool leaves it `None`.
 Check: `always` - `to.rs:31` calls `tool_vocabulary::exit_code(Harness::OpenCode, tool_name, metadata)`, which matches `EXIT_CODE_TOOL` exactly and reads `exit` with `as_i64` (`tv.rs:200-207`, the name at `tv.rs:35`); `to.rs:72` sets `exit_code: None` for Pi. `always` because the functions are pure over one record.
 Fault/timing angle: none.
 Required faults and enabling state: a `bash` part with an integer `exit`; with a null, string, or float `exit`; a non-`bash` part carrying `exit`.
 Confidence: high - [evidence](evidence/il-exit-code-only-for-opencode-bash.md). Code and tests read; the frozen OpenCode 1.18.22 session's four `bash` parts carry `exit` 0 three times and `exit: null` once.
-Existing check: `tv-tests:17`, `:145`; `hs-tests:3468`; `sc-tests:224`; unaudited.
+Existing check: `tv-tests:17`, `:145`; `hs-tests:3524`; `sc-tests:224`; unaudited.
 Impact: an exit code attributed to a tool whose `exit` means something else would enter the frozen request digest. The digest grammar's `[; exit=N]` (#1066 D9) is still not emitted (`to.rs:156-176`).
 Open questions: None. The source asked whether OpenCode 1.18.22 writes `metadata.exit` for `bash`; the frozen session (`crates/daemon/testdata/corpus/sessions/opencode-1.18.22/mix.json`) shows it does.
 
@@ -165,13 +165,13 @@ Open questions: None. The source asked whether OpenCode 1.18.22 writes `metadata
 Type: safety
 Reachability: explicit-config-only - same callers as the record above.
 Status: active
-Exercised: partial - `tv-tests:185` `truncation_flags_are_read_from_each_harness_field` reads both paths, a non-boolean value, and a missing flag on synthetic records; `hs-tests:3468` covers the OpenCode trace. No corpus session holds a Pi `details.truncation.truncated` value: none of the frozen Pi session's thirteen tool results (twelve captured; the image-bearing one is refused) has the flag.
+Exercised: partial - `tv-tests:185` `truncation_flags_are_read_from_each_harness_field` reads both paths, a non-boolean value, and a missing flag on synthetic records; `hs-tests:3524` covers the OpenCode trace. No corpus session holds a Pi `details.truncation.truncated` value: none of the frozen Pi session's thirteen tool results (twelve captured; the image-bearing one is refused) has the flag.
 Guarantee: `ToolOutcome.truncated` is read only as the boolean `state.metadata.truncated` on an OpenCode `tool` part and only as the boolean `details.truncation.truncated` on a Pi `toolResult`; any other shape leaves it unset.
 Check: `always` - `to.rs:37` and `to.rs:71` call `tool_vocabulary::truncated_flag`, which reads the pointer `/metadata/truncated` under `state` or `/details/truncation/truncated` under the message with `as_bool` (`tv.rs:212-218`). `always` because the functions are pure over one record.
 Fault/timing angle: none.
 Required faults and enabling state: an OpenCode `bash` part with `truncated: true`; a Pi `bash` `toolResult` with `details.truncation.truncated: true`; a non-boolean value at either path.
 Confidence: high - [evidence](evidence/il-truncated-flag-read-per-harness.md). Code read; the Pi side has no harness-produced fixture.
-Existing check: `tv-tests:185`; `hs-tests:3468`; unaudited.
+Existing check: `tv-tests:185`; `hs-tests:3524`; unaudited.
 Impact: the corpus report stratifies byte lengths by this flag; for Pi every result is `truncated=unknown` until a session truncates.
 Open questions:
 - Which Pi 0.80.2 tool output makes the harness write `details.truncation`? The frozen 70,000-byte Pi result carries no flag. (unresolved, needs a Pi session whose `bash` or `read` output passes the harness's own limit)
@@ -195,11 +195,11 @@ Open questions:
 ### il-repository-id-equals-project-id-at-head
 
 Type: safety
-Reachability: explicit-config-only - `plan_document` (`sc.rs:923`) runs inside `capture_documents` (`sc.rs:844`) under consent with `inject_docs` set.
+Reachability: explicit-config-only - `plan_document` (`sc.rs:945`) runs inside `capture_documents` (`sc.rs:866`) under consent with `inject_docs` set.
 Status: active - U7 ([#1112](https://github.com/ahrav/eidnara/issues/1112)) invalidates it by deriving `repository_id` from the repository; kept so that change has a named predecessor.
 Exercised: partial - the document tests at `sc-tests:1964`, `:2137`, `:2202`, and `:2276` assert identity fields one by one; no test asserts the equality as such, and none holds two checkouts of one repository.
 Guarantee: Every `RepositoryDocuments` unit the capture path builds carries the identity `[("project_id", P), ("repository_id", P), ("relative_path", name)]` with `P` the bound project digest and `name` a `PROJECT_DOC_FILES` entry, and the live-row lookup, the unchanged check, the head read, and retirement all key on that tuple.
-Check: `always` - `sc.rs:942-946` builds the vector with `project_id` twice; `sc.rs:947` `document_lineage(&identity)`; `sc.rs:949-951` filters the live row to `CAPTURE_DOMAIN_ID`; `sc.rs:880` retires by the live row's `object_id` through `retire_document` (`sc.rs:977`). `always` because the construction is unconditional.
+Check: `always` - `sc.rs:964-968` builds the vector with `project_id` twice; `sc.rs:969` `document_lineage(&identity)`; `sc.rs:971-973` filters the live row to `CAPTURE_DOMAIN_ID`; `sc.rs:902` retires by the live row's `object_id` through `retire_document` (`sc.rs:999`). `always` because the construction is unconditional.
 Fault/timing angle: none at HEAD. Once `repository_id` is derived, the value depends on repository history, which is why U7 adds a retire-by-`relative_path` step.
 Required faults and enabling state: two worktrees or clones holding the same `ARCHITECTURE.md`; a legacy row keyed `(P, P, path)` present when the first derived-identity pass runs.
 Confidence: high - [evidence](evidence/il-repository-id-equals-project-id-at-head.md). Code read at `41d889ea4`.
@@ -231,7 +231,7 @@ Status: active - U8 ([#1113](https://github.com/ahrav/eidnara/issues/1113)) revi
 Exercised: partial - `pd.rs:244` (final-component symlink), `:267` (growth under the read), `:304` (`Missing` versus `Unreadable`), `:318` (oversize); `sc-tests:2315` `unreadable_documents_are_counted_and_retire_nothing`. No test opens a document through a symlinked parent because no name has a parent below the root.
 Guarantee: Each document is opened at `project_root.join(name)` for the fixed names with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, validated as a regular file on the opened descriptor, read to at most 256 KiB, and decoded as UTF-8; the names hold no separator, so the only resolvable symlink on the path is the project root itself.
 Check: `always` - `pd.rs:9` list; `pd.rs:178` `dir.join(filename)`; `config.rs:703-719` open flags and `is_file` on the descriptor; `pd.rs:113-133` classification. `always` because the read is unconditional per name.
-Fault/timing angle: a parent-directory swap before the open is outside `NOFOLLOW`, and at HEAD the only parent is the root. `read_document` classifies a `NotFound` open as `Missing` when `std::fs::metadata(parent)` is a directory (`pd.rs:117-122`), and `metadata` follows symlinks; under nested names a missing target under a symlinked parent would classify `Missing` and `plan_document` would retire the live row (`sc.rs:952-958`). U8's resolver must cover the classification path as well as the open.
+Fault/timing angle: a parent-directory swap before the open is outside `NOFOLLOW`, and at HEAD the only parent is the root. `read_document` classifies a `NotFound` open as `Missing` when `std::fs::metadata(parent)` is a directory (`pd.rs:117-122`), and `metadata` follows symlinks; under nested names a missing target under a symlinked parent would classify `Missing` and `plan_document` would retire the live row (`sc.rs:974-980`). U8's resolver must cover the classification path as well as the open.
 Required faults and enabling state: a symlinked final component (covered); a symlinked intermediate directory with and without a target file (unreachable at HEAD; U8 scenarios); a kernel without `openat2`.
 Confidence: high - [evidence](evidence/il-doc-read-nofollow-final-component-flat-list.md). Code read; flags verified at `41d889ea4`.
 Existing check: `pd.rs:244`, `:267`, `:304`, `:318`, `:387`, `:398`, `:429`; `sc-tests:2315`; unaudited.
@@ -287,15 +287,15 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only - batch ingest under consent; the block arises only after an operator purge.
-Status: active - U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) invalidates it with a per-unit pre-screen.
-Exercised: not yet - no daemon test mentions `ReAdmissionBlocked` or a purge; the Kernel tests linked from `sc-readmission-blocked-after-purge-tombstone` (#1104) cover ingest only.
-Guarantee: At HEAD a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1468-1470`), the pass counts `kernel_error` (`sc.rs:1290-1295`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:805-830`), so the batch is retried whole on each later pass while the block holds.
+Status: invalidated - U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) refuses a blocked unit alone in the screening preview (`hs.rs:1593-1598`). Kept so the `sc-readmit-` obligations have a named predecessor.
+Exercised: not yet - the behavior no longer exists for a block present at the screening preview; the path it describes remains for a purge that commits after that preview, which `sc-tests:2561` exercises.
+Guarantee: Before U6, a blocked digest found during batch ingest returns `KernelError::Conflict` naming no unit (`crates/kernel/src/cas/ingest.rs:822-827`, the batch contract at `:693`); `BatchRefusal::conflicting_unit` returns `None` (`hs.rs:1482-1484`), the pass counts `kernel_error` (`sc.rs:1312-1317`), and `publish_locked` records every keyed unit of the batch `Pending` (`sc.rs:827-852`), so the batch is retried whole on each later pass while the block holds.
 Check: `always` - a batch holding one tombstoned or pending-unlink digest ends `kernel_error` with every keyed unit pending and nothing retained. `always` because the Kernel check runs on every new reference.
 Fault/timing angle: a purge committed before the pass; the block outlives the pending unlink because every pending unlink is written with a tombstone.
 Required faults and enabling state: an operator purge of a captured digest, then identical bytes under a new identity beside a sibling.
-Confidence: high - [evidence](evidence/il-readmission-block-ends-batch-unnamed-at-head.md). Traced at `41d889ea4`; the pre-screen (`hs.rs:1511-1580`) holds no re-admission check.
-Existing check: none on the daemon side; Kernel tests through `sc-readmission-blocked-after-purge-tombstone` (#1104); unaudited.
-Impact: one purged digest stalls every unit of its batch on every pass. U6 replaces this with a terminal per-unit refusal; the #1104 document rows "Pending unlink (OQ20)" and "Tombstone after purge (OQ21)" become stale then (U10 handoff).
+Confidence: high - [evidence](evidence/il-readmission-block-ends-batch-unnamed-at-head.md). Traced at `41d889ea4`, whose pre-screen held no re-admission check, and re-read after U6.
+Existing check: the U6 successors `sc-tests:2514` (AE5, tombstone and pending unlink), `sc-tests:2561` (a purge between the screening preview and the commit), `sc-tests:2600` (receipt replay precedence), `sc-tests:2624` (a reclaiming digest stays pending), `hs-tests:2555` (no admission slot), and `crates/kernel/tests/cas_fault_injection.rs:588` (the preview query); unaudited.
+Impact: before U6, one purged digest stalled every unit of its batch on every pass. U6 replaces this with a terminal per-unit refusal; the #1104 document rows "Pending unlink (OQ20)" and "Tombstone after purge (OQ21)" become stale then (U10 handoff).
 Open questions: None.
 
 ### il-vocabulary-literals-live-in-one-module

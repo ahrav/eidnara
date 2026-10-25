@@ -17,7 +17,7 @@ updated for the checks U1 to U4 landed; code references verified at
 | F-b2 OpenCode message with text parts beside a settled tool whose output is not a string | hand-built JSON | il-adapter-refusal-is-per-message | no |
 | F-b3 `step-start`, `reasoning`, `file`, `ignored` text, running or pending tool, interrupted tool | frozen OpenCode session; synthetic sessions in `replay` | il-unknown-part-kind-skipped-uncounted | partly: `replay:93`, `:225`, `:345` |
 | F-b4 second pass after the turn completes | two-pass capture test | il-unknown-part-kind-skipped-uncounted | yes for text: `hs-tests:922` |
-| F-b5 purged digest re-offered beside a sibling | Kernel purge, then a capture pass | il-readmission-block-ends-batch-unnamed-at-head | no |
+| F-b5 purged digest re-offered beside a sibling | Kernel purge, then a capture pass | il-readmission-block-ends-batch-unnamed-at-head | yes, by U6: `sc-tests:2514`, `:2561`, `:2600`, `:2624`; `hs-tests:2555` |
 | F-c1 legacy `(P, P, path)` live row, then a derived-identity pass | seeded Kernel row plus a `git init` root | il-repository-id-equals-project-id-at-head | no (U7) |
 | F-c2 two worktrees of one repository | the U1 materializer with a worktree | il-repository-id-equals-project-id-at-head | no (U7) |
 | F-c3 symlinked intermediate directory with and without a target; no `openat2` | U8 fixtures; a mocked syscall | il-doc-read-nofollow-final-component-flat-list | no (U8) |
@@ -50,9 +50,6 @@ Each marker asserts preconditions, never the violation.
    il-adapter-refusal-is-per-message.
 4. A bare-name `format_tool_summary` case: closes the third arm of
    il-tool-summary-description-precedes-key-arg.
-5. A daemon capture test that purges a captured digest and re-offers it beside
-   a sibling: pins il-readmission-block-ends-batch-unnamed-at-head before U6
-   changes it.
-6. A Pi session whose tool output passes the harness's own limit: gives
+5. A Pi session whose tool output passes the harness's own limit: gives
    il-truncated-flag-read-per-harness a harness-produced witness.
-7. The U7 and U8 fixtures (F-c1 to F-c3): owned by those units.
+6. The U7 and U8 fixtures (F-c1 to F-c3): owned by those units.

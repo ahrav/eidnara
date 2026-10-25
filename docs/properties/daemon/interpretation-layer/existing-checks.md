@@ -60,9 +60,9 @@ or whose check U4 deleted says so.
 | `hs-tests:782`, `:795`, `:866`, `:878`, `:1130` | refusal arms: Pi and OpenCode roles, harness namespaces, the first failing Pi field | unaudited |
 | `hs-tests:922` `unfinished_assistant_text_is_deferred_but_settled_tools_publish` | the unfinished-assistant-text arm | unaudited |
 | `hs-tests:2358`, `:2521` | a 65,537-byte unit is `UnitTooLarge`, siblings publish, no slot taken | unaudited |
-| `hs-tests:2583` `capture_batch_refuses_a_secret_unit_without_failing_siblings`; `sc-tests:594` `a_secret_bearing_unit_is_terminal_and_its_siblings_publish` | the secret-bearing pre-screen arm | unaudited |
-| `hs-tests:2705` `batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal` | `conflicting_unit` names a unit only for `Conflict` | unaudited |
-| `hs-tests:3468` `opencode_tool_outcomes_follow_the_pinned_trace` | the OpenCode 1.19.0 trace: string `exit`, absent metadata, `tool = "task"` yield `None` | unaudited |
+| `hs-tests:2639` `capture_batch_refuses_a_secret_unit_without_failing_siblings`; `sc-tests:594` `a_secret_bearing_unit_is_terminal_and_its_siblings_publish` | the secret-bearing pre-screen arm | unaudited |
+| `hs-tests:2761` `batch_refusal_names_the_failing_unit_and_only_a_conflict_is_terminal` | `conflicting_unit` names a unit only for `Conflict` | unaudited |
+| `hs-tests:3524` `opencode_tool_outcomes_follow_the_pinned_trace` | the OpenCode 1.19.0 trace: string `exit`, absent metadata, `tool = "task"` yield `None` | unaudited |
 | `sc-tests:224-227` | a failed `bash` call's record carries no exit code through the capture path | unaudited |
 | `sc-tests:820` | a foreign-session record counts once in `adapter_refused` | unaudited |
 | `sc-tests:1316`, `:1319` | three rows without `type` count 3 | unaudited |
@@ -94,7 +94,12 @@ or whose check U4 deleted says so.
 
 | Check | Covers | Status |
 | --- | --- | --- |
-| daemon-side purge or `ReAdmissionBlocked` test | none found | none |
+| `sc-tests:2514` `a_blocked_digest_is_refused_alone_and_its_sibling_publishes` | AE5 for a tombstoned and a pending-unlink digest, and the pre-screen digest equal to the stored artifact digest | unaudited |
+| `sc-tests:2561` `a_purge_between_screen_and_commit_fails_one_pass_then_converges` | one `kernel_error` pass, then AE5 | unaudited |
+| `sc-tests:2600` `a_purged_unit_with_a_stored_receipt_replays` | receipt replay precedes the pre-screen | unaudited |
+| `sc-tests:2624` `a_reclaiming_digest_stays_pending_and_publishes_after_reclamation` | a reclaiming-only digest is never terminal | unaudited |
+| `hs-tests:2555` `a_purged_digest_is_refused_before_the_batch_and_takes_no_admission_slot` | the refused unit takes no admission slot | unaudited |
+| `crates/kernel/tests/cas_fault_injection.rs:588` `readmission_preview_names_tombstoned_and_pending_unlink_digests_and_writes_nothing` | the preview query's truth table and that it writes nothing | unaudited |
 
 ## Suspiciously quiet areas
 

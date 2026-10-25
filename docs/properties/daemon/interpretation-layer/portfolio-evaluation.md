@@ -32,7 +32,8 @@ records are proposed obligations and have no portfolio result of their own.
 ## Re-verification at `41d889ea4`
 
 - Status changes: il-dedup-selector-never-fires-on-harness-names is
-  `invalidated` (U4 deleted the selector).
+  `invalidated` (U4 deleted the selector); il-readmission-block-ends-batch-unnamed-at-head
+  is `invalidated` by U6's per-unit pre-screen.
 - Reachability changes: il-exit-code-only-for-named-tool-and-harness is
   `explicit-config-only`; its only production caller is the capture adapter.
 - `Exercised` changes: nine records moved to `yes` on U4's checks
