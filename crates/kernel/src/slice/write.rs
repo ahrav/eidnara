@@ -1135,7 +1135,7 @@ fn require_live_decision_object(tx: &Transaction<'_>, object_id: &str) -> Result
     .ok_or(KernelError::NotFound)
 }
 
-fn require_live(
+pub(crate) fn require_live(
     tx: &Transaction<'_>,
     table: &str,
     column: &str,

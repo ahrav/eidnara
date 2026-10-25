@@ -3,13 +3,14 @@
 //! the engine's decoder and shares its envelope with its registry row, and a
 //! refused anchor keeps both tables at their prior rows.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use kernel::applicability::MAX_OBJECT_PAYLOAD_BYTES;
 use kernel::{
     ANCHOR_INSERT_KIND, AnchorCapture, AnchorCondition, AnchorDecodeError, AnchorKind,
     AnchorRowSpec, AnchorSpec, AnchorValidationError, AnchorValue, CommitIntent, DecisionPayload,
-    DecisionSpec, DomainSpec, KernelError, KernelStore, PatchIdCapture, Sensitivity,
+    DecisionSpec, DomainSpec, GitCondition, KernelError, KernelStore, PatchIdCapture, Sensitivity,
     validate_anchor, validate_anchor_row,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -99,12 +100,22 @@ fn decision(name: &str, anchor_id: &str) -> DecisionSpec {
     }
 }
 
-/// One valid typed value per anchor kind, in `AnchorKind::ALL` order.
-fn every_kind() -> Vec<(&'static str, AnchorValue)> {
+/// One valid typed value per anchor kind, in `AnchorKind::ALL` order, with the
+/// condition written out from the same inputs.
+fn every_kind() -> Vec<(&'static str, AnchorValue, AnchorCondition)> {
+    let captures = |captures: &[AnchorCapture]| {
+        captures
+            .iter()
+            .map(|capture| (capture.commit_oid.clone(), capture.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
     vec![
         (
             "exact",
             AnchorValue::Exact {
+                value: "pinned-token".to_string(),
+            },
+            AnchorCondition::Exact {
                 value: "pinned-token".to_string(),
             },
         ),
@@ -114,18 +125,30 @@ fn every_kind() -> Vec<(&'static str, AnchorValue)> {
                 oid: oid(0x1a),
                 captures: vec![capture(0x1a)],
             },
+            AnchorCondition::Git(GitCondition::ReachableFrom {
+                oid: oid(0x1a),
+                captures: captures(&[capture(0x1a)]),
+            }),
         ),
         (
             "reachable-between",
             AnchorValue::ReachableBetween {
                 start_oid: oid(0x2a),
                 end_oid: oid(0x3a),
-                captures: Vec::new(),
+                captures: vec![capture(0x3a), capture(0x2a)],
             },
+            AnchorCondition::Git(GitCondition::ReachableBetween {
+                start_oid: oid(0x2a),
+                end_oid: oid(0x3a),
+                captures: captures(&[capture(0x2a), capture(0x3a)]),
+            }),
         ),
         (
             "deployment",
             AnchorValue::DeploymentRevision {
+                revision: "deploy-42".to_string(),
+            },
+            AnchorCondition::DeploymentRevision {
                 revision: "deploy-42".to_string(),
             },
         ),
@@ -134,16 +157,26 @@ fn every_kind() -> Vec<(&'static str, AnchorValue)> {
             AnchorValue::ConfigRevision {
                 revision: "config-7".to_string(),
             },
+            AnchorCondition::ConfigRevision {
+                revision: "config-7".to_string(),
+            },
         ),
         (
             "platform",
             AnchorValue::PlatformVersion {
                 range: ">=1.2, <2".to_string(),
             },
+            AnchorCondition::PlatformVersion {
+                req: semver::VersionReq::parse(">=1.2, <2").unwrap(),
+            },
         ),
         (
             "interval",
             AnchorValue::WallClockInterval {
+                start_ms: 1_000,
+                end_ms: 2_000,
+            },
+            AnchorCondition::WallClockInterval {
                 start_ms: 1_000,
                 end_ms: 2_000,
             },
@@ -252,9 +285,15 @@ fn assert_anchor_rows_well_formed(root: &std::path::Path) {
 fn every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference() {
     let directory = tempfile::tempdir().unwrap();
     let store = seeded_store(directory.path());
-    for (name, value) in every_kind() {
-        let spec = spec(name, value.clone());
-        let expected = validate_anchor_row(&validate_anchor(&spec).unwrap()).unwrap();
+    for (name, value, expected) in every_kind() {
+        let mut spec = spec(name, value.clone());
+        if name == "deployment" {
+            spec.sensitivity = Sensitivity::Sensitive;
+        }
+        assert_eq!(
+            validate_anchor_row(&validate_anchor(&spec).unwrap()),
+            Ok(expected.clone())
+        );
         let anchor_id = spec.anchor_id.clone();
         let receipt = store
             .commit_before(deadline(), intent(name), |envelope| {
@@ -285,7 +324,7 @@ fn every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_referen
             )
             .unwrap();
         assert_eq!(object_kind, "anchor");
-        assert_eq!(sensitivity, "normal");
+        assert_eq!(sensitivity, spec.sensitivity.as_str());
         assert_eq!(created, receipt.commit_seq);
         let (change_kind, outbox_kind): (String, String) = connection
             .query_row(
@@ -302,7 +341,7 @@ fn every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_referen
     assert_eq!(
         every_kind()
             .iter()
-            .map(|(_, value)| value.kind())
+            .map(|(_, value, _)| value.kind())
             .collect::<Vec<_>>(),
         AnchorKind::ALL
     );
@@ -453,6 +492,40 @@ fn invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause() {
                 },
             ),
             AnchorValidationError::Decode(AnchorDecodeError::DuplicateCapture),
+        ),
+        (
+            spec(
+                "unanchored-capture",
+                AnchorValue::ReachableFrom {
+                    oid: oid(0x21),
+                    captures: vec![capture(0x22)],
+                },
+            ),
+            AnchorValidationError::UnanchoredCapture,
+        ),
+        (
+            spec(
+                "unanchored-between-capture",
+                AnchorValue::ReachableBetween {
+                    start_oid: oid(0x23),
+                    end_oid: oid(0x24),
+                    captures: vec![capture(0x23), capture(0x25)],
+                },
+            ),
+            AnchorValidationError::UnanchoredCapture,
+        ),
+        (
+            spec(
+                "secret-capture",
+                AnchorValue::ReachableFrom {
+                    oid: oid(0x26),
+                    captures: vec![AnchorCapture {
+                        changed_paths: vec![SECRET.to_string()],
+                        ..capture(0x26)
+                    }],
+                },
+            ),
+            AnchorValidationError::SecretValue,
         ),
         (
             spec(

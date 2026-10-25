@@ -1560,6 +1560,26 @@ fn anchor_commits_pass_through_the_claim_materializer() {
         corpus.inventory(),
         seed.ledger().0.into_iter().collect::<BTreeSet<_>>()
     );
+    for surface in [Surface::ExplicitSearch, Surface::AutoInject] {
+        let kinds: BTreeSet<String> = corpus
+            .kernel
+            .visible_as_of(surface, anchored.commit_seq)
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|row| row.object.object_kind)
+            .collect();
+        assert!(!kinds.contains("anchor"), "{surface:?}: {kinds:?}");
+    }
+    assert!(
+        corpus
+            .kernel
+            .visible_as_of(Surface::ExplicitSearch, anchored.commit_seq)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == seed.object)
+    );
 }
 
 /// A subject and decision naming different objects, or a non-decision registry row, are refused rather than mapped.
