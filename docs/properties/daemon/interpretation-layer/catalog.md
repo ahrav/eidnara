@@ -9,7 +9,9 @@ specification's Part B contract does.
 ## Scope
 
 The layer is the seven caller sites the parent specification names
-([#1105](https://github.com/ahrav/eidnara/issues/1105), D3 and R5): selection
+([#1105](https://github.com/ahrav/eidnara/issues/1105), D3 and R5), held in
+nine files (the codecs are two files, and `tool_vocabulary.rs` holds the moved
+tables): selection
 (`crates/daemon/src/selection.rs`), chunk text (`chunk_text.rs`), wire
 extraction (`wire.rs`), tool outcome (`tool_outcome.rs`), injection
 (`injection.rs`), the summarizer chunk formatter
@@ -41,12 +43,9 @@ Part B S2 records (proposed obligations) from comment 2, both authored at
 part changes only `docs/`, so the references hold at its head. Corrections to
 the source's coordinates and claims are stated in each record's evidence
 file. Records keep their source's `Check` semantics and confidence unless the
-evidence file says why they changed.
-
-Companion files: [`literals.md`](literals.md) is the literal classification
-table; [`loss-conditions.md`](loss-conditions.md) mirrors the closed
-loss-condition enumeration and records the fail-closed dispositions of the
-document reader and the capture pre-screen.
+evidence file's investigation log says why they changed; a Part B record's
+higher confidence rests on the U4 code and tests that implement it, which is
+evidence, not proof.
 
 ## Reachability classes
 
@@ -75,7 +74,7 @@ document reader and the capture pre-screen.
 | [il-unknown-part-kind-skipped-uncounted](#il-unknown-part-kind-skipped-uncounted) | A | safety | explicit-config-only | always | partial | active |
 | [il-exit-code-only-for-opencode-bash](#il-exit-code-only-for-opencode-bash) | A | safety | explicit-config-only | always | yes | active |
 | [il-truncated-flag-read-per-harness](#il-truncated-flag-read-per-harness) | A | safety | explicit-config-only | always | partial | active |
-| [il-path-arg-key-order-first-match](#il-path-arg-key-order-first-match) | A | safety | default-production (mixed per site) | always | yes | active |
+| [il-path-arg-key-order-first-match](#il-path-arg-key-order-first-match) | A | safety | default-production | always | yes | active |
 | [il-repository-id-equals-project-id-at-head](#il-repository-id-equals-project-id-at-head) | A | safety | explicit-config-only | always | partial | active |
 | [il-tool-name-matching-differs-across-consumers](#il-tool-name-matching-differs-across-consumers) | A | safety | default-production | always | yes | active |
 | [il-doc-read-nofollow-final-component-flat-list](#il-doc-read-nofollow-final-component-flat-list) | A | safety | default-production | always | partial | active |
@@ -89,18 +88,14 @@ document reader and the capture pre-screen.
 | [il-gate-fails-on-distinctive-literal-outside-module](#il-gate-fails-on-distinctive-literal-outside-module) | B S2 | safety | default-production | always | yes | active |
 | [il-dedup-removal-leaves-goldens-byte-identical](#il-dedup-removal-leaves-goldens-byte-identical) | B S2 | safety | default-production | always | yes | active |
 | [il-exit-code-only-for-named-tool-and-harness](#il-exit-code-only-for-named-tool-and-harness) | B S2 | safety | explicit-config-only | always | yes | active |
-| [il-literal-classified-contract-or-vocabulary](#il-literal-classified-contract-or-vocabulary) | B S2 | safety | default-production | always | yes | active |
+| [il-literal-classified-contract-or-vocabulary](#il-literal-classified-contract-or-vocabulary) | B S2 | safety | default-production | always | partial | active |
 | [il-path-arg-harness-neutral](#il-path-arg-harness-neutral) | B S2 | safety | default-production | always | yes | active |
 | [il-classify-one-case-rule-per-query](#il-classify-one-case-rule-per-query) | B S2 | safety | default-production | always | yes | active |
 
 Semantics distribution: 20 `always`, 2 `always(!X)`. No liveness or
 reachability record: the surface is pure functions over one record or one
-input plus one persistence step. Coverage markers the campaign should reach
-(preconditions, never the violation): `sometimes` a window held a tool name
-outside every table; `sometimes` a Pi tool result held a non-text item beside
-a text item; `sometimes` an OpenCode window held a running tool that settled on
-a later pass; `sometimes` two checkouts of one repository captured the same
-path in one campaign.
+input plus one persistence step. The coverage markers a campaign should reach
+are listed in [`fault-map.md`](fault-map.md#coverage-checks-to-add).
 
 ## Records
 
@@ -170,7 +165,7 @@ Open questions: None. The source asked whether OpenCode 1.18.22 writes `metadata
 Type: safety
 Reachability: explicit-config-only - same callers as the record above.
 Status: active
-Exercised: partial - `tv-tests:185` `truncation_flags_are_read_from_each_harness_field` reads both paths, a non-boolean value, and a missing flag on synthetic records; `hs-tests:3468` covers the OpenCode trace. No corpus session holds a Pi `details.truncation.truncated` value: the frozen Pi session's twelve tool results all have no flag.
+Exercised: partial - `tv-tests:185` `truncation_flags_are_read_from_each_harness_field` reads both paths, a non-boolean value, and a missing flag on synthetic records; `hs-tests:3468` covers the OpenCode trace. No corpus session holds a Pi `details.truncation.truncated` value: none of the frozen Pi session's thirteen tool results (twelve captured; the image-bearing one is refused) has the flag.
 Guarantee: `ToolOutcome.truncated` is read only as the boolean `state.metadata.truncated` on an OpenCode `tool` part and only as the boolean `details.truncation.truncated` on a Pi `toolResult`; any other shape leaves it unset.
 Check: `always` - `to.rs:37` and `to.rs:71` call `tool_vocabulary::truncated_flag`, which reads the pointer `/metadata/truncated` under `state` or `/details/truncation/truncated` under the message with `as_bool` (`tv.rs:212-218`). `always` because the functions are pure over one record.
 Fault/timing angle: none.
@@ -184,7 +179,7 @@ Open questions:
 ### il-path-arg-key-order-first-match
 
 Type: safety
-Reachability: default-production for wire flattening (`wire.rs:540`, every `ToolCall` of every transform request) and edit supersession (`sel.rs:649`); explicit-config-only for the summarizer `TC:` line (`chunk_text.rs:122`, through `history_summarizer_chunk.rs:1290`).
+Reachability: default-production - wire flattening (`wire.rs:540`, every `ToolCall` of every transform request) and edit supersession (`sel.rs:649`) run on the transform path; the third site, the summarizer `TC:` line (`chunk_text.rs:122`, through `history_summarizer_chunk.rs:1290`), is explicit-config-only.
 Status: active
 Exercised: yes - `tv-tests:66` `each_site_keeps_its_key_order` runs fourteen inputs, including two recognized keys, a non-string first key, `file_path` alone, and a 61-scalar value, through `path_arg` and `extract_key_arg`; `selection-golden.json` and the `TC:` goldens hold `filePath` inputs.
 Guarantee: Each site returns the value of the first key in its ordered list whose value is a JSON string, skipping absent or non-string values: `PATH_KEYS` = `["filePath", "file_path", "path"]` for wire extraction and edit supersession (`tv.rs:41`), and `DISPLAY_PATH_KEYS` = `["filePath", "path", "pattern", "query"]` then `DISPLAY_SYMBOL_KEYS` = `["symbol", "module", "action"]` for the summary line (`tv.rs:43`, `:45`).
@@ -276,7 +271,7 @@ Open questions: None.
 ### il-tool-summary-description-precedes-key-arg
 
 Type: safety
-Reachability: explicit-config-only - the summarizer path (see Reachability classes): `history_summarizer_chunk.rs:1254` and `:1259`, `crates/daemon/src/boundary.rs:1860` and `:1867`, and `to.rs:251` and `:270` call `format_tool_summary`.
+Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1254` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:251`, `:270`) at `history_summarizer_chunk.rs:1259` and `boundary.rs:1867`.
 Status: active
 Exercised: partial - `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. No test asserts the bare-name arm.
 Guarantee: A non-empty string `description` renders `TC: {description}`; otherwise `extract_key_arg` supplies the argument, cut to 60 scalar values plus `…` for a path-like key, and renders `TC: {name}({key_arg})`; otherwise `TC: {name}`; the result passes through `normalize_text`.
@@ -339,7 +334,7 @@ Falsifier or legal witness: Falsifier: `classify("")` panics. Legal witness: `cl
 ### il-unknown-tool-never-dropped-deduped-or-edit-marked
 
 Type: safety
-Reachability: default-production
+Reachability: default-production - `select_supersession` (`sel.rs:630`) and the tier lookup (`sel.rs:749-755`) run for every arc on the transform path (`transform.rs:4133`).
 Status: active
 Exercised: yes - `sel.rs:2828` `identical_calls_produce_no_dedup_decision_for_any_tool_name` runs two identical `mcp_foo` calls carrying `filePath` and `oldString` and asserts no decision, beside an `edit` positive control; `tv-tests:133` `an_unknown_tool_takes_every_default`.
 Guarantee: For an `Unknown` tool, selection never drops it as a zero-value meta tool, never deduplicates it, and never compresses it into an `edit_marker` by a class decision; its tier is 3, its display argument comes from the generic key list, and `exit_code` is `None`.
@@ -372,7 +367,7 @@ Falsifier or legal witness: Falsifier: the gate exits 1 on the post-U4 tree beca
 ### il-dedup-removal-leaves-goldens-byte-identical
 
 Type: safety
-Reachability: default-production
+Reachability: default-production - the goldens pin the output of selection, chunking, and compression on the transform path (`transform.rs:4133`); the check itself runs once per PR in CI.
 Status: active
 Exercised: yes - `git diff a91dbc2b6 97afdaff1 -- crates/daemon/testdata` is empty, so U4 changed no golden; `crates/daemon/tests/selection_differential.rs:2248` `optimized_matches_frozen_reference_on_identical_calls` and the rest of the differential pass against a reference without dedup.
 Guarantee: Removing `DEDUP_SAFE_TOOLS`, `select_tool_dedup`, `dedup_name`, and the mirrored differential constants changed no byte of `selection-golden.json`, `differential-golden.json`, `history_summarizer-chunk-golden.json`, or `compression-fidelity.json`, because no tool either harness sends was in the dedup list.
@@ -406,16 +401,16 @@ Falsifier or legal witness: Falsifier: `exit_code(OpenCode, "mcp_foo", {exit: 2}
 Type: safety
 Reachability: default-production - the classification governs every literal of the interpretation layer.
 Status: active
-Exercised: yes - [`literals.md`](literals.md) lands the table: 256 distinct literals, 167 rows covering every field, tool, and argument-key literal, and 100 excluded literals with reasons.
+Exercised: partial - [`literals.md`](literals.md) lands the table (256 distinct literals, 167 rows covering every field, tool, and argument-key literal, 100 excluded literals with reasons), checked once at authoring; no recurring check re-runs the classification.
 Guarantee: Every string literal in the interpretation-layer files that names a field, a tool, or an argument key carries exactly one recorded class per site: contract (a harness with zero tools registered still emits it), vocabulary (a tool author chose it), or Eidnara-owned (Eidnara defines it); vocabulary literals live in the module, contract literals stay with their codec or adapter, and Eidnara-owned identifiers are defined once and referenced.
 Check: `always` - the table lists every in-scope occurrence in exactly one row, and the gate's distinctive set equals the vocabulary rows' distinctive subset. `always` because the table is a static artifact checked at authoring.
 Fault/timing angle: none.
 Required faults and enabling state: none; static.
-Confidence: high - [evidence](evidence/il-literal-classified-contract-or-vocabulary.md). The table was built by a mechanical extraction and checked for one row per occurrence and for the gate-set equality.
+Confidence: medium - [evidence](evidence/il-literal-classified-contract-or-vocabulary.md). The extraction, the one-row-per-occurrence check, and the gate-set equality are mechanical; assigning a class to a generic word is a judgement the table records.
 Existing check: none beyond the table; unaudited.
 Impact: an unclassified literal is moved into or out of the module by habit, and the gate's set drifts from the classification.
 Open questions:
-- Two Eidnara-owned spellings are not defined once: `synthetic_todo_` (`injection.rs:20`, `codec/opencode.rs:1074`) and the `eidnara_note` actions `read` and `dismiss` (`tv.rs:37`, `lib.rs:12853`, `:13170`, `:18608`, `crates/daemon/src/conditional_note_evaluation.rs:1905`). Define each once and reference it, or accept the spellings? (needs human input: daemon owner)
+- These Eidnara-owned spellings are not defined once: `synthetic_todo_` (`injection.rs:20`, `codec/opencode.rs:1074`) and the `eidnara_note` actions `read` and `dismiss` (`tv.rs:37`, `lib.rs:12853`, `:13170`, `:18608`, `crates/daemon/src/conditional_note_evaluation.rs:1905`). Define each once and reference it, or accept the spellings? (needs human input: daemon owner)
 Falsifier or legal witness: Falsifier: `state.metadata.exit` recorded as contract. Legal witness: `info` contract, `filePath` vocabulary, `eidnara_note` Eidnara-owned.
 
 ### il-path-arg-harness-neutral
@@ -437,7 +432,7 @@ Falsifier or legal witness: Falsifier: `path_arg({filePath: "x"})` differs from 
 ### il-classify-one-case-rule-per-query
 
 Type: safety
-Reachability: default-production
+Reachability: default-production - the selection queries (`sel.rs:645`, `:750`) and the injection read-back (`injection.rs:435`) run on the transform path; the `exit_code` rule is capture-only.
 Status: active
 Exercised: yes - `tv-tests:17` (the per-consumer table), `tv-tests:215` `every_tabled_name_reaches_a_non_unknown_answer`, `tv-tests:257` `tabled_names_classify_under_any_ascii_case_and_one_mcp_prefix`.
 Guarantee: Each module query applies one declared name rule, and the rules reproduce HEAD at every caller: selection queries (`classify`, `tier`, `selection_tier`) evaluate the name lowercased with a leading `mcp_` removed; the injection read-back evaluates the raw name ignoring ASCII case; `exit_code` evaluates the raw name exactly; the `mcp_` strip is a shipped-default rule whose collision with `edit` or `write` for an MCP tool named `edit` is a known condition, not a guarantee.

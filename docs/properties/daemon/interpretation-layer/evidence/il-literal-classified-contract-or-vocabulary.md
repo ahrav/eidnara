@@ -12,6 +12,7 @@ identifiers.
   occurrences in the production source of nine files. 156 name a field, a
   tool, an argument key, or a discriminator value, in 167 rows (39
   vocabulary, 34 Eidnara-owned, 94 contract); 100 are excluded with a reason.
+  One row is one literal under one class and one meaning.
 - The table was built by extracting every string literal outside top-level
   `#[cfg(test)]` regions and items, assigning each occurrence to one row, and
   checking that every occurrence appears in exactly one row.
@@ -51,3 +52,13 @@ file gains a string literal.
 - Findings: each spelling is repeated across files with no shared constant.
 - Missing evidence: an owner decision.
 - Conclusion: needs human input.
+
+### Q: What confidence does the classification carry?
+- Sources examined: the extraction and its checks; the rows for generic words
+  such as `/metadata/truncated` and `content`.
+- Findings: the extraction, the one-row-per-occurrence check, and the gate-set
+  equality are mechanical. A class for a generic word, such as vocabulary for
+  the OpenCode truncation pointer that U4 placed in the module, is a
+  judgement the table records.
+- Missing evidence: a recurring check that re-runs the classification.
+- Conclusion: resolved with answer: medium; `Exercised` is `partial`.

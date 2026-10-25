@@ -55,3 +55,10 @@ accepted.
   `description`.
 - Missing evidence: an owner decision.
 - Conclusion: needs human input.
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: U4 implemented the module and the gate (`97afdaff1`); the gate passes at `41d889ea4`, and the literal table locates every vocabulary literal, so the claim and its residue rest on code and a mechanical scan.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.

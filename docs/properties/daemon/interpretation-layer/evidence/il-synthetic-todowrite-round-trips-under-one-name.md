@@ -42,3 +42,10 @@ assert keep-one keeps the newer and the read-back reads the newer state.
 - Findings: yes; U4 replaced the separate spellings with `TODO_TOOL`.
 - Missing evidence: a selection-level test of the round trip.
 - Conclusion: resolved with answer; the test gap stays open.
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: the source left the three uses unverified; this pass read all three at `41d889ea4` and found one constant, `TODO_TOOL` (`crates/daemon/src/tool_vocabulary.rs:26`), behind them, and `crates/daemon/src/tool_vocabulary_tests.rs:17` asserts both queries on it.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.

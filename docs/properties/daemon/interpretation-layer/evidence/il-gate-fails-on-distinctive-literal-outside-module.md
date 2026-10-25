@@ -52,3 +52,10 @@ Covered.
   attribute to the next column-0 `}`.
 - Missing evidence: none.
 - Conclusion: resolved with answer (OQ13).
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: U4 implemented the gate; `scripts/forbid-tool-literals.test.ts` asserts each exit status on scratch trees.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.

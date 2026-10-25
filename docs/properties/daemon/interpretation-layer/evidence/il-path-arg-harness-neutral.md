@@ -37,3 +37,10 @@ Covered.
 - Missing evidence: none for the behavior; the intent is the open question of
   `il-path-arg-key-order-first-match`.
 - Conclusion: resolved with answer.
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: U4 implemented both queries; `crates/daemon/src/tool_vocabulary_tests.rs:66` and `:127` pin them, and the goldens did not change.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.

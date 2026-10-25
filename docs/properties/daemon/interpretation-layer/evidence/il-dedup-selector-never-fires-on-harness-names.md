@@ -61,3 +61,10 @@ removal changed no output.
   built-in tools; no `mcp_` name.
 - Missing evidence: a registry listing, which no harness exposes to the daemon.
 - Conclusion: resolved for the frozen closures; OQ9 owns the general question.
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: the deletion is a read of the U4 diff (`97afdaff1`), not a premise about harness names, so the record's claim about HEAD rests on code alone.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.

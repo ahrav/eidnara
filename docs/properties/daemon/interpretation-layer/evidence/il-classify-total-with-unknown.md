@@ -36,3 +36,10 @@ Covered.
   (`tool_vocabulary_tests.rs:243`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
+
+### Q: Why does confidence move from the source's `medium` to `high`?
+- Sources examined: the source record in #1105; the code and tests cited above.
+- Findings: U4 implemented `classify`; `crates/daemon/src/tool_vocabulary_tests.rs:248` runs it over arbitrary strings and `:232` over the edge names.
+- Missing evidence: none for the confidence level; an `Exercised` gap, where
+  the record names one, stays open.
+- Conclusion: resolved with answer.
