@@ -1814,7 +1814,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         envelope: charges.envelope.clone(),
         ceilings: vec![],
         // The example's arms admit no memory writes.
-        prefix_rebill: ["aged", "fresh"]
+        prefix_rebill: eval_core::PAIRED_ARMS
             .map(|arm| (arm.to_string(), eval_core::PrefixRebill::default()))
             .into(),
     };

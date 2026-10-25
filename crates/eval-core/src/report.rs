@@ -1035,12 +1035,24 @@ impl SuiteBReport {
     }
 }
 
-/// Refuses an absent `prefix_rebill` record by name, any other missing
-/// block by shape, a field the type would drop, then everything `validate`
-/// refuses.
+/// Refuses a stale schema literal and an absent `prefix_rebill` record by
+/// name, any other missing block by shape, a field the type would drop, then
+/// everything `validate` refuses.
 pub fn parse_report(value: &Value) -> Result<SuiteBReport, ReportError> {
-    if value.get(PREFIX_REBILL_KEY).is_none() {
-        return Err(ReportError::PrefixRebillMissing);
+    // A stale literal is named before the field it would lack, and only an
+    // object can omit a key.
+    if let Some(fields) = value.as_object() {
+        match fields.get("schema").and_then(Value::as_str) {
+            Some(found) if found != SUITE_B_REPORT_SCHEMA => {
+                return Err(ReportError::SchemaMismatch {
+                    found: found.to_string(),
+                });
+            }
+            _ => {}
+        }
+        if !fields.contains_key(PREFIX_REBILL_KEY) {
+            return Err(ReportError::PrefixRebillMissing);
+        }
     }
     let report =
         SuiteBReport::deserialize(value).map_err(|error| ReportError::Shape(error.to_string()))?;

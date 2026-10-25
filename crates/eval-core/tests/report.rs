@@ -2214,10 +2214,12 @@ fn an_invalid_or_repeated_ceiling_refuses_the_report_by_name() {
     );
     let mut v1_document = serde_json::to_value(&v1).unwrap();
     v1_document.as_object_mut().unwrap().remove("ceilings");
-    assert!(matches!(
+    assert_eq!(
         parse_report(&v1_document),
-        Err(ReportError::Shape(_))
-    ));
+        Err(ReportError::SchemaMismatch {
+            found: "eval-suite-b-report/v1".to_string()
+        })
+    );
 }
 
 /// `docs/evaluator.md` is a test input: every `eval-suite-b-report/vN`
@@ -2254,7 +2256,7 @@ fn evaluator_document_names_the_current_report_literal() {
 }
 
 fn zero_rebill() -> BTreeMap<String, PrefixRebill> {
-    ["aged", "fresh"]
+    eval_core::PAIRED_ARMS
         .map(|arm| (arm.to_string(), PrefixRebill::default()))
         .into()
 }
@@ -2360,6 +2362,39 @@ fn a_report_records_the_rebill_per_paired_arm_and_never_drops_it() {
         parse_report(&serde_json::to_value(&overflowing).unwrap()),
         Err(expected)
     );
+    let mut fresh_overflow = open_report();
+    fresh_overflow
+        .prefix_rebill
+        .insert("fresh".to_string(), rebill(2, 1, 1 << 52));
+    fresh_overflow
+        .prefix_rebill
+        .insert("aged".to_string(), rebill(3, 4, 1000));
+    fresh_overflow
+        .prefix_rebill
+        .get_mut("fresh")
+        .unwrap()
+        .accepted_writes = u32::MAX;
+    fresh_overflow
+        .prefix_rebill
+        .get_mut("fresh")
+        .unwrap()
+        .live_sessions = u32::MAX;
+    assert_eq!(
+        fresh_overflow.validate(),
+        Err(ReportError::RebillOverflow {
+            arm: "fresh".to_string()
+        })
+    );
+    // A token count past the canonical safe range is refused at the wire.
+    let mut wide = open_report();
+    wide.prefix_rebill
+        .insert("aged".to_string(), rebill(1, 1, 1 << 53));
+    assert!(matches!(wide.validate(), Err(ReportError::NotCanonical(_))));
+    // A document that is no object is a shape error.
+    assert!(matches!(
+        parse_report(&json!([])),
+        Err(ReportError::Shape(_))
+    ));
     // A previous-version document is refused.
     let mut v2 = value.clone();
     v2["schema"] = json!("eval-suite-b-report/v2");
@@ -2373,6 +2408,8 @@ fn a_report_records_the_rebill_per_paired_arm_and_never_drops_it() {
     v2_shaped.as_object_mut().unwrap().remove(PREFIX_REBILL_KEY);
     assert_eq!(
         parse_report(&v2_shaped),
-        Err(ReportError::PrefixRebillMissing)
+        Err(ReportError::SchemaMismatch {
+            found: "eval-suite-b-report/v2".to_string()
+        })
     );
 }
