@@ -1,6 +1,6 @@
 use context_core::redaction::{
-    Detection, RedactionError, detect_windowed_durable_bytes, redact_durable_text,
-    redact_windowed_durable_text,
+    Detection, MAX_REDACTABLE_BYTES, RedactionError, detect_windowed_durable_bytes,
+    detect_windowed_durable_text, redact_durable_text, redact_windowed_durable_text,
 };
 use rusqlite::{Transaction, params};
 
@@ -87,6 +87,10 @@ pub(super) fn identity(value: &str) -> Result<String, KernelError> {
     }
 }
 
+pub(super) fn is_clean_identity(value: &str) -> bool {
+    value.len() <= MAX_REDACTABLE_BYTES && detect_windowed_durable_text(value) == Ok(false)
+}
+
 /// Returns an [`identity`] in a `RedactedField` so callers can store it beside redacted text without recording redaction rows.
 pub(super) fn identity_field(value: &str) -> Result<RedactedField, KernelError> {
     Ok(RedactedField {
@@ -154,4 +158,48 @@ pub(super) fn clear_owner(
     )
     .map_err(map_sqlite)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_identity_verdict_matches_identity() {
+        let at_limit = "a".repeat(MAX_REDACTABLE_BYTES);
+        let over_limit = "a".repeat(MAX_REDACTABLE_BYTES + 1);
+        let keyed = format!("api_key={}", "Zx81".repeat(8));
+        let password = format!("password={}", "hunter2".repeat(3));
+        let inputs = [
+            "",
+            " ",
+            "domain-main",
+            "anchor:capture:0123456789abcdef:0123456789abcdef0123456789abcdef01234567",
+            "0123456789abcdef0123456789abcdef01234567",
+            "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678",
+            "prefix sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678 suffix",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ghp_abcdefghijklmnopqrstuvwxyzABCDEF0123",
+            &keyed,
+            &password,
+            "token",
+            "ünïcödé-ïdéntïty",
+            &at_limit,
+            &over_limit,
+        ];
+        for input in inputs {
+            assert_eq!(
+                is_clean_identity(input),
+                identity(input).is_ok(),
+                "verdicts differ for an input of {} bytes",
+                input.len()
+            );
+        }
+        assert!(is_clean_identity("domain-main"));
+        assert!(is_clean_identity(&at_limit));
+        assert!(!is_clean_identity(inputs[5]));
+        assert!(!is_clean_identity(&keyed));
+        assert!(!is_clean_identity(&password));
+        assert!(!is_clean_identity(&over_limit));
+    }
 }
