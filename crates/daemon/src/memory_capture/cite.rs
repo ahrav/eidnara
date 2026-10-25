@@ -45,6 +45,32 @@ impl CitationReason {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AnchorReason {
+    Anchored,
+    HeadUnavailable,
+}
+
+impl AnchorReason {
+    pub(super) fn of(anchor: Option<&AnchorSpec>) -> Self {
+        if anchor.is_some() {
+            Self::Anchored
+        } else {
+            Self::HeadUnavailable
+        }
+    }
+
+    /// Records the reason in a decision's rationale and its count.
+    pub(super) fn record(self, rationale: &mut Map<String, Value>, reasons: &mut Vec<Count>) {
+        let (name, count) = match self {
+            Self::Anchored => ("anchored", Count::DecisionsAnchored),
+            Self::HeadUnavailable => ("head_unavailable", Count::DecisionsHeadUnavailable),
+        };
+        rationale.insert("anchor".into(), json!(name));
+        reasons.push(count);
+    }
+}
+
 /// One live `messages` descriptor of the job's message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Block {
@@ -58,7 +84,8 @@ pub(super) struct Block {
 pub(super) enum BlockRule {
     /// The quote lies inside one located block.
     Block,
-    /// The quote crosses adjacent located blocks and their separators.
+    /// The quote crosses adjacent located blocks; a separator it touches
+    /// belongs to the blocks on both sides.
     Span,
     /// No located block holds the quote; the lowest live block is cited.
     First,
@@ -97,15 +124,21 @@ pub(super) fn is_hashed_source_id(id: &str) -> bool {
         && (offset == "0" || !offset.starts_with('0'))
 }
 
-fn message_lineage(job: &CaptureJob, block: usize) -> Result<String, KernelError> {
-    let block = block.to_string();
-    let identity = [
-        ("project_id", job.project.as_str()),
-        ("harness", job.harness.as_str()),
-        ("session_id", job.session_id.as_str()),
-        ("message_id", job.message_id.as_str()),
-        ("block_index", block.as_str()),
-    ];
+/// The lineage of one block of the job's message, or `None` for an identity
+/// the encoder refuses, which no descriptor can hold. A lineage omits the
+/// revision, so any revision encodes it.
+fn message_lineage(job: &CaptureJob, block: usize) -> Option<String> {
+    let identity = crate::harness_sources::message_identity(
+        &job.project,
+        &job.harness,
+        &job.session_id,
+        &job.message_id,
+        block,
+    );
+    let identity: Vec<(&str, &str)> = identity
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
     encode_preserving_span(&Occurrence {
         class: OccurrenceClass::Messages.code(),
         identity: &identity,
@@ -113,8 +146,28 @@ fn message_lineage(job: &CaptureJob, block: usize) -> Result<String, KernelError
         representation: crate::harness_sources::Representation::Text.as_str(),
         span: None,
     })
+    .ok()
     .map(|encoded| encoded.lineage_id)
-    .map_err(|_| KernelError::InvalidInput)
+}
+
+/// The 32 bytes a lowercase hex SHA-256 digest names, or `None` for any other
+/// string.
+fn digest_bytes(hex: &str) -> Option<[u8; 32]> {
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let hex = hex.as_bytes();
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0; 32];
+    let (pairs, _) = hex.as_chunks::<2>();
+    for (byte, [high, low]) in bytes.iter_mut().zip(pairs) {
+        *byte = (digit(*high)? << 4) | digit(*low)?;
+    }
+    Some(bytes)
 }
 
 /// Byte ranges of the leading `blocks` in `text`, which joins the message's
@@ -125,21 +178,26 @@ fn message_lineage(job: &CaptureJob, block: usize) -> Result<String, KernelError
 pub(super) fn locate(text: &str, blocks: &[Block]) -> Vec<Range<usize>> {
     let bytes = text.as_bytes();
     let mut located = Vec::new();
+    let mut targets = blocks.iter().map(|block| digest_bytes(&block.digest));
+    let Some(Some(mut target)) = targets.next() else {
+        return located;
+    };
     let mut hasher = Sha256::new();
     let mut start = 0;
     let mut fed = 0;
     let ends = memchr::memchr_iter(b'\n', bytes).chain(std::iter::once(bytes.len()));
     for end in ends {
-        let Some(block) = blocks.get(located.len()) else {
-            break;
-        };
         hasher.update(&bytes[fed..end]);
         fed = end;
-        if lower_hex(&hasher.clone().finalize()) == block.digest {
+        if hasher.clone().finalize().as_slice() == target {
             located.push(start..end);
             start = end + 1;
             fed = start.min(bytes.len());
             hasher = Sha256::new();
+            match targets.next() {
+                Some(Some(next)) => target = next,
+                _ => break,
+            }
         }
     }
     located
@@ -157,11 +215,22 @@ pub(super) fn target<'b>(
         .find(quote)
         .map(|start| start..start + quote.len())
         .filter(|span| !span.is_empty());
-    let holding = |offset: usize| located.iter().position(|range| range.contains(&offset));
-    match span.and_then(|span| Some((holding(span.start)?, holding(span.end - 1)?))) {
+    // The separator after a located block opens a quote in that block, and
+    // the separator before one closes a quote in it.
+    let opening = |offset: usize| {
+        located
+            .iter()
+            .position(|range| range.start <= offset && offset <= range.end)
+    };
+    let closing = |offset: usize| {
+        located
+            .iter()
+            .position(|range| range.start.saturating_sub(1) <= offset && offset < range.end)
+    };
+    match span.and_then(|span| Some((opening(span.start)?, closing(span.end - 1)?))) {
         Some((first, last)) if first == last => (BlockRule::Block, &blocks[first..=first]),
-        Some((first, last)) => (BlockRule::Span, &blocks[first..=last]),
-        None => (BlockRule::First, &blocks[..1]),
+        Some((first, last)) if first < last => (BlockRule::Span, &blocks[first..=last]),
+        _ => (BlockRule::First, &blocks[..1]),
     }
 }
 
@@ -184,7 +253,9 @@ impl Citation {
         }
         let mut blocks = Vec::new();
         for index in 0..MAX_CITATION_BLOCKS {
-            let lineage = message_lineage(job, index)?;
+            let Some(lineage) = message_lineage(job, index) else {
+                break;
+            };
             if let Some(row) =
                 envelope.live_source_descriptor_of_lineage(OccurrenceClass::Messages, &lineage)?
             {
@@ -335,7 +406,8 @@ mod tests {
             cited("one\nbeta two\ngamma"),
             (BlockRule::Span, vec![0, 2, 4])
         );
-        assert_eq!(cited("\ngamma"), (BlockRule::First, vec![0]));
+        assert_eq!(cited("\ngamma"), (BlockRule::Span, vec![2, 4]));
+        assert_eq!(cited("two\n"), (BlockRule::Span, vec![2, 4]));
         assert_eq!(cited("absent"), (BlockRule::First, vec![0]));
         let partial = &located[..2];
         let (rule, cited) = target(&text, "gamma", &blocks, partial);
@@ -373,6 +445,26 @@ mod tests {
             for (range, block) in located.iter().zip(&texts) {
                 prop_assert_eq!(&text[range.clone()], block.as_str());
             }
+        }
+
+        #[test]
+        fn a_quote_of_a_fully_located_message_cites_blocks_whose_join_holds_it(
+            texts in proptest::collection::vec("[a-c\n]{0,6}", 1..6),
+            from in any::<proptest::sample::Index>(),
+            length in 1usize..12,
+        ) {
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            let text = refs.join("\n");
+            prop_assume!(!text.is_empty());
+            let start = from.index(text.len());
+            let quote = &text[start..(start + length).min(text.len())];
+            let blocks = blocks(&refs);
+            let located = locate(&text, &blocks);
+            let (rule, cited) = target(&text, quote, &blocks, &located);
+            prop_assert_ne!(rule, BlockRule::First);
+            let joined: Vec<&str> = cited.iter().map(|block| refs[block.index / 2]).collect();
+            prop_assert!(joined.join("\n").contains(quote));
+            prop_assert_eq!(rule == BlockRule::Block, cited.len() == 1);
         }
     }
 }

@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`SessionIdentity::message_unit` (`crates/daemon/src/harness_sources.rs:189`) builds one `messages` unit per text block with identity `project_id`, `harness`, `session_id`, `message_id`, and `block_index`. `evidence_request` (`:992`) sets `evidence_id` to `srcev:` plus the unit's receipt key, and assigns `harness_capture` retention. The capture job never sees the key, so it cannot name the evidence.
+`SessionIdentity::message_unit` (`crates/daemon/src/harness_sources.rs:207`) builds one `messages` unit per text block with identity `project_id`, `harness`, `session_id`, `message_id`, and `block_index`. `evidence_request` (`:1010`) sets `evidence_id` to `srcev:` plus the unit's receipt key, and assigns `harness_capture` retention. The capture job never sees the key, so it cannot name the evidence.
 
 ## Failure scenario
 

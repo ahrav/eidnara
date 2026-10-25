@@ -3280,14 +3280,14 @@ async fn capture_quotes(handler: &Handler, messages: &[(&str, &str)], quotes: &[
     );
     assert_eq!(work["state"], "work", "{work}");
     let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
-    let decisions: Vec<Value> = prompt["messages"]
-        .as_array()
-        .unwrap()
+    let prompt_messages = prompt["messages"].as_array().unwrap();
+    assert_eq!(prompt_messages.len(), messages.len());
+    let decisions: Vec<Value> = prompt_messages
         .iter()
-        .map(|message| {
-            let text = message["text"].as_str().unwrap();
-            let index = messages.iter().position(|(_, source)| *source == text).unwrap();
-            json!({"message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":quotes[index],"quote":quotes[index]}]})
+        .zip(quotes)
+        .map(|(message, quote)| {
+            assert!(message["text"].as_str().unwrap().contains(quote), "{message}");
+            json!({"message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":quote,"quote":quote}]})
         })
         .collect();
     let output = json!({"version":1,"decisions":decisions});
@@ -3409,24 +3409,32 @@ fn counter(handler: &Handler, name: &str) -> u64 {
         .unwrap()
 }
 
-const CITED_SOURCES: [(&str, &str); 5] = [
+/// A secret source capture refuses to retain, so its block has no descriptor
+/// and the memory store redacts it in the capture job's text.
+const CITED_SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
+const CITED_SOURCES: [(&str, &str); 6] = [
     ("pi-one", "Use port 4321 for staging."),
     (
         "pi-four",
         "The build uses cargo.\nTests run on nextest.\nDeploys go to region us-west-2.\nLogs ship to the collector.",
     ),
     ("pi-span", "The cache lives in\nthe shared volume."),
+    ("pi-edge", "Retries are capped.\nBackoff doubles each time."),
     (
         "pi-first",
-        "Retries are capped.\nBackoff doubles each time.",
+        concat!(
+            "Rotate the key sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678.",
+            "\nThe key rotates weekly."
+        ),
     ),
     ("pi-absent", "The staging host is blue."),
 ];
-const CITED_QUOTES: [&str; 5] = [
+const CITED_QUOTES: [&str; 6] = [
     "Use port 4321 for staging.",
     "Deploys go to region us-west-2.",
     "lives in\nthe shared",
     "\nBackoff doubles",
+    "The key rotates weekly.",
     "The staging host is blue.",
 ];
 
@@ -3435,7 +3443,8 @@ const CITED_QUOTES: [&str; 5] = [
 /// repository.
 async fn publish_cited_sources(handler: &Handler, project: &Path) -> String {
     let head = crate::memory_capture::head_fixtures::repository(project, 1).remove(0);
-    let rows: Vec<Value> = CITED_SOURCES[..4]
+    assert!(CITED_SOURCES[4].1.contains(CITED_SECRET));
+    let rows: Vec<Value> = CITED_SOURCES[..5]
         .iter()
         .enumerate()
         .map(|(index, (id, text))| {
@@ -3468,13 +3477,17 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
     let head = publish_cited_sources(&handler, &project).await;
     let store = kernel_store(&handler);
     let evidence = message_evidence(&store);
-    assert_eq!(evidence.len(), 1 + 4 + 2 + 2);
+    assert_eq!(
+        evidence.len(),
+        1 + 4 + 2 + 2 + 1,
+        "the secret block has no descriptor"
+    );
     assert_eq!(
         capture_quotes(&handler, &CITED_SOURCES, &CITED_QUOTES).await,
         "processed"
     );
     let decisions = captured_decisions(dir.path());
-    assert_eq!(decisions.len(), 5);
+    assert_eq!(decisions.len(), 6);
     let cited = |message: &str, rule: &str, blocks: &[usize]| {
         let decision = &decisions[message];
         let expected: Vec<String> = blocks
@@ -3508,21 +3521,22 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
     cited("pi-one", "block", &[0]);
     cited("pi-four", "block", &[2]);
     cited("pi-span", "span", &[0, 1]);
-    cited("pi-first", "first", &[0]);
+    cited("pi-edge", "span", &[0, 1]);
+    cited("pi-first", "first", &[1]);
     let absent = &decisions["pi-absent"];
     assert_eq!(absent.rationale["citation"], "descriptor_not_found");
     assert!(absent.events.is_empty());
     assert!(absent.rationale.get("citation_evidence").is_none());
 
     let anchors = anchor_oids(dir.path());
-    assert_eq!(anchors.len(), 5, "one anchor per job");
+    assert_eq!(anchors.len(), 6, "one anchor per job");
     for decision in decisions.values() {
         assert_eq!(decision.rationale["anchor"], "anchored");
         assert_eq!(anchors[decision.anchor_id.as_ref().unwrap()], head);
         assert_eq!(decision.evidence_id, None);
         assert_eq!(decision.sensitivity, "normal");
     }
-    let admissions: BTreeSet<(String, String, String, String, i64)> = kernel_db(dir.path())
+    let admissions: Vec<(String, String, String, String, i64)> = kernel_db(dir.path())
         .prepare(
             "SELECT a.source_class,a.taint_class,a.maturity,a.effective_maturity,a.elevated_support
              FROM admission_decisions a JOIN object_registry r ON r.object_id=a.subject_object_id
@@ -3541,8 +3555,14 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(admissions.len(), 1, "{admissions:?}");
-    let (source, taint, ..) = admissions.into_iter().next().unwrap();
+    assert_eq!(admissions.len(), 6, "{admissions:?}");
+    assert!(
+        admissions
+            .iter()
+            .all(|admission| *admission == admissions[0]),
+        "{admissions:?}"
+    );
+    let (source, taint, ..) = admissions[0].clone();
     assert_eq!(
         (source.as_str(), taint.as_str()),
         ("model_inference", "assistant_inference")
@@ -3578,11 +3598,15 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
         )
         .unwrap();
     let visibility: BTreeSet<String> = serde_json::from_str(&served.result).unwrap();
-    assert_eq!(visibility.len(), 1, "{visibility:?}");
+    assert_eq!(
+        visibility.into_iter().collect::<Vec<_>>(),
+        vec!["Hidden/Labeled/Normal".to_owned()],
+        "cited and uncited memories serve alike"
+    );
 
-    assert_eq!(counter(&handler, "decisions_cited"), 4);
+    assert_eq!(counter(&handler, "decisions_cited"), 5);
     assert_eq!(counter(&handler, "decisions_descriptor_not_found"), 1);
-    assert_eq!(counter(&handler, "decisions_anchored"), 5);
+    assert_eq!(counter(&handler, "decisions_anchored"), 6);
     for name in [
         "decisions_source_capture_off",
         "decisions_source_id_unjoinable",
@@ -3600,11 +3624,21 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
 #[tokio::test]
 async fn misses_carry_one_closed_reason_each_and_the_counters_follow_them() {
     let hashed = format!("{}:0", "c".repeat(64));
-    for (fixture, source_capture) in [("plain", false), ("unborn", true), ("detached", true)] {
+    for (fixture, source_capture) in [
+        ("plain", false),
+        ("unborn", true),
+        ("sha256", true),
+        ("detached", true),
+    ] {
         let (handler, dir, project) = capture_handler(citing_config(source_capture), true).await;
         let expected_oid = match fixture {
             "unborn" => {
                 gix::init(&project).unwrap();
+                None
+            }
+            "sha256" => {
+                crate::memory_capture::head_fixtures::repository(&project, 1);
+                crate::memory_capture::head_fixtures::declare_sha256(&project);
                 None
             }
             "detached" => {
@@ -3683,7 +3717,10 @@ async fn an_invented_source_id_is_refused_before_any_citation_lookup() {
     let (handler, dir, project) = capture_handler(citing_config(true), true).await;
     publish_cited_sources(&handler, &project).await;
     let request = json!({"method":"memory.capture","session_id":SESSION,"messages":[{"id":"pi-one","role":"user","text":CITED_SOURCES[0].1}]});
-    tool_body(handler.handle_memory_capture(test_route(7), &request).await);
+    assert_eq!(
+        tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+        "accepted"
+    );
     let next =
         json!({"method":"memory.capture.next","session_id":SESSION,"model":"custom-native/model"});
     let work = tool_body(
@@ -3691,13 +3728,28 @@ async fn an_invented_source_id_is_refused_before_any_citation_lookup() {
             .handle_native_capture_next(test_route(7), &next)
             .await,
     );
+    assert_eq!(work["state"], "work", "{work}");
+    // The prompt names its sources `source_1` and on; the native id is not one of them.
     let output = json!({"version":1,"decisions":[{"message_id":"pi-one","memories":[{"category":"CONFIG_VALUES","content":"x","quote":"Use port"}]}]});
     let submission = json!({"method":"memory.capture.submit","session_id":SESSION,"lease":work["lease"],"model":work["model"],"output":output.to_string()});
-    tool_body(
-        handler
-            .handle_native_capture_submit(test_route(7), &submission)
-            .await,
+    assert_eq!(
+        tool_body(
+            handler
+                .handle_native_capture_submit(test_route(7), &submission)
+                .await
+        )["state"],
+        "processed",
+        "a refused output settles its jobs as failed extractions"
     );
+    let key = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let status = handler
+        .store()
+        .unwrap()
+        .memory_capture_status(&key)
+        .unwrap();
+    assert_eq!(status.completed, 0, "{status:?}");
     assert!(captured_decisions(dir.path()).is_empty());
     assert!(anchor_oids(dir.path()).is_empty());
     assert_eq!(counter(&handler, "decisions_anchored"), 0);

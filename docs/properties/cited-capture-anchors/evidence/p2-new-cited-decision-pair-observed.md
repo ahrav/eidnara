@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed re
 
 ## Evidence trail
 
-The U3 tests commit an anchored and cited decision, and decisions for `source_capture_off`, `source_id_unjoinable`, `descriptor_not_found`, and `head_unavailable` (`crates/daemon/src/source_capture_tests.rs:3466`, `:3601`).
+The U3 tests commit an anchored and cited decision, and decisions for `source_capture_off`, `source_id_unjoinable`, `descriptor_not_found`, and `head_unavailable` (`crates/daemon/src/source_capture_tests.rs:3475`, `:3625`).
 
 ## Failure scenario
 

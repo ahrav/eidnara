@@ -120,6 +120,18 @@ counts! {
     DecisionsHeadUnavailable => "decisions_head_unavailable",
 }
 
+/// The memory-capture decision reasons: five citation reasons, then two
+/// anchor reasons.
+const DECISION_COUNTS: [Count; 7] = [
+    Count::DecisionsCited,
+    Count::DecisionsSourceCaptureOff,
+    Count::DecisionsSourceIdUnjoinable,
+    Count::DecisionsPublishBudgetExpired,
+    Count::DecisionsDescriptorNotFound,
+    Count::DecisionsAnchored,
+    Count::DecisionsHeadUnavailable,
+];
+
 struct Counters([AtomicU64; Count::ALL.len()]);
 
 impl Default for Counters {
@@ -569,11 +581,16 @@ impl SourceCapture {
     /// Adds one committed memory-capture publish's decisions, one citation
     /// reason and one anchor reason each, and logs each reason's count.
     pub(crate) fn record_capture_decisions(&self, reasons: &[Count]) {
-        for reason in Count::ALL {
+        debug_assert!(
+            reasons
+                .iter()
+                .all(|reason| DECISION_COUNTS.contains(reason))
+        );
+        for reason in DECISION_COUNTS {
             let count = reasons.iter().filter(|seen| **seen == reason).count();
             if count > 0 {
                 self.counters.add(reason, count);
-                log("capture decisions", reason, count);
+                log("memory decisions", reason, count);
             }
         }
     }

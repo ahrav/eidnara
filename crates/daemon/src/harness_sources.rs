@@ -185,6 +185,24 @@ fn revision(value: Option<&Value>, name: &'static str) -> Result<String, Adapter
     }
 }
 
+/// The identity of one `messages` unit in the class's field order. Memory
+/// capture rebuilds it from a capture job to read the unit's descriptor.
+pub(crate) fn message_identity(
+    project_id: &str,
+    harness: &str,
+    session_id: &str,
+    message_id: &str,
+    block_index: usize,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("project_id", project_id.to_owned()),
+        ("harness", harness.to_owned()),
+        ("session_id", session_id.to_owned()),
+        ("message_id", message_id.to_owned()),
+        ("block_index", block_index.to_string()),
+    ]
+}
+
 impl SessionIdentity {
     fn message_unit(
         &self,
@@ -196,13 +214,13 @@ impl SessionIdentity {
     ) -> SourceUnit {
         SourceUnit {
             class: OccurrenceClass::Messages,
-            identity: vec![
-                ("project_id", self.project_id.clone()),
-                ("harness", self.harness.as_str().to_owned()),
-                ("session_id", self.session_id.clone()),
-                ("message_id", message_id.to_owned()),
-                ("block_index", block_index.to_string()),
-            ],
+            identity: message_identity(
+                &self.project_id,
+                self.harness.as_str(),
+                &self.session_id,
+                message_id,
+                block_index,
+            ),
             revision: revision.to_owned(),
             representation: Representation::Text,
             text: text.to_owned(),

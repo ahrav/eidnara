@@ -1207,9 +1207,10 @@ fn publish_captured_memories(
                 &mut domains,
                 &mut refusal,
             )?;
-            let citation = cite::Citation::lookup(envelope, job, consent)?;
             let mut anchor = cite::anchor_spec(job, &output.head);
             let anchor_id = anchor.as_ref().map(|spec| spec.anchor_id.clone());
+            let anchor_reason = cite::AnchorReason::of(anchor.as_ref());
+            let mut citation = None;
             let recorded_at = now_ms();
             let mut written = 0;
             for (index, memory) in output.memories.iter().enumerate() {
@@ -1228,9 +1229,13 @@ fn publish_captured_memories(
                     }
                     None => 1,
                 };
-                // The job's first written decision inserts the anchor every decision of the job names.
+                // The job's first written decision inserts the anchor every
+                // decision of the job names and reads the message's descriptors.
                 if let Some(spec) = anchor.take() {
                     envelope.insert_anchor(spec)?;
+                }
+                if citation.is_none() {
+                    citation = Some(cite::Citation::lookup(envelope, job, consent)?);
                 }
                 let id = format!(
                     "mem_{:x}",
@@ -1238,27 +1243,20 @@ fn publish_captured_memories(
                 );
                 let id = &id[..36];
                 let decision_id = format!("dec_{}", &id[4..]);
-                let mut rationale = serde_json::Map::new();
-                for (key, value) in [
+                let mut rationale: serde_json::Map<String, Value> = [
                     ("source", json!("memory_capture")),
                     ("session", json!(job.session_id)),
                     ("message", json!(job.message_id)),
                     ("quote", json!(memory.quote)),
                     ("model", json!(output.model)),
-                ] {
-                    rationale.insert(key.into(), value);
-                }
-                let (anchor_reason, anchor_count) = if anchor_id.is_some() {
-                    ("anchored", crate::source_capture::Count::DecisionsAnchored)
-                } else {
-                    (
-                        "head_unavailable",
-                        crate::source_capture::Count::DecisionsHeadUnavailable,
-                    )
-                };
-                rationale.insert("anchor".into(), json!(anchor_reason));
-                reasons.push(anchor_count);
-                let evidence = citation.cite(&job.text, &memory.quote, &mut rationale, reasons);
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect();
+                anchor_reason.record(&mut rationale, reasons);
+                let evidence = citation.as_ref().map_or_else(Vec::new, |citation| {
+                    citation.cite(&job.text, &memory.quote, &mut rationale, reasons)
+                });
                 let spec = kernel::DecisionSpec {
                     decision_id: decision_id.clone(),
                     object_id: id.into(),
@@ -1734,6 +1732,58 @@ mod tests {
         assert!(decisions.iter().all(|decision| decision.2.is_none()));
     }
 
+    /// A publish refused after its anchor and first decision were written
+    /// rolls back whole, so the retry writes the same rows into the same
+    /// Kernel with no leftover anchor to conflict with.
+    #[test]
+    fn a_retry_after_a_rolled_back_publish_writes_one_anchor_and_the_same_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let mut source = job("job-1");
+        source.role = "assistant".into();
+        source.text = "Use port 4321.".into();
+        let plan = |memories| PreparedCapture {
+            version: CAPTURE_SCHEMA_VERSION,
+            model: "test/model".into(),
+            existing: vec![],
+            memories,
+            head: FrozenHead::Commit("cd".repeat(20)),
+        };
+        let mut replacing = memory("Use port 4321.");
+        replacing.replaces = Some("mem_target".into());
+        let refused = plan(vec![memory("Use port 4321."), replacing]);
+        let kernel_root = dir.path().join("kernel");
+        let kernel = kernel::KernelStore::open(&kernel_root).unwrap();
+        let mut reasons = Vec::new();
+        assert!(matches!(
+            publish_captured_memories(
+                &kernel,
+                &project,
+                &source,
+                &refused,
+                &serde_json::to_string(&refused).unwrap(),
+                true,
+                &mut reasons,
+            ),
+            Err(kernel::KernelError::Conflict)
+        ));
+        drop(kernel);
+        let retried = published_rows(
+            &kernel_root,
+            &project,
+            &source,
+            &plan(vec![memory("Use port 4321.")]),
+        );
+        let fresh = published_rows(
+            &dir.path().join("fresh"),
+            &project,
+            &source,
+            &plan(vec![memory("Use port 4321.")]),
+        );
+        assert_eq!(retried.0.len(), 1);
+        assert_eq!(retried, fresh);
+    }
+
     /// The #1135 probe-bound measurement, run by hand:
     /// `cargo nextest run -p daemon --all-features --run-ignored only -E 'test(citation_cost)' --no-capture`.
     /// Times the whole publish closure of one 3-memory job whose lookup runs
@@ -1748,7 +1798,9 @@ mod tests {
         let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
         let text = "\n".repeat(64 * 1024);
         let mut publishes = Vec::new();
-        for run in 0..RUNS {
+        // Run 0 also creates the project's memory domain and scope, a
+        // one-time cost of the project's first publish; it is not timed.
+        for run in 0..=RUNS {
             let mut source = job(&format!("job-{run}"));
             source.text = text.clone();
             let output = PreparedCapture {
@@ -1770,7 +1822,9 @@ mod tests {
                 &mut Vec::new(),
             )
             .unwrap();
-            publishes.push(started.elapsed());
+            if run > 0 {
+                publishes.push(started.elapsed());
+            }
         }
         let block = cite::Block {
             index: 0,
