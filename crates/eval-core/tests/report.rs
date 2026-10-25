@@ -2182,6 +2182,11 @@ fn an_invalid_or_repeated_ceiling_refuses_the_report_by_name() {
         parse_report(&serde_json::to_value(&repeated).unwrap()),
         Err(ReportError::RepeatedCeiling(transfer.clone()))
     );
+    // Inside a report, the array spelling of a ceiling is refused on the
+    // round trip.
+    let mut arrayed = open_report().serialize().unwrap();
+    arrayed["ceilings"] = json!([["transfer", "t1", "t2", "4f".repeat(20)]]);
+    assert_eq!(parse_report(&arrayed), Err(ReportError::Lossy));
     // One task pair pinned at two revisions is two declarations.
     let mut repinned = open_report();
     repinned.ceilings = vec![
@@ -2235,7 +2240,8 @@ fn evaluator_document_names_the_current_report_literal() {
         "evaluator document names no `{SUITE_B_REPORT_SCHEMA}`"
     );
     assert!(
-        doc.contains(&format!("version {version} added `ceilings`")),
+        doc.contains(&format!("eval-suite-b-report/v{version}`;")),
         "evaluator document lacks the version {version} history"
     );
+    assert!(doc.contains("version 2 added `ceilings`"));
 }
