@@ -1132,17 +1132,26 @@ fn a_prefix_then_generate_run_is_replay_built_only() {
     assert!(generated_bulk.validate().is_ok());
 }
 
+/// Writes `capture` under `config.capture` and re-derives the run id the
+/// identity now hashes to.
+fn declare(m: &mut Manifest, capture: Value) {
+    m.run_identity.config[CAPTURE_CONFIG_KEY] = capture;
+    m.eval_run_id = eval_run_id(&m.run_identity).unwrap();
+}
+
 /// The support identity with `{"source_capture": "on", "memory_capture":
 /// "off"}` under `config.capture`, inside a manifest that froze a family; its
 /// constants are pinned apart from the capture-free fixture's.
 fn capture_on_manifest() -> Manifest {
     let mut m = manifest();
-    m.run_identity.config[CAPTURE_CONFIG_KEY] = json!({
-        "source_capture": "on",
-        "memory_capture": "off",
-        "write_key": "task_arm",
-    });
-    m.eval_run_id = eval_run_id(&m.run_identity).unwrap();
+    declare(
+        &mut m,
+        json!({
+            "source_capture": "on",
+            "memory_capture": "off",
+            "write_key": "task_arm",
+        }),
+    );
     m.analysis_family_digest = Some("ab".repeat(32));
     m.recency_baseline = Some(eval_core::RecencyBaseline {
         version: eval_core::RECENCY_BASELINE_VERSION.to_string(),
@@ -1180,17 +1189,15 @@ fn a_capture_declaration_is_closed_total_and_canonical() {
         }
     );
     assert_eq!(parse_capture_declaration(&reversed).unwrap(), declaration);
+    // The canonical encoder sorts keys, so these bytes are the one spelling
+    // for every input key order.
     let encode = |d: &CaptureDeclaration| canonical_json_encode(&serde_json::to_value(d).unwrap());
-    assert_eq!(
-        encode(&declaration).unwrap(),
-        canonical_json_encode(&reversed).unwrap()
-    );
     assert_eq!(
         encode(&declaration).unwrap(),
         r#"{"memory_capture":"on","source_capture":"off","write_key":"task_arm"}"#
     );
-    assert!(declaration.captures());
-    assert!(!CaptureDeclaration::OFF.captures());
+    assert!(declaration.any_on());
+    assert!(!CaptureDeclaration::OFF.any_on());
     for (label, value) in [
         (
             "unknown variant",
@@ -1214,6 +1221,11 @@ fn a_capture_declaration_is_closed_total_and_canonical() {
             }),
         ),
         ("not an object", json!("on")),
+        ("array form", json!(["off", "on", "task_arm"])),
+        (
+            "single-key map variant",
+            json!({"source_capture": {"on": null}, "memory_capture": "on", "write_key": "task_arm"}),
+        ),
     ] {
         assert!(
             matches!(
@@ -1238,8 +1250,7 @@ fn a_capture_on_run_without_a_frozen_family_is_refused_by_name() {
     );
     let unfrozen = |capture: Value| {
         let mut m = manifest();
-        m.run_identity.config[CAPTURE_CONFIG_KEY] = capture;
-        m.eval_run_id = eval_run_id(&m.run_identity).unwrap();
+        declare(&mut m, capture);
         m
     };
     for (source, memory) in [("off", "on"), ("on", "off"), ("on", "on")] {
@@ -1270,8 +1281,9 @@ fn a_capture_on_run_without_a_frozen_family_is_refused_by_name() {
     // A present value that is no declaration is refused whether or not a
     // family was frozen.
     let mut malformed = capture_on_manifest();
-    malformed.run_identity.config[CAPTURE_CONFIG_KEY]["memory_capture"] = json!(true);
-    malformed.eval_run_id = eval_run_id(&malformed.run_identity).unwrap();
+    let mut capture = malformed.run_identity.config[CAPTURE_CONFIG_KEY].clone();
+    capture["memory_capture"] = json!(true);
+    declare(&mut malformed, capture);
     assert!(matches!(
         malformed.validate(),
         Err(ManifestError::MalformedCapture(_))

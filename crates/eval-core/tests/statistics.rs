@@ -1938,17 +1938,29 @@ fn the_frozen_family_owns_the_transfer_criterion() {
     );
 }
 
-/// `family` with the given switches, and a completed manifest that froze it
-/// and declares `config` under `config.capture` (absent for `None`).
-fn captured(family: &AnalysisFamily, config: Option<Value>) -> (Manifest, Vec<PairOutcome>) {
-    let pairs = pairs_at_threshold();
-    let frozen = FrozenFamily::freeze(family).unwrap();
-    let mut manifest = recorded(&frozen, arm_rates("0", "0"), &pairs);
-    if let Some(config) = config {
-        manifest.run_identity.config[CAPTURE_CONFIG_KEY] = config;
+/// Writes `capture` under `config.capture` (removing the key for `None`) and
+/// re-derives the run id the identity now hashes to.
+fn declare(manifest: &mut Manifest, capture: Option<CaptureDeclaration>) {
+    let config = manifest.run_identity.config.as_object_mut().unwrap();
+    match capture {
+        Some(capture) => {
+            config.insert(
+                CAPTURE_CONFIG_KEY.to_string(),
+                serde_json::to_value(capture).unwrap(),
+            );
+        }
+        None => drop(config.remove(CAPTURE_CONFIG_KEY)),
     }
     manifest.eval_run_id = eval_run_id(&manifest.run_identity).unwrap();
-    (manifest, pairs)
+}
+
+/// A completed manifest that froze `family` over `pairs_at_threshold` and
+/// declares `capture` under `config.capture`.
+fn captured(family: &AnalysisFamily, capture: Option<CaptureDeclaration>) -> Manifest {
+    let frozen = FrozenFamily::freeze(family).unwrap();
+    let mut manifest = recorded(&frozen, arm_rates("0", "0"), &pairs_at_threshold());
+    declare(&mut manifest, capture);
+    manifest
 }
 
 fn declaration(source: CaptureSwitch, memory: CaptureSwitch) -> CaptureDeclaration {
@@ -1959,21 +1971,30 @@ fn declaration(source: CaptureSwitch, memory: CaptureSwitch) -> CaptureDeclarati
     }
 }
 
-#[test]
-fn capture_declarations_separate_families_and_the_run_copy_must_agree() {
+fn declarations() -> [CaptureDeclaration; 4] {
     use CaptureSwitch::{Off, On};
-    let with = |capture: CaptureDeclaration| AnalysisFamily {
+    [
+        declaration(Off, Off),
+        declaration(Off, On),
+        declaration(On, Off),
+        declaration(On, On),
+    ]
+}
+
+fn with(capture: CaptureDeclaration) -> AnalysisFamily {
+    AnalysisFamily {
         capture,
         ..family()
-    };
-    let config = |capture: CaptureDeclaration| Some(serde_json::to_value(capture).unwrap());
-    let off_on = with(declaration(Off, On));
-    let off_off = with(declaration(Off, Off));
+    }
+}
 
-    // Runs differing only in `memory_capture` have different run ids and
-    // family digests, and neither report reads under the other's family.
-    let (memory_on, pairs) = captured(&off_on, config(declaration(Off, On)));
-    let (memory_off, _) = captured(&off_off, config(declaration(Off, Off)));
+#[test]
+fn runs_under_different_capture_declarations_never_read_under_each_other() {
+    use CaptureSwitch::{Off, On};
+    let pairs = pairs_at_threshold();
+    let (off_on, off_off) = (with(declaration(Off, On)), with(declaration(Off, Off)));
+    let memory_on = captured(&off_on, Some(declaration(Off, On)));
+    let memory_off = captured(&off_off, Some(declaration(Off, Off)));
     assert_ne!(memory_on.eval_run_id, memory_off.eval_run_id);
     assert_ne!(off_on.digest().unwrap(), off_off.digest().unwrap());
     for (manifest, family) in [(&memory_on, &off_off), (&memory_off, &off_on)] {
@@ -1983,81 +2004,77 @@ fn capture_declarations_separate_families_and_the_run_copy_must_agree() {
                 if Some(&recorded) == manifest.analysis_family_digest.as_ref() && found != recorded
         ));
     }
-    assert!(matches!(
-        analyze(&memory_on, &off_on, &pairs),
-        Ok(Analysis::Report(_))
-    ));
-    assert!(matches!(
-        analyze(&memory_off, &off_off, &pairs),
-        Ok(Analysis::Report(_))
-    ));
-    // An absent key is an undeclared run, which agrees with both switches off.
-    let (undeclared, _) = captured(&off_off, None);
-    assert!(matches!(
-        analyze(&undeclared, &off_off, &pairs),
-        Ok(Analysis::Report(_))
-    ));
+}
 
-    // The family's typed copy is authoritative: a run copy that differs is
-    // refused after the freeze check passes, and so is an absent key beside a
-    // family that captures.
-    for (family, run, expected) in [
-        (
-            with(declaration(On, On)),
-            config(declaration(On, Off)),
-            Some(declaration(On, Off)),
-        ),
-        (
-            off_off.clone(),
-            config(declaration(Off, On)),
-            Some(declaration(Off, On)),
-        ),
-        (with(declaration(On, Off)), None, None),
-        (off_on.clone(), None, None),
-    ] {
-        let (manifest, pairs) = captured(&family, run);
-        assert_eq!(
-            analyze(&manifest, &family, &pairs).err(),
-            Some(StatisticsError::CaptureDeclarationMismatch {
-                config: expected,
-                family: family.capture,
-            })
-        );
+/// Every run copy (absent or one of the four declarations) against every
+/// family declaration: the run proceeds exactly when the copy, with absent
+/// read as both switches `off`, equals the family's.
+#[test]
+fn the_run_copy_of_the_capture_declaration_must_equal_the_family_copy() {
+    let pairs = pairs_at_threshold();
+    let copies = std::iter::once(None).chain(declarations().map(Some));
+    for copy in copies {
+        for declared in declarations() {
+            let family = with(declared);
+            let manifest = captured(&family, copy);
+            let outcome = analyze(&manifest, &family, &pairs);
+            if copy.unwrap_or(CaptureDeclaration::OFF) == declared {
+                assert!(
+                    matches!(outcome, Ok(Analysis::Report(_))),
+                    "{copy:?} under {declared:?}"
+                );
+            } else {
+                assert_eq!(
+                    outcome.err(),
+                    Some(StatisticsError::CaptureDeclarationMismatch {
+                        config: copy,
+                        family: declared,
+                    }),
+                    "{copy:?} under {declared:?}"
+                );
+            }
+        }
     }
     // The freeze check runs first: an edited family is refused as edited even
-    // when its declaration also disagrees.
+    // when its declaration also disagrees with the run copy.
+    let off_off = with(CaptureDeclaration::OFF);
     let mut edited = off_off.clone();
     edited.exclusions.push("post hoc".into());
-    let (manifest, pairs) = captured(&off_off, config(declaration(On, On)));
+    let manifest = captured(&off_off, Some(declarations()[3]));
     assert!(matches!(
         analyze(&manifest, &edited, &pairs),
         Err(StatisticsError::FamilyChangedAfterResults { .. })
     ));
+}
 
-    // A run that captures with no frozen family never reaches the family gate;
-    // an undeclared or all-off run without one still reads as unrecorded.
+#[test]
+fn a_capture_on_run_without_a_frozen_family_never_reaches_the_family_gate() {
+    use CaptureSwitch::{Off, On};
+    let pairs = pairs_at_threshold();
     let mut unfrozen = support::manifest();
-    unfrozen.run_identity.config[CAPTURE_CONFIG_KEY] =
-        serde_json::to_value(declaration(Off, On)).unwrap();
-    unfrozen.eval_run_id = eval_run_id(&unfrozen.run_identity).unwrap();
+    declare(&mut unfrozen, Some(declaration(Off, On)));
     assert_eq!(
-        analyze(&unfrozen, &off_on, &pairs).err(),
+        analyze(&unfrozen, &with(declaration(Off, On)), &pairs).err(),
         Some(StatisticsError::InvalidManifest(
             ManifestError::CaptureOnWithoutFrozenFamily
         ))
     );
-    unfrozen.run_identity.config[CAPTURE_CONFIG_KEY] =
-        serde_json::to_value(CaptureDeclaration::OFF).unwrap();
-    unfrozen.eval_run_id = eval_run_id(&unfrozen.run_identity).unwrap();
-    unfrozen.validate().unwrap();
-    assert_eq!(
-        analyze(&unfrozen, &off_off, &pairs).err(),
-        Some(StatisticsError::FamilyNotRecorded)
-    );
+    // An undeclared or all-off run without a family still reads as unrecorded.
+    for capture in [None, Some(CaptureDeclaration::OFF)] {
+        declare(&mut unfrozen, capture);
+        unfrozen.validate().unwrap();
+        assert_eq!(
+            analyze(&unfrozen, &with(CaptureDeclaration::OFF), &pairs).err(),
+            Some(StatisticsError::FamilyNotRecorded)
+        );
+    }
+}
 
-    // A family document's declaration is closed like the run's copy.
-    let mut value = serde_json::to_value(&off_on).unwrap();
-    assert_eq!(parse_analysis_family(&value).unwrap(), off_on);
+#[test]
+fn a_family_document_declaration_is_closed() {
+    let family = with(declarations()[1]);
+    let mut value = serde_json::to_value(&family).unwrap();
+    assert_eq!(parse_analysis_family(&value).unwrap(), family);
     value["capture"]["memory_capture"] = json!("On");
     assert!(matches!(
         parse_analysis_family(&value),
