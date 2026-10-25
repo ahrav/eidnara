@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use crate::harness_sources::{
     Harness, MAX_SOURCE_BATCH_BYTES, MAX_SOURCE_UNIT_BYTES, PublishError, Representation,
     SessionIdentity, SourcePublisher, SourceUnit, UnitDisposition, opencode_units_within,
-    pi_units_within, publish_screened, receipt_key_of,
+    pi_units_within, publish_screened, publish_screened_between, receipt_key_of,
 };
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
@@ -236,6 +236,9 @@ pub(crate) struct SourceCapture {
     counters: Counters,
     #[cfg(test)]
     pub(crate) before_publish: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Runs inside the batch publication after the screening preview and before the commit, where a purge reaches the commit without the pre-screen seeing it.
+    #[cfg(test)]
+    pub(crate) between_screen_and_commit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// F23: when set, `session.delete` returns after the Kernel retirement commits and before the memory-store delete: an application-fault cut between the two commits.
     #[cfg(test)]
     pub(crate) stop_after_retirement: AtomicBool,
@@ -252,6 +255,8 @@ impl Default for SourceCapture {
             counters: Counters::default(),
             #[cfg(test)]
             before_publish: Mutex::new(None),
+            #[cfg(test)]
+            between_screen_and_commit: Mutex::new(None),
             #[cfg(test)]
             stop_after_retirement: AtomicBool::new(false),
         }
@@ -779,7 +784,24 @@ impl CaptureJob {
         }
         let observed_at = crate::now_ms();
         let started = Instant::now();
-        let result = publish_screened(publisher, &candidates, observed_at, Some(&self.budget));
+        let result = publish_screened_between(
+            publisher,
+            &candidates,
+            observed_at,
+            Some(&self.budget),
+            || {
+                #[cfg(test)]
+                if let Some(hook) = self
+                    .capture
+                    .between_screen_and_commit
+                    .lock()
+                    .expect("capture hook mutex")
+                    .clone()
+                {
+                    hook();
+                }
+            },
+        );
         let held = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let counters = &self.capture.counters;
         counters

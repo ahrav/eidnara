@@ -2550,6 +2550,62 @@ fn capture_batch_refusals_take_no_admission_slot() {
     );
 }
 
+/// A unit whose bytes a purge tombstone names is refused before the transaction and takes no admission slot: a full batch of fresh units publishes beside it and nothing defers.
+#[test]
+fn a_purged_digest_is_refused_before_the_batch_and_takes_no_admission_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let first = publish_screened(
+        &corpus.publisher(),
+        &[pi_text_unit("pi-first", "purged text")],
+        NOW,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(first[0], UnitDisposition::Published(_)));
+    let digest = kernel::source_identity::payload_id(b"purged text");
+    corpus
+        .kernel
+        .delete_artifact(kernel::ArtifactDeletionRequest {
+            intent: CommitIntent {
+                producer: "test".into(),
+                operation_key: "purge".into(),
+                request_digest: digest.clone(),
+                actor: "test".into(),
+                cause: "readmission".into(),
+            },
+            identity: kernel::ArtifactDeletionIdentity::Digest(digest),
+            kind: kernel::ArtifactDeletionKind::Purge,
+            operator_id: Some("operator".into()),
+            target_locator: Some("incident://readmission".into()),
+            reason: Some("readmission".into()),
+            deleted_at: NOW,
+        })
+        .unwrap();
+    let mut units: Vec<SourceUnit> = (0..MAX_SOURCE_BATCH_UNITS)
+        .map(|index| pi_text_unit(&format!("pi-{index}"), &format!("unit {index}")))
+        .collect();
+    units.insert(5, pi_text_unit("pi-again", "purged text"));
+    let dispositions = publish_screened(&corpus.publisher(), &units, NOW, None).unwrap();
+    assert!(matches!(
+        dispositions[5],
+        UnitDisposition::Refused(PublishError::Artifact(
+            ArtifactErrorKind::ReAdmissionBlocked
+        ))
+    ));
+    let published = dispositions
+        .iter()
+        .filter(|disposition| matches!(disposition, UnitDisposition::Published(_)))
+        .count();
+    assert_eq!(published, MAX_SOURCE_BATCH_UNITS);
+    assert!(
+        !dispositions
+            .iter()
+            .any(|disposition| matches!(disposition, UnitDisposition::Deferred))
+    );
+}
+
 /// A unit whose project the publisher's stored scope does not name is refused on its own before the transaction; its sibling publishes.
 #[test]
 fn capture_batch_refuses_a_foreign_project_without_failing_siblings() {

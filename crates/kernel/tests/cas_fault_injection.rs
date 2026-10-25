@@ -581,6 +581,92 @@ fn purge_and_gc_fault_table_preserves_pending_work_and_converges() {
     assert_drives(&driven, Driver::ReturnValue, &["gc"]);
 }
 
+/// The capture pre-screen refuses a unit terminally only on this answer, so it must be true for
+/// both monotone tables and false for a digest whose reservation is only reclaiming, and the
+/// preview it runs in must leave the store as it found it.
+#[test]
+fn readmission_preview_names_tombstoned_and_pending_unlink_digests_and_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let purged = store
+        .ingest_artifact(ingest_request("purged", b"purged"))
+        .unwrap();
+    store
+        .delete_artifact(purge_request("purge-purged", &purged.digest))
+        .unwrap();
+    let pending = store
+        .ingest_artifact(ingest_request("pending", b"pending"))
+        .unwrap();
+    let live = store
+        .ingest_artifact(ingest_request("live", b"live"))
+        .unwrap();
+    let reclaiming = store
+        .ingest_artifact(ingest_request("reclaiming", b"reclaiming"))
+        .unwrap();
+    store
+        .delete_artifact(ArtifactDeletionRequest {
+            kind: ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            ..purge_request("delete-reclaiming", &reclaiming.digest)
+        })
+        .unwrap();
+    let deleted_at: i64 = Connection::open(root.path().join("kernel.sqlite"))
+        .unwrap()
+        .query_row("SELECT MAX(recorded_at) FROM commit_log", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(
+        store
+            .run_staging_maintenance_with_fault_for_test(
+                deleted_at + 15 * DAY_MS,
+                ArtifactGcFault::AfterReclaiming,
+            )
+            .is_err()
+    );
+    let error = store
+        .delete_artifact_with_fault_for_test(
+            purge_request("purge-pending", &pending.digest),
+            ArtifactDeletionFault::AfterCommit,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::PurgeUnlinkPending);
+    let before = SemanticState::read(root.path());
+    assert!(before.tombstones.contains(&purged.digest));
+    assert!(!before.pending_unlinks.contains(&purged.digest));
+    assert!(before.pending_unlinks.contains(&pending.digest));
+    assert!(
+        before
+            .reservations
+            .contains(&(reclaiming.digest.clone(), "Reclaiming".to_owned()))
+    );
+    let tip = store.tip().unwrap();
+    let unknown = format!("{:x}", Sha256::digest(b"never ingested"));
+    let (_, answers) = store
+        .preview(
+            std::time::Instant::now() + Duration::from_secs(5),
+            |preview| {
+                [
+                    &purged.digest,
+                    &pending.digest,
+                    &live.digest,
+                    &reclaiming.digest,
+                    &unknown,
+                ]
+                .into_iter()
+                .map(|digest| preview.artifact_readmission_blocked(digest))
+                .collect::<Result<Vec<bool>, _>>()
+            },
+        )
+        .unwrap();
+    assert_eq!(answers, [true, true, false, false, false]);
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(SemanticState::read(root.path()), before);
+}
+
 #[test]
 fn deletion_return_faults_separate_intent_envelope_and_unlink_outcomes() {
     let mut driven = Vec::new();

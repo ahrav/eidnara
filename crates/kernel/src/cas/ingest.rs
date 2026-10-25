@@ -1467,6 +1467,12 @@ fn artifact_is_blocked(
         .map_err(|_| KernelError::Io)
 }
 
+impl crate::Preview<'_> {
+    pub fn artifact_readmission_blocked(&self, digest: &str) -> Result<bool, KernelError> {
+        artifact_is_blocked(self.envelope.tx, digest)
+    }
+}
+
 fn artifact_is_reclaiming(
     connection: &rusqlite::Transaction<'_>,
     digest: &str,

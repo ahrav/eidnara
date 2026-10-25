@@ -2448,3 +2448,246 @@ async fn an_emergency_rerun_captures_the_documents_its_served_block_carries() {
         .expect("a live descriptor");
     assert_eq!(bytes_of(&store, &row), "# Architecture\n\nEdited.\n");
 }
+
+fn count(handler: &Handler, name: &str) -> u64 {
+    report(handler)[name].as_u64().unwrap()
+}
+
+/// Deletes the artifact stored under `digest`; a purge names its operator, target, and reason, and `fault` stops a purge after its commit, before the unlink, leaving a pending unlink.
+fn delete_artifact(
+    store: &KernelStore,
+    digest: &str,
+    kind: kernel::ArtifactDeletionKind,
+    fault: Option<kernel::ArtifactDeletionFault>,
+) {
+    let purge = kind == kernel::ArtifactDeletionKind::Purge;
+    let request = kernel::ArtifactDeletionRequest {
+        intent: kernel::CommitIntent {
+            producer: "capture-test".to_owned(),
+            operation_key: format!("delete:{digest}:{kind:?}"),
+            request_digest: digest.to_owned(),
+            actor: "test".to_owned(),
+            cause: "readmission".to_owned(),
+        },
+        identity: kernel::ArtifactDeletionIdentity::Digest(digest.to_owned()),
+        kind,
+        operator_id: purge.then(|| "operator".to_owned()),
+        target_locator: purge.then(|| "incident://readmission".to_owned()),
+        reason: purge.then(|| "readmission".to_owned()),
+        deleted_at: now_ms(),
+    };
+    match fault {
+        None => {
+            store.delete_artifact(request).unwrap();
+        }
+        Some(fault) => {
+            let error = store
+                .delete_artifact_with_fault_for_test(request, fault)
+                .unwrap_err();
+            assert_eq!(error.kind(), kernel::ArtifactErrorKind::PurgeUnlinkPending);
+        }
+    }
+}
+
+/// Publishes `text` as one unit and returns the payload digest its descriptor cites, after checking that the pre-screen's digest of the same bytes is that digest.
+async fn published_digest(handler: &Handler, project: &Path, text: &str) -> String {
+    let window = [opencode_user("msg_a", 1_700_000_000_000, text)];
+    let end = capture_job(handler, project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::Completed);
+    let rows = live(&kernel_store(handler), OccurrenceClass::Messages);
+    assert_eq!(rows.len(), 1);
+    let digest = kernel::source_identity::payload_id(text.as_bytes());
+    assert_eq!(rows[0].detail.artifact_digest, digest);
+    digest
+}
+
+/// The purged unit's bytes under a new identity, beside a sibling.
+fn readmission_window(text: &str) -> [Value; 2] {
+    [
+        opencode_user("msg_again", 1_700_000_000_001, text),
+        opencode_user("msg_sibling", 1_700_000_000_002, "a sibling"),
+    ]
+}
+
+/// AE5: a unit whose bytes a purge tombstone or a pending unlink names is refused alone before the commit, its sibling publishes in the same pass, and the next pass answers both from the memo.
+#[tokio::test]
+async fn a_blocked_digest_is_refused_alone_and_its_sibling_publishes() {
+    for fault in [None, Some(kernel::ArtifactDeletionFault::AfterCommit)] {
+        let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+        let digest = published_digest(&handler, &project, "purged bytes").await;
+        let store = kernel_store(&handler);
+        delete_artifact(&store, &digest, kernel::ArtifactDeletionKind::Purge, fault);
+        let (published, terminal, errors) = (
+            count(&handler, "units_published"),
+            count(&handler, "units_refused_terminal"),
+            count(&handler, "kernel_error"),
+        );
+        let window = readmission_window("purged bytes");
+        let end = capture_job(&handler, &project, SESSION, &window).await;
+        assert_eq!(end, source_capture::Count::Completed, "{fault:?}");
+        assert_eq!(
+            count(&handler, "units_published") - published,
+            1,
+            "{fault:?}"
+        );
+        assert_eq!(
+            count(&handler, "units_refused_terminal") - terminal,
+            1,
+            "{fault:?}"
+        );
+        assert_eq!(count(&handler, "kernel_error") - errors, 0, "{fault:?}");
+
+        let skipped = count(&handler, "units_memo_skipped");
+        let tip = store.tip().unwrap();
+        let end = capture_job(&handler, &project, SESSION, &window).await;
+        assert_eq!(end, source_capture::Count::Completed, "{fault:?}");
+        assert_eq!(
+            count(&handler, "units_memo_skipped") - skipped,
+            2,
+            "{fault:?}"
+        );
+        assert_eq!(store.tip().unwrap(), tip, "{fault:?}");
+        let texts: Vec<String> = live(&store, OccurrenceClass::Messages)
+            .iter()
+            .map(|row| identity_of(row)[3].1.to_owned())
+            .collect();
+        assert!(texts.contains(&"msg_sibling".to_owned()), "{fault:?}");
+        assert!(!texts.contains(&"msg_again".to_owned()), "{fault:?}");
+    }
+}
+
+/// A purge that commits after the screening preview and before the batch commit fails that one pass with the unnamed conflict; the next pass screens the unit out and publishes its sibling.
+#[tokio::test]
+async fn a_purge_between_screen_and_commit_fails_one_pass_then_converges() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let digest = published_digest(&handler, &project, "raced bytes").await;
+    let store = kernel_store(&handler);
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *handler
+        .source_capture
+        .between_screen_and_commit
+        .lock()
+        .unwrap() = Some(Arc::new({
+        let store = Arc::clone(&store);
+        let fired = Arc::clone(&fired);
+        move || {
+            if !fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                delete_artifact(&store, &digest, kernel::ArtifactDeletionKind::Purge, None);
+            }
+        }
+    }));
+    let window = readmission_window("raced bytes");
+    let (published, terminal, errors) = (
+        count(&handler, "units_published"),
+        count(&handler, "units_refused_terminal"),
+        count(&handler, "kernel_error"),
+    );
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::KernelError);
+    assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(count(&handler, "kernel_error") - errors, 1);
+    assert_eq!(count(&handler, "units_published"), published);
+
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::Completed);
+    assert_eq!(count(&handler, "kernel_error") - errors, 1);
+    assert_eq!(count(&handler, "units_published") - published, 1);
+    assert_eq!(count(&handler, "units_refused_terminal") - terminal, 1);
+}
+
+/// A unit whose descriptor receipt is stored replays it after its bytes are purged, with the memo empty as after a restart; the same bytes under a new identity are refused.
+#[tokio::test]
+async fn a_purged_unit_with_a_stored_receipt_replays() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    let digest = published_digest(&handler, &project, "replayed bytes").await;
+    let store = kernel_store(&handler);
+    delete_artifact(&store, &digest, kernel::ArtifactDeletionKind::Purge, None);
+    handler.source_capture.forget_memo_for_test();
+    let (replayed, terminal) = (
+        count(&handler, "units_replayed"),
+        count(&handler, "units_refused_terminal"),
+    );
+    let window = [opencode_user("msg_a", 1_700_000_000_000, "replayed bytes")];
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::Completed);
+    assert_eq!(count(&handler, "units_replayed") - replayed, 1);
+    assert_eq!(count(&handler, "units_refused_terminal"), terminal);
+
+    let window = [opencode_user("msg_b", 1_700_000_000_001, "replayed bytes")];
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::Completed);
+    assert_eq!(count(&handler, "units_refused_terminal") - terminal, 1);
+}
+
+/// A digest whose only state is a reclaiming reservation is not refused terminally: ingest refuses the batch retryably, the units stay pending, and they publish once reclamation finishes. A descriptor-cited digest is kept for replay, so the reclaimed bytes are stored as plain evidence.
+#[tokio::test]
+async fn a_reclaiming_digest_stays_pending_and_publishes_after_reclamation() {
+    const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    published_digest(&handler, &project, "an earlier unit").await;
+    let store = kernel_store(&handler);
+    let digest = store
+        .ingest_artifact(kernel::ArtifactIngestRequest {
+            intent: kernel::CommitIntent {
+                producer: "capture-test".to_owned(),
+                operation_key: "plain-evidence".to_owned(),
+                request_digest: kernel::source_identity::payload_id(b"plain-evidence"),
+                actor: "test".to_owned(),
+                cause: "readmission".to_owned(),
+            },
+            payload: b"reclaimed bytes".to_vec(),
+            evidence_id: "evidence-plain".to_owned(),
+            object_id: "object-plain".to_owned(),
+            object_kind: "evidence".to_owned(),
+            domain_id: "harness-capture".to_owned(),
+            source_kind: "repository".to_owned(),
+            source_id: "src/plain".to_owned(),
+            source_revision: 1,
+            media_type: "text/plain".to_owned(),
+            retention_class: "canonical".to_owned(),
+            retain_until: None,
+            asserted_sensitivity: kernel::Sensitivity::Normal,
+            provider_egress: kernel::ProviderEgress::RemoteAllowed,
+            provenance: Some(kernel::RepositoryProvenance {
+                repository_id: "repo".to_owned(),
+                revision: "abc123".to_owned(),
+            }),
+        })
+        .unwrap()
+        .digest;
+    assert_eq!(
+        digest,
+        kernel::source_identity::payload_id(b"reclaimed bytes")
+    );
+    delete_artifact(&store, &digest, kernel::ArtifactDeletionKind::Delete, None);
+    let after_grace = now_ms() + 16 * DAY_MS;
+    assert!(
+        store
+            .run_staging_maintenance_with_fault_for_test(
+                after_grace,
+                kernel::ArtifactGcFault::AfterReclaiming,
+            )
+            .is_err()
+    );
+    let (_, blocked) = store
+        .preview(Instant::now() + Duration::from_secs(5), |preview| {
+            preview.artifact_readmission_blocked(&digest)
+        })
+        .unwrap();
+    assert!(!blocked);
+    let (published, terminal) = (
+        count(&handler, "units_published"),
+        count(&handler, "units_refused_terminal"),
+    );
+    let window = readmission_window("reclaimed bytes");
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::KernelError);
+    assert_eq!(count(&handler, "units_published"), published);
+    assert_eq!(count(&handler, "units_refused_terminal"), terminal);
+
+    store.run_staging_maintenance(after_grace).unwrap();
+    let end = capture_job(&handler, &project, SESSION, &window).await;
+    assert_eq!(end, source_capture::Count::Completed);
+    assert_eq!(count(&handler, "units_published") - published, 2);
+    assert_eq!(count(&handler, "units_refused_terminal"), terminal);
+}
