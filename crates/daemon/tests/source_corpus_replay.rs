@@ -159,6 +159,8 @@ fn every_frozen_session_reconciles_with_no_unclassified_loss() {
 enum Part {
     Text(usize),
     Tool(usize),
+    /// A tool part still `pending`: the reader names it a non-unit and the adapter yields none.
+    PendingTool,
     Image,
 }
 
@@ -187,6 +189,10 @@ fn synthetic_opencode_ordered(session: &str, parts: &[Part], order: &[usize]) ->
                         "state": { "status": "completed", "input": {}, "output": "o".repeat(*bytes),
                                    "metadata": { "exit": 0 },
                                    "time": { "start": 2_000 + index, "end": 2_500 + index } },
+                    }),
+                    Part::PendingTool => json!({
+                        "type": "tool", "tool": "bash", "callID": format!("call_{session}_{index}"),
+                        "state": { "status": "pending", "input": {} },
                     }),
                     Part::Image => json!({ "type": "file", "mime": "image/png", "url": "data:," }),
                 },
@@ -335,6 +341,30 @@ fn an_oversized_unit_and_a_33_unit_batch_reconcile_to_named_losses() {
     assert_eq!(result.losses.get(&LossCondition::Deferred), Some(&1));
 }
 
+#[test]
+fn a_pending_tool_part_is_a_non_unit_and_loses_no_unit() {
+    let session = fresh_session("pending");
+    let parts = [Part::Text(12), Part::PendingTool, Part::Tool(40)];
+    let (_, records) = opencode_records(&synthetic_opencode(&session, &parts));
+    let outcome = replay(
+        &STORE.store,
+        &identity(Harness::OpenCode, &session),
+        &records,
+        &harness_adapter,
+        SETTLING_PASSES,
+    );
+    assert_partitioned(&records, &outcome);
+    let result = reconcile(&records, &outcome);
+    // The user text, the assistant text, and the settled tool part; the pending part is none.
+    assert_eq!((result.expected, result.admitted), (3, 3));
+    let skips: Vec<NonUnitReason> = records
+        .iter()
+        .flat_map(|record| &record.expected.non_units)
+        .map(|non_unit| non_unit.reason)
+        .collect();
+    assert_eq!(skips, [NonUnitReason::UnsettledTool]);
+}
+
 fn part_strategy() -> impl Strategy<Value = Part> {
     let size = prop_oneof![
         4 => 1usize..64,
@@ -343,6 +373,7 @@ fn part_strategy() -> impl Strategy<Value = Part> {
     prop_oneof![
         5 => size.clone().prop_map(Part::Text),
         3 => size.prop_map(Part::Tool),
+        1 => Just(Part::PendingTool),
         1 => Just(Part::Image),
     ]
 }
