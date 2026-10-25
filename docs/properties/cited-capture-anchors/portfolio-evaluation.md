@@ -30,7 +30,7 @@ that order and splits the fixture-rows item into its two tables.
 | R7 | Mark the receipt-conflict coverage marker test-only | applied to `p2-capture-commit-replays-by-job-key-and-frozen-digest` |
 | R8 | Fix the offset `memory_capture.rs:126` | applied: the prompt's quote rule is at `crates/daemon/src/memory_capture.rs:134` at the branch tip |
 | R9 | Fix the offset `anchor.rs:329` | applied: references to the decoder use `crates/kernel/src/anchor.rs:272` (`AnchorCondition::decode`) and the interval check inside it |
-| R10 | Fix the offset `source_capture.rs:598` | applied: `into_job` is `crates/daemon/src/source_capture.rs:711` and `CAPTURE_BUDGET` is `:41` at the branch tip |
+| R10 | Fix the offset `source_capture.rs:598` | applied: `into_job` is `crates/daemon/src/source_capture.rs:710` and `CAPTURE_BUDGET` is `:41` at the branch tip |
 
 Line drift between `a0e3f2993` and the branch tip moved several daemon
 references: the `crates/daemon/src/lib.rs` capture tests by 31 lines and

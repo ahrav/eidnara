@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`capture_commit_gate` is one `Mutex<()>` per daemon handler. `publish` holds it for the frozen-plan read and the Kernel commit (`crates/daemon/src/memory_capture.rs:1000`); the checkpoint and the explicit capture route hold it while enqueuing; the source-capture job receives it through `capture_after_response` (`crates/daemon/src/lib.rs:9166`); session deletion holds it for the whole sweep (`crates/daemon/src/lib.rs:6918`). Every holder runs on a blocking thread, so the gate is never held across an await.
+`capture_commit_gate` is one `Mutex<()>` per daemon handler. `publish` holds it for the frozen-plan read and the Kernel commit (`crates/daemon/src/memory_capture.rs:1013`); the checkpoint and the explicit capture route hold it while enqueuing; the source-capture job receives it through `capture_after_response` (`crates/daemon/src/lib.rs:9166`); session deletion holds it for the whole sweep (`crates/daemon/src/lib.rs:6918`). Every holder runs on a blocking thread, so the gate is never held across an await.
 
 ## Failure scenario
 

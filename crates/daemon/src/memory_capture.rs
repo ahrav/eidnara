@@ -587,9 +587,22 @@ fn citation_consent(config: &crate::config::DaemonConfig) -> bool {
     config.source_capture_enabled && config.memory_enabled
 }
 
-/// Each job session's settlement outcome for one submit, keyed by session id;
-/// a session with no key is settled.
-type JobSettlements = std::collections::BTreeMap<String, SettlementOutcome>;
+/// Each job session's settlement outcome for one submit; a plan holds at most
+/// `MAX_CAPTURE_MESSAGES` jobs, so a scan finds a session.
+type JobSettlements = Vec<(crate::harness_sources::SessionIdentity, SettlementOutcome)>;
+
+/// The outcome a job's citation lookup reads: its session's, or `Settled` for
+/// a job no source publish can make citable.
+fn job_settlement(settlements: &JobSettlements, job: &CaptureJob) -> SettlementOutcome {
+    cite::settlement_key(job)
+        .and_then(|key| {
+            settlements
+                .iter()
+                .find(|(session, _)| *session == key)
+                .map(|(_, outcome)| *outcome)
+        })
+        .unwrap_or(SettlementOutcome::Settled)
+}
 
 /// Capture storage and leases key on the kernel binding's project digest:
 /// one canonical root is one queue however it is spelled, and two roots that

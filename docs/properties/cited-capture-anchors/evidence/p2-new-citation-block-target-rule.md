@@ -33,7 +33,7 @@ The end-to-end fixtures at `crates/daemon/src/source_capture_tests.rs:3496`: one
 
 ### Q: Does the walk stay within the 500 ms criterion?
 
-- Sources examined: `citation_cost_measurement` (`crates/daemon/src/memory_capture.rs:1827`) on the CI profile.
+- Sources examined: `citation_cost_measurement` (`crates/daemon/src/memory_capture.rs:1840`) on the CI profile.
 - Findings: across three runs of 20 timed publishes each (the project's
   first publish, which also creates its domain and scope, is untimed), the
   publish closure of a 3-memory job running all 256 probes measured medians

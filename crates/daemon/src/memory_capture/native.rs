@@ -116,30 +116,35 @@ enum NextStep {
 impl HandlerCore {
     /// What each job session's source publish reached before this submit's
     /// citation lookups, or `None` when the daemon was cancelled during a
-    /// wait. A plan spans its project's pending jobs, so each distinct job
-    /// session is awaited; at most one source job runs at a time, so the
-    /// waits together end by one budget deadline. No wait runs for an error
-    /// submit, with consent off, or for a job whose source id cannot join.
+    /// wait. A plan spans its project's pending jobs, so every distinct job
+    /// session is observed, all under one lock: one publication slot means at
+    /// most one of them is `Running`, so the waits end by its deadline. No
+    /// wait runs for an error submit, with consent off, or for a job whose
+    /// source id cannot join.
     async fn capture_settlements(
         &self,
         binding: &SessionBinding,
         plan: &NativePlan,
         error: bool,
     ) -> Option<JobSettlements> {
-        let mut settlements = JobSettlements::new();
         if error || !citation_consent(&binding.config) {
-            return Some(settlements);
+            return Some(JobSettlements::new());
         }
+        let mut sessions = Vec::new();
         for key in plan.jobs.iter().filter_map(super::cite::settlement_key) {
-            if settlements.contains_key(&key.session_id) {
-                continue;
+            if !sessions.contains(&key) {
+                sessions.push(key);
             }
+        }
+        let observed = self.source_capture.observe_settlements(&sessions);
+        let mut settlements = JobSettlements::with_capacity(sessions.len());
+        for (session, observed) in sessions.into_iter().zip(observed) {
             let outcome = tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => return None,
-                outcome = self.source_capture.await_settlement(&key) => outcome,
+                outcome = crate::source_capture::settle(observed) => outcome,
             };
-            settlements.insert(key.session_id, outcome);
+            settlements.push((session, outcome));
         }
         Some(settlements)
     }
@@ -659,11 +664,7 @@ impl CaptureWork {
                 };
             if let Some(frozen) = prepared {
                 job.prepared = Some(frozen);
-                let settlement = settlements
-                    .get(&job.session_id)
-                    .copied()
-                    .unwrap_or(SettlementOutcome::Settled);
-                self.publish_or_recover(&job, settlement)?;
+                self.publish_or_recover(&job, job_settlement(settlements, &job))?;
             }
         }
         Ok(())

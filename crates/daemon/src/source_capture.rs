@@ -21,8 +21,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 mod settlement;
 #[cfg(test)]
 pub(crate) use settlement::Settlement;
-pub(crate) use settlement::SettlementOutcome;
 use settlement::Settlements;
+pub(crate) use settlement::{Observed, SettlementOutcome, settle};
 use tokio_util::sync::CancellationToken;
 
 use crate::harness_sources::{
@@ -574,31 +574,30 @@ impl SourceCapture {
         self.settlements().refuse(session);
     }
 
-    /// Waits until the session's source publish has settled, at most until
-    /// the running job's budget deadline. Holds no lock across the wait.
-    pub(crate) async fn await_settlement(&self, session: &SessionIdentity) -> SettlementOutcome {
-        let receiver = self.settlements().subscribe(session);
+    /// Observes every session's entry under one lock, so at most one of
+    /// them is `Running`; each observation then settles on its own with
+    /// [`settle`], and the waits together end by that one entry's deadline.
+    pub(crate) fn observe_settlements(&self, sessions: &[SessionIdentity]) -> Vec<Observed> {
+        let settlements = self.settlements();
+        let observed: Vec<Observed> = sessions
+            .iter()
+            .map(|session| settlements.observe(session))
+            .collect();
         #[cfg(test)]
-        if receiver
-            .as_ref()
-            .is_some_and(|receiver| matches!(*receiver.borrow(), Settlement::Running { .. }))
-        {
-            self.settlement_waits.fetch_add(1, Ordering::Relaxed);
-        }
-        settlement::settle(receiver).await
+        self.settlement_waits.fetch_add(
+            observed
+                .iter()
+                .filter(|observed| observed.is_running())
+                .count() as u64,
+            Ordering::Relaxed,
+        );
+        observed
     }
 
     /// What the session's source publish has reached now, without waiting:
     /// a running publish reads as `BudgetExpired`.
     pub(crate) fn settlement_now(&self, session: &SessionIdentity) -> SettlementOutcome {
-        self.settlements()
-            .subscribe(session)
-            .map_or(SettlementOutcome::Settled, |receiver| {
-                receiver
-                    .borrow()
-                    .outcome()
-                    .unwrap_or(SettlementOutcome::BudgetExpired)
-            })
+        self.settlements().now(session)
     }
 
     /// A poisoned record is a lost record: it restarts empty, which reads as

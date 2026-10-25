@@ -4031,9 +4031,13 @@ async fn on_the_paused_clock_the_wait_is_zero_when_settled_and_ends_exactly_at_t
     let submission =
         prepare_submission(&handler, test_route(7), SESSION, &[SOURCE], &[SOURCE.1]).await;
     let submit = spawn_submit(&handler, test_route(7), submission);
-    while waits(&handler) == 0 {
+    for _ in 0..10_000 {
+        if waits(&handler) > 0 {
+            break;
+        }
         tokio::task::yield_now().await;
     }
+    assert_eq!(waits(&handler), 1, "the submit armed its wait");
     let deadline = accepted_at + crate::source_capture::CAPTURE_BUDGET;
     tokio::time::advance(deadline - tokio::time::Instant::now() - Duration::from_millis(1)).await;
     for _ in 0..100 {
@@ -4054,6 +4058,14 @@ async fn on_the_paused_clock_the_wait_is_zero_when_settled_and_ends_exactly_at_t
     tokio::time::advance(Duration::from_millis(1)).await;
     assert_eq!(submit.await.unwrap(), "processed");
     assert_eq!(tokio::time::Instant::now(), deadline);
+    assert_eq!(
+        handler
+            .source_capture
+            .citation_publishes
+            .load(Ordering::Relaxed),
+        publishes + 1,
+        "the lookup ran after the deadline"
+    );
     assert_eq!(
         captured_decisions(dir.path())[SOURCE.0].rationale["citation"],
         "publish_budget_expired"
@@ -4129,12 +4141,21 @@ async fn an_opencode_submit_during_the_publish_waits_and_then_cites() {
 
 /// A lease spans the project's pending jobs: a submit on another session
 /// whose batch holds this session's job waits on this session's publish and
-/// cites it.
+/// cites it, while its own job reads its own refused handoff.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_submit_on_another_session_waits_on_each_job_session_it_carries() {
     let (handler, dir, project) = settling_handler().await;
     let go = parked_pass(&handler).await;
     let mut other = binding_with_harness(project.to_str().unwrap(), "pi", "ses-y");
+    other.config = capture_config(true);
+    handler.bind_route(test_route(8), other.clone());
+    let mut request = pi_request(&[user_row(OTHER.0, OTHER.1, 1)], "base-y");
+    request["session_id"] = json!("ses-y");
+    pass_on(&handler, test_route(8), request).await;
+    assert_eq!(
+        settlement(&handler, &project, "ses-y"),
+        Some(Settlement::Refused)
+    );
     other.config = citing_config(true);
     handler.bind_route(test_route(8), other);
     let submission = prepare_submission(
@@ -4159,10 +4180,9 @@ async fn a_submit_on_another_session_waits_on_each_job_session_it_carries() {
     let decisions = captured_decisions(dir.path());
     assert_eq!(decisions[SOURCE.0].rationale["citation"], "cited");
     assert_eq!(
-        decisions[OTHER.0].rationale["citation"],
-        "descriptor_not_found"
+        decisions[OTHER.0].rationale["citation"], "publish_budget_expired",
+        "each job reads its own session's outcome"
     );
-    assert_eq!(settlement(&handler, &project, "ses-y"), None);
 }
 
 /// AC9: a publish that outlasts its budget releases the waiting submit at

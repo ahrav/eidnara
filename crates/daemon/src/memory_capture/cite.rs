@@ -113,8 +113,6 @@ pub(super) struct Citation {
     located: Vec<Range<usize>>,
 }
 
-/// The fragment id a capture checkpoint writes for a message it cannot pass
-/// through: a SHA-256 hex digest, `:`, and a canonical decimal offset.
 /// The settlement key of the source publish a job's citation reads, or
 /// `None` for a harness source capture never serves or a hashed source id,
 /// neither of which a publish can make citable.
@@ -129,6 +127,8 @@ pub(super) fn settlement_key(job: &CaptureJob) -> Option<SessionIdentity> {
     })
 }
 
+/// The fragment id a capture checkpoint writes for a message it cannot pass
+/// through: a SHA-256 hex digest, `:`, and a canonical decimal offset.
 pub(super) fn is_hashed_source_id(id: &str) -> bool {
     let Some((digest, offset)) = id.split_once(':') else {
         return false;

@@ -18,12 +18,12 @@ None.
 
 ## What a test must construct
 
-Each reason constructed separately, with the `publish_budget_expired` and deferred-unit constructions listed in the investigation log: `crates/daemon/src/source_capture_tests.rs:3496` (cited and descriptor not found), `crates/daemon/src/source_capture_tests.rs:3646` (source capture off, hashed id, plain, unborn, and SHA-256 roots, detached HEAD); the hashed fragment id the checkpoint writes passes the shape test (`crates/daemon/src/memory_capture.rs:1574`).
+Each reason constructed separately, with the `publish_budget_expired` and deferred-unit constructions listed in the investigation log: `crates/daemon/src/source_capture_tests.rs:3496` (cited and descriptor not found), `crates/daemon/src/source_capture_tests.rs:3646` (source capture off, hashed id, plain, unborn, and SHA-256 roots, detached HEAD); the hashed fragment id the checkpoint writes passes the shape test (`crates/daemon/src/memory_capture.rs:1587`).
 
 ## Investigation log
 
 ### Q: Is `publish_budget_expired` constructible?
 
 - Sources examined: the U4 code and tests.
-- Findings: yes. `a_publish_past_its_budget_releases_the_submit_at_the_deadline` (`crates/daemon/src/source_capture_tests.rs:4173`) parks a source job past its budget, and `a_queue_full_refusal_settles_at_once_and_hashed_ids_skip_the_wait` (`crates/daemon/src/source_capture_tests.rs:4227`) refuses a second session's handoff; both commit `publish_budget_expired` decisions with no citation event and count `decisions_publish_budget_expired`. `a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found` (`crates/daemon/src/source_capture_tests.rs:4451`) constructs the `Ended { Completed }` with a deferred unit case, and `a_terminal_or_absent_entry_settles_without_waiting` (`crates/daemon/src/source_capture/settlement.rs:208`) maps `Ended { Deadline }` and `Refused` to `BudgetExpired`.
+- Findings: yes. `a_publish_past_its_budget_releases_the_submit_at_the_deadline` (`crates/daemon/src/source_capture_tests.rs:4193`) parks a source job past its budget, and `a_queue_full_refusal_settles_at_once_and_hashed_ids_skip_the_wait` (`crates/daemon/src/source_capture_tests.rs:4247`) refuses a second session's handoff; both commit `publish_budget_expired` decisions with no citation event and count `decisions_publish_budget_expired`. `a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found` (`crates/daemon/src/source_capture_tests.rs:4471`) constructs the `Ended { Completed }` with a deferred unit case, and `a_terminal_or_absent_entry_settles_without_waiting` (`crates/daemon/src/source_capture/settlement.rs:241`) maps `Ended { Deadline }` and `Refused` to `BudgetExpired`.
 - Conclusion: resolved.

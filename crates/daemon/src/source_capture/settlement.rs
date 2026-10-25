@@ -103,11 +103,35 @@ impl Settlements {
         }
     }
 
+    /// The entry's state now and a receiver of its later writes; absent is
+    /// settled.
+    pub(super) fn observe(&self, key: &SessionIdentity) -> Observed {
+        Observed(self.subscribe(key).map(|mut receiver| {
+            let state = *receiver.borrow_and_update();
+            (state, receiver)
+        }))
+    }
+
     pub(super) fn subscribe(&self, key: &SessionIdentity) -> Option<watch::Receiver<Settlement>> {
         self.entries
             .iter()
             .find(|entry| entry.key == *key)
             .map(|entry| entry.state.subscribe())
+    }
+
+    /// The outcome `key` has reached now: a running publish reads as
+    /// `BudgetExpired`, an absent key as `Settled`.
+    pub(super) fn now(&self, key: &SessionIdentity) -> SettlementOutcome {
+        self.entries.iter().find(|entry| entry.key == *key).map_or(
+            SettlementOutcome::Settled,
+            |entry| {
+                entry
+                    .state
+                    .borrow()
+                    .outcome()
+                    .unwrap_or(SettlementOutcome::BudgetExpired)
+            },
+        )
     }
 
     #[cfg(test)]
@@ -162,26 +186,35 @@ impl Settlements {
     }
 }
 
-/// Waits for the settlement `receiver` reports, bounded by the running job's
-/// budget deadline. A later acceptance replacing the observed `Running` state
-/// ends the wait as settled, since a newer pass treats the older one as ended.
-pub(super) async fn settle(receiver: Option<watch::Receiver<Settlement>>) -> SettlementOutcome {
-    let Some(mut receiver) = receiver else {
+/// One session's entry as a submit observed it, with a receiver of the
+/// writes after that observation.
+pub(crate) struct Observed(Option<(Settlement, watch::Receiver<Settlement>)>);
+
+impl Observed {
+    #[cfg(test)]
+    pub(super) fn is_running(&self) -> bool {
+        matches!(self.0, Some((Settlement::Running { .. }, _)))
+    }
+}
+
+/// Settles an observation, bounded by the running job's budget deadline. Any
+/// write after an observed `Running` state ends the wait: the entry's next
+/// write is the job's end, a refusal, or a newer acceptance, and a newer pass
+/// treats the older one as ended.
+pub(crate) async fn settle(observed: Observed) -> SettlementOutcome {
+    let Some((state, mut receiver)) = observed.0 else {
         return SettlementOutcome::Settled;
     };
-    let observed = *receiver.borrow_and_update();
-    let Settlement::Running { accepted_at } = observed else {
-        return observed.outcome().unwrap_or(SettlementOutcome::Settled);
+    let Settlement::Running { accepted_at } = state else {
+        return state.outcome().unwrap_or(SettlementOutcome::Settled);
     };
-    match tokio::time::timeout_at(
-        accepted_at + CAPTURE_BUDGET,
-        receiver.wait_for(|state| *state != observed),
-    )
-    .await
-    {
+    match tokio::time::timeout_at(accepted_at + CAPTURE_BUDGET, receiver.changed()).await {
         Err(_elapsed) => SettlementOutcome::BudgetExpired,
         Ok(Err(_closed)) => SettlementOutcome::Settled,
-        Ok(Ok(state)) => state.outcome().unwrap_or(SettlementOutcome::Settled),
+        Ok(Ok(())) => receiver
+            .borrow()
+            .outcome()
+            .unwrap_or(SettlementOutcome::Settled),
     }
 }
 
@@ -201,7 +234,7 @@ mod tests {
     }
 
     async fn outcome(settlements: &Settlements, session: &str) -> SettlementOutcome {
-        settle(settlements.subscribe(&key(session))).await
+        settle(settlements.observe(&key(session))).await
     }
 
     #[tokio::test(start_paused = true)]
@@ -240,7 +273,7 @@ mod tests {
             .lock()
             .unwrap()
             .accept(&key("ends"), accepted_at);
-        let receiver = settlements.lock().unwrap().subscribe(&key("ends"));
+        let receiver = settlements.lock().unwrap().observe(&key("ends"));
         let waiter = tokio::spawn(settle(receiver));
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(!waiter.is_finished());
@@ -256,7 +289,7 @@ mod tests {
             .unwrap()
             .accept(&key("stalls"), Instant::now());
         let started = Instant::now();
-        let receiver = settlements.lock().unwrap().subscribe(&key("stalls"));
+        let receiver = settlements.lock().unwrap().observe(&key("stalls"));
         let waiter = tokio::spawn(settle(receiver));
         tokio::time::advance(CAPTURE_BUDGET - Duration::from_millis(1)).await;
         assert!(!waiter.is_finished());
@@ -269,7 +302,7 @@ mod tests {
     async fn a_refusal_overwrites_a_running_entry_and_its_late_end_is_ignored() {
         let mut settlements = Settlements::default();
         let first = settlements.accept(&key("ses"), Instant::now());
-        let receiver = settlements.subscribe(&key("ses"));
+        let receiver = settlements.observe(&key("ses"));
         settlements.refuse(&key("ses"));
         settlements.end(&key("ses"), first, Count::Completed);
         settlements.end_if_running(&key("ses"), first, Count::Discarded);
@@ -305,7 +338,7 @@ mod tests {
         assert_eq!(settlements.len(), MAX_SETTLEMENTS);
         assert!(
             settlements.subscribe(&key("running")).is_some(),
-            "a running entry at the front moves back instead of going"
+            "a running entry is never evicted"
         );
         assert!(settlements.subscribe(&key("settled-0")).is_none());
         assert!(settlements.subscribe(&key("settled-1")).is_some());
@@ -320,7 +353,7 @@ mod tests {
         let mut settlements = Settlements::default();
         settlements.refuse(&key("oldest"));
         let acceptance = settlements.accept(&key("waited"), Instant::now());
-        let receiver = settlements.subscribe(&key("waited"));
+        let receiver = settlements.observe(&key("waited"));
         settlements.end(&key("waited"), acceptance, Count::Completed);
         for index in 0..MAX_SETTLEMENTS {
             settlements.refuse(&key(&format!("filler-{index}")));
@@ -363,10 +396,11 @@ mod tests {
             .lock()
             .unwrap()
             .accept(&key("ses"), Instant::now());
-        let receiver = settlements.lock().unwrap().subscribe(&key("ses"));
+        let receiver = settlements.lock().unwrap().observe(&key("ses"));
         let waiter = tokio::spawn(settle(receiver));
-        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
         {
+            // The newer acceptance reads the same instant as the first.
             let mut settlements = settlements.lock().unwrap();
             settlements.end(&key("ses"), first, Count::Completed);
             settlements.accept(&key("ses"), Instant::now());
@@ -380,7 +414,7 @@ mod tests {
     async fn a_waiter_whose_record_is_cleared_reads_as_settled() {
         let mut settlements = Settlements::default();
         let first = settlements.accept(&key("ses"), Instant::now());
-        let receiver = settlements.subscribe(&key("ses"));
+        let receiver = settlements.observe(&key("ses"));
         let waiter = tokio::spawn(settle(receiver));
         tokio::task::yield_now().await;
         settlements.clear();
@@ -392,6 +426,39 @@ mod tests {
             *settlements.subscribe(&key("ses")).unwrap().borrow(),
             Settlement::Running { .. }
         ));
+    }
+
+    #[test]
+    fn the_current_outcome_reads_a_running_publish_as_budget_expired() {
+        let mut settlements = Settlements::default();
+        assert_eq!(settlements.now(&key("ses")), SettlementOutcome::Settled);
+        let acceptance = settlements.accept(&key("ses"), Instant::now());
+        assert_eq!(
+            settlements.now(&key("ses")),
+            SettlementOutcome::BudgetExpired
+        );
+        settlements.end(&key("ses"), acceptance, Count::Completed);
+        assert_eq!(settlements.now(&key("ses")), SettlementOutcome::Settled);
+        settlements.refuse(&key("ses"));
+        assert_eq!(
+            settlements.now(&key("ses")),
+            SettlementOutcome::BudgetExpired
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sessions_observed_together_settle_by_the_one_running_deadline() {
+        let mut settlements = Settlements::default();
+        let running = settlements.accept(&key("a"), Instant::now());
+        let observed = [key("a"), key("b")].map(|session| settlements.observe(&session));
+        settlements.end(&key("a"), running, Count::Completed);
+        // A later pass of the second session runs after the observation.
+        settlements.accept(&key("b"), Instant::now());
+        let started = Instant::now();
+        for observed in observed {
+            assert_eq!(settle(observed).await, SettlementOutcome::Settled);
+        }
+        assert_eq!(Instant::now(), started, "the later pass arms no wait");
     }
 
     /// Measurement, run by hand: `cargo nextest run -p daemon --all-features
