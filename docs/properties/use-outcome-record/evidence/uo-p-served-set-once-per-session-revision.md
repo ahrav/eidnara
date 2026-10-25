@@ -9,7 +9,7 @@ Record kind: proposed obligation; its owning ticket #1155 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5dc8c8480`).
+its parent is `438a48b57`).
 
 - Slug kept; the guarantee names the served-set digest (OQ3-12).
 
@@ -20,7 +20,7 @@ its parent is `5dc8c8480`).
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:214`);
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-  (`crates/kernel/tests/kernel_use_outcome.rs:681`). The writer is proposed.
+  (`crates/kernel/tests/kernel_use_outcome.rs:694`). The writer is proposed.
   Status: unaudited.
 
 ## Failure scenario

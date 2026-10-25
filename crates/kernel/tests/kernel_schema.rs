@@ -2292,7 +2292,7 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
     );
 }
 
-/// A class other than `sensitive`, `local_only`, or `use_outcome_capture`, a role outside `primary` and `subagent`, a malformed digest, an empty identity field, a serve at or after its recording commit, and a retirement at or before creation all fail a CHECK; a duplicate identity fails the UNIQUE constraint.
+/// A class other than `sensitive`, `local_only`, or `use_outcome_capture`, a role outside `primary` and `subagent`, a malformed digest, an empty identity field, a serve at or after its recording commit, a negative recorded time, a deadline at or before the recorded time, and a retirement at or before creation all fail a CHECK; a duplicate identity fails the UNIQUE constraint.
 #[test]
 fn use_outcome_classification_and_identity_shapes_are_checked() {
     let (_dir, mut conn) = open_profiled();
@@ -2353,6 +2353,9 @@ fn use_outcome_classification_and_identity_shapes_are_checked() {
         ("session_id", "''".to_string()),
         ("served_commit_seq", created.to_string()),
         ("invalidated_commit_seq", created.to_string()),
+        ("recorded_at", "-1".to_string()),
+        ("retain_until", "10".to_string()),
+        ("retain_until", "5".to_string()),
     ] {
         assert_constraint_violation(
             insert(column, &value),

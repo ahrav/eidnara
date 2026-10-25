@@ -433,7 +433,7 @@ impl KernelStore {
             // Another sweep committed this exact page at this cutoff, so this call's commit did not run.
             Ok(receipt) if receipt.replayed => Ok(sweep),
             Ok(_) => Ok(sweep.merged(tally)),
-            Err(_) if empty_page => Ok(sweep.merged(tally)),
+            Err(KernelError::NotFound) if empty_page => Ok(sweep.merged(tally)),
             Err(error) => Err(error),
         }
     }
@@ -706,6 +706,34 @@ mod tests {
         assert!(!retired(&store, "second"), "the replay ran no recheck");
         assert_eq!(store.expire_use_outcomes(NOW).unwrap().retired, 1);
         assert!(retired(&store, "second"));
+    }
+
+    /// A replay reports the cited rows its own scan read: a record cited before selection stays out of the page and is counted, while the racing sweep commits the same page.
+    #[test]
+    fn a_replayed_page_reports_the_cited_rows_its_scan_read() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, ids) = store_with_expired_serves(root.path(), &["cited", "due"]);
+        cite(root.path(), "report", &ids[0]);
+        let sweep = store
+            .expire_use_outcomes_after_selection(NOW, || {
+                assert_eq!(
+                    store.expire_use_outcomes(NOW).unwrap(),
+                    UseOutcomeExpiry {
+                        retired: 1,
+                        cited: 1
+                    }
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            sweep,
+            UseOutcomeExpiry {
+                retired: 0,
+                cited: 1
+            }
+        );
+        assert!(!retired(&store, "cited"));
+        assert!(retired(&store, "due"));
     }
 
     /// A record another sweep retired at a different cutoff after this sweep selected it is skipped, and a page that retires nothing commits nothing.

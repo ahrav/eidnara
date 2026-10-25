@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5dc8c8480`).
+its parent is `438a48b57`).
 
 - Record triggers: `use_outcomes_identity_immutable`,
   `use_outcomes_deleted_at_set_once`,
@@ -38,7 +38,7 @@ its parent is `5dc8c8480`).
   `use_outcome_classification_and_identity_shapes_are_checked`
   (`crates/kernel/tests/kernel_schema.rs:2297`);
   `an_admission_citation_names_a_recorded_use_outcome_and_never_changes`
-  (`crates/kernel/tests/kernel_schema.rs:2373`). Status: unaudited.
+  (`crates/kernel/tests/kernel_schema.rs:2376`). Status: unaudited.
 
 ## Failure scenario
 

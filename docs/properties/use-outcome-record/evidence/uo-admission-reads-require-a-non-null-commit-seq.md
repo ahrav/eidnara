@@ -10,12 +10,12 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5dc8c8480`).
+its parent is `438a48b57`).
 
 - Writer binding: the INSERT at `crates/kernel/src/admission.rs:1748` binds
   `self.commit_seq` at `crates/kernel/src/admission.rs:1781`.
 - Reader filters: `crates/kernel/src/admission.rs:675`; the new reader
-  `crates/kernel/src/use_outcome.rs:162`.
+  `crates/kernel/src/use_outcome.rs:163`.
 - Reachability: a null-commit row exists only after direct SQL, so the label is
   test-only.
 

@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5dc8c8480`).
+its parent is `438a48b57`).
 
 - Folding plan rule: `crates/daemon/src/transform.rs:4227` sets `Defer` when the
   scheduler defers and `Soft` otherwise.

@@ -9,10 +9,10 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5dc8c8480`).
+its parent is `438a48b57`).
 
-- Join: `crates/kernel/src/use_outcome.rs:162`; read: `served_sessions_for`
-  (`crates/kernel/src/use_outcome.rs:369`).
+- Join: `crates/kernel/src/use_outcome.rs:163`; read: `served_sessions_for`
+  (`crates/kernel/src/use_outcome.rs:371`).
 - The flag is computed in the read and stored nowhere; the read changes no
   visibility.
 
@@ -24,7 +24,7 @@ its parent is `5dc8c8480`).
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
   (`crates/kernel/tests/kernel_use_outcome.rs:341`);
   `disputed_after_serve_is_judged_against_each_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:717`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:730`). Status: unaudited.
 
 ## Failure scenario
 

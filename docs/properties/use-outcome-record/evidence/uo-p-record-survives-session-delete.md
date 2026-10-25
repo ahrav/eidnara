@@ -10,10 +10,10 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5dc8c8480`).
+its parent is `438a48b57`).
 
 - Delete triggers: `crates/kernel/src/schema.rs:187`.
-- Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:338`) answers
+- Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:340`) answers
   retired records.
 
 - Guarantee under test: After `session.delete` answers `ok`, the session's

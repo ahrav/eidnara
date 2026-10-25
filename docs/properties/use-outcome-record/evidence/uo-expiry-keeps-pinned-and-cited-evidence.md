@@ -10,12 +10,12 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5dc8c8480`).
+its parent is `438a48b57`).
 
 - Pin predicate: `crates/kernel/src/local_file.rs:514`.
 - Citation predicate: `crates/kernel/src/slice/write.rs:42`.
 - The use-outcome citation predicate keys liveness on the citing row's subject
-  the same way (`crates/kernel/src/use_outcome.rs:148`).
+  the same way (`crates/kernel/src/use_outcome.rs:149`).
 
 - Guarantee under test: Capture expiry keeps evidence a live hold pins and
   evidence another live row cites.

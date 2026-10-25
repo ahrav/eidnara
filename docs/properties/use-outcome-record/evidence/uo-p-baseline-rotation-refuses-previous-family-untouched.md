@@ -9,14 +9,14 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `5dc8c8480`).
+its parent is `438a48b57`).
 
 - Components: `crates/kernel/src/schema.rs:187` and
   `crates/kernel/src/schema.rs:191`; the admission citing column and
   `idx_admission_use_outcome_fk` in the `admission_decisions` component
   (`crates/kernel/src/schema.rs:163`).
 - Pinned digest: `crates/kernel/tests/kernel_schema.rs:183`
-  (`054583feb016773a8e481dc079851761b3fef41fecbd2d48a93ea59dfd002989`).
+  (`ed12f254bd6b6471905b6079de58c45c1072d05179892e2433a70506b2c1299e`).
 - Component-name list: `crates/kernel/tests/kernel_schema.rs:14`; object
   inventory: `kernel_schema_object_inventory_is_pinned_by_kind_and_name`
   (`crates/kernel/tests/kernel_schema.rs:1900`).
