@@ -15,8 +15,11 @@ the source's module-wide scope map that fixed the six area boundaries.
 | `facade/` | `part-4d-facade` | the facade surface, note evaluation, and response assembly |
 | `rendering/` | `part-4e-rendering` | rendered output, tags, and nudge overlay |
 | `decisions/` | `part-4f-decisions` | decision units, configuration, and harness codecs |
+| `interpretation-layer/` | the generalize-source-context specification ([#1105](https://github.com/ahrav/eidnara/issues/1105)), Part A and Part B S2, authored at `a0e3f2993`, verified at `41d889ea4`, and re-checked at `aff5a00e6` | tool-name, argument-key, and native-field interpretation, the literal classification, and the corpus loss conditions |
 
-Each `catalog.md` opens with a provenance section that states what the port
+The first six areas carry host-repository catalogs; `interpretation-layer/`
+is authored in this repository and states its own provenance in its README.
+Each carried `catalog.md` opens with a provenance section that states what the port
 changed under it: renamed crates, modules, tables, and identifiers; the
 mechanisms the port deleted, whose records carry `Status: invalidated`; and the
 rule that line citations are the source catalog's coordinates, marked where the

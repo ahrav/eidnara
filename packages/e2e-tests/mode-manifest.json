@@ -272,6 +272,24 @@
             ]
         },
         {
+            "path": "tests/source-capture-opencode.test.ts",
+            "tier": "rust-only",
+            "rationale": "source corpus (#1108): the R1 tool mix through OpenCode 1.18.22 reconciles every unit the SQL reader expects against live descriptors and source_capture counters, and capture consent off yields no unit or descriptor",
+            "contract_refs": [
+                "sc-corpus-reconciliation-partitions-every-expected-unit",
+                "sc-corpus-population-covers-declared-cells"
+            ]
+        },
+        {
+            "path": "tests/source-capture-pi.test.ts",
+            "tier": "pi-rust",
+            "rationale": "source corpus (#1108): the R1 tool mix through Pi 0.80.2 reconciles every unit the JSONL reader expects, the image-bearing toolResult is adapter-refused, consent off captures nothing, and both harnesses capture equal units and documents for one mix",
+            "contract_refs": [
+                "sc-corpus-reconciliation-partitions-every-expected-unit",
+                "sc-corpus-population-covers-declared-cells"
+            ]
+        },
+        {
             "path": "tests/thinking-block-safety.test.ts",
             "tier": "rust-only",
             "rationale": "thinking-block wire safety: no nudge text in a signed assistant, dropped text shells, and image parts under whole-arc history",

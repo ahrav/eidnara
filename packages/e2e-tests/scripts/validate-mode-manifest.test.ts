@@ -22,7 +22,7 @@ const VALID_TEST_SOURCE = 'import { it } from "bun:test";\nit("x", () => {});\n'
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(33);
+        expect(validation.files.length).toBe(35);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -43,6 +43,7 @@ describe("mode manifest validator", () => {
             "tests/pi-rust-eviction.test.ts",
             "tests/pi-rust-folding.test.ts",
             "tests/pi-smoke.test.ts",
+            "tests/source-capture-pi.test.ts",
         ]) {
             expect(tiers.get(path)).toBe("pi-rust");
             tiers.delete(path);

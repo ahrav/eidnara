@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use context_core::canonical_json::is_lower_hex;
 use serde::{Deserialize, Serialize};
@@ -46,8 +46,8 @@ pub struct MemoryWrite {
     pub key: WriteKey,
     /// The ledger sample that made the write.
     pub writer: String,
-    /// The run that made the write: the current run, or a run named in some
-    /// sample's lineage.
+    /// The run that made the write: the current run, or a run named in the
+    /// writer's lineage.
     pub eval_run_id: String,
     /// The write's position in its pool, recorded for audit.
     pub sequence: u32,
@@ -107,8 +107,9 @@ pub enum AccessError {
         key: WriteKey,
         writer_key: WriteKey,
     },
-    /// A write made under a run that is neither the current run nor in any
-    /// sample's lineage.
+    /// A write from a run outside the current run and the lineage of the
+    /// write's `writer`. Own-task attribution by run would name the wrong
+    /// attempt.
     UnknownRun {
         write_id: String,
         eval_run_id: String,
@@ -164,14 +165,6 @@ impl AccessRecord {
             write_id: write_id.to_string(),
             field,
         };
-        let known_runs: BTreeSet<&str> = std::iter::once(eval_run_id)
-            .chain(
-                ledger
-                    .samples
-                    .values()
-                    .flat_map(|sample| sample.lineage.iter().map(String::as_str)),
-            )
-            .collect();
         let mut writes: BTreeMap<&str, &MemoryWrite> = BTreeMap::new();
         for write in &self.writes {
             for (field, text) in [("write_id", &write.write_id), ("pool", &write.pool)] {
@@ -198,7 +191,9 @@ impl AccessRecord {
                     writer_key,
                 });
             }
-            if !known_runs.contains(write.eval_run_id.as_str()) {
+            if write.eval_run_id != eval_run_id
+                && !writer_record.lineage.contains(&write.eval_run_id)
+            {
                 return Err(AccessError::UnknownRun {
                     write_id: write.write_id.clone(),
                     eval_run_id: write.eval_run_id.clone(),
