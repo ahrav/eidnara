@@ -24688,10 +24688,22 @@ mod tests {
             assert_eq!(frozen_heads(&store), vec![expected.clone(); 2], "{fixture}");
             if fixture == "commits" {
                 commit(&project, "checked out later\n");
+                store
+                    .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+                    .unwrap();
+                assert_eq!(
+                    tool_body(
+                        handler
+                            .handle_native_capture_next(test_route(7), &next)
+                            .await
+                    )["state"],
+                    "pending",
+                    "the held retry publishes again and is refused completion again"
+                );
                 assert_eq!(
                     frozen_heads(&store),
                     vec![expected.clone(); 2],
-                    "a checkout after the submit leaves the frozen plans unchanged"
+                    "a retry after a later commit keeps the head frozen at submit"
                 );
             }
             store
@@ -24711,6 +24723,54 @@ mod tests {
             let status = store.memory_capture_status(&capture_key(&project)).unwrap();
             assert_eq!((status.completed, status.pending), (2, 0), "{fixture}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_plan_frozen_without_a_head_publishes_as_before() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let request = json!({"method":"memory.capture","session_id":"ses","messages":[
+            {"id":"native-user-1","role":"user","text":"Use port 4321 for staging."},
+        ]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        let key = capture_key(&project);
+        let job = store
+            .pending_memory_captures(&key, "pi", now_ms())
+            .unwrap()
+            .remove(0);
+        let legacy = json!({"version":1,"model":"custom-native/model","existing":[],"memories":[{
+            "category":"CONFIG_VALUES",
+            "content":"User stated: Use port 4321 for staging.",
+            "quote":"Use port 4321 for staging.",
+        }]})
+        .to_string();
+        store
+            .prepare_memory_capture(&key, &job.job_id, &legacy)
+            .unwrap();
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "ready"
+        );
+        assert_eq!(store.memory_capture_status(&key).unwrap().completed, 1);
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(memories.rows.len(), 1);
     }
 
     #[tokio::test]

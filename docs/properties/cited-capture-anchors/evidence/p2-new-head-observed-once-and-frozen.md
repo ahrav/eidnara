@@ -23,9 +23,15 @@ text, so a retry publishes the value frozen at submit. The commit's request
 digest is the SHA-256 of the frozen text
 (`crates/daemon/src/memory_capture.rs:1175`), so the receipt covers the head.
 
-The observation runs inside `kernel_routes::blocking` in the submit handler
-(`crates/daemon/src/memory_capture/native.rs:276`), before `publish` takes
-the capture commit gate.
+The observation runs inside the `kernel_routes::blocking` hop of the submit
+handler (`crates/daemon/src/memory_capture/native.rs:362`), before `publish`
+takes the capture commit gate.
+
+A plan frozen with a `head` field is refused by a daemon built before the
+field existed, because `PreparedCapture` denies unknown fields; rolling back
+the daemon with prepared plans in flight is unsupported. The derived
+`Deserialize` accepts any string in `Commit`; the U3 consumer passes it to
+`insert_anchor`, whose decoder refuses anything but a lowercase hex oid.
 
 ## Failure scenario
 
@@ -42,8 +48,9 @@ plan is frozen before the first publish, so the window cannot reach it.
 
 A two-job submission on a repository fixture with completion refused by a
 store trigger, so both frozen plans stay readable; a new commit on the
-checked-out branch; then the trigger dropped and a drain that publishes the
-frozen plans. `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it`
+checked-out branch; a retry while the trigger still refuses completion, after
+which both plans still hold the submit-time head; then the trigger dropped and
+a drain that publishes the frozen plans. `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it`
 (`crates/daemon/src/lib.rs:24619`) does this for a repository with
 commits, a detached HEAD, an unborn HEAD, a plain directory, and a
 repository declaring SHA-256.
@@ -55,8 +62,11 @@ repository declaring SHA-256.
 - Sources examined: `accept_native_output` and its callers at the branch
   that adds U2.
 - Findings: one call precedes the per-job loop; `settle` calls
-  `accept_native_output` once per submit.
-- Missing evidence: none.
+  `accept_native_output` once per submit. The route test sees two identical
+  heads, which a per-job read would also produce because nothing moves HEAD
+  between jobs; the single read rests on the code structure.
+- Missing evidence: a test that moves HEAD between two jobs of one
+  submission, which needs a hook inside the loop.
 - Conclusion: resolved with answer.
 
 ### Q: Does the plan schema version change?

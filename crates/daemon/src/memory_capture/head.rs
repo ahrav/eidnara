@@ -11,8 +11,10 @@ pub(crate) enum FrozenHead {
     /// The 40-character lowercase hex id of the commit HEAD names, directly
     /// when detached or through its branch.
     Commit(String),
-    /// An unborn or unreadable HEAD, an unsupported object format, or a
-    /// repository-open failure.
+    /// An unborn or unreadable HEAD, a HEAD naming an object other than a
+    /// commit, an unsupported object format, or a repository-open failure,
+    /// which includes a root that is a subdirectory of a work tree: the open
+    /// performs no upward discovery, as the Kernel's checkout open does.
     #[default]
     HeadUnavailable,
 }
@@ -31,12 +33,7 @@ pub(crate) fn observe_head(root: &Path) -> FrozenHead {
         .find_header(id)
         .is_ok_and(|header| header.kind() == gix::object::Kind::Commit);
     let hex = id.to_hex().to_string();
-    if is_commit
-        && hex.len() == 40
-        && hex
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if is_commit && crate::git_sources::parse_oid(&hex, gix::hash::Kind::Sha1).is_some() {
         FrozenHead::Commit(hex)
     } else {
         FrozenHead::HeadUnavailable
@@ -44,8 +41,8 @@ pub(crate) fn observe_head(root: &Path) -> FrozenHead {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
+pub(crate) mod fixtures {
+    use std::path::Path;
 
     fn signature() -> gix::actor::Signature {
         gix::actor::Signature {
@@ -108,6 +105,12 @@ pub(crate) mod tests {
         )
         .unwrap();
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::{declare_sha256, detach, repository};
+    use super::*;
 
     fn head_id(root: &Path) -> String {
         gix::open_opts(root, gix::open::Options::isolated())
@@ -168,7 +171,7 @@ pub(crate) mod tests {
     /// parse reads the commit's tree. The observation still answers with the
     /// index replaced by garbage and the HEAD commit's tree and blob deleted.
     #[test]
-    fn the_observation_reads_one_object_header_and_neither_the_index_nor_the_tree() {
+    fn the_observation_reads_at_most_one_object_and_neither_the_index_nor_the_tree() {
         let dir = tempfile::tempdir().unwrap();
         let commits = repository(dir.path(), 1);
         let repo = gix::open_opts(dir.path(), gix::open::Options::isolated()).unwrap();

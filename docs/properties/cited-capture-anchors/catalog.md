@@ -244,7 +244,7 @@ Check: `always` - for every prepared memory, `source.text.contains(quote)` for t
 Fault/timing angle: none
 Required faults and enabling state: a quote taken from another message of the batch; an invented `message_id`; a duplicate `message_id`; an empty quote
 Confidence: high - [evidence](evidence/p2-capture-quote-is-an-exact-substring-of-its-own-batch-source.md). Read `parse_capture_batch` at `crates/daemon/src/memory_capture.rs:208` and `validate_capture_memories` at `:270`; the prompt states the rule at `:130` (offset corrected by refinement R8)
-Existing check: `crates/daemon/src/memory_capture.rs:1285`, `:1318`, `:1350`, `:1391`, `:1398`; `crates/daemon/src/lib.rs:24820` (unaudited)
+Existing check: `crates/daemon/src/memory_capture.rs:1285`, `:1318`, `:1350`, `:1391`, `:1398`; `crates/daemon/src/lib.rs:24880` (unaudited)
 Impact: a quote from another message would cite evidence for a statement the source never made
 Open questions: None.
 
@@ -259,7 +259,7 @@ Check: `always` - for every capture job, `job_id == job_id(source, redacted_text
 Fault/timing angle: none
 Required faults and enabling state: the same source enqueued twice; a fragment id outside the store grammar
 Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:112`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:315`, and the object id at `:1196`
-Existing check: `crates/memory-store/src/memory_capture.rs:755`; `crates/daemon/src/memory_capture.rs:1417`, `:1466`, `:1566`, `:1588`, `:1674`; `crates/daemon/src/lib.rs:24489`, `:25736` (unaudited)
+Existing check: `crates/memory-store/src/memory_capture.rs:755`; `crates/daemon/src/memory_capture.rs:1417`, `:1466`, `:1566`, `:1588`, `:1674`; `crates/daemon/src/lib.rs:24489`, `:25796` (unaudited)
 Impact: unstable ids would duplicate memories on retry and break the deterministic anchor id U3 derives from the job id
 Open questions: None.
 
@@ -274,7 +274,7 @@ Check: `always` - no capture or source publish commit for a session has a `commi
 Fault/timing angle: a checkpoint or publish admitted before a delete that runs after it
 Required faults and enabling state: a session delete issued while a checkpoint or publish waits on the gate
 Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:983`, the delete path at `crates/daemon/src/lib.rs:6909`, and `capture_after_response` at `crates/daemon/src/lib.rs:9157`
-Existing check: `crates/daemon/src/lib.rs:24968`, `:25306`, `:25511`, `:26059`; `crates/daemon/src/lib.rs:24717`; `crates/daemon/src/source_capture_tests.rs:1036` (unaudited)
+Existing check: `crates/daemon/src/lib.rs:25028`, `:25366`, `:25571`, `:26119`; `crates/daemon/src/lib.rs:24777`; `crates/daemon/src/source_capture_tests.rs:1036` (unaudited)
 Impact: an interleaving would leave a deleted session's memory or descriptor live
 Open questions: None.
 
@@ -311,7 +311,7 @@ Open questions: None.
 ### p2-git-open-is-isolated-and-allocation-bounded
 
 Type: safety
-Reachability: default-production - every native capture submit opens the project root through `git_sources::open` in `observe_head` (`crates/daemon/src/memory_capture/head.rs:20`), added by U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)); before U2 the only caller was `GitReconciler`, which only tests construct (relabelled per METHOD rule 4)
+Reachability: default-production - every native capture submit opens the project root through `git_sources::open` in `observe_head` (`crates/daemon/src/memory_capture/head.rs:22`), added by U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)); before U2 the only caller was `GitReconciler`, which only tests construct (relabelled per METHOD rule 4)
 Status: active
 Exercised: yes - git-source tests refuse selections and an oversized delta base; the head-observation tests open repositories through the same function
 Guarantee: The daemon's repository open skips installation, user, and system configuration, ignores replacement refs, and installs `max_object_bytes` as gix's allocation limit after the repository's own configuration.
@@ -319,7 +319,7 @@ Check: `always` - every repository the daemon opens through `git_sources::open` 
 Fault/timing angle: none
 Required faults and enabling state: a delta-packed commit against an oversized base; a repository declaring an unsupported `extensions.objectFormat`
 Confidence: high - [evidence](evidence/p2-git-open-is-isolated-and-allocation-bounded.md). Read `isolated_options` at `crates/daemon/src/git_sources.rs:128` and `open` at `:138`
-Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`; `crates/daemon/src/memory_capture/head.rs:137` (unaudited)
+Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`; `crates/daemon/src/memory_capture/head.rs:140` (unaudited)
 Impact: an unisolated open would let repository or user configuration raise the bound or substitute objects
 Open questions: None.
 
@@ -381,7 +381,7 @@ Check: `always` - every job frozen by one submission carries the identical `head
 Fault/timing angle: a `git checkout` between the submit and its retry
 Required faults and enabling state: a commit on the checked-out branch between the submit and the retry, with completion refused so the frozen plans stay in the store
 Confidence: high - [evidence](evidence/p2-new-head-observed-once-and-frozen.md). Read `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:548`): one `observe_head` call precedes the loop that freezes each job's plan, and the receipt digest covers every frozen byte (`crates/daemon/src/memory_capture.rs:1175`)
-Existing check: `crates/daemon/src/lib.rs:24619`; `crates/daemon/src/memory_capture/head.rs:121` (unaudited)
+Existing check: `crates/daemon/src/lib.rs:24619`; `crates/daemon/src/memory_capture/head.rs:124` (unaudited)
 Impact: the anchor stops describing the revision at which the quote was observed, and the receipt no longer covers the anchor's value
 Open questions: None.
 
@@ -395,8 +395,8 @@ Guarantee: When HEAD is unborn or unreadable, the object format is unsupported, 
 Check: `always-or-unreached` - the path runs only when the head observation is unavailable; whenever it runs, the committed decision has `anchor_id IS NULL`, the rationale carries the reason, and no anchor row names the job
 Fault/timing angle: none
 Required faults and enabling state: a root with no `.git`; an unborn branch; an `objectFormat` gix refuses
-Confidence: medium - [evidence](evidence/p2-new-head-unavailable-keeps-decision-admitted.md). The owner decided on 2026-10-25 (OQ2-11) that a detached HEAD anchors at its commit, which removes detached HEAD from this path; `observe_head` (`crates/daemon/src/memory_capture/head.rs:20`) maps every other refusal to `HeadUnavailable`
-Existing check: `crates/daemon/src/memory_capture/head.rs:137`; `crates/daemon/src/lib.rs:24619` (unaudited)
+Confidence: medium - [evidence](evidence/p2-new-head-unavailable-keeps-decision-admitted.md). The owner decided on 2026-10-25 (OQ2-11) that a detached HEAD anchors at its commit, which removes detached HEAD from this path; `observe_head` (`crates/daemon/src/memory_capture/head.rs:22`) maps every other refusal to `HeadUnavailable`
+Existing check: `crates/daemon/src/memory_capture/head.rs:140`; `crates/daemon/src/lib.rs:24619` (unaudited)
 Impact: capture would stop in fresh checkouts
 Open questions: None.
 

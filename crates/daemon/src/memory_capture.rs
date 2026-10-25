@@ -8,7 +8,7 @@
 mod head;
 mod native;
 #[cfg(test)]
-pub(crate) use head::tests as head_fixtures;
+pub(crate) use head::fixtures as head_fixtures;
 pub(crate) use head::{FrozenHead, observe_head};
 #[cfg(test)]
 pub(crate) use native::LEASE_DURATION;

@@ -165,7 +165,7 @@ fn exceeds_allocation(error: &gix::objs::find::Error) -> bool {
 }
 
 /// Returns `None` unless `oid` is a full lowercase hexadecimal id for `hash`.
-fn parse_oid(oid: &str, hash: gix::hash::Kind) -> Option<gix::ObjectId> {
+pub(crate) fn parse_oid(oid: &str, hash: gix::hash::Kind) -> Option<gix::ObjectId> {
     if oid.len() != hash.len_in_hex()
         || !oid
             .bytes()
