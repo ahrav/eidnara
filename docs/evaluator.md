@@ -2016,9 +2016,9 @@ in this order:
 - each read: a blank `pool` (`Blank`), a reader outside the ledger
   (`UnknownReader`), a write the record lacks (`UnknownWrite`), a pool other
   than its write's (`CrossPoolRead`), and a read by a sample of one of its
-  own writes, a write in its pool whose key task is its task, made by this
-  run or by a run in that sample's own lineage (`OwnTaskRead {sample, read,
-  key}`); a write made under a run in its writer's lineage that the reader's
+  own task's writes, a write in its pool whose key task is its task, made by
+  this run or by a run in that sample's own lineage
+  (`OwnTaskRead {sample, read, key}`); a write made under a run in its writer's lineage that the reader's
   lineage lacks belongs to the writer's attempt and passes;
 - the attestation: a `read_counts` entry for a sample the ledger lacks
   (`UnknownAttestedSample`), and a count that differs from the reads recorded

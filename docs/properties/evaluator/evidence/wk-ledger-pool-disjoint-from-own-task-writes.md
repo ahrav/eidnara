@@ -27,7 +27,7 @@ before its write in one pool is refused the same way.
 
 ## What a test must construct
 Sample `s1` (task t1, Fresh) reads `w7` written under `(t1, Aged)` in the same
-pool; the same write made under a run in `s1.lineage`; a write under a run in
+pool; the same write made under a run in both `s1.lineage` and the writer's lineage; a write under a run in
 another sample's lineage but not its writer's; a dangling reader, writer,
 write, and run id; a read count off by one.
 

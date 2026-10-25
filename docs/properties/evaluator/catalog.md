@@ -1274,9 +1274,9 @@ Fault/timing angle: Order-free: sequences are carried for audit and never
   compared, so a read before its write in one pool is refused the same way.
 Required faults and enabling state: Sample `s1` (task t1, Fresh) reads `w7`
   written under `(t1, Aged)` in the same pool; the same write made under a run
-  in `s1.lineage`; a write under a run in another sample's lineage but not its
-  writer's; a dangling reader, writer, write, and run id; a read count off by
-  one.
+  in both `s1.lineage` and the writer's lineage; a write under a run in
+  another sample's lineage but not its writer's; a dangling reader, writer,
+  write, and run id; a read count off by one.
 Confidence: high -
   [evidence](evidence/wk-ledger-pool-disjoint-from-own-task-writes.md). Ran the
   cited tests at HEAD; read `check_disjoint`
