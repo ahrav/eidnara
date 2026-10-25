@@ -2,18 +2,21 @@
 
 ## Discovery trigger
 
-#1105 Part A lens pass (state and persistence): document capture writes the
+Issue #1105 Part A lens pass (state and persistence): document capture writes the
 project digest into both identity fields.
 
 ## Evidence trail
 
-- `crates/daemon/src/source_capture.rs:951-1002` `plan_document`; the identity
-  vector at `:970-974` holds `("project_id", P)`, `("repository_id", P)`, and
-  `("relative_path", name)`.
-- `:975` derives the lineage from that identity; `:977-979` reads the live row
-  and keeps it only for `CAPTURE_DOMAIN_ID` (`source_capture.rs:48`).
-- A missing document retires the live row (`:980-986`) through
-  `retire_document` (`:1005-1022`), called from `capture_documents` at `:908`.
+- `crates/daemon/src/source_capture.rs:1070-1122` `plan_document`; the identity
+  vector at `:1090-1094` held `("project_id", P)`, `("repository_id", P)`, and
+  `("relative_path", name)` at `41d889ea4`. At HEAD it holds
+  `("repository_id", R)`, with `R` the derived repository identity
+  (`crates/daemon/src/repository_identity.rs:62`, memoized per project at
+  `source_capture.rs:1048`) or `P` as its fallback.
+- `:1095` derives the lineage from that identity; `:1097-1099` reads the live row
+  and keeps it only for `CAPTURE_DOMAIN_ID` (`source_capture.rs:53`).
+- A missing document retires the live row (`:1100-1106`) through
+  `retire_document` (`:1125-1147`), called from `capture_documents` at `:961`.
 - `crates/kernel/tests/eval_identity.rs` pins the identity encoding, not the
   values.
 - The document tests (`crates/daemon/src/source_capture_tests.rs:1964`,
@@ -24,14 +27,16 @@ project digest into both identity fields.
 
 ## Failure scenario
 
-Two worktrees of one repository bind two project digests. Each captures
-`ARCHITECTURE.md` under its own `(P, P, path)` lineage; the two lineages never
-correlate, so a reader cannot tell they describe one repository's file.
+Before U7: two worktrees of one repository bind two project digests. Each
+captures `ARCHITECTURE.md` under its own `(P, P, path)` lineage; the two
+lineages never correlate, so a reader cannot tell they describe one
+repository's file. U7 closes this scenario (`sc-tests:2811`).
 
 ## Timing windows and dependencies
 
-None at HEAD. After U7, the derived `repository_id` depends on repository
-history, and a pass must retire a live row whose `repository_id` differs.
+None at `41d889ea4`. At HEAD, the derived `repository_id` depends on repository
+history, and a pass retires a live row whose `repository_id` differs before it
+publishes (`source_capture.rs:1477`, retired at `:943`).
 
 ## What a test must construct
 
@@ -40,10 +45,12 @@ assertion over both lineages' identities; the U7 tests replace it.
 
 ## Investigation log
 
-### Q: Does any HEAD code derive `repository_id` from the repository?
+### Q: Does any code at `41d889ea4` derive `repository_id` from the repository?
+
 - Sources examined: `source_capture.rs`, `project_docs.rs`, the capture
-  configuration.
-- Findings: no; the value is the bound project digest.
+  configuration, at `41d889ea4`.
+- Findings: no; the value is the bound project digest. U7 adds the derivation
+  (the last question below).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
@@ -57,8 +64,21 @@ assertion over both lineages' identities; the U7 tests replace it.
   line.
 
 ### Q: Can a cap on the history walk flip the derived identity?
+
 - Sources examined: #1105 OQ1 and U7's plan text.
 - Findings: U7's stability scenario fixes the history; no record covers a cap
   near the root count.
 - Missing evidence: the cap value.
 - Conclusion: unresolved, needs OQ1's decision.
+
+### Q: What does U7 change?
+
+- Sources examined: `crates/daemon/src/repository_identity.rs:62`;
+  `crates/daemon/src/source_capture.rs:1048`, `:1037`, `:1092`, `:1477`; the U7 tests.
+- Findings: the identity's `repository_id` is `git:` and the smallest root
+  commit reachable from HEAD, or the project digest as a deterministic
+  fallback, memoized per project for the incarnation. A pass retires every
+  live capture-domain row of a settled path under another `repository_id`
+  before it publishes.
+- Missing evidence: none.
+- Conclusion: resolved with answer: the record is invalidated.

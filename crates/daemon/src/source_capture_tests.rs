@@ -2655,10 +2655,7 @@ async fn a_reclaiming_digest_stays_pending_and_publishes_after_reclamation() {
             retain_until: None,
             asserted_sensitivity: kernel::Sensitivity::Normal,
             provider_egress: kernel::ProviderEgress::RemoteAllowed,
-            provenance: Some(kernel::RepositoryProvenance {
-                repository_id: "repo".to_owned(),
-                revision: "abc123".to_owned(),
-            }),
+            provenance: None,
         })
         .unwrap()
         .digest;
@@ -2697,4 +2694,429 @@ async fn a_reclaiming_digest_stays_pending_and_publishes_after_reclamation() {
     assert_eq!(end, source_capture::Count::Completed);
     assert_eq!(count(&handler, "units_published") - published, 2);
     assert_eq!(count(&handler, "units_refused_terminal"), terminal);
+}
+
+/// Commits every file of `root` as a new repository's only commit and returns `git:` and its id.
+fn commit_repository(root: &Path) -> String {
+    use super::source_corpus::git;
+    git(root, &["init", "-q", "-b", "main"]).unwrap();
+    git(root, &["add", "-A"]).unwrap();
+    git(root, &["commit", "-q", "-m", "documents"]).unwrap();
+    format!("git:{}", git(root, &["rev-parse", "HEAD"]).unwrap().trim())
+}
+
+/// One document pass at `root` on `route`, as the first pass of a new session there.
+async fn document_pass_at(handler: &Handler, root: &Path, route: u16, base: &str) {
+    let session = format!("ses-{route}-{base}");
+    let mut bound = binding_with_harness(root.to_str().unwrap(), "opencode", &session);
+    bound.config = capture_config(true);
+    handler.bind_route(test_route(route), bound);
+    let mut request = transform_with(&[opencode_user("msg_u1", 1_700_000_000_000, "hello")], base);
+    request["session_id"] = json!(session);
+    pass_on(handler, test_route(route), request).await;
+    settle(handler).await;
+}
+
+/// The `(repository_id, revision)` of every live capture of `path`.
+fn document_identities(store: &KernelStore, path: &str) -> Vec<(String, String)> {
+    live(store, OccurrenceClass::RepositoryDocuments)
+        .into_iter()
+        .filter(|row| identity_of(row)[2] == ("relative_path", path))
+        .map(|row| {
+            (
+                identity_of(&row)[1].1.to_owned(),
+                row.detail.revision.clone(),
+            )
+        })
+        .collect()
+}
+
+/// AE2 and `ri-memo-fixed-for-incarnation-and-restart-converges`: a document captured while the project was no repository keeps that identity for the incarnation; after a restart the derived identity retires the legacy row and publishes one row under `git:R`. The adapter refuses each pass's window message, whose session differs from the pass's, so the document is the only publication.
+#[tokio::test]
+async fn a_legacy_document_row_moves_to_the_derived_repository_identity_after_restart() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    let project_id = identity_of(&live(&store, OccurrenceClass::RepositoryDocuments)[0])[0]
+        .1
+        .to_owned();
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(project_id.clone(), "1".to_owned())]
+    );
+    let repository = commit_repository(&project);
+
+    let retired = count(&handler, "documents_retired");
+    document_pass(&handler, "base-2").await;
+    assert_eq!(count(&handler, "documents_retired"), retired);
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(project_id.clone(), "1".to_owned())]
+    );
+
+    handler.source_capture.forget_memo_for_test();
+    let published = count(&handler, "units_published");
+    document_pass(&handler, "base-3").await;
+    assert_eq!(count(&handler, "documents_retired") - retired, 1);
+    assert_eq!(count(&handler, "units_published") - published, 1);
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository.clone(), "1".to_owned())]
+    );
+
+    handler.source_capture.forget_memo_for_test();
+    let unchanged = count(&handler, "documents_unchanged");
+    document_pass(&handler, "base-4").await;
+    assert_eq!(count(&handler, "documents_retired") - retired, 1);
+    assert_eq!(count(&handler, "documents_unchanged") - unchanged, 1);
+}
+
+/// `ri-stale-identity-row-retired-before-new-revision`: a crash after the stale row retires and before the new lineage publishes leaves the path with no live row; the next pass publishes the new lineage's first revision and retires nothing.
+#[tokio::test]
+async fn a_crash_between_retire_and_publish_leaves_no_live_row_and_the_next_pass_publishes() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    let repository = commit_repository(&project);
+    handler.source_capture.forget_memo_for_test();
+    *handler
+        .source_capture
+        .between_document_retire_and_publish
+        .lock()
+        .unwrap() = Some(Arc::new(|| {
+        panic!("injected crash between retire and publish")
+    }));
+    document_pass(&handler, "base-2").await;
+    assert_eq!(count(&handler, "worker_panicked"), 1);
+    assert_eq!(document_identities(&store, "ARCHITECTURE.md"), []);
+
+    *handler
+        .source_capture
+        .between_document_retire_and_publish
+        .lock()
+        .unwrap() = None;
+    let retired = count(&handler, "documents_retired");
+    document_pass(&handler, "base-3").await;
+    assert_eq!(count(&handler, "documents_retired"), retired);
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository, "1".to_owned())]
+    );
+}
+
+/// AE3: two worktrees of one repository bind two projects that share one repository identity, so each holds its own lineage and alternating passes commit nothing.
+#[tokio::test]
+async fn two_worktrees_share_a_repository_identity_and_keep_their_lineages() {
+    use super::source_corpus::git;
+    let (handler, dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    let repository = commit_repository(&project);
+    let worktree = dir.path().join("worktree");
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            worktree.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    document_pass_at(&handler, &project, 300, "base-1").await;
+    document_pass_at(&handler, &worktree, 301, "base-1").await;
+    let store = kernel_store(&handler);
+    let rows: Vec<LiveDescriptor> = live(&store, OccurrenceClass::RepositoryDocuments);
+    assert_eq!(rows.len(), 2);
+    assert_ne!(identity_of(&rows[0])[0], identity_of(&rows[1])[0]);
+    for row in &rows {
+        assert_eq!(identity_of(row)[1], ("repository_id", repository.as_str()));
+    }
+    let tip = store.tip().unwrap();
+    let retired = count(&handler, "documents_retired");
+    for base in ["base-2", "base-3"] {
+        document_pass_at(&handler, &project, 300, base).await;
+        document_pass_at(&handler, &worktree, 301, base).await;
+    }
+    assert_eq!(count(&handler, "documents_retired"), retired);
+    let revisions: Vec<(String, String)> = live(&store, OccurrenceClass::RepositoryDocuments)
+        .iter()
+        .map(|row| (row.object_id.clone(), row.detail.revision.clone()))
+        .collect();
+    assert_eq!(
+        revisions,
+        rows.iter()
+            .map(|row| (row.object_id.clone(), row.detail.revision.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(store.tip().unwrap(), tip);
+}
+
+/// `ri-failed-derivation-refuses-pass-and-memoizes-nothing`: a derivation that cannot read an object or outlasts its share of the job's budget refuses both of the pass's document reads, retires and publishes no document, and memoizes nothing, so the next pass derives and publishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_derivation_refuses_the_documents_and_the_next_pass_derives() {
+    use super::source_corpus::git;
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    let repository = commit_repository(&project);
+    let root = repository.strip_prefix("git:").unwrap();
+    let object = project
+        .join(".git/objects")
+        .join(&root[..2])
+        .join(&root[2..]);
+    let saved = std::fs::read(&object).unwrap();
+    std::fs::remove_file(&object).unwrap();
+    let store = kernel_store(&handler);
+    let refused = count(&handler, "documents_refused");
+    document_pass(&handler, "base-1").await;
+    assert_eq!(count(&handler, "documents_refused") - refused, 2);
+    assert_eq!(document_identities(&store, "ARCHITECTURE.md"), []);
+    std::fs::write(&object, saved).unwrap();
+    assert!(git(&project, &["cat-file", "-e", root]).is_ok());
+
+    *handler
+        .source_capture
+        .before_repository_derivation
+        .lock()
+        .unwrap() = Some(Arc::new(|| {
+        std::thread::sleep(source_capture::REPOSITORY_WALK_BUDGET + Duration::from_millis(100));
+    }));
+    // The route's first pass of its own session composes the block, so it reads the documents, and its window message publishes in the window's commit after the walk's share of the budget ran out.
+    let (deadlines, published) = (
+        count(&handler, "deadline"),
+        count(&handler, "units_published"),
+    );
+    pass(
+        &handler,
+        transform_with(
+            &[opencode_user(
+                "msg_window",
+                1_700_000_000_000,
+                "window text",
+            )],
+            "base-2",
+        ),
+    )
+    .await;
+    for _ in 0..1_000 {
+        if handler.source_capture.is_idle() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(count(&handler, "deadline") - deadlines, 1);
+    assert_eq!(count(&handler, "documents_refused") - refused, 4);
+    assert_eq!(
+        count(&handler, "units_published") - published,
+        1,
+        "{}",
+        report(&handler)
+    );
+    assert_eq!(document_identities(&store, "ARCHITECTURE.md"), []);
+
+    *handler
+        .source_capture
+        .before_repository_derivation
+        .lock()
+        .unwrap() = None;
+    document_pass(&handler, "base-3").await;
+    assert_eq!(count(&handler, "documents_refused") - refused, 4);
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository, "1".to_owned())]
+    );
+}
+
+/// A shallow checkout falls back to the project on every pass; unshallowing it moves the document at the next incarnation, retiring the fallback row once.
+#[tokio::test]
+async fn a_shallow_checkout_falls_back_until_a_restart_after_unshallowing() {
+    use super::source_corpus::git;
+    let (handler, dir, project) = capture_handler(capture_config(true), true).await;
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    let repository = commit_repository(&source);
+    std::fs::write(source.join("ARCHITECTURE.md"), "# Architecture\n\nTwo.\n").unwrap();
+    git(&source, &["commit", "-q", "-am", "second"]).unwrap();
+    let url = format!("file://{}", source.display());
+    git(&project, &["init", "-q", "-b", "main"]).unwrap();
+    git(&project, &["fetch", "-q", "--depth", "1", &url, "main"]).unwrap();
+    git(&project, &["checkout", "-q", "FETCH_HEAD"]).unwrap();
+    let store = kernel_store(&handler);
+    document_pass(&handler, "base-1").await;
+    let fallback = document_identities(&store, "ARCHITECTURE.md");
+    assert_eq!(fallback.len(), 1);
+    assert_ne!(fallback[0].0, repository);
+    handler.source_capture.forget_memo_for_test();
+    document_pass(&handler, "base-2").await;
+    assert_eq!(document_identities(&store, "ARCHITECTURE.md"), fallback);
+
+    git(&project, &["fetch", "-q", "--unshallow", &url, "main"]).unwrap();
+    let retired = count(&handler, "documents_retired");
+    document_pass(&handler, "base-3").await;
+    assert_eq!(count(&handler, "documents_retired"), retired);
+    assert_eq!(document_identities(&store, "ARCHITECTURE.md"), fallback);
+
+    handler.source_capture.forget_memo_for_test();
+    document_pass(&handler, "base-4").await;
+    assert_eq!(count(&handler, "documents_retired") - retired, 1);
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository, "1".to_owned())]
+    );
+}
+
+/// `ri-stale-identity-row-retired-before-new-revision`, the general case: a path holding live rows under two other repository identities retires both, each in its own commit, before its current lineage publishes.
+#[tokio::test]
+async fn every_stale_lineage_of_a_path_retires_before_the_current_one_publishes() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    let project_id = identity_of(&live(&store, OccurrenceClass::RepositoryDocuments)[0])[0]
+        .1
+        .to_owned();
+    let scope_id = format!("project:{project_id}");
+    let publisher = crate::harness_sources::SourcePublisher {
+        kernel: &store,
+        domain_id: "harness-capture",
+        scope_id: Some(&scope_id),
+        egress: kernel::ProviderEgress::LocalOnly,
+        sensitivity: kernel::Sensitivity::Sensitive,
+    };
+    let unit = crate::harness_sources::SourceUnit {
+        class: OccurrenceClass::RepositoryDocuments,
+        identity: vec![
+            ("project_id", project_id.clone()),
+            ("repository_id", "git:an-earlier-root".to_owned()),
+            ("relative_path", "ARCHITECTURE.md".to_owned()),
+        ],
+        revision: "1".to_owned(),
+        representation: crate::harness_sources::Representation::Text,
+        text: "# Architecture\n".to_owned(),
+        role: "document".to_owned(),
+        outcome: None,
+    };
+    let published =
+        crate::harness_sources::publish_screened(&publisher, &[unit], now_ms(), None).unwrap();
+    assert!(matches!(
+        published[0],
+        crate::harness_sources::UnitDisposition::Published(_)
+    ));
+    assert_eq!(document_identities(&store, "ARCHITECTURE.md").len(), 2);
+    let repository = commit_repository(&project);
+    handler.source_capture.forget_memo_for_test();
+    let retired = count(&handler, "documents_retired");
+    document_pass(&handler, "base-2").await;
+    assert_eq!(count(&handler, "documents_retired") - retired, 2);
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository, "1".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn the_stale_identity_inventory_runs_once_per_path_and_incarnation() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    let repository = commit_repository(&project);
+    let sweeps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&sweeps);
+    *handler.source_capture.before_stale_sweep.lock().unwrap() = Some(Arc::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    let store = kernel_store(&handler);
+    document_pass(&handler, "base-1").await;
+    assert_eq!(sweeps.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let unchanged = count(&handler, "documents_unchanged");
+    for base in ["base-2", "base-3"] {
+        document_pass(&handler, base).await;
+    }
+    assert_eq!(count(&handler, "documents_unchanged") - unchanged, 2);
+    assert_eq!(sweeps.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    handler.source_capture.forget_memo_for_test();
+    document_pass(&handler, "base-4").await;
+    assert_eq!(sweeps.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository, "1".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn a_project_keyed_row_beside_the_derived_row_retires_at_the_next_incarnation() {
+    let (handler, _dir, project) = capture_handler(capture_config(true), true).await;
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    document_pass(&handler, "base-1").await;
+    let store = kernel_store(&handler);
+    let project_id = identity_of(&live(&store, OccurrenceClass::RepositoryDocuments)[0])[0]
+        .1
+        .to_owned();
+    let repository = commit_repository(&project);
+    handler.source_capture.forget_memo_for_test();
+    document_pass(&handler, "base-2").await;
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository.clone(), "1".to_owned())]
+    );
+
+    let edited = "# Architecture\n\nEdited.\n";
+    std::fs::write(project.join("ARCHITECTURE.md"), edited).unwrap();
+    let scope_id = format!("project:{project_id}");
+    let publisher = crate::harness_sources::SourcePublisher {
+        kernel: &store,
+        domain_id: "harness-capture",
+        scope_id: Some(&scope_id),
+        egress: kernel::ProviderEgress::LocalOnly,
+        sensitivity: kernel::Sensitivity::Sensitive,
+    };
+    let unit = crate::harness_sources::SourceUnit {
+        class: OccurrenceClass::RepositoryDocuments,
+        identity: vec![
+            ("project_id", project_id.clone()),
+            ("repository_id", project_id.clone()),
+            ("relative_path", "ARCHITECTURE.md".to_owned()),
+        ],
+        revision: "2".to_owned(),
+        representation: crate::harness_sources::Representation::Text,
+        text: edited.to_owned(),
+        role: "document".to_owned(),
+        outcome: None,
+    };
+    let published =
+        crate::harness_sources::publish_screened(&publisher, &[unit], now_ms(), None).unwrap();
+    assert!(matches!(
+        published[0],
+        crate::harness_sources::UnitDisposition::Published(_)
+    ));
+    let mut both = document_identities(&store, "ARCHITECTURE.md");
+    both.sort_unstable();
+    let mut expected = vec![
+        (repository.clone(), "1".to_owned()),
+        (project_id, "2".to_owned()),
+    ];
+    expected.sort_unstable();
+    assert_eq!(both, expected);
+
+    handler.source_capture.forget_memo_for_test();
+    let (retired, units) = (
+        count(&handler, "documents_retired"),
+        count(&handler, "units_published"),
+    );
+    document_pass(&handler, "base-3").await;
+    assert_eq!(count(&handler, "documents_retired") - retired, 1);
+    assert_eq!(count(&handler, "units_published") - units, 1);
+    let rows = live(&store, OccurrenceClass::RepositoryDocuments);
+    assert_eq!(
+        document_identities(&store, "ARCHITECTURE.md"),
+        [(repository, "2".to_owned())]
+    );
+    assert_eq!(
+        rows[0].detail.artifact_digest,
+        crate::project_docs::sha256_hex(edited.as_bytes())
+    );
 }

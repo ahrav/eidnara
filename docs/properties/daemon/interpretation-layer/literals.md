@@ -94,8 +94,8 @@ not defined once:
 
 - `synthetic_todo_` at `injection.rs:20` and `codec/opencode.rs:1074`.
 - The `eidnara_note` actions `read` and `dismiss` at `tool_vocabulary.rs:37`,
-  beside the note handler's own spellings at `lib.rs:12853`, `:13170` and the
-  tool schema at `lib.rs:18605`, and `conditional_note_evaluation.rs:1905`.
+  beside the note handler's own spellings at `lib.rs:12854`, `:13171` and the
+  tool schema at `lib.rs:18606`, and `conditional_note_evaluation.rs:1905`.
 - The placeholder `tool`, used for a missing native tool name or call id, at
   `codec/opencode.rs:1382` and `codec/pi.rs:458`, `:862`, `:878`, `:889`,
   `:1127`, `:1129`, `:1885`.

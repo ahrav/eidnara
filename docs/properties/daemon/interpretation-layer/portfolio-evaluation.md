@@ -4,7 +4,7 @@ The fresh-context evaluation of Part A ran during #1105's authoring, at
 `a0e3f2993`, through the four METHOD lenses (harness fit, coverage balance,
 implementability, wildcard). This file records its dispositions as carried
 into this part and what re-verification at `41d889ea4`, the re-check at
-`aff5a00e6`, and the re-read after U6 changed. Part B S2
+`aff5a00e6`, and the re-reads after U6 and U7 changed. Part B S2
 records are proposed obligations and have no portfolio result of their own.
 
 ## Finding disposition
@@ -90,7 +90,7 @@ revisions. Three cited files moved:
 
 One claim changed: `settled` (`corpus_replay.rs:263-286`) now maps only
 `IdentityReused` to `identity_conflict`; a permanent descriptor refusal is an
-unnamed outcome, as `classify` (`source_capture.rs:1092-1094`) already counted
+unnamed outcome, as `classify` (`source_capture.rs:1239-1241`) already counted
 it. [`loss-conditions.md`](loss-conditions.md#loss-condition-enumeration)
 states the HEAD mapping. Reachability changes: the gate record and the literal
 classification record are `test-only`; their subjects are a CI step and an
@@ -105,4 +105,17 @@ purge tombstone or a pending unlink names before the batch commit
 (`harness_sources.rs:1613-1619`, answered at `:1635-1648`); the record's
 [evidence file](evidence/il-readmission-block-ends-batch-unnamed-at-head.md)
 records the re-read and the U6 checks that succeed it. No other record changed
+status.
+
+## Re-read after U7
+
+U7 ([#1112](https://github.com/ahrav/eidnara/issues/1112)) landed on this
+branch after U6. Status change: il-repository-id-equals-project-id-at-head is
+`invalidated`. `plan_document` writes the derived repository identity into
+`repository_id` (`crates/daemon/src/repository_identity.rs:62`, used at
+`source_capture.rs:1092`), with the project digest only as the fallback, and a
+pass retires a live row under another `repository_id` before it publishes
+(`source_capture.rs:1477`, retired at `:943`); the record's
+[evidence file](evidence/il-repository-id-equals-project-id-at-head.md)
+records the re-read and the U7 checks that succeed it. No other record changed
 status.

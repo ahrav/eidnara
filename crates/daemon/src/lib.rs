@@ -80,6 +80,7 @@ pub mod packing;
 mod parallel_map;
 pub(crate) mod project_docs;
 pub(crate) mod prompt_surface;
+pub(crate) mod repository_identity;
 mod retained_size;
 pub mod scheduler;
 pub mod search_catchup;
@@ -18860,6 +18861,8 @@ mod tests {
     mod pi_native_serving_tests;
     #[path = "transform/recorded_goldens.rs"]
     mod recorded_goldens;
+    #[path = "repository_identity_tests.rs"]
+    mod repository_identity_tests;
     #[path = "request_budget/host_tests.rs"]
     mod request_budget_host_tests;
     #[path = "source_capture_tests.rs"]

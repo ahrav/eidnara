@@ -33,7 +33,7 @@ provenance and verification commit are stated in
 U6 ([#1111](https://github.com/ahrav/eidnara/issues/1111)) replaced the
 behavior il-readmission-block-ends-batch-unnamed-at-head describes, and the
 record is invalidated; U7
-([#1112](https://github.com/ahrav/eidnara/issues/1112)) invalidates
+([#1112](https://github.com/ahrav/eidnara/issues/1112)) invalidated
 il-repository-id-equals-project-id-at-head, and U8
 ([#1113](https://github.com/ahrav/eidnara/issues/1113)) revises
 il-doc-read-nofollow-final-component-flat-list. Each of those units updates

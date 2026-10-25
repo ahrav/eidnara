@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A lens pass (architecture and data flow): three sites each held an
+Issue #1105 Part A lens pass (architecture and data flow): three sites each held an
 ordered key list, and the lists diverged.
 
 ## Evidence trail
@@ -38,6 +38,7 @@ Covered by `tool_vocabulary_tests.rs:66`.
 ## Investigation log
 
 ### Q: Did U4 change any site's list?
+
 - Sources examined: the U4 diff of `selection.rs`, `wire.rs`,
   `chunk_text.rs`; `tool_vocabulary.rs:41-45`; the empty testdata diff
   `git diff a91dbc2b6 97afdaff1 -- crates/daemon/testdata`.
@@ -47,6 +48,7 @@ Covered by `tool_vocabulary_tests.rs:66`.
 - Conclusion: resolved with answer.
 
 ### Q: Is the display list's omission of `file_path` intended?
+
 - Sources examined: `72f35b64d`, which introduced the lists together; #1072.
 - Findings: no commit message or comment states a reason; U4 preserved it.
 - Missing evidence: an owner decision.

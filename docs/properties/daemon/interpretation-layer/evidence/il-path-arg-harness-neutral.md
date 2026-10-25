@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part B S2 (R6): one path query for both harnesses' spellings.
+Issue #1105 Part B S2 (R6): one path query for both harnesses' spellings.
 
 ## Evidence trail
 
@@ -34,6 +34,7 @@ A row `{"pattern": "p", "filePath": "f"}` in the per-site table, asserting
 ## Investigation log
 
 ### Q: Does `display_arg` adopt the shared list?
+
 - Sources examined: `tool_vocabulary.rs:43`; `tool_vocabulary_tests.rs:66`.
 - Findings: no; it keeps the summary line's list without `file_path`, and the
   test pins `{"file_path": ...}` to `None`.
@@ -42,6 +43,7 @@ A row `{"pattern": "p", "filePath": "f"}` in the per-site table, asserting
 - Conclusion: resolved with answer.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
 - Findings: U4 implemented both queries; `crates/daemon/src/tool_vocabulary_tests.rs:66` and `:127` pin them, and the goldens did not change.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where

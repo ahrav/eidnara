@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part B S2 (R7): `classify` is total, with `Unknown` as a legal value.
+Issue #1105 Part B S2 (R7): `classify` is total, with `Unknown` as a legal value.
 
 ## Evidence trail
 
@@ -32,6 +32,7 @@ Covered.
 ## Investigation log
 
 ### Q: Does `classify` normalize before lookup?
+
 - Sources examined: `tool_vocabulary.rs:106-108`.
 - Findings: yes; `mcp_read` classifies as `read`, and `MCP_READ` as `Tabled`
   (`tool_vocabulary_tests.rs:243`).
@@ -39,6 +40,7 @@ Covered.
 - Conclusion: resolved with answer.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
 - Findings: U4 implemented `classify`; `crates/daemon/src/tool_vocabulary_tests.rs:248` runs it over arbitrary strings and `:232` over the edge names.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where

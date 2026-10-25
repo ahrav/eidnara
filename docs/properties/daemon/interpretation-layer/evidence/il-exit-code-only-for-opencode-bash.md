@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A lens pass (claimed guarantees): `tool_outcome` reads
+Issue #1105 Part A lens pass (claimed guarantees): `tool_outcome` reads
 `state.metadata.exit`, a tool-authored field, for one tool name only.
 
 ## Evidence trail
@@ -39,6 +39,7 @@ Covered: the trace cases and the mutated cases in `tool_vocabulary_tests.rs:145`
 ## Investigation log
 
 ### Q: Does OpenCode 1.18.22 write `metadata.exit` for `bash`?
+
 - Sources examined: `crates/daemon/testdata/corpus/sessions/opencode-1.18.22/mix.json`.
 - Findings: yes, as an integer on three of four `bash` parts; one carries
   `null`, which `as_i64` maps to `None`.
@@ -46,6 +47,7 @@ Covered: the trace cases and the mutated cases in `tool_vocabulary_tests.rs:145`
 - Conclusion: resolved with answer: both pinned OpenCode versions write it.
 
 ### Q: Does the digest emit the exit code?
+
 - Sources examined: `tool_outcome.rs:156-176` `outcome_digest`.
 - Findings: the digest holds status, bytes, head, and tail; no exit field.
 - Missing evidence: none.

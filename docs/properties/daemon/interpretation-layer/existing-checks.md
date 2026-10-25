@@ -43,7 +43,7 @@ or whose check U4 deleted says so.
 | --- | --- | --- |
 | `history_summarizer_chunk.rs:3251` `repeated_call_ids_render_each_call_with_its_own_arguments` | `TC: read(one.rs)` from `filePath` | unaudited |
 | `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` | the description arm and a `filePath` key argument on separate inputs, with newlines collapsed | unaudited |
-| `crates/daemon/src/lib.rs:19636` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:19922-19927`, `:26286`) | unaudited |
+| `crates/daemon/src/lib.rs:19639` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:19925-19930`, `:26289`) | unaudited |
 | `crates/daemon/testdata/history_summarizer-chunk-golden.json` | `TC:` lines from short arguments | unaudited |
 
 ## Wire and injection
@@ -82,8 +82,8 @@ or whose check U4 deleted says so.
 | `replay:423` `admitted_plus_named_loss_equals_expected_for_any_order_split_and_size` (proptest) | the loss identity over creation order, batch splits, and sizes around 64 KiB | unaudited |
 | `replay:443` `the_identity_case_fails_when_the_adapter_refuses_every_record` | an adapter that refuses every record fails the identity | unaudited |
 | `replay:470` `a_seeded_dropped_unit_fails_the_identity_naming_the_unit` | a dropped unit is named | unaudited |
-| `replay:500` `a_refused_outcome_record_is_unclassified_loss` | a permanent descriptor refusal is an unnamed, unclassified loss, not `identity_conflict` ([`loss-conditions.md`](loss-conditions.md#loss-condition-enumeration)) | unaudited |
-| `replay:530` `a_changed_unit_under_a_published_identity_conflicts_alone` | `identity_conflict` names only the changed unit | unaudited |
+| `replay:585` `a_refused_outcome_record_is_unclassified_loss` | a permanent descriptor refusal is an unnamed, unclassified loss, not `identity_conflict` ([`loss-conditions.md`](loss-conditions.md#loss-condition-enumeration)) | unaudited |
+| `replay:615` `a_changed_unit_under_a_published_identity_conflicts_alone` | `identity_conflict` names only the changed unit | unaudited |
 | `crates/daemon/src/source_corpus_tests.rs` | the Rust readers and the closed enumerations | unaudited |
 
 ## Project documents and repository identity
@@ -93,7 +93,8 @@ or whose check U4 deleted says so.
 | `pd.rs:244`, `:267`, `:304`, `:318` | final-component symlink, a sparse file already past the cap and a FIFO, `Missing` versus `Unreadable`, oversize; no test grows a file during the read | unaudited |
 | `pd.rs:387`, `:398` (proptests), `pd.rs:429` golden | canonical form, escape, rendered block, and hash | unaudited |
 | `sc-tests:1964`, `:2137`, `:2202`, `:2276`, `:2315` | document lineage, retirement, renames, project isolation, unreadable reads, with rows selected by `relative_path` (`sc-tests:1903-1909`); none asserts the identity values capture writes | unaudited |
-| `repository_id == project_id` | none found as an assertion; `crates/kernel/tests/eval_identity.rs` pins the encoding | none |
+| `sc-tests:2736`, `:2777`, `:2811`, `:2860`, `:2935` | U7: the derived identity, stale-row retirement before publication, worktrees, a failed derivation, a shallow checkout; `document_identities` (`sc-tests:2721`) reads the `repository_id` capture writes | unaudited |
+| `crates/daemon/src/repository_identity_tests.rs` | U7: the derivation against the plugin's rendering, two roots, a subdirectory, the fallbacks, the failures, the unchanged encoding | unaudited |
 | symlinked intermediate directory | none found; unreachable at HEAD because no name holds a separator | none |
 
 ## Re-admission

@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A lens pass (existing tests and failure modes): the adapter skips
+Issue #1105 Part A lens pass (existing tests and failure modes): the adapter skips
 several part shapes with no unit, no refusal, and no counter.
 
 ## Evidence trail
@@ -14,12 +14,12 @@ several part shapes with no unit, no refusal, and no counter.
   turn), `:357` (`_ => {}` for every other part type).
 - Pi skip arm: `harness_sources.rs:448`, a user or assistant content item whose `type` is not
   `text`.
-- No `Count` variant names a skip (`crates/daemon/src/source_capture.rs:72-109`).
+- No `Count` variant names a skip (`crates/daemon/src/source_capture.rs:77-114`).
 - The independent reader classifies every arm with a closed reason
   (`crates/daemon/src/source_corpus.rs:573-594`): `non_text_part`,
   `ignored_text`, `unsettled_text`, `unsettled_tool`, `skipped_item`.
-- U3 witnesses: `crates/daemon/tests/source_corpus_replay.rs:213` (an `image`
-  part), `:336` (a pending tool part), `:80` (the frozen OpenCode session
+- U3 witnesses: `crates/daemon/tests/source_corpus_replay.rs:215` (an `image`
+  part), `:338` (a pending tool part), `:82` (the frozen OpenCode session
   holds `non_text_part` records).
 
 ## Failure scenario
@@ -34,7 +34,7 @@ Three arms are time-dependent, each on its own condition. A running or
 pending tool part is skipped by status whether or not the turn has completed
 (`crates/daemon/src/harness_sources.rs:328-332`); it becomes a unit only on a
 pass after its status settles to `completed` or `error`.
-`crates/daemon/tests/source_corpus_replay.rs:336` holds a pending part in a
+`crates/daemon/tests/source_corpus_replay.rs:338` holds a pending part in a
 completed turn and still expects `unsettled_tool`. An interrupted tool part
 (`harness_sources.rs:334-336`) and unfinished assistant text
 (`harness_sources.rs:308`) become units on a pass after the turn gains
@@ -52,6 +52,7 @@ unfinished-text arms, a later pass after the turn completes.
 ## Investigation log
 
 ### Q: Should the daemon count skips, or should the oracle classify them?
+
 - Sources examined: #1105 R3 and U1; `source_corpus.rs:573-594`; the U3
   report.
 - Findings: U1 landed the closed `NonUnitReason` enumeration and U3 reconciles
@@ -60,6 +61,7 @@ unfinished-text arms, a later pass after the turn completes.
 - Conclusion: resolved with answer: oracle-side classification.
 
 ### Q: Does every arm have a witness?
+
 - Sources examined: the `replay` tests and the frozen sessions.
 - Findings: `non_text_part` and `unsettled_tool` (pending) have witnesses; the
   frozen sessions' census reports one aborted call. `ignored_text` and an

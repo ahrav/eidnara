@@ -61,6 +61,11 @@ impl ProjectBinding {
         canonical_root(requested) == self.root
     }
 
+    /// The bound root after canonicalization.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub(crate) fn scope_id(&self) -> String {
         format!("project:{}", self.digest)
     }

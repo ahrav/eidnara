@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A evaluation (gap): the path key list is visible in compaction
+Issue #1105 Part A evaluation (gap): the path key list is visible in compaction
 output through the reduced call's `path`, and no record named it.
 
 ## Evidence trail
@@ -36,6 +36,7 @@ A `reduced_block` test over a flattened call with an input under each key of
 ## Investigation log
 
 ### Q: Does the reduced call read the same list as wire extraction?
+
 - Sources examined: `wire.rs:445-489`, `:520-570`, `:646-648`;
   `transform.rs:11880-11896`.
 - Findings: yes; the path is computed once by `path_arg` during flattening and

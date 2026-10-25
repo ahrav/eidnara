@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part B S2 (R5, OQ12): every literal of the layer carries one class, and
+Issue #1105 Part B S2 (R5, OQ12): every literal of the layer carries one class, and
 the variation-point owner found that two classes do not fit Eidnara's own
 identifiers.
 
@@ -21,7 +21,7 @@ identifiers.
 - Eidnara-owned identifiers defined more than once: `synthetic_todo_`
   (`crates/daemon/src/injection.rs:20`, `crates/daemon/src/codec/opencode.rs:1074`);
   the `eidnara_note` actions (`crates/daemon/src/tool_vocabulary.rs:37`,
-  `crates/daemon/src/lib.rs:12853`, `:13170`, `:18605`,
+  `crates/daemon/src/lib.rs:12854`, `:13171`, `:18606`,
   `crates/daemon/src/conditional_note_evaluation.rs:1905`); the placeholder
   `tool` for a missing native tool name or call id
   (`crates/daemon/src/codec/opencode.rs:1382`; `codec/pi.rs:458`, `:862`,
@@ -45,6 +45,7 @@ file gains a string literal.
 ## Investigation log
 
 ### Q: Are Eidnara-owned identifiers a third class?
+
 - Sources examined: OQ12; `tool_vocabulary.rs:1-18`; U4's documentation.
 - Findings: yes; U4's module doc and gate treat them as neither contract nor
   vocabulary.
@@ -52,12 +53,14 @@ file gains a string literal.
 - Conclusion: resolved with answer.
 
 ### Q: Should the duplicated Eidnara-owned spellings be defined once?
+
 - Sources examined: the sites above.
 - Findings: each spelling is repeated across files with no shared constant.
 - Missing evidence: an owner decision.
 - Conclusion: needs human input.
 
 ### Q: What confidence does the classification carry?
+
 - Sources examined: the extraction and its checks; the rows for generic words
   such as `/metadata/truncated` and `content`.
 - Findings: the extraction, the one-row-per-occurrence check, and the gate-set

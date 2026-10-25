@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part B S2 (OQ20): unifying the per-caller name rules would be a behavior
+Issue #1105 Part B S2 (OQ20): unifying the per-caller name rules would be a behavior
 change.
 
 ## Evidence trail
@@ -32,6 +32,7 @@ Covered.
 ## Investigation log
 
 ### Q: Does U4 keep per-caller rules or unify them?
+
 - Sources examined: `tool_vocabulary.rs:14-17`, `:57-73`;
   `docs/compression-fidelity.md` (Tool vocabulary).
 - Findings: U4 keeps the rules as module data, one per query.
@@ -39,6 +40,7 @@ Covered.
 - Conclusion: resolved with answer (OQ20).
 
 ### Q: Is the `mcp_` collision a guarantee?
+
 - Sources examined: `tool_vocabulary.rs:75-77`.
 - Findings: the module documents that a stripped MCP name equal to a tabled
   name takes that class; an MCP server exposing `edit` collides by design.
@@ -46,6 +48,7 @@ Covered.
 - Conclusion: resolved with answer: a known condition, not a guarantee.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
 - Findings: U4 implemented the rules as `NameRule` data; `crates/daemon/src/tool_vocabulary_tests.rs:17` pins the per-consumer table and `:257` every tabled name.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where

@@ -115,13 +115,21 @@ pub(crate) fn object_format(hash: gix::hash::Kind) -> Result<&'static str, GitRe
 }
 
 /// gix reports an `extensions.objectFormat` value this build does not read as a typed-string error on that key rather than a dedicated variant, so the refusal is recognized by the key it names.
-fn declares_unsupported_object_format(error: &gix::open::Error) -> bool {
+pub(crate) fn declares_unsupported_object_format(error: &gix::open::Error) -> bool {
     match error {
         gix::open::Error::Config(gix::config::Error::ConfigTypedString(error)) => {
             error.key == "extensions.objectFormat"
         }
         _ => false,
     }
+}
+
+/// Repository options without user, system, or installation configuration, with gix's allocation limit set to `max_object_bytes` after the repository's own configuration.
+pub(crate) fn isolated_options(max_object_bytes: NonZeroU64) -> gix::open::Options {
+    gix::open::Options::isolated().config_overrides([format!(
+        "gitoxide.objects.allocLimit={}",
+        max_object_bytes.get()
+    )])
 }
 
 /// Opens the repository without user, system, or installation configuration and with replacement refs ignored, so neither a repository's own settings nor a `refs/replace` entry can substitute another object for a selected id.
@@ -131,11 +139,7 @@ pub(crate) fn open(
     path: &Path,
     max_object_bytes: NonZeroU64,
 ) -> Result<gix::Repository, GitRefusal> {
-    let options = gix::open::Options::isolated().config_overrides([format!(
-        "gitoxide.objects.allocLimit={}",
-        max_object_bytes.get()
-    )]);
-    let mut repo = gix::open_opts(path, options).map_err(|error| {
+    let mut repo = gix::open_opts(path, isolated_options(max_object_bytes)).map_err(|error| {
         if declares_unsupported_object_format(&error) {
             GitRefusal::UnsupportedObjectFormat
         } else {

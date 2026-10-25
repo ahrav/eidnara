@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part B S2 (R6): the `bash` literal moves into the module's
+Issue #1105 Part B S2 (R6): the `bash` literal moves into the module's
 `exit_code` query.
 
 ## Evidence trail
@@ -32,6 +32,7 @@ Covered.
 ## Investigation log
 
 ### Q: Is the record default-production, as the source labels it?
+
 - Sources examined: every caller of `tool_outcome::opencode` and
   `tool_outcome::pi` outside tests.
 - Findings: the only callers are `harness_sources.rs:350` and `:432`, inside
@@ -40,6 +41,7 @@ Covered.
 - Conclusion: resolved with answer: `explicit-config-only`.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
 - Findings: U4 implemented the query; `crates/daemon/src/tool_vocabulary_tests.rs:145` runs it over the trace fixture and the mutated cases.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where

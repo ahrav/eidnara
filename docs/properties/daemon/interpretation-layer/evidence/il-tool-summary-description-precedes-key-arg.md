@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A evaluation (gap): the summary line's precedence and truncation
+Issue #1105 Part A evaluation (gap): the summary line's precedence and truncation
 are golden-visible and `display_arg` had to reproduce them.
 
 ## Evidence trail
@@ -21,10 +21,10 @@ are golden-visible and `display_arg` had to reproduce them.
   Reachability classes).
 - Tests: `history_summarizer_chunk.rs:3312` (description and key-argument
   arms, on separate inputs), `:3251`;
-  `crates/daemon/src/lib.rs:19636`
+  `crates/daemon/src/lib.rs:19639`
   `history_summarizer_boundary_construction_matches_owned_reference`, which
-  expects `TC: bash` (`lib.rs:19922-19927`) for a call whose input holds only
-  `command` (`lib.rs:26286`), the bare-name arm;
+  expects `TC: bash` (`lib.rs:19925-19930`) for a call whose input holds only
+  `command` (`lib.rs:26289`), the bare-name arm;
   `crates/daemon/src/tool_vocabulary_tests.rs:66` (the cut).
 
 ## Failure scenario
@@ -44,6 +44,7 @@ One input holding both a non-empty `description` and a `filePath`, asserting
 ## Investigation log
 
 ### Q: Does the description arm include the tool name?
+
 - Sources examined: `history_summarizer_chunk.rs:1291-1296`;
   `history_summarizer_chunk.rs:3331`.
 - Findings: no; the arm renders `TC: {description}`. The source record stated
@@ -52,8 +53,9 @@ One input holding both a non-empty `description` and a `filePath`, asserting
 - Conclusion: resolved with answer: corrected in the record.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
-- Findings: the source left the locations unverified; this pass read `format_tool_summary` and every caller at `41d889ea4`, and `history_summarizer_chunk.rs:3312`, `crates/daemon/src/lib.rs:19636` (`:19639` at `41d889ea4`), and `crates/daemon/src/tool_vocabulary_tests.rs:66` exercise all three arms on separate inputs.
+- Findings: the source left the locations unverified; this pass read `format_tool_summary` and every caller at `41d889ea4`, and `history_summarizer_chunk.rs:3312`, `crates/daemon/src/lib.rs:19639` (`:19639` at `41d889ea4`), and `crates/daemon/src/tool_vocabulary_tests.rs:66` exercise all three arms on separate inputs.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where
   the record names one, stays open.
 - Conclusion: resolved with answer.
