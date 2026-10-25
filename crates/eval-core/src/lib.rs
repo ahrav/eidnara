@@ -20,6 +20,7 @@ macro_rules! debug_display {
     )*};
 }
 
+mod access;
 mod anchor;
 mod campaign;
 mod capture;
@@ -57,6 +58,7 @@ mod stream;
 mod task;
 mod witness;
 
+pub use access::{AccessError, AccessRecord, MemoryRead, MemoryWrite, WriteKey, excludes};
 pub use anchor::{
     ANCHOR_CORPUS_DIGEST_PROTOCOL, ANCHOR_CORPUS_SCHEMA, ANCHOR_ENTRY_DIGEST_PROTOCOL,
     Affordability, AnchorCorpus, AnchorEntry, AnchorError, ClassifiedControl, Contamination,
