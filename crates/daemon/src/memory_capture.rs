@@ -1234,9 +1234,10 @@ fn publish_captured_memories(
                 if let Some(spec) = anchor.take() {
                     envelope.insert_anchor(spec)?;
                 }
-                if citation.is_none() {
-                    citation = Some(cite::Citation::lookup(envelope, job, consent)?);
-                }
+                let citation = match &mut citation {
+                    Some(found) => &*found,
+                    slot => slot.insert(cite::Citation::lookup(envelope, job, consent)?),
+                };
                 let id = format!(
                     "mem_{:x}",
                     Sha256::digest(format!("{}:{index}", job.job_id).as_bytes())
@@ -1254,9 +1255,7 @@ fn publish_captured_memories(
                 .map(|(key, value)| (key.to_owned(), value))
                 .collect();
                 anchor_reason.record(&mut rationale, reasons);
-                let evidence = citation.as_ref().map_or_else(Vec::new, |citation| {
-                    citation.cite(&job.text, &memory.quote, &mut rationale, reasons)
-                });
+                let evidence = citation.cite(&job.text, &memory.quote, &mut rationale, reasons);
                 let spec = kernel::DecisionSpec {
                     decision_id: decision_id.clone(),
                     object_id: id.into(),

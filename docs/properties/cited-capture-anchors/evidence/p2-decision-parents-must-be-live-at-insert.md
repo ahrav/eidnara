@@ -38,7 +38,7 @@ A decision naming a missing domain; a decision naming an anchor inserted after i
   At U3 the capture publish inserts the job's anchor before the job's first
   decision and names it on every decision of the job
   (`crates/daemon/src/memory_capture.rs:1235`), so the clause is reached on
-  every anchored publish (`crates/daemon/src/source_capture_tests.rs:3475`).
+  every anchored publish (`crates/daemon/src/source_capture_tests.rs:3474`).
 - Missing evidence: none.
 - Conclusion: resolved with answer: R1's `always-or-unreached` label is
   reversed to `always` at U3.

@@ -18,7 +18,7 @@ A rollback after the reasons were computed; a lost reply followed by a replay.
 
 ## What a test must construct
 
-The seven counters after a mixed submission (`crates/daemon/src/source_capture_tests.rs:3475`, `:3625`); a committed publish replayed on retry with every counter unchanged (`crates/daemon/src/source_capture_tests.rs:3801`).
+The seven counters after a mixed submission (`crates/daemon/src/source_capture_tests.rs:3474`, `:3624`); a committed publish replayed on retry with every counter unchanged (`crates/daemon/src/source_capture_tests.rs:3800`).
 
 ## Investigation log
 

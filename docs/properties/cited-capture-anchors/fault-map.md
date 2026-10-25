@@ -23,7 +23,7 @@ that adds this part.
 | F12 | Source-capture slot busy, budget spent, cancelled, Kernel starting | constructible: source-capture test module |
 | F13 | Secret-bearing text | constructible: known secret fixtures |
 | F14 | Unsupported object format, oversized delta base, replacement refs; unborn and non-repository roots | constructible: git-source tests and the U2 head-observation fixtures (`crates/daemon/src/memory_capture/head.rs:139`) |
-| F15 | Harness capture past `retain_until` while a decision cites it | constructible: capture citation events since U3 (`crates/daemon/src/source_capture_tests.rs:3762`) |
+| F15 | Harness capture past `retain_until` while a decision cites it | constructible: capture citation events since U3 (`crates/daemon/src/source_capture_tests.rs:3761`) |
 | F16 | Fragment id differs from descriptor message id (hashed, chunked, multi-block) | production: messages over 16 KiB or out-of-grammar ids |
 
 ## Per-property required faults

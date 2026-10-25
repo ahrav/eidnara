@@ -24,7 +24,7 @@ A batch where one memory quotes another message; an invented `message_id`; a dup
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/daemon/src/memory_capture.rs:1368`, `:1401`, `:1433`, `:1474`, `:1481`; `crates/daemon/src/lib.rs:24884`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/daemon/src/memory_capture.rs:1367`, `:1400`, `:1432`, `:1473`, `:1480`; `crates/daemon/src/lib.rs:24884`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

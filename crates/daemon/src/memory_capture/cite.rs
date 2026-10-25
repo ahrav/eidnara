@@ -432,6 +432,52 @@ mod tests {
         }
     }
 
+    /// An identity the source-identity encoder refuses can hold no
+    /// descriptor, so the lookup reads nothing and the memory reports a miss
+    /// instead of failing its publish.
+    #[test]
+    fn an_identity_the_encoder_refuses_reads_no_descriptor_and_reports_a_miss() {
+        let job = CaptureJob {
+            job_id: "job".into(),
+            project: "a".repeat(64),
+            harness: "cli".into(),
+            session_id: "session".into(),
+            message_id: "message".into(),
+            role: "user".into(),
+            text: "Use port 4321.".into(),
+            prepared: None,
+            attempts: 0,
+            failures: 0,
+        };
+        assert_eq!(message_lineage(&job, 0), None);
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = kernel::KernelStore::open(dir.path()).unwrap();
+        kernel
+            .commit(
+                kernel::CommitIntent {
+                    producer: "cite-test".into(),
+                    operation_key: "lookup".into(),
+                    request_digest: "0".repeat(64),
+                    actor: "test".into(),
+                    cause: "lookup".into(),
+                },
+                |envelope| {
+                    let citation = Citation::lookup(envelope, &job, true)?;
+                    let mut rationale = Map::new();
+                    let mut reasons = Vec::new();
+                    assert!(
+                        citation
+                            .cite(&job.text, "Use port", &mut rationale, &mut reasons)
+                            .is_empty()
+                    );
+                    assert_eq!(rationale["citation"], "descriptor_not_found");
+                    assert_eq!(reasons, vec![Count::DecisionsDescriptorNotFound]);
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+    }
+
     proptest! {
         #[test]
         fn every_block_of_a_joined_message_is_located_at_its_own_bytes(

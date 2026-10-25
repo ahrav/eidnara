@@ -3409,8 +3409,7 @@ fn counter(handler: &Handler, name: &str) -> u64 {
         .unwrap()
 }
 
-/// A secret source capture refuses to retain, so its block has no descriptor
-/// and the memory store redacts it in the capture job's text.
+/// A secret source capture refuses to retain, so its block has no descriptor.
 const CITED_SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
 const CITED_SOURCES: [(&str, &str); 6] = [
     ("pi-one", "Use port 4321 for staging."),

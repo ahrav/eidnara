@@ -74,16 +74,16 @@ repository declaring SHA-256.
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
   without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:1948`).
+  (`crates/daemon/src/memory_capture.rs:1947`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
 ### Q: Does the anchor use the frozen value?
 
-- Sources examined: `anchor_spec` (`crates/daemon/src/memory_capture/cite.rs:340`)
+- Sources examined: `anchor_spec` (`crates/daemon/src/memory_capture/cite.rs:341`)
   and the publish closure at the U3 branch.
 - Findings: the anchor's oid is the plan's `FrozenHead::Commit`; the U3
   tests compare each anchor row's oid with the fixture HEAD at submit
-  (`crates/daemon/src/source_capture_tests.rs:3475`, `:3625`).
+  (`crates/daemon/src/source_capture_tests.rs:3474`, `:3624`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
