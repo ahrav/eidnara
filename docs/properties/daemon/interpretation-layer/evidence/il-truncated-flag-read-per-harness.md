@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A evaluation (refinement): the exit-code record hid that the Pi
+Issue #1105 Part A evaluation (refinement): the exit-code record hid that the Pi
 truncation flag comes from a different field than the OpenCode one.
 
 ## Evidence trail
@@ -37,6 +37,7 @@ through the adapter.
 ## Investigation log
 
 ### Q: Does the frozen Pi session exercise the Pi path?
+
 - Sources examined: the frozen Pi 0.80.2 session; the U3 report.
 - Findings: no Pi tool result carries the flag, including the 70,000-byte
   result.
@@ -45,6 +46,7 @@ through the adapter.
   harness's limit.
 
 ### Q: Does U4's move preserve both reads?
+
 - Sources examined: the U4 diff of `tool_outcome.rs`; `tool_vocabulary.rs:212-218`.
 - Findings: the two inline reads became one query with the same pointers and
   the same `as_bool`.

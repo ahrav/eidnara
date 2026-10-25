@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A lens pass (existing tests and failure modes): the adapter skips
+Issue #1105 Part A lens pass (existing tests and failure modes): the adapter skips
 several part shapes with no unit, no refusal, and no counter.
 
 ## Evidence trail
@@ -43,6 +43,7 @@ pass after the turn completes.
 ## Investigation log
 
 ### Q: Should the daemon count skips, or should the oracle classify them?
+
 - Sources examined: #1105 R3 and U1; `source_corpus.rs:573-594`; the U3
   report.
 - Findings: U1 landed the closed `NonUnitReason` enumeration and U3 reconciles
@@ -51,6 +52,7 @@ pass after the turn completes.
 - Conclusion: resolved with answer: oracle-side classification.
 
 ### Q: Does every arm have a witness?
+
 - Sources examined: the `replay` tests and the frozen sessions.
 - Findings: `non_text_part` and `unsettled_tool` (pending) have witnesses; the
   frozen sessions' census reports one aborted call. `ignored_text` and an

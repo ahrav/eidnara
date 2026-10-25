@@ -2,18 +2,18 @@
 
 ## Discovery trigger
 
-#1105 Part A lens pass (state and persistence): document capture writes the
+Issue #1105 Part A lens pass (state and persistence): document capture writes the
 project digest into both identity fields.
 
 ## Evidence trail
 
-- `crates/daemon/src/source_capture.rs:1048-1100` `plan_document`; the identity
-  vector at `:1068-1072` holds `("project_id", P)`, `("repository_id", P)`, and
+- `crates/daemon/src/source_capture.rs:1028-1080` `plan_document`; the identity
+  vector at `:1048-1052` holds `("project_id", P)`, `("repository_id", P)`, and
   `("relative_path", name)`.
-- `:1073` derives the lineage from that identity; `:1075-1077` reads the live row
+- `:1053` derives the lineage from that identity; `:1055-1057` reads the live row
   and keeps it only for `CAPTURE_DOMAIN_ID` (`source_capture.rs:51`).
-- A missing document retires the live row (`:1078-1084`) through
-  `retire_document` (`:1103-1120`), called from `capture_documents` at `:981`.
+- A missing document retires the live row (`:1058-1064`) through
+  `retire_document` (`:1083-1105`), called from `capture_documents` at `:937`.
 - `crates/kernel/tests/eval_identity.rs` pins the identity encoding, not the
   values.
 
@@ -36,6 +36,7 @@ assertion over both lineages' identities; the U7 tests replace it.
 ## Investigation log
 
 ### Q: Does any HEAD code derive `repository_id` from the repository?
+
 - Sources examined: `source_capture.rs`, `project_docs.rs`, the capture
   configuration.
 - Findings: no; the value is the bound project digest.
@@ -43,6 +44,7 @@ assertion over both lineages' identities; the U7 tests replace it.
 - Conclusion: resolved with answer.
 
 ### Q: Can a cap on the history walk flip the derived identity?
+
 - Sources examined: #1105 OQ1 and U7's plan text.
 - Findings: U7's stability scenario fixes the history; no record covers a cap
   near the root count.
@@ -50,8 +52,9 @@ assertion over both lineages' identities; the U7 tests replace it.
 - Conclusion: unresolved, needs OQ1's decision.
 
 ### Q: What does U7 change?
-- Sources examined: `crates/daemon/src/repository_identity.rs:53`;
-  `crates/daemon/src/source_capture.rs:1024`, `:945`, `:1070`, `:1420`; the U7 tests.
+
+- Sources examined: `crates/daemon/src/repository_identity.rs:62`;
+  `crates/daemon/src/source_capture.rs:1011`, `:998`, `:1050`, `:1426`; the U7 tests.
 - Findings: the identity's `repository_id` is `git:` and the smallest root
   commit reachable from HEAD, or the project digest as a deterministic
   fallback, memoized per project for the incarnation. A pass retires every

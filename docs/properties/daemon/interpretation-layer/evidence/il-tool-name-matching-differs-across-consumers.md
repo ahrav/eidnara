@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A lens pass (unproven assumptions): consumers compared tool names
+Issue #1105 Part A lens pass (unproven assumptions): consumers compared tool names
 by different rules, so one spelling could mean two tools.
 
 ## Evidence trail
@@ -38,6 +38,7 @@ Covered by `tool_vocabulary_tests.rs:17`.
 ## Investigation log
 
 ### Q: Which rule does `classify` apply, and did U4 unify the rules?
+
 - Sources examined: `tool_vocabulary.rs:1-18` module doc, `:57-158`; U4's
   `docs/compression-fidelity.md` paragraph.
 - Findings: `classify` normalizes; each query keeps its HEAD rule as module
@@ -46,6 +47,7 @@ Covered by `tool_vocabulary_tests.rs:17`.
 - Conclusion: resolved with answer.
 
 ### Q: Is the double normalization in the tier lookup a behavior change?
+
 - Sources examined: `tool_vocabulary.rs:147-152`; `tool_vocabulary_tests.rs:58-60`.
 - Findings: no; at `a0e3f2993` selection normalized at grouping and again in
   the tier lookup. `mcp_mcp_edit` is `Unknown` for `classify` and tier 2 for

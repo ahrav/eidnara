@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part B S2 (R6, KTD4): one module owns every tool-name and argument-key
+Issue #1105 Part B S2 (R6, KTD4): one module owns every tool-name and argument-key
 table, and a gate keeps distinctive literals out of every other daemon
 production file.
 
@@ -42,6 +42,7 @@ accepted.
 ## Investigation log
 
 ### Q: Are the `todowrite` input keys vocabulary?
+
 - Sources examined: R5's rule; `injection.rs:400-470`; the OpenCode
   `todowrite` tool input in the frozen session.
 - Findings: yes; a harness with no to-do tool never emits them, and the tool
@@ -50,6 +51,7 @@ accepted.
 - Conclusion: resolved with answer.
 
 ### Q: Move them behind module queries, or accept them?
+
 - Sources examined: #1105 D3; U4's PR scope (tables listed in R6).
 - Findings: R6 lists the tables U4 moved; it does not list the to-do schema or
   `description`.
@@ -57,6 +59,7 @@ accepted.
 - Conclusion: needs human input.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
 - Findings: U4 implemented the module and the gate (`97afdaff1`); the gate passes at `41d889ea4`, and the literal table locates every vocabulary literal, so the claim and its residue rest on code and a mechanical scan.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where

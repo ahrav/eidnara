@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part B S2 (R6, KTD4, AE6 first half): a CI gate in the comment-marker
+Issue #1105 Part B S2 (R6, KTD4, AE6 first half): a CI gate in the comment-marker
 gate's style.
 
 ## Evidence trail
@@ -39,6 +39,7 @@ Covered.
 ## Investigation log
 
 ### Q: Are `eidnara_reduce` and `eidnara_note` gated?
+
 - Sources examined: `PATTERN`; `crates/daemon/src/prompt_surface.rs:65`, `:67`;
   `tool_vocabulary.rs:23`.
 - Findings: no; they are Eidnara-owned identifiers defined once in
@@ -47,6 +48,7 @@ Covered.
 - Conclusion: resolved with answer (OQ12).
 
 ### Q: How are inline test modules treated?
+
 - Sources examined: `scripts/forbid-tool-literals.sh:42-50`; the test-region tests.
 - Findings: a top-level `#[cfg(test)]` module region is skipped from its
   attribute to the next column-0 `}`.
@@ -54,6 +56,7 @@ Covered.
 - Conclusion: resolved with answer (OQ13).
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
 - Findings: U4 implemented the gate; `scripts/forbid-tool-literals.test.ts` asserts each exit status on scratch trees.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where

@@ -6,7 +6,12 @@
 //! repository, unborn HEAD, a shallow history, an object format this build does not read, or a
 //! history past [`MAX_ROOT_WALK_COMMITS`]) takes the project digest, and the answer depends on that
 //! state alone, so it is stable across passes.
+//!
+//! The daemon reads the repository without user configuration and with replacement refs ignored,
+//! so a repository whose `refs/replace` entries or grafts substitute a root derives the root its
+//! objects record, where the plugin's `git` invocation renders the substitute.
 
+use std::num::NonZeroU64;
 use std::path::Path;
 
 use kernel::applicability::EvalBudget;
@@ -14,6 +19,10 @@ use kernel::applicability::EvalBudget;
 /// The commits one derivation visits before the history counts as past the cap, the default
 /// #1105 OQ1 sets for the capture job budget.
 pub(crate) const MAX_ROOT_WALK_COMMITS: usize = 1 << 18;
+
+/// gix's allocation limit for the walk: a commit or a delta base above it fails the derivation
+/// instead of being inflated.
+const MAX_ROOT_WALK_OBJECT_BYTES: NonZeroU64 = NonZeroU64::new(16 << 20).unwrap();
 
 /// A derivation outcome fixed by the repository's state; capture memoizes it for the daemon
 /// incarnation.
@@ -56,7 +65,7 @@ pub(crate) fn derive(
     cap: usize,
 ) -> Result<RepositoryIdentity, DerivationFailure> {
     use gix::discover::upwards::Error as Upwards;
-    let options = gix::open::Options::isolated();
+    let options = crate::git_sources::isolated_options(MAX_ROOT_WALK_OBJECT_BYTES);
     let trust = gix::sec::trust::Mapping {
         full: options.clone(),
         reduced: options,
@@ -67,7 +76,7 @@ pub(crate) fn derive(
             Upwards::NoGitRepository { .. }
             | Upwards::NoGitRepositoryWithinCeiling { .. }
             | Upwards::NoGitRepositoryWithinFs { .. },
-        )) => return Ok(RepositoryIdentity::Fallback),
+        )) if !git_entry_above(root) => return Ok(RepositoryIdentity::Fallback),
         Err(gix::discover::Error::Open(error))
             if crate::git_sources::declares_unsupported_object_format(&error) =>
         {
@@ -103,7 +112,15 @@ pub(crate) fn derive(
             }
         }
     }
-    smallest
-        .map(|hex| RepositoryIdentity::Git(format!("git:{hex}")))
-        .ok_or(DerivationFailure::Unreadable)
+    // A completed walk that met no parentless commit is a property of the history, so it falls back.
+    Ok(smallest.map_or(RepositoryIdentity::Fallback, |hex| {
+        RepositoryIdentity::Git(format!("git:{hex}"))
+    }))
+}
+
+/// Whether `root` or a parent holds a `.git` entry, the marker the plugin's resolver looks for: a
+/// discovery that found no repository beside one could not read it, which the next pass retries.
+fn git_entry_above(root: &Path) -> bool {
+    root.ancestors()
+        .any(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
 }

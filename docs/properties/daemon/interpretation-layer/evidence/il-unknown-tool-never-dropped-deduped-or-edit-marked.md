@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part B S2 (R7, AE6 second half): an unknown tool takes every default.
+Issue #1105 Part B S2 (R7, AE6 second half): an unknown tool takes every default.
 
 ## Evidence trail
 
@@ -36,6 +36,7 @@ Covered for class decisions.
 ## Investigation log
 
 ### Q: Does "never dropped" include budget-driven drops?
+
 - Sources examined: #1105 R7; `selection.rs:789` `select_emergency`.
 - Findings: the plan text does not separate class decisions from budget
   decisions; the emergency pass drops by tier.
@@ -44,6 +45,7 @@ Covered for class decisions.
   decisions.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
 - Findings: U4 implemented the class arms; `crates/daemon/src/selection.rs:2828` runs an `Unknown` tool through selection beside an `edit` positive control.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where
@@ -51,6 +53,7 @@ Covered for class decisions.
 - Conclusion: resolved with answer.
 
 ### Q: Why is the check `always(!X)` when the source's `Check` line opens with `always`?
+
 - Sources examined: the source record (#1105 Part B S2) and METHOD's
   check-semantics rules.
 - Findings: the source's own rationale says "`always(!X)` for the forbidden

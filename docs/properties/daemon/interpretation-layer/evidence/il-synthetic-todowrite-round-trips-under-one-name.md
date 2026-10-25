@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A evaluation (gap): injection writes, reads back, and selection
+Issue #1105 Part A evaluation (gap): injection writes, reads back, and selection
 counts one tool name through three spellings.
 
 ## Evidence trail
@@ -37,6 +37,7 @@ assert keep-one keeps the newer and the read-back reads the newer state.
 ## Investigation log
 
 ### Q: Do the three uses resolve one constant at HEAD?
+
 - Sources examined: `injection.rs:10` imports `TODO_TOOL` and
   `is_injected_todo_tool`; `selection.rs` reaches the name through `classify`.
 - Findings: yes; U4 replaced the separate spellings with `TODO_TOOL`.
@@ -44,6 +45,7 @@ assert keep-one keeps the newer and the read-back reads the newer state.
 - Conclusion: resolved with answer; the test gap stays open.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
 - Findings: the source left the three uses unverified; this pass read all three at `41d889ea4` and found one constant, `TODO_TOOL` (`crates/daemon/src/tool_vocabulary.rs:26`), behind them, and `crates/daemon/src/tool_vocabulary_tests.rs:17` asserts both queries on it.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where

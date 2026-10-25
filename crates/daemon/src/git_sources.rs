@@ -124,6 +124,14 @@ pub(crate) fn declares_unsupported_object_format(error: &gix::open::Error) -> bo
     }
 }
 
+/// Repository options without user, system, or installation configuration, with gix's allocation limit set to `max_object_bytes` after the repository's own configuration.
+pub(crate) fn isolated_options(max_object_bytes: NonZeroU64) -> gix::open::Options {
+    gix::open::Options::isolated().config_overrides([format!(
+        "gitoxide.objects.allocLimit={}",
+        max_object_bytes.get()
+    )])
+}
+
 /// Opens the repository without user, system, or installation configuration and with replacement refs ignored, so neither a repository's own settings nor a `refs/replace` entry can substitute another object for a selected id.
 ///
 /// `max_object_bytes` is also installed as gix's allocation limit. A packed delta's header states only the final object size, while materializing it inflates every base in its chain; the limit makes the store refuse a base above the bound instead of allocating it. The override is applied after the repository's own configuration, so a repository cannot raise it.
@@ -131,11 +139,7 @@ pub(crate) fn open(
     path: &Path,
     max_object_bytes: NonZeroU64,
 ) -> Result<gix::Repository, GitRefusal> {
-    let options = gix::open::Options::isolated().config_overrides([format!(
-        "gitoxide.objects.allocLimit={}",
-        max_object_bytes.get()
-    )]);
-    let mut repo = gix::open_opts(path, options).map_err(|error| {
+    let mut repo = gix::open_opts(path, isolated_options(max_object_bytes)).map_err(|error| {
         if declares_unsupported_object_format(&error) {
             GitRefusal::UnsupportedObjectFormat
         } else {

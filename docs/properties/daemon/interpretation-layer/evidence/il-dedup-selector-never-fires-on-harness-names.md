@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A lens pass (bug history and unproven assumptions): the dedup
+Issue #1105 Part A lens pass (bug history and unproven assumptions): the dedup
 selector compared raw tool names against a list of `mcp_`-prefixed names that
 no pinned harness sends.
 
@@ -45,6 +45,7 @@ removal changed no output.
 ## Investigation log
 
 ### Q: Does any selector at HEAD drop an arc as a duplicate of another?
+
 - Sources examined: `selection.rs:630-677`, `selection.rs:893` and `:905`
   (`select_reductions` and `select_reductions_with_outcome`), the U4 diff.
 - Findings: no. Supersession drops by class (`todowrite` keep-one,
@@ -54,6 +55,7 @@ removal changed no output.
 - Conclusion: resolved with answer: the record is invalidated.
 
 ### Q: Which names does each pinned harness register?
+
 - Sources examined: the frozen OpenCode 1.18.22 and Pi 0.80.2 sessions; the
   census in `packages/e2e-tests/src/corpus-sessions/census.ts`.
 - Findings: the frozen sessions name `bash`, `read`, `edit`, `write`, `glob`,
@@ -63,6 +65,7 @@ removal changed no output.
 - Conclusion: resolved for the frozen closures; OQ9 owns the general question.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
 - Findings: the deletion is a read of the U4 diff (`97afdaff1`), not a premise about harness names, so the record's claim about HEAD rests on code alone.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where

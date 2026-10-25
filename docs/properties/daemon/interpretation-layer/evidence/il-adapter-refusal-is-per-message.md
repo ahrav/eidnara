@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part A lens pass (failure and degradation): an adapter refusal arm
+Issue #1105 Part A lens pass (failure and degradation): an adapter refusal arm
 returns before any unit of the record is kept, so one unsupported part costs
 every sibling unit of its message.
 
@@ -19,9 +19,9 @@ every sibling unit of its message.
 - Budget stop: `Kept::keep` (`harness_sources.rs:463-482`) returns `false`
   when the copy budget refuses; the adapter returns `Ok(None)` at `:321`,
   `:354`, `:435`, `:443`, or `:454`.
-- Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1131-1161`)
-  counts each `Err` once (`:1153`) and adds the count to `adapter_refused`
-  (`:1156-1159`), also when a later record stops the pass (`:1149-1152`).
+- Counting: `CaptureJob::units` (`crates/daemon/src/source_capture.rs:1116-1146`)
+  counts each `Err` once (`:1138`) and adds the count to `adapter_refused`
+  (`:1141-1144`), also when a later record stops the pass (`:1134-1137`).
 - U3: `crates/daemon/tests/source_corpus_replay.rs:93` asserts that the frozen
   Pi session's image-bearing tool result is among `refused_records` and that
   the reader classifies it `non_text_item`.
@@ -45,6 +45,7 @@ reader's expected units all reconciled as `adapter_refused`.
 ## Investigation log
 
 ### Q: Is the per-message blast radius intended?
+
 - Sources examined: the adapter doc comments (`harness_sources.rs:258`,
   `:367`); #1066; the corpus README.
 - Findings: the doc comments list the refusals; none states that sibling units
@@ -54,6 +55,7 @@ reader's expected units all reconciled as `adapter_refused`.
 - Conclusion: needs human input.
 
 ### Q: Do the line references of the source hold at HEAD?
+
 - Sources examined: `harness_sources.rs` at `41d889ea4`.
 - Findings: the arms moved by at most one line; the budget-stop returns are at
   `:321`, `:354`, `:435`, `:443`, `:454`.

@@ -63,32 +63,64 @@ fn a_repository_derives_the_plugin_rendering_of_its_root() {
     );
 }
 
-/// A merged orphan branch gives the history two roots; both resolvers pick the byte-order-smallest.
+/// A merged orphan branch gives the history two roots; both resolvers pick the byte-order-smallest
+/// whichever side of the merge HEAD sits on, so the smallest root is the first one a walk meets in
+/// one case and not in the other.
 #[test]
 fn two_roots_derive_the_byte_order_smallest() {
-    let dir = tempfile::tempdir().unwrap();
-    repository(dir.path(), 1);
-    git(dir.path(), &["checkout", "-q", "--orphan", "other"]).unwrap();
-    git(dir.path(), &["rm", "-q", "-rf", "."]).unwrap();
-    commit(dir.path(), "other.txt", "other root");
-    git(dir.path(), &["checkout", "-q", "main"]).unwrap();
-    git(
-        dir.path(),
-        &[
+    for head in ["main", "other"] {
+        let dir = tempfile::tempdir().unwrap();
+        repository(dir.path(), 1);
+        git(dir.path(), &["checkout", "-q", "--orphan", "other"]).unwrap();
+        git(dir.path(), &["rm", "-q", "-rf", "."]).unwrap();
+        commit(dir.path(), "other.txt", "other root");
+        let merged = if head == "main" { "other" } else { "main" };
+        git(dir.path(), &["checkout", "-q", head]).unwrap();
+        let merge = [
             "merge",
             "-q",
             "--allow-unrelated-histories",
             "-m",
             "merge",
-            "other",
-        ],
+            merged,
+        ];
+        git(dir.path(), &merge).unwrap();
+        let roots = git(dir.path(), &["rev-list", "--max-parents=0", "HEAD"]).unwrap();
+        assert_eq!(roots.lines().count(), 2, "{head}");
+        assert_eq!(
+            derived(dir.path()),
+            RepositoryIdentity::Git(plugin_identity(dir.path())),
+            "{head}"
+        );
+    }
+}
+
+/// Replacement refs are ignored: a `refs/replace` entry that swaps HEAD for a parentless commit
+/// makes `git` report HEAD as the root, while the derived value stays the root the objects record.
+#[test]
+fn a_replacement_ref_leaves_the_recorded_root() {
+    let dir = tempfile::tempdir().unwrap();
+    repository(dir.path(), 2);
+    let recorded = plugin_identity(dir.path());
+    let substitute = git(
+        dir.path(),
+        &["commit-tree", "HEAD^{tree}", "-m", "substitute"],
     )
     .unwrap();
-    let roots = git(dir.path(), &["rev-list", "--max-parents=0", "HEAD"]).unwrap();
-    assert_eq!(roots.lines().count(), 2);
+    git(dir.path(), &["replace", "HEAD", substitute.trim()]).unwrap();
+    assert_ne!(plugin_identity(dir.path()), recorded);
+    assert_eq!(derived(dir.path()), RepositoryIdentity::Git(recorded));
+}
+
+/// A `.git` entry that discovery cannot open is an unreadable repository, retried on the next
+/// pass, never a project without one.
+#[test]
+fn an_unopenable_git_entry_fails_the_derivation() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".git"), "not a gitdir link").unwrap();
     assert_eq!(
-        derived(dir.path()),
-        RepositoryIdentity::Git(plugin_identity(dir.path()))
+        derive(dir.path(), &budget(), MAX_ROOT_WALK_COMMITS),
+        Err(DerivationFailure::Unreadable)
     );
 }
 

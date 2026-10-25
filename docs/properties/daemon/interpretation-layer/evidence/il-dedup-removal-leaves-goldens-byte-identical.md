@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-#1105 Part B S2 (R8): U4's execution note made a golden diff in the removal a
+Issue #1105 Part B S2 (R8): U4's execution note made a golden diff in the removal a
 defect.
 
 ## Evidence trail
@@ -35,6 +35,7 @@ Covered.
 ## Investigation log
 
 ### Q: Was `dedup_name` normalized before the dedup lookup at the U4 base?
+
 - Sources examined: `selection.rs` at `a91dbc2b6`.
 - Findings: no; the comparison read the raw name, so only an exact `mcp_`
   spelling could reach it.
@@ -42,6 +43,7 @@ Covered.
 - Conclusion: resolved with answer.
 
 ### Q: Why does confidence move from the source's `medium` to `high`?
+
 - Sources examined: the source record in #1105; the code and tests cited above.
 - Findings: the empty testdata diff between `a91dbc2b6` and `97afdaff1` is a direct observation of the claim.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where
