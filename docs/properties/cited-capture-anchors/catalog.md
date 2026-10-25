@@ -319,7 +319,7 @@ Check: `always` - every repository the daemon opens through `git_sources::open` 
 Fault/timing angle: none
 Required faults and enabling state: a delta-packed commit against an oversized base; a repository declaring an unsupported `extensions.objectFormat`
 Confidence: high - [evidence](evidence/p2-git-open-is-isolated-and-allocation-bounded.md). Read `isolated_options` at `crates/daemon/src/git_sources.rs:130`, `open` at `:137`, `open_with_slots` at `:147`, and `file_object_kind` at `:200`
-Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`; `crates/daemon/src/memory_capture/head.rs:344`, `:552` (unaudited)
+Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`; `crates/daemon/src/memory_capture/head.rs:400`, `:608` (unaudited)
 Impact: an unisolated open would let repository or user configuration raise the bound or substitute objects
 Open questions: None.
 
@@ -375,13 +375,13 @@ Open questions:
 Type: safety
 Reachability: default-production - every `memory.capture.submit` whose output parses observes HEAD in `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:562`)
 Status: active - activated by U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)); U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135)) completes the anchor-equals-frozen-head clause
-Exercised: partial - `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it` freezes one head in both jobs of a submission for five roots and keeps it across a later commit and a retry; the head-observation tests freeze loose, packed, delta-packed, and alternate HEAD commits; the anchor clause waits for U3
+Exercised: partial - `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it` freezes one head in both jobs of a submission for five roots and keeps it across a later commit and a retry; the head-observation tests freeze loose, packed, delta-packed, and alternate HEAD commits and a HEAD that reaches its commit through branch aliases; the anchor clause waits for U3
 Guarantee: The checkout HEAD is read once per `memory.capture.submit`, before any plan of that submission is frozen, and the observation is part of the frozen `prepared_json`, so the receipt digest covers the anchor's value.
 Check: `always` - every job frozen by one submission carries the identical `head`, equal to the commit the fixture's HEAD named at submit, and a retry publishes that frozen value; after U3, for every capture decision with an anchor, `anchors.reachable_from_oid == parse(prepared_json).head`
 Fault/timing angle: a `git checkout` between the submit and its retry
 Required faults and enabling state: a commit on the checked-out branch between the submit and the retry, with completion refused so the frozen plans stay in the store
 Confidence: high - [evidence](evidence/p2-new-head-observed-once-and-frozen.md). Read `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:548`): one `observe_head` call precedes the loop that freezes each job's plan, and the receipt digest covers every frozen byte (`crates/daemon/src/memory_capture.rs:1175`)
-Existing check: `crates/daemon/src/lib.rs:24619`; `crates/daemon/src/memory_capture/head.rs:322`, `:445`, `:552` (unaudited)
+Existing check: `crates/daemon/src/lib.rs:24619`; `crates/daemon/src/memory_capture/head.rs:335`, `:357`, `:501`, `:608` (unaudited)
 Impact: the anchor stops describing the revision at which the quote was observed, and the receipt no longer covers the anchor's value
 Open questions: None.
 
@@ -390,13 +390,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - capture in an unborn, unreadable, unsupported-format, or non-repository root
 Status: active - activated by U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)); U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135)) adds the rationale reason, the counter, and the anchor clause
-Exercised: partial - U2 constructs the unborn, plain, unsupported-format, missing, non-commit, and absent-object roots, roots with a cyclic alternates chain or an unlistable pack directory, and a HEAD whose commit only another repository's pack holds: each freezes `head_unavailable` and the jobs publish as before; the rationale reason and the no-anchor clause wait for U3
+Exercised: partial - U2 constructs the unborn, plain, unsupported-format, missing, non-commit, and absent-object roots, roots with a cyclic alternates chain or an unlistable pack directory, a HEAD whose commit only another repository's pack holds, and a HEAD whose branch alias is cyclic or names an unborn branch: each freezes `head_unavailable` and the jobs publish as before; the rationale reason and the no-anchor clause wait for U3
 Guarantee: When HEAD is unborn or unreadable, the object format is unsupported, or the root is not a repository, the decision is still admitted with `anchor_id = None` and rationale `anchor: "head_unavailable"`, and no `anchors` row is written for the job.
 Check: `always-or-unreached` - the path runs only when the head observation is unavailable; whenever it runs, the committed decision has `anchor_id IS NULL`, the rationale carries the reason, and no anchor row names the job
 Fault/timing angle: none
 Required faults and enabling state: a root with no `.git`; an unborn branch; an `objectFormat` gix refuses
 Confidence: medium - [evidence](evidence/p2-new-head-unavailable-keeps-decision-admitted.md). The owner decided on 2026-10-25 (OQ2-11) that a detached HEAD anchors at its commit, which removes detached HEAD from this path; `observe_head` (`crates/daemon/src/memory_capture/head.rs:30`) maps every other refusal to `HeadUnavailable`
-Existing check: `crates/daemon/src/memory_capture/head.rs:344`, `:496`; `crates/daemon/src/lib.rs:24619` (unaudited)
+Existing check: `crates/daemon/src/memory_capture/head.rs:357`, `:400`, `:552`; `crates/daemon/src/lib.rs:24619` (unaudited)
 Impact: capture would stop in fresh checkouts
 Open questions: None.
 

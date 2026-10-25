@@ -22,7 +22,7 @@ that adds this part.
 | F11 | Blocking hop failure | constructible: daemon route tests |
 | F12 | Source-capture slot busy, budget spent, cancelled, Kernel starting | constructible: source-capture test module |
 | F13 | Secret-bearing text | constructible: known secret fixtures |
-| F14 | Unsupported object format, oversized delta base, replacement refs; unborn and non-repository roots | constructible: git-source tests and the U2 head-observation fixtures (`crates/daemon/src/memory_capture/head.rs:344`, `:552`) |
+| F14 | Unsupported object format, oversized delta base, replacement refs; unborn and non-repository roots | constructible: git-source tests and the U2 head-observation fixtures (`crates/daemon/src/memory_capture/head.rs:400`, `:608`) |
 | F15 | Harness capture past `retain_until` while a decision cites it | constructible for observations and events; absent for capture decisions until U3 |
 | F16 | Fragment id differs from descriptor message id (hashed, chunked, multi-block) | production: messages over 16 KiB or out-of-grammar ids |
 

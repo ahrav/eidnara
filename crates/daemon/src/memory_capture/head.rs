@@ -36,7 +36,7 @@ pub(crate) fn observe_head(root: &Path) -> FrozenHead {
     if git_sources::object_format(hash).is_err() {
         return FrozenHead::HeadUnavailable;
     }
-    let Some(id) = repo.head().ok().and_then(|head| head.id()) else {
+    let Some(id) = head_id(&repo) else {
         return FrozenHead::HeadUnavailable;
     };
     let kind = git_sources::file_object_kind(&repo, &id, &LAST_HEAD_INDEX).or_else(|| {
@@ -49,6 +49,19 @@ pub(crate) fn observe_head(root: &Path) -> FrozenHead {
     } else {
         FrozenHead::HeadUnavailable
     }
+}
+
+/// Resolves HEAD through its symbolic-reference chain and returns the first
+/// object id the chain reaches, a tag object's id included. A branch that is
+/// itself symbolic, such as one aliased with `git symbolic-ref`, follows the
+/// rest of the chain.
+fn head_id(repo: &gix::Repository) -> Option<gix::ObjectId> {
+    let head = repo.head().ok()?;
+    if let Some(id) = head.id() {
+        return Some(id.detach());
+    }
+    let mut referent = head.try_into_referent()?;
+    referent.follow_to_object().ok().map(gix::Id::detach)
 }
 
 fn reopened_kind(root: &Path, id: &gix::oid) -> Option<gix::object::Kind> {
@@ -338,6 +351,49 @@ mod tests {
             observe_head(dir.path()),
             FrozenHead::Commit(commits[0].clone())
         );
+    }
+
+    #[test]
+    fn a_head_through_a_branch_alias_freezes_the_aliased_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let commits = repository(dir.path(), 1);
+        let git = dir.path().join(".git");
+        let branch = std::fs::read_to_string(git.join("HEAD")).unwrap();
+        let branch = branch.trim().strip_prefix("ref: ").unwrap().to_owned();
+        let point = |name: &str, target: &str| {
+            std::fs::write(git.join(name), format!("ref: {target}\n")).unwrap();
+        };
+        point("refs/heads/alias", &branch);
+        point("HEAD", "refs/heads/alias");
+        assert_eq!(
+            observe_head(dir.path()),
+            FrozenHead::Commit(commits[0].clone())
+        );
+        point("refs/heads/outer", "refs/heads/alias");
+        point("HEAD", "refs/heads/outer");
+        assert_eq!(
+            observe_head(dir.path()),
+            FrozenHead::Commit(commits[0].clone())
+        );
+        std::fs::remove_file(git.join(&branch)).unwrap();
+        std::fs::write(
+            git.join("packed-refs"),
+            format!("{} {branch}\n", commits[0]),
+        )
+        .unwrap();
+        assert_eq!(
+            observe_head(dir.path()),
+            FrozenHead::Commit(commits[0].clone()),
+            "an aliased branch held in packed-refs"
+        );
+        point("refs/heads/alias", "refs/heads/outer");
+        assert_eq!(
+            observe_head(dir.path()),
+            FrozenHead::HeadUnavailable,
+            "a cyclic alias"
+        );
+        point("refs/heads/alias", "refs/heads/unborn");
+        assert_eq!(observe_head(dir.path()), FrozenHead::HeadUnavailable);
     }
 
     #[test]

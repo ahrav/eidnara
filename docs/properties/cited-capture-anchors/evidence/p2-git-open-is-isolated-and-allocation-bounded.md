@@ -50,7 +50,7 @@ A delta-packed commit against an oversized base; a repository declaring an unsup
   stream that state the result size. No object body is inflated, so the
   allocation limit has nothing to bound on these paths. A store with more
   indices than the first 128 slots answers after the retry with default
-  sizing (`crates/daemon/src/memory_capture/head.rs:552`).
+  sizing (`crates/daemon/src/memory_capture/head.rs:608`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
@@ -62,7 +62,7 @@ A delta-packed commit against an oversized base; a repository declaring an unsup
   not resolve or whose own or alternate `pack` directory fails to list with
   an error other than `NotFound`; `sizing_inputs_readable` performs both
   reads. `unborn_unsupported_non_commit_absent_and_non_repository_roots_are_unavailable`
-  (`crates/daemon/src/memory_capture/head.rs:344`) constructs a cyclic
+  (`crates/daemon/src/memory_capture/head.rs:400`) constructs a cyclic
   alternates chain, a `pack` that is a regular file, and an alternate whose
   `pack` is a regular file. The default sizing also refuses more than 32767
   indices, a pack entry without a modification time, and an objects path
