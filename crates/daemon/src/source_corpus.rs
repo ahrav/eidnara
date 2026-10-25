@@ -528,6 +528,8 @@ pub(crate) struct ExpectedUnit {
 pub(crate) struct ExpectedTool {
     pub name: String,
     pub call_id: String,
+    /// The OpenCode tool part's message id, or the Pi `toolResult` entry's `parentId`.
+    pub parent: String,
     pub is_error: bool,
     /// OpenCode `state.metadata.exit` when the harness wrote an integer; Pi writes none.
     pub exit: Option<i64>,
@@ -732,6 +734,7 @@ fn pi_record(entry: &Value, at: &str) -> Result<ExpectedRecord, String> {
     let tool = ExpectedTool {
         name: string(message, "toolName", at)?.to_owned(),
         call_id: string(message, "toolCallId", at)?.to_owned(),
+        parent: string(entry, "parentId", at)?.to_owned(),
         is_error: message
             .get("isError")
             .and_then(Value::as_bool)
@@ -880,6 +883,7 @@ pub(crate) fn read_opencode_session(
                         byte_len: output.len(),
                         tool: Some(ExpectedTool {
                             call_id: string(&part, "callID", &at)?.to_owned(),
+                            parent: id.clone(),
                             name,
                             is_error,
                             exit,

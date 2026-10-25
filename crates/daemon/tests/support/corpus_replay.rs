@@ -18,7 +18,7 @@ use daemon::harness_sources::{
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactErrorKind, CommitIntent, Dimension, DomainSpec, KernelStore, ProviderEgress, ScopeSpec,
-    ScopeTermSpec, Sensitivity,
+    ScopeTermSpec, Sensitivity, ToolOutcome, ToolStatus,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -220,10 +220,8 @@ pub fn harness_adapter(
     }
 }
 
-/// The reconciliation key both sides build: the unit's class, its native message or call id, and
-/// its block index.
-fn key(tool: bool, id: &str, block: &str) -> String {
-    format!("{}:{id}:{block}", if tool { "tool" } else { "text" })
+fn key(tool: bool, ids: &[&str]) -> String {
+    format!("{}:{}", if tool { "tool" } else { "text" }, ids.join(":"))
 }
 
 fn unit_key(unit: &SourceUnit) -> String {
@@ -234,16 +232,23 @@ fn unit_key(unit: &SourceUnit) -> String {
             .map_or("", |(_, value)| value.as_str())
     };
     match unit.class {
-        OccurrenceClass::RawToolSpans => key(true, field("tool_call_id"), field("block_index")),
-        _ => key(false, field("message_id"), field("block_index")),
+        OccurrenceClass::RawToolSpans => key(
+            true,
+            &[
+                field("parent_message_id"),
+                field("tool_call_id"),
+                field("block_index"),
+            ],
+        ),
+        _ => key(false, &[field("message_id"), field("block_index")]),
     }
 }
 
 fn expected_key(record: &ExpectedRecord, unit: &ExpectedUnit) -> String {
     let block = unit.block.to_string();
     match &unit.tool {
-        Some(tool) => key(true, &tool.call_id, &block),
-        None => key(false, &record.id, &block),
+        Some(tool) => key(true, &[&tool.parent, &tool.call_id, &block]),
+        None => key(false, &[&record.id, &block]),
     }
 }
 
@@ -291,6 +296,8 @@ pub struct ReplayedUnit {
     pub key: String,
     pub revision: String,
     pub bytes: usize,
+    /// The outcome record a tool unit was published with.
+    pub outcome: Option<ToolOutcome>,
     pub settled: Settled,
 }
 
@@ -387,6 +394,7 @@ pub fn replay(
                 key: unit_key(&unit),
                 revision: unit.revision.clone(),
                 bytes: unit.text.len(),
+                outcome: unit.outcome.clone(),
                 settled: outcome.unwrap_or(Settled::Lost(if last_pass_failed {
                     LossCondition::PassFailed
                 } else if refused {
@@ -414,6 +422,8 @@ pub struct Reconciliation {
     pub phantom: Vec<String>,
     /// Expected units whose replayed revision differs from the one the harness wrote.
     pub revision_mismatch: Vec<String>,
+    pub byte_mismatch: Vec<String>,
+    pub outcome_mismatch: Vec<String>,
     /// Keys more than one expected unit, or more than one replayed unit, carries.
     pub duplicate: Vec<String>,
 }
@@ -469,9 +479,32 @@ pub fn reconcile(records: &[ReplayRecord], replay: &Replay) -> Reconciliation {
                 ));
             }
             match replayed.settled {
-                Settled::Admitted { replayed } => {
+                Settled::Admitted { replayed: again } => {
                     result.admitted += 1;
-                    result.replayed += usize::from(replayed);
+                    result.replayed += usize::from(again);
+                    if unit.byte_len != replayed.bytes {
+                        result.byte_mismatch.push(format!(
+                            "{key} (record {}, part {}): expected {} bytes, replayed {}",
+                            expected.id, unit.index, unit.byte_len, replayed.bytes
+                        ));
+                    }
+                    if let Some(tool) = &unit.tool {
+                        let wanted = (tool.name.as_str(), tool.is_error, tool.exit, tool.truncated);
+                        let got = replayed.outcome.as_ref().map(|outcome| {
+                            (
+                                outcome.tool_name.as_str(),
+                                outcome.status == ToolStatus::Error,
+                                outcome.exit_code,
+                                outcome.truncated,
+                            )
+                        });
+                        if got != Some(wanted) {
+                            result.outcome_mismatch.push(format!(
+                                "{key} (record {}, part {}): expected {wanted:?}, replayed {got:?}",
+                                expected.id, unit.index
+                            ));
+                        }
+                    }
                 }
                 Settled::Lost(condition) => *result.losses.entry(condition).or_default() += 1,
                 Settled::Unnamed => result.unclassified.push(format!(

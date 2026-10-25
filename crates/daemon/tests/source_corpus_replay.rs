@@ -72,6 +72,8 @@ fn assert_partitioned(records: &[ReplayRecord], outcome: &corpus_replay::Replay)
     assert_eq!(result.unclassified, Vec::<String>::new());
     assert_eq!(result.phantom, Vec::<String>::new());
     assert_eq!(result.revision_mismatch, Vec::<String>::new());
+    assert_eq!(result.byte_mismatch, Vec::<String>::new());
+    assert_eq!(result.outcome_mismatch, Vec::<String>::new());
     assert_eq!(result.duplicate, Vec::<String>::new());
     assert_eq!(result.admitted + result.lost(), result.expected);
 }
@@ -390,6 +392,8 @@ fn identity_case(
     prop_assert_eq!(&result.unclassified, &Vec::<String>::new());
     prop_assert_eq!(&result.phantom, &Vec::<String>::new());
     prop_assert_eq!(&result.revision_mismatch, &Vec::<String>::new());
+    prop_assert_eq!(&result.byte_mismatch, &Vec::<String>::new());
+    prop_assert_eq!(&result.outcome_mismatch, &Vec::<String>::new());
     prop_assert_eq!(&result.duplicate, &Vec::<String>::new());
     prop_assert_eq!(result.admitted + result.lost(), result.expected);
     prop_assert!(
@@ -448,6 +452,87 @@ fn the_identity_case_fails_when_the_adapter_refuses_every_record() {
     assert!(identity_case(&store, &parts, &[0, 1], 1, &refuse_all).is_err());
 }
 
+#[test]
+fn the_identity_case_fails_when_the_adapter_truncates_an_admitted_unit() {
+    let store = ReplayStore::temporary();
+    let truncate_text = |identity: &SessionIdentity, native: &Value| {
+        let mut units = harness_adapter(identity, native)?;
+        for unit in units
+            .iter_mut()
+            .filter(|unit| unit.class == OccurrenceClass::Messages)
+        {
+            unit.text.pop();
+        }
+        Ok(units)
+    };
+    let parts = [Part::Text(5), Part::Tool(9)];
+    let error = identity_case(&store, &parts, &[0, 1], 1, &truncate_text)
+        .expect_err("a truncated admission is a disagreement");
+    assert!(
+        error.to_string().contains("expected 5 bytes, replayed 4"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_identity_case_fails_when_the_adapter_misreads_a_tool_outcome() {
+    let store = ReplayStore::temporary();
+    let rename_tool = |identity: &SessionIdentity, native: &Value| {
+        let mut units = harness_adapter(identity, native)?;
+        for outcome in units.iter_mut().filter_map(|unit| unit.outcome.as_mut()) {
+            outcome.tool_name = "grep".to_owned();
+        }
+        Ok(units)
+    };
+    let parts = [Part::Text(5), Part::Tool(9)];
+    let error = identity_case(&store, &parts, &[0, 1], 1, &rename_tool)
+        .expect_err("a misread outcome is a disagreement");
+    assert!(
+        error.to_string().contains("grep") && error.to_string().contains("bash"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_tool_result_under_another_parent_is_unclassified_and_phantom() {
+    let store = ReplayStore::temporary();
+    let (_, fixture) = frozen_sessions()
+        .into_iter()
+        .find(|(closure, _)| closure.starts_with("pi-"))
+        .unwrap();
+    let (session, records) = pi_records(&fixture);
+    let tool_units = records
+        .iter()
+        .flat_map(|record| &record.expected.units)
+        .filter(|unit| unit.tool.is_some())
+        .count();
+    assert!(tool_units > 0);
+    let reparent = |identity: &SessionIdentity, native: &Value| {
+        let mut units = harness_adapter(identity, native)?;
+        for (field, value) in units.iter_mut().flat_map(|unit| &mut unit.identity) {
+            if *field == "parent_message_id" {
+                value.push('x');
+            }
+        }
+        Ok(units)
+    };
+    let outcome = replay(
+        &store,
+        &identity(Harness::Pi, &session),
+        &records,
+        &reparent,
+        SETTLING_PASSES,
+    );
+    let result = reconcile(&records, &outcome);
+    assert_eq!(
+        result.unclassified.len(),
+        tool_units,
+        "{:?}",
+        result.unclassified
+    );
+    assert_eq!(result.phantom.len(), tool_units, "{:?}", result.phantom);
+}
+
 /// The case the property once shrank to, kept as a named example.
 #[test]
 fn a_single_text_part_replays_in_one_pass() {
@@ -491,7 +576,7 @@ fn a_seeded_dropped_unit_fails_the_identity_naming_the_unit() {
     assert_eq!(
         result.unclassified,
         [format!(
-            "tool:call_{session}_1:0 (record msg_{session}_b, part 1)"
+            "tool:msg_{session}_b:call_{session}_1:0 (record msg_{session}_b, part 1)"
         )]
     );
 }
@@ -521,7 +606,7 @@ fn a_refused_outcome_record_is_unclassified_loss() {
     assert_eq!(
         result.unclassified,
         [format!(
-            "tool:call_{session}_1:0 (record msg_{session}_b, part 1): unnamed refusal"
+            "tool:msg_{session}_b:call_{session}_1:0 (record msg_{session}_b, part 1): unnamed refusal"
         )]
     );
 }

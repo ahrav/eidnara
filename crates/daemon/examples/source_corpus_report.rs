@@ -321,12 +321,14 @@ fn session_section(out: &mut String, session: &Session) -> usize {
     let _ = writeln!(
         out,
         "- all units: expected {}, admitted {}, unclassified_loss {}; oracle disagreements: \
-         phantom {}, revision_mismatch {}, duplicate {}",
+         phantom {}, revision_mismatch {}, byte_mismatch {}, outcome_mismatch {}, duplicate {}",
         all.expected,
         all.admitted,
         all.unclassified.len(),
         all.phantom.len(),
         all.revision_mismatch.len(),
+        all.byte_mismatch.len(),
+        all.outcome_mismatch.len(),
         all.duplicate.len(),
     );
     for wanted in ["text", "tool"] {

@@ -422,6 +422,7 @@ fn the_pi_reader_classifies_an_image_bearing_tool_result_whole() {
             tool: Some(ExpectedTool {
                 name: "bash".to_owned(),
                 call_id: "c2".to_owned(),
+                parent: "p".to_owned(),
                 is_error: true,
                 exit: None,
                 truncated: Some(true),
