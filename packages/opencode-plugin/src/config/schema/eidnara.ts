@@ -584,7 +584,7 @@ export const EidnaraConfigSchema = z
                     .array(z.string())
                     .optional()
                     .describe(
-                        "User-only: the repository documents, as paths relative to the project root, that Eidnara reads for the prompt block and, when source_capture.enabled is set, retains as Kernel source descriptors (default: [\"ARCHITECTURE.md\", \"STRUCTURE.md\"]). At most 8 entries, each 1 to 1024 bytes of at most 16 '/'-separated components with no '.', '..', '.eidnara', or '.git' component and no leading '/'; an empty list reads no documents; a refused entry or a duplicate keeps the default. Each path resolves beneath the root without following a symlink. Project values are ignored with a warning.",
+                        "User-only: the repository documents, as paths relative to the project root, that Eidnara reads for the prompt block and, when source_capture.enabled is set, retains as Kernel source descriptors (default: [\"ARCHITECTURE.md\", \"STRUCTURE.md\"]). At most 8 entries, each 1 to 1024 bytes of at most 16 '/'-separated components with no '.' or '..' component, no '.eidnara' or '.git' component in any letter case, and no leading '/'; an empty list reads no documents; a refused entry or a duplicate keeps the default. Each path resolves beneath the root without following a symlink. Project values are ignored with a warning.",
                     ),
             })
             .optional()
