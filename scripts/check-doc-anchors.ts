@@ -11,23 +11,19 @@ export interface Anchor {
 
 const LINK = /\]\(([^)\s#]+)#L(\d+)(?:-L?(\d+))?\)/g;
 const BARE =
-    /(?<![\w/.-])((?:[\w.-]+\/)*[\w.-]+\.(?:rs|ts|tsx|js|mjs|sql|toml|ya?ml|sh|json)):(\d+)(?:-(\d+))?(?![\w-]|\.\d)/g;
+    /(?<![\w/.-])((?:[\w.-]+\/)*[\w.-]+\.(?:rs|ts|tsx|js|mjs|sql|toml|ya?ml|sh|json|md|py)):(\d+)(?:-(\d+))?(?![\w-]|\.\d)/g;
+const SCHEME = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 
 export function findAnchors(text: string): Anchor[] {
     const anchors: Anchor[] = [];
     text.split("\n").forEach((content, index) => {
         let plain = content;
         for (const match of content.matchAll(LINK)) {
-            const start = Number(match[2]);
-            anchors.push({
-                line: index + 1,
-                text: match[0],
-                path: match[1] ?? "",
-                form: "link",
-                start,
-                end: Number(match[3] ?? start),
-            });
             plain = plain.replace(match[0], "");
+            const path = match[1] ?? "";
+            if (SCHEME.test(path)) continue;
+            const start = Number(match[2]);
+            anchors.push({ line: index + 1, text: match[0], path, form: "link", start, end: Number(match[3] ?? start) });
         }
         for (const match of plain.matchAll(BARE)) {
             const start = Number(match[2]);
@@ -76,7 +72,8 @@ export type Mapped = { kind: "same" } | { kind: "moved"; start: number; end: num
 
 /**
  * Where the old-side lines `start..end` sit on the new side: `same` or `moved` when every line
- * survives unchanged, `changed` when a hunk modifies or deletes any of them.
+ * survives unchanged and stays contiguous, `changed` when a hunk modifies, deletes, or inserts
+ * inside them.
  */
 export function mapRange(hunks: Hunk[], start: number, end: number): Mapped {
     let shift = 0;
@@ -85,18 +82,24 @@ export function mapRange(hunks: Hunk[], start: number, end: number): Mapped {
             const last = hunk.oldStart + hunk.oldCount - 1;
             if (hunk.oldStart <= end && last >= start) return { kind: "changed" };
             if (last < start) shift += hunk.newCount - hunk.oldCount;
+        } else if (hunk.oldStart >= start && hunk.oldStart < end) {
+            return { kind: "changed" };
         } else if (hunk.oldStart < start) {
-            // A pure insertion follows old line `oldStart`.
             shift += hunk.newCount;
         }
     }
     return shift === 0 ? { kind: "same" } : { kind: "moved", start: start + shift, end: end + shift };
 }
 
+export type FileChange = { kind: "added" } | { kind: "modified"; base: string };
+
 export interface Repository {
     tracked: Set<string>;
     text(path: string): string;
-    changed: Map<string, string>;
+    /** `changes` maps HEAD paths to file changes. */
+    changes: Map<string, FileChange>;
+    /** `removed` maps a base path to its HEAD path after a rename, or to `null` after a deletion. */
+    removed: Map<string, string | null>;
     hunks(basePath: string, headPath: string): Hunk[];
 }
 
@@ -118,108 +121,146 @@ function lineCount(text: string): number {
     return text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
 }
 
-export function resolveAnchor(tracked: Set<string>, doc: string, anchor: Anchor): string | undefined {
+export function resolveAnchor(paths: Set<string>, doc: string, anchor: Anchor): string | undefined {
     if (anchor.form === "link") {
         const path = normalize(`${dirname(doc)}/${anchor.path}`);
-        return tracked.has(path) ? path : undefined;
+        return paths.has(path) ? path : undefined;
     }
-    if (tracked.has(anchor.path)) return anchor.path;
+    if (paths.has(anchor.path)) return anchor.path;
     const suffix = `/${anchor.path}`;
-    const matches = [...tracked].filter((path) => path.endsWith(suffix));
+    const matches = [...paths].filter((path) => path.endsWith(suffix));
     return matches.length === 1 ? matches[0] : undefined;
 }
 
+export interface Entry {
+    doc: string;
+    line: number;
+    message: string;
+}
+
 export interface Report {
-    findings: string[];
-    notices: string[];
+    findings: Entry[];
+    notices: Entry[];
 }
 
 export function checkAnchors(repo: Repository): Report {
     const report: Report = { findings: [], notices: [] };
     const hunkCache = new Map<string, Hunk[]>();
-    const hunksOf = (path: string): Hunk[] => {
-        let hunks = hunkCache.get(path);
+    const hunksOf = (base: string, head: string): Hunk[] => {
+        const key = `${base}\0${head}`;
+        let hunks = hunkCache.get(key);
         if (hunks === undefined) {
-            const base = repo.changed.get(path) ?? path;
-            hunks = base === "" ? [] : repo.hunks(base, path);
-            hunkCache.set(path, hunks);
+            hunks = repo.hunks(base, head);
+            hunkCache.set(key, hunks);
         }
         return hunks;
     };
+    const removedPaths = new Set(repo.removed.keys());
     const docs = [...repo.tracked].filter((path) => path.endsWith(".md")).sort();
     for (const doc of docs) {
-        const docBase = repo.changed.get(doc);
-        const docChanged = docBase !== undefined;
-        const docAdded = docBase === "";
-        const added = docChanged && !docAdded ? addedLines(hunksOf(doc)) : new Set<number>();
+        const docChange = repo.changes.get(doc);
+        const docAdded = docChange?.kind === "added";
+        const added =
+            docChange?.kind === "modified" ? addedLines(hunksOf(docChange.base, doc)) : new Set<number>();
+        const entries = docChange === undefined ? report.notices : report.findings;
         for (const anchor of findAnchors(repo.text(doc))) {
-            const where = `${doc}:${anchor.line}: ${anchor.text}`;
+            const push = (sink: Entry[], message: string) =>
+                sink.push({ doc, line: anchor.line, message: `${anchor.text} ${message}` });
             const target = resolveAnchor(repo.tracked, doc, anchor);
             if (docAdded || added.has(anchor.line)) {
                 if (target === undefined) {
-                    if (anchor.form === "link") report.findings.push(`${where} cites no tracked file`);
+                    if (anchor.form === "link") push(report.findings, "cites no tracked file");
                     continue;
                 }
                 const count = lineCount(repo.text(target));
                 if (anchor.start < 1 || anchor.end < anchor.start || anchor.end > count) {
-                    report.findings.push(`${where} cites past the end of ${target} (${count} lines)`);
+                    push(report.findings, `cites past the end of ${target} (${count} lines)`);
                 }
                 continue;
             }
-            if (target === undefined) continue;
-            const targetBase = repo.changed.get(target);
-            if (targetBase === undefined || targetBase === "") continue;
-            const mapped = mapRange(hunksOf(target), anchor.start, anchor.end);
-            if (mapped.kind === "same") continue;
-            const message =
-                mapped.kind === "moved"
-                    ? `${where} cites lines that moved to ${mapped.start}-${mapped.end}`
-                    : `${where} cites lines this change edits`;
-            (docChanged ? report.findings : report.notices).push(message);
+            let base: string;
+            let head: string;
+            if (target === undefined) {
+                const suffix = `/${anchor.path}`;
+                const stillTracked =
+                    anchor.form === "bare" && [...repo.tracked].some((path) => path.endsWith(suffix));
+                const gone = stillTracked ? undefined : resolveAnchor(removedPaths, doc, anchor);
+                if (gone === undefined) continue;
+                const renamed = repo.removed.get(gone) ?? null;
+                if (renamed === null) {
+                    push(entries, "cites a file this change deletes");
+                    continue;
+                }
+                base = gone;
+                head = renamed;
+            } else {
+                const change = repo.changes.get(target);
+                if (change?.kind !== "modified") continue;
+                base = change.base;
+                head = target;
+            }
+            const mapped = mapRange(hunksOf(base, head), anchor.start, anchor.end);
+            const renamedTo = head === base ? "" : ` in ${head}`;
+            if (mapped.kind === "changed") push(entries, `cites lines this change edits${renamedTo}`);
+            else if (mapped.kind === "moved") push(entries, `cites lines that moved to ${head}:${mapped.start}-${mapped.end}`);
+            else if (head !== base) push(entries, `cites a file this change renames to ${head}`);
         }
     }
     return report;
 }
 
-function git(args: string[]): string {
-    const result = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+function git(cwd: string | undefined, args: string[]): string {
+    const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
     if (result.exitCode !== 0) {
         throw new Error(`git ${args.join(" ")} exited ${result.exitCode}: ${result.stderr.toString()}`);
     }
     return result.stdout.toString();
 }
 
-export function gitRepository(base: string): Repository {
-    const mergeBase = git(["merge-base", base, "HEAD"]).trim();
-    const tracked = new Set(git(["ls-tree", "-r", "-z", "--name-only", "HEAD"]).split("\0").filter(Boolean));
-    const changed = new Map<string, string>();
-    const status = git(["diff", "--name-status", "-z", "-M", mergeBase, "HEAD"]).split("\0");
+export function gitRepository(base: string, cwd?: string): Repository {
+    const mergeBase = git(cwd, ["merge-base", base, "HEAD"]).trim();
+    const tracked = new Set(git(cwd, ["ls-tree", "-r", "-z", "--name-only", "HEAD"]).split("\0").filter(Boolean));
+    const changes = new Map<string, FileChange>();
+    const removed = new Map<string, string | null>();
+    const status = git(cwd, ["diff", "--name-status", "-z", "-M", mergeBase, "HEAD"]).split("\0");
     for (let index = 0; index + 1 < status.length; ) {
         const code = status[index] ?? "";
+        const path = status[index + 1] ?? "";
         if (code.startsWith("R") || code.startsWith("C")) {
-            changed.set(status[index + 2] ?? "", status[index + 1] ?? "");
+            const headPath = status[index + 2] ?? "";
+            changes.set(headPath, { kind: "modified", base: path });
+            if (code.startsWith("R")) removed.set(path, headPath);
             index += 3;
-        } else {
-            const path = status[index + 1] ?? "";
-            if (!code.startsWith("D")) changed.set(path, code.startsWith("A") ? "" : path);
-            index += 2;
+            continue;
         }
+        if (code.startsWith("D")) removed.set(path, null);
+        else if (code.startsWith("A")) changes.set(path, { kind: "added" });
+        else changes.set(path, { kind: "modified", base: path });
+        index += 2;
     }
     const texts = new Map<string, string>();
     return {
         tracked,
-        changed,
+        changes,
+        removed,
         text: (path) => {
             let content = texts.get(path);
             if (content === undefined) {
-                content = git(["show", `HEAD:${path}`]);
+                content = git(cwd, ["show", `HEAD:${path}`]);
                 texts.set(path, content);
             }
             return content;
         },
         hunks: (basePath, headPath) =>
-            parseHunks(git(["diff", "-U0", "--no-color", "--no-ext-diff", `${mergeBase}:${basePath}`, `HEAD:${headPath}`])),
+            parseHunks(
+                git(cwd, ["diff", "-U0", "--no-color", "--no-ext-diff", `${mergeBase}:${basePath}`, `HEAD:${headPath}`]),
+            ),
     };
+}
+
+function annotation(kind: "error" | "notice", entry: Entry): string {
+    const message = entry.message.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+    return `::${kind} file=${entry.doc},line=${entry.line}::${message}`;
 }
 
 if (import.meta.main) {
@@ -235,10 +276,10 @@ if (import.meta.main) {
         console.error(String(error));
         process.exit(2);
     }
-    for (const notice of report.notices) console.log(`notice: ${notice}`);
+    for (const notice of report.notices) console.log(annotation("notice", notice));
     if (report.findings.length > 0) {
         console.error("line anchors in changed Markdown need updating:");
-        for (const finding of report.findings) console.error(`  ${finding}`);
+        for (const finding of report.findings) console.log(annotation("error", finding));
         process.exit(1);
     }
     console.log(`doc anchors: changed Markdown cites current lines (${report.notices.length} notices)`);

@@ -1,25 +1,41 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 import {
     checkAnchors,
+    type FileChange,
     findAnchors,
+    gitRepository,
     type Hunk,
     mapRange,
     parseHunks,
     type Repository,
 } from "./check-doc-anchors";
 
+function modified(base: string): FileChange {
+    return { kind: "modified", base };
+}
+
 function repository(
     files: Record<string, string>,
-    changed: Record<string, string>,
+    changes: Record<string, FileChange>,
     hunks: Record<string, Hunk[]>,
+    removed: Record<string, string | null> = {},
 ): Repository {
     return {
         tracked: new Set(Object.keys(files)),
         text: (path) => files[path] ?? "",
-        changed: new Map(Object.entries(changed)),
+        changes: new Map(Object.entries(changes)),
+        removed: new Map(Object.entries(removed)),
         hunks: (_base, head) => hunks[head] ?? [],
     };
+}
+
+function messages(entries: { doc: string; line: number; message: string }[]): string[] {
+    return entries.map(({ doc, line, message }) => `${doc}:${line}: ${message}`);
 }
 
 const SOURCE = `${Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n")}\n`;
@@ -27,18 +43,23 @@ const SOURCE = `${Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).
 describe("findAnchors", () => {
     test("reads link ranges and bare ranges without counting a link twice", () => {
         const anchors = findAnchors(
-            "See [`a.rs:3`](../src/a.rs#L3-L5) and `crates/b/src/b.rs:7` and c.ts:9-11.\n",
+            "See [`a.rs:3`](../src/a.rs#L3-L5) and `crates/b/src/b.rs:7` and c.ts:9-11 and docs/x.md:4.\n",
         );
         expect(anchors.map(({ form, path, start, end }) => ({ form, path, start, end }))).toEqual([
             { form: "link", path: "../src/a.rs", start: 3, end: 5 },
             { form: "bare", path: "a.rs", start: 3, end: 3 },
             { form: "bare", path: "crates/b/src/b.rs", start: 7, end: 7 },
             { form: "bare", path: "c.ts", start: 9, end: 11 },
+            { form: "bare", path: "docs/x.md", start: 4, end: 4 },
         ]);
     });
 
     test("ignores versions, URLs without line fragments, and prose colons", () => {
         expect(findAnchors("Pi 0.80.2, see https://x.test/a.rs and ratio 3:4.\n")).toEqual([]);
+    });
+
+    test("ignores a commit permalink with a line fragment", () => {
+        expect(findAnchors("[p](https://github.com/o/r/blob/abc/src/a.rs#L3-L4)\n")).toEqual([]);
     });
 
     test("refuses a partial match of a range or a decimal", () => {
@@ -64,6 +85,10 @@ describe("mapRange", () => {
     test("an insertion directly after the range leaves it in place", () => {
         expect(mapRange(parseHunks("@@ -5,0 +6,3 @@\n"), 4, 5)).toEqual({ kind: "same" });
     });
+
+    test("an insertion inside the range changes it", () => {
+        expect(mapRange(parseHunks("@@ -5,0 +6,3 @@\n"), 4, 8)).toEqual({ kind: "changed" });
+    });
 });
 
 describe("checkAnchors", () => {
@@ -73,28 +98,26 @@ describe("checkAnchors", () => {
                 "docs/p/catalog.md": "intro\nCheck: `src/a.rs:20-21` holds.\nnew line\n",
                 "src/a.rs": SOURCE,
             },
-            { "docs/p/catalog.md": "docs/p/catalog.md", "src/a.rs": "src/a.rs" },
+            { "docs/p/catalog.md": modified("docs/p/catalog.md"), "src/a.rs": modified("src/a.rs") },
             {
                 "docs/p/catalog.md": parseHunks("@@ -2,0 +3 @@\n"),
                 "src/a.rs": parseHunks("@@ -1,0 +2,2 @@\n"),
             },
         );
-        expect(checkAnchors(repo)).toEqual({
-            findings: ["docs/p/catalog.md:2: src/a.rs:20-21 cites lines that moved to 22-23"],
-            notices: [],
-        });
+        expect(messages(checkAnchors(repo).findings)).toEqual([
+            "docs/p/catalog.md:2: src/a.rs:20-21 cites lines that moved to src/a.rs:22-23",
+        ]);
     });
 
     test("reports the same drift in an untouched document as a notice", () => {
         const repo = repository(
             { "docs/p/catalog.md": "Check: `src/a.rs:20`.\n", "src/a.rs": SOURCE },
-            { "src/a.rs": "src/a.rs" },
+            { "src/a.rs": modified("src/a.rs") },
             { "src/a.rs": parseHunks("@@ -19,2 +19,2 @@\n") },
         );
-        expect(checkAnchors(repo)).toEqual({
-            findings: [],
-            notices: ["docs/p/catalog.md:1: src/a.rs:20 cites lines this change edits"],
-        });
+        const report = checkAnchors(repo);
+        expect(report.findings).toEqual([]);
+        expect(messages(report.notices)).toEqual(["docs/p/catalog.md:1: src/a.rs:20 cites lines this change edits"]);
     });
 
     test("fails an added anchor past the end of its file and an added link to a missing file", () => {
@@ -103,10 +126,10 @@ describe("checkAnchors", () => {
                 "docs/p/catalog.md": "[x](../../src/a.rs#L39-L41)\n[y](../../src/gone.rs#L1)\n",
                 "src/a.rs": SOURCE,
             },
-            { "docs/p/catalog.md": "" },
+            { "docs/p/catalog.md": { kind: "added" } },
             {},
         );
-        expect(checkAnchors(repo).findings).toEqual([
+        expect(messages(checkAnchors(repo).findings)).toEqual([
             "docs/p/catalog.md:1: ](../../src/a.rs#L39-L41) cites past the end of src/a.rs (40 lines)",
             "docs/p/catalog.md:2: ](../../src/gone.rs#L1) cites no tracked file",
         ]);
@@ -120,9 +143,70 @@ describe("checkAnchors", () => {
                 "x/lib.rs": SOURCE,
                 "y/lib.rs": SOURCE,
             },
-            { "docs/p/catalog.md": "docs/p/catalog.md" },
+            { "docs/p/catalog.md": modified("docs/p/catalog.md") },
             { "docs/p/catalog.md": parseHunks("@@ -2,0 +2 @@\n") },
         );
         expect(checkAnchors(repo)).toEqual({ findings: [], notices: [] });
+    });
+
+    test("fails unchanged anchors in an edited document that cite a renamed or deleted file", () => {
+        const repo = repository(
+            {
+                "docs/p/catalog.md": "intro\n`src/old.rs:20`\n`src/gone.rs:3`\nnew\n",
+                "src/new.rs": SOURCE,
+            },
+            { "docs/p/catalog.md": modified("docs/p/catalog.md"), "src/new.rs": modified("src/old.rs") },
+            { "docs/p/catalog.md": parseHunks("@@ -3,0 +4 @@\n"), "src/new.rs": parseHunks("@@ -1,0 +2 @@\n") },
+            { "src/old.rs": "src/new.rs", "src/gone.rs": null },
+        );
+        expect(messages(checkAnchors(repo).findings)).toEqual([
+            "docs/p/catalog.md:2: src/old.rs:20 cites lines that moved to src/new.rs:21-21",
+            "docs/p/catalog.md:3: src/gone.rs:3 cites a file this change deletes",
+        ]);
+    });
+});
+
+describe("gitRepository", () => {
+    let repo: string;
+
+    function git(...args: string[]): string {
+        const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+        if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+        return result.stdout.trim();
+    }
+
+    function write(path: string, content: string): void {
+        mkdirSync(dirname(join(repo, path)), { recursive: true });
+        writeFileSync(join(repo, path), content);
+    }
+
+    beforeEach(() => {
+        repo = mkdtempSync(join(tmpdir(), "check-doc-anchors-"));
+        git("init", "-q", "-b", "main");
+        git("config", "user.email", "test@example.com");
+        git("config", "user.name", "test");
+    });
+
+    afterEach(() => {
+        rmSync(repo, { recursive: true, force: true });
+    });
+
+    test("reads renames, edits, and added lines from a real history", () => {
+        write("src/old.rs", SOURCE);
+        write("src/b.rs", SOURCE);
+        write("docs/a.md", "`src/old.rs:30` and `src/b.rs:30`\n");
+        git("add", ".");
+        git("commit", "-q", "-m", "base");
+        const base = git("rev-parse", "HEAD");
+        git("mv", "src/old.rs", "src/new.rs");
+        write("src/b.rs", `inserted\n${SOURCE}`);
+        write("docs/a.md", "`src/old.rs:30` and `src/b.rs:30`\n[x](../src/new.rs#L41)\n");
+        git("add", ".");
+        git("commit", "-q", "-m", "change");
+        expect(messages(checkAnchors(gitRepository(base, repo)).findings)).toEqual([
+            "docs/a.md:1: src/old.rs:30 cites a file this change renames to src/new.rs",
+            "docs/a.md:1: src/b.rs:30 cites lines that moved to src/b.rs:31-31",
+            "docs/a.md:2: ](../src/new.rs#L41) cites past the end of src/new.rs (40 lines)",
+        ]);
     });
 });
