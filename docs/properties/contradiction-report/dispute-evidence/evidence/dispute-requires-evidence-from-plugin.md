@@ -19,7 +19,7 @@ None`. PR A adds the fields and the requirement.
   (`crates/daemon/tests/kernel_routes.rs:6252`) sends such a body and
   asserts an error with the four row counts unchanged; it asserts the
   error variant, not the refusal name.
-- `compose_reason` (`commit.rs:206-234`) routes dispute events to
+- `compose_reason` (`commit.rs:208-236`) routes dispute events to
   `DisputeReason::validated` and refuses evidence on every other event
   with `InvalidReason::InvalidInput` (`:228-229`); non-dispute events get
   `ADMISSION_REASON` (`:231`, constant at `:100`).
@@ -27,7 +27,7 @@ None`. PR A adds the fields and the requirement.
   empty `evidence_id` (`crates/daemon/src/kernel_routes/dispute.rs:55-64`).
 - The handler runs `compose_reason` for every operation after
   `resolve_classes` and before the intent, preview, or commit
-  (`commit.rs:1111-1125`), and answers `state_only(invalid(reason))`, so
+  (`commit.rs:1154-1168`), and answers `state_only(invalid(reason))`, so
   no transaction starts.
 - The module header states the requirement and the refusal names
   (`commit.rs:12-15`, `:46-53`).
@@ -54,7 +54,7 @@ would fall to Candidate on assertion alone.
 ## Timing windows and dependencies
 
 None in time. The check depends on the handler loop running before
-`if parsed.preview` (`commit.rs:1145`); it does, so preview and commit
+`if parsed.preview` (`commit.rs:1194`); it does, so preview and commit
 share it.
 
 ## What a test must construct
@@ -68,7 +68,7 @@ share it.
 
 All four are constructed: `a_dispute_needs_evidence_and_other_events_take_none`
 (`crates/daemon/tests/kernel_routes.rs:5971`), the unit test of the same
-name (`dispute.rs:370`), and the parser test at
+name (`dispute.rs:372`), and the parser test at
 `memory-mark-command.test.ts:126`.
 
 The check is a per-request route oracle (portfolio refinement R4): it
@@ -92,7 +92,7 @@ row, so a store scan on it is circular.
 ### Q: Should the Kernel enforce the requirement for every writer?
 
 - Sources examined: `commit.rs:55-58`; `record_admission`
-  (`crates/kernel/src/admission.rs:982`).
+  (`crates/kernel/src/admission.rs:998`).
 - Findings: the Kernel accepts a dispute without evidence from any
   in-process caller; the route documents itself as the validator for
   plugin-written disputes and marks its rows with the `v=1` prefix.

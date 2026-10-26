@@ -16,13 +16,13 @@ subject, and an `adr_accepted` approval is one.
 
 - Route reachability: `disposition_request` requires only kind
   `decision`, live, in scope, with a prior admission
-  (`crates/daemon/src/kernel_routes/commit.rs:706-712`). Route test
+  (`crates/daemon/src/kernel_routes/commit.rs:719-725`). Route test
   `:5493` quarantines `approval-1` (seeded by `seed_approval`,
   `kernel_routes.rs:4362-4393`, an `adr_accepted` decision admitted under
   `ExplicitUser`/`UserExplicit`) through the route and the commit is
   `available` (`:5558-5559`).
 - `record_admission_inner` wraps the write in `with_authority_cascade`
-  (`crates/kernel/src/admission.rs:1041-1055`); the bearer list is
+  (`crates/kernel/src/admission.rs:1092-1106`); the bearer list is
   `[subject]` when `subject_grants_authority(subject)` (`:1071-1073`);
   after the write, `demote_dependents_if_authority_lost(bearer, reason)`
   runs (`:1079-1081`).
@@ -67,7 +67,7 @@ The cascade runs inside the invalidating transaction and holds the single
 writer for its duration. A preview of the same operation shows only the
 approval's own verdict; the dependents' projected visibility is not part
 of the preview (`PreviewRun` reads served rows for the targets only,
-`commit.rs:812-823`).
+`commit.rs:845-856`).
 
 ## What a test must construct
 
@@ -94,7 +94,7 @@ demotion, and does not read `kernel.read`.
 
 ### Q: Is a plugin-filed dispute of an approval, and its cascade, intended behavior under "the report adds data, not authority"?
 
-- Sources examined: P4 KTD4, R4; index D3 and D7; `admission.rs:1041-
+- Sources examined: P4 KTD4, R4; index D3 and D7; `admission.rs:1092-
   1139`, `:843-856`; route test `:5493`.
 - Findings: the code admits it and the route test exercises the quarantine
   variant without commenting on intent. The plan's authority invariants
@@ -106,7 +106,7 @@ demotion, and does not read `kernel.read`.
 
 ### Q: How is a deferred dependent's served visibility repaired?
 
-- Sources examined: `admission.rs:1445-1451`, `:1452-1490`.
+- Sources examined: `admission.rs:1496-1502`, `:1452-1490`.
 - Findings: validity is already withdrawn through the chain read; the
   served row is not rewritten; the comment names chunked repair as
   remaining work. No repair job was found in this pass.
@@ -117,7 +117,7 @@ demotion, and does not read `kernel.read`.
 ### Q: Does the preview show the cascade a dispute on an approval causes (G2)?
 
 - Sources examined: `PreviewRun::disposition`
-  (`crates/daemon/src/kernel_routes/commit.rs:827-866`), `changes_to`
+  (`crates/daemon/src/kernel_routes/commit.rs:860-899`), `changes_to`
   (`:537-542`), the route module header (`commit.rs:60-63`), the command
   usage (`packages/opencode-plugin/src/shared/memory-mark-command.ts:53`)
   and its test (`memory-mark-command.test.ts:156`), and PR A's

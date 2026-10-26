@@ -36,7 +36,7 @@ only from `decisions` and `observations` (`crates/kernel/src/envelope.rs:
 (`:1903-1904`). `ScopeFilter::matches(None, ..)` returns `false`
 (`crates/daemon/src/kernel_routes/project.rs:204-206`), so
 `scoped_object_state` on an evidence object's `object_id` is always
-`NotFound` (`commit.rs:676-690`). Tables with `scope_id`: `propositions`,
+`NotFound` (`commit.rs:688-702`). Tables with `scope_id`: `propositions`,
 `scopes`, `asserted_edges`, `decisions`, `observations`
 (`crates/kernel/src/schema.rs:118, 126, 143, 167, 175`).
 
@@ -114,7 +114,7 @@ Evidence: `memoryMarkOperationId` is `[sessionId, event, objectId]`
 operations (`client.ts:272-281`); a stored receipt with a different digest
 is `KernelError::Conflict` (`envelope.rs:1365-1367`), which `run` maps to
 `OperationKeyReused` when raised before entering the closure
-(`commit.rs:1064-1072`).
+(`commit.rs:1100-1108`).
 
 Consequence: a user who disputes the same finding twice in one session with
 different evidence gets `operation_key_reused`. The tool's identity is per
@@ -139,7 +139,7 @@ typed columns" can mean. See Q6.
 
 ### C7. Plan line references that are off at HEAD
 
-The plan cites `derive_classes` at `commit.rs:226-240` (HEAD: `:368-378`),
+The plan cites `derive_classes` at `commit.rs:228-242` (HEAD: `:368-378`),
 `disposition_request` evidence at `:590-596` (HEAD `3a3b916b7`: `:595-596`;
 PR A: `:731-732`), and the
 reporter join at `envelope.rs:1343-1352` (HEAD: insert at `:1399-1415`).
@@ -152,7 +152,7 @@ Plan R1 distinguishes plugin callers. Evidence: every `kernel.commit`
 request arrives through a bound plugin connection (dispatch
 `crates/daemon/src/lib.rs:14529`; the daemon has no internal caller of the
 route). The only non-plugin writer of disposition events is the Kernel API
-`Envelope::record_admission` (`admission.rs:982`), used by Kernel tests.
+`Envelope::record_admission` (`admission.rs:998`), used by Kernel tests.
 Consequence: at the route the qualifier is vacuous; the real question is
 whether the Kernel API path must also require and validate evidence. See
 Q5.
@@ -192,7 +192,7 @@ Options:
 - (a) Identity = (session, event, subject, canonical evidence key). Two
   pieces of evidence are two disputes; each lands as its own admission row
   (the Kernel accepts a repeat `mark_disputed` on a `Disputed` decision as
-  `outcome=deny`, disposition unchanged, `admission.rs:321-367`). Repeats
+  `outcome=deny`, disposition unchanged, `admission.rs:337-383`). Repeats
   of the same evidence replay.
 - (b) Identity = (session, event, subject) as today. One dispute per
   session per finding; a second evidence is refused `operation_key_reused`
@@ -285,7 +285,7 @@ storage rule and is not recommended.
 Fact: `EVIDENCE_CITED_SQL` (`write.rs:42-54`) does not include
 `admission_decisions`, so `retire_evidence` and capture expiry
 (`local_file.rs:3`) can invalidate evidence a dispute cites. The FK
-`ON DELETE RESTRICT` (`schema.rs:163`) is inert because evidence rows are
+`ON DELETE RESTRICT` (`schema.rs:164`) is inert because evidence rows are
 invalidated, never deleted.
 
 Options:
@@ -305,7 +305,7 @@ admission. Alternative (b) is a retention-policy change and needs an owner.
 ### Q8. Replay response shape for a committed dispute
 
 Fact: a replayed preview returns `previews: []` with the receipt
-(`commit.rs:1165-1172`); the TS command treats a commit receipt with no
+(`commit.rs:1214-1221`); the TS command treats a commit receipt with no
 matching verdict as `outcome_unknown` (`memory-mark-command.ts:241-242`).
 Whether a replayed commit returns the stored verdict list was not traced
 end to end here.
@@ -321,7 +321,7 @@ choosing.
 Fact: `mark_disputed` on a `Rejected`, `Contradicted`, or `Quarantined`
 decision is a relaxation (`disposition_restrictiveness`, `admission.rs:
 4168-4175`); without approval it is recorded with `denied=true`, outcome
-`deny`, disposition unchanged (`admission.rs:330-334`), and the row is
+`deny`, disposition unchanged (`admission.rs:346-350`), and the row is
 written with its evidence.
 
 Options:
@@ -384,11 +384,11 @@ No human input needed; record the choice in the route header.
   `docs/host-wire-protocol.md` lists no `kernel.*` method (`:767`), so the
   route doc is the module header plus the `docs/properties` catalogs.
 - KTD4 and R4: `MarkDisputed` and `Contradict` request `Deny` with a more
-  restrictive disposition (`admission.rs:4161-4162`); support is withdrawn
+  restrictive disposition (`admission.rs:4265-4266`); support is withdrawn
   to `Candidate` (`:345-351`); `has_evidence` gates only `Enforce`
   (`:275-277`).
 - Non-goal `ExplicitUser`: `derive_classes` maps every `source_kind` to
-  `ModelInference` (`commit.rs:368-378`).
+  `ModelInference` (`commit.rs:370-380`).
 - Non-goal free-text rationale: `reason` is redacted lossy
   (`redaction.rs:41, 73-78`) and bounded at 512 KiB
   (`secret-scanner/src/api.rs:6`); the structured reason stays within an

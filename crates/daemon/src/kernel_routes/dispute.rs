@@ -3,7 +3,7 @@
 
 use context_core::redaction::redact_durable_text;
 use kernel::{EventKind, TaintClass, is_lower_hex_oid};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::InvalidReason;
 use crate::confined_path;
@@ -18,7 +18,7 @@ const VERSION: &str = "1";
 const OPERATION: &str = "kernel.commit";
 
 /// A repository file at a git object id, as the wire carries it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceRef {
     pub path: String,
@@ -175,7 +175,9 @@ fn encode(value: &str) -> String {
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
-    char::from(byte).to_digit(16).and_then(|digit| u8::try_from(digit).ok())
+    char::from(byte)
+        .to_digit(16)
+        .and_then(|digit| u8::try_from(digit).ok())
 }
 
 /// The bytes `value` encodes, as UTF-8; `None` for a `%` without two hex

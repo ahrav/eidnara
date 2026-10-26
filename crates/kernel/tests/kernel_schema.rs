@@ -181,7 +181,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "ed12f254bd6b6471905b6079de58c45c1072d05179892e2433a70506b2c1299e";
+    "3f434cd773bbf349848eb35a74763f26e41c57392fdaca4381794e4ef23d4be5";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -2437,4 +2437,54 @@ fn an_admission_citation_names_a_recorded_use_outcome_and_never_changes() {
         [],
     )
     .expect("rewriting the same citation changes nothing");
+}
+
+/// The admission table's columns in DDL order. Batch K1 adds the use-outcome
+/// citation and the dispute reporter columns at the end.
+#[test]
+fn admission_decisions_carries_the_batch_k1_citation_and_reporter_columns() {
+    let (_dir, mut conn) = open_profiled();
+    apply_kernel_schema(&mut conn, INCARNATION, 1_000).expect("bootstrap");
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('admission_decisions') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        [
+            "admission_decision_id",
+            "candidate_id",
+            "candidate_ref",
+            "candidate_kind",
+            "candidate_payload_digest",
+            "subject_object_id",
+            "source_kind",
+            "source_id",
+            "source_revision",
+            "source_class",
+            "taint_class",
+            "event_kind",
+            "maturity",
+            "effective_maturity",
+            "disposition",
+            "visibility",
+            "outcome",
+            "sensitivity_class",
+            "policy_revision",
+            "reason",
+            "evidence_id",
+            "approval_object_id",
+            "trigger_object_id",
+            "elevated_support",
+            "commit_seq",
+            "decided_at",
+            "use_outcome_id",
+            "reporter_source_class",
+            "reporter_taint_class",
+            "event_payload",
+        ]
+    );
 }

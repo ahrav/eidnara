@@ -29,7 +29,7 @@ per report.
   and identity-immutable triggers (`schema.rs:42`); `commit_log` has
   `idx_commit_operation UNIQUE(producer, operation_key)` (`:26`).
 - The route maps a `Conflict` before entering the operation to
-  `OperationKeyReused` (`commit.rs:1065-1070`) and reports
+  `OperationKeyReused` (`commit.rs:1101-1106`) and reports
   `invalid/operation_key_reused` (`:483`).
 - The replayed receipt's `result` is the original `CommitResult` JSON;
   the route re-derives `tokens` from `touched` with `known_as_of =

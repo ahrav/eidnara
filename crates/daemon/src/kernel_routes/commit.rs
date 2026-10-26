@@ -68,9 +68,9 @@ use std::time::{Duration, Instant};
 use host_runtime::RouteHandle;
 use kernel::{
     ALIGNMENT_DEPENDENCY_KIND, AdmissionEvent, AdmissionRequest, CommitIntent, CommitReceipt,
-    DecisionPayload, DecisionSpec, Disposition, DomainSpec, Envelope, EventKind, KernelError,
-    KernelStore, ObjectState, ObservationDependencySpec, ObservationPayload, ObservationSpec,
-    Outcome, Preview, PriorDecision, Sensitivity, ServedRow, SourceClass, Surface,
+    DecisionPayload, DecisionSpec, Disposition, DisputeReporter, DomainSpec, Envelope, EventKind,
+    KernelError, KernelStore, ObjectState, ObservationDependencySpec, ObservationPayload,
+    ObservationSpec, Outcome, Preview, PriorDecision, Sensitivity, ServedRow, SourceClass, Surface,
     SurfaceVisibility, TaintClass, TokenCheck, TokenConflict, VisibilityRow,
 };
 use serde::{Deserialize, Serialize};
@@ -179,6 +179,7 @@ struct DispositionArgs<'a> {
     event: DispositionEvent,
     approval_object_id: Option<&'a str>,
     evidence_id: Option<&'a str>,
+    evidence_ref: Option<&'a EvidenceRef>,
     reason: &'a str,
 }
 
@@ -190,13 +191,14 @@ impl Operation {
                 event,
                 approval_object_id,
                 evidence_id,
+                evidence_ref,
                 reason,
-                ..
             } => Some(DispositionArgs {
                 object_id,
                 event: *event,
                 approval_object_id: approval_object_id.as_deref(),
                 evidence_id: evidence_id.as_deref(),
+                evidence_ref: evidence_ref.as_ref(),
                 reason,
             }),
             _ => None,
@@ -451,6 +453,16 @@ struct CommitPlan {
     classes: (SourceClass, TaintClass),
     project: ProjectBinding,
     deadline: Duration,
+    reporter: Reporter,
+}
+
+/// The caller as a dispute row records it: the derived classes and the
+/// reporting session, which names the serving record the row links.
+struct Reporter {
+    classes: (SourceClass, TaintClass),
+    project_digest: String,
+    harness: String,
+    session_id: String,
 }
 
 pub(crate) enum CommitFailure {
@@ -702,6 +714,7 @@ fn disposition_request(
         approval_object_id,
         evidence_id,
         reason,
+        ..
     } = args;
     let state = scoped_object_state(envelope, filter, object_id)?;
     if state.object.object_kind != "decision" || state.object.invalidated_commit_seq.is_some() {
@@ -786,9 +799,29 @@ fn record_disposition(
     envelope: &mut Envelope<'_>,
     filter: &mut ScopeFilter,
     args: DispositionArgs<'_>,
+    reporter: &Reporter,
 ) -> Result<DispositionResult, KernelError> {
     let (prior, request) = disposition_request(envelope, filter, args)?;
-    let decision = envelope.record_admission(request)?;
+    let decision = if dispute::is_dispute(args.event.kind()) {
+        let event_payload = args
+            .evidence_ref
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| KernelError::InvalidInput)?;
+        envelope.record_dispute_admission(
+            request,
+            &DisputeReporter {
+                source_class: reporter.classes.0,
+                taint_class: reporter.classes.1,
+                event_payload,
+                project_digest: reporter.project_digest.clone(),
+                harness: reporter.harness.clone(),
+                session_id: reporter.session_id.clone(),
+            },
+        )?
+    } else {
+        envelope.record_admission(request)?
+    };
     Ok(DispositionResult::new(
         args.object_id,
         args.event,
@@ -999,9 +1032,12 @@ fn apply(
             }
             Operation::Disposition { object_id, .. } => {
                 let args = operation.disposition().expect("a disposition operation");
-                result
-                    .dispositions
-                    .push(record_disposition(envelope, filter, args)?);
+                result.dispositions.push(record_disposition(
+                    envelope,
+                    filter,
+                    args,
+                    &plan.reporter,
+                )?);
                 result.touched.push(object_id.clone());
             }
             Operation::InsertObservation { spec } => {
@@ -1080,6 +1116,13 @@ impl HandlerCore {
         channel: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
+        // The transport strips `session_id` before the body is parsed, so the
+        // reporting session is read here.
+        let session_id = request
+            .get("session_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let (scope, mut parsed) =
             match self.kernel_request::<CommitRequest>(channel, request, OPERATION) {
                 Ok(bound) => bound,
@@ -1138,6 +1181,12 @@ impl HandlerCore {
             operations: parsed.operations,
             source_kind: parsed.source_kind,
             classes,
+            reporter: Reporter {
+                classes,
+                project_digest: scope.project.digest().to_string(),
+                harness: scope.harness,
+                session_id,
+            },
             project: scope.project,
             deadline,
         };

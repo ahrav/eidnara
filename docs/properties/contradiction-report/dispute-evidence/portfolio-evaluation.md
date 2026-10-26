@@ -31,7 +31,7 @@ by a doc-comment line. Examples: `commit.rs:12-63`, `:206-234`,
 `:719-721`, `:725-726`, `:742-759`, `:1047-1062`, `:1111-1125`,
 `:1151-1159`; `dispute.rs:49-81`, `:108-148`, `:151-159`, `:201-207`;
 `envelope.rs:187-194`, `:532-577`; `scope.rs:710-716`;
-`lib.rs:14529`; `admission.rs:4168-4175`, `:4532`; all eight route test
+`lib.rs:14529`; `admission.rs:4272-4279`, `:4532`; all eight route test
 lines from `kernel_routes.rs:5723` to `:6199`; and all seven TypeScript
 test lines.
 
@@ -41,12 +41,12 @@ The following were wrong at `16660c3dd`:
   off by 17. The listed lines were 252, 266, 300, 328, 340, 356, 376 and
   390. At `f68e895ca` the tests are at 232, 246, 314, 342, 354, 370, 390
   and 404.
-- `catalog.md`, form record, `Exercised:`. It cited `dispute.rs:300`,
+- `catalog.md`, form record, `Exercised:`. It cited `dispute.rs:302`,
   `:328`, `:340` and `:266`. At `f68e895ca` these are 314, 342, 354 and
   246.
 - `catalog.md`, reason record, `Existing check:`. It cited `:390`. At
   `f68e895ca` the test is at 404.
-- `commit.rs:1068-1070` is the comment that interprets a conflict. The
+- `commit.rs:1104-1106` is the comment that interprets a conflict. The
   receipt lookup itself runs inside `KernelStore::commit_before`. This is
   minor.
 
@@ -57,7 +57,7 @@ under one writer transaction.
 
 | Record | Route | Why |
 |---|---|---|
-| requirement | route test with raw bodies, plus TS parser | refusal happens before any transaction (`commit.rs:1119-1125`) |
+| requirement | route test with raw bodies, plus TS parser | refusal happens before any transaction (`commit.rs:1162-1168`) |
 | liveness | route test; kernel lock harness for the queued case | `retire_evidence` store API |
 | visibility | route test with two projects; kernel test for the edge citer | asserted-edge branch has no test |
 | form | `dispute.rs` unit tests plus route | pure predicates |
@@ -115,12 +115,12 @@ consistently.
 ## 4. Wildcard
 
 - **Self-citation.** `insert_decision` and `insert_observation` accept a
-  caller `evidence_id` (`commit.rs:274`, `:314`). The Kernel checks only
+  caller `evidence_id` (`commit.rs:276`, `:314`). The Kernel checks only
   that the row is live (`require_parents`, `slice/write.rs:1095-1107`).
   The tests' `project_evidence` helper uses exactly this path to make
   evidence citable (`kernel_routes.rs:5684-5698`).
   - `apply` runs operations in order inside one transaction
-    (`commit.rs:901-1041`). I infer, without having tested it, that a
+    (`commit.rs:934-1077`). I infer, without having tested it, that a
     single envelope holding `insert_decision` citing E, then a dispute
     citing E, passes `require_visible_evidence`.
   - The insert also distinguishes a live id (`available`) from an unknown
@@ -131,11 +131,11 @@ consistently.
     guessable (G1).
 - **Approved relaxation.** The route accepts `approval_object_id` on a
   dispute (`commit.rs:158-159`). A valid approval permits a move toward a
-  less restrictive disposition (`admission.rs:321-334`). An approved
+  less restrictive disposition (`admission.rs:337-350`). An approved
   `mark_disputed` against a `contradicted` prior lands `disputed`. That
   breaks the standing check
   `restrictiveness(r) >= restrictiveness(p)`. The grid test fixes
-  `approval_valid: false` (`admission.rs:4557`), and no route test sends
+  `approval_valid: false` (`admission.rs:4661`), and no route test sends
   an approval with a dispute (R1).
 - **Whitespace in paths.** The command splits arguments on `/\s+/`
   (`memory-mark-command.ts:85-88`). A path containing a space cannot be
@@ -160,7 +160,7 @@ consistently.
 
 ## Gaps queued
 
-- **G1.** Read `commit.rs:901-1041` and `slice/write.rs:1095-1107`.
+- **G1.** Read `commit.rs:934-1077` and `slice/write.rs:1095-1107`.
   Write one route test: in one envelope, `insert_decision` citing
   evidence that only project B cites, then a dispute citing it. Record
   the result. An owner then decides whether visibility means "already

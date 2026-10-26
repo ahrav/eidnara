@@ -1057,3 +1057,232 @@ fn an_outside_file_lock_bounds_the_advance_at_begin() {
     );
     assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
 }
+
+// --- Dispute rows: reporter columns and the use-outcome link ---
+
+use kernel::{
+    AdmissionEvent, AdmissionRequest, DecisionPayload, DecisionSpec, DisputeReporter, EventKind,
+    SourceClass, TaintClass,
+};
+
+/// A store holding live, admitted decisions `objects` under the route's
+/// plugin classes.
+fn decision_store(root: &std::path::Path, objects: &[&str]) -> KernelStore {
+    let store = store_with_objects(root, &[]);
+    for object in objects {
+        store
+            .commit(intent(&format!("decide-{object}")), |envelope| {
+                envelope.insert_decision(DecisionSpec {
+                    decision_id: format!("{object}-decision"),
+                    object_id: (*object).to_string(),
+                    domain_id: "domain".to_string(),
+                    proposition_id: None,
+                    scope_id: None,
+                    anchor_id: None,
+                    evidence_id: None,
+                    decision_kind: "memory".to_string(),
+                    payload: DecisionPayload {
+                        summary: (*object).to_string(),
+                        rationale: String::new(),
+                    },
+                    source_kind: "assistant".to_string(),
+                    source_id: format!("{object}-lineage"),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                envelope.record_admission(request(object, EventKind::Other))?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+    store
+}
+
+fn request(subject: &str, kind: EventKind) -> AdmissionRequest {
+    AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(subject.to_string()),
+        source_class: Some(SourceClass::ModelInference),
+        taint_class: Some(TaintClass::AssistantInference),
+        event: AdmissionEvent {
+            kind,
+            trigger_object_id: None,
+            approval_object_id: None,
+            evidence_id: None,
+            reason: "dispute".to_string(),
+        },
+    }
+}
+
+fn reporter(session: &str, taint: TaintClass, payload: Option<&str>) -> DisputeReporter {
+    DisputeReporter {
+        source_class: SourceClass::ModelInference,
+        taint_class: taint,
+        event_payload: payload.map(str::to_string),
+        project_digest: project(),
+        harness: HARNESS.to_string(),
+        session_id: session.to_string(),
+    }
+}
+
+/// Files a dispute and answers its row's `(use_outcome_id, reporter source,
+/// reporter taint, payload)`.
+fn dispute(
+    store: &KernelStore,
+    root: &std::path::Path,
+    key: &str,
+    subject: &str,
+    reporter: &DisputeReporter,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let receipt = store
+        .commit(intent(key), |envelope| {
+            envelope
+                .record_dispute_admission(request(subject, EventKind::MarkDisputed), reporter)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    writer(root)
+        .query_row(
+            "SELECT use_outcome_id,reporter_source_class,reporter_taint_class,event_payload
+               FROM admission_decisions WHERE commit_seq=?1 AND subject_object_id=?2",
+            params![receipt.commit_seq, subject],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+}
+
+/// A dispute links the reporting session's serve of its subject with the
+/// greatest served sequence below the dispute's commit: not an older serve, not
+/// another session's, not a serve of another decision, and none for a session
+/// never served the subject. A serve recorded after the dispute leaves the
+/// dispute's link as it was written.
+#[test]
+fn a_dispute_links_the_reporting_sessions_latest_prior_serve_of_its_subject() {
+    let root = tempfile::tempdir().unwrap();
+    let store = decision_store(root.path(), &["d1", "d2", "d3"]);
+    let first_at = tick(&store, "first");
+    let older = insert(&store, "older", spec("s1", &["d1"], first_at, 0)).unwrap();
+    let second_at = tick(&store, "second");
+    let newer = insert(&store, "newer", spec("s1", &["d1", "d2"], second_at, 0)).unwrap();
+    let third_at = tick(&store, "third");
+    let other_decision =
+        insert(&store, "other-decision", spec("s1", &["d2"], third_at, 0)).unwrap();
+    insert(&store, "other-session", spec("s2", &["d1"], third_at, 0)).unwrap();
+    assert_ne!(older, newer);
+
+    let payload =
+        r#"{"path":"src/a.rs","git_object_id":"0123456789abcdef0123456789abcdef01234567"}"#;
+    let served = reporter("s1", TaintClass::UserInferred, Some(payload));
+    let linked = dispute(&store, root.path(), "dispute-d1", "d1", &served);
+    assert_eq!(
+        linked,
+        (
+            Some(newer.clone()),
+            Some("model_inference".to_string()),
+            Some("user_inferred".to_string()),
+            Some(payload.to_string()),
+        )
+    );
+    assert_eq!(
+        dispute(
+            &store,
+            root.path(),
+            "dispute-d2",
+            "d2",
+            &reporter("s1", TaintClass::AssistantInference, None)
+        )
+        .0,
+        Some(other_decision)
+    );
+    let unserved = dispute(
+        &store,
+        root.path(),
+        "unserved",
+        "d1",
+        &reporter("s3", TaintClass::AssistantInference, None),
+    );
+    assert_eq!(
+        unserved,
+        (
+            None,
+            Some("model_inference".to_string()),
+            Some("assistant_inference".to_string()),
+            None
+        )
+    );
+
+    let later_at = tick(&store, "later");
+    insert(
+        &store,
+        "later-serve",
+        spec("s1", &["d1", "d3"], later_at, 0),
+    )
+    .unwrap();
+    assert_eq!(
+        count(
+            root.path(),
+            &format!(
+                "SELECT COUNT(*) FROM admission_decisions
+                  WHERE subject_object_id='d1' AND use_outcome_id='{newer}'"
+            )
+        ),
+        1,
+        "the first dispute keeps the link it was written with"
+    );
+}
+
+/// Only disputes take reporter columns; every other writer stores NULL, and
+/// the DDL refuses a class outside its vocabulary, a half-set pair, and a
+/// payload that is not JSON.
+#[test]
+fn reporter_columns_are_dispute_only_and_checked_by_the_schema() {
+    let root = tempfile::tempdir().unwrap();
+    let store = decision_store(root.path(), &["d1"]);
+    assert_eq!(
+        count(
+            root.path(),
+            "SELECT COUNT(*) FROM admission_decisions WHERE reporter_source_class IS NULL
+               AND reporter_taint_class IS NULL AND event_payload IS NULL AND use_outcome_id IS NULL"
+        ),
+        1
+    );
+    let refused = store.commit(intent("stale-as-dispute"), |envelope| {
+        envelope.record_dispute_admission(
+            request("d1", EventKind::MarkStale),
+            &reporter("s1", TaintClass::UserInferred, None),
+        )?;
+        Ok(String::new())
+    });
+    assert_eq!(refused.unwrap_err(), KernelError::InvalidInput);
+
+    let insert_row = |id: &str, source: &str, taint: &str, payload: &str| {
+        writer(root.path()).execute(
+            &format!(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,
+                     source_revision,source_class,taint_class,event_kind,maturity,
+                     effective_maturity,disposition,visibility,outcome,sensitivity_class,
+                     policy_revision,reason,decided_at,reporter_source_class,
+                     reporter_taint_class,event_payload
+                 ) VALUES ('{id}','d1','fixture','d1',1,'model_inference','assistant_inference',
+                           'mark_disputed','candidate','candidate','disputed','explicit_labeled',
+                           'deny','normal',1,'r',1,{source},{taint},{payload})"
+            ),
+            [],
+        )
+    };
+    assert!(insert_row("ok", "'model_inference'", "'user_inferred'", "'{}'").is_ok());
+    for (id, source, taint, payload) in [
+        ("bad-source", "'oracle'", "'user_inferred'", "NULL"),
+        ("bad-taint", "'model_inference'", "'oracle'", "NULL"),
+        ("half", "'model_inference'", "NULL", "NULL"),
+        ("not-json", "'model_inference'", "'user_inferred'", "'{'"),
+    ] {
+        assert!(insert_row(id, source, taint, payload).is_err(), "{id}");
+    }
+}

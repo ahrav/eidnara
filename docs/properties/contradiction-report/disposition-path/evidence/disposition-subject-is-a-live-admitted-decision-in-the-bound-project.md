@@ -13,7 +13,7 @@ and what each failure answers.
 
 ## Evidence trail
 
-- `disposition_request` (`crates/daemon/src/kernel_routes/commit.rs:694-
+- `disposition_request` (`crates/daemon/src/kernel_routes/commit.rs:706-
   736`):
   1. `scoped_object_state(envelope, filter, object_id)?` (`:706`): the
      registry row exists and its `scope_id` names the bound project, else
@@ -28,10 +28,10 @@ and what each failure answers.
      `approval_chain_members` entry pass `scoped_object_state`
      (`:713-717`); the chain reader refuses above
      `MAX_AUTHORITY_CHAIN_DEPTH` with `AdmissionPolicy`
-     (`admission.rs:1017-1038`).
+     (`admission.rs:1068-1089`).
 - Mapping: `NotFound -> invalid/not_found`, `AdmissionPolicy ->
   invalid/admission_policy` (`kernel_routes/state.rs:275-276`).
-- Both preview and commit call the same function (`commit.rs:790` in
+- Both preview and commit call the same function (`commit.rs:804` in
   `record_disposition`, `:835` in `PreviewRun::disposition`), so a refusal is identical in both modes
   (`kernel_routes.rs:5355`).
 - Tests: retired subject and unadmitted subject (`kernel_routes.rs:4888-
@@ -40,7 +40,7 @@ and what each failure answers.
 - An in-scope `observation` object has `scope_id` and is live, so step 1
   passes and step 2 refuses it; no test drives this.
 - `load_subject_facts` in the Kernel filters `invalidated_commit_seq IS
-  NULL` again (`admission.rs:2143`), a second liveness gate.
+  NULL` again (`admission.rs:2247`), a second liveness gate.
 
 ## Failure scenario
 

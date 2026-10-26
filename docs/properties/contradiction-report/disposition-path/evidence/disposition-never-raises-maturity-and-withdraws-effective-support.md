@@ -9,13 +9,13 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 Plan P4 R4 ("the report never raises maturity"), the Problem Frame
 ("forces maturity to `Candidate`"), and index D3 ("authority never derives
 from model confidence"). Lens: claimed safety guarantees, then data
-integrity. The `DispositionEvent` doc (`commit.rs:237-238`) makes the same
+integrity. The `DispositionEvent` doc (`commit.rs:239-240`) makes the same
 claim: "never a maturity promotion".
 
 ## Evidence trail
 
 - `event_effect` returns `(current, Some(<disposition>), <outcome>)` for
-  all five events (`crates/kernel/src/admission.rs:4160-4163`), so
+  all five events (`crates/kernel/src/admission.rs:4264-4267`), so
   `requested == current`.
 - `event_can_raise_support` lists no disposition event (`:4189-4199`), so
   `raises_support` is false (`:318-319`).
@@ -74,7 +74,7 @@ sees the earlier one's row as prior (`admission_latest`, `:1835-1843`).
 
 ### Q: Is the preserved `maturity` history intended to be visible to P3/P4 readers?
 
-- Sources examined: `admission.rs:336-351`, `:1770-1771`; P4 Problem
+- Sources examined: `admission.rs:352-367`, `:1770-1771`; P4 Problem
   Frame; P3 plan R3 ("whether a `MarkDisputed` or `Contradict` event
   landed after the served commit sequence").
 - Findings: the row keeps `maturity` (historical) at its prior value and

@@ -28,7 +28,7 @@ on them.
   `append_decision_citations` (`:240`, call at `:266`).
 - Route reachability: `DecisionRequest.evidence_id` and
   `ObservationRequest.evidence_id` (`crates/daemon/src/kernel_routes/
-  commit.rs:274`, `:314`) flow into the specs (`:292`, `:344`) and into
+  commit.rs:276`, `:314`) flow into the specs (`:292`, `:344`) and into
   `envelope.insert_decision` / `insert_observation` (`:927`, `:1033`).
 - `NotFound` maps to `invalid/not_found` (`kernel_routes/state.rs:276`),
   whose doc reads "does not exist, is not live, or is not scoped to the
@@ -73,7 +73,7 @@ predicate runs inside the writer transaction and sees the retirement.
 - Sources examined: `slice/write.rs:1095-1178` (all private `fn`);
   PR A's `Envelope::evidence_citations` (`envelope.rs:532-577`) and
   `require_visible_evidence`
-  (`crates/daemon/src/kernel_routes/commit.rs:742-759`).
+  (`crates/daemon/src/kernel_routes/commit.rs:755-772`).
 - Findings: at `3a3b916b7` no public read returned an evidence row's
   liveness by id. PR A adds `evidence_citations`, which returns the row's
   liveness and the scopes of its live citers inside the envelope's

@@ -31,10 +31,10 @@ carries so R3's join is specified against the real columns.
 - `session_id` is an envelope key stripped before parsing
   (`kernel_routes/mod.rs:461`); the binding knows the session but nothing
   writes it to the Kernel on this path. `source_kind` is consumed by
-  `resolve_classes` (`commit.rs:1111-1118`) and copied into inserted specs
+  `resolve_classes` (`commit.rs:1154-1161`) and copied into inserted specs
   (`:288-294`), never into `commit_log`.
 - The admission row joins to the commit log by `commit_seq`
-  (`admission_decisions.commit_seq REFERENCES commit_log`, `schema.rs:163`).
+  (`admission_decisions.commit_seq REFERENCES commit_log`, `schema.rs:164`).
 - Command values: `actor = "user:opencode"` (`hooks/context/command-
   handler.ts:391`) or `"user:pi"` (`pi-plugin/src/commands/eidnara-memory-
   mark.ts:18`); `cause` is `commandLine(args)`: `/eidnara-memory-mark

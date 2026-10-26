@@ -23,19 +23,19 @@ definition.
   (`envelope.rs:555-565`).
 - `require_visible_evidence` accepts the first citing scope that
   `ScopeFilter::matches` accepts for the bound project and answers
-  `NotFound` otherwise (`crates/daemon/src/kernel_routes/commit.rs:751-758`).
+  `NotFound` otherwise (`crates/daemon/src/kernel_routes/commit.rs:764-771`).
   `ScopeFilter` is the same algebra `kernel.read` serves rows with
-  (`commit.rs:671-675`).
+  (`commit.rs:683-687`).
 - Every refusal case (unknown, retired, uncited, unscoped-only,
   foreign-only) answers the one name `not_found` (doc comment at
-  `commit.rs:738-741`; header at `:48-49`). Since `511cd6d73` the doc
+  `commit.rs:751-754`; header at `:48-49`). Since `511cd6d73` the doc
   comment states that the check answers the same for another project's
   evidence as for an unknown id.
 - The scope loop tries every citing scope until one passes
-  (`commit.rs:751-757`), so the order scopes sort in does not decide the
+  (`commit.rs:764-770`), so the order scopes sort in does not decide the
   answer.
 - `apply` runs an envelope's operations in order in one transaction
-  (`commit.rs:901-1041`), so a citer inserted earlier in the envelope is
+  (`commit.rs:934-1077`), so a citer inserted earlier in the envelope is
   visible to the dispute's read.
 - Decision events reach the citing set through the review acceptance
   path: `append_decision_citations`
@@ -61,7 +61,7 @@ versus `not_found`) would reveal that E exists.
   `cited-evidence-live-at-dispute-commit`, so the commit sees the
   retirement.
 - The scope verdict depends on stored scope terms read through
-  `envelope.scope_terms` inside the same transaction (`commit.rs:752-754`).
+  `envelope.scope_terms` inside the same transaction (`commit.rs:765-767`).
 - The sequential form (preview answers `available`, the only project
   citer retires, the commit answers `not_found` with nothing written) is
   constructed by
@@ -120,9 +120,9 @@ versus `not_found`) would reveal that E exists.
 ### Q: Can a client make evidence citable through the route's own inserts (portfolio G1)?
 
 - Sources examined: `insert_decision` and `insert_observation` wire
-  fields (`commit.rs:274`, `:314`); `require_parents`
+  fields (`commit.rs:276`, `:314`); `require_parents`
   (`crates/kernel/src/slice/write.rs:1095-1107`); `apply`
-  (`commit.rs:901-1041`); `kernel_routes.rs:6475`.
+  (`commit.rs:934-1077`); `kernel_routes.rs:6475`.
 - Findings: yes. The inserts accept any live evidence id; the Kernel
   checks liveness only. The test refuses a dispute citing uncited live
   evidence with `not_found`, then lands one envelope holding an

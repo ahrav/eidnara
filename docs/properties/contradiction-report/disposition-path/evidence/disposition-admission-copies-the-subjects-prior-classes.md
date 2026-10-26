@@ -16,19 +16,19 @@ reading; code resolves which describes the disposition path.
 
 - `disposition_request` builds the request with `source_class:
   Some(prior.source_class)` and `taint_class: Some(prior.taint_class)`
-  (`crates/daemon/src/kernel_routes/commit.rs:725-726`). `prior` is the
+  (`crates/daemon/src/kernel_routes/commit.rs:738-739`). `prior` is the
   `PriorDecision` from `envelope.subject_admission(object_id)`
   (`:710-712`), which reads `load_prior_for_key(AdmissionKey::Object)`
-  (`crates/kernel/src/admission.rs:1006-1013`).
+  (`crates/kernel/src/admission.rs:1057-1064`).
 - `CommitPlan.classes` (the caller's derived pair from `resolve_classes`,
-  `commit.rs:411-444`) is read only by `admit` (`:579-598`) for inserts
+  `commit.rs:413-446`) is read only by `admit` (`:579-598`) for inserts
   and supersedes. The `Operation::Disposition` arm in `apply`
   (`:1000-1006`) never touches it.
 - `evaluate_admission` refuses when the request's classes differ from the
-  prior's (`admission.rs:268-273`), so the copy is also what makes the
+  prior's (`admission.rs:284-289`), so the copy is also what makes the
   route's dispositions pass that gate for every subject class.
 - `write_admission` binds `prepared.source_class.as_str()` and
-  `prepared.taint_class.as_str()` into the row (`admission.rs:1767-1768`);
+  `prepared.taint_class.as_str()` into the row (`admission.rs:1867-1868`);
   `prepared.source_class` is the request's (`prepare_with_facts`,
   `:1563-1564`, `:1666-1667`).
 - Route test `:5493` quarantines `approval-1`, an `ExplicitUser`/
@@ -49,7 +49,7 @@ relabel the subject's lineage as model inference, and the subject's next
 ## Timing windows and dependencies
 
 None in time. Depends on `subject_admission` returning the object-scoped
-latest row, not the lineage row (`admission.rs:2172-2181` doc).
+latest row, not the lineage row (`admission.rs:2276-2285` doc).
 
 ## What a test must construct
 
@@ -69,7 +69,7 @@ latest row, not the lineage row (`admission.rs:2172-2181` doc).
 ### Q: Which wording is the contract, the header's "derived classes" or the plan's "prior source class"?
 
 - Sources examined: `commit.rs:1-10`, `:579-598`, `:694-736`,
-  `admission.rs:264-273`, plan P4 Problem Frame and R4.
+  `admission.rs:280-289`, plan P4 Problem Frame and R4.
 - Findings: the header describes inserts; the disposition arm copies the
   prior. Both statements are true of their own paths; the header's
   "every written row" is over-broad for admission rows written by a

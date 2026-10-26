@@ -9,7 +9,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 Plan P4 OQ4-1 and OQ4-2: encode the reporter class and `evidence_ref` in a
 structured `reason` for PR A; "Confirm the `reason` byte bound at
 implementation." Scope Boundaries: "The `reason` column is redacted
-(`admission.rs:1689`) and sized for codes, not prose." Lens: resource
+(`admission.rs:1780`) and sized for codes, not prose." Lens: resource
 boundaries and data integrity. The record states what the column enforces
 before it becomes a carrier.
 
@@ -17,7 +17,7 @@ before it becomes a carrier.
 
 - Blank check: `request.event.reason.trim().is_empty()` is
   `AdmissionPolicy` in `prepare_with_facts`
-  (`crates/kernel/src/admission.rs:1565-1567`) and in
+  (`crates/kernel/src/admission.rs:1616-1618`) and in
   `revoke_approval_inner` (`:1369-1371`).
 - Bound: `redact(value)` returns `InvalidInput` when `value.len() >
   MAX_REDACTABLE_BYTES` (`crates/kernel/src/redaction.rs:72-77`);
@@ -26,17 +26,17 @@ before it becomes a carrier.
   `crates/secret-scanner/src/api.rs:6`).
 - Redaction: `redact_lossy` runs `redact_durable_text` and returns the
   rewritten text plus detections (`redaction.rs:41-47`); `write_admission`
-  stores `reason.text` (`admission.rs:1689`, `:1777`) and calls
+  stores `reason.text` (`admission.rs:1780`, `:1777`) and calls
   `record(tx, "admission_decision", id, "reason", &reason, commit_seq)`
   (`:1787-1794`), which inserts one `durable_text_redactions` row per
   detection (`redaction.rs:104-130`).
 - The pending change also carries `redactions: vec![("reason", reason)]`
-  (`admission.rs:1830`) into the change-event payload.
+  (`admission.rs:1934`) into the change-event payload.
 - Schema: `reason TEXT NOT NULL`, no `CHECK` on length
-  (`crates/kernel/src/schema.rs:163`).
+  (`crates/kernel/src/schema.rs:164`).
 - Route value: the constant `"kernel.commit"` (`commit.rs:100`; inserts at
   `:594`) for every event except the two disputes; a dispute carries the
-  composed `v=1` reason (`commit.rs:221-227`, passed through at `:732`).
+  composed `v=1` reason (`commit.rs:223-229`, passed through at `:732`).
   At the PR A tip the route cannot produce a blank, oversize, or
   secret-bearing reason: `DisputeReason::validated` refuses a rendering
   over 4096 bytes or holding a detection
@@ -98,7 +98,7 @@ read in this pass.
 - Sources examined: `crates/kernel/src/redaction.rs:41-42`
   (`redact_lossy` calls `context_core::redaction::redact_durable_text`);
   `crates/context-core/src/redaction.rs:462-464`;
-  `crates/daemon/src/kernel_routes/dispute.rs:342-349`, `:354-367`;
+  `crates/daemon/src/kernel_routes/dispute.rs:344-351`, `:354-367`;
   `crates/secret-scanner/conservative_overlay.yaml:5-7`;
   `crates/secret-scanner/default_rules.yaml:410-411`;
   `crates/secret-scanner/src/rules.rs:31`, `:299-306`.

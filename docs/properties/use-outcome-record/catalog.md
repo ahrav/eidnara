@@ -363,10 +363,10 @@ Required faults and enabling state: A decision admitted, then a committed
 Confidence: high -
 [evidence](evidence/uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search.md).
 `visibility_row` maps `Disputed` to `ExplicitLabeled` (`visibility_row`
-(`crates/kernel/src/admission.rs:4248`)); `surface_visibility` hides it on every
-surface but explicit search (`crates/kernel/src/admission.rs:4121`).
+(`crates/kernel/src/admission.rs:4352`)); `surface_visibility` hides it on every
+surface but explicit search (`crates/kernel/src/admission.rs:4225`).
 Existing check: `visibility_matrix_and_sensitivity_ceiling_are_total`
-(`crates/kernel/src/admission.rs:4915`);
+(`crates/kernel/src/admission.rs:5019`);
 `every_non_active_disposition_has_the_contracted_surface_row`
 (`crates/kernel/tests/kernel_admission.rs:2890`);
 `dispositions_and_sensitivity_only_reduce_visibility`
@@ -391,8 +391,8 @@ SQL.
 Confidence: high -
 [evidence](evidence/uo-admission-reads-require-a-non-null-commit-seq.md). the
 predicates filter `commit_seq IS NOT NULL`
-(`crates/kernel/src/admission.rs:675`); the production writer binds the envelope
-sequence at `crates/kernel/src/admission.rs:1781`. The use-outcome dispute join
+(`crates/kernel/src/admission.rs:691`); the production writer binds the envelope
+sequence at `crates/kernel/src/admission.rs:1881`. The use-outcome dispute join
 and citation predicate filter the same way
 (`crates/kernel/src/use_outcome.rs:178`).
 Existing check:
@@ -419,12 +419,12 @@ Required faults and enabling state: A `mark_stale` and a `mark_disputed`
 committed together.
 Confidence: high -
 [evidence](evidence/uo-disposition-events-append-rows-and-newest-by-commit-seq-wins.md).
-`LATEST_SUBJECT_DECISION_PREDICATE` (`crates/kernel/src/admission.rs:675`) and
+`LATEST_SUBJECT_DECISION_PREDICATE` (`crates/kernel/src/admission.rs:691`) and
 its single-row seek.
 Existing check: `both_latest_decision_formulations_choose_the_same_row`
 (`crates/kernel/tests/kernel_admission.rs:2252`);
 `an_event_that_names_a_disposition_keeps_its_own_outcome`
-(`crates/kernel/src/admission.rs:5245`). Status: unaudited.
+(`crates/kernel/src/admission.rs:5349`). Status: unaudited.
 Impact: The dispute join counts event existence (C12), so this record bounds
 what a reader sees, not the join.
 Open questions:
@@ -611,8 +611,8 @@ Confidence: high -
 [evidence](evidence/uo-kernel-opens-only-at-the-compiled-baseline-identity.md).
 `classify_existing_family` (`crates/kernel/src/open.rs:796`);
 `classify_open_kernel` (`crates/kernel/src/open.rs:852`). Disposition B:
-re-verified against the #1154 digest
-`ed12f254bd6b6471905b6079de58c45c1072d05179892e2433a70506b2c1299e`.
+re-verified against the Batch K1 digest as #1162 extends it
+`3f434cd773bbf349848eb35a74763f26e41c57392fdaca4381794e4ef23d4be5`.
 Existing check: `every_conclusive_kernel_mismatch_is_refused_and_left_untouched`
 (`crates/kernel/tests/kernel_open.rs:183`);
 `a_family_created_under_the_previous_baseline_is_refused_untouched`
@@ -805,7 +805,7 @@ including REPLACE.
 Confidence: high -
 [evidence](evidence/uo-p-served-set-and-identity-never-rewritten.md). triggers
 in the `use_outcomes` and `use_outcome_decisions` components
-(`crates/kernel/src/schema.rs:187`); `recursive_triggers` is on for every Kernel
+(`crates/kernel/src/schema.rs:188`); `recursive_triggers` is on for every Kernel
 connection.
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
 (`crates/kernel/tests/kernel_schema.rs:2175`);
@@ -836,7 +836,7 @@ Required faults and enabling state: Inserts with `normal` and `remote_allowed`;
 a serve through the envelope.
 Confidence: high -
 [evidence](evidence/uo-p-classification-sensitive-local-only-no-remote-egress.md).
-CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:187`); the insert
+CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:188`); the insert
 names the classes as literals (`insert_use_outcome`
 (`crates/kernel/src/use_outcome.rs:279`)).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
@@ -868,7 +868,7 @@ and before n; a null row and another lineage by SQL.
 Confidence: high -
 [evidence](evidence/uo-p-disputed-after-serve-from-committed-events-only.md).
 the join is `crates/kernel/src/use_outcome.rs:190`, using the admission lineage
-text through `crates/kernel/src/admission.rs:910`.
+text through `crates/kernel/src/admission.rs:926`.
 Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
 (`crates/kernel/tests/kernel_use_outcome.rs:341`);
@@ -1168,7 +1168,7 @@ runs inside the capture gate after the descriptor retirement and before the
 memory delete (`delete_kernel_step` (`crates/daemon/src/lib.rs:6850`)); the
 envelope selects the session's live records under the writer
 (`mark_use_outcomes_deleted` (`crates/kernel/src/use_outcome.rs:347`)), and the
-set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:187`).
+set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:188`).
 Existing check:
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`);

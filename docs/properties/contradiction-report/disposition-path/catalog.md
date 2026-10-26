@@ -160,25 +160,25 @@ Check: `always` - for each `DispositionResult` the route returns with
 object_id AND commit_seq = c AND event_kind = event` has `source_class`
 and `taint_class` equal to the latest prior row's, and the request the
 route built had `source_class == prior.source_class && taint_class ==
-prior.taint_class` (`commit.rs:725-726`). Every evaluated write must
+prior.taint_class` (`commit.rs:738-739`). Every evaluated write must
 satisfy it, so `always`.
 Fault/timing angle: a subject whose prior classes differ from the caller's
 derived classes (an `ExplicitUser`/`UserExplicit` approval, a
 `TrustedLocalCode` observation-promoted decision) disputed by an
 `assistant` or `user` source kind; a prior whose own row is inconsistent
 (`effective_maturity > historical_maturity`) is refused instead
-(`admission.rs:268-273`).
+(`admission.rs:284-289`).
 Required faults and enabling state: a live admitted decision in the bound
 project whose prior `(source_class, taint_class)` is not the caller's
 derived pair; a disposition request from a plugin `source_kind`.
 Confidence: high - [evidence](evidence/disposition-admission-copies-the-subjects-prior-classes.md).
-Read `disposition_request` (`commit.rs:694-736`), the class-equality
-refusal (`admission.rs:268-273`), and `write_admission` column binding
-(`admission.rs:1767-1768`).
+Read `disposition_request` (`commit.rs:706-749`), the class-equality
+refusal (`admission.rs:284-289`), and `write_admission` column binding
+(`admission.rs:1867-1868`).
 Existing check: `crates/daemon/tests/kernel_routes.rs:4398`
 (`disposition_events_apply_the_fixed_table_and_report_outcome_and_disposition`)
 asserts disposition and outcome only; `kernel_routes.rs:5723` and `:6199`
-assert the row's classes for disputes; `admission.rs:4912`
+assert the row's classes for disputes; `admission.rs:5016`
 (`restrictive_disposition_and_origin_classification_are_sticky`) asserts
 the class-mismatch refusal at the evaluator. Status unaudited.
 Impact: if the caller's class were written, a model-filed dispute would
@@ -198,16 +198,16 @@ Open questions:
 Type: safety
 Reachability: default-production - `lib.rs:14529`; every disposition event
 reaches `evaluate_admission` through `record_admission`
-(`admission.rs:982-987`).
+(`admission.rs:998-1003`).
 Status: active
 Exercised: partial - evaluator unit tests cover the withdrawal
-(`admission.rs:5732`, `:5313`); kernel integration tests cover
+(`admission.rs:5836`, `:5313`); kernel integration tests cover
 `MarkStale` on a `CodeObserved` subject (`kernel_admission.rs:2735`).
 PR A route tests read `maturity` and `effective_maturity` after a dispute:
 `kernel_routes.rs:5723` (historical kept, effective `candidate`) and
 `:6199` (an approval above Candidate keeps its historical maturity and
 falls to effective `candidate`); the evaluator grid
-`admission.rs:4532` covers both dispute events over every maturity pair.
+`admission.rs:4636` covers both dispute events over every maturity pair.
 No route test reads the maturity columns after `mark_stale`,
 `explicit_reject`, or `quarantine`.
 Guarantee: A disposition event never raises `maturity` or
@@ -217,7 +217,7 @@ Check: `always` - for each disposition row written at `commit_seq = c`
 with prior row `p`: `maturity == p.maturity`, `rank(effective_maturity) <=
 rank(p.effective_maturity)`, and `disposition != 'active' implies
 effective_maturity == 'candidate'`. Derived from `event_effect` returning
-`current` for all five events (`admission.rs:4150-4163`), `historical =
+`current` for all five events (`admission.rs:4254-4267`), `historical =
 current.max(target)` (`:337`), and the Candidate forcing (`:345-349`).
 Holds on every write, so `always`.
 Fault/timing angle: a subject at `Verified`, `Approved`, or `Enforced`
@@ -230,7 +230,7 @@ from the route.
 Confidence: high - [evidence](evidence/disposition-never-raises-maturity-and-withdraws-effective-support.md).
 Read `evaluate_admission` lines `:264-388` and `event_can_raise_support`
 (`:4189-4199`), which lists no disposition event.
-Existing check: `admission.rs:5732`
+Existing check: `admission.rs:5836`
 (`non_active_dispositions_withdraw_effective_support`), `:5313`
 (`an_event_that_names_a_disposition_keeps_its_own_outcome`),
 `kernel_admission.rs:2735` (`dispositions_and_sensitivity_only_reduce_
@@ -253,7 +253,7 @@ Exercised: partial - route tests cover Active to each of the five
 (`kernel_routes.rs:4398`), Quarantined to Stale denied and then permitted
 with a scoped approval (`:4458`), Stale to Stale admitted (`:4551-4565`);
 evaluator tests cover Rejected/Contradicted/Quarantined to Stale/Disputed
-(`admission.rs:5208`, `:5407`). PR A drives Stale to Disputed through the
+(`admission.rs:5312`, `:5407`). PR A drives Stale to Disputed through the
 route (`kernel_routes.rs:6146`) and Rejected, Contradicted, and
 Quarantined to Disputed denied without approval (same test). Disputed to
 Stale and Disputed to Contradicted are not driven by any test.
@@ -268,8 +268,8 @@ Check: `always` - for each disposition result `r` with prior `p`: if
 cited or stored approval is invalid then `r.disposition == p.disposition
 && r.outcome == "deny" && r.denied == true` and one new
 `admission_decisions` row exists; else `r.disposition ==
-requested(event)`. Table at `admission.rs:4168-4175`, rule at `:321-330`,
-`denied` derivation at `commit.rs:762-782`. Every evaluation, so `always`.
+requested(event)`. Table at `admission.rs:4272-4279`, rule at `:321-330`,
+`denied` derivation at `commit.rs:775-795`. Every evaluation, so `always`.
 Fault/timing angle: the approval's authority changing between preview and
 commit; an approval quarantined earlier in the same envelope
 (`kernel_routes.rs:5493`); lateral moves at equal rank.
@@ -281,8 +281,8 @@ Read the restrictiveness table, `relaxes_disposition`, and both route and
 evaluator tests.
 Existing check: `kernel_routes.rs:4458`
 (`a_relaxation_is_denied_without_a_valid_approval_and_permitted_with_one`),
-`admission.rs:5208` (`leaving_a_restricted_disposition_requires_authority`),
-`admission.rs:5407` (`relaxing_a_restrictive_disposition_requires_approval`).
+`admission.rs:5312` (`leaving_a_restricted_disposition_requires_authority`),
+`admission.rs:5511` (`relaxing_a_restrictive_disposition_requires_approval`).
 Status unaudited.
 Impact: a relaxation that landed without approval would let a plugin undo
 a quarantine; a tightening that required approval would block the P4
@@ -309,7 +309,7 @@ before any read or write, and every admission row the route writes for a
 disposition has `evidence_id IS NULL` and `trigger_object_id IS NULL`.
 Invalidated by PR A (#1160): the operation now accepts `evidence_id` and
 `evidence_ref` (`commit.rs:160-167`), and a dispute row carries the cited
-`evidence_id` (`commit.rs:731`). The replacing guarantees are
+`evidence_id` (`commit.rs:744`). The replacing guarantees are
 `dispute-requires-evidence-from-plugin` (only disputes carry evidence;
 other events keep `evidence_id IS NULL` and the constant reason) and
 `evidence-ref-well-formed-and-redaction-stable` in
@@ -317,7 +317,7 @@ other events keep `evidence_id IS NULL` and the constant reason) and
 Unknown keys other than the two new fields, and a caller-supplied
 `reason` (`#[serde(skip)]`, `commit.rs:168-171`), are still refused by
 `deny_unknown_fields` (`commit.rs:137`); `trigger_object_id` stays `None`
-for every disposition (`commit.rs:729`).
+for every disposition (`commit.rs:742`).
 Check: `always` - retained for history: a body whose disposition
 operation holds a key outside `op`, `object_id`, `event`,
 `approval_object_id`, `evidence_id`, `evidence_ref` answers the
@@ -331,12 +331,12 @@ Fault/timing angle: version skew: a client built for PR A sending
 user sees.
 Required faults and enabling state: a body with an unknown key; a body
 with the new fields against an older daemon; a replay of a stored receipt
-whose `result` predates `dispositions` (`commit.rs:1315-1351` tolerates
+whose `result` predates `dispositions` (`commit.rs:1364-1400` tolerates
 the missing key).
 Confidence: high - [evidence](evidence/disposition-operation-carries-no-evidence-and-refuses-unknown-fields.md).
 Read the `deny_unknown_fields` attributes, the new fields, and the
 request builder at the PR A tip.
-Existing check: `commit.rs:1315`
+Existing check: `commit.rs:1364`
 (`the_result_payload_round_trips_and_tolerates_an_unreadable_receipt`)
 covers receipt shape only. No test sends an unknown key on a disposition
 operation. Status unaudited.
@@ -357,9 +357,9 @@ rs:976` (`EventKind::Other`) is the only production writer; the
 (module at `:500`) and is an `ObservationSpec`, so it is not a writer of
 this path (portfolio refinement R1). Re-labelled at the PR A tip: the
 disposition route now sets `Some(evidence_id)` for a dispute
-(`commit.rs:731`), but only after `require_visible_evidence` found the row
+(`commit.rs:744`), but only after `require_visible_evidence` found the row
 live and cited by the bound project in the same transaction
-(`commit.rs:719-721`, `:742-759`). The route therefore never reaches the
+(`commit.rs:732-734`, `:742-759`). The route therefore never reaches the
 accept-retired branch or the dangling-id FK branch; both remain reachable
 from `harness_sources.rs:976` and from any store-API caller of
 `record_admission` (`commit.rs:55-58`).
@@ -374,10 +374,10 @@ Check: `always` - for an `AdmissionRequest` with `evidence_id = Some(e)`:
 if `e` has a secret-like substring then `InvalidInput`; else if no
 `evidence_meta` row has `evidence_id = e` then the INSERT fails with
 `SQLITE_CONSTRAINT` mapped to `Conflict` (`lib.rs:212-224`), which the
-route would report as `invalid/already_exists` (`commit.rs:1065-1073`); else
+route would report as `invalid/already_exists` (`commit.rs:1101-1109`); else
 the row is written with `evidence_id = e` whether or not
 `invalidated_commit_seq IS NULL`. No liveness predicate exists between
-`admission.rs:1690-1695` and the INSERT at `:1748-1786`. Holds on every
+`admission.rs:1781-1786` and the INSERT at `:1748-1786`. Holds on every
 write, so `always`.
 Fault/timing angle: an evidence row retired by the retention sweep between
 the caller's read and the commit; a dangling id the FK rejects after the
@@ -388,11 +388,11 @@ route refuses both rows before the write (`not_found`,
 `crates/daemon/tests/kernel_routes.rs:5801`), so a route test cannot
 construct this record's enabling state.
 Confidence: high - [evidence](evidence/admission-evidence-citation-is-existence-checked-only.md).
-Read `write_admission`, the FK in `schema.rs:163`, `foreign_keys=ON`
-(`schema.rs:244`, `open.rs:1035`), and `map_sqlite`.
+Read `write_admission`, the FK in `schema.rs:164`, `foreign_keys=ON`
+(`schema.rs:245`, `open.rs:1035`), and `map_sqlite`.
 Existing check: none for liveness. `kernel_admission.rs:4211`
 (`a_trigger_whose_evidence_is_gone_cannot_admit`) covers the trigger
-query (`validate_trigger`, `admission.rs:2731`), a different path. Status
+query (`validate_trigger`, `admission.rs:2835`), a different path. Status
 unaudited.
 Impact: PR A places the liveness check in the daemon (KTD2), so any other
 writer can still record a dispute citing retired evidence, and a reader of
@@ -410,7 +410,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - `kernel.commit` `insert_decision` and
-`insert_observation` accept `evidence_id` (`commit.rs:274`, `:314`) and
+`insert_observation` accept `evidence_id` (`commit.rs:276`, `:314`) and
 reach `require_parents` (`write.rs:1095-1108`); decision events reach
 `require_live_evidence` (`write.rs:1151-1178`).
 Status: active
@@ -457,7 +457,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - every route path that resolves an
-object id goes through `scoped_object_state` (`commit.rs:676-691`):
+object id goes through `scoped_object_state` (`commit.rs:688-703`):
 subjects, approvals, chain members, tokens, replaced ids, projected
 dependencies.
 Status: active
@@ -489,7 +489,7 @@ Impact: an evidence object id cannot be a disposition subject, approval,
 token, or projected dependency under any binding. Re-labelled at the PR A
 tip: the guarantee still holds, and dispute evidence no longer depends on
 it. The route judges a cited `evidence_id` through its live citers
-(`require_visible_evidence`, `commit.rs:742-759`, over
+(`require_visible_evidence`, `commit.rs:755-772`, over
 `Envelope::evidence_citations`, `envelope.rs:532-577`), which is
 `cited-evidence-visible-to-bound-project` in
 [`../dispute-evidence/catalog.md`](../dispute-evidence/catalog.md).
@@ -521,7 +521,7 @@ Check: `always` - for each disposition operation: `scoped_object_state`
 succeeds, `object_kind == "decision"`, `invalidated_commit_seq IS NULL`,
 `subject_admission` is `Some`, and `scoped_object_state` succeeds for
 `approval_object_id.or(stored_approval)` and each
-`approval_chain_members` entry (`commit.rs:694-716`); any failure maps to
+`approval_chain_members` entry (`commit.rs:706-729`); any failure maps to
 `invalid/not_found` or `invalid/admission_policy` with
 `admission_decisions` and `commit_log` counts unchanged. Every request,
 so `always`.
@@ -566,11 +566,11 @@ their values before it; and for a preview `P` and a commit `C` of the same
 operations against the same tip with no intervening commit, each
 `P.previews[i]` restricted to `DispositionResult` fields equals
 `C.dispositions[i]`. Preview and commit share `disposition_request` and
-`prepare_admission` (`commit.rs:827-865`; `admission.rs:1859-1870`).
+`prepare_admission` (`commit.rs:860-898`; `admission.rs:1963-1974`).
 Every request, so `always`.
 Fault/timing angle: a commit landing between preview and commit changes
 the prior; an earlier operation in the same preview changing an approval
-chain is refused as malformed (`commit.rs:1174-1180`).
+chain is refused as malformed (`commit.rs:1223-1229`).
 Required faults and enabling state: subjects in each disposition; a
 preview with a recorded identity (replays, judges nothing).
 Confidence: high - [evidence](evidence/disposition-preview-writes-nothing-and-reports-the-commit-verdict.md).
@@ -608,8 +608,8 @@ Check: `always` - per identity `k`: `COUNT(commit_log WHERE producer,
 operation_key = k) <= 1`; a second request with equal digest returns
 `receipt.replayed == true`, `receipt.commit_seq` equal to the first, and
 `dispositions` byte-equal to the first (`stored_receipt`,
-`envelope.rs:1342-1372`; `commit.rs:1190-1206`); a request with a
-different digest returns `invalid/operation_key_reused` (`commit.rs:1065-
+`envelope.rs:1342-1372`; `commit.rs:1239-1255`); a request with a
+different digest returns `invalid/operation_key_reused` (`commit.rs:1101-
 1070`). Every request, so `always`.
 Fault/timing angle: a lost response (`outcome_unknown`) followed by the
 client's single reissue under the same identity
@@ -629,7 +629,7 @@ relies on.
 Open questions:
 - A repeated command after the object moved reports `applied` with the
   original verdict while the stored disposition differs
-  (`memory-mark-command.test.ts:351`; `commit.rs:1190-1206`). Safe for the
+  (`memory-mark-command.test.ts:351`; `commit.rs:1239-1255`). Safe for the
   store; is the replayed verdict the right thing to show the user? (needs
   human input; portfolio refinement R5)
 
@@ -717,7 +717,7 @@ prior row cited `s` as `approval_object_id`, either a row
 exists with `rank(effective_maturity) <=
 rank(automatic_ceiling(d.source_class, d.taint_class))`, or `d` is counted
 in the walk's `deferred` total once `MAX_AUTHORITY_DEMOTIONS` (4,096) rows
-have been written (`with_authority_cascade`, `admission.rs:1060-1082`;
+have been written (`with_authority_cascade`, `admission.rs:1111-1133`;
 `demote_authority_dependents`, `:1452-1490`; `approval_row_fields`
 requires `disposition='active'`, `:850`). Every qualifying write, so
 `always`.
@@ -744,7 +744,7 @@ Open questions:
   (`commit.rs:60-62`); no owner decision beyond that is recorded. (needs
   human input)
 - Portfolio gap G2: the preview's `visibility_changes` reports the
-  subject only (`PreviewRun::disposition`, `commit.rs:827-866`; `changes_to`
+  subject only (`PreviewRun::disposition`, `commit.rs:860-899`; `changes_to`
   at `:537-542`) and excludes the dependents the commit demotes in the same
   `commit_seq`, so a user confirming a dispute on an approval is not shown
   the cascade. Resolved per OQ4-10 by documenting the limit: the route
@@ -753,7 +753,7 @@ Open questions:
   state that the preview reports the named memory's visibility only. The
   preview still does not report the cascade.
 - How does a deferred dependent (past `MAX_AUTHORITY_DEMOTIONS`) get its
-  visibility repaired? The code comment at `admission.rs:1445-1451` calls
+  visibility repaired? The code comment at `admission.rs:1496-1502` calls
   chunking "the remaining work". (partial: validity is already withdrawn
   by `validate_approval`; the served row is not)
 
@@ -809,10 +809,10 @@ Open questions:
 
 Type: safety
 Reachability: default-production - every admission row passes
-`write_admission` (`admission.rs:1675`); the route's reason is the
+`write_admission` (`admission.rs:1726`); the route's reason is the
 constant `"kernel.commit"` (`commit.rs:100`) for every event except the two
 disputes, which carry the `v=1` structured reason the route composes and
-caps at 4096 bytes (`commit.rs:221-227`;
+caps at 4096 bytes (`commit.rs:223-229`;
 `crates/daemon/src/kernel_routes/dispute.rs:14`, `:77-79`).
 Status: active
 Exercised: partial - `kernel_admission.rs:1676` covers a revocation reason
@@ -824,11 +824,11 @@ Guarantee: The stored `reason` is `redact(reason).text`; a reason longer
 than 512 KiB is refused with `InvalidInput`; a blank reason is refused with
 `AdmissionPolicy`; a redaction is recorded beside the row.
 Check: `always` - for every `AdmissionRequest`: `reason.trim().is_empty()
-implies Err(AdmissionPolicy)` (`admission.rs:1565-1567`);
+implies Err(AdmissionPolicy)` (`admission.rs:1616-1618`);
 `reason.len() > MAX_REDACTABLE_BYTES implies Err(InvalidInput)`
 (`redaction.rs:72-77`); otherwise the row's `reason` equals
 `redact_lossy(reason).text` and a `durable_text_redactions` row exists for
-each detection (`record(.., "reason", ..)`, `admission.rs:1787-1794`). Every
+each detection (`record(.., "reason", ..)`, `admission.rs:1891-1898`). Every
 write, so `always`.
 Fault/timing angle: none in time; the bound is per request.
 Required faults and enabling state: a store-API caller with a long or
@@ -852,8 +852,8 @@ Open questions:
   `redact_durable_text` the route scans with
   (`crates/kernel/src/redaction.rs:41-42`). The scanner detects the test
   token `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678`
-  (`dispute.rs:342-349`), and 64 seeded 40- and 64-hex object ids beside
-  an ordinary repository path carry no detection (`dispute.rs:354-367`).
+  (`dispute.rs:344-351`), and 64 seeded 40- and 64-hex object ids beside
+  an ordinary repository path carry no detection (`dispute.rs:356-369`).
   The evidence file records which rule the token matches and that the
   attribution is inferred from the rule regexes.
 
@@ -884,7 +884,7 @@ intent `I` on binding `B`: the `commit_log` row at `c` has `actor =
 redact(I.actor)`, `cause = redact(I.cause)`, `producer = I.producer`
 whatever `B.harness` is; the dispute reason's `reporter_taint` is a
 function of `(source_kind, asserted_taint_class)` alone
-(`commit.rs:1111-1125`); the request's `session_id` equals the channel's
+(`commit.rs:1154-1168`); the request's `session_id` equals the channel's
 bound session or the request is refused `session_mismatch` before parsing
 (`management_binding`, `crates/daemon/src/lib.rs:6596-6631`). Holds on
 every request, so `always`.
@@ -897,7 +897,7 @@ Confidence: high - [evidence](evidence/commit-actor-cause-and-source-kind-are-ca
 Read `IntentRequest::into_intent` (`project.rs:148-165`),
 `kernel_route_scope` (`mod.rs:415-441`), the envelope keys stripped before
 body parsing (`ENVELOPE_KEYS`, `mod.rs:461`), and every use of the bound
-scope in `handle_kernel_commit` (`commit.rs:1126`, `:1141`, `:1144`).
+scope in `handle_kernel_commit` (`commit.rs:1169`, `:1141`, `:1144`).
 Existing check: `kernel_routes.rs:5723` for `actor` and `cause` stored as
 sent on a `test` binding. Status unaudited.
 Impact: a model-driven client can file a dispute with `actor:
@@ -917,17 +917,17 @@ Open questions:
 
 Shared mechanisms:
 
-- `disposition_request` (`commit.rs:694-736`) is the single builder for
+- `disposition_request` (`commit.rs:706-749`) is the single builder for
   preview and commit; records `disposition-admission-copies-the-subjects-
   prior-classes`, `disposition-subject-is-a-live-admitted-decision-in-the-
   bound-project`, and `disposition-preview-writes-nothing-and-reports-
   the-commit-verdict` all read it, and so do the dispute-evidence records
   for liveness and visibility.
-- `evaluate_admission` (`admission.rs:264-388`) decides records
+- `evaluate_admission` (`admission.rs:280-404`) decides records
   `disposition-never-raises-maturity-and-withdraws-effective-support` and
   `disposition-approval-requirement-follows-the-restrictiveness-order`;
   both are pure-function checks over `EvaluationInputs`.
-- `write_admission` (`admission.rs:1675-1853`) is shared by
+- `write_admission` (`admission.rs:1726-1957`) is shared by
   `admission-evidence-citation-is-existence-checked-only`,
   `admission-reason-is-redacted-bounded-and-non-blank`, and the column
   assertions in the first two records.

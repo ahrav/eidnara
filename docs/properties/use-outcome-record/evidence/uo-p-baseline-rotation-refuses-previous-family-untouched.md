@@ -11,12 +11,12 @@ Record kind: new obligation activated by #1154.
 References are verified at the #1157 branch tip (the commit that adds this file;
 its parent is `d85de937b`).
 
-- Components: `crates/kernel/src/schema.rs:187` and
-  `crates/kernel/src/schema.rs:191`; the admission citing column and
+- Components: `crates/kernel/src/schema.rs:188` and
+  `crates/kernel/src/schema.rs:192`; the admission citing column and
   `idx_admission_use_outcome_fk` in the `admission_decisions` component
-  (`crates/kernel/src/schema.rs:163`).
+  (`crates/kernel/src/schema.rs:164`).
 - Pinned digest: `crates/kernel/tests/kernel_schema.rs:183`
-  (`ed12f254bd6b6471905b6079de58c45c1072d05179892e2433a70506b2c1299e`).
+  (`3f434cd773bbf349848eb35a74763f26e41c57392fdaca4381794e4ef23d4be5`).
 - Component-name list: `crates/kernel/tests/kernel_schema.rs:14`; object
   inventory: `kernel_schema_object_inventory_is_pinned_by_kind_and_name`
   (`crates/kernel/tests/kernel_schema.rs:1900`).

@@ -42,16 +42,14 @@ and `dispute-evidence/domain-model.md` section 0.
 | Part | Surfaces | Records | Origin | Companions |
 | --- | --- | --- | --- | --- |
 | `disposition-path/` | the daemon route (`Operation::Disposition`, `DispositionEvent`, `disposition_request`, `derive_classes`, preview, scope filtering, refusal mapping, envelope replay); Kernel admission for the five disposition events (`evaluate_admission`, `event_effect`, `disposition_restrictiveness`, `write_admission`, `load_subject_facts`); the shared TypeScript command runner and client intent derivation; evidence liveness primitives; caller-asserted intent fields | 15 (14 active, 1 invalidated) | implemented | `system-model.md`, `existing-checks.md`, `fault-map.md`, `portfolio-evaluation.md`, `evidence/` |
-| `dispute-evidence/` | evidence fields on the dispute operation; daemon-side liveness, visibility, and form validation; reporter class; dispute identity; preview parity; structured `reason`; use-outcome link | 10 active (9 implemented, 1 proposed for PR B) | implemented by PR A, one proposed | `existing-checks.md`, `fault-map.md`, `portfolio-evaluation.md`, `evidence/`, `domain-model.md`, `certificate.md`, `open-questions.md` |
+| `dispute-evidence/` | evidence fields on the dispute operation; daemon-side liveness, visibility, and form validation; reporter class; dispute identity; preview parity; structured `reason`; use-outcome link | 10 active | implemented by PR A and PR B (#1162) | `existing-checks.md`, `fault-map.md`, `portfolio-evaluation.md`, `evidence/`, `domain-model.md`, `certificate.md`, `open-questions.md` |
 
 Record origin: every record under `disposition-path/catalog.md` is
 implemented behavior; PR A invalidates one and re-labels two (see that
 catalog's PR A revision note). Under `dispute-evidence/catalog.md`, all
 ten records carry `Status: active`; nine are implemented and exercised by
-PR A tests; the tenth,
-`use-outcome-link-names-own-session-prior-serve`, stays a proposed
-obligation with its `Lifecycle:`, `Falsifier:`, and `Legal witness:` lines
-and no evidence file until PR B
+PR A tests, and the tenth,
+`use-outcome-link-names-own-session-prior-serve`, by PR B
 ([#1162](https://github.com/ahrav/eidnara/issues/1162)). The model tool arm
 of the dispute surface lands with
 [#1161](https://github.com/ahrav/eidnara/issues/1161).
@@ -100,7 +98,7 @@ Decisions, AC = Acceptance Criteria, OQ = Open Questions.
 | `dispute-identity-includes-evidence-key` | implemented (PR A) | safety, `always` | C10, D7, AC6 |
 | `dispute-preview-writes-nothing` | implemented (PR A) | safety, `always-or-unreached` | C11, AC7 |
 | `structured-reason-projects-typed-reporter-data` | implemented (PR A form; typed form PR B) | safety, `always` | C12, D5, D9, AC3 |
-| `use-outcome-link-names-own-session-prior-serve` | proposed (PR B) | safety, `always-or-unreached` | D10, AC12 |
+| `use-outcome-link-names-own-session-prior-serve` | implemented (PR B) | safety, `always` | D10, AC12 |
 
 ## Landing
 

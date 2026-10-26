@@ -10,18 +10,18 @@ live". At `3a3b916b7` the admission write checked only that the id exists
 ## Evidence trail
 
 - `disposition_request` calls `require_visible_evidence` when the
-  operation names an id (`crates/daemon/src/kernel_routes/commit.rs:719-721`).
+  operation names an id (`crates/daemon/src/kernel_routes/commit.rs:732-734`).
 - `require_visible_evidence` reads `Envelope::evidence_citations`, keeps
   the answer only when `citations.live`, and maps absence or a retired row
-  to `KernelError::NotFound` (`commit.rs:747-750`).
+  to `KernelError::NotFound` (`commit.rs:760-763`).
 - `evidence_citations` reads `invalidated_commit_seq IS NULL` for the row
   inside the envelope's transaction and returns `None` for an unknown id
   (`crates/kernel/src/envelope.rs:536-551`). The doc comment states the
   check and a citing write observe one state (`:532-535`).
 - The commit path runs `disposition_request` inside `commit_before`'s
-  closure (`commit.rs:1047-1062`, through `apply` at `:1000-1006` and
+  closure (`commit.rs:1083-1098`, through `apply` at `:1000-1006` and
   `record_disposition` at `:785-791`); the preview path runs it inside
-  `store.preview` (`commit.rs:877-897`, through `PreviewRun::disposition`
+  `store.preview` (`commit.rs:910-930`, through `PreviewRun::disposition`
   at `:835`).
 - The refusal maps to `invalid/not_found` and writes nothing: the commit
   closure returns `Err`, which rolls back the envelope.
@@ -96,7 +96,7 @@ read inside the transaction, the dispute either sees the retirement
 
 ### Q: Does the Kernel admission write check liveness for other writers?
 
-- Sources examined: `write_admission` (`crates/kernel/src/admission.rs:1675`),
+- Sources examined: `write_admission` (`crates/kernel/src/admission.rs:1726`),
   `commit.rs:55-58`.
 - Findings: no; it checks identity and the FK only.
 - Missing evidence: an owner decision.

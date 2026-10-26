@@ -17,13 +17,13 @@ ordinary path.
   `redact_durable_text` detection in the path (`dispute.rs:151-159`).
 - `is_lower_hex_oid` accepts exactly 40 or 64 lowercase hex bytes; PR A
   made it `pub` (`crates/kernel/src/scope.rs:710-716`) and re-exported it
-  (`crates/kernel/src/lib.rs:149`).
+  (`crates/kernel/src/lib.rs:150`).
 - `confined_path::check` refuses NUL, empty, `.`, and `..` components,
   protected components, and more than `MAX_COMPONENTS` components
   (`crates/daemon/src/confined_path.rs:29-45`). An absolute path has an
   empty first component and is refused.
 - `decodes_to_itself` refuses any `%` followed by two hex digits
-  (`dispute.rs:201-207`), so a stored value has one reading.
+  (`dispute.rs:203-209`), so a stored value has one reading.
 - `validated` scans the raw `evidence_id` (`dispute.rs:58-64`, added in
   `511cd6d73`) and the composed reason (`dispute.rs:77`). The raw scan
   covers an `evidence_id` whose secret the percent-encoding would break
@@ -58,16 +58,16 @@ All constructed:
   a path over 1024 bytes, a path holding the test token (same test).
 - Unit refusals of empty oid, absolute path, empty path,
   `src/.eidnara/x`, and `double%2Fencoded`:
-  `malformed_references_are_invalid_input` (`dispute.rs:314`).
+  `malformed_references_are_invalid_input` (`dispute.rs:316`).
 - Both fields on one dispute land and parse back, and a malformed
   reference beside an id that would answer `not_found` answers
   `invalid_input`, so the form check runs before the visibility check
   (`a_dispute_judges_every_citer_and_both_evidence_fields_together`,
   `kernel_routes.rs:6284`).
 - Every accepted path renders and parses back to itself (proptest
-  `every_accepted_reference_parses_back_to_its_inputs`, `dispute.rs:292`);
+  `every_accepted_reference_parses_back_to_its_inputs`, `dispute.rs:294`);
   `encode` on reserved and multi-byte input has a fixed witness
-  (`dispute.rs:280`).
+  (`dispute.rs:282`).
 - The fake kernel refuses five path shapes the route refuses
   (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts:223`).
 - Command parser: `--path` split at the last `@`; a path without `@`, an
@@ -80,8 +80,8 @@ All constructed:
 ### Q: Which token does the scanner detect, and do object ids and ordinary paths pass (G3)?
 
 - Sources examined: `a_path_the_secret_scanner_detects_is_invalid_input`
-  (`dispute.rs:342-349`); `git_object_ids_and_ordinary_paths_carry_no_detection`
-  (`dispute.rs:354-367`); `crates/secret-scanner/conservative_overlay.yaml:5-7`;
+  (`dispute.rs:344-351`); `git_object_ids_and_ordinary_paths_carry_no_detection`
+  (`dispute.rs:356-369`); `crates/secret-scanner/conservative_overlay.yaml:5-7`;
   `crates/secret-scanner/default_rules.yaml:410-411`;
   `context_core::redaction::redact_durable_text`
   (`crates/context-core/src/redaction.rs:462-464`).

@@ -10,8 +10,8 @@ Every location was read at the #1157 branch tip.
 
 | Check | Location | Records | Status |
 | --- | --- | --- | --- |
-| `visibility_matrix_and_sensitivity_ceiling_are_total` | `crates/kernel/src/admission.rs:4915` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
-| `an_event_that_names_a_disposition_keeps_its_own_outcome` | `crates/kernel/src/admission.rs:5245` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
+| `visibility_matrix_and_sensitivity_ceiling_are_total` | `crates/kernel/src/admission.rs:5019` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
+| `an_event_that_names_a_disposition_keeps_its_own_outcome` | `crates/kernel/src/admission.rs:5349` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
 | `unrecognized_stored_classes_read_back_restrictive` | `crates/kernel/src/cas/mod.rs:797` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only` | unaudited |
 | `a_replayed_expiry_receipt_is_not_counted_as_a_retirement` | `crates/kernel/src/local_file.rs:728` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
 | `a_capture_pinned_after_it_was_selected_for_expiry_is_kept` | `crates/kernel/src/local_file.rs:751` | `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |

@@ -47,11 +47,11 @@ Fixtures: `commit-available-disposition-quarantine.json`,
 | 5732 | `non_active_dispositions_withdraw_effective_support` | an `Enforce` on a Rejected prior raises `historical` to Enforced and keeps `effective` at Candidate | maturity | unaudited |
 | 4736 | `an_authority_event_requires_approval_even_at_an_unchanged_rung` | authority events need approval | (context) | unaudited |
 
-Compile-time guard: `admission.rs:4317-4324` asserts the maturity rank
-order. `commit.rs:1295` (`every_disposition_event_names_a_disposition_
+Compile-time guard: `admission.rs:4421-4428` asserts the maturity rank
+order. `commit.rs:1344` (`every_disposition_event_names_a_disposition_
 transition`) asserts each `DispositionEvent` maps to a kind with
 `requested_disposition().is_some()` and that `"approve"` does not parse.
-`commit.rs:1315` asserts the receipt payload round trip and tolerates a
+`commit.rs:1364` asserts the receipt payload round trip and tolerates a
 receipt without `dispositions`.
 
 ## Kernel integration tests (`crates/kernel/tests/kernel_admission.rs`)
@@ -87,14 +87,14 @@ receipt without `dispositions`.
 
 | Location | Guard | Records | Status |
 |---|---|---|---|
-| `admission.rs:265-281` | `evaluate_admission` refuses illegal class pairs, prior mismatch, inconsistent prior, `Enforce` without evidence, succession without predecessor | classes, maturity | unaudited |
-| `admission.rs:1565-1567` | blank reason is `AdmissionPolicy` | reason | unaudited |
+| `admission.rs:281-297` | `evaluate_admission` refuses illegal class pairs, prior mismatch, inconsistent prior, `Enforce` without evidence, succession without predecessor | classes, maturity | unaudited |
+| `admission.rs:1616-1618` | blank reason is `AdmissionPolicy` | reason | unaudited |
 | `redaction.rs:72-77` | reason over 512 KiB is `InvalidInput` | reason | unaudited |
-| `admission.rs:2564-2572` | `refuse_succession_events` on `record_admission` and `preview_admission` | (context) | unaudited |
-| `schema.rs:163` | FK `evidence_id REFERENCES evidence_meta ON DELETE RESTRICT`; `foreign_keys=ON` at `schema.rs:244`, `open.rs:1035` | evidence existence | unaudited |
+| `admission.rs:2668-2676` | `refuse_succession_events` on `record_admission` and `preview_admission` | (context) | unaudited |
+| `schema.rs:164` | FK `evidence_id REFERENCES evidence_meta ON DELETE RESTRICT`; `foreign_keys=ON` at `schema.rs:245`, `open.rs:1035` | evidence existence | unaudited |
 | `schema.rs:26` | `commit_log` append-only triggers | commit-log row | unaudited |
 | `commit.rs:136-137`, `:108-109` | `deny_unknown_fields` on `Operation` and `CommitRequest` | no-evidence field | unaudited |
-| `commit.rs:1145-1160` | preview refuses tokens and non-disposition operations | preview | unaudited |
+| `commit.rs:1194-1209` | preview refuses tokens and non-disposition operations | preview | unaudited |
 | `state.rs:191-250` | compile-time guard that every `InvalidReason` has a slice position | refusal mapping | unaudited |
 
 ## PR A checks that touch these records
@@ -107,7 +107,7 @@ receipt without `dispositions`.
 | `kernel_routes.rs:6080` | `dispute_identities_land_replay_and_refuse_reuse_like_every_envelope` | replay | unaudited |
 | `kernel_routes.rs:6146` | `a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale` | restrictiveness (Stale to Disputed) | unaudited |
 | `kernel_routes.rs:6199` | `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents` | authority-bearer cascade, classes, maturity | unaudited |
-| `admission.rs:4532` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | maturity, restrictiveness (dispute events) | unaudited |
+| `admission.rs:4636` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | maturity, restrictiveness (dispute events) | unaudited |
 | `memory-mark-command.test.ts:174` | the evidence rides the preview and the commit byte for byte under the user source kind | command (both bodies, `source_kind`) | unaudited |
 | `memory-mark-command.test.ts:201` | two disputes with different evidence in one session are two commits; the same evidence replays | replay | unaudited |
 
@@ -137,7 +137,7 @@ At authoring (`3a3b916b7`), with the PR A state noted:
   A matches both bodies against one expected operation
   (`memory-mark-command.test.ts:174`).
 - No liveness check existed on this surface. PR A adds the dispute
-  evidence check (`require_visible_evidence`, `commit.rs:742-759`).
+  evidence check (`require_visible_evidence`, `commit.rs:755-772`).
 
 ## Suspiciously quiet areas
 
@@ -149,7 +149,7 @@ At authoring (`3a3b916b7`), with the PR A state noted:
   test exercises a retired or dangling id on that path.
 - The lateral disposition moves at equal restrictiveness rank other than
   Stale to Disputed.
-- `derive_classes` is unit-tested (`commit.rs:1215-1293`) but its output
+- `derive_classes` is unit-tested (`commit.rs:1264-1342`) but its output
   is irrelevant to the disposition path, which no test demonstrates.
 - The TypeScript `invalid_params` transport error path for a body the
   daemon refuses as malformed.

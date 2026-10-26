@@ -35,12 +35,11 @@ The normative text for the route is the `commit.rs` module header section
 document.
 
 Ten records carry `Status: active`. Nine are implemented and checked by
-the PR A tests. The tenth,
-`use-outcome-link-names-own-session-prior-serve`, is a proposed
-obligation for PR B ([#1162](https://github.com/ahrav/eidnara/issues/1162));
-its `Lifecycle:` line marks it proposed, it keeps the design-time
-`Lifecycle:`, `Falsifier:`, and `Legal witness:` lines, and it has no
-evidence file until PR B makes it checkable. The model
+the PR A tests; the tenth,
+`use-outcome-link-names-own-session-prior-serve`, is implemented and
+checked by PR B ([#1162](https://github.com/ahrav/eidnara/issues/1162)),
+which also adds the typed form of
+`structured-reason-projects-typed-reporter-data`. The model
 tool arm of the dispute surface lands with
 [#1161](https://github.com/ahrav/eidnara/issues/1161); the records that
 name both surfaces cover the command arm only and say so.
@@ -71,9 +70,9 @@ once PR B writes it; it is not verifiable at HEAD and the record says so.
 | `dispute-identity-includes-evidence-key` | safety | default-production | active | yes | always |
 | `dispute-preview-writes-nothing` | safety | default-production | active | yes | always-or-unreached |
 | `structured-reason-projects-typed-reporter-data` | safety | default-production | active | partial | always |
-| `use-outcome-link-names-own-session-prior-serve` | safety | default-production (PR B; unverified at HEAD) | active | not yet | always-or-unreached |
+| `use-outcome-link-names-own-session-prior-serve` | safety | default-production | active | yes | always |
 
-Semantics distribution: 8 `always`, 2 `always-or-unreached`, 0
+Semantics distribution: 9 `always`, 1 `always-or-unreached`, 0
 `sometimes`, 0 `reachable`, 0 `unreachable`. The enabling states that
 keep these from passing vacuously are listed in
 [fault-map.md](fault-map.md).
@@ -86,7 +85,7 @@ Type: safety
 Reachability: default-production - `lib.rs:14529` dispatches
 `kernel.commit`; `compose_reason` runs for every operation of every
 request after class resolution and before the preview or commit
-transaction (`commit.rs:1119-1125`).
+transaction (`commit.rs:1162-1168`).
 Status: active
 Exercised: yes - command arm, tool arm, and raw route bodies: route test
 `a_dispute_needs_evidence_and_other_events_take_none`
@@ -141,10 +140,10 @@ field; a body with an empty `evidence_id`; a non-dispute event carrying
 either field; a body carrying its own `reason`; a client that bypasses
 the TypeScript parser and sends the raw body (the route tests do this).
 Confidence: high - [evidence](evidence/dispute-requires-evidence-from-plugin.md).
-Read `compose_reason` (`commit.rs:206-234`), `DisputeReason::validated`
-(`dispute.rs:49-81`), the handler loop (`commit.rs:1119-1125`), and the
+Read `compose_reason` (`commit.rs:208-236`), `DisputeReason::validated`
+(`dispute.rs:49-81`), the handler loop (`commit.rs:1162-1168`), and the
 route and parser tests above.
-Existing check: `kernel_routes.rs:5971`, `:6252`; `dispute.rs:370`
+Existing check: `kernel_routes.rs:5971`, `:6252`; `dispute.rs:372`
 (`a_dispute_needs_evidence_and_other_events_take_none`, unit);
 `memory-mark-command.test.ts:126`; the fake kernel mirrors the rule
 (`disputeEvidenceWellFormed`,
@@ -176,9 +175,9 @@ Open questions:
 Type: safety
 Reachability: default-production - `disposition_request` calls
 `require_visible_evidence` for every dispute that names an `evidence_id`
-(`commit.rs:719-721`), in the commit's writer closure
-(`commit.rs:1047-1062`) and in the preview transaction
-(`commit.rs:877-897`).
+(`commit.rs:732-734`), in the commit's writer closure
+(`commit.rs:1083-1098`) and in the preview transaction
+(`commit.rs:910-930`).
 Status: active
 Exercised: yes - `a_dispute_citing_unusable_evidence_is_not_found_and_writes_nothing`
 (`kernel_routes.rs:5801`) retires an evidence row through
@@ -226,7 +225,7 @@ Required faults and enabling state: an ingested evidence row retired
 before the dispute; a never-ingested id; a live cited id for the positive
 case; a citer retired between a preview and its commit.
 Confidence: high - [evidence](evidence/cited-evidence-live-at-dispute-commit.md).
-Read `require_visible_evidence` (`commit.rs:738-759`),
+Read `require_visible_evidence` (`commit.rs:751-772`),
 `evidence_citations` (`envelope.rs:532-577`), and the three route tests.
 Existing check: `kernel_routes.rs:5801`, `:5723`, `:6375`;
 `kernel_slice.rs:2159`. Status unaudited.
@@ -243,7 +242,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - same call path as the liveness record
-(`commit.rs:719-721`).
+(`commit.rs:732-734`).
 Status: active
 Exercised: yes - `kernel_routes.rs:5801` cites a live id that nothing
 cites, a live id cited only by an unscoped decision, and a live id cited
@@ -273,17 +272,17 @@ id gets.
 Check: `always` - for every dispute row `r` with `r.evidence_id`, at
 `r.commit_seq` at least one of `EvidenceCitations.citing_scopes`
 (`envelope.rs:187-194`) passed `ScopeFilter::matches` for the bound
-project (`commit.rs:751-757`). Every refusal case (unknown, retired,
+project (`commit.rs:764-770`). Every refusal case (unknown, retired,
 uncited, unscoped-only, foreign-only) answers the same `not_found` with
 row counts unchanged, so this check answers the same for another
 project's evidence as for an unknown id (doc comment at
-`commit.rs:738-741`). Holds on every request, so `always`.
+`commit.rs:751-754`). Holds on every request, so `always`.
 Fault/timing angle: the only citing row retired between a client's read
 and the commit; the read runs in the writer transaction, as in the
 liveness record. The sequential form (preview, citer retired, commit) is
 constructed by `kernel_routes.rs:6375`. A citer written earlier in the
 same envelope counts: `apply` runs operations in order in one transaction
-(`commit.rs:901-1041`), and `kernel_routes.rs:6475` observes it.
+(`commit.rs:934-1077`), and `kernel_routes.rs:6475` observes it.
 Required faults and enabling state: two bound projects in one Kernel
 store; evidence cited only by the other project; evidence cited by both
 projects with the foreign scope sorting first; evidence cited only by an
@@ -291,7 +290,7 @@ unscoped row; an uncited live row; a citer retired between preview and
 commit; an insert citing the evidence earlier in the dispute's envelope.
 Confidence: high - [evidence](evidence/cited-evidence-visible-to-bound-project.md).
 Read the SQL in `evidence_citations` (`envelope.rs:553-566`), the filter
-loop (`commit.rs:747-758`), and the tests above. The asserted-edge branch
+loop (`commit.rs:760-771`), and the tests above. The asserted-edge branch
 of the SQL (`envelope.rs:563-564`) has no production writer and no test:
 no Rust code under `crates/` inserts into `asserted_edges`, so the arm is
 read, not exercised.
@@ -306,7 +305,7 @@ Open questions:
   unscoped case is recorded. (needs human input)
 - Self-citation through the same route (portfolio gap G1). The route's
   `insert_decision` and `insert_observation` accept any live evidence id
-  (`commit.rs:274`, `:314`; `require_parents` checks liveness only,
+  (`commit.rs:276`, `:314`; `require_parents` checks liveness only,
   `crates/kernel/src/slice/write.rs:1095-1107`), and
   `kernel_routes.rs:6475` shows a dispute citing that evidence later in
   the same envelope lands. Under the resolved OQ4-3 definition, evidence
@@ -331,7 +330,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - `DisputeReason::validated` runs for
-every dispute in `compose_reason` (`commit.rs:221-227`); the command's
+every dispute in `compose_reason` (`commit.rs:223-229`); the command's
 `--path <path>@<oid>` reaches it (`memory-mark-command.ts:75-81`).
 Status: active
 Exercised: yes - `a_dispute_citing_a_repository_file_records_it_in_the_reason`
@@ -374,9 +373,9 @@ Confidence: high - [evidence](evidence/evidence-ref-well-formed-and-redaction-st
 Read `is_well_formed`, `validated`, `confined_path::check`, and the tests.
 G3 is recorded in the evidence file: the test token
 `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678` is detected
-(asserted at `dispute.rs:344`), and 64 seeded 40- and 64-hex ids beside
-an ordinary path carry no detection (`dispute.rs:354-367`).
-Existing check: `kernel_routes.rs:5880`, `:6284`; `dispute.rs:246`,
+(asserted at `dispute.rs:346`), and 64 seeded 40- and 64-hex ids beside
+an ordinary path carry no detection (`dispute.rs:356-369`).
+Existing check: `kernel_routes.rs:5880`, `:6284`; `dispute.rs:248`,
 `:280`, `:292`, `:314`, `:342`, `:354`. Status unaudited.
 Impact: a malformed reference cannot be followed; a path the redactor
 rewrote would point at a file that does not exist.
@@ -387,7 +386,7 @@ Open questions:
   decision to verify blobs exists.
 - A path with a literal `%XX` sequence (for example a file named
   `100%41.md`) is refused by the decode-idempotence rule
-  (`dispute.rs:201-207`). The command help does not mention the rule.
+  (`dispute.rs:203-209`). The command help does not mention the rule.
 - A path holding a space cannot be cited from the command: the parser
   splits its arguments on `/\s+/` (`memory-mark-command.ts:85-88`), while
   the route accepts such paths (`kernel_routes.rs:5880`). At `511cd6d73`
@@ -404,8 +403,8 @@ Open questions:
 
 Type: safety
 Reachability: default-production - `resolve_classes` runs on every
-`kernel.commit` (`commit.rs:1111-1118`) and its taint is the reporter
-taint `compose_reason` renders (`commit.rs:1122`).
+`kernel.commit` (`commit.rs:1154-1161`) and its taint is the reporter
+taint `compose_reason` renders (`commit.rs:1165`).
 Status: active
 Exercised: yes - command arm, tool arm, and raw route bodies:
 `a_dispute_reporter_class_is_derived_and_never_asserted_up`
@@ -437,11 +436,11 @@ request that lands a dispute, it reads the request's `source_kind`,
 `asserted_source_class`, and `asserted_taint_class` (`commit.rs:115-119`)
 and the written row: `taint_rank(parse(r.reason).reporter_taint) >=
 taint_rank(derive_classes(request.source_kind).taint)`
-(`commit.rs:368-380`, `:395-404`), the reporter taint equals
+(`commit.rs:370-382`, `:395-404`), the reporter taint equals
 `resolve_classes(source_kind, asserted_source_class,
-asserted_taint_class).1` (`commit.rs:411-444`), and the row's class
+asserted_taint_class).1` (`commit.rs:413-446`), and the row's class
 columns equal the subject's previous row's (`disposition_request` copies
-them, `commit.rs:725-726`). The check has no store form: `commit_log`
+them, `commit.rs:738-739`). The check has no store form: `commit_log`
 stores no `source_kind` ([open-questions.md](open-questions.md) C2), and
 the row's `source_kind` column holds the subject's facts, not the
 request's. Holds on every request, so `always`.
@@ -450,9 +449,9 @@ Required faults and enabling state: an asserted class above the
 derivation; an unknown `source_kind`; a lowered assertion; a subject
 whose prior classes differ from the caller's derived pair.
 Confidence: high - [evidence](evidence/reporter-class-derived-never-asserted-up.md).
-Read `derive_classes`, `resolve_classes` (`commit.rs:411-444`), the
-handler (`commit.rs:1111-1125`), and the tests.
-Existing check: `kernel_routes.rs:6025`, `:5723`; `commit.rs:1215`
+Read `derive_classes`, `resolve_classes` (`commit.rs:413-446`), the
+handler (`commit.rs:1154-1168`), and the tests.
+Existing check: `kernel_routes.rs:6025`, `:5723`; `commit.rs:1264`
 (`a_plugin_write_is_capped_at_inference_classes`), `:1261`; Status
 unaudited.
 Impact: a reporter class above the derived one would give model output
@@ -468,11 +467,11 @@ Open questions:
 Type: safety
 Reachability: default-production - every dispute reaches
 `evaluate_admission` through `record_admission`
-(`crates/kernel/src/admission.rs:982`).
+(`crates/kernel/src/admission.rs:998`).
 Status: active
 Exercised: yes - the evaluator grid test
 `a_dispute_with_evidence_never_raises_standing_across_the_grid`
-(`admission.rs:4532`) judges both dispute events with and without
+(`admission.rs:4636`) judges both dispute events with and without
 evidence against every consistent `(historical, effective)` maturity pair
 and every prior disposition. Route tests: `kernel_routes.rs:5723` reads
 `outcome = deny`, unchanged `maturity`, and `effective_maturity =
@@ -498,10 +497,10 @@ Check: `always` - for every dispute row `r` and its prior `p`:
 `rank(r.effective_maturity) <= rank(p.effective_maturity)`, and
 `disposition_restrictiveness(r.disposition) >=
 disposition_restrictiveness(p.disposition)`
-(`admission.rs:4168-4175`) unless `r.approval_object_id` names an
+(`admission.rs:4272-4279`) unless `r.approval_object_id` names an
 approval the evaluator judged valid for `r`'s subject in `r`'s
-transaction (`validate_approval`, `admission.rs:1587-1591`; the
-relaxation rule at `admission.rs:321-334`). This matches AC8: no
+transaction (`validate_approval`, `admission.rs:1638-1642`; the
+relaxation rule at `admission.rs:337-350`). This matches AC8: no
 relaxation without a valid approval. Validity is not a stored column, so
 the approval clause is evaluated per request from the answer's `denied`
 flag; over stored rows, `r.approval_object_id IS NULL` implies the
@@ -511,12 +510,12 @@ Fault/timing angle: none.
 Required faults and enabling state: a subject above Candidate; priors in
 every disposition; both dispute events with and without evidence; a
 valid approval named on a dispute against a more restrictive prior. The
-only evaluator gate on evidence is `Enforce` (`admission.rs:275`), so the
+only evaluator gate on evidence is `Enforce` (`admission.rs:291`), so the
 field has no lever on these events.
 Confidence: high - [evidence](evidence/dispute-with-evidence-never-raises-standing.md).
-Read `event_effect` (`admission.rs:4161-4162`), the restrictiveness table,
+Read `event_effect` (`admission.rs:4265-4266`), the restrictiveness table,
 the relaxation rule, and the five tests.
-Existing check: `admission.rs:4532`; `kernel_routes.rs:5723`, `:6146`,
+Existing check: `admission.rs:4636`; `kernel_routes.rs:5723`, `:6146`,
 `:6199`, `:6418`. Status unaudited.
 Impact: a report would become a promotion path.
 Open questions:
@@ -557,7 +556,7 @@ and path, `memory-mark-command.ts:79`, `:116-121`). Holds on every
 request, so `always`.
 Fault/timing angle: a lost response followed by the client's reissue
 under the same identity must replay. The receipt lookup precedes the
-operation (`commit.rs:1068-1070`). The route-level reply drop is not
+operation (`commit.rs:1104-1106`). The route-level reply drop is not
 constructed (fault F12 in the disposition-path fault map).
 Required faults and enabling state: two disputes with different evidence
 in one session; an identical repeat; the same key with other bytes.
@@ -580,7 +579,7 @@ Open questions:
 Type: safety
 Reachability: default-production - `runMemoryMarkCommand` previews before
 every commit (`memory-mark-command.ts:222`); the route refuses a preview
-of anything other than dispositions (`commit.rs:1151-1159`).
+of anything other than dispositions (`commit.rs:1200-1208`).
 Status: active
 Exercised: yes - `assert_refused_without_writing`
 (`kernel_routes.rs:5701-5715`) previews and then commits one body and
@@ -603,9 +602,9 @@ the same tip.
 Check: `always-or-unreached` - the preview is optional for a raw caller;
 when it runs, the four row counts before and after are equal, and for an
 invalid evidence input its refusal name equals the commit's. The form
-check runs before either transaction (`commit.rs:1119-1125`) and the
+check runs before either transaction (`commit.rs:1162-1168`) and the
 evidence check runs inside `disposition_request`, which both paths call
-(`commit.rs:790`, `:835`).
+(`commit.rs:804`, `:835`).
 Fault/timing angle: a commit between preview and commit can change the
 answer; the commit's verdict is the one recorded
 (`memory-mark-command.ts:243-244`). Constructed at the route by
@@ -614,7 +613,7 @@ Required faults and enabling state: a preview of each refused input and
 of a valid one at the same tip as the following commit; a commit between
 a preview and its commit that changes the verdict.
 Confidence: high - [evidence](evidence/dispute-preview-writes-nothing.md).
-Read the handler, `preview` (`commit.rs:877-897`), and the helper.
+Read the handler, `preview` (`commit.rs:910-930`), and the helper.
 Existing check: `kernel_routes.rs:5703`, `:5801`, `:5880`, `:5971`,
 `:6375`; `memory-mark-command.test.ts:242`. Status unaudited.
 Impact: a writing preview would record disputes the user declined; a
@@ -630,7 +629,7 @@ Open questions:
 Type: safety
 Reachability: default-production - every route-written dispute row, and
 every `approval_revoked` row its cascade writes, carries the composed
-reason (`commit.rs:732`; cascade copy asserted at `kernel_routes.rs:6241-6245`).
+reason (`commit.rs:745`; cascade copy asserted at `kernel_routes.rs:6241-6245`).
 Status: active
 Exercised: partial - the PR A form is active and exercised:
 `kernel_routes.rs:5880` parses each stored reason, compares
@@ -640,15 +639,27 @@ Exercised: partial - the PR A form is active and exercised:
 a reference; `a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field`
 (`kernel_routes.rs:6252`) sends a forged `reason` and asserts an error
 with the four row counts unchanged, so the client cannot supply the
-reason; `dispute.rs:232`, `:246`, `:404` cover the documented rendering,
+reason; `dispute.rs:234`, `:246`, `:404` cover the documented rendering,
 the round trip over reserved and non-ASCII bytes, and refusal of every
-rendering `render` does not produce; `dispute.rs:280` pins `encode` and
+rendering `render` does not produce; `dispute.rs:282` pins `encode` and
 `decode` on reserved and multi-byte input; the proptest at
-`dispute.rs:292` asserts every accepted value renders an ASCII reason
-within the cap that parses back to its inputs. The typed form (reporter
-columns and `event_payload`) arrives in PR B (#1162) and is not yet
-exercised.
-Guarantee: In PR A, a dispute row's `reason` is the `v=1` rendering of
+`dispute.rs:294` asserts every accepted value renders an ASCII reason
+within the cap that parses back to its inputs. Typed form (#1162):
+`a_dispute_row_records_its_reporter_and_links_the_sessions_latest_serve`
+(`kernel_routes.rs:6604`) asserts the reporter columns read
+`(model_inference, user_inferred)` for a command-shaped dispute and
+`(model_inference, assistant_inference)` for a tool-shaped one, that
+`event_payload` holds the sent `evidence_ref` serialized byte for byte and
+is null when none was sent, and that `DisputeReason` rendered from the
+typed columns and the row's `evidence_id` equals the stored `reason`;
+`reporter_columns_are_dispute_only_and_checked_by_the_schema`
+(`crates/kernel/tests/kernel_use_outcome.rs:1243`) asserts other writers
+store NULL and the CHECKs refuse an unknown class, a half-set pair, and
+non-JSON payload.
+Guarantee: The typed columns (`reporter_source_class`,
+`reporter_taint_class`, `event_payload`, and the row's `evidence_id`) are
+authoritative for a route-written dispute, and its `reason` equals their
+`v=1` rendering. The rendering is
 (event, reporter taint, optional evidence id, optional reference): one
 ASCII line of at most 4096 bytes that `DisputeReason::parse` reads back
 exactly and the redactor leaves unchanged. No admission decision reads it.
@@ -667,11 +678,11 @@ dispute on an approval so the cascade copies the reason; a body carrying
 its own `reason`.
 Confidence: high - [evidence](evidence/structured-reason-projects-typed-reporter-data.md).
 Read `render`, `parse`, `encode`, `decode`, `decodes_to_itself`
-(`dispute.rs:83-207`), and the Kernel `reason` path
-(`admission.rs:1689`). The redaction-row absence for a landed dispute is
+(`dispute.rs:83-209`), and the Kernel `reason` path
+(`admission.rs:1780`). The redaction-row absence for a landed dispute is
 argued from the shared detector, not asserted by a test.
 Existing check: `kernel_routes.rs:5880`, `:5723`, `:6199`, `:6252`,
-`:6284`; `dispute.rs:232`, `:246`, `:280`, `:292`, `:390`, `:404`.
+`:6284`; `dispute.rs:234`, `:246`, `:280`, `:292`, `:390`, `:404`.
 Status unaudited.
 Impact: a reader could not recover the reporter or the reference, and PR
 B could not be checked against PR A rows.
@@ -680,57 +691,76 @@ Open questions:
   carries `event=mark_disputed` in its reason
   (`kernel_routes.rs:6241-6245`). A reader must take the row's own
   `event_kind` from the column. Recorded; no decision needed.
-- Whether PR A rows carry into the PR B typed columns stays open
-  ([open-questions.md](open-questions.md) Q6). (needs human input)
+- PR A rows never coexist with the typed columns: Batch K1 rotates the
+  Kernel baseline once, and a store created before it refuses to open
+  (`crates/kernel/tests/kernel_open.rs:582`). Resolved by the rotation.
 
-### use-outcome-link-names-own-session-prior-serve (PROPOSED)
+### use-outcome-link-names-own-session-prior-serve
 
 Type: safety
-Reachability: default-production - the class the link path will have once
-PR B ([#1162](https://github.com/ahrav/eidnara/issues/1162)) writes it.
-The label is not verifiable at HEAD (`../../METHOD.md` rule 4): the path
-does not exist yet. At HEAD the `use_outcomes` table and the
-`admission_decisions.use_outcome_id` column exist
-(`crates/kernel/src/schema.rs:188`, `:163`), and the dispute route writes
-no value into the column (`AdmissionRequest` carries no such field,
-`commit.rs:722-734`).
+Reachability: default-production - every `mark_disputed` and `contradict`
+the route commits goes through `Envelope::record_dispute_admission`
+(`crates/daemon/src/kernel_routes/commit.rs:798`;
+`crates/kernel/src/admission.rs:1014`), which computes the link with
+`reporting_serve` (`admission.rs:1737`) and writes it in
+`write_reported_admission` (`admission.rs:1765`) with no flag.
 Status: active
-Lifecycle: proposed obligation, not yet implemented
-Exercised: not yet - PR B lands the link.
-Guarantee: A dispute row's `use_outcome_id`, when set, names a
-`use_outcome` row whose session is the route's bound session, whose
-decision is the dispute's subject, and whose `served_commit_seq` is the
-greatest one strictly below the dispute's `commit_seq`; it is null when no
-such row exists.
-Check: `always-or-unreached` - the link path runs only when a serve
-exists; when it runs, for every row `r` with `r.use_outcome_id IS NOT
-NULL`, the joined `use_outcome` row `u` has `u.session = bound session`,
-`u.decision = r.subject_object_id`, `u.served_commit_seq < r.commit_seq`,
-and no other row for the same (session, decision) has a greater
-`served_commit_seq` below `r.commit_seq`.
-Falsifier: `u.session` differs from the reporting session; or
-`u.served_commit_seq >= r.commit_seq`.
-Legal witness: session S served D at seq 100 and 140; S disputes D at seq
-150; the link names the seq-140 row.
-Fault/timing angle: the lookup and the write share one writer
-transaction; a serve committed after the dispute's snapshot is not
-linked. A use-outcome sweep must keep rows a live dispute cites.
-Required faults and enabling state: a session served the decision before
-disputing it.
-Confidence: low - proposed; no implementation evidence. The route binds
-the session (envelope keys stripped at
-`crates/daemon/src/kernel_routes/mod.rs:461-473`; `RouteScope` at
-`:405-412`), and no route code writes `use_outcome_id` at this revision.
-Existing check: none.
+Exercised: yes - Kernel test
+`a_dispute_links_the_reporting_sessions_latest_prior_serve_of_its_subject`
+(`crates/kernel/tests/kernel_use_outcome.rs:1165`) serves `d1` to one
+session at two sequences, serves another decision to the same session and
+`d1` to another session, and asserts the dispute links the later serve, a
+dispute of the other decision links that decision's serve, a session never
+served the subject links null, and a serve recorded after the dispute
+leaves the stored link unchanged. Route test
+`a_dispute_row_records_its_reporter_and_links_the_sessions_latest_serve`
+(`crates/daemon/tests/kernel_routes.rs:6604`) seeds serves through the P3
+insert API under the route's project digest and harness, files a
+command-shaped dispute that links the later of two serves, a tool-shaped
+dispute of a decision the session was never served that links null, and a
+`mark_stale` that links nothing. The link cannot name a serve at or above
+the dispute's sequence because `use_outcomes` requires
+`served_commit_seq < created_commit_seq` and the query bounds
+`served_commit_seq` below the dispute's commit.
+Guarantee: A dispute row's `use_outcome_id`, when set, names the
+`use_outcomes` row of the route's (project digest, harness, reporting
+session) whose decision rows name the dispute's subject and whose
+`served_commit_seq` is the greatest strictly below the dispute's
+`commit_seq`; it is null when no such row exists.
+Check: `always` - for every row `r` with
+`r.reporter_taint_class IS NOT NULL`: when `r.use_outcome_id` is set, the
+joined record `u` has `u.served_commit_seq < r.commit_seq`, a
+`use_outcome_decisions` row naming `r.subject_object_id`, and no record of
+the same (project digest, harness, session) naming the subject has a
+greater `served_commit_seq` below `r.commit_seq` at the time of the write;
+the session is the request envelope's `session_id`, read before the
+transport strips it (`commit.rs:1121`). Every route dispute takes this
+path, so `always`.
+Fault/timing angle: the lookup and the INSERT share one writer
+transaction, so a serve committed after the dispute is never linked; the
+`admission_decisions_use_outcome_immutable` trigger keeps the link as it
+was written.
+Required faults and enabling state: a session served the decision at two
+sequences before disputing it; a session never served it; a serve of a
+different decision in the same session; a serve recorded after the
+dispute.
+Confidence: high - [evidence](evidence/use-outcome-link-names-own-session-prior-serve.md).
+Read `reporting_serve` and the INSERT; both tests above construct the
+listed faults.
+Existing check: `kernel_use_outcome.rs:1165`; `kernel_routes.rs:6604`.
+Status unaudited.
 Impact: a wrong link attributes a harm signal to a session that did not
 receive the finding.
 Open questions:
 - Whether the bound session is the right key when the same session id
-  appears under two harnesses. (needs human input)
-- Whether a dangling `use_outcome_id` after a sweep is a sweep defect or
-  the column should carry no FK. See [open-questions.md](open-questions.md)
-  Q10. The column carries an FK with `ON DELETE RESTRICT` at this revision
-  (`schema.rs:163`).
+  appears under two harnesses. The key includes the harness, so two
+  harnesses never share a link. Recorded; no decision needed.
+- Retired serving records stay linkable: the query reads every record of
+  the session, retired or not. A record a committed dispute cites is
+  retained by the P3 sweep while its subject is live
+  (`kernel_routes.rs:6604` asserts `cited == 1` and the record live after
+  expiry). (needs human input on whether a retired record should be
+  linked)
 
 ## Relationship map
 

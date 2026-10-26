@@ -10,16 +10,16 @@ dispute the user declined.
 ## Evidence trail
 
 - The handler composes every reason before it branches on `preview`
-  (`crates/daemon/src/kernel_routes/commit.rs:1119-1125`, branch at
+  (`crates/daemon/src/kernel_routes/commit.rs:1162-1168`, branch at
   `:1145`), so form refusals are identical by construction.
 - The preview runs `PreviewRun::disposition`, which calls the same
-  `disposition_request` as the commit (`commit.rs:835`; commit at `:790`),
+  `disposition_request` as the commit (`commit.rs:868`; commit at `:790`),
   so liveness and visibility refusals are identical at the same tip.
-- The preview runs in `store.preview` (`commit.rs:877-897`), which writes
+- The preview runs in `store.preview` (`commit.rs:910-930`), which writes
   no commit-log row, no receipt, and no admission row; a recorded identity
   replays its receipt instead (`:880-882`).
 - A preview refuses tokens and non-disposition operations
-  (`commit.rs:1146-1159`).
+  (`commit.rs:1195-1208`).
 - The command treats the commit's verdict as the one recorded
   (`packages/opencode-plugin/src/shared/memory-mark-command.ts:243-244`)
   and reports a refused preview with no commit (`:223-224`).
@@ -63,7 +63,7 @@ All constructed:
 
 ### Q: Does the preview report the cascade a dispute on an approval causes?
 
-- Sources examined: `PreviewRun::disposition` (`commit.rs:827-866`), the
+- Sources examined: `PreviewRun::disposition` (`commit.rs:860-899`), the
   module header (`commit.rs:60-63`), the command usage
   (`memory-mark-command.ts:53`), `memory-mark-command.test.ts:156`.
 - Findings: no. `visibility_changes` compares the subject's current and
