@@ -14,9 +14,12 @@ revision.
 - Step: `delete_kernel_step` (`crates/daemon/src/lib.rs:6883`) retires the
   captured sources, then `mark_use_outcomes_deleted`
   (`crates/daemon/src/lib.rs:6908`) commits one envelope keyed by
-  `use-outcome-delete` and a fresh attempt nonce
-  (`crates/daemon/src/use_outcome_writer.rs:226`); an envelope that marks
-  nothing rolls back.
+  `use-outcome-delete`, a digest of the session id, and a fresh attempt nonce
+  (`crates/daemon/src/use_outcome_writer.rs:226`); the digest keeps the key
+  clear of the Kernel's identity check for any session id the wire admits
+  (`a_session_id_that_reads_as_a_secret_still_deletes`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:476`)); an envelope that
+  marks nothing rolls back.
 - Order: the step runs at `crates/daemon/src/lib.rs:7007`, before the
   `stop_after_retirement` hook and the memory delete; a `kernel_unavailable`
   from either part counts `delete_kernel_unavailable`.

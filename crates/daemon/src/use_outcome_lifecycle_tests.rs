@@ -471,6 +471,35 @@ async fn a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_
     assert_eq!(counts, [("transform_touched", 2)]);
 }
 
+/// A session id the Kernel's secret detector matches still deletes: the delete receipt key carries a digest of the id, so the identity check passes, a session with nothing live commits nothing, and a session with a live record is marked.
+#[tokio::test(flavor = "current_thread")]
+async fn a_session_id_that_reads_as_a_secret_still_deletes() {
+    let (handler, _store, _dir, project) = served_handler().await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let binding = bound(&project);
+    // Assembled at run time so the repository's secret scanners see no credential-shaped literal.
+    let session_id = format!("{}={}", "token", "abcdefghijklmnopqrstuvwxyz0123456789");
+    let marked = crate::use_outcome_writer::mark_session_deleted(
+        &kernel,
+        &binding.kernel_project,
+        &binding.harness,
+        &session_id,
+        1,
+    );
+    assert_eq!(marked, Ok(LifecycleWrite::DeleteNothingLive));
+    assert_eq!(
+        crate::use_outcome_writer::mark_session_deleted(
+            &kernel,
+            &binding.kernel_project,
+            &binding.harness,
+            "ses",
+            1,
+        ),
+        Ok(LifecycleWrite::DeletedMarked),
+        "a plain id still selects and marks its live record"
+    );
+}
+
 /// With the Kernel Starting, and again once it is marked unavailable, `review.use_outcome` answers the kernel routes' `unavailable` state and carries no count.
 #[tokio::test(flavor = "current_thread")]
 async fn review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count() {

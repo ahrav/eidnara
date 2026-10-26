@@ -222,7 +222,7 @@ impl LifecycleCounts {
     }
 }
 
-/// `session.delete`'s use-outcome step: one envelope that sets `deleted_at = now` on every live record of the session, selected under the writer. An envelope that marks nothing rolls back, so a session with no live record commits nothing. The key carries a fresh attempt nonce, so a receipt never answers a later delete as a replay; idempotence rests on the live selection, and a record already marked keeps its first timestamp.
+/// `session.delete`'s use-outcome step: one envelope that sets `deleted_at = now` on every live record of the session, selected under the writer. An envelope that marks nothing rolls back, so a session with no live record commits nothing. The key carries a digest of the session id, so the Kernel's identity check on the key passes for any id the wire admits, and a fresh attempt nonce, so a receipt never answers a later delete as a replay; idempotence rests on the live selection, and a record already marked keeps its first timestamp.
 pub(crate) fn mark_session_deleted(
     store: &KernelStore,
     project: &ProjectBinding,
@@ -233,8 +233,9 @@ pub(crate) fn mark_session_deleted(
     let mut nonce = [0u8; 16];
     getrandom::getrandom(&mut nonce).map_err(|_| KernelError::Io)?;
     let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let session_digest = length_prefixed_digest(DELETE_REQUEST_DOMAIN, [session_id].into_iter());
     let operation_key = project
-        .operation_key(DELETE_FAMILY, &format!("{session_id}:{nonce}"))
+        .operation_key(DELETE_FAMILY, &format!("{session_digest}:{nonce}"))
         .ok_or(KernelError::InvalidInput)?;
     let now_text = now.to_string();
     let intent = CommitIntent {

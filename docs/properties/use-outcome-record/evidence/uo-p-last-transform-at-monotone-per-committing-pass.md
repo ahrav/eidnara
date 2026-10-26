@@ -11,18 +11,18 @@ Record kind: new obligation activated by #1156.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Hook: `crates/daemon/src/lib.rs:10150` in the settle step, after any rerun,
+- Hook: `crates/daemon/src/lib.rs:10126` in the settle step, after any rerun,
   when the final response committed and the check
   (`crates/daemon/src/lib.rs:9813`) finds a live record to advance. The update
   runs on a scoped thread beside the response build, and the settle joins it
-  before the response returns (`crates/daemon/src/lib.rs:10156`). A pass that
+  before the response returns (`crates/daemon/src/lib.rs:10132`). A pass that
   handed its serve to a tracked job sets `touch_delegated`
-  (`crates/daemon/src/lib.rs:9837`) and the job touches after its serve commits
-  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:304`)).
+  (`crates/daemon/src/lib.rs:9808`) and the job touches after its serve commits
+  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:305`)).
 - Update: `crates/kernel/src/use_outcome.rs:43` selects the live records with a
   null or earlier value. A session with none takes no writer, because the
   check above skips it; the update itself holds only the writer.
-- Outcomes: `crates/daemon/src/use_outcome_writer.rs:268` counts
+- Outcomes: `crates/daemon/src/use_outcome_writer.rs:269` counts
   `transform_touched`, `transform_skipped_deadline`, or
   `transform_skipped_unavailable`.
 
@@ -103,12 +103,14 @@ Kernel unavailable at the write.
 - Missing evidence: an owner decision or the named read.
 - Conclusion: needs human input.
 
-### Q: A pass that commits and then fails its boundary read answers an error before the settle step, so it records its serve and touches nothing; the next committing pass catches up
+### Q: Does a pass that commits and then fails its boundary read advance `last_transform_at`?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
-- Findings: A pass that commits and then fails its boundary read answers an
-  error before the settle step, so it records its serve and touches nothing; the
-  next committing pass catches up.
+- Findings: Yes. The pass answers an error before the settle step, so the pass
+  thread makes no touch, but it hands off its serve first and the job's touch
+  advances the record with that pass's time, because the pass committed
+  (`a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
+  asserts `last_transform_at` equals the serve's `recorded_at`).
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 

@@ -11,9 +11,9 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:371-374`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:372-375`; the request
   digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:422`)).
+  (`crates/daemon/src/use_outcome_writer.rs:423`)).
 - Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9721`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
@@ -36,15 +36,15 @@ revision.
   `a_recorded_served_set_replays_while_another_writer_holds_the_writer`
   (`crates/daemon/src/use_outcome_writer_tests.rs:702`);
   `every_kernel_error_maps_to_a_closed_outcome`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:829`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:827`);
   `an_emergency_pass_that_reruns_records_one_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:848`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:846`);
   `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:876`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:874`);
   `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:963`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:961`);
   `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:994`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1017`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
@@ -100,6 +100,9 @@ between; a CAS retry.
   every write slot is taken, the write is counted `deadline` and repaired the
   same way
   (`a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`).
+  This placement departs from the ticket's OQ3-5 resolution, an inline write
+  within the pass's remaining budget; the job's 250 ms writer wait is the budget
+  AC6 names (owner decision, taken at the #1155 review rounds).
   A session whose composition never folds HARD again at that set stays
   unrecorded. A conflict and a refusal are not repaired by a later fold.
 - Missing evidence: none beyond what the question names.

@@ -25,7 +25,7 @@ revision.
   `review_use_outcome_counts_serves_and_later_disputes_of_one_decision`
   (`crates/daemon/tests/memory_reviewer_wire.rs:686`);
   `review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:476`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:505`);
   `packages/cli/src/commands/review-wire.contract.test.ts:125`;
   `packages/cli/src/commands/review.test.ts:849`; Kernel half:
   `disputed_after_serve_is_judged_against_each_serve`

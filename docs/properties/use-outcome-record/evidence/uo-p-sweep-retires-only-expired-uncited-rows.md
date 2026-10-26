@@ -11,7 +11,7 @@ Record kind: new obligation activated by #1154.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:725`) reads one
+- Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:727`) reads one
   statement, so one snapshot, in `retain_until`, id order through
   `idx_use_outcomes_live_retention` (`crates/kernel/src/use_outcome.rs:232`); it
   pages up to 64 uncited records and counts the cited ones it reads before the
@@ -19,9 +19,9 @@ revision.
   grows with the cited expired records while its writes stay bounded by the
   page.
 - Commit: one page commit keyed by the cutoff and a digest of the page's ids
-  (`page_key` (`crates/kernel/src/use_outcome.rs:667`), `expire_use_outcomes`
-  (`crates/kernel/src/use_outcome.rs:612`)); inside it `retire_due_use_outcome`
-  (`crates/kernel/src/use_outcome.rs:749`) sets `invalidated_commit_seq` in one
+  (`page_key` (`crates/kernel/src/use_outcome.rs:669`), `expire_use_outcomes`
+  (`crates/kernel/src/use_outcome.rs:614`)); inside it `retire_due_use_outcome`
+  (`crates/kernel/src/use_outcome.rs:751`) sets `invalidated_commit_seq` in one
   conditional update that rechecks retirement and citation
   (`crates/kernel/src/use_outcome.rs:241`), and records the record's own
   reserved receipt. The deadline is immutable, so the recheck reads only
@@ -49,17 +49,17 @@ revision.
   `an_expired_record_cited_by_a_live_report_is_retained`
   (`crates/kernel/tests/kernel_use_outcome.rs:700`);
   `a_record_cited_after_selection_is_kept`
-  (`crates/kernel/src/use_outcome.rs:895`);
+  (`crates/kernel/src/use_outcome.rs:897`);
   `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-  (`crates/kernel/src/use_outcome.rs:923-924`);
+  (`crates/kernel/src/use_outcome.rs:925-926`);
   `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-  (`crates/kernel/src/use_outcome.rs:986`);
+  (`crates/kernel/src/use_outcome.rs:988`);
   `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-  (`crates/kernel/src/use_outcome.rs:1007`);
+  (`crates/kernel/src/use_outcome.rs:1009`);
   `the_cited_count_covers_the_rows_read_before_the_page_fills`
   (`crates/kernel/tests/kernel_use_outcome.rs:956`);
   `the_sweep_and_the_reads_use_their_indexes`
-  (`crates/kernel/src/use_outcome.rs:1024`);
+  (`crates/kernel/src/use_outcome.rs:1026`);
   `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
   (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
   `a_cancelled_slice_stops_before_the_use_outcome_sweep`
