@@ -2,11 +2,13 @@
 //! kind, capture completeness, loss by named condition, tool-result byte-length quantiles
 //! stratified by the harness `truncated` flag, the share of units and bytes above the 64 KiB unit
 //! cap, per-pass batch fill against the 32-unit and 64 KiB batch bounds, publish time against
-//! admitted bytes, and the R1 cell census.
+//! admitted bytes, the R1 cell census, output-shape shares per harness and content kind with exact
+//! intervals, and the "answerable from digest" question set with its positive control.
 //!
 //! Every figure describes the frozen corpus population, computed exhaustively. The exit status is
-//! non-zero only when `unclassified_loss` is: an expected unit neither admitted nor lost under a
-//! named condition. Every other figure only prints.
+//! non-zero when `unclassified_loss` is, an expected unit neither admitted nor lost under a named
+//! condition, or when the question set's positive control goes unanswered. Every other figure only
+//! prints.
 //!
 //! Usage: `cargo run -p daemon --example source_corpus_report --features test-support -- [runs]`
 //! (`runs`, default 5, is how many independent replays time the publish batches).
@@ -26,6 +28,9 @@ use std::process::ExitCode;
 use daemon::harness_sources::{
     Harness, MAX_SOURCE_BATCH_BYTES, MAX_SOURCE_BATCH_UNITS, MAX_SOURCE_UNIT_BYTES, SessionIdentity,
 };
+use daemon::tool_outcome::shape::{OutputShape, classify};
+use daemon::tool_outcome::{from_output, output_outcome};
+use memory_store::{OutputKind, ResultBlock, ResultBlockKind, ToolOutput};
 use serde_json::Value;
 
 use corpus_replay::{
@@ -306,6 +311,233 @@ fn host() -> String {
     format!("{cpu}; {cpus} CPUs")
 }
 
+/// The probability of exactly `k` successes in `n` trials of success probability `p`, from the log
+/// of the binomial coefficient.
+fn binomial_pmf(n: usize, k: usize, p: f64) -> f64 {
+    let ln_choose: f64 = (1..=k)
+        .map(|i| ((n - k + i) as f64).ln() - (i as f64).ln())
+        .sum();
+    (ln_choose + k as f64 * p.ln() + (n - k) as f64 * (1.0 - p).ln()).exp()
+}
+
+/// The pointwise 95 percent Clopper-Pearson interval of `k` successes in `n` trials: the lower
+/// bound solves P(X >= k) = 0.025 and the upper bound P(X <= k) = 0.025, each by bisection.
+fn exact_interval(k: usize, n: usize) -> (f64, f64) {
+    let at_least = |p: f64| (k..=n).map(|x| binomial_pmf(n, x, p)).sum::<f64>();
+    let at_most = |p: f64| (0..=k).map(|x| binomial_pmf(n, x, p)).sum::<f64>();
+    // `rising` says whether `tail` grows with p; the bound is where it crosses 0.025.
+    let solve = |rising: bool, tail: &dyn Fn(f64) -> f64| {
+        let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+        for _ in 0..100 {
+            let mid = f64::midpoint(lo, hi);
+            if (tail(mid) < 0.025) == rising {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        f64::midpoint(lo, hi)
+    };
+    let lower = if k == 0 { 0.0 } else { solve(true, &at_least) };
+    let upper = if k == n { 1.0 } else { solve(false, &at_most) };
+    (lower, upper)
+}
+
+/// The shape of every text block and every settled tool result of `session`, by content kind. A
+/// tool result is classified whole, as [`from_output`] reads it, units and non-units alike, so a Pi
+/// result holding an image counts once as `non_text_blocks`.
+fn shapes(session: &Session) -> BTreeMap<&'static str, Vec<OutputShape>> {
+    let mut shapes: BTreeMap<&'static str, Vec<OutputShape>> = BTreeMap::new();
+    let mut push = |kind: &'static str, shape| shapes.entry(kind).or_default().push(shape);
+    match session.harness {
+        Harness::OpenCode => {
+            for message in session.fixture["messages"].as_array().into_iter().flatten() {
+                for part in message["parts"].as_array().into_iter().flatten() {
+                    let data = &part["data"];
+                    match data["type"].as_str() {
+                        Some("text") if data["ignored"] != Value::Bool(true) => push(
+                            "text",
+                            text_shape(data["text"].as_str().unwrap_or_default()),
+                        ),
+                        Some("tool") => {
+                            let state = &data["state"];
+                            let text =
+                                |field: &str| state[field].as_str().unwrap_or_default().to_owned();
+                            let kind = match state["status"].as_str() {
+                                Some("completed") => Some(OutputKind::Text {
+                                    text: text("output"),
+                                }),
+                                Some("error") => Some(OutputKind::ErrorText {
+                                    text: text("error"),
+                                }),
+                                _ => None,
+                            };
+                            if let Some(kind) = kind {
+                                push("tool", classify(&from_output(&ToolOutput::bare(kind)).1));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Harness::Pi => {
+            for entry in session.fixture["entries"].as_array().into_iter().flatten() {
+                let message = &entry["message"];
+                let content = &message["content"];
+                match message["role"].as_str() {
+                    Some("toolResult") => {
+                        let blocks: Vec<ResultBlock> = content
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|item| ResultBlock {
+                                kind: match (item["type"] == "text")
+                                    .then(|| item["text"].as_str().unwrap_or_default())
+                                {
+                                    Some(text) => ResultBlockKind::Text {
+                                        text: text.to_owned(),
+                                    },
+                                    None => ResultBlockKind::Opaque {
+                                        opaque: memory_store::OpaqueBlock {
+                                            source: Value::Null,
+                                            kind: item["type"]
+                                                .as_str()
+                                                .unwrap_or("unknown")
+                                                .to_owned(),
+                                            raw: item.clone(),
+                                            arc: None,
+                                        },
+                                    },
+                                },
+                                provider_extras: memory_store::ProviderExtras::new(),
+                            })
+                            .collect();
+                        let kind = if message["isError"] == Value::Bool(true) {
+                            OutputKind::ErrorContent { blocks }
+                        } else {
+                            OutputKind::Content { blocks }
+                        };
+                        push("tool", classify(&from_output(&ToolOutput::bare(kind)).1));
+                    }
+                    Some("user" | "assistant") => match content {
+                        Value::String(text) => push("text", text_shape(text)),
+                        _ => {
+                            for item in content.as_array().into_iter().flatten() {
+                                if let Some(text) =
+                                    item["text"].as_str().filter(|_| item["type"] == "text")
+                                {
+                                    push("text", text_shape(text));
+                                }
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+    shapes
+}
+
+/// The shape of a text block, read as a text output.
+fn text_shape(text: &str) -> OutputShape {
+    classify(
+        &from_output(&ToolOutput::bare(OutputKind::Text {
+            text: text.to_owned(),
+        }))
+        .1,
+    )
+}
+
+/// Shape shares per content kind, each a count over the kind's total with its pointwise exact 95
+/// percent interval. The count describes the frozen corpus. The interval measures the hypothetical
+/// sampling resolution of a sample that size under independent draws; the scripted mix runs a fixed
+/// tool sequence against a mock provider.
+fn shape_section(out: &mut String, session: &Session) {
+    let _ = writeln!(
+        out,
+        "- output shapes (count / total, pointwise exact 95% interval as the resolution of a sample \
+         this size under independent draws, not coverage over the scripted mix; every text block and \
+         every settled tool result, units and non-units):"
+    );
+    for (kind, shapes) in shapes(session) {
+        let _ = writeln!(out, "    content kind `{kind}` (n={}):", shapes.len());
+        for shape in OutputShape::ALL {
+            let k = shapes.iter().filter(|&&found| found == shape).count();
+            let (lower, upper) = exact_interval(k, shapes.len());
+            // The OpenCode arm reads `output` and `error` only; the corpus tool parts carry no
+            // `attachments`, the field the codec decodes into media blocks.
+            let structural = session.harness == Harness::OpenCode
+                && shape == OutputShape::NonTextBlocks
+                && kind == "tool";
+            let note = if structural {
+                " (zero by construction: the corpus OpenCode tool parts carry no attachments)"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "      {}: {k}/{} [{lower:.4}, {upper:.4}]{note}",
+                shape.name(),
+                shapes.len()
+            );
+        }
+    }
+}
+
+/// The questions a reader asks of a tool result, authored from the full output before its digest
+/// is seen, and the compression-fidelity case C5.V1 as the positive control: its digest answers
+/// the first two. Returns whether the control answered both.
+fn question_set(out: &mut String) -> bool {
+    let _ = writeln!(
+        out,
+        "## Answerable from digest\n\nFor each sampled tool result, author the answers from the \
+         full output before reading its digest, then mark each answerable from the digest alone \
+         or not:\n\n1. Did it fail?\n2. Which line names the cause?\n3. What did it touch?\n"
+    );
+    let fidelity: Value = serde_json::from_slice(
+        &std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("testdata/compression-fidelity.json"),
+        )
+        .expect("the compression-fidelity cases read"),
+    )
+    .expect("the compression-fidelity cases parse");
+    let output = fidelity["cases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|case| case["sources"].as_array().into_iter().flatten())
+        .filter(|source| source["id"] == "C5.V1")
+        .flat_map(|source| source["messages"].as_array().into_iter().flatten())
+        .flat_map(|message| message["parts"].as_array().into_iter().flatten())
+        .find(|part| part["callID"] == "call_cf_504")
+        .and_then(|part| part["state"]["output"].as_str())
+        .expect("C5.V1 holds the wave-1 bash result");
+    // Authored from the full output: its second line reports the failure and names the cause.
+    let cause = "billing-worker: error: connection refused (10.4.2.17:5433)";
+    let output = ToolOutput::bare(OutputKind::Text {
+        text: output.to_owned(),
+    });
+    let digest = output_outcome(&output);
+    // The cause line reports the failure, so its presence answers Q1 and Q2 together.
+    let answered = digest.contains(&format!("\"{cause}\""));
+    let answers = if answered {
+        "answerable"
+    } else {
+        "not answerable"
+    };
+    let _ = writeln!(
+        out,
+        "Positive control C5.V1 (`bash`, shape {}): digest `{digest}`\n- Q1 did it fail: yes, \
+         billing-worker failed; {answers} from the digest\n- Q2 which line names the cause: \
+         `{cause}`; {answers} from the digest\n",
+        classify(&from_output(&output).1).name(),
+    );
+    answered
+}
+
 /// Writes one session's section and returns its unclassified loss count.
 fn session_section(out: &mut String, session: &Session) -> usize {
     let store = ReplayStore::temporary();
@@ -392,6 +624,7 @@ fn session_section(out: &mut String, session: &Session) -> usize {
         };
         let _ = writeln!(out, "    {cell}: {shown}");
     }
+    shape_section(out, session);
     let _ = writeln!(out);
     all.unclassified.len()
 }
@@ -401,14 +634,27 @@ fn main() -> ExitCode {
         .nth(1)
         .map_or(5, |runs| runs.parse().expect("runs is a positive integer"));
     assert!(runs > 0, "runs is a positive integer");
+    for (k, n, bounds) in [
+        (6, 13, (0.1922, 0.7487)),
+        (0, 29, (0.0, 0.1194)),
+        (27, 27, (0.8723, 1.0)),
+    ] {
+        let (lower, upper) = exact_interval(k, n);
+        assert!(
+            (lower - bounds.0).abs() < 5e-5 && (upper - bounds.1).abs() < 5e-5,
+            "Clopper-Pearson ({k}, {n}) gave [{lower}, {upper}]"
+        );
+    }
     let sessions = sessions();
     let mut out = String::new();
     let _ = writeln!(out, "# Source corpus measurement report\n");
     let _ = writeln!(
         out,
-        "Estimand: every figure is a population fact about the frozen corpus \
+        "Estimand: every count is a population fact about the frozen corpus \
          (crates/daemon/testdata/corpus/sessions), computed exhaustively; none estimates real \
-         sessions. No figure is compared to a threshold. The replay offers every record, the \
+         sessions. The output-shape intervals alone are hypothetical: the resolution a sample of \
+         each kind's size would have under independent draws (see that section). No figure is \
+         compared to a threshold. The replay offers every record, the \
          final assistant reply included, which live capture never offers; live reconciliation \
          (the corpus README) counts one unit fewer per session.\n"
     );
@@ -423,6 +669,7 @@ fn main() -> ExitCode {
         .iter()
         .map(|session| session_section(&mut out, session))
         .sum();
+    let control = question_set(&mut out);
     let _ = writeln!(
         out,
         "## Publish time against admitted bytes\n\nHost: {}. Runs: {runs}, one after another \
@@ -454,7 +701,7 @@ fn main() -> ExitCode {
     }
     let _ = writeln!(out, "\nunclassified_loss = {unclassified}");
     print!("{out}");
-    if unclassified == 0 {
+    if unclassified == 0 && control {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

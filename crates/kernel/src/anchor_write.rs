@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::params;
+use rusqlite::{Transaction, params};
 use serde::Serialize;
 
 use super::anchor::{
@@ -18,8 +18,8 @@ use super::anchor::{
 };
 use super::applicability::anchor_row_exceeds_bounds;
 use super::envelope::{Envelope, ObjectRow, PendingChange};
-use super::object_write::{insert_registry, map_write_error, record_registry_fields};
-use super::redaction::{RedactedField, identity, payload_has_secret};
+use super::object_write::{insert_registry, map_write_error};
+use super::redaction::is_clean_identity;
 use super::slice::require_live;
 use super::{CachedSql, KernelError, Sensitivity};
 
@@ -111,6 +111,19 @@ impl AnchorValue {
         row
     }
 
+    fn captures(&self) -> &[AnchorCapture] {
+        match self {
+            Self::ReachableFrom { captures, .. } | Self::ReachableBetween { captures, .. } => {
+                captures
+            }
+            Self::Exact { .. }
+            | Self::DeploymentRevision { .. }
+            | Self::ConfigRevision { .. }
+            | Self::PlatformVersion { .. }
+            | Self::WallClockInterval { .. } => &[],
+        }
+    }
+
     /// Whether a capture's `commit_oid` is outside this value's anchored oids.
     fn has_unanchored_capture(&self) -> bool {
         match self {
@@ -191,6 +204,24 @@ fn same_captures(requested: &[AnchorCapture], stored: &BTreeMap<String, AnchorCa
             .all(|capture| stored.get(&capture.commit_oid) == Some(capture))
 }
 
+/// The scanner checks each present field value before JSON encoding adds
+/// escape sequences or `null` placeholders.
+fn capture_holds_secret(capture: &AnchorCapture) -> bool {
+    let AnchorCapture {
+        commit_oid,
+        tree_oid,
+        patch_id,
+        changed_paths,
+    } = capture;
+    let holds = |text: &str| !is_clean_identity(text);
+    holds(commit_oid)
+        || tree_oid.as_deref().is_some_and(holds)
+        || patch_id
+            .as_ref()
+            .is_some_and(|patch| holds(&patch.algorithm) || holds(&patch.value))
+        || changed_paths.iter().any(|path| holds(path))
+}
+
 /// Complete input for inserting one anchor and its object identity. The
 /// registry fields match [`crate::DecisionSpec`]'s.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,8 +274,10 @@ pub enum AnchorValidationError {
     /// resolution ladder reads captures by anchored oid only.
     #[error("anchor capture names a commit the anchor does not name")]
     UnanchoredCapture,
-    /// A value column or the capture payload holds a detected secret, or the
-    /// scanner could not read it, as for a value above its input bound.
+    /// A value column or a string field of an [`AnchorCapture`] holds a
+    /// detected secret, or the scanner could not read that column or field. A
+    /// value column or capture field longer than `MAX_REDACTABLE_BYTES`
+    /// produces this error.
     #[error("anchor value holds a detected secret or could not be scanned")]
     SecretValue,
 }
@@ -271,7 +304,7 @@ pub fn validate_anchor(spec: &AnchorSpec) -> Result<AnchorRowSpec, AnchorValidat
     if spec.source_revision < 0
         || identities
             .iter()
-            .any(|field| field.trim().is_empty() || identity(field).is_err())
+            .any(|field| field.trim().is_empty() || !is_clean_identity(field))
     {
         return Err(AnchorValidationError::InvalidIdentity);
     }
@@ -295,15 +328,71 @@ pub fn validate_anchor(spec: &AnchorSpec) -> Result<AnchorRowSpec, AnchorValidat
     if values
         .into_iter()
         .flatten()
-        .any(|value| identity(value).is_err())
-        || row
-            .payload
-            .as_deref()
-            .is_some_and(|payload| payload_has_secret(payload).unwrap_or(true))
+        .any(|value| !is_clean_identity(value))
+        || spec.value.captures().iter().any(capture_holds_secret)
     {
         return Err(AnchorValidationError::SecretValue);
     }
     Ok(row)
+}
+
+/// Writes `row` with the statement for its kind, which names the five columns
+/// every anchor sets and the value columns that kind owns.
+fn insert_row(
+    tx: &Transaction<'_>,
+    kind: AnchorKind,
+    row: &AnchorRowSpec,
+    object_id: &str,
+    commit_seq: i64,
+    sensitivity: Sensitivity,
+) -> rusqlite::Result<usize> {
+    macro_rules! insert {
+        ($columns:literal, $placeholders:literal, $($value:expr),+) => {
+            tx.execute_cached(
+                concat!(
+                    "INSERT INTO anchors(anchor_id,object_id,anchor_kind,created_commit_seq,",
+                    "sensitivity_class,", $columns, ") VALUES (?1,?2,?3,?4,?5,", $placeholders, ")"
+                ),
+                params![
+                    row.anchor_id,
+                    object_id,
+                    row.anchor_kind,
+                    commit_seq,
+                    sensitivity.as_str(),
+                    $($value),+
+                ],
+            )
+        };
+    }
+    match kind {
+        AnchorKind::Exact => insert!("exact_value", "?6", row.exact_value),
+        AnchorKind::ReachableFrom => insert!(
+            "reachable_from_oid,payload",
+            "?6,?7",
+            row.reachable_from_oid,
+            row.payload
+        ),
+        AnchorKind::ReachableBetween => insert!(
+            "reachable_between_start_oid,reachable_between_end_oid,payload",
+            "?6,?7,?8",
+            row.reachable_between_start_oid,
+            row.reachable_between_end_oid,
+            row.payload
+        ),
+        AnchorKind::DeploymentRevision => {
+            insert!("deployment_revision", "?6", row.deployment_revision)
+        }
+        AnchorKind::ConfigRevision => insert!("config_revision", "?6", row.config_revision),
+        AnchorKind::PlatformVersion => {
+            insert!("platform_version_range", "?6", row.platform_version_range)
+        }
+        AnchorKind::WallClockInterval => insert!(
+            "wall_clock_start,wall_clock_end",
+            "?6,?7",
+            row.wall_clock_start,
+            row.wall_clock_end
+        ),
+    }
 }
 
 impl Envelope<'_> {
@@ -319,61 +408,46 @@ impl Envelope<'_> {
 
     fn insert_anchor_inner(&mut self, spec: AnchorSpec) -> Result<AnchorWriteOutcome, KernelError> {
         let row = validate_anchor(&spec).map_err(|_| KernelError::InvalidInput)?;
+        let kind = spec.value.kind();
         require_live(self.tx, "domains", "domain_id", &spec.domain_id)?;
+        let AnchorSpec {
+            anchor_id,
+            object_id,
+            domain_id,
+            source_kind,
+            source_id,
+            source_revision,
+            sensitivity,
+            value: _,
+        } = spec;
         let object = ObjectRow {
-            object_id: spec.object_id.clone(),
+            object_id,
             object_kind: "anchor".to_string(),
-            domain_id: spec.domain_id.clone(),
-            source_kind: spec.source_kind.clone(),
-            source_id: spec.source_id.clone(),
-            source_revision: spec.source_revision,
+            domain_id,
+            source_kind,
+            source_id,
+            source_revision,
             created_commit_seq: self.commit_seq,
             invalidated_commit_seq: None,
             superseded_by: None,
-            sensitivity: spec.sensitivity,
+            sensitivity,
         };
+        // The registry row stores its identity fields verbatim: `validate_anchor`
+        // admits only fields the redactor leaves unchanged.
         insert_registry(self.tx, self.commit_seq, &object)?;
-        // `validate_anchor` refused every identity field holding a detection.
-        let field = |text: &str| RedactedField {
-            text: text.to_string(),
-            detections: Vec::new(),
-        };
-        record_registry_fields(
+        insert_row(
             self.tx,
-            &spec.object_id,
-            &field(&spec.domain_id),
-            &field(&spec.object_id),
-            &field(&spec.source_kind),
-            &field(&spec.source_id),
+            kind,
+            &row,
+            &object.object_id,
             self.commit_seq,
-        )?;
-        self.tx
-            .execute_cached(
-                "INSERT INTO anchors(
-                     anchor_id,object_id,anchor_kind,exact_value,reachable_from_oid,
-                     reachable_between_start_oid,reachable_between_end_oid,deployment_revision,
-                     config_revision,platform_version_range,wall_clock_start,wall_clock_end,
-                     payload,created_commit_seq,sensitivity_class
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-                params![
-                    row.anchor_id,
-                    spec.object_id,
-                    row.anchor_kind,
-                    row.exact_value,
-                    row.reachable_from_oid,
-                    row.reachable_between_start_oid,
-                    row.reachable_between_end_oid,
-                    row.deployment_revision,
-                    row.config_revision,
-                    row.platform_version_range,
-                    row.wall_clock_start,
-                    row.wall_clock_end,
-                    row.payload,
-                    self.commit_seq,
-                    spec.sensitivity.as_str(),
-                ],
-            )
-            .map_err(map_write_error)?;
+            sensitivity,
+        )
+        .map_err(map_write_error)?;
+        let outcome = AnchorWriteOutcome {
+            anchor_id,
+            object_id: object.object_id.clone(),
+        };
         self.changes.push(PendingChange {
             object,
             kind: ANCHOR_INSERT_KIND,
@@ -381,9 +455,6 @@ impl Envelope<'_> {
             redactions: Vec::new(),
             audit: None,
         });
-        Ok(AnchorWriteOutcome {
-            anchor_id: spec.anchor_id,
-            object_id: spec.object_id,
-        })
+        Ok(outcome)
     }
 }

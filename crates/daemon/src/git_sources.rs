@@ -2,11 +2,14 @@
 //!
 //! Object headers, the store's allocations, and decoded sizes are bounded independently; a selection is refused whole if any object is missing, corrupt, non-commit, repeated, or exceeds a bound. A non-UTF-8 message or a declared non-UTF-8 encoding is an explicit disposition rather than a converted or dropped row.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use gix::bstr::ByteSlice;
+use gix::odb::store::init::Slots;
 use kernel::source_identity::OccurrenceClass;
 
 use crate::harness_sources::{Representation, SourceUnit};
@@ -132,22 +135,219 @@ pub(crate) fn isolated_options(max_object_bytes: NonZeroU64) -> gix::open::Optio
     )])
 }
 
-/// Opens the repository without user, system, or installation configuration and with replacement refs ignored, so neither a repository's own settings nor a `refs/replace` entry can substitute another object for a selected id.
-///
-/// `max_object_bytes` is also installed as gix's allocation limit. A packed delta's header states only the final object size, while materializing it inflates every base in its chain; the limit makes the store refuse a base above the bound instead of allocating it. The override is applied after the repository's own configuration, so a repository cannot raise it.
 pub(crate) fn open(
     path: &Path,
     max_object_bytes: NonZeroU64,
 ) -> Result<gix::Repository, GitRefusal> {
-    let mut repo = gix::open_opts(path, isolated_options(max_object_bytes)).map_err(|error| {
+    open_with_slots(path, max_object_bytes, Slots::default())
+}
+
+/// Opens the repository without user, system, or installation configuration and with replacement refs ignored, so neither a repository's own settings nor a `refs/replace` entry can substitute another object for a selected id.
+///
+/// `max_object_bytes` is also installed as gix's allocation limit. A packed delta's header states only the final object size, while materializing it inflates every base in its chain; the limit makes the store refuse a base above the bound instead of allocating it. The override is applied after the repository's own configuration, so a repository cannot raise it.
+pub(crate) fn open_with_slots(
+    path: &Path,
+    max_object_bytes: NonZeroU64,
+    slots: Slots,
+) -> Result<gix::Repository, GitRefusal> {
+    let options = isolated_options(max_object_bytes).object_store_slots(slots);
+    let mut repo = gix::open_opts(path, options).map_err(|error| {
         if declares_unsupported_object_format(&error) {
             GitRefusal::UnsupportedObjectFormat
         } else {
             GitRefusal::Open
         }
     })?;
+    // gix's default slot sizing resolves the alternates chain and lists every
+    // database's `pack` directory while the store opens (gix-odb
+    // `store_impls/dynamic/init.rs`). Pack-directory listing errors other than
+    // `NotFound` cause gix's default store opening to fail; this check applies
+    // the same refusals to a given slot count.
+    if matches!(slots, Slots::Given(_)) && !sizing_inputs_readable(repo.objects.store_ref().path())
+    {
+        return Err(GitRefusal::Open);
+    }
     repo.objects.ignore_replacements = true;
     Ok(repo)
+}
+
+fn sizing_inputs_readable(objects: &Path) -> bool {
+    let mut dirs = if matches!(
+        objects.join("info").join("alternates").try_exists(),
+        Ok(false)
+    ) {
+        Vec::new()
+    } else {
+        let Ok(cwd) = std::env::current_dir() else {
+            return false;
+        };
+        let Ok(alternates) = gix::odb::alternate::resolve(objects.to_owned(), &cwd) else {
+            return false;
+        };
+        alternates
+    };
+    dirs.insert(0, objects.to_owned());
+    dirs.iter().all(|dir| {
+        std::fs::read_dir(dir.join("pack")).map_or_else(
+            |error| error.kind() == std::io::ErrorKind::NotFound,
+            |_| true,
+        )
+    })
+}
+
+/// The lookup returns `id`'s kind by decoding headers from `repo`'s own loose objects, then its pack files. Loose read errors and unusable pack lookups count as misses.
+///
+/// The pack read tries `hint`'s index first when it lies in this repository's `objects/pack`, then the other indices newest first, and stores the index that answers in `hint`. Both the hinted and the scanned lookups require regular index and pack files.
+///
+/// # Errors
+///
+/// A pack whose index describes another pack, or whose delta chain revisits an entry, produces [`PackCorruption`].
+pub(crate) fn file_object_kind(
+    repo: &gix::Repository,
+    id: &gix::oid,
+    hint: &Mutex<Option<PathBuf>>,
+) -> Result<Option<gix::object::Kind>, PackCorruption> {
+    let objects = repo.objects.store_ref().path();
+    let hash = repo.object_hash();
+    let loose = gix::odb::loose::Store::at(objects, hash)
+        .try_header(id)
+        .ok()
+        .flatten()
+        .map(|(_, kind)| kind);
+    match loose {
+        Some(kind) => Ok(Some(kind)),
+        None => packed_kind(&objects.join("pack"), hash, id, hint),
+    }
+}
+
+fn packed_kind(
+    pack_dir: &Path,
+    hash: gix::hash::Kind,
+    id: &gix::oid,
+    hint: &Mutex<Option<PathBuf>>,
+) -> Result<Option<gix::object::Kind>, PackCorruption> {
+    let hinted = hint
+        .lock()
+        .ok()
+        .and_then(|hint| hint.clone())
+        .filter(|path| path.parent() == Some(pack_dir));
+    if let Some(path) = hinted.as_deref()
+        && let Some(kind) = index_kind(path, hash, id)?
+    {
+        return Ok(Some(kind));
+    }
+    let Ok(entries) = std::fs::read_dir(pack_dir) else {
+        return Ok(None);
+    };
+    let mut indices: Vec<_> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let is_index = entry.file_type().is_ok_and(|kind| kind.is_file())
+                && path.extension().is_some_and(|extension| extension == "idx");
+            if !is_index || hinted.as_ref() == Some(&path) {
+                return None;
+            }
+            Some((entry.metadata().ok()?.modified().ok()?, path))
+        })
+        .collect();
+    indices.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, path) in indices {
+        if let Some(kind) = index_kind(&path, hash, id)? {
+            if let Ok(mut hint) = hint.lock() {
+                *hint = Some(path);
+            }
+            return Ok(Some(kind));
+        }
+    }
+    Ok(None)
+}
+
+/// A pack of the repository holds the looked-up object in a form whose header cannot be decoded.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PackCorruption {
+    /// The delta chain revisits one of the pack's entries.
+    CyclicDeltaChain,
+    /// The index's pack checksum differs from the pack file's trailer, so the index's offsets describe another pack.
+    MismatchedIndex,
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+/// Reads `id`'s header from the pack `path` indexes. Each ref-delta hop resolves its base in the same index; a well-formed chain visits each entry at most once, so more hops than the index holds entries means the chain revisits an entry.
+fn index_kind(
+    path: &Path,
+    hash: gix::hash::Kind,
+    id: &gix::oid,
+) -> Result<Option<gix::object::Kind>, PackCorruption> {
+    use gix::odb::pack;
+    let pack_path = path.with_extension("pack");
+    if !is_regular_file(path) || !is_regular_file(&pack_path) {
+        return Ok(None);
+    }
+    let Ok(index) = pack::index::File::at(path, hash) else {
+        return Ok(None);
+    };
+    let Some(position) = index.lookup(id) else {
+        return Ok(None);
+    };
+    let Ok(data) = pack::data::File::at(pack_path, hash) else {
+        return Ok(None);
+    };
+    if index.pack_checksum() != data.checksum() {
+        return Err(PackCorruption::MismatchedIndex);
+    }
+    let entry_at = |position| data.entry(index.pack_offset_at_index(position)).ok();
+    let Some(entry) = entry_at(position) else {
+        return Ok(None);
+    };
+    let remaining_hops = Cell::new(index.num_objects());
+    let revisited = Cell::new(false);
+    let in_pack = |base: &gix::oid| {
+        let Some(left) = remaining_hops.get().checked_sub(1) else {
+            revisited.set(true);
+            return None;
+        };
+        remaining_hops.set(left);
+        let entry = entry_at(index.lookup(base)?)?;
+        Some(pack::data::decode::header::ResolvedBase::InPack(entry))
+    };
+    let header = data.decode_header(entry, &mut gix::zlib::Inflate::default(), &in_pack);
+    match header {
+        Ok(header) => Ok(Some(header.kind)),
+        Err(_) if revisited.get() => Err(PackCorruption::CyclicDeltaChain),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The object store's lookup needed more pack index slots than [`open_with_slots`] received.
+pub(crate) struct SlotsExhausted;
+
+/// The kind of object `id` from `repo`'s object store. Store errors read as absent objects.
+pub(crate) fn store_object_kind(
+    repo: &gix::Repository,
+    id: &gix::oid,
+) -> Result<Option<gix::object::Kind>, SlotsExhausted> {
+    match repo.try_find_header(id) {
+        Ok(header) => Ok(header.map(|header| header.kind())),
+        Err(error) if exhausts_slots(&error.0) => Err(SlotsExhausted),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Whether the store ran out of pack index slots while looking up the object or any base in its delta chain. The store wraps a base lookup's failure in `DeltaBaseLookup`.
+fn exhausts_slots(error: &gix::objs::find::Error) -> bool {
+    use gix::odb::store::{find::Error as Store, load_index::Error as LoadIndex};
+    fn walk(error: &Store) -> bool {
+        match error {
+            Store::LoadIndex(LoadIndex::InsufficientSlots { .. }) => true,
+            Store::DeltaBaseLookup { err, .. } => walk(err),
+            _ => false,
+        }
+    }
+    error.downcast_ref::<Store>().is_some_and(walk)
 }
 
 /// Whether the store refused an object because materializing it needs an allocation above its limit, anywhere in a delta chain.

@@ -11,8 +11,8 @@ truncation flag comes from a different field than the OpenCode one.
   reads `/metadata/truncated` under the tool part's `state`; Pi reads
   `/details/truncation/truncated` under the `toolResult` message; both with
   `as_bool`.
-- Callers: `crates/daemon/src/tool_outcome.rs:37` (OpenCode, passing `state`)
-  and `tool_outcome.rs:71` (Pi, passing the message).
+- Callers: `crates/daemon/src/tool_outcome.rs:39` (OpenCode, passing `state`)
+  and `tool_outcome.rs:73` (Pi, passing the message).
 - Tests: `crates/daemon/src/tool_vocabulary_tests.rs:185` covers both pointers,
   a string value, a missing flag, and a Pi message read as OpenCode;
   `crates/daemon/tests/harness_sources.rs:3619` covers the OpenCode trace.

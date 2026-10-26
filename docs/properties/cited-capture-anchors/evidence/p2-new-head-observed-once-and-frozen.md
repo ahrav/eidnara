@@ -16,7 +16,13 @@ parses the submission's output, then calls `observe_head` once
 builds and freezes one `PreparedCapture` per job. Each plan carries the
 same `head` value (`crates/daemon/src/memory_capture.rs:950`), serialized
 as `{"commit":"<40 hex>"}` or `"head_unavailable"`
-(`crates/daemon/src/memory_capture/head.rs:10`). The store freezes a plan
+(`crates/daemon/src/memory_capture/head.rs:15`). `observe_head` (`:32`)
+resolves HEAD once through `head_id` (`:62`), which follows a branch that
+is itself symbolic, such as one `git symbolic-ref` aliases to another
+branch, to the end of its chain, as the Kernel's checkout snapshot
+(`head_id`, `crates/kernel/src/applicability/checkout.rs:699`) does; when its first store lookup exhausts the store's index
+slots, only the object lookup repeats, for the same id, in a store opened
+with the default slot sizing (`reopened_kind`, `:70`). The store freezes a plan
 once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:373`,
 returns the stored text to a later call), and `publish` reads the stored
 text, so a retry publishes the value frozen at submit. The commit's request
@@ -53,7 +59,14 @@ which both plans still hold the submit-time head; then the trigger dropped and
 a drain that publishes the frozen plans. `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it`
 (`crates/daemon/src/lib.rs:24632`) does this for a repository with
 commits, a detached HEAD, an unborn HEAD, a plain directory, and a
-repository declaring SHA-256.
+repository declaring SHA-256. The head-observation tests freeze a HEAD
+commit stored whole, as an offset delta, and as an id delta in a pack
+(`crates/daemon/src/memory_capture/head.rs:517`), one stored as a delta
+whose base sits in another pack (`:534`), and one held only by an
+alternate behind more pack indices than the first slot count (`:690`).
+`a_head_through_a_branch_alias_freezes_the_aliased_commit` (`:373`) freezes
+the commit a HEAD reaches through one and two branch aliases, with the
+aliased branch loose and in `packed-refs`.
 
 ## Investigation log
 
@@ -74,13 +87,13 @@ repository declaring SHA-256.
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
   without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:1994`).
+  (`crates/daemon/src/memory_capture.rs:1996`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
 ### Q: Does the anchor use the frozen value?
 
-- Sources examined: `anchor_spec` (`crates/daemon/src/memory_capture/cite.rs:362`)
+- Sources examined: `anchor_spec` (`crates/daemon/src/memory_capture/cite.rs:403`)
   and the publish closure at the U3 branch.
 - Findings: the anchor's oid is the plan's `FrozenHead::Commit`; the U3
   tests compare each anchor row's oid with the fixture HEAD at submit

@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-`append_citations` (`crates/daemon/src/memory_capture/cite.rs:338`) appends one `memory_capture_citation` event per cited block through `Envelope::append_decision_event`, which checks the evidence is live. The decision row keeps `evidence_id` empty, so `fold_cited_evidence_class` does not raise its class. `EVIDENCE_CITED_SQL` (`crates/kernel/src/slice/write.rs:42`) counts decision events of live decisions, so `expire_harness_captures` (`crates/kernel/src/local_file.rs:245`) keeps the cited evidence and `retire_evidence` refuses it with `Conflict`.
+`append_citations` (`crates/daemon/src/memory_capture/cite.rs:379`) appends one `memory_capture_citation` event per cited block through `Envelope::append_decision_event`, which checks the evidence is live. The decision row keeps `evidence_id` empty, so `fold_cited_evidence_class` does not raise its class. `EVIDENCE_CITED_SQL` (`crates/kernel/src/slice/write.rs:42`) counts decision events of live decisions, so `expire_harness_captures` (`crates/kernel/src/local_file.rs:245`) keeps the cited evidence and `retire_evidence` refuses it with `Conflict`.
 
 ## Failure scenario
 
@@ -27,4 +27,4 @@ A cited decision, a sweep at a far-future instant, and a retirement attempt (`cr
 - Sources examined: served visibility through `served_rows_for` in the end-to-end test.
 - Findings: Cited and uncited siblings serve with one visibility and class on every surface.
 - Missing evidence: an audit of every export path.
-- Conclusion: resolved with answer for serving; export paths read the stored class, which is the decision's own.
+- Conclusion: resolved with answer for serving. For export paths: the decision row keeps `evidence_id` empty, so its stored class is its own and a reader of the stored class and a reader of the folded class return the same value; whether every export path reads one of those two is unresolved, needs an audit of every export path.
