@@ -144,21 +144,21 @@ async fn an_equal_digest_replays_and_another_harness_or_role_conflicts() {
     };
     assert_eq!(
         record_serve(&handler.kernel, &serve("daemon-test", false)),
-        UseOutcomeWrite::Written
+        Some(UseOutcomeWrite::Written)
     );
     let tip = kernel_commits(&handler);
     assert_eq!(
         record_serve(&handler.kernel, &serve("daemon-test", false)),
-        UseOutcomeWrite::Replayed
+        Some(UseOutcomeWrite::Replayed)
     );
     assert_eq!(kernel_commits(&handler), tip, "a replay commits nothing");
     assert_eq!(
         record_serve(&handler.kernel, &serve("other-harness", false)),
-        UseOutcomeWrite::Conflict
+        Some(UseOutcomeWrite::Conflict)
     );
     assert_eq!(
         record_serve(&handler.kernel, &serve("daemon-test", true)),
-        UseOutcomeWrite::Conflict
+        Some(UseOutcomeWrite::Conflict)
     );
     let records = served(&handler, &project);
     assert_eq!(records.len(), 1);
@@ -256,7 +256,7 @@ async fn a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_re
             &faulted_project,
             &[("mem-a", "Rule a.")],
         );
-        *faulted.use_outcome_fault.lock().unwrap() = Some(fault);
+        *faulted.use_outcome_fault.lock().unwrap() = Some(Some(fault));
 
         let expected = call_transform(&clean, vec![ck("m1", 1, "hello")]).await;
         let observed = call_transform(&faulted, vec![ck("m1", 1, "hello")]).await;
@@ -579,7 +579,8 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     };
     assert_eq!(
         record_serve(&starting.kernel, &serve),
-        UseOutcomeWrite::KernelUnavailable
+        None,
+        "a Kernel that is not Ready attempts no write"
     );
 
     let (held, _store, _dir, project) =
@@ -617,7 +618,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     let waited = started.elapsed();
     holding.send(()).unwrap();
     holder.join().unwrap();
-    assert_eq!(outcome, UseOutcomeWrite::Deadline);
+    assert_eq!(outcome, Some(UseOutcomeWrite::Deadline));
     eprintln!("use-outcome writer wait under a held writer: {waited:?}");
     assert!(
         waited >= std::time::Duration::from_millis(250)
@@ -625,7 +626,10 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
         "the wait is bounded by the write budget: {waited:?}"
     );
     assert!(served(&held, &project).is_empty());
-    assert_eq!(record_serve(&held.kernel, &serve), UseOutcomeWrite::Written);
+    assert_eq!(
+        record_serve(&held.kernel, &serve),
+        Some(UseOutcomeWrite::Written)
+    );
     let as_subagent = Serve {
         is_subagent: true,
         ..serve
@@ -633,7 +637,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     for _ in 0..2 {
         assert_eq!(
             record_serve(&held.kernel, &as_subagent),
-            UseOutcomeWrite::Conflict,
+            Some(UseOutcomeWrite::Conflict),
             "a conflict is not repaired by a later fold"
         );
     }
@@ -701,17 +705,18 @@ async fn an_emergency_pass_that_reruns_records_one_serve() {
     assert_eq!(counts(&handler), [("written", 1)]);
 }
 
-/// Within one rerunning pass, a write that met an unready Kernel is retried by the rerun, while a write that waited out its budget or met a conflict settles the pass: one writer wait per pass at most.
+/// Within one rerunning pass, a write that met a Kernel that was not Ready is retried by the rerun, while any commit outcome settles the pass, including a lost fence after the writer wait: one writer wait per pass at most.
 #[tokio::test(flavor = "current_thread")]
 async fn only_an_unready_kernel_leaves_the_pass_to_retry_its_serve() {
     for (fault, expected, records) in [
+        (None, vec![("written", 1), ("kernel_unavailable", 1)], 1),
+        (Some(KernelError::Deadline), vec![("deadline", 1)], 0),
+        (Some(KernelError::Conflict), vec![("conflict", 1)], 0),
         (
-            KernelError::Held,
-            vec![("written", 1), ("kernel_unavailable", 1)],
-            1,
+            Some(KernelError::FenceLost),
+            vec![("kernel_unavailable", 1)],
+            0,
         ),
-        (KernelError::Deadline, vec![("deadline", 1)], 0),
-        (KernelError::Conflict, vec![("conflict", 1)], 0),
     ] {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, project) =

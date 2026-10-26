@@ -48,16 +48,6 @@ impl UseOutcomeWrite {
         }
     }
 
-    /// Whether this outcome ends the pass's serve writes. Only an unready Kernel, which costs no writer wait, leaves a later attempt in the same pass to retry, so a pass waits on the writer at most once.
-    pub(crate) const fn settles(self) -> bool {
-        match self {
-            Self::Written | Self::Replayed | Self::Conflict | Self::Deadline | Self::Refused => {
-                true
-            }
-            Self::KernelUnavailable => false,
-        }
-    }
-
     pub(crate) fn from_error(error: KernelError) -> Self {
         match error {
             KernelError::Conflict => Self::Conflict,
@@ -117,17 +107,21 @@ pub(crate) struct Serve<'a> {
     pub(crate) recorded_at: i64,
 }
 
-pub(crate) fn record_serve(kernel: &KernelOpenCoordinator, serve: &Serve<'_>) -> UseOutcomeWrite {
-    let Ok(store) = kernel.kernel_store() else {
-        return UseOutcomeWrite::KernelUnavailable;
-    };
+/// Writes the serve record, or answers `None` when the Kernel is not Ready and no write was attempted.
+/// `kernel_unavailable` from a commit can follow a writer wait, and after a post-commit `Io` or `Inconclusive`
+/// the record may exist; a later write at the same key replays it.
+pub(crate) fn record_serve(
+    kernel: &KernelOpenCoordinator,
+    serve: &Serve<'_>,
+) -> Option<UseOutcomeWrite> {
+    let store = kernel.kernel_store().ok()?;
     let snapshot = serve.snapshot;
     let digest = snapshot.served_set_digest();
     let Some(operation_key) = serve
         .project
         .operation_key(FAMILY, &format!("{}:{digest}", serve.session_id))
     else {
-        return UseOutcomeWrite::Refused;
+        return Some(UseOutcomeWrite::Refused);
     };
     let session_role = if serve.is_subagent {
         SessionRole::Subagent
@@ -153,13 +147,15 @@ pub(crate) fn record_serve(kernel: &KernelOpenCoordinator, serve: &Serve<'_>) ->
         decision_object_ids: snapshot.served_ids().to_vec(),
     };
     let budget = EvalBudget::new(Some(Instant::now() + WRITE_BUDGET), Arc::default());
-    match store.commit_within_budget(&budget, intent, |envelope| {
-        envelope.insert_use_outcome(spec)
-    }) {
-        Ok(receipt) if receipt.replayed => UseOutcomeWrite::Replayed,
-        Ok(_) => UseOutcomeWrite::Written,
-        Err(error) => UseOutcomeWrite::from_error(error),
-    }
+    Some(
+        match store.commit_within_budget(&budget, intent, |envelope| {
+            envelope.insert_use_outcome(spec)
+        }) {
+            Ok(receipt) if receipt.replayed => UseOutcomeWrite::Replayed,
+            Ok(_) => UseOutcomeWrite::Written,
+            Err(error) => UseOutcomeWrite::from_error(error),
+        },
+    )
 }
 
 fn request_digest(served_ids: &[String], harness: &str, role: SessionRole) -> String {

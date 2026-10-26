@@ -2833,9 +2833,10 @@ pub struct HandlerCore {
     reduction_injection: Mutex<HashMap<String, Vec<ReductionDecision>>>,
     #[cfg(test)]
     after_transform_commit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    /// Stands in for the Kernel's answer to the next serve write, between the fold's Memory Store commit and the write.
+    /// Stands in for the Kernel's answer to the next serve write, between the fold's Memory Store commit and the write:
+    /// `Some(None)` is a Kernel that is not Ready, and `Some(Some(error))` is a commit that returned `error`.
     #[cfg(test)]
-    use_outcome_fault: Mutex<Option<kernel::KernelError>>,
+    use_outcome_fault: Mutex<Option<Option<kernel::KernelError>>>,
     #[cfg(test)]
     between_transform_and_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -9658,7 +9659,7 @@ impl HandlerCore {
         {
             return;
         }
-        let outcome = self.use_outcome_fault().map_or_else(
+        let attempt = self.use_outcome_fault().map_or_else(
             || {
                 use_outcome_writer::record_serve(
                     &self.kernel,
@@ -9672,17 +9673,22 @@ impl HandlerCore {
                     },
                 )
             },
-            use_outcome_writer::UseOutcomeWrite::from_error,
+            |fault| fault.map(use_outcome_writer::UseOutcomeWrite::from_error),
         );
-        if outcome.settles() {
-            env.use_outcome_settled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-        }
+        // A Kernel that is not Ready cost no writer wait, so a rerun in this pass may retry; any commit outcome
+        // settles the pass, which bounds a pass to one writer wait.
+        let Some(outcome) = attempt else {
+            self.use_outcome_counts
+                .record(use_outcome_writer::UseOutcomeWrite::KernelUnavailable);
+            return;
+        };
+        env.use_outcome_settled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.use_outcome_counts.record(outcome);
     }
 
     #[cfg(test)]
-    fn use_outcome_fault(&self) -> Option<kernel::KernelError> {
+    fn use_outcome_fault(&self) -> Option<Option<kernel::KernelError>> {
         self.use_outcome_fault
             .lock()
             .expect("use-outcome fault mutex")
@@ -9690,7 +9696,7 @@ impl HandlerCore {
     }
 
     #[cfg(not(test))]
-    fn use_outcome_fault(&self) -> Option<kernel::KernelError> {
+    fn use_outcome_fault(&self) -> Option<Option<kernel::KernelError>> {
         None
     }
 

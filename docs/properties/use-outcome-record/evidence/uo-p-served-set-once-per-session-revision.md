@@ -9,12 +9,12 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `757cada42`).
+its parent is `75408189f`).
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:120`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:113`; the request
   digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:165`)).
-- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9635`) runs after
+  (`crates/daemon/src/use_outcome_writer.rs:161`)).
+- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9636`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
@@ -33,11 +33,11 @@ its parent is `757cada42`).
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
   (`crates/daemon/src/use_outcome_writer_tests.rs:565`);
   `every_kernel_error_maps_to_a_closed_outcome`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:659`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:663`);
   `an_emergency_pass_that_reruns_records_one_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:678`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:682`);
   `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:706`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:710`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:214`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
@@ -83,10 +83,11 @@ between; a CAS retry.
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A deadline, an unready Kernel, or a lost fence leaves the serve for
-  a later write at its digest: a rerun in the same pass when the Kernel was
-  unready (a pass waits on the writer at most once), or a later HARD fold that
-  another input requests over the same served set, such as context pressure. A
-  session whose composition never folds HARD again at that set stays unrecorded.
-  A conflict and a refusal are not repaired by a later fold.
+  a later write at its digest: a rerun in the same pass when the Kernel was not
+  Ready and no write was attempted (every commit outcome settles the pass, so a
+  pass waits on the writer at most once), or a later HARD fold that another
+  input requests over the same served set, such as context pressure. A session
+  whose composition never folds HARD again at that set stays unrecorded. A
+  conflict and a refusal are not repaired by a later fold.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.

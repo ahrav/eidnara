@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `757cada42`).
+its parent is `75408189f`).
 
 - Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:485`) reads one
   statement, so one snapshot, in `retain_until`, id order through
