@@ -88,10 +88,6 @@ function hunkLines(hunks: Hunk[], side: "old" | "new"): Set<number> {
     return lines;
 }
 
-export function addedLines(hunks: Hunk[]): Set<number> {
-    return hunkLines(hunks, "new");
-}
-
 /**
  * An anchor that reappears on a replacement line is an existing citation whose surrounding prose
  * changed, so it still maps through its target's hunks.
@@ -195,7 +191,7 @@ export function checkAnchors(repo: Repository): Report {
         const docChange = repo.changes.get(doc);
         const docAdded = docChange?.kind === "added";
         const docHunks = docChange?.kind === "modified" ? repo.hunks(docChange.base, doc) : [];
-        const added = addedLines(docHunks);
+        const added = hunkLines(docHunks, "new");
         const kept =
             docChange?.kind === "modified" && docHunks.some((hunk) => hunk.oldCount > 0)
                 ? removedAnchors(repo.baseText(docChange.base), docHunks)
@@ -243,7 +239,8 @@ export function checkAnchors(repo: Repository): Report {
             if (mapped.kind === "changed" && edited && located.kind === "modified") {
                 // An anchor kept on an edited document line is reaffirmed: an in-place edit of its
                 // cited lines passes while the range exists at HEAD. Hunks above the range still
-                // shift it, and that shift reports as moved.
+                // shift it, and that shift reports as moved. A pure insertion names the old line it
+                // follows, so one at `start - 1` is above the range and one at `start` is inside it.
                 const above = hunks.filter((hunk) => Math.max(hunk.oldStart, hunk.oldStart + hunk.oldCount - 1) < anchor.start);
                 mapped = mapRange(above, anchor.start, anchor.end);
                 if (mapped.kind === "same") {
