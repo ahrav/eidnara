@@ -51,7 +51,29 @@ Analyzer checks the scorer relies on:
 `identity_pins_the_manifest` (`:389-413`); see
 `../dependencies/existing-checks.md` S1.
 
-## S-B to S-H and R5
+## S-D store (`crates/memory-store/tests/contradiction_candidates.rs`, #1165)
+
+| Check | Location | Asserts | Records | Status |
+| --- | --- | --- | --- | --- |
+| `each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` | `:73` | one row per key; lower-tip rewrite keeps the tip; a newer write removes unnamed keys | row key and caps | unaudited |
+| `a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` | `:115` | K + 1 rows, bad counts, repeated decisions, bad ids and digests refused; nothing written | row key and caps | unaudited |
+| `an_id_the_scanner_detects_is_refused_and_nothing_is_written` | `:169` | a secret-bearing id is refused | read keys (no text) | unaudited |
+| `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest` | `:188` | eviction order and count; another project untouched | row key and caps | unaudited |
+| `a_decision_pages_in_reader_order_with_a_stable_cursor` | `:236` | reader order; 70 rows at limit 64 page as 64, 6, none; clamp | read serves only live rows (store arm) | unaudited |
+| `the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys` | `:309` | sweep page by rowid; keyed delete; row and byte gauge | sweep (store arm) | unaudited |
+| `truncating_and_replaying_the_writes_rebuilds_the_same_rows` | `:376` | truncate then replay reproduces the rows | rebuildable (store arm) | unaudited |
+| `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:415` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
+| `a_late_write_replaces_held_keys_and_adds_none` | `:458` | a write below the held tip adds no key | row key and caps | unaudited |
+| `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:492` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
+| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:517` | rows added before or removed from page one move nothing after the cursor; non-canonical cursors refused | read (paging) | unaudited |
+| `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:570` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
+| `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:634` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
+
+Baseline: `crates/memory-store/tests/baseline.rs` pins the table and its two
+indexes in `EXPECTED_OBJECTS` and refuses a store at the prior baseline
+untouched (`:495`).
+
+## S-B, S-C, S-E to S-H and R5
 
 None found. The trigger, candidate set, store, sweep, read, flag, and
 dispute-handoff behavior does not exist at the branch tip; the store

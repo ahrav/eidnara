@@ -447,7 +447,21 @@ complete, none for 3, 4, 5; `deadline` = 1.
 Type: safety
 Reachability: explicit-config-only
 Status: active - PROPOSED
-Exercised: not yet - U3 table does not exist
+Exercised: partial - direct-write store arm (#1165): `crates/memory-store/tests/contradiction_candidates.rs`
+`each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` (`:73`) shows one
+row per key, a lower-tip rewrite that keeps the higher tip and replaces the
+other values, and a newer write that removes keys it no longer names;
+`a_late_write_replaces_held_keys_and_adds_none` (`:458`) shows a write below
+the held tip adds no key, so a descriptor never exceeds K;
+`a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` (`:115`)
+and `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` (`:570`)
+show K accepted, K + 1 refused with the held rows unchanged, and a project
+at `per_project` evicting the lowest `score_bp`, then oldest, then smallest
+key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest`
+(`:188`) shows another project's rows are untouched. The store
+(`crates/memory-store/src/contradiction_candidates.rs:230`) enforces K and the
+project cap in the write transaction; the daemon owns the values. The pass
+arm (M per pass, `rows_written`, replayed units) lands with #1167.
 Guarantee: The table key is (project digest, descriptor evidence object id,
 decision object id); a write for an existing key replaces `decision_id`,
 `score`, `matched_atoms`, `publish_tip`, `created_at_ms`; one pass writes at
@@ -482,7 +496,12 @@ publishing it again yields the same 5 rows with a newer `publish_tip`.
 Type: safety
 Reachability: explicit-config-only
 Status: active - PROPOSED
-Exercised: not yet - U3 rebuild path does not exist
+Exercised: partial - store arm (#1165):
+`truncating_and_replaying_the_writes_rebuilds_the_same_rows`
+(`crates/memory-store/tests/contradiction_candidates.rs:376`) truncates through the test-support
+`truncate_contradiction_candidates_for_test` and replays a write sequence,
+reproducing the same rows excluding `created_at_ms`. The pass arm, which
+re-scores retained evidence bytes at one tip, lands with #1167.
 Guarantee: For one Kernel snapshot, one scorer contract version V, and no
 budget exhaustion, truncating the table and rebuilding it from the project's
 live descriptors yields the same set of (key, decision_id, score,
@@ -589,6 +608,13 @@ Open questions:
 - Terminal name and the section 7.8 method literal (API handoff); whether
   `matched_atoms` as a count is acceptable where the atom list is not (yes
   proposed: a count is not text).
+- G7, sensitivity of descriptor-derived rows: resolved by #1165. A row holds
+  ids, integers, and times only (the table's columns are pinned by
+  `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
+  `crates/memory-store/tests/contradiction_candidates.rs:415`), the memory
+  store is local, and the read answers carry the same closed key set, so a
+  derived row inherits local-only egress by construction and carries no
+  sensitivity column.
 Falsifier: the read answers rows for a `superseded` decision, or a row
 includes `summary`.
 Legal witness: active decision with 3 rows answers 3 rows and `next: null`;
