@@ -24,7 +24,7 @@ revision.
   predicates at lines 45-46). A session with none takes no writer, because the
   check above skips it; the update itself holds only the writer.
 - Outcomes: the match in `touch_session`
-  (`crates/daemon/src/use_outcome_writer.rs:297-301`) counts
+  (`crates/daemon/src/use_outcome_writer.rs:305-315`) counts
   `transform_touched` for an updated row and maps a Kernel error through
   `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:350`) to
   `transform_skipped_deadline` or `transform_skipped_unavailable`.

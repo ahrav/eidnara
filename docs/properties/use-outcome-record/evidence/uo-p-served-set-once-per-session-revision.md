@@ -13,9 +13,12 @@ revision.
 
 - Key and digest: `crates/daemon/src/use_outcome_writer.rs:402-405`; the request
   digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:453`)).
-- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9721`) runs after
-  each committed attempt in `run_transform`.
+  (`crates/daemon/src/use_outcome_writer.rs:453-458`)).
+- Call sites: `record_use_outcome` (`crates/daemon/src/lib.rs:9721`) runs after
+  each committed attempt: the boundary-failure path in `run_transform`
+  (`crates/daemon/src/lib.rs:9716`), the committed attempt in `first_transform`
+  (`crates/daemon/src/lib.rs:10039`), and the committed rerun in
+  `rerun_transform` (`crates/daemon/src/lib.rs:9968`).
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
 - Guarantee under test: For one (project digest, harness, session, served-set

@@ -1186,7 +1186,7 @@ with a Canonical read; a primary on each engine.
 Confidence: high -
 [evidence](evidence/uo-p-producer-matches-request-subagent-flag.md). the role
 comes from the pass's `is_subagent`
-(`crates/daemon/src/use_outcome_writer.rs:409`). Reachability per engine (B1):
+(`crates/daemon/src/use_outcome_writer.rs:409-413`). Reachability per engine (B1):
 `subagent` rows arise only on the additive engine.
 Existing check: `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
 (`crates/daemon/src/use_outcome_writer_tests.rs:385`); Kernel half:
@@ -1256,6 +1256,13 @@ Open questions:
 - A conflict or invalid input in the step answers `source_retirement_failed` and
   counts no lifecycle name; the closed names cover the marked, nothing-live, and
   unavailable outcomes only.
+- The step marks every live record of the session in one `UPDATE` under one
+  commit with no row bound or deadline (`mark_session_deleted`,
+  `crates/daemon/src/use_outcome_writer.rs:261-293`), so it holds the writer
+  and the delete's blocking worker for a time that grows with the session's
+  live records; the captured-source retirement before it pages. Whether a
+  session can accumulate enough live records to need paging is an owner
+  decision (needs human input).
 
 ### uo-p-last-transform-at-monotone-per-committing-pass
 
@@ -1282,7 +1289,7 @@ memory-enabled route (`use_outcomes_to_touch`
 scoped thread beside the response build that the settle joins before the
 response returns (`crates/daemon/src/lib.rs:10130`, `touch_use_outcomes`
 (`crates/daemon/src/lib.rs:9851`)), within what remains of the pass's Kernel
-wait (`crates/daemon/src/use_outcome_writer.rs:359`); a pass that handed its
+wait (`PassWriteBudget::spend`, `crates/daemon/src/use_outcome_writer.rs:368-375`); a pass that handed its
 serve to a tracked job leaves the touch to that job, which checks and updates
 after its serve commits with a Kernel wait of its own (`touch_after_serve`
 (`crates/daemon/src/use_outcome_writer.rs:333`)); the Kernel update moves
@@ -1343,6 +1350,13 @@ Open questions:
   pass's time is recorded by the next committing pass. This is the convergence
   a skipped touch already has; whether the attribution must name that later
   pass without a further pass is an owner decision (needs human input).
+- The advance updates every stale live record of the session in one statement
+  under the pass budget (`crates/kernel/src/use_outcome.rs:43-47`); a row set
+  the budget cannot cover is interrupted and rolled back whole, and each later
+  committing pass repeats the attempt, so a session with enough stale records
+  never catches up. Paging the update, or one activity timestamp per session,
+  would bound it; the row count a session can reach is an owner decision
+  (needs human input).
 - A session rebound to a route with memory disabled keeps its records untouched
   by those passes, because such a route takes no Kernel read (C2).
 - A pass with an earlier clock selects no record, because the update filters on

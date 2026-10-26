@@ -205,14 +205,41 @@ async fn only_an_available_composition_is_recorded() {
                 ..bound(&disabled_project)
             },
         );
-        seed_memories(
-            &disabled.kernel.kernel_store().unwrap(),
-            &disabled_project,
-            &[("mem-a", "Rule a.")],
+        let kernel = disabled.kernel.kernel_store().unwrap();
+        seed_memories(&kernel, &disabled_project, &[("mem-a", "Rule a.")]);
+        // A live record with a null `last_transform_at` is stale for any pass, so a touch on the disabled route would count.
+        let stale = canonical_memory::CanonicalMemorySnapshot::new(
+            kernel.tip().unwrap(),
+            false,
+            vec![canonical_memory::CanonicalMemory {
+                object_id: "mem-a".to_string(),
+                category: "PROJECT_RULES".to_string(),
+                content: "Rule a.".to_string(),
+            }],
+        );
+        let binding = bound(&disabled_project);
+        assert_eq!(
+            record_serve(
+                &disabled.kernel,
+                &Serve {
+                    project: &binding.kernel_project,
+                    harness: &binding.harness,
+                    session_id: "ses",
+                    is_subagent: false,
+                    snapshot: &stale,
+                    recorded_at: 1,
+                },
+            ),
+            Some(UseOutcomeWrite::Written)
         );
         let response = call_transform(&disabled, vec![ck("m1", 1, "hello")]).await;
         assert_eq!(response["action"], "HARD", "{response}");
-        assert!(served(&disabled, &disabled_project).is_empty());
+        let records = served(&disabled, &disabled_project);
+        assert_eq!(records.len(), 1, "the disabled pass recorded no serve");
+        assert_eq!(
+            records[0].serve.last_transform_at, None,
+            "the disabled pass touched no record"
+        );
         assert!(
             counts(&disabled).is_empty(),
             "a disabled route attempts no write"
