@@ -2594,7 +2594,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 /// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
-/// Each in-flight use-outcome serve write holds one clone of the composition it records after the pass's response released its charges; `use_outcome_writer::RETAINED_SNAPSHOT_BYTES_BOUND` covers every write slot at the bounded read's size.
+/// Each in-flight use-outcome serve write holds one clone of the composition it records after the pass's response released its charges; `use_outcome_writer::RETAINED_SNAPSHOT_BYTES_BOUND` covers every write slot at the size of a block the Memory Store commit admits.
 /// The transform-serving combined budget is the CK previous-output store plus the native previous-output store, which refuses an entry above `NATIVE_OUTPUT_ENTRY_BUDGET_BYTES` and evicts sessions past `NATIVE_OUTPUT_BUDGET_BYTES`.
 /// A ready transform snapshot holds the CK input and scalar fields, never native messages or a delta fallback, so the snapshot and lease budgets bound what `TransformRequest::snapshot_retained_bytes` charges.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
@@ -9708,6 +9708,10 @@ impl HandlerCore {
         }
         env.use_outcome_settled
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // The slot is reserved before the composition is cloned, so a full set of slots clones nothing.
+        let Some(slot) = self.use_outcome_writes.reserve() else {
+            return;
+        };
         let injected = fault.flatten();
         let kernel = Arc::clone(&self.kernel);
         let project = env.binding.kernel_project.clone();
@@ -9717,7 +9721,7 @@ impl HandlerCore {
         let snapshot = snapshot.clone();
         let recorded_at = env.pass_now;
         let write_budget = self.use_outcome_writes.write_budget();
-        let Some(job) = self.use_outcome_writes.job(move || match injected {
+        let job = self.use_outcome_writes.job(slot, move || match injected {
             Some(error) => Some(use_outcome_writer::UseOutcomeWrite::from_error(error)),
             None => use_outcome_writer::record_serve(
                 &kernel,
@@ -9731,9 +9735,7 @@ impl HandlerCore {
                 },
                 write_budget,
             ),
-        }) else {
-            return;
-        };
+        });
         if self.admission().spawn_blocking(job).is_none() {
             self.use_outcome_writes
                 .record(use_outcome_writer::UseOutcomeWrite::KernelUnavailable);

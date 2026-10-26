@@ -27,7 +27,7 @@ revision.
   `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`
   (`crates/daemon/src/use_outcome_writer_tests.rs:510`);
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:600`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:709`); Kernel half:
   `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
   (`crates/kernel/tests/kernel_use_outcome.rs:164`). Status: unaudited.
 
