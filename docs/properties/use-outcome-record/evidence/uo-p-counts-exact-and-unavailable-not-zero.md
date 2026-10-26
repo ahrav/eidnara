@@ -9,11 +9,11 @@ Record kind: new obligation activated by #1157.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `742896941`).
+its parent is `7d2a34fe5`).
 
 - Count read: `crates/kernel/src/use_outcome.rs:211` counts the rows of the
   by-decision read in one statement.
-- Route: `crates/daemon/src/memory_reviewer/wire.rs:25` binds through
+- Route: `crates/daemon/src/memory_reviewer/wire.rs:26` binds through
   `kernel_request`, so no Memory Store or MODULE authority is consulted.
 - Client: `packages/cli/src/commands/review.ts:469` requests exact integers.
 

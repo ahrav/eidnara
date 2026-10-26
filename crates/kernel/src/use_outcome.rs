@@ -489,7 +489,7 @@ impl KernelStore {
     ///
     /// # Errors
     ///
-    /// Returns storage and lock errors, and `CorruptCanonicalRow` for a count that does not decode or is negative.
+    /// Returns storage and lock errors.
     pub fn served_counts_for(
         &self,
         project_digest: &str,

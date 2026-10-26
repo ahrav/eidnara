@@ -9,6 +9,7 @@ use context_core::canonical_json::is_lower_hex;
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::blocking;
+use crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES;
 use crate::{HandlerCore, MemoriesAuthority, memories_authority_for_route};
 use host_runtime::RouteHandle;
 use memory_store::memory_reviewer_ledger::{MAX_RECEIPT_PAGE, MemoryReviewerReceipt};
@@ -313,12 +314,9 @@ impl HandlerCore {
                 Ok(bound) => bound,
                 Err(outcome) => return outcome,
             };
-        if parsed.object_id.is_empty()
-            || parsed.object_id.len() > crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES
-        {
+        if parsed.object_id.is_empty() || parsed.object_id.len() > MAX_OBJECT_ID_BYTES {
             return crate::invalid_params_error(format!(
-                "{USE_OUTCOME} requires an object_id of 1 to {} bytes",
-                crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES
+                "{USE_OUTCOME} requires an object_id of 1 to {MAX_OBJECT_ID_BYTES} bytes"
             ));
         }
         let counts = blocking(move || {

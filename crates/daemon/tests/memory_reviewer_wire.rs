@@ -759,6 +759,7 @@ async fn review_use_outcome_counts_serves_and_later_disputes_of_one_decision() {
         json!({ "object_id": decision, "limit": 1 }),
         json!({ "object": decision }),
         json!({ "object_id": "" }),
+        json!({ "object_id": "x".repeat(513) }),
     ] {
         let request = envelope("review.use_outcome", &project, body.clone());
         let PreparedOutcome::Error { code, .. } = daemon.outcome(request).await else {
@@ -768,7 +769,11 @@ async fn review_use_outcome_counts_serves_and_later_disputes_of_one_decision() {
     }
     let elsewhere = daemon.data_home().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
-    for body in [json!({ "object_id": decision }), json!({ "object_id": "" })] {
+    for body in [
+        json!({ "object_id": decision }),
+        json!({ "object_id": "" }),
+        json!({ "object": decision }),
+    ] {
         let mismatch = daemon
             .call(envelope("review.use_outcome", &elsewhere, body.clone()))
             .await;

@@ -17,7 +17,7 @@ The specification authored its records at `a0e3f2993` and condensed the
 evidence inline because no part directory existed; this part reconstructs
 the records and their evidence from that catalog. Every `file:line` here was
 re-verified against the #1157 branch tip, the commit that carries this
-revision of the directory, whose parent is `742896941`. A specification reference that moved or
+revision of the directory, whose parent is `7d2a34fe5`. A specification reference that moved or
 pointed at a test rather than production code is corrected in the record's
 evidence file. `Exercised` cites tests that run in the #1157 PR's recorded
 gate run.
@@ -734,7 +734,7 @@ bound to one project.
 Confidence: high -
 [evidence](evidence/uo-review-reads-authorize-by-bearer-and-project-binding-not-owner.md).
 `kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:414`);
-`bind_review` (`crates/daemon/src/memory_reviewer/wire.rs:201`);
+`bind_review` (`crates/daemon/src/memory_reviewer/wire.rs:202`);
 `crates/daemon/src/lib.rs:275`.
 Existing check:
 `review_operations_are_disabled_without_module_authority_and_list_and_read_receipts_under_it`
@@ -1279,7 +1279,7 @@ Confidence: high -
 [evidence](evidence/uo-p-counts-exact-and-unavailable-not-zero.md). one
 statement counts the by-decision rows at one snapshot (`served_counts_for`
 (`crates/kernel/src/use_outcome.rs:493`)); the handler answers counts or the
-kernel state (`crates/daemon/src/memory_reviewer/wire.rs:306`); the client
+kernel state (`crates/daemon/src/memory_reviewer/wire.rs:307`); the client
 decodes each count with `exactCount` and renders any other answer unavailable
 (`packages/cli/src/commands/review-wire.ts:344`).
 Existing check:
