@@ -21,8 +21,12 @@ Do not turn a PR review into a repository-wide redesign.
   shared fixture or contract input, confirm the `changed paths` filter runs every
   consumer's required job. Run the `gates` job steps from
   `.github/workflows/ci.yml` locally before opening a PR. The `:ci` validator
-  entry points read GitHub event data; locally, run `validate:incident-history`
-  and `validate:incident-verifiers` in `packages/e2e-tests` instead.
+  entry points read GitHub event data. Locally, in `packages/e2e-tests`, run
+  `validate:incident-verifiers`, and run
+  `validate:incident-history -- --accepted <dir> --base <sha>` where `<sha>` is
+  the merge base with `main` and `<dir>` holds
+  `git archive <sha> packages/e2e-tests/incidents` extracted; without
+  `--accepted` the script checks only the working tree.
 
 ## Review priorities
 
@@ -128,9 +132,8 @@ These recur as false positives here; check them before reporting:
 ## Sub-agents
 
 The ticket's Pre-PR Gate names the review set for a change. Every PR that
-changes production code, tests, CI workflows, or scripts, or Markdown contract,
-property, or test-evidence claims, records a gate, including fixes outside the
-ticket flow.
+changes a file other than Markdown, or Markdown contract, property, or
+test-evidence claims, records a gate, including fixes outside the ticket flow.
 This file sets no count. Always run `ponytail-review` and
 `/code-quality:reduce-complexity`. Run `/testing:test-strategy` for Rust changes;
 for other languages, run the testing-approach owner the router names. Run the
