@@ -591,12 +591,14 @@ impl KernelStore {
         project_digest: &str,
         object_id: &str,
     ) -> Result<ServedCounts, KernelError> {
+        let limit = budget.acquire_limit();
         let (served, disputed): (i64, i64) = self
-            .reader_with_limit(&budget.acquire_limit())?
+            .reader_with_limit(&limit)?
             .query_row_cached(&SERVED_COUNTS_SQL, [object_id, project_digest], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .map_err(map_read)?;
+        limit.check()?;
         Ok(ServedCounts {
             served_sessions: u64::try_from(served).map_err(|_| KernelError::CorruptCanonicalRow)?,
             disputed_after_serve: u64::try_from(disputed)

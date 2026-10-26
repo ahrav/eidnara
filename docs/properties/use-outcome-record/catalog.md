@@ -1363,9 +1363,9 @@ Impact: A zero misread as "no harm observed".
 Open questions:
 - OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome` method
   answering the Kernel state outcome when unready.
-- `served_sessions` counts unretired serving records, one per (session, served
-  set), so a session served the decision at two served sets counts twice; the
-  name follows the ticket.
+- `served_sessions` counts unretired serving records, one per (harness,
+  session, served set), so a session served the decision at two served sets
+  counts twice; the name follows the ticket.
 - The counts cover the bound project only; another project's serves of the same
   decision are not counted.
 - A failed read after the Kernel is Ready answers the kernel state its failure
