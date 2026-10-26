@@ -16,7 +16,7 @@ revision.
   qualifying dispute, the rule the by-decision read applies per serve.
 - Route: `crates/daemon/src/memory_reviewer/wire.rs:314` binds through
   `kernel_request`, so no Memory Store or MODULE authority is consulted.
-- Client: `packages/cli/src/commands/review.ts:470` requests exact integers.
+- Client: `packages/cli/src/commands/review.ts:471` requests exact integers.
 
 - Guarantee under test: Served and disputed-after-serve counts per decision are
   exact unsigned integers at one Kernel snapshot; a Kernel that is not Ready
