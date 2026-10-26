@@ -68,6 +68,33 @@ fn term_sets_follow_the_documented_fold_and_floor() {
     );
     // Non-ASCII uppercase folds; diacritics are kept.
     assert_eq!(terms("ÉCOLE École"), set(&["école"]));
+    // The floor counts scalars, not bytes, and runs after the fold: `éa` and
+    // `日本` hold two scalars, `THE` lowers to a stopword, and `İs` lowers to
+    // three scalars, `i`, a combining dot, and `s`.
+    assert_eq!(terms("éa 日本 THE And İs"), set(&["i\u{307}s"]));
+    // `İ` lowers to `i` plus a combining dot, so it is a different term from `i`.
+    assert_eq!(
+        terms("İSTANBUL istanbul"),
+        set(&["i\u{307}stanbul", "istanbul"])
+    );
+}
+
+#[test]
+fn one_identifier_can_satisfy_the_term_gates() {
+    // `parseConfigFile` holds four terms: the atom and its three parts.
+    assert_eq!(
+        terms("parseConfigFile"),
+        set(&["parseconfigfile", "parse", "config", "file"])
+    );
+    assert_eq!(
+        DescriptorTerms::new("call parseConfigFile here")
+            .unwrap()
+            .score("parseConfigFile"),
+        SummaryScore::Candidate {
+            matched_terms: 4,
+            decision_terms: 4
+        }
+    );
 }
 
 #[test]
@@ -207,17 +234,25 @@ fn an_unscorable_summary_is_reported_and_the_others_still_score() {
     let at_bound = format!("{} alpha beta gamma delta", "x".repeat(bound - 23));
     assert_eq!(at_bound.len(), bound);
     let over = format!("{at_bound}y");
+    // The most atoms 8192 bytes hold is analyzed, not refused; one-letter atoms then fall to the floor.
+    assert_eq!(SUMMARY_BOUNDS.max_atoms.get(), 4_097);
+    assert_eq!(
+        term_set(&"a ".repeat(bound / 2), SUMMARY_BOUNDS),
+        Ok(BTreeSet::new())
+    );
+    assert!(term_set(&over, SUMMARY_BOUNDS).is_err());
     let scored = score_descriptor(
         "alpha beta gamma delta",
         &[
             candidate("over", &over),
             candidate("floor-emptied", "a an of to 12 345 the"),
+            candidate("also-emptied", "x y z"),
             candidate("at-bound", &at_bound),
             candidate("plain", "alpha beta gamma delta"),
         ],
     )
     .unwrap();
-    assert_eq!(scored.unscorable, ["over", "floor-emptied"]);
+    assert_eq!(scored.unscorable, ["also-emptied", "floor-emptied", "over"]);
     let ids: Vec<&str> = scored
         .candidates
         .iter()
@@ -236,6 +271,9 @@ fn the_top_k_is_the_same_under_every_input_order() {
         ("tie-d", "alpha beta gamma delta"),
         ("more-terms", "alpha beta gamma delta omega"),
         ("wider", "alpha beta gamma delta epsilon zeta"),
+        // Five matched of six is more matches at a lower score than the ties.
+        ("lower-score", "alpha beta gamma delta epsilon omicron"),
+        ("unscorable", "x y z"),
     ];
     let descriptor = "alpha beta gamma delta epsilon zeta";
     let ordered: Vec<CandidateInput<'_>> = summaries
@@ -251,6 +289,7 @@ fn the_top_k_is_the_same_under_every_input_order() {
     // `wider` matches more terms at the same full score; the K+1 ties fall to id order.
     assert_eq!(ids, ["wider", "tie-a", "tie-b", "tie-c"]);
     assert_eq!(expected.candidates.len(), CANDIDATES_PER_DESCRIPTOR);
+    assert_eq!(expected.unscorable, ["unscorable"]);
     let mut permutation = ordered.clone();
     for rotation in 0..permutation.len() {
         permutation.rotate_left(1);
@@ -267,16 +306,46 @@ fn the_top_k_is_the_same_under_every_input_order() {
 }
 
 #[test]
+fn a_decision_object_id_appears_once_and_the_better_entry_wins_in_any_order() {
+    let inputs = [
+        CandidateInput {
+            decision_object_id: "same",
+            decision_id: "weaker",
+            summary: "alpha beta gamma delta omega",
+        },
+        CandidateInput {
+            decision_object_id: "same",
+            decision_id: "stronger",
+            summary: "alpha beta gamma delta",
+        },
+    ];
+    for order in [inputs, [inputs[1], inputs[0]]] {
+        let scored = score_descriptor("alpha beta gamma delta", &order).unwrap();
+        assert_eq!(
+            scored.candidates,
+            [ScoredCandidate {
+                decision_object_id: "same".to_string(),
+                decision_id: "stronger".to_string(),
+                matched_terms: 4,
+                decision_terms: 4,
+            }]
+        );
+    }
+}
+
+#[test]
 fn the_matcher_digest_pins_every_rule() {
-    let preimage = matcher_preimage();
     let (major, minor, update) = char::UNICODE_VERSION;
-    for field in [
+    let unicode = format!("{major}.{minor}.{update}");
+    let expected: String = [
         "matcher_epoch",
-        CANDIDATE_MATCHER_EPOCH,
+        "contradiction-candidate-matcher.v1",
         "analysis_epoch",
         ANALYSIS_CONTRACT_EPOCH,
         "unicode",
-        &format!("{major}.{minor}.{update}"),
+        &unicode,
+        "terms",
+        "atoms-and-parts-as-a-set.v1",
         "fold",
         "str-to-lowercase-per-term.v1",
         "floor",
@@ -284,31 +353,36 @@ fn the_matcher_digest_pins_every_rule() {
         "min_term_scalars",
         "3",
         "stopwords",
+        "fc90dd770d6a61eb3ee45824f2414582ed5d5b56a0b6d04679a5314fc589324d",
         "score",
         "decision-side-containment.v1",
         "score_threshold",
         "1/2",
         "min_matched_terms",
+        "3",
         "min_decision_terms",
         "4",
         "candidates_per_descriptor",
+        "4",
+        "order",
+        "score-desc,matched-desc,decision-terms-asc,object-id-asc,decision-id-asc,one-per-object.v1",
         "descriptor_bounds",
         "65536/32769",
         "summary_bounds",
         "8192/4097",
-    ] {
-        assert!(
-            preimage.contains(&format!("{}:{field}\n", field.len())),
-            "{field:?} missing from the preimage"
-        );
-    }
+    ]
+    .iter()
+    .map(|value| format!("{}:{value}\n", value.len()))
+    .collect();
+    assert_eq!(ANALYSIS_CONTRACT_EPOCH, "identifier-analysis.v1");
+    assert_eq!(matcher_preimage(), expected);
     assert_eq!(
         CANDIDATE_MATCHER_EPOCH,
         "contradiction-candidate-matcher.v1"
     );
     assert_eq!(
         matcher_digest(),
-        "45e14ab4a2c0cbfe551617a854545bea3498fa36bed7ba84ad3b9ec00e0bf398",
+        "63a46048304e06a0ff71bf491c9f83effd1c606d2cd393963695670c0a94b0bd",
         "a changed matcher rule changes the digest; update the epoch and the digest together"
     );
 }
