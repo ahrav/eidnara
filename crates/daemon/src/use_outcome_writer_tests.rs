@@ -589,6 +589,115 @@ async fn a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve(
     assert!(counts(&handler).is_empty());
 }
 
+/// Commits one verified memory decision per id, with short source and observation identities, so an object id longer
+/// than the Kernel's identity-value bound still enters the memory domain the way a wire client could insert it.
+fn seed_long_id_memories(kernel: &kernel::KernelStore, project: &Path, ids: &[String]) {
+    use kernel::{
+        AdmissionEvent, AdmissionRequest, EventKind, ObservationPayload, ObservationSpec,
+        SourceClass, TaintClass,
+    };
+    let binding = bound(project);
+    let scope_id = binding.kernel_project.scope_id();
+    kernel
+        .commit(intent("scope-long-ids"), |envelope| {
+            ensure_domain(envelope, MEMORY_DOMAIN)?;
+            if envelope.object_state(&scope_id)?.is_none() {
+                envelope.insert_scope(binding.kernel_project.scope_spec(MEMORY_DOMAIN))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    for (index, object_id) in ids.iter().enumerate() {
+        kernel
+            .commit(intent(&format!("long-id-{index}")), |envelope| {
+                let mut spec = kernel_route_fixtures::memory_decision_spec(
+                    object_id,
+                    &scope_id,
+                    "PROJECT_RULES",
+                    "Rule.",
+                );
+                spec.decision_id = format!("long-decision-{index}");
+                spec.source_id = format!("long-source-{index}");
+                envelope.insert_decision(spec)?;
+                let observation = format!("long-observed-{index}");
+                envelope.insert_observation(ObservationSpec {
+                    observation_id: observation.clone(),
+                    object_id: observation.clone(),
+                    domain_id: MEMORY_DOMAIN.to_string(),
+                    proposition_id: None,
+                    scope_id: None,
+                    anchor_id: None,
+                    evidence_id: None,
+                    observation_kind: "code_present".to_string(),
+                    payload: ObservationPayload {
+                        summary: "code present".to_string(),
+                        classification: "code_present".to_string(),
+                        detail: None,
+                    },
+                    observed_at: 1,
+                    dependencies: Vec::new(),
+                    source_kind: "repo".to_string(),
+                    source_id: format!("long-source-{index}"),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                envelope.record_admission(AdmissionRequest {
+                    candidate_id: None,
+                    subject_object_id: Some(object_id.clone()),
+                    source_class: Some(SourceClass::TrustedLocalCode),
+                    taint_class: Some(TaintClass::CurrentCode),
+                    event: AdmissionEvent {
+                        kind: EventKind::CodeObserved,
+                        trigger_object_id: Some(observation),
+                        approval_object_id: None,
+                        evidence_id: None,
+                        reason: "CodeObserved".to_string(),
+                    },
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+}
+
+/// A composition whose rendered block outgrows the Memory Store's durable-text bound fails its commit, so the pass hands
+/// off no serve: the bound that `RETAINED_SNAPSHOT_BYTES_BOUND` declares per write holds because only a committed
+/// block reaches the hand-off.
+#[tokio::test(flavor = "current_thread")]
+async fn a_block_past_the_durable_text_bound_commits_nothing_and_hands_off_no_serve() {
+    let producer = Arc::new(ProducerState::default());
+    let config = DaemonConfig {
+        memory_budget_tokens: 50_000_000.0,
+        ..default_test_config()
+    };
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, config.clone()).await;
+    handler.bind_route(
+        test_route(7),
+        SessionBinding {
+            config,
+            ..bound(&project)
+        },
+    );
+    // One id at the Kernel's identity bound renders a block past the Memory Store's durable-text bound.
+    let id = format!(
+        "0{}",
+        "m".repeat(context_core::redaction::MAX_REDACTABLE_BYTES - 1)
+    );
+    assert!(id.len() >= memory_store::MAX_DURABLE_TEXT_BYTES);
+    seed_long_id_memories(&handler.kernel.kernel_store().unwrap(), &project, &[id]);
+    let outcome = call_transform_outcome(&handler, request(vec![ck("m1", 1, "hello")])).await;
+    match outcome {
+        PreparedOutcome::Error { code, message } => {
+            assert_eq!(code, "transform_failed", "{message}");
+            assert!(message.contains("InputLimit"), "{message}");
+        }
+        other => panic!("the oversized block committed: {other:?}"),
+    }
+    assert!(counts(&handler).is_empty(), "{:?}", counts(&handler));
+    assert!(served(&handler, &project).is_empty());
+}
+
 /// The outcome vocabulary is closed: the counters and the log line carry these names and nothing else.
 #[test]
 fn the_write_outcomes_are_a_closed_vocabulary() {

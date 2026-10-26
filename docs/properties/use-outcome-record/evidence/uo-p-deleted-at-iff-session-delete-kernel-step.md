@@ -15,7 +15,7 @@ revision.
   captured sources, then `mark_use_outcomes_deleted`
   (`crates/daemon/src/lib.rs:6908`) commits one envelope keyed by
   `use-outcome-delete`, a digest of the session id, and a fresh attempt nonce
-  (`crates/daemon/src/use_outcome_writer.rs:240`); the digest keeps the key
+  (`crates/daemon/src/use_outcome_writer.rs:254`); the digest keeps the key
   clear of the Kernel's identity check for any session id the wire admits
   (`a_session_id_that_reads_as_a_secret_still_deletes`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:483`)); an envelope that

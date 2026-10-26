@@ -9,9 +9,10 @@ use kernel::{
     CommitIntent, CommitReceipt, Envelope, KernelError, KernelStore, SessionRole, UseOutcomeSpec,
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::canonical_memory::CanonicalMemorySnapshot;
+use crate::kernel_routes::read::MAX_READ_ROWS;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
 
 const PRODUCER: &str = "eidnara-daemon/use-outcome";
@@ -86,12 +87,16 @@ impl UseOutcomeWrite {
 const _: () = assert!(UseOutcomeWrite::Refused as usize + 1 == UseOutcomeWrite::ALL.len());
 
 const WRITES_IN_FLIGHT: usize = 4;
-/// One retained composition: the figure `memory_capture::RETAINED_BYTES_BOUND` declares per worker for the same
-/// bounded canonical read, 8 MiB of decision payload plus the rows' ids, categories, and string headers, which
-/// the read's payload cut leaves uncounted.
-const RETAINED_SNAPSHOT_BYTES_PER_WRITE: u64 = 32 * 1024 * 1024;
-/// The compositions in-flight jobs retain after their passes' responses released their charges: at most
-/// [`WRITES_IN_FLIGHT`] clones.
+/// Heap bytes a snapshot row holds beside its rendered text: three string headers and the vector slot.
+const SNAPSHOT_ROW_OVERHEAD_BYTES: u64 = 128;
+/// One retained composition. A job is handed off only after the pass's Memory Store commit, which stores the rendered
+/// block, every served row's id, category, and content, as one durable string bounded by
+/// `memory_store::MAX_DURABLE_TEXT_BYTES`; a block past it fails the commit and no job is handed off. The read bounds
+/// the row count by [`MAX_READ_ROWS`].
+const RETAINED_SNAPSHOT_BYTES_PER_WRITE: u64 = memory_store::MAX_DURABLE_TEXT_BYTES as u64
+    + MAX_READ_ROWS as u64 * SNAPSHOT_ROW_OVERHEAD_BYTES;
+/// The compositions in-flight jobs retain after their passes' responses released their charges: a slot is reserved
+/// before the composition is cloned, so at most [`WRITES_IN_FLIGHT`] clones exist.
 pub(crate) const RETAINED_SNAPSHOT_BYTES_BOUND: u64 =
     WRITES_IN_FLIGHT as u64 * RETAINED_SNAPSHOT_BYTES_PER_WRITE;
 
@@ -124,20 +129,29 @@ impl UseOutcomeWrites {
         }
     }
 
-    /// The returned job holds a write slot through `write` and the outcome count, or until it is dropped. `write` returning `None` counts `kernel_unavailable`. Slot exhaustion counts `deadline` and returns `None`.
+    /// Reserves a write slot before the caller clones what the job retains. Slot exhaustion counts `deadline` and
+    /// returns `None`; a reservation dropped without a job releases the slot.
+    pub(crate) fn reserve(&self) -> Option<OwnedSemaphorePermit> {
+        match Arc::clone(&self.slots).try_acquire_owned() {
+            Ok(slot) => Some(slot),
+            Err(_) => {
+                self.record(UseOutcomeWrite::Deadline);
+                None
+            }
+        }
+    }
+
+    /// The returned job holds `slot` through `write` and the outcome count, or until it is dropped. `write` returning `None` counts `kernel_unavailable`.
     pub(crate) fn job(
         self: &Arc<Self>,
+        slot: OwnedSemaphorePermit,
         write: impl FnOnce() -> Option<UseOutcomeWrite> + Send + 'static,
-    ) -> Option<impl FnOnce() + Send + 'static> {
-        let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() else {
-            self.record(UseOutcomeWrite::Deadline);
-            return None;
-        };
+    ) -> impl FnOnce() + Send + 'static {
         let writes = Arc::clone(self);
-        Some(move || {
+        move || {
             writes.record(write().unwrap_or(UseOutcomeWrite::KernelUnavailable));
             drop(slot);
-        })
+        }
     }
 
     pub(crate) fn write_budget(&self) -> Duration {
