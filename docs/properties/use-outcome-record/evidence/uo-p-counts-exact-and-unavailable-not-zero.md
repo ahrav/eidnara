@@ -14,9 +14,9 @@ its parent is `d85de937b`).
 - Count read: `crates/kernel/src/use_outcome.rs:211` counts the object's
   decision rows in one statement and compares each serve with the newest
   qualifying dispute, the rule the by-decision read applies per serve.
-- Route: `crates/daemon/src/memory_reviewer/wire.rs:26` binds through
+- Route: `crates/daemon/src/memory_reviewer/wire.rs:314` binds through
   `kernel_request`, so no Memory Store or MODULE authority is consulted.
-- Client: `packages/cli/src/commands/review.ts:469` requests exact integers.
+- Client: `packages/cli/src/commands/review.ts:470` requests exact integers.
 
 - Guarantee under test: Served and disputed-after-serve counts per decision are
   exact unsigned integers at one Kernel snapshot; a Kernel that is not Ready
@@ -62,7 +62,7 @@ two sessions with one later dispute.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: `served_sessions` counts unretired serving records, one per (session, 
+### Q: `served_sessions` counts unretired serving records, one per (session, served set), so a session served the decision at two served sets counts twice; the name follows the ticket
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: `served_sessions` counts unretired serving records, one per
@@ -71,7 +71,7 @@ two sessions with one later dispute.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: The counts cover the bound project only; another project's serves of t
+### Q: The counts cover the bound project only; another project's serves of the same decision are not counted
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: The counts cover the bound project only; another project's serves of
@@ -79,7 +79,7 @@ two sessions with one later dispute.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: A failed read after the Kernel is Ready answers the kernel state its f
+### Q: A failed read after the Kernel is Ready answers the kernel state its failure maps to
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A failed read after the Kernel is Ready answers the kernel state its
