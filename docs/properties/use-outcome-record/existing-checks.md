@@ -49,6 +49,7 @@ Every location was read at the #1156 branch tip.
 | `a_session_delete_marks_each_live_record_once` | `crates/kernel/tests/kernel_use_outcome.rs:843` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `last_transform_at_advances_live_records_without_a_commit` | `crates/kernel/tests/kernel_use_outcome.rs:892` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 | `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it` | `crates/kernel/tests/kernel_use_outcome.rs:951` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `an_outside_file_lock_bounds_the_advance_at_begin` | `crates/kernel/tests/kernel_use_outcome.rs:988` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 
 ## Daemon
 
@@ -82,6 +83,7 @@ Every location was read at the #1156 branch tip.
 | `last_transform_at_moves_forward_only_on_committing_passes` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:220` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 | `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:305` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 | `a_spent_pass_budget_skips_the_touch` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:353` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `the_serve_and_the_touch_of_one_pass_share_one_kernel_wait` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:382` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 | `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:39` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate`, `uo-per-session-pass-timestamps-die-with-the-session`, `uo-p-record-survives-session-delete`, `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:84` | `uo-p-record-survives-session-delete`, `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `an_equal_digest_replays_and_another_harness_or_role_conflicts` | `crates/daemon/src/use_outcome_writer_tests.rs:125` | `uo-p-served-set-once-per-session-revision` | unaudited |

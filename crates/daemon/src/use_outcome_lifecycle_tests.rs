@@ -376,3 +376,50 @@ async fn a_spent_pass_budget_skips_the_touch() {
         Some(touched)
     );
 }
+
+/// A HARD pass whose serve write waits out the budget on a held writer leaves its touch nothing to wait with: the serve counts `deadline`, the touch `transform_skipped_deadline`, and the pass's Kernel wait stays inside one budget rather than two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_serve_and_the_touch_of_one_pass_share_one_kernel_wait() {
+    let (handler, _store, _dir, project) = served_handler().await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    seed_memories(
+        &kernel,
+        &project,
+        &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
+    );
+    let (entered, held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(kernel_route_fixtures::intent("hold-writer"), |_| {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    held.recv().unwrap();
+    let started = Instant::now();
+    let refold = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+    let elapsed = started.elapsed();
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(refold["action"], "HARD", "{refold}");
+    assert_eq!(
+        handler
+            .use_outcome_counts
+            .get(crate::use_outcome_writer::UseOutcomeWrite::Deadline),
+        1
+    );
+    assert_eq!(
+        handler
+            .use_outcome_lifecycle
+            .get(LifecycleWrite::TransformSkippedDeadline),
+        1
+    );
+    // Two budgets would spend at least 500 ms waiting alone.
+    assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+}

@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `ed75b9e5b`).
+its parent is `f4dd2b618`).
 
 - Key and digest: `crates/daemon/src/use_outcome_writer.rs:266`; the request
   digest binds the ids, the harness, and the role (`length_prefixed_digest`

@@ -11,7 +11,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `ed75b9e5b`).
+its parent is `f4dd2b618`).
 
 - Disposition mapping: `crates/kernel/src/admission.rs:4161`.
 - Row and surface: `visibility_row` (`crates/kernel/src/admission.rs:4248`),

@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `ed75b9e5b`).
+its parent is `f4dd2b618`).
 
 - Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9684`).
 

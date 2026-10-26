@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1156.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `ed75b9e5b`).
+its parent is `f4dd2b618`).
 
 - Hook: `crates/daemon/src/lib.rs:10030` in the settle step, after any rerun,
   when the final response committed.
@@ -26,11 +26,15 @@ its parent is `ed75b9e5b`).
   `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:305`);
   `a_spent_pass_budget_skips_the_touch`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:353`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:353`);
+  `the_serve_and_the_touch_of_one_pass_share_one_kernel_wait`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:382`); Kernel half:
   `last_transform_at_advances_live_records_without_a_commit`
   (`crates/kernel/tests/kernel_use_outcome.rs:892`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-  (`crates/kernel/tests/kernel_use_outcome.rs:951`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:951`),
+  `an_outside_file_lock_bounds_the_advance_at_begin`
+  (`crates/kernel/tests/kernel_use_outcome.rs:988`). Status: unaudited.
 
 ## Failure scenario
 

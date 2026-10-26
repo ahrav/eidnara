@@ -982,3 +982,30 @@ fn a_held_writer_bounds_the_advance_and_an_idle_session_skips_it() {
     });
     assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
 }
+
+/// A writer outside this process holding the database file lock stops the advance at its budget, at BEGIN, before SQLite's busy timeout; the record is unchanged.
+#[test]
+fn an_outside_file_lock_bounds_the_advance_at_begin() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let outside = writer(root.path());
+    outside.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let advanced = store.advance_use_outcome_last_transform(
+        &budget(std::time::Duration::from_millis(100)),
+        &project(),
+        HARNESS,
+        "s1",
+        10,
+    );
+    let waited = started.elapsed();
+    outside.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(advanced, Err(KernelError::Deadline));
+    assert!(
+        waited < std::time::Duration::from_secs(2),
+        "the busy timeout did not run: {waited:?}"
+    );
+    assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
+}

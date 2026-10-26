@@ -18,7 +18,7 @@ The specification authored its records at `a0e3f2993` and condensed the
 evidence inline because no part directory existed; this part reconstructs
 the records and their evidence from that catalog. Every `file:line` here was
 re-verified against the #1156 branch tip, the commit that carries this
-revision of the directory, whose parent is `ed75b9e5b`. A specification reference that moved or
+revision of the directory, whose parent is `f4dd2b618`. A specification reference that moved or
 pointed at a test rather than production code is corrected in the record's
 evidence file. `Exercised` cites tests that run in the #1156 PR's recorded
 gate run.
@@ -1223,11 +1223,15 @@ Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:305`);
 `a_spent_pass_budget_skips_the_touch`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:353`); Kernel half:
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:353`);
+`the_serve_and_the_touch_of_one_pass_share_one_kernel_wait`
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:382`); Kernel half:
 `last_transform_at_advances_live_records_without_a_commit`
 (`crates/kernel/tests/kernel_use_outcome.rs:892`),
 `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-(`crates/kernel/tests/kernel_use_outcome.rs:951`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:951`),
+`an_outside_file_lock_bounds_the_advance_at_begin`
+(`crates/kernel/tests/kernel_use_outcome.rs:988`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.

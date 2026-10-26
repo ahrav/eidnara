@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `ed75b9e5b`).
+its parent is `f4dd2b618`).
 
 - Teardown: `unbind_route` (`crates/daemon/src/lib.rs:4683`); purge:
   `purge_session_state` (`crates/daemon/src/lib.rs:4723`).
