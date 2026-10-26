@@ -1049,14 +1049,15 @@ Open questions:
   input requests over the same served set, such as context pressure. The pass
   hands the write to a tracked blocking job and answers while the job waits for
   the Kernel writer; when every write slot is taken, the write is counted
-  `deadline` and repaired the same way. This placement departs from the
-  ticket's OQ3-5 resolution, an inline write within the pass's remaining
-  budget: the job's own 250 ms writer wait is the budget AC6 names, and the
-  measured wait the ticket asked for is recorded by
-  `the_real_failure_paths_count_their_outcomes_and_bound_the_wait` (owner
-  decision, taken at the #1155 review rounds). A session whose composition never folds
+  `deadline` and repaired the same way. A session whose composition never folds
   HARD again at that set stays unrecorded. A conflict and a refusal are not
   repaired by a later fold.
+- Does the detached write stand as the resolution of OQ3-5, which resolved the
+  write as inline within the pass's remaining budget? Commit `6d15ee29c` moved
+  it to the tracked blocking job with its own 250 ms writer wait, which is the
+  budget AC6 then names, and the measured wait the ticket asked for is recorded
+  by `the_real_failure_paths_count_their_outcomes_and_bound_the_wait` (needs
+  human input).
 
 ### uo-p-served-ids-equal-frozen-composition
 
