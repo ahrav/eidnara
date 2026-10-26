@@ -658,6 +658,133 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     assert!(served(&fresh, &fresh_project).is_empty());
 }
 
+/// A recorded served set replays from a reader while another writer holds the Kernel writer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recorded_served_set_replays_while_another_writer_holds_the_writer() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    seed_memories(
+        &kernel,
+        &project,
+        &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
+    );
+    let snapshot = canonical_memory::CanonicalMemorySnapshot::new(
+        kernel.tip().unwrap(),
+        false,
+        ["mem-a", "mem-b"]
+            .map(|object_id| canonical_memory::CanonicalMemory {
+                object_id: object_id.to_string(),
+                category: "PROJECT_RULES".to_string(),
+                content: format!("Rule {object_id}."),
+            })
+            .to_vec(),
+    );
+    let binding = bound(&project);
+    let serve = Serve {
+        project: &binding.kernel_project,
+        harness: "daemon-test",
+        session_id: "ses",
+        is_subagent: false,
+        snapshot: &snapshot,
+        recorded_at: 1,
+    };
+    assert_eq!(
+        record_serve(&handler.kernel, &serve),
+        Some(UseOutcomeWrite::Written)
+    );
+    let (holding, release) = std::sync::mpsc::channel::<()>();
+    let (entered, writer_held) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(intent("hold-writer"), |_| {
+                    entered.send(()).unwrap();
+                    release.recv().unwrap();
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    writer_held.recv().unwrap();
+    let started = std::time::Instant::now();
+    let replayed = record_serve(&handler.kernel, &serve);
+    let waited = started.elapsed();
+    let conflict = record_serve(
+        &handler.kernel,
+        &Serve {
+            is_subagent: true,
+            ..serve
+        },
+    );
+    let other_session = Serve {
+        session_id: "other",
+        ..serve
+    };
+    let deadline = record_serve(&handler.kernel, &other_session);
+    holding.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(replayed, Some(UseOutcomeWrite::Replayed));
+    eprintln!("use-outcome replay under a held writer: {waited:?}");
+    assert!(
+        waited < std::time::Duration::from_millis(250),
+        "a replay answers before the write budget ends: {waited:?}"
+    );
+    assert_eq!(conflict, Some(UseOutcomeWrite::Conflict));
+    assert_eq!(deadline, Some(UseOutcomeWrite::Deadline));
+    let served_in = |session_id: &str| {
+        kernel
+            .served_set(binding.kernel_project.digest(), "daemon-test", session_id)
+            .unwrap()
+            .unwrap_or_default()
+    };
+    let records = served_in("ses");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a", "mem-b"]);
+    assert_eq!(records[0].serve.session_role, kernel::SessionRole::Primary);
+    assert!(served_in("other").is_empty());
+    assert_eq!(
+        record_serve(&handler.kernel, &other_session),
+        Some(UseOutcomeWrite::Written)
+    );
+
+    let (entered, writer_held) = std::sync::mpsc::channel::<()>();
+    let brief = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(intent("hold-writer-briefly"), |_| {
+                    entered.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    writer_held.recv().unwrap();
+    let started = std::time::Instant::now();
+    let written = record_serve(
+        &handler.kernel,
+        &Serve {
+            session_id: "third",
+            ..serve
+        },
+    );
+    let waited = started.elapsed();
+    brief.join().unwrap();
+    assert_eq!(
+        written,
+        Some(UseOutcomeWrite::Written),
+        "a new served set waits for a writer released within the budget"
+    );
+    assert!(waited < std::time::Duration::from_millis(250), "{waited:?}");
+    let third = served_in("third");
+    assert_eq!(third.len(), 1);
+    assert_eq!(third[0].decision_object_ids, ["mem-a", "mem-b"]);
+}
+
 /// The outcome vocabulary indexes its counters in order, and the Kernel errors the writer meets map to their closed names.
 #[test]
 fn every_kernel_error_maps_to_a_closed_outcome() {

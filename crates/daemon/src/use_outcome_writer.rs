@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
-use kernel::{CommitIntent, KernelError, SessionRole, UseOutcomeSpec};
+use kernel::{CommitIntent, CommitReceipt, Envelope, KernelError, SessionRole, UseOutcomeSpec};
 use sha2::{Digest, Sha256};
 
 use crate::canonical_memory::CanonicalMemorySnapshot;
@@ -14,8 +14,9 @@ use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
 const PRODUCER: &str = "eidnara-daemon/use-outcome";
 const FAMILY: &str = "use-outcome";
 const REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-serve-v1\n";
-/// Bounds the wait for the Kernel writer; the insert runs to completion once the writer is held.
+/// `WRITE_BUDGET` bounds writer waits and the pooled-reader replay check; the insert runs to completion once the writer is held.
 const WRITE_BUDGET: Duration = Duration::from_millis(250);
+const WRITER_FIRST_WAIT: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UseOutcomeWrite {
@@ -108,6 +109,9 @@ pub(crate) struct Serve<'a> {
 }
 
 /// Writes the serve record, or answers `None` when the Kernel is not Ready and no write was attempted.
+/// The first commit waits at most [`WRITER_FIRST_WAIT`] for the writer. When another writer holds it longer, a served set already
+/// recorded under the key replays from a pooled reader, and a new one waits for the writer until [`WRITE_BUDGET`] ends.
+/// A reader replay reads only the stored receipt, which commits with its record; the writer's fence check applies to commits.
 /// `kernel_unavailable` from a commit can follow a writer wait, and after a post-commit `Io` or `Inconclusive`
 /// the record may exist; a later write at the same key replays it.
 pub(crate) fn record_serve(
@@ -116,6 +120,7 @@ pub(crate) fn record_serve(
 ) -> Option<UseOutcomeWrite> {
     let store = kernel.kernel_store().ok()?;
     let snapshot = serve.snapshot;
+    let served_ids = snapshot.served_ids();
     let digest = snapshot.served_set_digest();
     let Some(operation_key) = serve
         .project
@@ -128,44 +133,49 @@ pub(crate) fn record_serve(
     } else {
         SessionRole::Primary
     };
-    let intent = CommitIntent {
+    let request_digest = request_digest(&served_ids, serve.harness, session_role);
+    let intent = || CommitIntent {
         producer: PRODUCER.to_string(),
-        operation_key,
-        request_digest: request_digest(snapshot.served_ids(), serve.harness, session_role),
+        operation_key: operation_key.clone(),
+        request_digest: request_digest.clone(),
         actor: "daemon".to_string(),
         cause: "use outcome served".to_string(),
     };
-    let spec = UseOutcomeSpec {
-        project_digest: serve.project.digest().to_string(),
-        harness: serve.harness.to_string(),
-        session_id: serve.session_id.to_string(),
-        served_set_digest: digest.to_string(),
-        composition_revision: snapshot.revision(),
-        served_commit_seq: snapshot.known_as_of(),
-        session_role,
-        recorded_at: serve.recorded_at,
-        decision_object_ids: snapshot.served_ids().to_vec(),
+    let insert = |envelope: &mut Envelope<'_>| {
+        envelope.insert_use_outcome(UseOutcomeSpec {
+            project_digest: serve.project.digest().to_string(),
+            harness: serve.harness.to_string(),
+            session_id: serve.session_id.to_string(),
+            served_set_digest: digest.to_string(),
+            composition_revision: snapshot.revision(),
+            served_commit_seq: snapshot.known_as_of(),
+            session_role,
+            recorded_at: serve.recorded_at,
+            decision_object_ids: served_ids.iter().map(|id| (*id).to_string()).collect(),
+        })
     };
-    let budget = EvalBudget::new(Some(Instant::now() + WRITE_BUDGET), Arc::default());
-    Some(
-        match store.commit_within_budget(&budget, intent, |envelope| {
-            envelope.insert_use_outcome(spec)
-        }) {
-            Ok(receipt) if receipt.replayed => UseOutcomeWrite::Replayed,
-            Ok(_) => UseOutcomeWrite::Written,
-            Err(error) => UseOutcomeWrite::from_error(error),
-        },
-    )
+    let commit = |until: Instant| -> Result<CommitReceipt, KernelError> {
+        let budget = EvalBudget::new(Some(until), Arc::default());
+        store.commit_within_budget(&budget, intent(), insert)
+    };
+    let deadline = Instant::now() + WRITE_BUDGET;
+    let outcome = match commit(Instant::now() + WRITER_FIRST_WAIT) {
+        Err(KernelError::Deadline) => store
+            .preview(deadline, |preview| preview.stored_receipt(intent()))
+            .and_then(|(_, stored)| stored.map_or_else(|| commit(deadline), Ok)),
+        settled => settled,
+    };
+    Some(match outcome {
+        Ok(receipt) if receipt.replayed => UseOutcomeWrite::Replayed,
+        Ok(_) => UseOutcomeWrite::Written,
+        Err(error) => UseOutcomeWrite::from_error(error),
+    })
 }
 
-fn request_digest(served_ids: &[String], harness: &str, role: SessionRole) -> String {
+fn request_digest(served_ids: &[&str], harness: &str, role: SessionRole) -> String {
     let mut hash = Sha256::new();
     hash.update(REQUEST_DOMAIN);
-    for field in served_ids
-        .iter()
-        .map(String::as_str)
-        .chain([harness, role.as_str()])
-    {
+    for field in served_ids.iter().copied().chain([harness, role.as_str()]) {
         hash.update(field.len().to_string().as_bytes());
         hash.update(b":");
         hash.update(field.as_bytes());

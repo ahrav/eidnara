@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `62659617c`).
+its parent is `a9060af05`).
 
 - Bind: `crates/daemon/src/lib.rs:13348`.
 - Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:5985`) reads

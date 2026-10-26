@@ -18,7 +18,7 @@ The specification authored its records at `a0e3f2993` and condensed the
 evidence inline because no part directory existed; this part reconstructs
 the records and their evidence from that catalog. Every `file:line` here was
 re-verified against the #1155 branch tip, the commit that carries this
-revision of the directory, whose parent is `62659617c`. A specification reference that moved or
+revision of the directory, whose parent is `a9060af05`. A specification reference that moved or
 pointed at a test rather than production code is corrected in the record's
 evidence file. `Exercised` cites tests that run in the #1155 PR's recorded
 gate run.
@@ -154,17 +154,17 @@ Required faults and enabling state: Snapshots that differ only in rows the
 renderer drops, bytes past the render cap, or rows past the memory budget.
 Confidence: high -
 [evidence](evidence/uo-composition-revision-digests-exactly-the-rendered-rows.md).
-read at `crates/daemon/src/canonical_memory.rs:61`; the revision is a
+read at `crates/daemon/src/canonical_memory.rs:55`; the revision is a
 `DefaultHasher` `u64`, which is why #1154 keys the record by a separate
 served-set digest.
 Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-(`crates/daemon/src/canonical_memory.rs:374`);
+(`crates/daemon/src/canonical_memory.rs:380`);
 `rows_the_renderer_drops_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:432`);
+(`crates/daemon/src/canonical_memory.rs:438`);
 `bytes_past_the_render_cap_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:449`);
+(`crates/daemon/src/canonical_memory.rs:455`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:471`). Status: unaudited.
+(`crates/daemon/src/canonical_memory.rs:477`). Status: unaudited.
 Impact: A revision that moved without a byte change would record a second serve
 of the same rows.
 Open questions:
@@ -269,7 +269,7 @@ commit.
 Confidence: high -
 [evidence](evidence/uo-known-as-of-is-the-tip-bound-read-sequence.md).
 `read_project_memory` captures the tip and passes it as the requested snapshot
-(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:161`)); the route
+(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:167`)); the route
 returns `known_as_of` from the visible read
 (`crates/daemon/src/kernel_routes/read.rs:252`).
 Existing check:
@@ -971,7 +971,7 @@ between; a CAS retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-set-once-per-session-revision.md). the writer
 keys its commit by the project binding, `use-outcome`, the session, and the
-served-set digest (`crates/daemon/src/use_outcome_writer.rs:113`); the Kernel
+served-set digest (`crates/daemon/src/use_outcome_writer.rs:117`); the Kernel
 holds one record per identity tuple.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 (`crates/daemon/src/use_outcome_writer_tests.rs:60`);
@@ -983,12 +983,14 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 (`crates/daemon/src/use_outcome_writer_tests.rs:298`);
 `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
 (`crates/daemon/src/use_outcome_writer_tests.rs:565`);
-`every_kernel_error_maps_to_a_closed_outcome`
+`a_recorded_served_set_replays_while_another_writer_holds_the_writer`
 (`crates/daemon/src/use_outcome_writer_tests.rs:663`);
+`every_kernel_error_maps_to_a_closed_outcome`
+(`crates/daemon/src/use_outcome_writer_tests.rs:790`);
 `an_emergency_pass_that_reruns_records_one_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:682`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:809`);
 `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:710`); Kernel half:
+(`crates/daemon/src/use_outcome_writer_tests.rs:837`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:214`),
 `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
@@ -1003,8 +1005,8 @@ Open questions:
   the design takes session ids as unique within a project (needs human input).
 - A deadline, an unready Kernel, or a lost fence leaves the serve for a later
   write at its digest: a rerun in the same pass when the Kernel was not Ready
-  and no write was attempted (every commit outcome settles the pass, so a pass
-  waits on the writer at most once), or a later HARD fold that another input
+  and no write was attempted (every Kernel outcome settles the pass, so a pass
+  spends at most one write budget), or a later HARD fold that another input
   requests over the same served set, such as context pressure. A session whose
   composition never folds HARD again at that set stays unrecorded. A conflict
   and a refusal are not repaired by a later fold.
@@ -1026,19 +1028,19 @@ retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-ids-equal-frozen-composition.md). the ids and
 digest come from the pinned snapshot the same fold froze (`served_ids`
-(`crates/daemon/src/canonical_memory.rs:81`), `served_set_digest`
-(`crates/daemon/src/canonical_memory.rs:86`)), and the Kernel refuses ids that
+(`crates/daemon/src/canonical_memory.rs:72`), `served_set_digest`
+(`crates/daemon/src/canonical_memory.rs:82`)), and the Kernel refuses ids that
 disagree with the digest.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 (`crates/daemon/src/use_outcome_writer_tests.rs:60`);
 `a_dispute_between_folds_records_the_next_served_set_without_it`
 (`crates/daemon/src/use_outcome_writer_tests.rs:439`);
 `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
-(`crates/daemon/src/canonical_memory.rs:336`);
+(`crates/daemon/src/canonical_memory.rs:342`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:471`);
+(`crates/daemon/src/canonical_memory.rs:477`);
 `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:739`); Kernel half:
+(`crates/daemon/src/use_outcome_writer_tests.rs:866`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:214`),
 `session_roles_round_trip_and_the_served_set_digest_is_order_free`
@@ -1116,7 +1118,7 @@ with a Canonical read; a primary on each engine.
 Confidence: high -
 [evidence](evidence/uo-p-producer-matches-request-subagent-flag.md). the role
 comes from the pass's `is_subagent`
-(`crates/daemon/src/use_outcome_writer.rs:113`). Reachability per engine (B1):
+(`crates/daemon/src/use_outcome_writer.rs:117`). Reachability per engine (B1):
 `subagent` rows arise only on the additive engine.
 Existing check: `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
 (`crates/daemon/src/use_outcome_writer_tests.rs:353`). Status: unaudited.

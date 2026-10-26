@@ -35,9 +35,7 @@ pub struct CanonicalMemorySnapshot {
     truncated: bool,
     rows: Vec<CanonicalMemory>,
     revision: u64,
-    /// The decision object ids of the rendered rows, ascending.
-    served_ids: Vec<String>,
-    /// The served-set digest of `served_ids`: the identity a use-outcome record of this composition carries.
+    /// The served-set digest of [`Self::served_ids`]: the identity a use-outcome record of this composition carries.
     served_set_digest: String,
 }
 
@@ -52,34 +50,32 @@ impl CanonicalMemorySnapshot {
     /// changes no digested byte. `truncated` is not digested: it does not
     /// change the rendered bytes.
     pub fn new(known_as_of: i64, truncated: bool, rows: Vec<CanonicalMemory>) -> Self {
-        let mut rendered: Vec<&CanonicalMemory> = rows
-            .iter()
-            .filter(|row| is_positive_memory_category(&row.category))
-            .collect();
-        rendered.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+        let rendered = rendered_rows(&rows);
         let mut hasher = DefaultHasher::new();
         "eidnara-project-memory-revision-v1".hash(&mut hasher);
         for row in &rendered {
             row.category.hash(&mut hasher);
             render_memory_line(row).hash(&mut hasher);
         }
-        let mut served_ids: Vec<String> =
-            rendered.iter().map(|row| row.object_id.clone()).collect();
-        served_ids.dedup();
-        let served_set_digest = kernel::served_set_digest(served_ids.iter().map(String::as_str));
+        let served_set_digest =
+            kernel::served_set_digest(rendered.iter().map(|row| row.object_id.as_str()));
         Self {
             known_as_of,
             truncated,
             rows,
             revision: hasher.finish(),
-            served_ids,
             served_set_digest,
         }
     }
 
     /// The decision object ids the block renders, ascending and distinct.
-    pub fn served_ids(&self) -> &[String] {
-        &self.served_ids
+    pub fn served_ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = rendered_rows(&self.rows)
+            .into_iter()
+            .map(|row| row.object_id.as_str())
+            .collect();
+        ids.dedup();
+        ids
     }
 
     /// The domain-separated SHA-256 over [`Self::served_ids`]: equal digests name one served id set whatever bytes rendered it.
@@ -106,6 +102,16 @@ impl CanonicalMemorySnapshot {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+}
+
+/// The rows the block renders, in object-id order; the revision and the served-set digest derive from them.
+fn rendered_rows(rows: &[CanonicalMemory]) -> Vec<&CanonicalMemory> {
+    let mut rendered: Vec<&CanonicalMemory> = rows
+        .iter()
+        .filter(|row| is_positive_memory_category(&row.category))
+        .collect();
+    rendered.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+    rendered
 }
 
 /// The outcome of one canonical read for a pass.

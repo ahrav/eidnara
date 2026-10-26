@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `62659617c`).
+its parent is `a9060af05`).
 
 - Handler and step order: `handle_session_delete_value`
   (`crates/daemon/src/lib.rs:6896`).
