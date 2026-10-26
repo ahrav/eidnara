@@ -222,6 +222,9 @@ jobs:
               # The delivery campaign's decay oracle checks itself against the
               # decay ladder's golden vectors.
               - 'crates/context-core/testdata/decay-golden.json'
+
+              # TypeScript tests read these Rust sources, fixtures, and release
+              # files directly.
               - 'crates/daemon/tests/fixtures/daemon-states.fixture.json'
               - 'crates/daemon/tests/fixtures/kernel-health-blocks.json'
               - 'crates/daemon/tests/fixtures/kernel-routes/**'
