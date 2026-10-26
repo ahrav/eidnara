@@ -102,6 +102,7 @@ Every location was read at the #1156 branch tip.
 | `a_delete_step_with_an_unknown_outcome_converges_on_retry` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:136` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `a_second_delete_marks_records_written_after_the_first` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:172` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `a_route_torn_down_after_a_hard_fold_leaves_its_records_live` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:203` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row`, `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
+| `a_session_id_that_reads_as_a_secret_still_deletes` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:476` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `last_transform_at_moves_forward_only_on_committing_passes` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:222` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 | `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:307` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 | `a_spent_pass_budget_skips_the_touch` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:355` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |

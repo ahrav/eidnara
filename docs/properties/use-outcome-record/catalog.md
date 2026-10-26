@@ -952,13 +952,16 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - the Kernel arm (no delete of either table succeeds, a retired
-record stays readable) and the `session.delete` arm (the records and decision
-rows read the same before and after `ok`, across a stop between the stores and a
-retry)
-Guarantee: After `session.delete` answers `ok`, the session's serving records
-and decision rows are readable, equal in count and ids to before.
-Check: `always` - the record count and decision ids of the session before and
-after any delete path are equal.
+record stays readable) and the `session.delete` arm (every record and decision
+row read before the delete reads the same after `ok`, across a stop between the
+stores and a retry; the tests run no serve beside the delete)
+Guarantee: After `session.delete` answers `ok`, every serving record and
+decision row of the session that was readable before it is readable after it,
+with the same ids. A serve whose write lands beside the delete adds a record
+and removes none (OQ3-10).
+Check: `always` - the record ids and decision ids of the session read before
+any delete path are a subset of those read after it, and every record read
+before keeps its decision ids.
 Fault/timing angle: A delete with the Kernel unavailable at step 1 and a retry.
 Required faults and enabling state: A session with records, then a delete
 (Kernel arm: direct SQL deletes).
@@ -977,7 +980,12 @@ readable);
 `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:86`). Status: unaudited.
 Impact: The record dies at the event it witnesses (KTD1).
-Open questions: None.
+Open questions:
+- A serve write takes no capture gate, so a pass that committed before the
+  delete can insert its record while the delete runs or after its Kernel step
+  (OQ3-10); the count after the delete can then exceed the count before. The
+  guarantee is preservation of the rows read before, and the cited tests
+  construct no concurrent serve.
 
 ### uo-p-served-set-once-per-session-revision
 
@@ -998,7 +1006,7 @@ between; a CAS retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-set-once-per-session-revision.md). the writer
 keys its commit by the project binding, `use-outcome`, the session, and the
-served-set digest (`crates/daemon/src/use_outcome_writer.rs:364`); the Kernel
+served-set digest (`crates/daemon/src/use_outcome_writer.rs:365`); the Kernel
 holds one record per identity tuple.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 (`crates/daemon/src/use_outcome_writer_tests.rs:64`);
@@ -1171,7 +1179,7 @@ with a Canonical read; a primary on each engine.
 Confidence: high -
 [evidence](evidence/uo-p-producer-matches-request-subagent-flag.md). the role
 comes from the pass's `is_subagent`
-(`crates/daemon/src/use_outcome_writer.rs:378`). Reachability per engine (B1):
+(`crates/daemon/src/use_outcome_writer.rs:379`). Reachability per engine (B1):
 `subagent` rows arise only on the additive engine.
 Existing check: `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
 (`crates/daemon/src/use_outcome_writer_tests.rs:379`); Kernel half:
@@ -1220,7 +1228,9 @@ Existing check:
 `a_second_delete_marks_records_written_after_the_first`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:172`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:203`); Kernel half:
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:203`);
+`a_session_id_that_reads_as_a_secret_still_deletes`
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:476`); Kernel half:
 `a_session_delete_marks_each_live_record_once`
 (`crates/kernel/tests/kernel_use_outcome.rs:935`). Status: unaudited.
 Impact: A deleted session reads as live, or a live one as deleted.
@@ -1260,12 +1270,12 @@ settle step checks the session's live records once per committed pass on a
 memory-enabled route (`use_outcomes_to_touch`
 (`crates/daemon/src/lib.rs:9813`)) and, when one needs the update, makes it on a
 scoped thread beside the response build that the settle joins before the
-response returns (`crates/daemon/src/lib.rs:10150`, `touch_use_outcomes`
+response returns (`crates/daemon/src/lib.rs:10126`, `touch_use_outcomes`
 (`crates/daemon/src/lib.rs:9847`)), within what remains of the pass's Kernel
-wait (`crates/daemon/src/use_outcome_writer.rs:330`); a pass that handed its
+wait (`crates/daemon/src/use_outcome_writer.rs:331`); a pass that handed its
 serve to a tracked job leaves the touch to that job, which checks and updates
 after its serve commits with a Kernel wait of its own (`touch_after_serve`
-(`crates/daemon/src/use_outcome_writer.rs:304`)); the Kernel update moves
+(`crates/daemon/src/use_outcome_writer.rs:305`)); the Kernel update moves
 only live records whose value is null or earlier, in one fenced transaction
 with no commit that holds only the writer (`advance_use_outcome_last_transform`
 (`crates/kernel/src/use_outcome.rs:533`)).
@@ -1309,8 +1319,9 @@ Open questions:
   predicate would skip most of these commits and changes the
   per-committing-pass rule (needs human input).
 - A pass that commits and then fails its boundary read answers an error before
-  the settle step, so it records its serve and touches nothing; the next
-  committing pass catches up.
+  the settle step; it hands off its serve, and the job's touch advances the
+  record with that pass's time, because the pass committed
+  (`a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`).
 - A session rebound to a route with memory disabled keeps its records untouched
   by those passes, because such a route takes no Kernel read (C2).
 - A pass with an earlier clock selects no record, because the update filters on

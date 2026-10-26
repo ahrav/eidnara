@@ -1068,4 +1068,9 @@ async fn a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].decision_object_ids, ["mem-a"]);
     assert_eq!(counts(&handler), [("written", 1)]);
+    assert_eq!(
+        records[0].serve.last_transform_at,
+        Some(records[0].serve.recorded_at),
+        "the serve job's touch carries the committing pass's time"
+    );
 }
