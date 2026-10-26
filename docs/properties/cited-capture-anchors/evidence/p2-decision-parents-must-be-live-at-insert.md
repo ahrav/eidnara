@@ -8,7 +8,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 `insert_decision` (`crates/kernel/src/slice/write.rs:920`) calls `require_parents` (`:1095`), which runs `require_live` for the domain and `require_optional_live` for proposition, scope, anchor, and evidence. Each query requires `invalidated_commit_seq IS NULL` inside the envelope's transaction and returns `NotFound` otherwise. The parent check runs before the registry insert, so a refusal leaves no registry row.
 
-Memory capture passes `anchor_id: None` (`crates/daemon/src/memory_capture.rs:1176`), so at the branch tip no production decision reaches the anchor clause. `crates/kernel/tests/kernel_anchor_write.rs:404` inserts a decision naming an anchor before the anchor in one envelope and gets `NotFound`, and the commit stores neither row.
+At U1 and U2 memory capture passed `anchor_id: None`, so no production decision reached the anchor clause. Since U3, `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:1176`) inserts the job's anchor before the job's first decision and names it on every decision of the job (`:1235`, `:1265`), so every anchored capture publish reaches the clause in production order. `crates/kernel/tests/kernel_anchor_write.rs:404` inserts a decision naming an anchor before the anchor in one envelope and gets `NotFound`, and the commit stores neither row.
 
 ## Failure scenario
 
