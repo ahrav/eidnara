@@ -340,6 +340,38 @@ describe("checkAnchors on a renamed target", () => {
         );
         expect(checkAnchors(repo)).toEqual({ findings: [], notices: [] });
     });
+
+    test("reports the file a bare anchor cited at the base when an added file takes over its name", () => {
+        const repo = repository(
+            {
+                "docs/a.md": "intro\n`x.rs:3`, `y.rs:4`, `w.rs:20`, `v.rs:6`\nnew\n",
+                "new/x.rs": SOURCE,
+                "new/y.rs": SOURCE,
+                "b/z.rs": SOURCE,
+                "a/w.rs": SOURCE,
+                "c/w.rs": SOURCE,
+                "v.rs": SOURCE,
+                "a/v.rs": SOURCE,
+            },
+            {
+                "docs/a.md": modified("docs/a.md"),
+                "new/x.rs": { kind: "added" },
+                "new/y.rs": { kind: "added" },
+                "b/z.rs": modified("old/y.rs"),
+                "a/w.rs": modified("a/w.rs"),
+                "c/w.rs": { kind: "added" },
+                "v.rs": { kind: "added" },
+            },
+            { "docs/a.md": parseHunks("@@ -2,0 +3 @@\n"), "a/w.rs": parseHunks("@@ -1,0 +2 @@\n") },
+            { "old/x.rs": null, "old/y.rs": "b/z.rs" },
+        );
+        expect(messages(checkAnchors(repo).findings)).toEqual([
+            "docs/a.md:2: x.rs:3 cites a file this change deletes",
+            "docs/a.md:2: y.rs:4 cites a file this change renames to b/z.rs",
+            "docs/a.md:2: w.rs:20 cites lines that moved to a/w.rs:21-21",
+            "docs/a.md:2: v.rs:6 now resolves to v.rs; the cited file is a/v.rs",
+        ]);
+    });
 });
 
 describe("gitRepository", () => {

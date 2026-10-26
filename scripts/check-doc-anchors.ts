@@ -193,7 +193,11 @@ export function checkAnchors(repo: Repository): Report {
         }
         return hunks;
     };
-    const removedPaths = new Set(repo.removed.keys());
+    const baseTracked = new Set(repo.removed.keys());
+    for (const path of repo.tracked) {
+        const change = repo.changes.get(path);
+        if (change === undefined || (change.kind === "modified" && change.base === path)) baseTracked.add(path);
+    }
     const docs = [...repo.tracked].filter((path) => path.endsWith(".md")).sort();
     for (const doc of docs) {
         const docChange = repo.changes.get(doc);
@@ -220,7 +224,7 @@ export function checkAnchors(repo: Repository): Report {
                 }
                 continue;
             }
-            const located = locate(repo, removedPaths, doc, docChange, anchor, target);
+            const located = locate(repo, baseTracked, doc, docChange, anchor, target);
             if (located === undefined) continue;
             if (located === "deleted") {
                 push(entries, "cites a file this change deletes");
@@ -229,6 +233,10 @@ export function checkAnchors(repo: Repository): Report {
             if (located.kind === "relink") {
                 const cites = target === undefined ? "cites no tracked file" : `cites ${target}`;
                 push(entries, `${cites} from the document's new path; the target is ${located.path}`);
+                continue;
+            }
+            if (located.kind === "retargeted") {
+                push(entries, `now resolves to ${target}; the cited file is ${located.path}`);
                 continue;
             }
             const { base, head } = located;
@@ -245,12 +253,18 @@ export function checkAnchors(repo: Repository): Report {
 type Located =
     | { kind: "modified" | "renamed"; base: string; head: string }
     | { kind: "relink"; path: string }
+    | { kind: "retargeted"; path: string }
     | "deleted"
     | undefined;
 
+/**
+ * `baseTracked` holds the paths that existed at the merge base. `locate` resolves the anchor
+ * against them first and follows that file through renames and deletions, so it reports the
+ * deletion even when a file this change adds reuses the name.
+ */
 function locate(
     repo: Repository,
-    removedPaths: Set<string>,
+    baseTracked: Set<string>,
     doc: string,
     docChange: FileChange | undefined,
     anchor: Anchor,
@@ -262,15 +276,18 @@ function locate(
         if (cited === null) return "deleted";
         if (cited !== undefined && cited !== target) return { kind: "relink", path: cited };
     }
-    if (target !== undefined) {
-        const change = repo.changes.get(target);
-        return change?.kind === "modified" ? { kind: "modified", base: change.base, head: target } : undefined;
+    const meant = resolveAnchor(baseTracked, doc, anchor);
+    if (meant === undefined) {
+        const change = target === undefined ? undefined : repo.changes.get(target);
+        return change?.kind === "modified" && target !== undefined ? { kind: "modified", base: change.base, head: target } : undefined;
     }
-    if (anchor.form === "bare" && bareMatches(repo.tracked, anchor.path).length > 0) return undefined;
-    const gone = resolveAnchor(removedPaths, doc, anchor);
-    if (gone === undefined) return undefined;
-    const renamed = repo.removed.get(gone) ?? null;
-    return renamed === null ? "deleted" : { kind: "renamed", base: gone, head: renamed };
+    const now = repo.removed.has(meant) ? repo.removed.get(meant) ?? null : meant;
+    if (now === null) return "deleted";
+    if (target !== undefined && target !== now && now === meant) return { kind: "retargeted", path: now };
+    const change = repo.changes.get(now);
+    const kind = now === meant || now === target ? "modified" : "renamed";
+    if (change?.kind === "modified") return { kind, base: change.base, head: now };
+    return kind === "renamed" ? { kind, base: meant, head: now } : undefined;
 }
 
 function git(cwd: string | undefined, args: string[]): string {
