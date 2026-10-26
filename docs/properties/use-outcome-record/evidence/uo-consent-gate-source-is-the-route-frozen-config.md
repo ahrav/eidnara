@@ -12,7 +12,7 @@ re-verified at this branch tip.
 References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Bind: `crates/daemon/src/lib.rs:13555`.
+- Bind: `crates/daemon/src/lib.rs:13555-13565`.
 - Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:6029`) reads
   `self.effective_config` at `crates/daemon/src/lib.rs:6071`.
 - Correction: the spec cited `config.rs:2630, 2753, 2762`, which are config

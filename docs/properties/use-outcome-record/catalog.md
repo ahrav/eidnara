@@ -329,7 +329,7 @@ Required faults and enabling state: A route bound with memory on, then a reload
 that turns it off (and the reverse), then a pass and a wrapup.
 Confidence: medium -
 [evidence](evidence/uo-consent-gate-source-is-the-route-frozen-config.md). bind
-freezes `effective_config` into the binding (`crates/daemon/src/lib.rs:13555`);
+freezes `effective_config` into the binding (`crates/daemon/src/lib.rs:13555-13565`);
 wrapup reads the live config (`prepare_wrapup_fire`
 (`crates/daemon/src/lib.rs:6029`)). R14 applied: the config seam is
 `SessionBinding.config` versus `effective_config` at the two call sites.
@@ -874,8 +874,8 @@ Required faults and enabling state: A serve at n; dispositions at n + k, at n,
 and before n; a null row and another lineage by SQL.
 Confidence: high -
 [evidence](evidence/uo-p-disputed-after-serve-from-committed-events-only.md).
-the join is `crates/kernel/src/use_outcome.rs:183`, using the admission lineage
-text through `crates/kernel/src/admission.rs:910`.
+the join is `crates/kernel/src/use_outcome.rs:183-201`, using the admission
+lineage text through `crates/kernel/src/admission.rs:910`.
 Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
 (`crates/kernel/tests/kernel_use_outcome.rs:400`);
@@ -1207,9 +1207,11 @@ marks records written after the first; a route teardown leaves the records live
 Guarantee: `deleted_at` is set exactly when a `session.delete` for the session
 committed its Kernel step, before the memory-store delete; route teardown leaves
 it null.
-Check: `always` - after `ok` every live record of the session has `deleted_at`
-set and the memory rows are gone, and a record expiry retired before the delete
-keeps its state with `deleted_at` null; after teardown it is null; after
+Check: `always` - after `ok` every record the Kernel step selected as live has
+`deleted_at` set and the memory rows are gone; a record expiry retired before
+the delete keeps its state with `deleted_at` null, and a serve whose job lands
+after the step is live until the next delete (OQ3-10); after teardown it is
+null; after
 `kernel_unavailable` the memory rows are intact, and `deleted_at` is null when
 the Kernel was not Ready and set when the step's commit ran and its answer was
 an error; one repeat with the Kernel Ready completes `ok` and keeps the first
@@ -1316,7 +1318,9 @@ Open questions:
   makes no touch of its own: the job touches after its serve, under a budget of
   the same size, so the serving pass's record carries that pass's time and the
   response waits on neither write.
-- Cost: every committing pass of a session with a live record makes one fenced
+- Cost: every committing pass of a session with a stale live record (a value
+  null or before the pass's time; the staleness read skips the writer
+  otherwise) makes one fenced
   commit, on a scoped thread beside the response build, so its device flush
   overlaps the memory-store flush of the pass trace. Measured on this host
   (release build, one session with one record, paired runs of 240 committing

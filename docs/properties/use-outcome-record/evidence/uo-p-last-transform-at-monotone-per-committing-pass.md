@@ -95,8 +95,10 @@ Kernel unavailable at the write.
 ### Q: Cost
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
-- Findings: Cost: every committing pass of a session with a live record makes
-  one fenced commit, on a scoped thread beside the response build, so its
+- Findings: Cost: every committing pass of a session with a stale live record
+  (a value null or before the pass's time; the staleness read skips the writer
+  otherwise) makes one fenced commit, on a scoped thread beside the response
+  build, so its
   device flush overlaps the memory-store flush of the pass trace. Measured on
   this host (release build, one session with one record, paired runs of 240
   committing passes): with a fixed 1 ms flush on tmpfs the committing pass p50
