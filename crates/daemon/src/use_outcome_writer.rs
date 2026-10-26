@@ -1,7 +1,7 @@
 //! Records a frozen Canonical composition as a Kernel use-outcome serve: which decision objects one session was served. Also writes the record lifecycle: `session.delete` marks a session's live records deleted, and a committing pass advances their `last_transform_at`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
@@ -17,7 +17,7 @@ const REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-serve-v1\n";
 const DELETE_PRODUCER: &str = "eidnara-daemon/use-outcome-delete";
 const DELETE_FAMILY: &str = "use-outcome-delete";
 const DELETE_REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-delete-v1\n";
-/// Bounds the wait for the Kernel writer; the insert runs to completion once the writer is held.
+/// Bounds one pass's total wait for Kernel connections across its writes; a write runs to completion once its connection is held.
 const WRITE_BUDGET: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,7 +163,7 @@ impl LifecycleCounts {
     }
 }
 
-/// `session.delete`'s use-outcome step: lists the session's live records and, when any exist, commits one envelope that sets `deleted_at = now` on exactly those. The key carries a fresh attempt nonce, so a receipt never answers a later delete as a replay; idempotence rests on the live listing, and a record already marked keeps its first timestamp.
+/// `session.delete`'s use-outcome step: one envelope that sets `deleted_at = now` on every live record of the session, selected under the writer. An envelope that marks nothing rolls back, so a session with no live record commits nothing. The key carries a fresh attempt nonce, so a receipt never answers a later delete as a replay; idempotence rests on the live selection, and a record already marked keeps its first timestamp.
 pub(crate) fn mark_session_deleted(
     store: &KernelStore,
     project: &ProjectBinding,
@@ -171,18 +171,6 @@ pub(crate) fn mark_session_deleted(
     session_id: &str,
     now: i64,
 ) -> Result<LifecycleWrite, KernelError> {
-    let live: Vec<String> = store
-        .served_set(project.digest(), harness, session_id)?
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|record| {
-            record.serve.invalidated_commit_seq.is_none() && record.serve.deleted_at.is_none()
-        })
-        .map(|record| record.serve.use_outcome_id)
-        .collect();
-    if live.is_empty() {
-        return Ok(LifecycleWrite::DeleteNothingLive);
-    }
     let mut nonce = [0u8; 16];
     getrandom::getrandom(&mut nonce).map_err(|_| KernelError::Io)?;
     let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -195,33 +183,39 @@ pub(crate) fn mark_session_deleted(
         operation_key,
         request_digest: length_prefixed_digest(
             DELETE_REQUEST_DOMAIN,
-            live.iter().map(String::as_str).chain([now_text.as_str()]),
+            [session_id, now_text.as_str()].into_iter(),
         ),
         actor: "daemon".to_string(),
         cause: "session deleted".to_string(),
     };
-    store.commit(intent, |envelope| {
-        envelope
-            .mark_use_outcomes_deleted(&live, now)
-            .map(|marked| marked.to_string())
-    })?;
-    Ok(LifecycleWrite::DeletedMarked)
+    let mut nothing_live = false;
+    let outcome = store.commit(intent, |envelope| {
+        let marked =
+            envelope.mark_use_outcomes_deleted(project.digest(), harness, session_id, now)?;
+        nothing_live = marked == 0;
+        if nothing_live {
+            return Err(KernelError::NotFound);
+        }
+        Ok(marked.to_string())
+    });
+    match outcome {
+        Ok(_) => Ok(LifecycleWrite::DeletedMarked),
+        Err(KernelError::NotFound) if nothing_live => Ok(LifecycleWrite::DeleteNothingLive),
+        Err(error) => Err(error),
+    }
 }
 
-/// Advances `last_transform_at` to `at` on the session's live records after a committed pass. Answers `None` when no record needed it; a deadline or any other Kernel failure skips the write, and the next committing pass catches up.
+/// Advances `last_transform_at` to `at` on the session's live records after a committed pass, within `budget`. Answers `None` when no record needed it. A deadline counts `transform_skipped_deadline` and every other Kernel failure `transform_skipped_unavailable`; either skips the write, and the next committing pass catches up.
 pub(crate) fn touch_session(
-    kernel: &KernelOpenCoordinator,
+    store: &KernelStore,
+    budget: &EvalBudget,
     project: &ProjectBinding,
     harness: &str,
     session_id: &str,
     at: i64,
 ) -> Option<LifecycleWrite> {
-    let Ok(store) = kernel.kernel_store() else {
-        return Some(LifecycleWrite::TransformSkippedUnavailable);
-    };
-    let budget = EvalBudget::new(Some(Instant::now() + WRITE_BUDGET), Arc::default());
     match store.advance_use_outcome_last_transform(
-        &budget,
+        budget,
         project.digest(),
         harness,
         session_id,
@@ -229,10 +223,31 @@ pub(crate) fn touch_session(
     ) {
         Ok(0) => None,
         Ok(_) => Some(LifecycleWrite::TransformTouched),
-        Err(KernelError::Deadline | KernelError::Busy) => {
-            Some(LifecycleWrite::TransformSkippedDeadline)
-        }
-        Err(_) => Some(LifecycleWrite::TransformSkippedUnavailable),
+        Err(error) => Some(match UseOutcomeWrite::from_error(error) {
+            UseOutcomeWrite::Deadline => LifecycleWrite::TransformSkippedDeadline,
+            _ => LifecycleWrite::TransformSkippedUnavailable,
+        }),
+    }
+}
+
+/// The Kernel wait one pass may spend across its serve and touch writes. Each write gets what remains and spends its elapsed time, so a pass waits on the Kernel for at most `WRITE_BUDGET` in total.
+#[derive(Debug)]
+pub(crate) struct PassWriteBudget(Mutex<Duration>);
+
+impl Default for PassWriteBudget {
+    fn default() -> Self {
+        Self(Mutex::new(WRITE_BUDGET))
+    }
+}
+
+impl PassWriteBudget {
+    pub(crate) fn spend<T>(&self, write: impl FnOnce(&EvalBudget) -> T) -> T {
+        let remaining = *self.0.lock().expect("pass write budget mutex");
+        let started = Instant::now();
+        let outcome = write(&EvalBudget::new(Some(started + remaining), Arc::default()));
+        let mut left = self.0.lock().expect("pass write budget mutex");
+        *left = left.saturating_sub(started.elapsed());
+        outcome
     }
 }
 
@@ -250,6 +265,7 @@ pub(crate) struct Serve<'a> {
 /// the record may exist; a later write at the same key replays it.
 pub(crate) fn record_serve(
     kernel: &KernelOpenCoordinator,
+    budget: &PassWriteBudget,
     serve: &Serve<'_>,
 ) -> Option<UseOutcomeWrite> {
     let store = kernel.kernel_store().ok()?;
@@ -291,10 +307,9 @@ pub(crate) fn record_serve(
         recorded_at: serve.recorded_at,
         decision_object_ids: snapshot.served_ids().to_vec(),
     };
-    let budget = EvalBudget::new(Some(Instant::now() + WRITE_BUDGET), Arc::default());
     Some(
-        match store.commit_within_budget(&budget, intent, |envelope| {
-            envelope.insert_use_outcome(spec)
+        match budget.spend(|budget| {
+            store.commit_within_budget(budget, intent, |envelope| envelope.insert_use_outcome(spec))
         }) {
             Ok(receipt) if receipt.replayed => UseOutcomeWrite::Replayed,
             Ok(_) => UseOutcomeWrite::Written,

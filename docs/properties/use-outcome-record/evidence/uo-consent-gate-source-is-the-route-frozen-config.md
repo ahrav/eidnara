@@ -10,11 +10,11 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `6d91bfa92`).
 
-- Bind: `crates/daemon/src/lib.rs:13417`.
-- Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:5988`) reads
-  `self.effective_config` at `crates/daemon/src/lib.rs:6030`.
+- Bind: `crates/daemon/src/lib.rs:13425`.
+- Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:5996`) reads
+  `self.effective_config` at `crates/daemon/src/lib.rs:6038`.
 - Correction: the spec cited `config.rs:2630, 2753, 2762`, which are config
   tests at this tip.
 
@@ -22,11 +22,11 @@ its parent is `a9060af05`).
   `route.open`; the wrapup fire reads the live effective config.
 - Existing check:
   `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-  (`crates/daemon/src/lib.rs:39608`);
+  (`crates/daemon/src/lib.rs:39630`);
   `only_an_available_composition_is_recorded`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:174`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:190`);
   `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:514`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_writer_tests.rs:536`). Status: unaudited.
 
 ## Failure scenario
 
@@ -59,10 +59,10 @@ that turns it off (and the reverse), then a pass and a wrapup.
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: Gap G4: the summarizer reattach path reads `memory_enabled` from the
-  live effective config (`crates/daemon/src/lib.rs:5215`, used at
-  `crates/daemon/src/lib.rs:5362`), a third consent source beside the frozen
+  live effective config (`crates/daemon/src/lib.rs:5223`, used at
+  `crates/daemon/src/lib.rs:5370`), a third consent source beside the frozen
   binding and the live wrapup config; the fire path states the frozen-config
-  rule in its own comment (`crates/daemon/src/lib.rs:5872`). Recorded, not
+  rule in its own comment (`crates/daemon/src/lib.rs:5880`). Recorded, not
   fixed; whether the reattach should follow the frozen config is an owner
   decision (needs human input).
 - Missing evidence: an owner decision or the named read.

@@ -820,12 +820,12 @@ fn lifecycle(store: &KernelStore, session: &str) -> Vec<(Option<i64>, Option<i64
 fn mark_deleted(
     store: &KernelStore,
     key: &str,
-    ids: &[String],
+    session: &str,
     at: i64,
 ) -> Result<usize, KernelError> {
     let marked = std::cell::Cell::new(0);
     store.commit(intent(key), |envelope| {
-        marked.set(envelope.mark_use_outcomes_deleted(ids, at)?);
+        marked.set(envelope.mark_use_outcomes_deleted(&project(), HARNESS, session, at)?);
         Ok(String::new())
     })?;
     Ok(marked.get())
@@ -838,38 +838,53 @@ fn budget(wait: std::time::Duration) -> kernel::applicability::EvalBudget {
     )
 }
 
-/// Marking a session deleted sets `deleted_at` once on each named live record: a repeat keeps the first value, a retired record keeps its state, and a negative time is refused with no row changed.
+/// Marking a session deleted sets `deleted_at` once on each of its live records: a repeat keeps the first value, a record served after the first mark is marked by the next, a retired record and another session keep their state, and a negative time is refused with no row changed.
 #[test]
 fn a_session_delete_marks_each_live_record_once() {
     let root = tempfile::tempdir().unwrap();
-    let store = store_with_objects(root.path(), &["d1", "d2"]);
+    let store = store_with_objects(root.path(), &["d1", "d2", "d3"]);
     let served_at = tick(&store, "tick");
     let now = USE_OUTCOME_RETENTION_MS + 1;
-    let first = insert(&store, "a", spec("s1", &["d1"], served_at, now)).unwrap();
-    let second = insert(&store, "b", spec("s1", &["d2"], served_at, now)).unwrap();
-    let expired = insert(&store, "c", spec("s2", &["d1"], served_at, 0)).unwrap();
+    insert(&store, "a", spec("s1", &["d1"], served_at, now)).unwrap();
+    insert(&store, "b", spec("s1", &["d2"], served_at, now)).unwrap();
+    insert(&store, "c", spec("s1", &["d3"], served_at, 0)).unwrap();
+    insert(&store, "other", spec("s2", &["d1"], served_at, now)).unwrap();
     assert_eq!(store.expire_use_outcomes(now).unwrap().retired, 1);
-    let ids = [first, second];
 
     assert_eq!(
-        mark_deleted(&store, "neg", &ids, -1),
+        mark_deleted(&store, "neg", "s1", -1),
         Err(KernelError::InvalidInput)
     );
-    assert_eq!(lifecycle(&store, "s1"), [(None, None), (None, None)]);
-    assert_eq!(mark_deleted(&store, "del-1", &ids, 10), Ok(2));
-    assert_eq!(mark_deleted(&store, "del-2", &ids, 20), Ok(0));
     assert_eq!(
         lifecycle(&store, "s1"),
-        [(Some(10), None), (Some(10), None)]
+        [(None, None), (None, None), (None, None)]
     );
-    assert_eq!(mark_deleted(&store, "del-3", &[expired], 30), Ok(0));
+    assert_eq!(mark_deleted(&store, "del-1", "s1", 10), Ok(2));
+    assert_eq!(mark_deleted(&store, "del-2", "s1", 20), Ok(0));
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(Some(10), None), (Some(10), None), (None, None)],
+        "the retired record keeps its state"
+    );
     assert_eq!(lifecycle(&store, "s2"), [(None, None)]);
+    let served_again = tick(&store, "tick-2");
+    insert(&store, "e", spec("s1", &["d1", "d2"], served_again, now)).unwrap();
+    assert_eq!(mark_deleted(&store, "del-3", "s1", 30), Ok(1));
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [
+            (Some(10), None),
+            (Some(10), None),
+            (None, None),
+            (Some(30), None)
+        ]
+    );
     let records = store
         .served_set(&project(), HARNESS, "s1")
         .unwrap()
         .unwrap();
     assert_eq!(records[0].decision_object_ids, ["d1"]);
-    assert_eq!(records[1].decision_object_ids, ["d2"]);
+    assert_eq!(records[3].decision_object_ids, ["d1", "d2"]);
 }
 
 /// `last_transform_at` moves forward only on the session's live records, through a write that appends no commit-log row, receipt, or outbox entry; an earlier time, a deleted record, a retired record, and another session are left alone.
@@ -879,8 +894,7 @@ fn last_transform_at_advances_live_records_without_a_commit() {
     let store = store_with_objects(root.path(), &["d1", "d2"]);
     let served_at = tick(&store, "tick");
     let now = USE_OUTCOME_RETENTION_MS + 1;
-    let first = insert(&store, "a", spec("s1", &["d1"], served_at, now)).unwrap();
-    insert(&store, "b", spec("s1", &["d2"], served_at, now)).unwrap();
+    insert(&store, "a", spec("s1", &["d1"], served_at, now)).unwrap();
     insert(&store, "c", spec("s2", &["d1"], served_at, now)).unwrap();
     insert(&store, "d", spec("s3", &["d1"], served_at, 0)).unwrap();
     assert_eq!(store.expire_use_outcomes(now).unwrap().retired, 1);
@@ -904,13 +918,10 @@ fn last_transform_at_advances_live_records_without_a_commit() {
     let before = durable(root.path());
 
     assert_eq!(advance("s1", -1), Err(KernelError::InvalidInput));
-    assert_eq!(advance("s1", 100), Ok(2));
+    assert_eq!(advance("s1", 100), Ok(1));
     assert_eq!(advance("s1", 50), Ok(0));
     assert_eq!(advance("s1", 100), Ok(0));
-    assert_eq!(
-        lifecycle(&store, "s1"),
-        [(None, Some(100)), (None, Some(100))]
-    );
+    assert_eq!(lifecycle(&store, "s1"), [(None, Some(100))]);
     assert_eq!(lifecycle(&store, "s2"), [(None, None)]);
     assert_eq!(
         advance("s3", 100),
@@ -921,13 +932,18 @@ fn last_transform_at_advances_live_records_without_a_commit() {
     assert_eq!(store.tip().unwrap(), tip);
     assert_eq!(durable(root.path()), before);
 
-    assert_eq!(mark_deleted(&store, "del", &[first], 150), Ok(1));
+    insert(&store, "b", spec("s1", &["d2"], served_at, now)).unwrap();
+    assert_eq!(mark_deleted(&store, "del", "s1", 150), Ok(2));
+    let later = tick(&store, "tick-2");
+    insert(&store, "e", spec("s1", &["d1", "d2"], later, now)).unwrap();
+    let tip = store.tip().unwrap();
     assert_eq!(advance("s1", 200), Ok(1));
     assert_eq!(
         lifecycle(&store, "s1"),
-        [(Some(150), Some(100)), (None, Some(200))],
+        [(Some(150), Some(100)), (Some(150), None), (None, Some(200))],
         "a deleted record receives no update"
     );
+    assert_eq!(store.tip().unwrap(), tip);
 }
 
 /// With the Kernel writer held, an advance that has rows to move stops at its budget with `Deadline`, and one with nothing to move answers without waiting for the writer.

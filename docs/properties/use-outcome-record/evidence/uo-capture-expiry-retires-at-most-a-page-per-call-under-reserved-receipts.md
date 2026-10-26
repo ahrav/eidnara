@@ -10,13 +10,13 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `6d91bfa92`).
 
 - Page bound and order: `expired_captures_sql`
   (`crates/kernel/src/local_file.rs:549`).
 - Reserved receipt: `expiry_intent` (`crates/kernel/src/local_file.rs:433`).
 - The use-outcome sweep follows the same shape at `expire_use_outcomes`
-  (`crates/kernel/src/use_outcome.rs:473`).
+  (`crates/kernel/src/use_outcome.rs:477`).
 - Correction: the spec cited `harness_sources.rs:3331, 3187`; the tests moved to
   the lines under Existing check.
 

@@ -9,10 +9,10 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `6d91bfa92`).
 
-- Join: `crates/kernel/src/use_outcome.rs:167`; read: `served_sessions_for`
-  (`crates/kernel/src/use_outcome.rs:406`).
+- Join: `crates/kernel/src/use_outcome.rs:183`; read: `served_sessions_for`
+  (`crates/kernel/src/use_outcome.rs:419`).
 - The flag is computed in the read and stored nowhere; the read changes no
   visibility.
 

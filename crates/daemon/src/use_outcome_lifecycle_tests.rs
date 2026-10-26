@@ -79,9 +79,9 @@ async fn a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_
     );
 }
 
-/// A session with no record deletes with no Kernel commit for its records, and a Kernel that is not Ready answers `kernel_unavailable` with the memory rows intact and `deleted_at` null.
+/// A session with no record deletes with no Kernel commit for its records. A Kernel that is not Ready answers `kernel_unavailable`, counted, with the memory rows intact and `deleted_at` null; once the Kernel is Ready, one repeat answers `ok` and marks the records.
 #[tokio::test(flavor = "current_thread")]
-async fn a_delete_with_nothing_live_or_no_ready_kernel_marks_nothing() {
+async fn a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry() {
     let producer = Arc::new(ProducerState::default());
     let (empty, _store, _dir, _project) =
         handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
@@ -92,20 +92,101 @@ async fn a_delete_with_nothing_live_or_no_ready_kernel_marks_nothing() {
     assert_eq!(empty.kernel.kernel_store().unwrap().tip().unwrap(), tip);
     assert_eq!(lifecycle_counts(&empty), [("delete_nothing_live", 1)]);
 
-    let (handler, store, _dir, project) = served_handler().await;
-    let kernel = handler.kernel.kernel_store().unwrap();
+    let (handler, store, dir, project) = served_handler().await;
+    let before = served(&handler, &project);
     handler
         .kernel
         .mark_unavailable(kernel_routes::UnavailableKind::Store);
     let refused = delete_session(&handler, "ses").await;
     assert_eq!(refused["error"], "kernel_unavailable", "{refused}");
     assert!(store.load("ses").unwrap().row_version.is_some());
-    let binding = bound(&project);
-    let records = kernel
-        .served_set(binding.kernel_project.digest(), &binding.harness, "ses")
-        .unwrap()
-        .unwrap();
-    assert_eq!(records[0].serve.deleted_at, None);
+    handler
+        .kernel
+        .open(
+            dir.path().join("kernel"),
+            StoreOpenPolicy::default(),
+            handler.cancel.clone(),
+        )
+        .await;
+    assert_eq!(handler.kernel.state(), kernel_routes::KernelState::Ready);
+    assert_eq!(served(&handler, &project)[0].serve.deleted_at, None);
+    let retried = delete_session(&handler, "ses").await;
+    assert_eq!(retried["ok"], true, "{retried}");
+    let after = served(&handler, &project);
+    assert!(after[0].serve.deleted_at.is_some());
+    assert_eq!(
+        after[0].serve.use_outcome_id,
+        before[0].serve.use_outcome_id
+    );
+    assert_eq!(after[0].decision_object_ids, before[0].decision_object_ids);
+    assert_eq!(
+        lifecycle_counts(&handler),
+        [
+            ("deleted_marked", 1),
+            ("delete_kernel_unavailable", 1),
+            ("transform_touched", 1)
+        ]
+    );
+}
+
+/// A delete step whose commit ran but whose answer was an error leaves the memory rows intact and the records marked: a transient error answers `kernel_unavailable` and the repeat answers `ok` with nothing live and the first timestamp kept, while a conflict answers `source_retirement_failed`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_delete_step_with_an_unknown_outcome_converges_on_retry() {
+    for (fault, code) in [
+        (kernel::KernelError::Io, "kernel_unavailable"),
+        (kernel::KernelError::Conflict, "source_retirement_failed"),
+    ] {
+        let (handler, store, _dir, project) = served_handler().await;
+        *handler.use_outcome_delete_fault.lock().unwrap() = Some(fault);
+        let failed = delete_session(&handler, "ses").await;
+        assert_eq!(failed["error"], code, "{failed}");
+        assert!(store.load("ses").unwrap().row_version.is_some(), "{code}");
+        let deleted_at = served(&handler, &project)[0].serve.deleted_at;
+        assert!(deleted_at.is_some(), "{code}: the commit ran");
+        let tip = handler.kernel.kernel_store().unwrap().tip().unwrap();
+        let retried = delete_session(&handler, "ses").await;
+        assert_eq!(retried["ok"], true, "{code}: {retried}");
+        assert_eq!(served(&handler, &project)[0].serve.deleted_at, deleted_at);
+        assert_eq!(handler.kernel.kernel_store().unwrap().tip().unwrap(), tip);
+        assert_eq!(
+            handler
+                .use_outcome_lifecycle
+                .get(LifecycleWrite::DeleteNothingLive),
+            1,
+            "{code}"
+        );
+    }
+}
+
+/// The route stays bound after `session.delete`, so the session can keep passing; a later delete marks the records its later folds wrote, because each delete commits under its own attempt key. A later fold over a composition the deleted record already holds replays that record.
+#[tokio::test(flavor = "current_thread")]
+async fn a_second_delete_marks_records_written_after_the_first() {
+    let (handler, _store, _dir, project) = served_handler().await;
+    let first = delete_session(&handler, "ses").await;
+    assert_eq!(first["ok"], true, "{first}");
+    let first_mark = served(&handler, &project)[0].serve.deleted_at;
+    seed_memories(
+        &handler.kernel.kernel_store().unwrap(),
+        &project,
+        &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
+    );
+    let continued = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(continued["action"], "HARD", "{continued}");
+    let records = served(&handler, &project);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1].serve.deleted_at, None);
+
+    let second = delete_session(&handler, "ses").await;
+    assert_eq!(second["ok"], true, "{second}");
+    let records = served(&handler, &project);
+    assert_eq!(records[0].serve.deleted_at, first_mark);
+    assert!(records[1].serve.deleted_at.is_some());
+    assert_eq!(
+        handler
+            .use_outcome_lifecycle
+            .get(LifecycleWrite::DeletedMarked),
+        2
+    );
 }
 
 /// Route teardown without `session.delete` writes nothing: `deleted_at` stays null and the memory rows stay.
@@ -144,12 +225,13 @@ async fn last_transform_at_moves_forward_only_on_committing_passes() {
     assert_eq!(repeat["committed"], false, "{repeat}");
     assert_eq!(read(), [(None, Some(first))]);
 
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let later = call_transform(&handler, vec![ck("m1", 1, "hello"), ck("m2", 2, "more")]).await;
     assert_eq!(later["committed"], true, "{later}");
     let [(None, Some(second))] = read()[..] else {
         panic!("{:?}", read());
     };
-    assert!(second >= first);
+    assert!(second > first);
     assert_eq!(kernel.tip().unwrap(), tip, "the update appends no commit");
 
     // A stored value ahead of this host's clock stands for a pass whose clock reads earlier.
@@ -225,7 +307,6 @@ async fn a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up(
         })
     };
     held.recv().unwrap();
-    tokio::time::sleep(Duration::from_millis(2)).await;
     let skipped = call_transform(&handler, vec![ck("m1", 1, "hello"), ck("m2", 2, "more")]).await;
     release.send(()).unwrap();
     holder.join().unwrap();

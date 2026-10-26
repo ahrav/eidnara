@@ -9,11 +9,11 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `6d91bfa92`).
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:251`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:266`; the request
   digest binds the ids, the harness, and the role (`length_prefixed_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:306`)).
+  (`crates/daemon/src/use_outcome_writer.rs:321`)).
 - Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9687`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
@@ -27,17 +27,17 @@ its parent is `a9060af05`).
   `an_equal_digest_replays_and_another_harness_or_role_conflicts`
   (`crates/daemon/src/use_outcome_writer_tests.rs:125`);
   `an_equal_served_set_at_a_later_known_as_of_replays`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:407`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:429`);
   `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:302`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:324`);
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:569`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:591`);
   `every_kernel_error_maps_to_a_closed_outcome`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:667`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:689`);
   `an_emergency_pass_that_reruns_records_one_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:686`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:708`);
   `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:714`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:736`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:214`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`

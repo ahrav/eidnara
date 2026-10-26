@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `6d91bfa92`).
 
 - Folding plan rule: `crates/daemon/src/transform.rs:4239` sets `Defer` when the
   scheduler defers and `Soft` otherwise.
@@ -28,7 +28,7 @@ its parent is `a9060af05`).
   `subagent_first_active_render_commits_tagged_bytes_before_replay`
   (`crates/daemon/src/transform.rs:23781`);
   `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:357`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_writer_tests.rs:379`). Status: unaudited.
 
 ## Failure scenario
 

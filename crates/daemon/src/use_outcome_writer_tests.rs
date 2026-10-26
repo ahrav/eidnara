@@ -1,5 +1,5 @@
 use super::*;
-use crate::use_outcome_writer::{Serve, UseOutcomeWrite, record_serve};
+use crate::use_outcome_writer::{PassWriteBudget, Serve, UseOutcomeWrite, record_serve};
 use kernel::KernelError;
 use kernel_route_fixtures::{MEMORY_DOMAIN, commit_verified_memory, ensure_domain, intent};
 
@@ -147,21 +147,37 @@ async fn an_equal_digest_replays_and_another_harness_or_role_conflicts() {
         recorded_at: 1,
     };
     assert_eq!(
-        record_serve(&handler.kernel, &serve("daemon-test", false)),
+        record_serve(
+            &handler.kernel,
+            &PassWriteBudget::default(),
+            &serve("daemon-test", false)
+        ),
         Some(UseOutcomeWrite::Written)
     );
     let tip = kernel_commits(&handler);
     assert_eq!(
-        record_serve(&handler.kernel, &serve("daemon-test", false)),
+        record_serve(
+            &handler.kernel,
+            &PassWriteBudget::default(),
+            &serve("daemon-test", false)
+        ),
         Some(UseOutcomeWrite::Replayed)
     );
     assert_eq!(kernel_commits(&handler), tip, "a replay commits nothing");
     assert_eq!(
-        record_serve(&handler.kernel, &serve("other-harness", false)),
+        record_serve(
+            &handler.kernel,
+            &PassWriteBudget::default(),
+            &serve("other-harness", false)
+        ),
         Some(UseOutcomeWrite::Conflict)
     );
     assert_eq!(
-        record_serve(&handler.kernel, &serve("daemon-test", true)),
+        record_serve(
+            &handler.kernel,
+            &PassWriteBudget::default(),
+            &serve("daemon-test", true)
+        ),
         Some(UseOutcomeWrite::Conflict)
     );
     let records = served(&handler, &project);
@@ -210,6 +226,12 @@ async fn only_an_available_composition_is_recorded() {
         assert!(
             counts(&disabled).is_empty(),
             "a disabled route attempts no write"
+        );
+        assert!(
+            crate::use_outcome_writer::LifecycleWrite::ALL
+                .iter()
+                .all(|write| disabled.use_outcome_lifecycle.get(*write) == 0),
+            "a disabled route takes no Kernel read to touch records"
         );
     }
 
@@ -582,7 +604,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
         recorded_at: 1,
     };
     assert_eq!(
-        record_serve(&starting.kernel, &serve),
+        record_serve(&starting.kernel, &PassWriteBudget::default(), &serve),
         None,
         "a Kernel that is not Ready attempts no write"
     );
@@ -618,7 +640,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     };
     writer_held.recv().unwrap();
     let started = std::time::Instant::now();
-    let outcome = record_serve(&held.kernel, &serve);
+    let outcome = record_serve(&held.kernel, &PassWriteBudget::default(), &serve);
     let waited = started.elapsed();
     holding.send(()).unwrap();
     holder.join().unwrap();
@@ -631,7 +653,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     );
     assert!(served(&held, &project).is_empty());
     assert_eq!(
-        record_serve(&held.kernel, &serve),
+        record_serve(&held.kernel, &PassWriteBudget::default(), &serve),
         Some(UseOutcomeWrite::Written)
     );
     let as_subagent = Serve {
@@ -640,7 +662,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     };
     for _ in 0..2 {
         assert_eq!(
-            record_serve(&held.kernel, &as_subagent),
+            record_serve(&held.kernel, &PassWriteBudget::default(), &as_subagent),
             Some(UseOutcomeWrite::Conflict),
             "a conflict is not repaired by a later fold"
         );

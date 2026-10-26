@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `6d91bfa92`).
 
 - Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9687`); one
   write per pass covers its reruns.
@@ -20,11 +20,11 @@ its parent is `a9060af05`).
   serving record; an Available snapshot with zero rows writes a record with zero
   decision rows.
 - Existing check: `only_an_available_composition_is_recorded`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:174`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:190`);
   `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:479`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:501`);
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:569`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:591`); Kernel half:
   `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
   (`crates/kernel/tests/kernel_use_outcome.rs:163`). Status: unaudited.
 

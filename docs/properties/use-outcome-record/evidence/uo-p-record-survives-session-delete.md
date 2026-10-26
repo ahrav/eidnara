@@ -10,10 +10,10 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `6d91bfa92`).
 
 - Delete triggers: `crates/kernel/src/schema.rs:187`.
-- Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:375`) answers
+- Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:388`) answers
   retired records.
 
 - Guarantee under test: After `session.delete` answers `ok`, the session's
@@ -26,7 +26,7 @@ its parent is `a9060af05`).
   readable);
   `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`);
-  `a_delete_with_nothing_live_or_no_ready_kernel_marks_nothing`
+  `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:84`). Status: unaudited.
 
 ## Failure scenario

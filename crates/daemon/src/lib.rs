@@ -2838,6 +2838,9 @@ pub struct HandlerCore {
     /// `Some(None)` is a Kernel that is not Ready, and `Some(Some(error))` is a commit that returned `error`.
     #[cfg(test)]
     use_outcome_fault: Mutex<Option<Option<kernel::KernelError>>>,
+    /// The answer the next `session.delete` use-outcome step gives after its commit ran, standing in for an unknown commit outcome.
+    #[cfg(test)]
+    use_outcome_delete_fault: Mutex<Option<kernel::KernelError>>,
     #[cfg(test)]
     between_transform_and_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -3479,6 +3482,8 @@ struct PassEnv {
     /// Set once a serve write of this pass reached a Kernel commit, whatever its outcome; a Kernel that is not Ready leaves it
     /// clear so a rerun retries. Every attempt of a pass freezes the same pinned read, so one commit covers its reruns.
     use_outcome_settled: std::sync::atomic::AtomicBool,
+    /// What remains of the pass's Kernel wait across its serve and touch writes.
+    kernel_writes: use_outcome_writer::PassWriteBudget,
     snapshot_generation: u64,
     pass_now: i64,
     timings: PassTimings,
@@ -3849,6 +3854,8 @@ impl Handler {
             after_transform_commit: Mutex::new(None),
             #[cfg(test)]
             use_outcome_fault: Mutex::new(None),
+            #[cfg(test)]
+            use_outcome_delete_fault: Mutex::new(None),
             #[cfg(test)]
             between_transform_and_prepare: Mutex::new(None),
             #[cfg(test)]
@@ -4376,6 +4383,7 @@ impl Handler {
             reduction_injection: Mutex::new(HashMap::new()),
             after_transform_commit: Mutex::new(None),
             use_outcome_fault: Mutex::new(None),
+            use_outcome_delete_fault: Mutex::new(None),
             between_transform_and_prepare: Mutex::new(None),
             wrapup_operation_budget: Mutex::new(None),
             unknown_module_retry_delay: Mutex::new(None),
@@ -6838,8 +6846,8 @@ impl HandlerCore {
         }
     }
 
-    /// The use-outcome part of step 1 of `session.delete`; the caller holds the capture commit gate. A deployment without a kernel holds no record. A Kernel that is starting or unavailable, or a transient failure, is the retryable `kernel_unavailable`; a conflict, a corrupt row, or invalid input is `source_retirement_failed`.
-    fn mark_use_outcomes_deleted(
+    /// Step 1 of `session.delete`, under the capture commit gate the caller holds: retires the bound session's captured sources, then marks its live use-outcome records deleted. A deployment without a kernel holds neither. A Kernel that is starting or unavailable, or a transient inventory or commit failure, is the retryable `kernel_unavailable`, counted `delete_kernel_unavailable`; a conflict, a corrupt row, invalid input, or a page that replays is `source_retirement_failed`, which a retry meets again.
+    fn delete_kernel_step(
         &self,
         binding: &SessionBinding,
         session_id: &str,
@@ -6847,59 +6855,60 @@ impl HandlerCore {
         if !self.kernel.expected() {
             return Ok(());
         }
-        let unavailable = |message: String| {
-            self.use_outcome_lifecycle
-                .record(use_outcome_writer::LifecycleWrite::DeleteKernelUnavailable);
-            PreparedOutcome::Error {
-                code: "kernel_unavailable".to_string(),
-                message,
-            }
-        };
-        let kernel = self
-            .kernel
-            .kernel_store()
-            .map_err(|state| unavailable(state.state_key()))?;
-        match use_outcome_writer::mark_session_deleted(
-            &kernel,
-            &binding.kernel_project,
-            &binding.harness,
-            session_id,
-            now_ms(),
-        ) {
-            Ok(write) => {
-                self.use_outcome_lifecycle.record(write);
-                Ok(())
-            }
-            Err(
-                error @ (kernel::KernelError::Conflict
-                | kernel::KernelError::CorruptCanonicalRow
-                | kernel::KernelError::InvalidInput),
-            ) => Err(PreparedOutcome::Error {
-                code: "source_retirement_failed".to_string(),
-                message: format!("use outcomes not marked deleted: {error}"),
-            }),
-            Err(error) => Err(unavailable(format!(
-                "use outcomes not marked deleted: {error}"
-            ))),
-        }
-    }
-
-    /// Step 1 of `session.delete`: retires the bound session's captured sources in the Kernel. The caller holds the capture commit gate. A deployment without a kernel holds no captured sources. A Kernel that is starting or unavailable, or a transient inventory or commit failure, is the retryable `kernel_unavailable`; a corrupt row or a page that replays is `source_retirement_failed`, which a retry meets again.
-    fn retire_captured_sources(
-        &self,
-        binding: &SessionBinding,
-        session_id: &str,
-    ) -> Result<(), PreparedOutcome> {
-        if !self.kernel.expected() {
-            return Ok(());
-        }
-        let kernel = self
+        let outcome = self
             .kernel
             .kernel_store()
             .map_err(|state| PreparedOutcome::Error {
                 code: "kernel_unavailable".to_string(),
                 message: state.state_key(),
-            })?;
+            })
+            .and_then(|kernel| {
+                Self::retire_captured_sources(&kernel, binding, session_id)?;
+                self.mark_use_outcomes_deleted(&kernel, binding, session_id)
+            });
+        if matches!(&outcome, Err(PreparedOutcome::Error { code, .. }) if code == "kernel_unavailable")
+        {
+            self.use_outcome_lifecycle
+                .record(use_outcome_writer::LifecycleWrite::DeleteKernelUnavailable);
+        }
+        outcome
+    }
+
+    fn mark_use_outcomes_deleted(
+        &self,
+        kernel: &kernel::KernelStore,
+        binding: &SessionBinding,
+        session_id: &str,
+    ) -> Result<(), PreparedOutcome> {
+        let marked = use_outcome_writer::mark_session_deleted(
+            kernel,
+            &binding.kernel_project,
+            &binding.harness,
+            session_id,
+            now_ms(),
+        );
+        #[cfg(test)]
+        let marked = self.use_outcome_delete_fault().map_or(marked, Err);
+        let write =
+            marked.map_err(|error| delete_step_error("use outcomes not marked deleted", error))?;
+        self.use_outcome_lifecycle.record(write);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn use_outcome_delete_fault(&self) -> Option<kernel::KernelError> {
+        self.use_outcome_delete_fault
+            .lock()
+            .expect("use-outcome delete fault mutex")
+            .take()
+    }
+
+    /// Retires the bound session's captured sources in receipt-keyed pages.
+    fn retire_captured_sources(
+        kernel: &kernel::KernelStore,
+        binding: &SessionBinding,
+        session_id: &str,
+    ) -> Result<(), PreparedOutcome> {
         let session = source_capture::CapturedSession {
             project_id: binding.kernel_project.digest(),
             harness: &binding.harness,
@@ -6907,17 +6916,8 @@ impl HandlerCore {
         };
         let page_rows = std::num::NonZeroUsize::new(source_capture::SESSION_RETIREMENT_PAGE)
             .expect("a nonzero page");
-        let retired = source_capture::retire_session_pages(&kernel, session, page_rows, usize::MAX)
-            .map_err(|error| PreparedOutcome::Error {
-                code: match error {
-                    kernel::KernelError::Conflict
-                    | kernel::KernelError::CorruptCanonicalRow
-                    | kernel::KernelError::InvalidInput => "source_retirement_failed",
-                    _ => "kernel_unavailable",
-                }
-                .to_string(),
-                message: format!("captured sources not retired: {error}"),
-            })?;
+        let retired = source_capture::retire_session_pages(kernel, session, page_rows, usize::MAX)
+            .map_err(|error| delete_step_error("captured sources not retired", error))?;
         // Every page ran, so the session holds no live captured source; the memory delete may follow.
         if retired {
             Ok(())
@@ -6974,8 +6974,7 @@ impl HandlerCore {
                     .lock()
                     .expect("capture publication mutex");
                 // Captured sources retire and the session's use-outcome records are marked deleted before the memory rows go, so no deleted session keeps a live descriptor or reads as live.
-                core.retire_captured_sources(&binding, &session_id)?;
-                core.mark_use_outcomes_deleted(&binding, &session_id)?;
+                core.delete_kernel_step(&binding, &session_id)?;
                 #[cfg(test)]
                 if core
                     .source_capture
@@ -9571,6 +9570,7 @@ impl HandlerCore {
             note_project_path,
             project_memory,
             use_outcome_settled: std::sync::atomic::AtomicBool::new(false),
+            kernel_writes: Default::default(),
             snapshot_generation,
             pass_now,
             timings: PassTimings {
@@ -9714,6 +9714,7 @@ impl HandlerCore {
             || {
                 use_outcome_writer::record_serve(
                     &self.kernel,
+                    &env.kernel_writes,
                     &use_outcome_writer::Serve {
                         project: &env.binding.kernel_project,
                         harness: &env.binding.harness,
@@ -9726,8 +9727,8 @@ impl HandlerCore {
             },
             |fault| fault.map(use_outcome_writer::UseOutcomeWrite::from_error),
         );
-        // A Kernel that is not Ready cost no writer wait, so a rerun in this pass may retry; any commit outcome
-        // settles the pass, which bounds a pass to one writer wait.
+        // A Kernel that is not Ready cost no wait, so a rerun in this pass may retry; any commit outcome settles
+        // the pass. `kernel_writes` bounds the pass's total Kernel wait across these writes and the touch.
         if attempt.is_some() {
             env.use_outcome_settled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -9736,18 +9737,25 @@ impl HandlerCore {
             .record(attempt.unwrap_or(use_outcome_writer::UseOutcomeWrite::KernelUnavailable));
     }
 
-    /// Advances `last_transform_at` on the session's live records once per committed pass. The write never fails the pass; a skipped write is counted, and the next committing pass catches up.
+    /// Advances `last_transform_at` on the session's live records once per settled committed pass, within what remains of the pass's Kernel wait. The write never fails the pass; a skipped write is counted, and the next committing pass catches up. A route with memory disabled takes no Kernel read, so it writes no record and touches none.
     fn touch_use_outcomes(&self, env: &PassEnv) {
-        if !self.kernel.expected() {
+        if !self.kernel.expected() || env.project_memory.is_none() {
             return;
         }
-        if let Some(write) = use_outcome_writer::touch_session(
-            &self.kernel,
-            &env.binding.kernel_project,
-            &env.binding.harness,
-            &env.parsed.session_id,
-            env.pass_now,
-        ) {
+        let write = match self.kernel.kernel_store() {
+            Ok(store) => env.kernel_writes.spend(|budget| {
+                use_outcome_writer::touch_session(
+                    &store,
+                    budget,
+                    &env.binding.kernel_project,
+                    &env.binding.harness,
+                    &env.parsed.session_id,
+                    env.pass_now,
+                )
+            }),
+            Err(_) => Some(use_outcome_writer::LifecycleWrite::TransformSkippedUnavailable),
+        };
+        if let Some(write) = write {
             self.use_outcome_lifecycle.record(write);
         }
     }
@@ -16596,6 +16604,20 @@ fn invalid_params_error(message: impl Into<String>) -> PreparedOutcome {
     PreparedOutcome::Error {
         code: "invalid_params".to_string(),
         message: message.into(),
+    }
+}
+
+/// Maps a Kernel failure in `session.delete`'s Kernel step: a conflict, a corrupt row, or invalid input recurs on retry and is `source_retirement_failed`; every other failure is the retryable `kernel_unavailable`.
+fn delete_step_error(context: &str, error: kernel::KernelError) -> PreparedOutcome {
+    let code = match error {
+        kernel::KernelError::Conflict
+        | kernel::KernelError::CorruptCanonicalRow
+        | kernel::KernelError::InvalidInput => "source_retirement_failed",
+        _ => "kernel_unavailable",
+    };
+    PreparedOutcome::Error {
+        code: code.to_string(),
+        message: format!("{context}: {error}"),
     }
 }
 

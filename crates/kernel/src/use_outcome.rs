@@ -26,10 +26,26 @@ const PAGE_KEY_DOMAIN: &[u8] = b"eidnara-use-outcome-expiry-page-v1\n";
 /// The reserved producer suffix of expiry commits, also their actor.
 const EXPIRY_PRODUCER: &str = "use-outcome-expiry";
 const EXPIRY_CAUSE: &str = "use outcome retention expired";
-/// The live records of one session (project digest, harness, session) whose `last_transform_at` is null or before `?4`.
-const STALE_TRANSFORM_WHERE: &str = "project_digest=?1 AND harness=?2 AND session_id=?3
-     AND invalidated_commit_seq IS NULL AND deleted_at IS NULL
-     AND (last_transform_at IS NULL OR last_transform_at<?4)";
+/// The live (unretired, `deleted_at` null) records of one session: `?1` project digest, `?2` harness, `?3` session id. The UNIQUE identity index serves the prefix.
+const LIVE_SESSION_WHERE: &str = "project_digest=?1 AND harness=?2 AND session_id=?3
+     AND invalidated_commit_seq IS NULL AND deleted_at IS NULL";
+/// Marks the session's live records deleted at `?4`.
+static MARK_DELETED_SQL: LazyLock<String> =
+    LazyLock::new(|| format!("UPDATE use_outcomes SET deleted_at=?4 WHERE {LIVE_SESSION_WHERE}"));
+/// Whether a live record of the session holds a `last_transform_at` that is null or before `?4`.
+static STALE_TRANSFORM_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM use_outcomes WHERE {LIVE_SESSION_WHERE}
+           AND (last_transform_at IS NULL OR last_transform_at<?4))"
+    )
+});
+/// Advances those records to `?4`.
+static ADVANCE_TRANSFORM_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "UPDATE use_outcomes SET last_transform_at=?4 WHERE {LIVE_SESSION_WHERE}
+           AND (last_transform_at IS NULL OR last_transform_at<?4)"
+    )
+});
 
 /// Whether the served session was a primary session or a subagent session at the serve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -296,32 +312,29 @@ impl Envelope<'_> {
 }
 
 impl Envelope<'_> {
-    /// Sets `deleted_at` on each named record that is still live (unretired, `deleted_at` null) and answers how many it marked. A record already marked keeps its first value, and a retired record keeps its state.
+    /// Sets `deleted_at` on every live (unretired, `deleted_at` null) record of one session and answers how many it marked. The records are selected under the writer, so a serve committed before this commit is marked with the rest. A record already marked keeps its first value, and a retired record keeps its state.
     ///
     /// # Errors
     ///
     /// Returns `InvalidInput` for a negative `deleted_at`, and mapped storage errors otherwise.
     pub fn mark_use_outcomes_deleted(
         &mut self,
-        use_outcome_ids: &[String],
+        project_digest: &str,
+        harness: &str,
+        session_id: &str,
         deleted_at: i64,
     ) -> Result<usize, KernelError> {
         self.guarded(|envelope| {
             if deleted_at < 0 {
                 return Err(KernelError::InvalidInput);
             }
-            use_outcome_ids.iter().try_fold(0, |marked, id| {
-                let changed = envelope
-                    .tx
-                    .execute_cached(
-                        "UPDATE use_outcomes SET deleted_at=?1
-                         WHERE use_outcome_id=?2 AND deleted_at IS NULL
-                           AND invalidated_commit_seq IS NULL",
-                        params![deleted_at, id],
-                    )
-                    .map_err(map_sqlite)?;
-                Ok(marked + changed)
-            })
+            envelope
+                .tx
+                .execute_cached(
+                    &MARK_DELETED_SQL,
+                    params![project_digest, harness, session_id, deleted_at],
+                )
+                .map_err(map_sqlite)
         })
     }
 }
@@ -422,7 +435,7 @@ impl KernelStore {
         Ok(sessions)
     }
 
-    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. A session with nothing to advance takes no writer. The waits for the reader and the writer stop at the budget.
+    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. A session with nothing to advance takes no writer. The waits for a pooled reader and the writer connection stop at the budget; SQLite's own busy wait on the file lock, which only a writer outside this process can cause, is not bounded by it.
     ///
     /// # Errors
     ///
@@ -442,11 +455,7 @@ impl KernelStore {
         let args = params![project_digest, harness, session_id, at];
         let stale: bool = self
             .lock_reader_within(&limit)?
-            .query_row_cached(
-                &format!("SELECT EXISTS(SELECT 1 FROM use_outcomes WHERE {STALE_TRANSFORM_WHERE})"),
-                args,
-                |row| row.get(0),
-            )
+            .query_row_cached(&STALE_TRANSFORM_SQL, args, |row| row.get(0))
             .map_err(map_sqlite)?;
         if !stale {
             return Ok(0);
@@ -454,12 +463,7 @@ impl KernelStore {
         let mut writer = self.lock_writer_within(&limit)?;
         let tx = super::retention::begin_fenced_write(&mut writer, self.lease_epoch())?;
         let advanced = tx
-            .execute_cached(
-                &format!(
-                    "UPDATE use_outcomes SET last_transform_at=?4 WHERE {STALE_TRANSFORM_WHERE}"
-                ),
-                args,
-            )
+            .execute_cached(&ADVANCE_TRANSFORM_SQL, args)
             .map_err(map_sqlite)?;
         tx.commit().map_err(map_sqlite)?;
         Ok(advanced)

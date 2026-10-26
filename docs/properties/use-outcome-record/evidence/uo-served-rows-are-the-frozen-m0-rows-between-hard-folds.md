@@ -11,7 +11,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `6d91bfa92`).
 
 - The additive engine composes m0 from the pinned read inside its HARD arm and
   assigns the composition at `crates/daemon/src/transform.rs:3122`.
@@ -19,7 +19,7 @@ its parent is `a9060af05`).
   `meta.project_memory`; the response field `project_memory` is read from meta
   (`apply_additive_only` (`crates/daemon/src/transform.rs:2854`)).
 - Each pass still reads the Kernel (`project_memory_read`
-  (`crates/daemon/src/lib.rs:5501`)); the read feeds only the m1 revision
+  (`crates/daemon/src/lib.rs:5509`)); the read feeds only the m1 revision
   signal, and a changed revision requests a HARD fold
   (`project_memory_revision_change_requests_a_hard_fold`
   (`crates/daemon/src/transform.rs:13993`)).
