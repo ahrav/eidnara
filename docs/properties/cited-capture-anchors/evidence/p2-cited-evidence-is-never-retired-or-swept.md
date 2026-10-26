@@ -32,6 +32,6 @@ A `harness_capture` row past `retain_until` cited by a live decision event; a pi
 ### Q: Did the expiry test move?
 
 - Sources examined: `crates/daemon/tests/harness_sources.rs` at `a0e3f2993` and at the branch tip.
-- Findings: `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` moved from line 3331 to 3482.
+- Findings: `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` moved from line 3331 at `a0e3f2993` to 3482 at `a734661b6`, and sits at line 3500 at HEAD.
 - Missing evidence: none.
 - Conclusion: resolved with answer: the record cites the current line.
