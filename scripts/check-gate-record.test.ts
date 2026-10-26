@@ -6,6 +6,9 @@ import { join } from "node:path";
 
 import { type Change, checkGateRecord, gitChange, lastRound } from "./check-gate-record";
 
+// Signing, hooks, and merge settings in a developer's git config can fail these commits.
+const ISOLATED_GIT = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+
 const ORDER = ["c1", "c2", "c3"];
 
 function change(files: string[], edits: Record<string, string[]>): Change {
@@ -83,7 +86,7 @@ describe("gitChange", () => {
     let repo: string;
 
     function git(...args: string[]): string {
-        const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+        const result = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: ISOLATED_GIT });
         if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
         return result.stdout.trim();
     }
