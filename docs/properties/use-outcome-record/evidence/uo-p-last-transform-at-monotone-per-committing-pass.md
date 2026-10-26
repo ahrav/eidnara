@@ -19,12 +19,15 @@ revision.
   handed its serve to a tracked job sets `touch_delegated`
   (`crates/daemon/src/lib.rs:9808`) and the job touches after its serve commits
   (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:305`)).
-- Update: `crates/kernel/src/use_outcome.rs:43` selects the live records with a
-  null or earlier value. A session with none takes no writer, because the
+- Update: `crates/kernel/src/use_outcome.rs:43-47` selects the live records with
+  a null or earlier value (the `LIVE_SESSION_WHERE` and `last_transform_at`
+  predicates at lines 45-46). A session with none takes no writer, because the
   check above skips it; the update itself holds only the writer.
-- Outcomes: `crates/daemon/src/use_outcome_writer.rs:269` counts
-  `transform_touched`, `transform_skipped_deadline`, or
-  `transform_skipped_unavailable`.
+- Outcomes: the match in `touch_session`
+  (`crates/daemon/src/use_outcome_writer.rs:283-287`) counts
+  `transform_touched` for an updated row and maps a Kernel error through
+  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:322`) to
+  `transform_skipped_deadline` or `transform_skipped_unavailable`.
 
 - Guarantee under test: `last_transform_at` never decreases on a session's
   serving record, and only a pass whose response committed updates it.
@@ -114,6 +117,19 @@ Kernel unavailable at the write.
   asserts `last_transform_at` equals the serve's `recorded_at`).
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
+
+### Q: Does a committing pass that lands while an earlier serve job still waits leave its time unrecorded?
+
+- Sources examined: `record_use_outcome` and `use_outcomes_to_touch` (`crates/daemon/src/lib.rs`), `touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs`).
+- Findings: Until the next committing pass, yes. The later pass's staleness
+  check finds no record while the serve job waits on the writer, so it touches
+  nothing; the job then inserts the record and advances it to its own pass's
+  `recorded_at`. The next committing pass advances it again. The window is the
+  serve job's wait, at most its `WRITE_BUDGET`.
+- Missing evidence: an owner decision on whether the attribution must name the
+  later pass without a further pass; a reconciliation would need the job to
+  learn the latest committed pass time, or the per-session writes serialized.
+- Conclusion: needs human input.
 
 ### Q: A session rebound to a route with memory disabled keeps its records untouched by those passes, because such a route takes no Kernel read (C2)
 

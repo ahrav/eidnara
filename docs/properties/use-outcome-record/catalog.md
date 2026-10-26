@@ -1329,6 +1329,12 @@ Open questions:
   the settle step; it hands off its serve, and the job's touch advances the
   record with that pass's time, because the pass committed
   (`a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`).
+- A committing pass that lands while an earlier pass's serve job still waits
+  for the writer finds no record at its staleness check and touches nothing;
+  the job then advances the record to its own pass's time, and the later
+  pass's time is recorded by the next committing pass. This is the convergence
+  a skipped touch already has; whether the attribution must name that later
+  pass without a further pass is an owner decision (needs human input).
 - A session rebound to a route with memory disabled keeps its records untouched
   by those passes, because such a route takes no Kernel read (C2).
 - A pass with an earlier clock selects no record, because the update filters on
