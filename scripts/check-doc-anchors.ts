@@ -236,7 +236,8 @@ export function checkAnchors(repo: Repository): Report {
                 continue;
             }
             if (located.kind === "retargeted") {
-                push(entries, `now resolves to ${target}; the cited file is ${located.path}`);
+                const now = target === undefined ? "matches several files after this change" : `now resolves to ${target}`;
+                push(entries, `${now}; the cited file is ${located.path}`);
                 continue;
             }
             const { base, head } = located;
@@ -283,7 +284,7 @@ function locate(
     }
     const now = repo.removed.has(meant) ? repo.removed.get(meant) ?? null : meant;
     if (now === null) return "deleted";
-    if (target !== undefined && target !== now && now === meant) return { kind: "retargeted", path: now };
+    if (target !== now && now === meant) return { kind: "retargeted", path: now };
     const change = repo.changes.get(now);
     const kind = now === meant || now === target ? "modified" : "renamed";
     if (change?.kind === "modified") return { kind, base: change.base, head: now };

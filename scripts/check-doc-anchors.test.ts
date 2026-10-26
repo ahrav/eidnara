@@ -368,7 +368,7 @@ describe("checkAnchors on a renamed target", () => {
         expect(messages(checkAnchors(repo).findings)).toEqual([
             "docs/a.md:2: x.rs:3 cites a file this change deletes",
             "docs/a.md:2: y.rs:4 cites a file this change renames to b/z.rs",
-            "docs/a.md:2: w.rs:20 cites lines that moved to a/w.rs:21-21",
+            "docs/a.md:2: w.rs:20 matches several files after this change; the cited file is a/w.rs",
             "docs/a.md:2: v.rs:6 now resolves to v.rs; the cited file is a/v.rs",
         ]);
     });
