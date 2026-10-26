@@ -37,7 +37,10 @@ A withheld read treated as an empty set.
 
 ## Timing windows and dependencies
 
-None.
+A Kernel that is Starting at the pass's read and Ready by its write: the read
+pins `Withheld`, and the writer must guard on that pinned value rather than on
+the Kernel's readiness at the hand-off. The cited tests leave the Kernel
+unopened for the whole pass, so this window is not constructed.
 
 ## What a test must construct
 
