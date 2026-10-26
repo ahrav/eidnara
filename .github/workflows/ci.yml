@@ -225,6 +225,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Predecessor tokens
         # `docs/plans/` is the only tracked path allowed to contain a
@@ -604,6 +605,15 @@ jobs:
         run: |
           bun test scripts/forbid-oracle-adapter-imports.test.ts
           bun scripts/forbid-oracle-adapter-imports.ts
+
+      - name: Line anchors in changed Markdown
+        # `fetch-depth: 0` on the checkout supplies the merge-base history.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          bun test scripts/check-doc-anchors.test.ts
+          bun scripts/check-doc-anchors.ts "$BASE_SHA"
 
   lint:
     name: lint (1.98)
