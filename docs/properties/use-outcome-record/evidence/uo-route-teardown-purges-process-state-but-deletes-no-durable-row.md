@@ -45,6 +45,9 @@ after a HARD fold.
 ### Q: Does any open question remain for this record?
 
 - Sources examined: the specification catalog entry, the code and tests cited above.
-- Findings: the cited code and tests agree with the guarantee at this tip.
-- Missing evidence: none for the guarantee as stated.
-- Conclusion: resolved with answer - no open question.
+- Findings: the cited code and tests agree with the guarantee at this tip for
+  process-local state; no test reads both stores after a route teardown.
+- Missing evidence: a HARD fold, a route close, then a read of both stores
+  (marker `uo_route_torn_down_after_hard`, owner #1156).
+- Conclusion: resolved with answer - no design question is open; coverage stays
+  partial until #1156 constructs the two-store read.
