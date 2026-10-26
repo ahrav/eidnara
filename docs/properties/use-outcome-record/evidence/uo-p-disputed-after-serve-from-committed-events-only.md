@@ -12,7 +12,7 @@ References are verified at the #1154 branch tip (the commit that adds this file;
 its parent is `8ace6c9f8`).
 
 - Join: `crates/kernel/src/use_outcome.rs:163`; read: `served_sessions_for`
-  (`crates/kernel/src/use_outcome.rs:425`).
+  (`crates/kernel/src/use_outcome.rs:427`).
 - The read takes the newest qualifying commit sequence once for the object and
   compares each serve's `served_commit_seq` against it, so a serve is disputed
   exactly when some qualifying event is later than it.
@@ -25,9 +25,9 @@ its parent is `8ace6c9f8`).
   sequence greater than n.
 - Existing check:
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:358`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:376`);
   `disputed_after_serve_is_judged_against_each_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:749`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:767`). Status: unaudited.
 
 ## Failure scenario
 

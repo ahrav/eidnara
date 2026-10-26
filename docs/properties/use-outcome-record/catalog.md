@@ -391,7 +391,7 @@ Existing check:
 `malformed_stored_policy_and_sensitivity_fail_closed_without_read_error`
 (`crates/kernel/tests/kernel_admission.rs:2935`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:358`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:376`). Status: unaudited.
 Impact: A null row counted as a dispute would report harm with no committed
 event.
 Open questions: None.
@@ -595,7 +595,7 @@ Confidence: high -
 `classify_existing_family` (`crates/kernel/src/open.rs:796`);
 `classify_open_kernel` (`crates/kernel/src/open.rs:852`). Disposition B:
 re-verified against the #1154 digest
-`39b44d5010050e9eb4eb9fdfb92793c0c235d284228309b35cefcdf16a8103d6`.
+`1f1321066d22d1333645aa883c3d516c226f506e5c230999b7f167e303e1d0d5`.
 Existing check: `every_conclusive_kernel_mismatch_is_refused_and_left_untouched`
 (`crates/kernel/tests/kernel_open.rs:183`);
 `a_family_created_under_the_previous_baseline_is_refused_untouched`
@@ -661,7 +661,7 @@ Existing check: `eligibility_matrix_includes_secret_unknown_and_tombstone`
 `unrecognized_stored_classes_read_back_restrictive`
 (`crates/kernel/src/cas/mod.rs:797`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-(`crates/kernel/tests/kernel_use_outcome.rs:339`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:357`). Status: unaudited.
 Impact: A use-outcome row presented to egress would leave the host.
 Open questions: None.
 
@@ -779,7 +779,8 @@ Check: `always` - every forbidden update or delete aborts under a named trigger,
 or once a later commit exists aborts (so a Kernel-written set is sealed at its
 commit, and any record's set is sealed by the next commit), a row with
 `served_commit_seq >= created_commit_seq` or `decision_count < 0` fails its
-CHECK, and an admission row naming an unrecorded serve fails its foreign key.
+CHECK, a decision row naming a registry object of another kind aborts, and an
+admission row naming an unrecorded serve fails its foreign key.
 Fault/timing angle: A raw insert after the recording commit while that commit
 is still the newest.
 Required faults and enabling state: Direct SQL for each forbidden transition,
@@ -791,11 +792,11 @@ in the `use_outcomes` and `use_outcome_decisions` components
 trigger (`crates/kernel/src/schema.rs:163`); `recursive_triggers` is on for
 every Kernel connection.
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-(`crates/kernel/tests/kernel_schema.rs:2176`);
+(`crates/kernel/tests/kernel_schema.rs:2177`);
 `use_outcome_classification_and_identity_shapes_are_checked`
-(`crates/kernel/tests/kernel_schema.rs:2334`);
+(`crates/kernel/tests/kernel_schema.rs:2345`);
 `an_admission_citation_names_a_recorded_use_outcome_and_never_changes`
-(`crates/kernel/tests/kernel_schema.rs:2415`). Status: unaudited.
+(`crates/kernel/tests/kernel_schema.rs:2426`). Status: unaudited.
 Impact: History rewriting defeats the witness the record exists to be.
 Open questions:
 - OQ3-10: a session that continues after its delete reuses its identity at an
@@ -823,9 +824,9 @@ CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:188`); the insert
 names the classes as literals (`insert_use_outcome`
 (`crates/kernel/src/use_outcome.rs:246`)).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
-(`crates/kernel/tests/kernel_schema.rs:2334`);
+(`crates/kernel/tests/kernel_schema.rs:2345`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-(`crates/kernel/tests/kernel_use_outcome.rs:339`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:357`). Status: unaudited.
 Impact: A stop condition of the plan: a Remote-eligible serving record.
 Open questions:
 - Backup classification: the backup scan reads every table with a
@@ -854,9 +855,9 @@ the join is `crates/kernel/src/use_outcome.rs:163`, using the admission lineage
 text through `crates/kernel/src/admission.rs:910`.
 Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:358`);
+(`crates/kernel/tests/kernel_use_outcome.rs:376`);
 `disputed_after_serve_is_judged_against_each_serve`
-(`crates/kernel/tests/kernel_use_outcome.rs:749`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:767`). Status: unaudited.
 Impact: A prior dispute or a stale mark counted as harm after the serve.
 Open questions:
 - A decision disputed then re-approved still counts: event existence counts
@@ -888,28 +889,28 @@ Required faults and enabling state: An expired record; an expired cited record;
 70 expired records; a citation inserted after selection.
 Confidence: high -
 [evidence](evidence/uo-p-sweep-retires-only-expired-uncited-rows.md).
-`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:458`); predicate
+`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:460`); predicate
 `crates/kernel/src/use_outcome.rs:149`; recheck `retire_due_use_outcome`
-(`crates/kernel/src/use_outcome.rs:587`); receipt
+(`crates/kernel/src/use_outcome.rs:597`); receipt
 `crates/kernel/src/local_file.rs:438`.
 Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
-(`crates/kernel/tests/kernel_use_outcome.rs:491`);
+(`crates/kernel/tests/kernel_use_outcome.rs:509`);
 `an_expiry_backlog_drains_one_page_per_call`
-(`crates/kernel/tests/kernel_use_outcome.rs:553`);
+(`crates/kernel/tests/kernel_use_outcome.rs:571`);
 `an_expired_record_cited_by_a_live_report_is_retained`
-(`crates/kernel/tests/kernel_use_outcome.rs:623`);
+(`crates/kernel/tests/kernel_use_outcome.rs:641`);
 `a_record_cited_after_selection_is_kept`
-(`crates/kernel/src/use_outcome.rs:723`);
+(`crates/kernel/src/use_outcome.rs:743`);
 `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-(`crates/kernel/src/use_outcome.rs:751`);
+(`crates/kernel/src/use_outcome.rs:771`);
 `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-(`crates/kernel/src/use_outcome.rs:814`);
+(`crates/kernel/src/use_outcome.rs:834`);
 `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-(`crates/kernel/src/use_outcome.rs:835`);
+(`crates/kernel/src/use_outcome.rs:855`);
 `the_cited_count_covers_the_rows_read_before_the_page_fills`
-(`crates/kernel/tests/kernel_use_outcome.rs:820`);
+(`crates/kernel/tests/kernel_use_outcome.rs:838`);
 `the_sweep_and_the_reads_use_their_indexes`
-(`crates/kernel/src/use_outcome.rs:852`);
+(`crates/kernel/src/use_outcome.rs:872`);
 `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
 `a_cancelled_slice_stops_before_the_use_outcome_sweep`
@@ -939,11 +940,11 @@ Required faults and enabling state: A session with records, then a delete
 Confidence: medium -
 [evidence](evidence/uo-p-record-survives-session-delete.md). the Kernel arm
 holds by the delete triggers and the retained read (`served_set`
-(`crates/kernel/src/use_outcome.rs:391`)); the daemon arm is not yet written.
+(`crates/kernel/src/use_outcome.rs:393`)); the daemon arm is not yet written.
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-(`crates/kernel/tests/kernel_schema.rs:2176`);
+(`crates/kernel/tests/kernel_schema.rs:2177`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:358`) (a retired record stays
+(`crates/kernel/tests/kernel_use_outcome.rs:376`) (a retired record stays
 readable). Status: unaudited.
 Impact: The record dies at the event it witnesses (KTD1).
 Open questions:
@@ -969,12 +970,12 @@ half exists: one identity has one record
 (`duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:215`)) and an equal intent replays
 (`a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-(`crates/kernel/tests/kernel_use_outcome.rs:713`)).
+(`crates/kernel/tests/kernel_use_outcome.rs:731`)).
 Existing check: Kernel half only:
 `duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:215`);
 `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-(`crates/kernel/tests/kernel_use_outcome.rs:713`). The writer is proposed.
+(`crates/kernel/tests/kernel_use_outcome.rs:731`). The writer is proposed.
 Status: unaudited.
 Impact: Duplicates inflate served counts and P7 removal sets.
 Open questions:
@@ -1004,7 +1005,7 @@ Existing check: Kernel half only:
 `duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:215`);
 `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-(`crates/kernel/tests/kernel_use_outcome.rs:734`). The writer is proposed.
+(`crates/kernel/tests/kernel_use_outcome.rs:752`). The writer is proposed.
 Status: unaudited.
 Impact: The record names findings the session never saw.
 Open questions: None.
@@ -1089,7 +1090,7 @@ a closed enum with a stored-string round trip
 folding engine serves a subagent no composition (explicit-config-only).
 Existing check: Kernel half only:
 `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-(`crates/kernel/tests/kernel_use_outcome.rs:734`). The writer is proposed.
+(`crates/kernel/tests/kernel_use_outcome.rs:752`). The writer is proposed.
 Status: unaudited.
 Impact: Harm attributed to the wrong session kind.
 Open questions:
@@ -1116,7 +1117,7 @@ Confidence: medium -
 set-once trigger exists (`crates/kernel/src/schema.rs:188`).
 Existing check: Kernel half only:
 `use_outcome_identity_and_served_set_are_never_rewritten`
-(`crates/kernel/tests/kernel_schema.rs:2176`). The delete step is proposed.
+(`crates/kernel/tests/kernel_schema.rs:2177`). The delete step is proposed.
 Status: unaudited.
 Impact: A deleted session reads as live, or a live one as deleted.
 Open questions: None.
@@ -1139,7 +1140,7 @@ Confidence: medium -
 monotone trigger exists (`crates/kernel/src/schema.rs:188`).
 Existing check: Kernel half only:
 `use_outcome_identity_and_served_set_are_never_rewritten`
-(`crates/kernel/tests/kernel_schema.rs:2176`). The pass hook is proposed.
+(`crates/kernel/tests/kernel_schema.rs:2177`). The pass hook is proposed.
 Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
@@ -1166,10 +1167,10 @@ two sessions with one later dispute.
 Confidence: medium -
 [evidence](evidence/uo-p-counts-exact-and-unavailable-not-zero.md). the
 by-decision read exists (`served_sessions_for`
-(`crates/kernel/src/use_outcome.rs:425`)).
+(`crates/kernel/src/use_outcome.rs:427`)).
 Existing check: Kernel half only:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:358`). The routed read is proposed.
+(`crates/kernel/tests/kernel_use_outcome.rs:376`). The routed read is proposed.
 Status: unaudited.
 Impact: A zero misread as "no harm observed".
 Open questions:

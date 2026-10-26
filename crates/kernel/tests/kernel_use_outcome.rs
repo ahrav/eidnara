@@ -235,6 +235,24 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
         Err(KernelError::NotFound),
         "a decision row names a registry object"
     );
+    writer(root.path())
+        .execute(
+            "INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES ('o1','observation','domain','fixture','o1',1,1,'normal')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        insert(
+            &store,
+            "observation",
+            spec("s3", &["d1", "o1"], served_at, 100)
+        ),
+        Err(KernelError::InvalidInput),
+        "a decision row names a decision object"
+    );
     let next = store.tip().unwrap() + 1;
     let with_secret_id = || {
         let mut ids = vec!["d1".to_string(), SECRET.to_string()];
@@ -327,7 +345,7 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
         count(
             root.path(),
             "SELECT COUNT(*) FROM commit_log
-             WHERE operation_key GLOB 'bad-*' OR operation_key IN ('again','unknown')"
+             WHERE operation_key GLOB 'bad-*' OR operation_key IN ('again','unknown','observation')"
         ),
         0,
         "a refused commit appends no commit-log row"

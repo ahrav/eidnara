@@ -242,7 +242,7 @@ impl Envelope<'_> {
     ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` for a malformed spec (see [`UseOutcomeSpec`]), `NotFound` when a decision id names no registry object, `Conflict` when the identity is already recorded, and mapped storage errors otherwise.
+    /// Returns `InvalidInput` for a malformed spec (see [`UseOutcomeSpec`]) or a decision-row trigger abort, `NotFound` for a missing decision registry object, `Conflict` for an existing identity, and mapped storage errors otherwise.
     pub fn insert_use_outcome(&mut self, spec: UseOutcomeSpec) -> Result<String, KernelError> {
         self.guarded(|envelope| envelope.insert_use_outcome_inner(&spec))
     }
@@ -291,6 +291,8 @@ impl Envelope<'_> {
                     // The record was written earlier in this transaction, so the reference a decision row can miss is its registry object. A duplicate identity fails the record's insert first; its recorded decision rows hold the same registry objects, which they keep from deletion.
                     if is_foreign_key_failure(&error) {
                         KernelError::NotFound
+                    } else if is_trigger_abort(&error) {
+                        KernelError::InvalidInput
                     } else {
                         map_sqlite(error)
                     }
@@ -552,6 +554,14 @@ fn is_foreign_key_failure(error: &rusqlite::Error) -> bool {
     )
 }
 
+fn is_trigger_abort(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+    )
+}
+
 fn map_read(error: rusqlite::Error) -> KernelError {
     match error {
         rusqlite::Error::FromSqlConversionFailure(..) => KernelError::CorruptCanonicalRow,
@@ -635,7 +645,7 @@ mod tests {
         }
     }
 
-    /// A store holding one expired serve of the domain object `decision` per session in `sessions`, and their ids in order.
+    /// A store holding one expired serve of the decision object `decision` per session in `sessions`, and their ids in order.
     fn store_with_expired_serves(
         root: &std::path::Path,
         sessions: &[&str],
@@ -645,15 +655,25 @@ mod tests {
             .commit(intent("domain"), |envelope| {
                 envelope.insert_domain(DomainSpec {
                     domain_id: "domain".to_string(),
-                    object_id: "decision".to_string(),
+                    object_id: "domain-object".to_string(),
                     name: "domain".to_string(),
                     source_kind: "fixture".to_string(),
-                    source_id: "decision".to_string(),
+                    source_id: "domain".to_string(),
                     source_revision: 1,
                     sensitivity: Sensitivity::Normal,
                 })?;
                 Ok(String::new())
             })
+            .unwrap();
+        Connection::open(root.join("kernel.sqlite"))
+            .unwrap()
+            .execute(
+                "INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 ) VALUES ('decision','decision','domain','fixture','decision',1,1,'normal')",
+                [],
+            )
             .unwrap();
         let ids = sessions
             .iter()

@@ -18,7 +18,7 @@ its parent is `8ace6c9f8`).
   answers unavailable with no integer.
 - Existing check: Kernel half only:
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:358`). The routed read is
+  (`crates/kernel/tests/kernel_use_outcome.rs:376`). The routed read is
   proposed. Status: unaudited.
 
 ## Failure scenario

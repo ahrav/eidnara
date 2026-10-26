@@ -21,6 +21,8 @@ its parent is `8ace6c9f8`).
   `decision_count` rows exist or once a later commit exists: a Kernel-written
   set is complete at its commit, and any record's set is sealed by the next
   commit),
+  `use_outcome_decisions_name_decisions` (refuses an `object_id` whose registry
+  kind is other than `decision`; the Kernel reports it as `InvalidInput`),
   `use_outcome_decisions_no_update`, and `use_outcome_decisions_no_delete` in
   the `use_outcome_decisions` component (`crates/kernel/src/schema.rs:192`).
 - Citation rule: the `admission_decisions.use_outcome_id` foreign key, the
@@ -41,11 +43,11 @@ its parent is `8ace6c9f8`).
   admission citation names a recorded serve when its row is written, never
   changes, and its row is never deleted.
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-  (`crates/kernel/tests/kernel_schema.rs:2176`);
+  (`crates/kernel/tests/kernel_schema.rs:2177`);
   `use_outcome_classification_and_identity_shapes_are_checked`
-  (`crates/kernel/tests/kernel_schema.rs:2334`);
+  (`crates/kernel/tests/kernel_schema.rs:2345`);
   `an_admission_citation_names_a_recorded_use_outcome_and_never_changes`
-  (`crates/kernel/tests/kernel_schema.rs:2415`). Status: unaudited.
+  (`crates/kernel/tests/kernel_schema.rs:2426`). Status: unaudited.
 
 ## Failure scenario
 

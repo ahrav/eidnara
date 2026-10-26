@@ -181,7 +181,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "39b44d5010050e9eb4eb9fdfb92793c0c235d284228309b35cefcdf16a8103d6";
+    "1f1321066d22d1333645aa883c3d516c226f506e5c230999b7f167e303e1d0d5";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -2095,6 +2095,7 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("trigger", "operation_receipts_identity_immutable"),
         ("trigger", "operation_receipts_no_delete"),
         ("trigger", "outbox_consumers_checkpoint_monotonic"),
+        ("trigger", "use_outcome_decisions_name_decisions"),
         ("trigger", "use_outcome_decisions_no_delete"),
         ("trigger", "use_outcome_decisions_no_update"),
         ("trigger", "use_outcome_decisions_written_with_record"),
@@ -2318,6 +2319,16 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
         [&short],
     )
     .unwrap();
+    // A decision row names a registry object of kind `decision`.
+    seed_object(&conn, "observation-1", "observation", again);
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT INTO use_outcome_decisions(use_outcome_id,object_id)
+             VALUES ('{short}','observation-1')"
+        ),
+        "use_outcome_decisions name decision objects",
+    );
     next_commit(&conn, "tx-after-short");
     assert_aborts_with(
         &conn,
