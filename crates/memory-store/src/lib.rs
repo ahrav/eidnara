@@ -4233,7 +4233,7 @@ pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
     DurableWriteRegistration {
         family: DurableWriteFamily::ContradictionCandidates,
         policy: DurableFieldPolicy::NoUntrustedText,
-        preparation: "closed-shape hex digests, integers, and Kernel ids refused on any detection; no text column",
+        preparation: "closed-shape hex digests, integers, and Kernel ids refused on any detection before the write, so no scan record is kept; no text column",
         test: "contradiction_candidates::an_id_the_scanner_detects_is_refused_and_nothing_is_written",
     },
     DurableWriteRegistration {

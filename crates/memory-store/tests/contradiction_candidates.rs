@@ -453,3 +453,208 @@ fn the_table_holds_ids_integers_and_times_and_checks_its_shapes() {
         "matched_terms exceeds decision_terms"
     );
 }
+
+#[test]
+fn a_late_write_replaces_held_keys_and_adds_none() {
+    let (_dir, store) = open();
+    let held = [score("d1", 3, 4), score("d2", 3, 4)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 10, 1, &held), CAPS)
+        .unwrap();
+    let late = [score("d2", 4, 4), score("d3", 4, 4)];
+    let outcome = store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 7, 2, &late), CAPS)
+        .unwrap();
+    assert_eq!(
+        (outcome.written, outcome.replaced_away),
+        (1, 0),
+        "only d2 is replaced"
+    );
+    let rows = all_rows(&store);
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|row| row.decision_object_id.as_str())
+        .collect();
+    assert_eq!(ids, ["d1", "d2"]);
+    assert!(rows.iter().all(|row| row.publish_tip == 10));
+    assert_eq!(rows[1].score_bp, 10_000);
+    let equal = [score("d3", 3, 4)];
+    let outcome = store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 10, 3, &equal), CAPS)
+        .unwrap();
+    assert_eq!(
+        outcome.replaced_away, 2,
+        "a write at the held tip replaces the set"
+    );
+}
+
+#[test]
+fn a_write_under_another_kernel_incarnation_takes_its_own_tip() {
+    let (_dir, store) = open();
+    let rows = [score("d1", 3, 4)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 50, 1, &rows), CAPS)
+        .unwrap();
+    let other = DescriptorCandidates {
+        kernel_incarnation_id: "fedcba9876543210fedcba9876543210",
+        ..write(PROJECT, "ev-1", 3, 2, &rows)
+    };
+    store
+        .replace_candidates_for_descriptor(&other, CAPS)
+        .unwrap();
+    let stored = all_rows(&store);
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        (
+            stored[0].kernel_incarnation_id.as_str(),
+            stored[0].publish_tip
+        ),
+        ("fedcba9876543210fedcba9876543210", 3)
+    );
+}
+
+#[test]
+fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
+    let (_dir, store) = open();
+    for index in 0..10_i64 {
+        let rows = [score("decision", 3, 4)];
+        store
+            .replace_candidates_for_descriptor(
+                &write(PROJECT, &format!("ev-{index}"), 1, index, &rows),
+                CAPS,
+            )
+            .unwrap();
+    }
+    let first = store
+        .candidates_for_decision(PROJECT, "decision", None, 4)
+        .unwrap();
+    let mut expected = all_rows(&store);
+    reader_order(&mut expected);
+    let before = [score("decision", 4, 4)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-top", 1, 99, &before), CAPS)
+        .unwrap();
+    store
+        .delete_candidates(&[CandidateKey {
+            project_digest: PROJECT,
+            evidence_id: &first.items[0].evidence_id,
+            decision_object_id: "decision",
+        }])
+        .unwrap();
+    let second = store
+        .candidates_for_decision(PROJECT, "decision", first.next.as_deref(), 4)
+        .unwrap();
+    assert_eq!(
+        second.items,
+        expected[4..8],
+        "rows added before the cursor or removed from page one move nothing after it"
+    );
+    for cursor in [
+        "01.5.65",
+        "7500.5.6A",
+        "7500.5.616",
+        "+7500.5.65",
+        "4294967296.5.65",
+        "7500.5.",
+    ] {
+        assert!(
+            store
+                .candidates_for_decision(PROJECT, "decision", Some(cursor), 4)
+                .is_err(),
+            "{cursor}"
+        );
+    }
+}
+
+#[test]
+fn the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows() {
+    let (_dir, store) = open();
+    let four = [
+        score("d1", 3, 4),
+        score("d2", 3, 4),
+        score("d3", 3, 4),
+        score("d4", 3, 4),
+    ];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 1, 1, &four), CAPS)
+        .unwrap();
+    let five = [
+        score("e1", 3, 4),
+        score("e2", 3, 4),
+        score("e3", 3, 4),
+        score("e4", 3, 4),
+        score("e5", 3, 4),
+    ];
+    let refused = store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 2, 2, &five), CAPS)
+        .unwrap_err();
+    assert!(
+        matches!(refused, memory_store::MemoryStoreError::Serde(_)),
+        "{refused}"
+    );
+    let secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
+    let refused = store
+        .replace_candidates_for_descriptor(
+            &write(PROJECT, "ev-1", 2, 2, &[score(secret, 3, 4)]),
+            CAPS,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(refused, memory_store::MemoryStoreError::Redaction(_)),
+        "{refused}"
+    );
+    assert_eq!(all_rows(&store).len(), 4, "the held rows are unchanged");
+
+    let caps = CandidateCaps {
+        per_descriptor: 4,
+        per_project: 2,
+    };
+    let outcome = store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-2", 1, 1, &four[..2]), caps)
+        .unwrap();
+    assert_eq!(
+        outcome.dropped_at_cap, 4,
+        "six rows over a cap of two evict four"
+    );
+    let kept: Vec<(String, String)> = all_rows(&store)
+        .into_iter()
+        .map(|row| (row.evidence_id, row.decision_object_id))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            ("ev-2".to_string(), "d1".to_string()),
+            ("ev-2".to_string(), "d2".to_string())
+        ],
+        "equal score and age evict the smallest key first"
+    );
+}
+
+#[test]
+fn a_keyed_delete_names_its_project_and_the_gauge_counts_bytes() {
+    let (_dir, store) = open();
+    let rows = [score("décision-ü", 3, 4)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-é", 1, 1, &rows), CAPS)
+        .unwrap();
+    store
+        .replace_candidates_for_descriptor(&write(OTHER_PROJECT, "ev-é", 1, 1, &rows), CAPS)
+        .unwrap();
+    let deleted = store
+        .delete_candidates(&[CandidateKey {
+            project_digest: PROJECT,
+            evidence_id: "ev-é",
+            decision_object_id: "décision-ü",
+        }])
+        .unwrap();
+    assert_eq!(deleted, 1);
+    let bytes = 64 + "ev-é".len() + 2 * "décision-ü".len() + 32 + 64 + 40;
+    assert_eq!(
+        store.candidate_rows_and_bytes(Some(OTHER_PROJECT)).unwrap(),
+        (1, bytes as u64)
+    );
+    assert_eq!(
+        store.candidate_rows_and_bytes(Some(PROJECT)).unwrap(),
+        (0, 0)
+    );
+}

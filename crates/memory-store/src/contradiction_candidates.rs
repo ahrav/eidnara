@@ -4,10 +4,10 @@
 //! times only. The store keeps the rows, bounds them per descriptor and per
 //! project, and pages them; the daemon judges their liveness.
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 
 use context_core::canonical_json::is_lower_hex;
-use context_core::redaction::redact_durable_text;
+use context_core::redaction::{RedactionErrorKind, redact_durable_text};
 
 use crate::{DurableWriteFamily, MemoryStore, MemoryStoreError, PreparedWrite, WriteDisposition};
 
@@ -100,14 +100,19 @@ fn invalid(message: &str) -> MemoryStoreError {
 }
 
 /// A Kernel-issued id the row stores verbatim: non-empty, bounded, free of
-/// control characters and of secret-scanner detections.
+/// control characters and of secret-scanner detections. The detection check
+/// runs before the write, so a refused id leaves no scan record.
 fn check_id(field: &str, value: &str) -> Result<(), MemoryStoreError> {
     if value.is_empty()
         || value.len() > MAX_CANDIDATE_ID_BYTES
         || value.chars().any(char::is_control)
-        || !redact_durable_text(value).detections.is_empty()
     {
         return Err(invalid(&format!("{field} is not a storable id")));
+    }
+    if !redact_durable_text(value).detections.is_empty() {
+        return Err(MemoryStoreError::Redaction(
+            RedactionErrorKind::SecretDetected,
+        ));
     }
     Ok(())
 }
@@ -142,23 +147,23 @@ fn candidate_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredCandida
 
 /// The page cursor: `{score_bp}.{created_at_ms}.{evidence id as hex}`, the
 /// position of the last row a page returned in reader order.
-fn encode_cursor(row: &StoredCandidate) -> String {
-    let evidence: String = row
-        .evidence_id
+fn format_cursor(score_bp: u32, created_at_ms: i64, evidence_id: &str) -> String {
+    let evidence: String = evidence_id
         .bytes()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    format!("{}.{}.{evidence}", row.score_bp, row.created_at_ms)
+    format!("{score_bp}.{created_at_ms}.{evidence}")
 }
 
-fn decode_cursor(cursor: &str) -> Result<(i64, i64, String), MemoryStoreError> {
+/// The position `cursor` names; only a cursor [`format_cursor`] produces is accepted.
+fn decode_cursor(cursor: &str) -> Result<(u32, i64, String), MemoryStoreError> {
     let refused = || invalid("the page cursor is not one this store issued");
     let mut parts = cursor.splitn(3, '.');
     let (Some(score), Some(created), Some(evidence)) = (parts.next(), parts.next(), parts.next())
     else {
         return Err(refused());
     };
-    let score: i64 = score.parse().map_err(|_| refused())?;
+    let score: u32 = score.parse().map_err(|_| refused())?;
     let created: i64 = created.parse().map_err(|_| refused())?;
     if evidence.is_empty() || evidence.len() % 2 != 0 || !is_lower_hex(evidence, evidence.len()) {
         return Err(refused());
@@ -169,20 +174,7 @@ fn decode_cursor(cursor: &str) -> Result<(i64, i64, String), MemoryStoreError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| refused())?;
     let evidence = String::from_utf8(bytes).map_err(|_| refused())?;
-    if encode_cursor(&StoredCandidate {
-        project_digest: String::new(),
-        evidence_id: evidence.clone(),
-        decision_object_id: String::new(),
-        decision_id: String::new(),
-        matched_terms: 0,
-        decision_terms: 0,
-        score_bp: u32::try_from(score).map_err(|_| refused())?,
-        publish_tip: 0,
-        kernel_incarnation_id: String::new(),
-        matcher_digest: String::new(),
-        created_at_ms: created,
-    }) != cursor
-    {
+    if format_cursor(score, created, &evidence) != cursor {
         return Err(refused());
     }
     Ok((score, created, evidence))
@@ -219,17 +211,22 @@ fn check_write(
 }
 
 impl MemoryStore {
-    /// Writes one descriptor's rows in one transaction: each key is inserted or
-    /// its values replaced, keeping the greater `publish_tip`; the descriptor's
-    /// rows at or below this tip that the new set no longer names are deleted;
-    /// and while the project holds more than `caps.per_project` rows, the lowest
-    /// `score_bp`, then oldest, then smallest key is evicted.
+    /// Writes one descriptor's rows in one transaction. When the write's tip
+    /// is at or above every tip the descriptor holds under the same Kernel
+    /// incarnation, each key is inserted or its values replaced and the
+    /// descriptor's other rows are deleted. A write below that tip is a late
+    /// write: it replaces the values of keys the descriptor already holds,
+    /// keeps their higher tip, and inserts and deletes nothing, so the
+    /// descriptor never holds more than its cap. While the project then holds
+    /// more than `caps.per_project` rows, the lowest `score_bp`, then oldest,
+    /// then smallest key is evicted.
     ///
     /// # Errors
     ///
+    /// [`MemoryStoreError::Redaction`] for an id a secret detector matches;
     /// [`MemoryStoreError::Serde`] for a malformed id, digest, or count, a
-    /// repeated decision, or more rows than `caps.per_descriptor`; nothing is
-    /// written. Storage errors otherwise.
+    /// repeated decision, or more rows than `caps.per_descriptor`. Either
+    /// refusal writes nothing. Storage errors otherwise.
     pub fn replace_candidates_for_descriptor(
         &self,
         write: &DescriptorCandidates<'_>,
@@ -237,59 +234,79 @@ impl MemoryStore {
     ) -> Result<CandidateWrite, MemoryStoreError> {
         check_write(write, caps)?;
         let per_project = i64::try_from(caps.per_project).map_err(|_| invalid("cap too large"))?;
+        let kept = serde_json::to_string(
+            &write
+                .rows
+                .iter()
+                .map(|row| row.decision_object_id)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| invalid(&error.to_string()))?;
         PreparedWrite::new(DurableWriteFamily::ContradictionCandidates).execute(&self.inner, |tx| {
             let tx = tx.tx();
+            let held_tip: Option<i64> = tx.query_row(
+                "SELECT MAX(publish_tip) FROM contradiction_candidates
+                  WHERE project_digest=?1 AND evidence_id=?2 AND kernel_incarnation_id=?3",
+                params![write.project_digest, write.evidence_id, write.kernel_incarnation_id],
+                |row| row.get(0),
+            )?;
+            let late = held_tip.is_some_and(|held| held > write.publish_tip);
             let mut written = 0;
             for row in write.rows {
-                written += tx.execute(
-                    "INSERT INTO contradiction_candidates (
-                         project_digest,evidence_id,decision_object_id,decision_id,matched_terms,
-                         decision_terms,score_bp,publish_tip,kernel_incarnation_id,matcher_digest,
-                         created_at_ms
-                     ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
-                     ON CONFLICT (project_digest,evidence_id,decision_object_id) DO UPDATE SET
-                         decision_id=excluded.decision_id,
-                         matched_terms=excluded.matched_terms,
-                         decision_terms=excluded.decision_terms,
-                         score_bp=excluded.score_bp,
-                         publish_tip=max(publish_tip,excluded.publish_tip),
-                         kernel_incarnation_id=excluded.kernel_incarnation_id,
-                         matcher_digest=excluded.matcher_digest,
-                         created_at_ms=excluded.created_at_ms",
-                    params![
-                        write.project_digest,
-                        write.evidence_id,
-                        row.decision_object_id,
-                        row.decision_id,
-                        row.matched_terms,
-                        row.decision_terms,
-                        score_bp(row.matched_terms, row.decision_terms),
-                        write.publish_tip,
-                        write.kernel_incarnation_id,
-                        write.matcher_digest,
-                        write.created_at_ms,
-                    ],
-                )?;
-            }
-            let kept = serde_json::to_string(
-                &write
-                    .rows
-                    .iter()
-                    .map(|row| row.decision_object_id)
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            let replaced_away = tx.execute(
-                "DELETE FROM contradiction_candidates
-                  WHERE project_digest=?1 AND evidence_id=?2 AND publish_tip<=?3
-                    AND decision_object_id NOT IN (SELECT value FROM json_each(?4))",
-                params![
+                let values = params![
                     write.project_digest,
                     write.evidence_id,
+                    row.decision_object_id,
+                    row.decision_id,
+                    row.matched_terms,
+                    row.decision_terms,
+                    score_bp(row.matched_terms, row.decision_terms),
                     write.publish_tip,
-                    kept
-                ],
-            )?;
+                    write.kernel_incarnation_id,
+                    write.matcher_digest,
+                    write.created_at_ms,
+                ];
+                written += if late {
+                    tx.execute(
+                        "UPDATE contradiction_candidates SET decision_id=?4, matched_terms=?5,
+                                decision_terms=?6, score_bp=?7, matcher_digest=?10,
+                                created_at_ms=?11
+                          WHERE project_digest=?1 AND evidence_id=?2 AND decision_object_id=?3
+                            AND kernel_incarnation_id=?9 AND ?8 IS NOT NULL",
+                        values,
+                    )?
+                } else {
+                    tx.execute(
+                        "INSERT INTO contradiction_candidates (
+                             project_digest,evidence_id,decision_object_id,decision_id,
+                             matched_terms,decision_terms,score_bp,publish_tip,
+                             kernel_incarnation_id,matcher_digest,created_at_ms
+                         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                         ON CONFLICT (project_digest,evidence_id,decision_object_id) DO UPDATE SET
+                             decision_id=excluded.decision_id,
+                             matched_terms=excluded.matched_terms,
+                             decision_terms=excluded.decision_terms,
+                             score_bp=excluded.score_bp,
+                             publish_tip=CASE WHEN kernel_incarnation_id=excluded.kernel_incarnation_id
+                                 THEN max(publish_tip,excluded.publish_tip)
+                                 ELSE excluded.publish_tip END,
+                             kernel_incarnation_id=excluded.kernel_incarnation_id,
+                             matcher_digest=excluded.matcher_digest,
+                             created_at_ms=excluded.created_at_ms",
+                        values,
+                    )?
+                };
+            }
+            let replaced_away = if late {
+                0
+            } else {
+                tx.execute(
+                    "DELETE FROM contradiction_candidates
+                      WHERE project_digest=?1 AND evidence_id=?2
+                        AND decision_object_id NOT IN (SELECT value FROM json_each(?3))",
+                    params![write.project_digest, write.evidence_id, kept],
+                )?
+            };
             let rows: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM contradiction_candidates WHERE project_digest=?1",
                 [write.project_digest],
@@ -335,13 +352,17 @@ impl MemoryStore {
         let after = after.map(decode_cursor).transpose()?;
         let limit = limit.clamp(1, MAX_CANDIDATE_PAGE);
         let fetch = i64::try_from(limit + 1).map_err(|_| invalid("limit"))?;
-        let (score, created, evidence) = after.unwrap_or((i64::MAX, i64::MAX, String::new()));
+        let (score, created, evidence) = after.map_or(
+            (i64::MAX, i64::MAX, String::new()),
+            |(score, created, evidence)| (i64::from(score), created, evidence),
+        );
         let mut items = self
             .inner
             .with_conn(|conn| {
                 let mut statement = conn.prepare_cached(&format!(
                     "SELECT {COLUMNS} FROM contradiction_candidates
                       WHERE project_digest=?1 AND decision_object_id=?2
+                        AND score_bp<=?3
                         AND (score_bp<?3 OR (score_bp=?3 AND created_at_ms<?4)
                              OR (score_bp=?3 AND created_at_ms=?4 AND evidence_id>?5))
                       ORDER BY score_bp DESC, created_at_ms DESC, evidence_id ASC
@@ -364,7 +385,9 @@ impl MemoryStore {
             .map_err(MemoryStoreError::from)?;
         let next = if items.len() > limit {
             items.truncate(limit);
-            items.last().map(encode_cursor)
+            items
+                .last()
+                .map(|row| format_cursor(row.score_bp, row.created_at_ms, &row.evidence_id))
         } else {
             None
         };
@@ -372,7 +395,9 @@ impl MemoryStore {
     }
 
     /// At most `page` rows of every project with a rowid above `after_rowid`,
-    /// in rowid order, each with its rowid, for a sweep's watermark.
+    /// in rowid order, each with its rowid, for a sweep's watermark. A new row
+    /// can take a rowid at or below a watermark after the highest row is
+    /// deleted, so a sweep wraps to 0 after a short page.
     ///
     /// # Errors
     ///
@@ -435,26 +460,24 @@ impl MemoryStore {
         if let Some(project_digest) = project_digest {
             check_hex("project_digest", project_digest, 64)?;
         }
-        self.inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*), COALESCE(SUM(
-                         length(CAST(project_digest AS BLOB)) + length(CAST(evidence_id AS BLOB))
-                         + length(CAST(decision_object_id AS BLOB))
-                         + length(CAST(decision_id AS BLOB))
-                         + length(CAST(kernel_incarnation_id AS BLOB))
-                         + length(CAST(matcher_digest AS BLOB)) + 40), 0)
-                       FROM contradiction_candidates WHERE ?1 IS NULL OR project_digest=?1",
+        let sum = "SELECT COUNT(*), COALESCE(SUM(
+                 length(CAST(project_digest AS BLOB)) + length(CAST(evidence_id AS BLOB))
+                 + length(CAST(decision_object_id AS BLOB)) + length(CAST(decision_id AS BLOB))
+                 + length(CAST(kernel_incarnation_id AS BLOB))
+                 + length(CAST(matcher_digest AS BLOB)) + 40), 0)
+               FROM contradiction_candidates";
+        let (rows, bytes): (i64, i64) = self
+            .inner
+            .with_conn(|conn| match project_digest {
+                Some(project_digest) => conn.query_row(
+                    &format!("{sum} WHERE project_digest=?1"),
                     [project_digest],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-                )
-                .optional()
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ),
+                None => conn.query_row(sum, [], |row| Ok((row.get(0)?, row.get(1)?))),
             })
-            .map_err(MemoryStoreError::from)
-            .map(|counts| {
-                let (rows, bytes) = counts.unwrap_or_default();
-                (rows.unsigned_abs(), bytes.unsigned_abs())
-            })
+            .map_err(MemoryStoreError::from)?;
+        Ok((rows.unsigned_abs(), bytes.unsigned_abs()))
     }
 
     /// Empties the table, the first step of a rebuild a test replays.
