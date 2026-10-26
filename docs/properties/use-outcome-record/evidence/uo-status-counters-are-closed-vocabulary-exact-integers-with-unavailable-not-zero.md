@@ -10,9 +10,9 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `dc07f442a`).
+its parent is `742896941`).
 
-- Ready gate: `packages/cli/src/commands/review-wire.ts:430`.
+- Ready gate: `packages/cli/src/commands/review-wire.ts:434`.
 - Exact bound:
   `packages/opencode-plugin/src/shared/host-client/exact-json.ts:11`.
 - Correction: the ready gate applies to the `memory_reviewer` block; no client
@@ -23,9 +23,9 @@ its parent is `dc07f442a`).
   ready, through an exact-integer decoder bounded at 2^53.
 - Existing check: `the_capture_report_reaches_host_status_field_for_field`
   (`crates/daemon/src/source_capture_tests.rs:844`);
-  `packages/cli/src/commands/review.test.ts:860`;
-  `packages/cli/src/commands/review.test.ts:911`;
-  `packages/cli/src/commands/review.test.ts:822`. Status: unaudited.
+  `packages/cli/src/commands/review.test.ts:887`;
+  `packages/cli/src/commands/review.test.ts:938`;
+  `packages/cli/src/commands/review.test.ts:849`. Status: unaudited.
 
 ## Failure scenario
 

@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1156.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `dc07f442a`).
+its parent is `742896941`).
 
 - Step: `delete_kernel_step` (`crates/daemon/src/lib.rs:6850`) retires the
   captured sources, then `mark_use_outcomes_deleted`
@@ -38,7 +38,7 @@ its parent is `dc07f442a`).
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:201`); Kernel half:
   `a_session_delete_marks_each_live_record_once`
-  (`crates/kernel/tests/kernel_use_outcome.rs:857`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:872`). Status: unaudited.
 
 ## Failure scenario
 

@@ -11,6 +11,7 @@ import { stateKey } from "@eidnara/opencode/shared/kernel-client/state";
 import { shellQuote } from "@eidnara/opencode/shared/shell-quote";
 import { printableBlock, printableLine } from "../lib/terminal-text";
 import {
+    boundedText,
     decodePage,
     decodeReviewStatus,
     decodeSelected,
@@ -157,11 +158,14 @@ export function parseReviewArgs(args: string[]): ReviewArgs | string {
         return { command, project, causalIdentity: positional[0], json };
     }
     if (command === "outcome") {
-        const objectId = positional.length === 1 ? positional[0] : "";
-        if (objectId.length === 0 || utf8Bytes(objectId) > MAX_IDENTITY_BYTES) {
+        if (
+            positional.length !== 1 ||
+            positional[0].length === 0 ||
+            boundedText(positional[0], MAX_IDENTITY_BYTES) === null
+        ) {
             return `review outcome requires one decision object id of 1 to ${MAX_IDENTITY_BYTES} bytes`;
         }
-        return { command, project, objectId, json };
+        return { command, project, objectId: positional[0], json };
     }
     if (positional.length > 0) {
         return `Unexpected review ${command} argument: ${printableLine(positional[0], 64)}`;
@@ -188,10 +192,6 @@ function terminalText(terminal: ReadTerminal): string {
         default:
             return "A disclosed input no longer passes the Kernel for a local reader.";
     }
-}
-
-function utf8Bytes(text: string): number {
-    return new TextEncoder().encode(text).byteLength;
 }
 
 /** JSON output with every `bigint` as an exact number token; safe integers already serialize exactly. */
@@ -415,43 +415,7 @@ async function render(
         return { ok: true, text: lines.join("\n") };
     }
     if (parsed.command === "outcome") {
-        const raw = await connection.request(
-            handle,
-            { ...envelope, method: "review.use_outcome", object_id: parsed.objectId },
-            { exactIntegers: true },
-        );
-        const answer = decodeUseOutcome(raw, parsed.objectId);
-        if (answer.kind !== "body") {
-            const detail =
-                answer.kind === "state"
-                    ? `Kernel state ${stateKey(answer.state)}`
-                    : answer.kind === "malformed"
-                      ? `the response could not be validated: ${answer.detail}`
-                      : "the response is not counts";
-            return {
-                ok: false,
-                text: parsed.json
-                    ? toJson({ kind: "unavailable", project_root: projectRoot, answer })
-                    : `Use-outcome counts: unavailable (${detail}).`,
-            };
-        }
-        const counts = answer.body;
-        if (parsed.json) {
-            return {
-                ok: true,
-                text: toJson({ kind: "counts", project_root: projectRoot, ...counts }),
-            };
-        }
-        return {
-            ok: true,
-            text: [
-                `Project: ${printableLine(projectRoot, MAX_PATH_LINE)}`,
-                `Decision: ${printableLine(counts.object_id, MAX_IDENTITY_BYTES)}`,
-                `Served sessions: ${counts.served_sessions}`,
-                `Disputed after serve: ${counts.disputed_after_serve}`,
-                "Counts cover unretired serves in the retention window; a serve is counted disputed when a dispute or contradiction committed after it.",
-            ].join("\n"),
-        };
+        return renderOutcome(parsed, connection, handle, envelope, projectRoot);
     }
     const raw = await connection.request(
         handle,
@@ -480,6 +444,56 @@ async function render(
             ...proposalLines(selected.proposal),
             `Review expires at: ${integerText(selected.review_expires_at)} ms`,
             "Reference only: this proposal is not applied, and viewing it changes nothing.",
+        ].join("\n"),
+    };
+}
+
+/** One `review.use_outcome` read: both counts, or `unavailable` for any other answer, including a daemon that predates the method. */
+async function renderOutcome(
+    parsed: Extract<ReviewArgs, { command: "outcome" }>,
+    connection: ReviewConnection,
+    handle: Parameters<ReviewConnection["request"]>[0],
+    envelope: { session_id: string; project_root: string },
+    projectRoot: string,
+): Promise<{ text: string; ok: boolean }> {
+    const unavailable = (answer: unknown, detail: string) => ({
+        ok: false,
+        text: parsed.json
+            ? toJson({ kind: "unavailable", project_root: projectRoot, answer })
+            : `Use-outcome counts: unavailable (${detail}).`,
+    });
+    let raw: unknown;
+    try {
+        raw = await connection.request(
+            handle,
+            { ...envelope, method: "review.use_outcome", object_id: parsed.objectId },
+            { exactIntegers: true },
+        );
+    } catch (error) {
+        if (!isHostCallError(error) || error.code !== "unrecognized_request_shape") throw error;
+        return unavailable(
+            { kind: "error", code: error.code },
+            "the daemon does not answer review.use_outcome",
+        );
+    }
+    const answer = decodeUseOutcome(raw, parsed.objectId);
+    if (answer.kind === "state")
+        return unavailable(answer, `Kernel state ${stateKey(answer.state)}`);
+    if (answer.kind === "malformed") {
+        return unavailable(answer, `the response could not be validated: ${answer.detail}`);
+    }
+    const counts = answer.body;
+    if (parsed.json) {
+        return { ok: true, text: toJson({ kind: "counts", project_root: projectRoot, ...counts }) };
+    }
+    return {
+        ok: true,
+        text: [
+            `Project: ${printableLine(projectRoot, MAX_PATH_LINE)}`,
+            `Decision: ${printableLine(counts.object_id, MAX_IDENTITY_BYTES)}`,
+            `Served sessions: ${counts.served_sessions}`,
+            `Disputed after serve: ${counts.disputed_after_serve}`,
+            "Counts cover the project's unretired serves in the retention window; a serve is counted disputed when a dispute or contradiction committed after it.",
         ].join("\n"),
     };
 }

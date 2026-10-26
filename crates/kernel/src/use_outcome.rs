@@ -153,7 +153,7 @@ pub struct ServedSession {
     pub disputed_after_serve: bool,
 }
 
-/// How many unretired serves name one decision object, and how many of them a `mark_disputed` or `contradict` on its lineage followed; both are read at one snapshot, so `disputed_after_serve <= served_sessions`.
+/// How many unretired serving records of one project name one decision object, and how many of them a `mark_disputed` or `contradict` on its lineage followed; both are read at one snapshot, so `disputed_after_serve <= served_sessions`. A session served the object at two served sets holds two records and counts twice.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ServedCounts {
     pub served_sessions: u64,
@@ -207,10 +207,10 @@ static SERVED_SESSIONS_SQL: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-/// [`SERVED_SESSIONS_SQL`]'s rows counted in one statement.
+/// [`SERVED_SESSIONS_SQL`]'s rows of the project `?2`, counted in one statement.
 static SERVED_COUNTS_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "SELECT COUNT(*),COALESCE(SUM(disputed_after_serve),0) FROM ({})",
+        "SELECT COUNT(*),COALESCE(SUM(disputed_after_serve),0) FROM ({}) WHERE project_digest=?2",
         *SERVED_SESSIONS_SQL
     )
 });
@@ -485,18 +485,22 @@ impl KernelStore {
         Ok(advanced)
     }
 
-    /// [`Self::served_sessions_for`] as counts, derived in one statement at one snapshot; an object never served counts `(0, 0)`.
+    /// [`Self::served_sessions_for`] restricted to the serves recorded under `project_digest`, as counts, derived in one statement at one snapshot; an object the project never served counts `(0, 0)`.
     ///
     /// # Errors
     ///
-    /// Returns storage and lock errors, and `CorruptCanonicalRow` for a negative count.
-    pub fn served_counts_for(&self, object_id: &str) -> Result<ServedCounts, KernelError> {
+    /// Returns storage and lock errors, and `CorruptCanonicalRow` for a count that does not decode or is negative.
+    pub fn served_counts_for(
+        &self,
+        project_digest: &str,
+        object_id: &str,
+    ) -> Result<ServedCounts, KernelError> {
         let (served, disputed): (i64, i64) = self
             .lock_reader()?
-            .query_row_cached(&SERVED_COUNTS_SQL, [object_id], |row| {
+            .query_row_cached(&SERVED_COUNTS_SQL, [object_id, project_digest], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
-            .map_err(map_sqlite)?;
+            .map_err(map_read)?;
         Ok(ServedCounts {
             served_sessions: u64::try_from(served).map_err(|_| KernelError::CorruptCanonicalRow)?,
             disputed_after_serve: u64::try_from(disputed)

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { parseExactJson } from "@eidnara/opencode/shared/host-client";
 import {
     ABSTAIN_REASONS,
     ACTIVATION_STATES,
@@ -131,5 +132,24 @@ describe("review.use_outcome counts are exact through 2^53", () => {
             },
         });
         expect(decodeUseOutcome(answer(9007199254740993n), "mem-1").kind).toBe("malformed");
+    });
+
+    test("the exact-JSON lexemes reach the decoder unrounded", () => {
+        const decoded = (served: string) =>
+            decodeUseOutcome(
+                parseExactJson(
+                    `{"kind":"counts","object_id":"mem-1","served_sessions":${served},"disputed_after_serve":0}`,
+                ),
+                "mem-1",
+            );
+        expect(decoded("9007199254740992")).toEqual({
+            kind: "body",
+            body: {
+                object_id: "mem-1",
+                served_sessions: 9007199254740992,
+                disputed_after_serve: 0,
+            },
+        });
+        expect(decoded("9007199254740993").kind).toBe("malformed");
     });
 });

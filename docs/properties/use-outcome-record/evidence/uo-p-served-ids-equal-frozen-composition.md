@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `dc07f442a`).
+its parent is `742896941`).
 
 - Ids: the rendered rows of `CanonicalMemorySnapshot::new`, ascending
   (`served_ids` (`crates/daemon/src/canonical_memory.rs:81`)).

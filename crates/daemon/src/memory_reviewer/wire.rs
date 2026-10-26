@@ -302,7 +302,7 @@ impl HandlerCore {
 }
 
 impl HandlerCore {
-    /// `review.use_outcome`: the exact served and disputed-after-serve counts of one decision object at one Kernel snapshot. It binds through the kernel-route scope alone, so it needs no Memory Store, and an unready Kernel or a failed read answers the kernel state with no count.
+    /// `review.use_outcome`: the exact served and disputed-after-serve counts of one decision object within the bound project, at one Kernel snapshot. It binds through the kernel-route scope alone, so it needs no Memory Store, and an unready Kernel or a failed read answers its kernel state with no count.
     pub(crate) async fn handle_review_use_outcome(
         &self,
         channel: RouteHandle,
@@ -313,13 +313,18 @@ impl HandlerCore {
                 Ok(bound) => bound,
                 Err(outcome) => return outcome,
             };
-        if parsed.object_id.is_empty() {
-            return crate::invalid_params_error(format!("{USE_OUTCOME} requires an object_id"));
+        if parsed.object_id.is_empty()
+            || parsed.object_id.len() > crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES
+        {
+            return crate::invalid_params_error(format!(
+                "{USE_OUTCOME} requires an object_id of 1 to {} bytes",
+                crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES
+            ));
         }
         let counts = blocking(move || {
             scope
                 .store
-                .served_counts_for(&parsed.object_id)
+                .served_counts_for(scope.project.digest(), &parsed.object_id)
                 .map(|counts| (parsed.object_id, counts))
         })
         .await;

@@ -17,7 +17,7 @@ The specification authored its records at `a0e3f2993` and condensed the
 evidence inline because no part directory existed; this part reconstructs
 the records and their evidence from that catalog. Every `file:line` here was
 re-verified against the #1157 branch tip, the commit that carries this
-revision of the directory, whose parent is `dc07f442a`. A specification reference that moved or
+revision of the directory, whose parent is `742896941`. A specification reference that moved or
 pointed at a test rather than production code is corrected in the record's
 evidence file. `Exercised` cites tests that run in the #1157 PR's recorded
 gate run.
@@ -699,16 +699,16 @@ Required faults and enabling state: A `memory_reviewer` block in a non-ready
 state with zero counters.
 Confidence: medium -
 [evidence](evidence/uo-status-counters-are-closed-vocabulary-exact-integers-with-unavailable-not-zero.md).
-`packages/cli/src/commands/review-wire.ts:375`;
-`packages/cli/src/commands/review-wire.ts:430`;
+`packages/cli/src/commands/review-wire.ts:379`;
+`packages/cli/src/commands/review-wire.ts:434`;
 `packages/opencode-plugin/src/shared/host-client/exact-json.ts:11`. Lead L4: the
 `source_capture` block has no state flag
 (`crates/daemon/src/source_capture.rs:563`).
 Existing check: `the_capture_report_reaches_host_status_field_for_field`
 (`crates/daemon/src/source_capture_tests.rs:844`);
-`packages/cli/src/commands/review.test.ts:860`;
-`packages/cli/src/commands/review.test.ts:911`;
-`packages/cli/src/commands/review.test.ts:822`. Status: unaudited.
+`packages/cli/src/commands/review.test.ts:887`;
+`packages/cli/src/commands/review.test.ts:938`;
+`packages/cli/src/commands/review.test.ts:849`. Status: unaudited.
 Impact: A zero read as "no harm observed" when the store was not ready.
 Open questions:
 - Gap G6: does the status surface name no identifiers? The `source_capture` and
@@ -742,7 +742,7 @@ Existing check:
 `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`
 (`crates/daemon/tests/memory_reviewer_wire.rs:260`);
 `review_use_outcome_counts_serves_and_later_disputes_of_one_decision`
-(`crates/daemon/tests/memory_reviewer_wire.rs:679`). Status: unaudited.
+(`crates/daemon/tests/memory_reviewer_wire.rs:686`). Status: unaudited.
 Impact: A per-owner read would contradict K5; the #1157 read follows the bearer
 rule.
 Open questions:
@@ -905,9 +905,9 @@ Required faults and enabling state: An expired record; an expired cited record;
 70 expired records; a citation inserted after selection.
 Confidence: high -
 [evidence](evidence/uo-p-sweep-retires-only-expired-uncited-rows.md).
-`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:512`); predicate
+`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:516`); predicate
 `crates/kernel/src/use_outcome.rs:176`; recheck `retire_due_use_outcome`
-(`crates/kernel/src/use_outcome.rs:626`); receipt
+(`crates/kernel/src/use_outcome.rs:630`); receipt
 `crates/kernel/src/local_file.rs:438`.
 Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
 (`crates/kernel/tests/kernel_use_outcome.rs:474`);
@@ -916,17 +916,17 @@ Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
 `an_expired_record_cited_by_a_live_report_is_retained`
 (`crates/kernel/tests/kernel_use_outcome.rs:604`);
 `a_record_cited_after_selection_is_kept`
-(`crates/kernel/src/use_outcome.rs:767`);
+(`crates/kernel/src/use_outcome.rs:771`);
 `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-(`crates/kernel/src/use_outcome.rs:795`);
+(`crates/kernel/src/use_outcome.rs:799`);
 `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-(`crates/kernel/src/use_outcome.rs:858`);
+(`crates/kernel/src/use_outcome.rs:862`);
 `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-(`crates/kernel/src/use_outcome.rs:879`);
+(`crates/kernel/src/use_outcome.rs:883`);
 `the_cited_count_covers_the_rows_read_before_the_page_fills`
-(`crates/kernel/tests/kernel_use_outcome.rs:784`);
+(`crates/kernel/tests/kernel_use_outcome.rs:799`);
 `the_sweep_and_the_reads_use_their_indexes`
-(`crates/kernel/src/use_outcome.rs:896`);
+(`crates/kernel/src/use_outcome.rs:900`);
 `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
 `a_cancelled_slice_stops_before_the_use_outcome_sweep`
@@ -1181,7 +1181,7 @@ Existing check:
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:201`); Kernel half:
 `a_session_delete_marks_each_live_record_once`
-(`crates/kernel/tests/kernel_use_outcome.rs:857`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:872`). Status: unaudited.
 Impact: A deleted session reads as live, or a live one as deleted.
 Open questions:
 - A record written after the delete commits, by a pass on a route still bound to
@@ -1231,11 +1231,11 @@ Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 `the_serve_and_the_touch_of_one_pass_share_one_kernel_wait`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:382`); Kernel half:
 `last_transform_at_advances_live_records_without_a_commit`
-(`crates/kernel/tests/kernel_use_outcome.rs:906`),
+(`crates/kernel/tests/kernel_use_outcome.rs:921`),
 `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-(`crates/kernel/tests/kernel_use_outcome.rs:965`),
+(`crates/kernel/tests/kernel_use_outcome.rs:980`),
 `an_outside_file_lock_bounds_the_advance_at_begin`
-(`crates/kernel/tests/kernel_use_outcome.rs:1002`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1017`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.
@@ -1281,14 +1281,14 @@ statement counts the by-decision rows at one snapshot (`served_counts_for`
 (`crates/kernel/src/use_outcome.rs:493`)); the handler answers counts or the
 kernel state (`crates/daemon/src/memory_reviewer/wire.rs:306`); the client
 decodes each count with `exactCount` and renders any other answer unavailable
-(`packages/cli/src/commands/review-wire.ts:341`).
+(`packages/cli/src/commands/review-wire.ts:344`).
 Existing check:
 `review_use_outcome_counts_serves_and_later_disputes_of_one_decision`
-(`crates/daemon/tests/memory_reviewer_wire.rs:679`);
+(`crates/daemon/tests/memory_reviewer_wire.rs:686`);
 `review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:432`);
-`packages/cli/src/commands/review-wire.contract.test.ts:124`;
-`packages/cli/src/commands/review.test.ts:822`; Kernel half:
+`packages/cli/src/commands/review-wire.contract.test.ts:125`;
+`packages/cli/src/commands/review.test.ts:849`; Kernel half:
 `disputed_after_serve_is_judged_against_each_serve`
 (`crates/kernel/tests/kernel_use_outcome.rs:730`). Status: unaudited.
 Impact: A zero misread as "no harm observed".
@@ -1298,6 +1298,12 @@ Open questions:
 - `served_sessions` counts unretired serving records, one per (session, served
   set), so a session served the decision at two served sets counts twice; the
   name follows the ticket.
+- The counts cover the bound project only; another project's serves of the same
+  decision are not counted.
+- A failed read after the Kernel is Ready answers the kernel state its failure
+  maps to; no test drives that arm. AC19 (no identifier in logs or
+  `host.status`) holds by inspection: the handler logs nothing and adds no
+  status field.
 
 ## Relationship map
 

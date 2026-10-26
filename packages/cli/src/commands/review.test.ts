@@ -819,6 +819,33 @@ describe("review outcome", () => {
         });
     });
 
+    test("a daemon that predates review.use_outcome renders unavailable, and other transport failures still fail the command", async () => {
+        const old = harness({
+            respond: () => {
+                throw new HostCallError("terminal", "unknown method", "unrecognized_request_shape");
+            },
+        });
+        expect(await runReviewCommand(["outcome", "mem-1"], old.deps)).toBe(1);
+        expect(old.recorded.stdout).toEqual([
+            "Use-outcome counts: unavailable (the daemon does not answer review.use_outcome).",
+        ]);
+        const oldJson = harness({
+            respond: () => {
+                throw new HostCallError("terminal", "unknown method", "unrecognized_request_shape");
+            },
+        });
+        expect(await runReviewCommand(["outcome", "mem-1", "--json"], oldJson.deps)).toBe(1);
+        expect(JSON.parse(oldJson.recorded.stdout[0]).kind).toBe("unavailable");
+        const lost = harness({
+            respond: () => {
+                throw new HostCallError("outcome_unknown", "lost", undefined);
+            },
+        });
+        expect(await runReviewCommand(["outcome", "mem-1"], lost.deps)).toBe(1);
+        expect(lost.recorded.stdout).toEqual([]);
+        expect(lost.recorded.stderr).toEqual(["Review outcome failed: outcome_unknown."]);
+    });
+
     test("an unready Kernel, a count past 2^53, and every other answer render unavailable, never zero", async () => {
         const counts = (served: unknown, disputed: unknown, objectId = "mem-1") => ({
             kind: "counts",

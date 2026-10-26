@@ -652,14 +652,21 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
     }
 }
 
-/// Records one serve of `objects` for `session` under the daemon's project, read at the current tip.
-fn serve(daemon: &KernelDaemon, key: &str, session: &str, objects: &[&str], recorded_at: i64) {
+/// Records one serve of `objects` for `session` under `project_digest`, read at the current tip.
+fn serve(
+    daemon: &KernelDaemon,
+    project_digest: &str,
+    key: &str,
+    session: &str,
+    objects: &[&str],
+    recorded_at: i64,
+) {
     let kernel = daemon.store();
     let served_commit_seq = kernel.tip().unwrap();
     kernel
         .commit(daemon::kernel_route_fixtures::intent(key), |envelope| {
             envelope.insert_use_outcome(kernel::UseOutcomeSpec {
-                project_digest: daemon.project_digest(),
+                project_digest: project_digest.to_owned(),
                 harness: "test".to_owned(),
                 session_id: session.to_owned(),
                 served_set_digest: kernel::served_set_digest(objects.iter().copied()),
@@ -674,7 +681,7 @@ fn serve(daemon: &KernelDaemon, key: &str, session: &str, objects: &[&str], reco
         .unwrap();
 }
 
-/// `review.use_outcome` counts the unretired serves of one decision and those a later `contradict` followed, at one snapshot: two serves with a contradiction between them answer (2, 1), a retired serve is not counted, and a decision never served answers (0, 0). It reads through the kernel-route scope alone, so a root without MODULE memories authority, where `review.list` is `disabled`, still answers; an observational route receives the same answer; an unknown or misspelled field is `invalid_params`.
+/// `review.use_outcome` counts the bound project's unretired serves of one decision and those a later `contradict` followed, at one snapshot: two serves with a contradiction between them answer (2, 1), a retired serve and another project's serve are not counted, and a decision never served answers (0, 0). A root the binding does not accept answers `project_mismatch` before the body is read. It reads through the kernel-route scope alone, so a root without MODULE memories authority, where `review.list` is `disabled`, still answers; an observational route receives the same answer; an unknown or misspelled field is `invalid_params`.
 #[tokio::test]
 async fn review_use_outcome_counts_serves_and_later_disputes_of_one_decision() {
     let daemon = KernelDaemon::start().await;
@@ -687,7 +694,8 @@ async fn review_use_outcome_counts_serves_and_later_disputes_of_one_decision() {
     assert_eq!(created["state"]["kind"], "available", "{created}");
     let decision = "decision-object-1";
     let now = now_ms();
-    serve(&daemon, "serve-1", "ses-1", &[decision], now);
+    let digest = daemon.project_digest();
+    serve(&daemon, &digest, "serve-1", "ses-1", &[decision], now);
     let contradicted = daemon
         .commit(
             "contradict",
@@ -695,8 +703,16 @@ async fn review_use_outcome_counts_serves_and_later_disputes_of_one_decision() {
         )
         .await;
     assert_eq!(contradicted["state"]["kind"], "available", "{contradicted}");
-    serve(&daemon, "serve-2", "ses-2", &[decision], now);
-    serve(&daemon, "serve-3", "ses-3", &[decision], 0);
+    serve(&daemon, &digest, "serve-2", "ses-2", &[decision], now);
+    serve(&daemon, &digest, "serve-3", "ses-3", &[decision], 0);
+    serve(
+        &daemon,
+        &"b".repeat(64),
+        "foreign",
+        "ses-4",
+        &[decision],
+        now,
+    );
     assert_eq!(
         kernel
             .expire_use_outcomes(kernel::USE_OUTCOME_RETENTION_MS + 1)
@@ -749,5 +765,15 @@ async fn review_use_outcome_counts_serves_and_later_disputes_of_one_decision() {
             panic!("{body}");
         };
         assert_eq!(code, "invalid_params", "{body}");
+    }
+    let elsewhere = daemon.data_home().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    for body in [json!({ "object_id": decision }), json!({ "object_id": "" })] {
+        let mismatch = daemon
+            .call(envelope("review.use_outcome", &elsewhere, body.clone()))
+            .await;
+        assert_eq!(mismatch["state"]["kind"], "invalid", "{body}: {mismatch}");
+        assert_eq!(mismatch["state"]["reason"], "project_mismatch", "{body}");
+        assert!(mismatch.get("served_sessions").is_none(), "{body}");
     }
 }

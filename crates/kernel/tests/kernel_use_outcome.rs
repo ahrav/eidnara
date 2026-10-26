@@ -729,7 +729,7 @@ fn session_roles_round_trip_and_the_served_set_digest_is_order_free() {
 #[test]
 fn disputed_after_serve_is_judged_against_each_serve() {
     let root = tempfile::tempdir().unwrap();
-    let store = store_with_objects(root.path(), &["x"]);
+    let store = store_with_objects(root.path(), &["x", "y"]);
     let first_at = tick(&store, "first");
     let first = insert(&store, "serve-1", spec("s1", &["x"], first_at, 100)).unwrap();
     let disputed_at = tick(&store, "disputed");
@@ -760,10 +760,18 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         served_sessions,
         disputed_after_serve,
     };
-    assert_eq!(store.served_counts_for("x").unwrap(), counts(2, 1));
     assert_eq!(
-        store.served_counts_for("never-served").unwrap(),
+        store.served_counts_for(&project(), "x").unwrap(),
+        counts(2, 1)
+    );
+    assert_eq!(
+        store.served_counts_for(&project(), "never-served").unwrap(),
         counts(0, 0)
+    );
+    assert_eq!(
+        store.served_counts_for(&"b".repeat(64), "x").unwrap(),
+        counts(0, 0),
+        "another project's serves are not counted"
     );
     writer(root.path())
         .execute(
@@ -773,9 +781,16 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         .unwrap();
     assert_eq!(answer(&store), [(second, false)]);
     assert_eq!(
-        store.served_counts_for("x").unwrap(),
+        store.served_counts_for(&project(), "x").unwrap(),
         counts(1, 0),
         "a retired record is not counted"
+    );
+    let third_at = tick(&store, "third");
+    insert(&store, "serve-3", spec("s2", &["x", "y"], third_at, 100)).unwrap();
+    assert_eq!(
+        store.served_counts_for(&project(), "x").unwrap(),
+        counts(2, 0),
+        "one session served at two served sets holds two records"
     );
 }
 

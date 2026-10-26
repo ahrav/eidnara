@@ -122,7 +122,7 @@ export function isHex64(value: unknown): value is string {
     return typeof value === "string" && HEX64.test(value);
 }
 
-function boundedText(value: unknown, maxBytes: number): string | null {
+export function boundedText(value: unknown, maxBytes: number): string | null {
     if (typeof value !== "string" || utf8.encode(value).byteLength > maxBytes) return null;
     return value;
 }
@@ -327,6 +327,9 @@ export function decodeSelected(
     });
 }
 
+/** `review.use_outcome` has no terminal vocabulary. */
+export type UseOutcomeAnswer = Exclude<ReviewAnswer<never, UseOutcomeCounts>, { kind: "terminal" }>;
+
 export interface UseOutcomeCounts {
     object_id: string;
     served_sessions: number;
@@ -338,11 +341,8 @@ export interface UseOutcomeCounts {
  * `9007199254740993` and every value outside the count domain fail validation, as does any answer that is not `counts`:
  * the caller renders all of them as unavailable, never as zero.
  */
-export function decodeUseOutcome(
-    raw: unknown,
-    requested: string,
-): ReviewAnswer<never, UseOutcomeCounts> {
-    return classify(raw, [], "counts", (body) => {
+export function decodeUseOutcome(raw: unknown, requested: string): UseOutcomeAnswer {
+    const answer = classify<never, UseOutcomeCounts>(raw, [], "counts", (body) => {
         if (body.object_id !== requested) return "object_id is not the requested decision";
         const served_sessions = exactCount(body.served_sessions);
         const disputed_after_serve = exactCount(body.disputed_after_serve);
@@ -354,6 +354,10 @@ export function decodeUseOutcome(
         }
         return { object_id: requested, served_sessions, disputed_after_serve };
     });
+    // With an empty terminal vocabulary, `classify` already reports every terminal as malformed.
+    return answer.kind === "terminal"
+        ? { kind: "malformed", detail: "terminal is not in the protocol vocabulary" }
+        : answer;
 }
 
 export const MEMORY_REVIEWER_STATES = ["ready", "starting", "unavailable"] as const;

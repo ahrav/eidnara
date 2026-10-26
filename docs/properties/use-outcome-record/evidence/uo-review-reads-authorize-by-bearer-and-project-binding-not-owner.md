@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `dc07f442a`).
+its parent is `742896941`).
 
 - Scope: `kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:414`).
 - Correction: `memory_reviewer_wire.rs:409` tests `review.accept`, not reads.
@@ -24,7 +24,7 @@ its parent is `dc07f442a`).
   `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`
   (`crates/daemon/tests/memory_reviewer_wire.rs:260`);
   `review_use_outcome_counts_serves_and_later_disputes_of_one_decision`
-  (`crates/daemon/tests/memory_reviewer_wire.rs:679`). Status: unaudited.
+  (`crates/daemon/tests/memory_reviewer_wire.rs:686`). Status: unaudited.
 
 ## Failure scenario
 
