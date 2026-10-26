@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Bind: `crates/daemon/src/lib.rs:13398`.
 - Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:6014`) reads

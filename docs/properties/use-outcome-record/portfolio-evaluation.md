@@ -38,7 +38,7 @@ or merge verdict.
 | ID | Lens | Finding | Class | Disposition |
 | --- | --- | --- | --- | --- |
 | E1 | Coverage balance | No active record states the insert contract (`Conflict` for a duplicate identity, `InvalidInput` for a malformed spec, no row after a refused commit) | gap | Queued: the ticket fixes the record count at 34, and the contract is the Kernel half of `uo-p-served-set-once-per-session-revision` and `uo-p-served-ids-equal-frozen-composition`; both now cite `duplicate_and_malformed_serves_are_refused_without_rows` as their Kernel-half check, and #1155 activates them |
-| E2 | Coverage balance | The digest agreement and the deterministic `use_outcome_id` have no #1154 record | gap | Queued with E1; `uo-p-served-ids-equal-frozen-composition` names both in its `Confidence` line |
+| E2 | Coverage balance | The digest agreement and the deterministic `use_outcome_id` have no #1154 record | gap | Digest half applied at #1155 through `uo-p-served-ids-equal-frozen-composition`; the deterministic-id half stays open, checked by a Kernel test and stated by no record |
 | E3 | Wildcard | The served-before-recorded bound, the secret refusal, and the revision round trip have no record | gap | Applied in part: `uo-p-served-set-and-identity-never-rewritten` now states the served-before-recorded rule, which #1154 also made a DDL CHECK; the secret refusal and the revision round trip are checked by `duplicate_and_malformed_serves_are_refused_without_rows` and `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve` and queued with E1 |
 | E4 | Wildcard | G4 is answerable by one read of the reattach path | gap | Applied: the consent record cites the reattach path's live config read |
 | E5 | Coverage balance | Kernel-half checks were missing from `existing-checks.md` and from proposed records | gap | Applied: each proposed record names its Kernel-half check, and the inventory lists them |
@@ -75,9 +75,11 @@ reviewed fix moves a line.
 `uo-p-served-ids-equal-frozen-composition`, `uo-p-no-row-when-memory-disabled`,
 `uo-p-no-row-for-withheld-composition`, and
 `uo-p-producer-matches-request-subagent-flag`, and owns the eight writer
-markers. E1 and E2 close with those activations: the Kernel tests check the
-insert contract, and the writer's tests check the key, the digest, and the
-role from the daemon side. G1 closes by
+markers. E1 and the digest half of E2 close with those activations: the Kernel
+tests check the insert contract, and the writer's tests check the key, the
+digest, and the role from the daemon side. The deterministic `use_outcome_id`
+half of E2 stays open: `duplicate_and_malformed_serves_are_refused_without_rows`
+checks it and no record states it. G1 closes by
 `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`. The R13 crash
 arm is constructed by the test-only fault point between the fold's Memory
 Store commit and the Kernel write.

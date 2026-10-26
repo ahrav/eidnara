@@ -8,8 +8,8 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:573`) reads one
   statement, so one snapshot, in `retain_until`, id order through

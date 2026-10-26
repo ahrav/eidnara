@@ -8,8 +8,8 @@ Record kind: proposed obligation; its owning ticket #1157 activates it.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - The counts derive from `served_sessions_for`.
 

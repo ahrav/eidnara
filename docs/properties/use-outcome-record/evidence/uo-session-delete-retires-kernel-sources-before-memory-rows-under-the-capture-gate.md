@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Handler and step order: `handle_session_delete_value`
   (`crates/daemon/src/lib.rs:6925`).

@@ -8,8 +8,8 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Ids: the rendered rows of `CanonicalMemorySnapshot::new`, ascending
   (`served_ids` (`crates/daemon/src/canonical_memory.rs:72`)).

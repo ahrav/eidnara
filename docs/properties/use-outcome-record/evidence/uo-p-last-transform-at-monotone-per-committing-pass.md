@@ -8,8 +8,8 @@ Record kind: proposed obligation; its owning ticket #1156 activates it.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Design (proposed, owner #1156): the pass hook updates
   `MAX(last_transform_at, now)` over live records. At this tip only the

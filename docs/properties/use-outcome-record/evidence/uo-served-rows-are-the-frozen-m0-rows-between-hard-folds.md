@@ -10,8 +10,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - The additive engine composes m0 from the pinned read inside its HARD arm and
   assigns the composition at `crates/daemon/src/transform.rs:3122`.

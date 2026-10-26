@@ -8,8 +8,8 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Key and digest: `crates/daemon/src/use_outcome_writer.rs:165`; the request
   digest binds the ids, the harness, and the role (`request_digest`

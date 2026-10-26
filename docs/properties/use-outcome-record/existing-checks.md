@@ -124,8 +124,9 @@ Every location was read at the #1155 branch tip.
 ## Suspiciously quiet areas
 
 - The pressure-refold freeze site is checked with an empty Canonical read: the test reloads the persisted composition and compares it with the pinned read; no handler test drives a refold with a populated read.
-- No test asserts the absence of a `<project-memory>` block for a subagent pass
-  under `eidnara_folds`; the #1155 test asserts it folds no HARD and records
-  nothing.
+- The subagent arm under `eidnara_folds` is checked through the wire response:
+  `the_session_role_follows_the_pass_subagent_flag_on_each_engine` asserts no
+  HARD, no composition, no `<project-memory>` block in the serialized response,
+  and no record; no test inspects the applied message array itself.
 - The `source_capture` status block carries no state flag, and no client
   decodes it (lead L4).

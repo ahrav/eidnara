@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - `CanonicalMemorySnapshot::new` seeds the hasher with
   `eidnara-project-memory-revision-v1` and hashes category plus rendered line

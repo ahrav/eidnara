@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Teardown: `unbind_route` (`crates/daemon/src/lib.rs:4701`); purge:
   `purge_session_state` (`crates/daemon/src/lib.rs:4741`).

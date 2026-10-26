@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Tip capture and bound read: `read_project_memory`
   (`crates/daemon/src/canonical_memory.rs:167`).

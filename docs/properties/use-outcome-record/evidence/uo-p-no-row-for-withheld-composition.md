@@ -8,8 +8,8 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that carries this
-revision; its parent is `1fe3dfbad`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9669`); one
   write per pass covers its reruns.
@@ -19,7 +19,8 @@ revision; its parent is `1fe3dfbad`).
 - Guarantee under test: A fold that persists a withheld composition writes no
   serving record; an Available snapshot with zero rows at a tip of at least one
   commit attempts a record with zero decision rows, which exists once the write
-  lands as `written` or `replayed`. At tip 0 the composition names no commit and
+  lands as `written` or as `replayed` against a live record; a receipt that
+  outlives its expired record replays with no live row. At tip 0 the composition names no commit and
   the writer records nothing (`crates/daemon/src/lib.rs:9686`).
 - Existing check: `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
