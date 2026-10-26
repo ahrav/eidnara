@@ -15,7 +15,7 @@ revision.
 - Handler and step order: `handle_session_delete_value`
   (`crates/daemon/src/lib.rs:6927`).
 - Test hook `stop_after_retirement`: `crates/daemon/src/lib.rs:6963`.
-- Correction: the spec's `lib.rs:25159, 25911` were test functions that moved by
+- Correction: the spec's `lib.rs:25158, 25911` were test functions that moved by
   31 lines.
 
 - Guarantee under test: `session.delete` holds the capture commit gate, retires

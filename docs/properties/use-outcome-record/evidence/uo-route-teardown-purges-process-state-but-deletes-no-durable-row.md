@@ -14,7 +14,7 @@ revision.
 
 - Teardown: `unbind_route` (`crates/daemon/src/lib.rs:4703`); purge:
   `purge_session_state` (`crates/daemon/src/lib.rs:4743`).
-- Correction: the spec's `lib.rs:32182` maps to a `session.delete` test at this
+- Correction: the spec's `lib.rs:32181` maps to a `session.delete` test at this
   tip.
 
 - Guarantee under test: Route teardown purges process-local session state and
