@@ -492,7 +492,7 @@ async function renderOutcome(
         text: [
             `Project: ${printableLine(projectRoot, MAX_PATH_LINE)}`,
             `Decision: ${printableLine(counts.object_id, MAX_IDENTITY_BYTES)}`,
-            `Served sessions: ${counts.served_sessions}`,
+            `Unretired serves: ${counts.served_sessions}`,
             `Disputed after serve: ${counts.disputed_after_serve}`,
             "Counts cover the project's unretired serves; a serve is counted disputed when a dispute or contradiction committed after it.",
         ].join("\n"),

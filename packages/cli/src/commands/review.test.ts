@@ -797,7 +797,7 @@ describe("review outcome", () => {
             },
         ]);
         expect(recorded.requestOptions).toEqual([{ exactIntegers: true }]);
-        expect(recorded.stdout.join("\n")).toContain("Served sessions: 9007199254740992");
+        expect(recorded.stdout.join("\n")).toContain("Unretired serves: 9007199254740992");
         expect(recorded.stdout.join("\n")).toContain("Disputed after serve: 1");
         expect(recorded.closes).toBe(1);
 
@@ -873,7 +873,7 @@ describe("review outcome", () => {
             expect(await runReviewCommand(["outcome", "mem-1"], deps)).toBe(1);
             const text = recorded.stdout.join("\n");
             expect(text).toStartWith("Use-outcome counts: unavailable (");
-            expect(text).not.toMatch(/Served sessions|: 0\b/);
+            expect(text).not.toMatch(/Unretired serves|: 0\b/);
             const json = harness({ respond: () => answer });
             expect(await runReviewCommand(["outcome", "mem-1", "--json"], json.deps)).toBe(1);
             const rendered = JSON.parse(json.recorded.stdout[0]);
