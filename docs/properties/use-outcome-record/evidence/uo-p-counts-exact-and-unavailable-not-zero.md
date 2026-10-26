@@ -62,12 +62,14 @@ two sessions with one later dispute.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: `served_sessions` counts unretired serving records, one per (session, served set), so a session served the decision at two served sets counts twice; the name follows the ticket
+### Q: `served_sessions` counts unretired serving records, one per (harness, session, served set), so a session served the decision at two served sets counts twice; the name follows the ticket
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: `served_sessions` counts unretired serving records, one per
-  (session, served set), so a session served the decision at two served sets
-  counts twice; the name follows the ticket.
+  (harness, session, served set), the record identity the `use_outcomes`
+  UNIQUE constraint holds within a project (`crates/kernel/src/schema.rs:188`),
+  so a session served the decision at two served sets counts twice; the name
+  follows the ticket.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 

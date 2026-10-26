@@ -691,8 +691,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - the daemon report test and two CLI tests; the use-outcome read
-renders unavailable for a non-ready Kernel or a count past 2^53
+Exercised: yes - the daemon report test and two CLI tests
 Guarantee: `host.status` blocks carry closed-name counters, and the CLI renders
 the MemoryReviewer counters unavailable unless the block state is ready, through
 an exact-integer decoder bounded at 2^53.
@@ -711,8 +710,7 @@ Confidence: medium -
 Existing check: `the_capture_report_reaches_host_status_field_for_field`
 (`crates/daemon/src/source_capture_tests.rs:845`);
 `packages/cli/src/commands/review.test.ts:887`;
-`packages/cli/src/commands/review.test.ts:938`;
-`packages/cli/src/commands/review.test.ts:849`. Status: unaudited.
+`packages/cli/src/commands/review.test.ts:938`. Status: unaudited.
 Impact: A zero read as "no harm observed" when the store was not ready.
 Open questions:
 - Gap G6: does the status surface name no identifiers? The `source_capture` and

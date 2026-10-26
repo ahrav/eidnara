@@ -130,7 +130,7 @@ Every location was read at the #1157 branch tip.
 | Check | Location | Records | Status |
 | --- | --- | --- | --- |
 | `(TypeScript test at this line)` | `packages/cli/src/commands/review-wire.contract.test.ts:125` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
-| `(TypeScript test at this line)` | `packages/cli/src/commands/review.test.ts:849` | `uo-status-counters-are-closed-vocabulary-exact-integers-with-unavailable-not-zero`, `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
+| `(TypeScript test at this line)` | `packages/cli/src/commands/review.test.ts:849` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
 | `(TypeScript test at this line)` | `packages/cli/src/commands/review.test.ts:887` | `uo-status-counters-are-closed-vocabulary-exact-integers-with-unavailable-not-zero` | unaudited |
 | `(TypeScript test at this line)` | `packages/cli/src/commands/review.test.ts:938` | `uo-status-counters-are-closed-vocabulary-exact-integers-with-unavailable-not-zero` | unaudited |
 
