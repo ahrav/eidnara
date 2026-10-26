@@ -48,10 +48,10 @@ Every location was read at the #1156 branch tip.
 | `the_cited_count_covers_the_rows_read_before_the_page_fills` | `crates/kernel/tests/kernel_use_outcome.rs:862` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
 | `a_session_delete_marks_each_live_record_once` | `crates/kernel/tests/kernel_use_outcome.rs:969` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `last_transform_at_advances_live_records_without_a_commit` | `crates/kernel/tests/kernel_use_outcome.rs:1024` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it` | `crates/kernel/tests/kernel_use_outcome.rs:1099` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `an_outside_file_lock_bounds_the_advance_at_begin` | `crates/kernel/tests/kernel_use_outcome.rs:1136` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing` | `crates/kernel/tests/kernel_use_outcome.rs:1160` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `the_advance_takes_no_pooled_reader` | `crates/kernel/tests/kernel_use_outcome.rs:1192` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it` | `crates/kernel/tests/kernel_use_outcome.rs:1108` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `an_outside_file_lock_bounds_the_advance_at_begin` | `crates/kernel/tests/kernel_use_outcome.rs:1145` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing` | `crates/kernel/tests/kernel_use_outcome.rs:1169` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `the_advance_takes_no_pooled_reader` | `crates/kernel/tests/kernel_use_outcome.rs:1201` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 
 ## Daemon
 

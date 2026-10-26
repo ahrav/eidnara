@@ -14,8 +14,8 @@ revision.
 
 - Writer binding: the INSERT at `crates/kernel/src/admission.rs:1748` binds
   `self.commit_seq` at `crates/kernel/src/admission.rs:1781`.
-- Reader filters: `crates/kernel/src/admission.rs:675`; the new reader
-  `crates/kernel/src/use_outcome.rs:183`.
+- Reader filters: `crates/kernel/src/admission.rs:675`; the new reader's
+  `a.commit_seq IS NOT NULL` predicate at `crates/kernel/src/use_outcome.rs:190`.
 - Reachability: a null-commit row exists only after direct SQL, so the label is
   test-only.
 

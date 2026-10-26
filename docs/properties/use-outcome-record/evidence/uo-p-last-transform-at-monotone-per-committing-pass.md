@@ -45,13 +45,13 @@ revision.
   `last_transform_at_advances_live_records_without_a_commit`
   (`crates/kernel/tests/kernel_use_outcome.rs:1024`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1099`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1108`),
   `an_outside_file_lock_bounds_the_advance_at_begin`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1136`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1145`),
   `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1160`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1169`),
   `the_advance_takes_no_pooled_reader`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1192`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:1201`). Status: unaudited.
 
 ## Failure scenario
 
