@@ -9,13 +9,15 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `d5ebb3598`).
+its parent is `ea5115e1b`).
 
 - Ids: the rendered rows of `CanonicalMemorySnapshot::new`, ascending
-  (`served_ids` (`crates/daemon/src/canonical_memory.rs:80`)).
-- Freeze marker: `froze_composition` set at each freeze site
-  (`crates/daemon/src/transform.rs:3117`, `crates/daemon/src/transform.rs:4739`,
-  `crates/daemon/src/transform.rs:4895`).
+  (`served_ids` (`crates/daemon/src/canonical_memory.rs:79`)).
+- Freeze marker: every freeze site calls `freeze_project_memory`
+  (`freeze_project_memory` (`crates/daemon/src/transform.rs:613`)), which
+  assigns the composition and reports the freeze
+  (`crates/daemon/src/transform.rs:3122`, `crates/daemon/src/transform.rs:4743`,
+  `crates/daemon/src/transform.rs:4898`).
 
 - Guarantee under test: The stored decision set equals, as a set, the object ids
   of the snapshot rows whose composition the same fold persisted.
@@ -23,9 +25,9 @@ its parent is `d5ebb3598`).
   `a_hard_fold_records_its_frozen_composition_once_per_served_set`
   (`crates/daemon/src/use_outcome_writer_tests.rs:60`);
   `a_dispute_between_folds_records_the_next_served_set_without_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:395`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:415`);
   `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
-  (`crates/daemon/src/canonical_memory.rs:335`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:334`). Status: unaudited.
 
 ## Failure scenario
 

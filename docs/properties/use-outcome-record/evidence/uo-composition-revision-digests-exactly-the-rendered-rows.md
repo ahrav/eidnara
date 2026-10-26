@@ -10,14 +10,14 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `d5ebb3598`).
+its parent is `ea5115e1b`).
 
 - `CanonicalMemorySnapshot::new` seeds the hasher with
   `eidnara-project-memory-revision-v1` and hashes category plus rendered line
-  per positive row (`crates/daemon/src/canonical_memory.rs:60`).
+  per positive row (`crates/daemon/src/canonical_memory.rs:61`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
-  (`crates/daemon/src/canonical_memory.rs:203`)).
+  (`crates/daemon/src/canonical_memory.rs:202`)).
 - The four tests named under Existing check are unchanged since `a0e3f2993`; the
   spec cited their `fn` lines, and the production code was not cited.
 
@@ -25,13 +25,13 @@ its parent is `d5ebb3598`).
   rendered positive-category rows, sorted by object id, after the token-budget
   trim.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:372`);
+  (`crates/daemon/src/canonical_memory.rs:371`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:430`);
+  (`crates/daemon/src/canonical_memory.rs:429`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:447`);
+  (`crates/daemon/src/canonical_memory.rs:446`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:469`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:468`). Status: unaudited.
 
 ## Failure scenario
 

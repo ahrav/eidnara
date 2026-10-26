@@ -179,35 +179,41 @@ async fn only_an_available_composition_is_recorded() {
     assert_eq!(records.len(), 1, "{empty}");
     assert!(records[0].decision_object_ids.is_empty());
 
-    let (disabled, _store, _dir, disabled_project) =
-        handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
-    disabled.bind_route(
-        test_route(7),
-        SessionBinding {
-            config: DaemonConfig {
-                memory_enabled: false,
-                ..default_test_config()
+    for engine in [
+        default_test_config(),
+        fold_authority_handler_tests::native_config(),
+    ] {
+        let (disabled, _store, _dir, disabled_project) =
+            handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+        disabled.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    memory_enabled: false,
+                    ..engine
+                },
+                ..bound(&disabled_project)
             },
-            ..bound(&disabled_project)
-        },
-    );
-    seed_memories(
-        &disabled.kernel.kernel_store().unwrap(),
-        &disabled_project,
-        &[("mem-a", "Rule a.")],
-    );
-    let response = call_transform(&disabled, vec![ck("m1", 1, "hello")]).await;
-    assert_eq!(response["action"], "HARD", "{response}");
-    assert!(served(&disabled, &disabled_project).is_empty());
-    assert!(
-        counts(&disabled).is_empty(),
-        "a disabled route attempts no write"
-    );
+        );
+        seed_memories(
+            &disabled.kernel.kernel_store().unwrap(),
+            &disabled_project,
+            &[("mem-a", "Rule a.")],
+        );
+        let response = call_transform(&disabled, vec![ck("m1", 1, "hello")]).await;
+        assert_eq!(response["action"], "HARD", "{response}");
+        assert!(served(&disabled, &disabled_project).is_empty());
+        assert!(
+            counts(&disabled).is_empty(),
+            "a disabled route attempts no write"
+        );
+    }
 
     let (withheld, _store, _dir, _project) =
         handler_with_store(Arc::clone(&producer), default_test_config());
     let response = call_transform(&withheld, vec![ck("m1", 1, "hello")]).await;
     assert_eq!(response["project_memory"]["kind"], "withheld", "{response}");
+    assert_eq!(response["action"], "HARD", "{response}");
     assert!(
         counts(&withheld).is_empty(),
         "a withheld read attempts no write"
@@ -219,8 +225,9 @@ async fn only_an_available_composition_is_recorded() {
 async fn a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it() {
     for (fault, name) in [
         (KernelError::Deadline, "deadline"),
+        (KernelError::Busy, "deadline"),
         (KernelError::Held, "kernel_unavailable"),
-        (KernelError::Conflict, "conflict"),
+        (KernelError::FenceLost, "kernel_unavailable"),
     ] {
         let producer = Arc::new(ProducerState::default());
         let (clean, clean_store, _dir, clean_project) =
@@ -242,11 +249,18 @@ async fn a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_re
         let expected = call_transform(&clean, vec![ck("m1", 1, "hello")]).await;
         let observed = call_transform(&faulted, vec![ck("m1", 1, "hello")]).await;
         assert_eq!(observed["status"], "ok", "{name}: {observed}");
-        assert_eq!(observed["messages"], expected["messages"], "{name}");
-        assert_eq!(
-            observed["project_memory"], expected["project_memory"],
-            "{name}"
-        );
+        for field in [
+            "messages",
+            "project_memory",
+            "action",
+            "decision",
+            "committed",
+            "boundary",
+            "materialize_reason",
+            "history_summarizer",
+        ] {
+            assert_eq!(observed[field], expected[field], "{name}: {field}");
+        }
         assert_eq!(
             faulted_store.load("ses").unwrap().meta.project_memory,
             clean_store.load("ses").unwrap().meta.project_memory,
@@ -313,12 +327,18 @@ async fn a_discarded_attempt_leaves_no_serve_and_the_retry_records_one() {
 /// On the additive engine a subagent pass that freezes a Canonical composition records the `subagent` role; on the `eidnara_folds` engine the same request freezes no composition and records nothing.
 #[tokio::test(flavor = "current_thread")]
 async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
-    for (config, expected) in [
+    for (config, is_subagent, expected) in [
         (
             fold_authority_handler_tests::native_config(),
+            true,
             Some(kernel::SessionRole::Subagent),
         ),
-        (default_test_config(), None),
+        (
+            fold_authority_handler_tests::native_config(),
+            false,
+            Some(kernel::SessionRole::Primary),
+        ),
+        (default_test_config(), true, None),
     ] {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, project) =
@@ -336,7 +356,7 @@ async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
             &[("mem-a", "Rule a.")],
         );
         let mut subagent = request(vec![ck("m1", 1, "hello")]);
-        subagent["is_subagent"] = json!(true);
+        subagent["is_subagent"] = json!(is_subagent);
         let response = call_transform_request(&handler, subagent).await;
         assert_eq!(response["status"], "ok", "{response}");
         if expected.is_none() {
@@ -434,6 +454,7 @@ async fn a_withheld_read_then_an_available_read_of_the_same_rows_records_once() 
         handler_with_store(Arc::clone(&producer), default_test_config());
     let withheld = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
     assert_eq!(withheld["project_memory"]["kind"], "withheld", "{withheld}");
+    assert_eq!(withheld["action"], "HARD", "{withheld}");
     handler.kernel.set_expected(true);
     handler
         .kernel
@@ -513,4 +534,126 @@ fn the_write_outcomes_are_a_closed_vocabulary() {
             "refused"
         ]
     );
+}
+
+/// A Kernel that is starting at the write, a Kernel writer held past the write budget, a same-key serve under another role on a later fold, and a read at sequence 0 each leave the response alone and count their outcome; the held writer bounds the measured wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
+    let producer = Arc::new(ProducerState::default());
+    let (starting, _store, _dir, project) =
+        handler_with_store(Arc::clone(&producer), default_test_config());
+    starting.kernel.set_expected(true);
+    let snapshot = canonical_memory::CanonicalMemorySnapshot::new(3, false, Vec::new());
+    let binding = bound(&project);
+    let serve = Serve {
+        project: &binding.kernel_project,
+        harness: "daemon-test",
+        session_id: "ses",
+        is_subagent: false,
+        snapshot: &snapshot,
+        recorded_at: 1,
+    };
+    assert_eq!(
+        record_serve(&starting.kernel, &serve),
+        UseOutcomeWrite::KernelUnavailable
+    );
+
+    let (held, _store, _dir, project) =
+        handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+    let kernel = held.kernel.kernel_store().unwrap();
+    seed_memories(&kernel, &project, &[]);
+    let snapshot =
+        canonical_memory::CanonicalMemorySnapshot::new(kernel.tip().unwrap(), false, Vec::new());
+    let binding = bound(&project);
+    let serve = Serve {
+        project: &binding.kernel_project,
+        harness: "daemon-test",
+        session_id: "ses",
+        is_subagent: false,
+        snapshot: &snapshot,
+        recorded_at: 1,
+    };
+    let (holding, release) = std::sync::mpsc::channel::<()>();
+    let (entered, writer_held) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(intent("hold-writer"), |_| {
+                    entered.send(()).unwrap();
+                    release.recv().unwrap();
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    writer_held.recv().unwrap();
+    let started = std::time::Instant::now();
+    let outcome = record_serve(&held.kernel, &serve);
+    let waited = started.elapsed();
+    holding.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(outcome, UseOutcomeWrite::Deadline);
+    eprintln!("use-outcome writer wait under a held writer: {waited:?}");
+    assert!(
+        waited >= std::time::Duration::from_millis(250)
+            && waited < std::time::Duration::from_secs(5),
+        "the wait is bounded by the write budget: {waited:?}"
+    );
+    assert!(served(&held, &project).is_empty());
+    assert_eq!(record_serve(&held.kernel, &serve), UseOutcomeWrite::Written);
+    let as_subagent = Serve {
+        is_subagent: true,
+        ..serve
+    };
+    for _ in 0..2 {
+        assert_eq!(
+            record_serve(&held.kernel, &as_subagent),
+            UseOutcomeWrite::Conflict,
+            "a conflict is not repaired by a later fold"
+        );
+    }
+    let records = served(&held, &project);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].serve.session_role, kernel::SessionRole::Primary);
+
+    let (fresh, _store, _dir, fresh_project) =
+        handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+    assert_eq!(fresh.kernel.kernel_store().unwrap().tip().unwrap(), 0);
+    let response = call_transform(&fresh, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(response["action"], "HARD", "{response}");
+    assert_eq!(response["project_memory"]["known_as_of"], 0, "{response}");
+    assert!(
+        counts(&fresh).is_empty(),
+        "a read at sequence 0 names no commit, so no write is attempted"
+    );
+    assert!(served(&fresh, &fresh_project).is_empty());
+}
+
+/// Every Kernel error maps to one closed outcome name, and the vocabulary indexes its counters in order.
+#[test]
+fn every_kernel_error_maps_to_a_closed_outcome() {
+    for (index, outcome) in UseOutcomeWrite::ALL.iter().enumerate() {
+        assert_eq!(*outcome as usize, index);
+    }
+    let mapped: Vec<_> = KernelError::ALL
+        .iter()
+        .map(|error| (*error, UseOutcomeWrite::from_error(*error)))
+        .collect();
+    let expected = |error: KernelError| match error {
+        KernelError::Conflict => UseOutcomeWrite::Conflict,
+        KernelError::Deadline | KernelError::Busy => UseOutcomeWrite::Deadline,
+        KernelError::Held
+        | KernelError::EngineUnsupported
+        | KernelError::Foreign
+        | KernelError::Inconclusive
+        | KernelError::Io
+        | KernelError::IdentityMismatch
+        | KernelError::FenceLost
+        | KernelError::InvalidRestore => UseOutcomeWrite::KernelUnavailable,
+        _ => UseOutcomeWrite::Refused,
+    };
+    for (error, outcome) in mapped {
+        assert_eq!(outcome, expected(error), "{error:?}");
+    }
 }

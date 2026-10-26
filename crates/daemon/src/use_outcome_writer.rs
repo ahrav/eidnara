@@ -14,7 +14,8 @@ use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
 const PRODUCER: &str = "eidnara-daemon/use-outcome";
 const FAMILY: &str = "use-outcome";
 const REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-serve-v1\n";
-pub(crate) const WRITE_BUDGET: Duration = Duration::from_millis(250);
+/// Bounds the wait for the Kernel writer; the insert runs to completion once the writer is held.
+const WRITE_BUDGET: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UseOutcomeWrite {
@@ -51,11 +52,31 @@ impl UseOutcomeWrite {
         match error {
             KernelError::Conflict => Self::Conflict,
             KernelError::Deadline | KernelError::Busy => Self::Deadline,
-            KernelError::InvalidInput | KernelError::NotFound => Self::Refused,
-            _ => Self::KernelUnavailable,
+            KernelError::Held
+            | KernelError::EngineUnsupported
+            | KernelError::Foreign
+            | KernelError::Inconclusive
+            | KernelError::Io
+            | KernelError::IdentityMismatch
+            | KernelError::FenceLost
+            | KernelError::InvalidRestore => Self::KernelUnavailable,
+            KernelError::CorruptCanonicalRow
+            | KernelError::InvalidInput
+            | KernelError::AdmissionPolicy
+            | KernelError::PreviewAuthorityChanged
+            | KernelError::FutureSnapshot
+            | KernelError::NotFound
+            | KernelError::InvalidCheckpoint
+            | KernelError::NoRequiredConsumers
+            | KernelError::ConsumerPending
+            | KernelError::Fault
+            | KernelError::UnsafeDestination
+            | KernelError::InvalidBackup => Self::Refused,
         }
     }
 }
+
+const _: () = assert!(UseOutcomeWrite::Refused as usize + 1 == UseOutcomeWrite::ALL.len());
 
 #[derive(Debug, Default)]
 pub(crate) struct UseOutcomeCounts([AtomicU64; UseOutcomeWrite::ALL.len()]);

@@ -10,10 +10,10 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `d5ebb3598`).
+its parent is `ea5115e1b`).
 
-- Writes happen only when state changed: `crates/daemon/src/transform.rs:3257`,
-  `crates/daemon/src/transform.rs:3756`, `crates/daemon/src/transform.rs:5379`.
+- Writes happen only when state changed: `crates/daemon/src/transform.rs:3262`,
+  `crates/daemon/src/transform.rs:3761`, `crates/daemon/src/transform.rs:5382`.
 
 - Guarantee under test: The per-session pass timestamp
   `last_committed_pass_at_ms` lives on Memory Store session meta and is deleted

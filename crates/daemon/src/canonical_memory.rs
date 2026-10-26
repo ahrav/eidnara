@@ -35,8 +35,9 @@ pub struct CanonicalMemorySnapshot {
     truncated: bool,
     rows: Vec<CanonicalMemory>,
     revision: u64,
-    /// The decision object ids of the rendered rows, ascending, and their served-set digest: the identity a use-outcome record of this composition carries.
+    /// The decision object ids of the rendered rows, ascending.
     served_ids: Vec<String>,
+    /// The served-set digest of `served_ids`: the identity a use-outcome record of this composition carries.
     served_set_digest: String,
 }
 
@@ -62,9 +63,7 @@ impl CanonicalMemorySnapshot {
             row.category.hash(&mut hasher);
             render_memory_line(row).hash(&mut hasher);
         }
-        let mut served_ids: Vec<String> =
-            rendered.iter().map(|row| row.object_id.clone()).collect();
-        served_ids.dedup();
+        let served_ids: Vec<String> = rendered.iter().map(|row| row.object_id.clone()).collect();
         let served_set_digest = kernel::served_set_digest(served_ids.iter().map(String::as_str));
         Self {
             known_as_of,
@@ -501,6 +500,12 @@ mod tests {
             only_short.revision(),
             "a row the budget excludes must not be digested"
         );
+        assert_eq!(
+            trimmed.served_ids(),
+            ["short"],
+            "a row the budget excludes is not served"
+        );
+        assert_eq!(trimmed.served_set_digest(), only_short.served_set_digest());
         let edited_long = decision("long", "PROJECT_RULES", &format!("{long_summary} edited"));
         let edited = injectable_snapshot(response(rows(), vec![edited_long, short]), budget);
         assert_eq!(

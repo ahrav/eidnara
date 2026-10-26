@@ -609,6 +609,12 @@ impl ProducerContext<'_> {
     }
 }
 
+/// Assigns the pinned read's composition to `meta` at a HARD freeze site and reports that this attempt froze one; the caller of the pass checks whether the read was Available.
+fn freeze_project_memory(meta: &mut ModuleMeta, ctx: &ProducerContext<'_>) -> bool {
+    meta.project_memory = ctx.project_memory_composition();
+    true
+}
+
 /// A history segment end anchor: the bare mid of the segment's end block and its `sequence`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoundaryAnchor {
@@ -3113,8 +3119,7 @@ fn apply_additive_only(
             meta.coverage_history_segment_seq = Some(applied_m1_signal.max_history_segment_seq);
             // When compaction is off, record the current maximum sequence so pre-existing rows do not appear in `m1` as new history.
             meta.folded_history_segment_seq = applied_m1_signal.max_history_segment_seq;
-            meta.project_memory = ctx.project_memory_composition();
-            froze_composition = true;
+            froze_composition = freeze_project_memory(&mut meta, ctx);
             meta.expiry_cutoff_ms = ctx.now_ms;
             meta.memory_disabled = !ctx.memory_enabled;
             meta.m1_revision = applied_m1_signal.revision;
@@ -4735,8 +4740,7 @@ fn apply_once(
                 meta.coverage_history_segment_seq = Some(comp.folded_history_segment_seq);
                 meta.folded_history_segment_seq = comp.folded_history_segment_seq;
                 meta.legacy_history_segment_seqs = Some(comp.legacy_history_segment_seqs);
-                meta.project_memory = ctx.project_memory_composition();
-                froze_composition = true;
+                froze_composition = freeze_project_memory(&mut meta, ctx);
                 meta.expiry_cutoff_ms = ctx.now_ms; // FROZEN here, atomic with the m0 bytes
                 let applied_m1_signal = revision_signal_for_context(
                     store,
@@ -4891,8 +4895,7 @@ fn apply_once(
                     meta.coverage_history_segment_seq = Some(comp.folded_history_segment_seq);
                     meta.folded_history_segment_seq = comp.folded_history_segment_seq;
                     meta.legacy_history_segment_seqs = Some(comp.legacy_history_segment_seqs);
-                    meta.project_memory = ctx.project_memory_composition();
-                    froze_composition = true;
+                    froze_composition = freeze_project_memory(&mut meta, ctx);
                     meta.expiry_cutoff_ms = ctx.now_ms;
                     let applied_m1_signal = revision_signal_for_context(
                         store,

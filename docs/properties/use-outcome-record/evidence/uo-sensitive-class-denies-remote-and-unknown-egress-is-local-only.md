@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `d5ebb3598`).
+its parent is `ea5115e1b`).
 
 - Class rule: `denies_destination` (`crates/kernel/src/envelope.rs:71`).
 - Egress read-back: `crates/kernel/src/cas/mod.rs:109`.

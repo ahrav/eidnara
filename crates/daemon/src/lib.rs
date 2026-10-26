@@ -2775,6 +2775,8 @@ pub struct HandlerCore {
     /// The kernel store opens after the cache store under the same managed
     /// directory; routes read it through `kernel_store()`, never the slot.
     kernel: Arc<kernel_routes::KernelOpenCoordinator>,
+    /// Outcomes of the serve writes transform passes make after freezing a composition.
+    use_outcome_counts: use_outcome_writer::UseOutcomeCounts,
     /// The MemoryReviewer sampler's published block; `health()` and status read it and never touch the ledger.
     memory_reviewer_status: Arc<memory_reviewer::lifecycle::MemoryReviewerStatus>,
     /// `initialize` decodes the storage descriptor, and `activate` consumes it: malformed descriptors fail before publication, while storage opens after transport publication.
@@ -2834,7 +2836,6 @@ pub struct HandlerCore {
     /// Stands in for the Kernel's answer to the next serve write, between the fold's Memory Store commit and the write.
     #[cfg(test)]
     use_outcome_fault: Mutex<Option<kernel::KernelError>>,
-    use_outcome_counts: use_outcome_writer::UseOutcomeCounts,
     #[cfg(test)]
     between_transform_and_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -3473,6 +3474,8 @@ struct PassEnv {
     project_path: String,
     note_project_path: String,
     project_memory: Option<canonical_memory::CanonicalMemoryRead>,
+    /// Set by the pass's first serve write: every attempt of a pass freezes the same pinned read, so one write per pass covers its reruns.
+    use_outcome_attempted: std::sync::atomic::AtomicBool,
     snapshot_generation: u64,
     pass_now: i64,
     timings: PassTimings,
@@ -3802,6 +3805,7 @@ impl Handler {
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
             source_capture: Arc::default(),
+            use_outcome_counts: Default::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
@@ -3841,7 +3845,6 @@ impl Handler {
             after_transform_commit: Mutex::new(None),
             #[cfg(test)]
             use_outcome_fault: Mutex::new(None),
-            use_outcome_counts: Default::default(),
             #[cfg(test)]
             between_transform_and_prepare: Mutex::new(None),
             #[cfg(test)]
@@ -4334,6 +4337,7 @@ impl Handler {
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
             source_capture: Arc::default(),
+            use_outcome_counts: Default::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
@@ -4367,7 +4371,6 @@ impl Handler {
             reduction_injection: Mutex::new(HashMap::new()),
             after_transform_commit: Mutex::new(None),
             use_outcome_fault: Mutex::new(None),
-            use_outcome_counts: Default::default(),
             between_transform_and_prepare: Mutex::new(None),
             wrapup_operation_budget: Mutex::new(None),
             unknown_module_retry_delay: Mutex::new(None),
@@ -9515,6 +9518,7 @@ impl HandlerCore {
             project_path,
             note_project_path,
             project_memory,
+            use_outcome_attempted: std::sync::atomic::AtomicBool::new(false),
             snapshot_generation,
             pass_now,
             timings: PassTimings {
@@ -9619,12 +9623,13 @@ impl HandlerCore {
                 .unwrap_or_default(),
         };
         let mut pass = transform_with_projection_cached(store, parsed, &producer_ctx)?;
-        self.record_use_outcome(env, &pass);
         self.promote_derived_state(store, env, &mut pass);
-        pass.finished()
+        let pass = pass.finished()?;
+        self.record_use_outcome(env, &pass);
+        Ok(pass)
     }
 
-    /// Records the serve when this attempt froze an Available composition and its Memory Store commit landed. The commit already decided the pass, so the write's outcome is only counted.
+    /// Records the serve when this attempt froze an Available composition, its Memory Store commit landed, and the pass has not yet written one. The commit already decided the pass, so the write's outcome is only counted.
     fn record_use_outcome(&self, env: &PassEnv, pass: &TransformWithProjection) {
         if !(pass.froze_composition && pass.response.committed) {
             return;
@@ -9634,29 +9639,53 @@ impl HandlerCore {
         else {
             return;
         };
-        #[cfg(test)]
-        if let Some(error) = self
-            .use_outcome_fault
+        debug_assert_eq!(
+            pass.response.project_memory,
+            Some(memory_store::ProjectMemoryComposition::Canonical {
+                known_as_of: snapshot.known_as_of(),
+                truncated: snapshot.truncated(),
+                revision: snapshot.revision(),
+            }),
+            "the recorded snapshot is the composition the pass froze"
+        );
+        // A read at sequence 0 precedes every commit, so its serve has no commit to name.
+        if snapshot.known_as_of() == 0
+            || env
+                .use_outcome_attempted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let outcome = self.use_outcome_fault().map_or_else(
+            || {
+                use_outcome_writer::record_serve(
+                    &self.kernel,
+                    &use_outcome_writer::Serve {
+                        project: &env.binding.kernel_project,
+                        harness: &env.binding.harness,
+                        session_id: &env.parsed.session_id,
+                        is_subagent: env.parsed.is_subagent,
+                        snapshot,
+                        recorded_at: env.pass_now,
+                    },
+                )
+            },
+            use_outcome_writer::UseOutcomeWrite::from_error,
+        );
+        self.use_outcome_counts.record(outcome);
+    }
+
+    #[cfg(test)]
+    fn use_outcome_fault(&self) -> Option<kernel::KernelError> {
+        self.use_outcome_fault
             .lock()
             .expect("use-outcome fault mutex")
             .take()
-        {
-            self.use_outcome_counts
-                .record(use_outcome_writer::UseOutcomeWrite::from_error(error));
-            return;
-        }
-        let outcome = use_outcome_writer::record_serve(
-            &self.kernel,
-            &use_outcome_writer::Serve {
-                project: &env.binding.kernel_project,
-                harness: &env.binding.harness,
-                session_id: &env.parsed.session_id,
-                is_subagent: env.parsed.is_subagent,
-                snapshot,
-                recorded_at: env.pass_now,
-            },
-        );
-        self.use_outcome_counts.record(outcome);
+    }
+
+    #[cfg(not(test))]
+    fn use_outcome_fault(&self) -> Option<kernel::KernelError> {
+        None
     }
 
     fn promote_derived_state(

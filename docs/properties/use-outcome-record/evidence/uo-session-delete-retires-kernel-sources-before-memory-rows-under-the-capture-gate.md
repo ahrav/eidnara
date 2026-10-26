@@ -10,11 +10,11 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `d5ebb3598`).
+its parent is `ea5115e1b`).
 
 - Handler and step order: `handle_session_delete_value`
-  (`crates/daemon/src/lib.rs:6891`).
-- Test hook `stop_after_retirement`: `crates/daemon/src/lib.rs:6927`.
+  (`crates/daemon/src/lib.rs:6894`).
+- Test hook `stop_after_retirement`: `crates/daemon/src/lib.rs:6930`.
 - Correction: the spec's `lib.rs:25158, 25911` were test functions that moved by
   31 lines.
 
@@ -29,7 +29,7 @@ its parent is `d5ebb3598`).
   `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
   (`crates/daemon/src/source_capture_tests.rs:1689`);
   `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-  (`crates/daemon/src/lib.rs:25990`). Status: unaudited.
+  (`crates/daemon/src/lib.rs:26019`). Status: unaudited.
 
 ## Failure scenario
 

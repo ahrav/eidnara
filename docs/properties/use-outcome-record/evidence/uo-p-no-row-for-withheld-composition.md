@@ -9,11 +9,12 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `d5ebb3598`).
+its parent is `ea5115e1b`).
 
-- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9628`).
-- An Available composition read at sequence 0 names no commit and is refused by
-  the Kernel, counted `refused`.
+- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9633`); one
+  write per pass covers its reruns.
+- A composition read at sequence 0 precedes every commit; the handler skips its
+  write, and the next fold after a commit records the serve.
 
 - Guarantee under test: A fold that persists a withheld composition writes no
   serving record; an Available snapshot with zero rows writes a record with zero
@@ -21,7 +22,9 @@ its parent is `d5ebb3598`).
 - Existing check: `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
   `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:431`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_writer_tests.rs:451`);
+  `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:541`). Status: unaudited.
 
 ## Failure scenario
 

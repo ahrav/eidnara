@@ -18,7 +18,7 @@ The specification authored its records at `a0e3f2993` and condensed the
 evidence inline because no part directory existed; this part reconstructs
 the records and their evidence from that catalog. Every `file:line` here was
 re-verified against the #1155 branch tip, the commit that carries this
-revision of the directory, whose parent is `d5ebb3598`. A specification reference that moved or
+revision of the directory, whose parent is `ea5115e1b`. A specification reference that moved or
 pointed at a test rather than production code is corrected in the record's
 evidence file. `Exercised` cites tests that run in the #1155 PR's recorded
 gate run.
@@ -124,15 +124,15 @@ pass.
 Confidence: high -
 [evidence](evidence/uo-served-rows-are-the-frozen-m0-rows-between-hard-folds.md).
 the m0 unit is built only in `Hard | MigrateHard` arms
-(`crates/daemon/src/transform.rs:3116`); the per-pass Kernel read feeds the
+(`crates/daemon/src/transform.rs:3122`); the per-pass Kernel read feeds the
 revision signal that requests a HARD fold
 (`project_memory_revision_change_requests_a_hard_fold`
-(`crates/daemon/src/transform.rs:13990`)).
+(`crates/daemon/src/transform.rs:13993`)).
 Existing check:
 `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
 (`crates/daemon/tests/transform_canonical_memory.rs:46`) (third pass keeps
 `project_memory`); `project_memory_revision_change_requests_a_hard_fold`
-(`crates/daemon/src/transform.rs:13990`). Status: unaudited.
+(`crates/daemon/src/transform.rs:13993`). Status: unaudited.
 Impact: A record keyed by a later read would name findings the session never
 received.
 Open questions: None.
@@ -154,17 +154,17 @@ Required faults and enabling state: Snapshots that differ only in rows the
 renderer drops, bytes past the render cap, or rows past the memory budget.
 Confidence: high -
 [evidence](evidence/uo-composition-revision-digests-exactly-the-rendered-rows.md).
-read at `crates/daemon/src/canonical_memory.rs:60`; the revision is a
+read at `crates/daemon/src/canonical_memory.rs:61`; the revision is a
 `DefaultHasher` `u64`, which is why #1154 keys the record by a separate
 served-set digest.
 Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-(`crates/daemon/src/canonical_memory.rs:372`);
+(`crates/daemon/src/canonical_memory.rs:371`);
 `rows_the_renderer_drops_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:430`);
+(`crates/daemon/src/canonical_memory.rs:429`);
 `bytes_past_the_render_cap_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:447`);
+(`crates/daemon/src/canonical_memory.rs:446`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:469`). Status: unaudited.
+(`crates/daemon/src/canonical_memory.rs:468`). Status: unaudited.
 Impact: A revision that moved without a byte change would record a second serve
 of the same rows.
 Open questions:
@@ -192,20 +192,20 @@ Required faults and enabling state: A HARD fold on each engine, a pressure
 refold on the folding engine, and a CAS conflict inside one pass.
 Confidence: high -
 [evidence](evidence/uo-composition-freeze-persists-at-every-hard-fold-site.md).
-the three assignments are `crates/daemon/src/transform.rs:3116`,
-`crates/daemon/src/transform.rs:4738`, and
-`crates/daemon/src/transform.rs:4894`. Reachability per site: the additive site
+the three assignments are `crates/daemon/src/transform.rs:3122`,
+`crates/daemon/src/transform.rs:4743`, and
+`crates/daemon/src/transform.rs:4898`. Reachability per site: the additive site
 is default-production; the two folding sites are explicit-config-only
 (`eidnara_folds`).
 Existing check:
 `canonical_memory_composes_the_project_memory_block_and_pins_the_snapshot`
-(`crates/daemon/src/transform.rs:13883`);
+(`crates/daemon/src/transform.rs:13886`);
 `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
 (`crates/daemon/tests/transform_canonical_memory.rs:46`);
 `a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it`
-(`crates/daemon/src/use_outcome_writer_tests.rs:219`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:225`);
 `a_pressure_refold_reports_its_frozen_composition`
-(`crates/daemon/src/transform.rs:20892`). Status: unaudited.
+(`crates/daemon/src/transform.rs:20895`). Status: unaudited.
 Impact: A site that skipped the assignment would leave the writer (#1155) with
 no composition to record.
 Open questions:
@@ -231,23 +231,23 @@ a model chain) and a subagent request; the same request under native authority.
 Confidence: medium -
 [evidence](evidence/uo-subagent-pass-serves-no-composition-under-eidnara-folds.md).
 the folding engine sets the subagent plan at
-`crates/daemon/src/transform.rs:4234` and steps Soft with reduction units at
-`crates/daemon/src/transform.rs:4473`; the additive engine reads `is_subagent`
-only as scheduler inputs (`crates/daemon/src/transform.rs:2974`), so a subagent
+`crates/daemon/src/transform.rs:4239` and steps Soft with reduction units at
+`crates/daemon/src/transform.rs:4478`; the additive engine reads `is_subagent`
+only as scheduler inputs (`crates/daemon/src/transform.rs:2980`), so a subagent
 pass on the default engine can enter a HARD arm (lead L1).
 Existing check:
 `a_subagent_pass_under_native_authority_reports_native_authority`
 (`crates/daemon/src/fold_authority_handler_tests.rs:143`);
 `subagent_first_active_render_commits_tagged_bytes_before_replay`
-(`crates/daemon/src/transform.rs:23778`);
+(`crates/daemon/src/transform.rs:23781`);
 `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
-(`crates/daemon/src/use_outcome_writer_tests.rs:315`). Status: unaudited.
+(`crates/daemon/src/use_outcome_writer_tests.rs:329`). Status: unaudited.
 Impact: The record's `subagent` rows would be attributed to the wrong engine.
 Open questions:
 - OQ3-13: is the additive engine's subagent serve intended? Owner: product owner
   with #1142 (needs human input).
 - Correction: a native subagent lineage switch routes to `apply_once` and
-  answers a passthrough (`crates/daemon/src/transform.rs:3358`), so "no subagent
+  answers a passthrough (`crates/daemon/src/transform.rs:3363`), so "no subagent
   rule applies under native authority" holds for the plan, not for routing.
 
 ### uo-known-as-of-is-the-tip-bound-read-sequence
@@ -269,7 +269,7 @@ commit.
 Confidence: high -
 [evidence](evidence/uo-known-as-of-is-the-tip-bound-read-sequence.md).
 `read_project_memory` captures the tip and passes it as the requested snapshot
-(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:160`)); the route
+(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:159`)); the route
 returns `known_as_of` from the visible read
 (`crates/daemon/src/kernel_routes/read.rs:252`).
 Existing check:
@@ -301,7 +301,7 @@ Required faults and enabling state: A route bound with `/memory/enabled: false`.
 Confidence: high -
 [evidence](evidence/uo-memory-disabled-route-takes-no-canonical-read.md).
 `project_memory_read` wraps the read in `cfg.memory_enabled.then(...)`
-(`project_memory_read` (`crates/daemon/src/lib.rs:5493`)).
+(`project_memory_read` (`crates/daemon/src/lib.rs:5496`)).
 Existing check: `a_memory_disabled_pass_takes_no_canonical_read`
 (`crates/daemon/tests/transform_canonical_memory.rs:320`). Status: unaudited.
 Impact: A disabled route that still read and recorded would breach the consent
@@ -325,25 +325,25 @@ Required faults and enabling state: A route bound with memory on, then a reload
 that turns it off (and the reverse), then a pass and a wrapup.
 Confidence: medium -
 [evidence](evidence/uo-consent-gate-source-is-the-route-frozen-config.md). bind
-freezes `effective_config` into the binding (`crates/daemon/src/lib.rs:13306`);
+freezes `effective_config` into the binding (`crates/daemon/src/lib.rs:13335`);
 wrapup reads the live config (`prepare_wrapup_fire`
-(`crates/daemon/src/lib.rs:5980`)). R14 applied: the config seam is
+(`crates/daemon/src/lib.rs:5983`)). R14 applied: the config seam is
 `SessionBinding.config` versus `effective_config` at the two call sites.
 Existing check:
 `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-(`crates/daemon/src/lib.rs:39495`); `only_an_available_composition_is_recorded`
+(`crates/daemon/src/lib.rs:39524`); `only_an_available_composition_is_recorded`
 (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
 `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:465`). Status: unaudited.
+(`crates/daemon/src/use_outcome_writer_tests.rs:486`). Status: unaudited.
 Impact: The record could be written under a consent value the route never had.
 Open questions:
 - Lead L5: the pass and the wrapup read consent from different sources. Owner:
   daemon owner (needs human input).
 - Gap G4: the summarizer reattach path reads `memory_enabled` from the live
-  effective config (`crates/daemon/src/lib.rs:5207`, used at
-  `crates/daemon/src/lib.rs:5354`), a third consent source beside the frozen
+  effective config (`crates/daemon/src/lib.rs:5210`, used at
+  `crates/daemon/src/lib.rs:5357`), a third consent source beside the frozen
   binding and the live wrapup config; the fire path states the frozen-config
-  rule in its own comment (`crates/daemon/src/lib.rs:5864`). Recorded, not
+  rule in its own comment (`crates/daemon/src/lib.rs:5867`). Recorded, not
   fixed; whether the reattach should follow the frozen config is an owner
   decision (needs human input).
 
@@ -515,10 +515,10 @@ Required faults and enabling state: A session with captured sources; the
 `stop_after_retirement` hook.
 Confidence: high -
 [evidence](evidence/uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate.md).
-handler `handle_session_delete_value` (`crates/daemon/src/lib.rs:6891`); gate
-`crates/daemon/src/lib.rs:2792`; Kernel step `retire_captured_sources`
-(`crates/daemon/src/lib.rs:6834`); memory delete
-`crates/daemon/src/lib.rs:6936`.
+handler `handle_session_delete_value` (`crates/daemon/src/lib.rs:6894`); gate
+`crates/daemon/src/lib.rs:2794`; Kernel step `retire_captured_sources`
+(`crates/daemon/src/lib.rs:6837`); memory delete
+`crates/daemon/src/lib.rs:6939`.
 Existing check:
 `session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores`
 (`crates/daemon/src/source_capture_tests.rs:1547`);
@@ -527,7 +527,7 @@ Existing check:
 `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
 (`crates/daemon/src/source_capture_tests.rs:1689`);
 `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-(`crates/daemon/src/lib.rs:25990`). Status: unaudited.
+(`crates/daemon/src/lib.rs:26019`). Status: unaudited.
 Impact: #1156 places the `deleted_at` write in this Kernel step; a reordering
 would let the record miss the delete.
 Open questions: None.
@@ -548,10 +548,10 @@ Required faults and enabling state: A route closed without `session.delete`
 after a HARD fold.
 Confidence: high -
 [evidence](evidence/uo-route-teardown-purges-process-state-but-deletes-no-durable-row.md).
-`unbind_route` (`crates/daemon/src/lib.rs:4667`) calls `purge_session_state`
-(`crates/daemon/src/lib.rs:4707`), which clears in-memory maps only.
+`unbind_route` (`crates/daemon/src/lib.rs:4670`) calls `purge_session_state`
+(`crates/daemon/src/lib.rs:4710`), which clears in-memory maps only.
 Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-(`crates/daemon/src/lib.rs:24940`);
+(`crates/daemon/src/lib.rs:24969`);
 `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
 (`crates/daemon/tests/kernel_routes.rs:3849`). Status: unaudited.
 Impact: A teardown that wrote `deleted_at` would mark a live session deleted
@@ -575,7 +575,7 @@ Required faults and enabling state: A session with committed passes, then
 Confidence: high -
 [evidence](evidence/uo-per-session-pass-timestamps-die-with-the-session.md).
 field `crates/memory-store/src/lib.rs:2512`; writes
-`crates/daemon/src/transform.rs:3257`; delete `delete_session`
+`crates/daemon/src/transform.rs:3262`; delete `delete_session`
 (`crates/memory-store/src/lib.rs:8968`).
 Existing check:
 `delete_session_sweeps_every_session_table_once_and_scopes_notes`
@@ -971,20 +971,30 @@ between; a CAS retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-set-once-per-session-revision.md). the writer
 keys its commit by the project binding, `use-outcome`, the session, and the
-served-set digest (`crates/daemon/src/use_outcome_writer.rs:89`); the Kernel
+served-set digest (`crates/daemon/src/use_outcome_writer.rs:110`); the Kernel
 holds one record per identity tuple.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 (`crates/daemon/src/use_outcome_writer_tests.rs:60`);
 `an_equal_digest_replays_and_another_harness_or_role_conflicts`
 (`crates/daemon/src/use_outcome_writer_tests.rs:121`);
 `an_equal_served_set_at_a_later_known_as_of_replays`
-(`crates/daemon/src/use_outcome_writer_tests.rs:359`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:379`);
 `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
-(`crates/daemon/src/use_outcome_writer_tests.rs:280`). Status: unaudited.
+(`crates/daemon/src/use_outcome_writer_tests.rs:294`);
+`the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
+(`crates/daemon/src/use_outcome_writer_tests.rs:541`);
+`every_kernel_error_maps_to_a_closed_outcome`
+(`crates/daemon/src/use_outcome_writer_tests.rs:635`). Status: unaudited.
 Impact: Duplicates inflate served counts and P7 removal sets.
 Open questions:
-- OQ3-10 (gap G2): a session that continues after its delete replays its earlier
-  receipt at an equal composition; accepted as a loss at #1155 ticketing.
+- Receipts last for the database incarnation and serving records for the
+  retention window, so a fold at a served set whose record expired replays with
+  no live record; recorded as a gap beside G2 (needs human input).
+- The receipt key omits the harness while the record identity carries it, so one
+  session id served under two harnesses at one served set is a lasting conflict;
+  the design takes session ids as unique within a project (needs human input).
+- A deadline, an unready Kernel, or a lost fence leaves the serve for the next
+  fold at its digest; a conflict and a refusal are not repaired by a later fold.
 
 ### uo-p-served-ids-equal-frozen-composition
 
@@ -1003,15 +1013,15 @@ retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-ids-equal-frozen-composition.md). the ids and
 digest come from the pinned snapshot the same fold froze (`served_ids`
-(`crates/daemon/src/canonical_memory.rs:80`), `served_set_digest`
-(`crates/daemon/src/canonical_memory.rs:85`)), and the Kernel refuses ids that
+(`crates/daemon/src/canonical_memory.rs:79`), `served_set_digest`
+(`crates/daemon/src/canonical_memory.rs:84`)), and the Kernel refuses ids that
 disagree with the digest.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 (`crates/daemon/src/use_outcome_writer_tests.rs:60`);
 `a_dispute_between_folds_records_the_next_served_set_without_it`
-(`crates/daemon/src/use_outcome_writer_tests.rs:395`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:415`);
 `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
-(`crates/daemon/src/canonical_memory.rs:335`). Status: unaudited.
+(`crates/daemon/src/canonical_memory.rs:334`). Status: unaudited.
 Impact: The record names findings the session never saw.
 Open questions: None.
 
@@ -1031,7 +1041,7 @@ Required faults and enabling state: A route bound with `/memory/enabled: false`,
 then HARD folds on both engines.
 Confidence: high - [evidence](evidence/uo-p-no-row-when-memory-disabled.md). a
 disabled route takes no read, so `env.project_memory` is `None` and
-`record_use_outcome` (`crates/daemon/src/lib.rs:9628`) returns before any write.
+`record_use_outcome` (`crates/daemon/src/lib.rs:9633`) returns before any write.
 Existing check: `only_an_available_composition_is_recorded`
 (`crates/daemon/src/use_outcome_writer_tests.rs:170`). Status: unaudited.
 Impact: Consent violation (R5).
@@ -1054,11 +1064,13 @@ Required faults and enabling state: A Kernel starting or a refusing serving
 verdict at read time, then a HARD fold.
 Confidence: high - [evidence](evidence/uo-p-no-row-for-withheld-composition.md).
 the writer acts only on `CanonicalMemoryRead::Available` (`record_use_outcome`
-(`crates/daemon/src/lib.rs:9628`)).
+(`crates/daemon/src/lib.rs:9633`)).
 Existing check: `only_an_available_composition_is_recorded`
 (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
 `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`
-(`crates/daemon/src/use_outcome_writer_tests.rs:431`). Status: unaudited.
+(`crates/daemon/src/use_outcome_writer_tests.rs:451`);
+`the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
+(`crates/daemon/src/use_outcome_writer_tests.rs:541`). Status: unaudited.
 Impact: A record claiming a serve that did not render.
 Open questions:
 - OQ3-11 resolved at #1155 ticketing: an empty Canonical composition writes a
@@ -1081,10 +1093,10 @@ with a Canonical read; a primary on each engine.
 Confidence: high -
 [evidence](evidence/uo-p-producer-matches-request-subagent-flag.md). the role
 comes from the pass's `is_subagent`
-(`crates/daemon/src/use_outcome_writer.rs:89`). Reachability per engine (B1):
+(`crates/daemon/src/use_outcome_writer.rs:110`). Reachability per engine (B1):
 `subagent` rows arise only on the additive engine.
 Existing check: `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
-(`crates/daemon/src/use_outcome_writer_tests.rs:315`). Status: unaudited.
+(`crates/daemon/src/use_outcome_writer_tests.rs:329`). Status: unaudited.
 Impact: Harm attributed to the wrong session kind.
 Open questions:
 - OQ3-9 resolved at #1154 ticketing: the column is `session_role`.
