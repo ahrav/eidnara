@@ -57,9 +57,9 @@ Every location was read at the #1155 branch tip.
 | `bytes_past_the_render_cap_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:455` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
 | `rows_past_the_memory_budget_are_neither_injected_nor_digested` | `crates/daemon/src/canonical_memory.rs:477` | `uo-composition-revision-digests-exactly-the-rendered-rows`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
 | `a_subagent_pass_under_native_authority_reports_native_authority` | `crates/daemon/src/fold_authority_handler_tests.rs:143` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds` | unaudited |
-| `route_teardown_keeps_an_admitted_checkpoint_alive` | `crates/daemon/src/lib.rs:24982` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
-| `session_delete_waits_for_the_capture_gate_off_the_runtime_worker` | `crates/daemon/src/lib.rs:26032` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
-| `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired` | `crates/daemon/src/lib.rs:39537` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
+| `route_teardown_keeps_an_admitted_checkpoint_alive` | `crates/daemon/src/lib.rs:25018` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
+| `session_delete_waits_for_the_capture_gate_off_the_runtime_worker` | `crates/daemon/src/lib.rs:26068` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
+| `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired` | `crates/daemon/src/lib.rs:39573` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
 | `the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair` | `crates/daemon/src/memory_reviewer/activation.rs:385` | `uo-activation-gate-closes-on-kernel-baseline-or-incarnation-change` | unaudited |
 | `the_gate_opens_only_for_a_matching_attested_owner_only_record` | `crates/daemon/src/memory_reviewer/activation.rs:448` | `uo-activation-gate-closes-on-kernel-baseline-or-incarnation-change` | unaudited |
 | `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed` | `crates/daemon/src/memory_reviewer/lifecycle.rs:829` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
@@ -88,7 +88,9 @@ Every location was read at the #1155 branch tip.
 | `every_kernel_error_maps_to_a_closed_outcome` | `crates/daemon/src/use_outcome_writer_tests.rs:790` | `uo-p-served-set-once-per-session-revision` | unaudited |
 | `an_emergency_pass_that_reruns_records_one_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:809` | `uo-p-served-set-once-per-session-revision` | unaudited |
 | `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:837` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:866` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer` | `crates/daemon/src/use_outcome_writer_tests.rs:906` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it` | `crates/daemon/src/use_outcome_writer_tests.rs:937` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:966` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
 | `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it` | `crates/daemon/tests/harness_sources.rs:3338` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
 | `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` | `crates/daemon/tests/harness_sources.rs:3482` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts`, `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
 | `route_teardown_releases_the_staged_upload_while_the_session_stays_bound` | `crates/daemon/tests/kernel_routes.rs:3849` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |

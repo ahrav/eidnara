@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `dd84f77af`).
 
 - Ids: the rendered rows of `CanonicalMemorySnapshot::new`, ascending
   (`served_ids` (`crates/daemon/src/canonical_memory.rs:72`)).
@@ -31,7 +31,7 @@ its parent is `a9060af05`).
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
   (`crates/daemon/src/canonical_memory.rs:477`);
   `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:866`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:966`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:214`),
   `session_roles_round_trip_and_the_served_set_digest_is_order_free`

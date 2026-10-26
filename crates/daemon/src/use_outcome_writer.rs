@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use kernel::applicability::EvalBudget;
 use kernel::{CommitIntent, CommitReceipt, Envelope, KernelError, SessionRole, UseOutcomeSpec};
 use sha2::{Digest, Sha256};
+use tokio::sync::Semaphore;
 
 use crate::canonical_memory::CanonicalMemorySnapshot;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
@@ -79,12 +80,26 @@ impl UseOutcomeWrite {
 
 const _: () = assert!(UseOutcomeWrite::Refused as usize + 1 == UseOutcomeWrite::ALL.len());
 
-#[derive(Debug, Default)]
-pub(crate) struct UseOutcomeCounts([AtomicU64; UseOutcomeWrite::ALL.len()]);
+const WRITES_IN_FLIGHT: usize = 4;
 
-impl UseOutcomeCounts {
+#[derive(Debug)]
+pub(crate) struct UseOutcomeWrites {
+    counts: [AtomicU64; UseOutcomeWrite::ALL.len()],
+    slots: Arc<Semaphore>,
+}
+
+impl Default for UseOutcomeWrites {
+    fn default() -> Self {
+        Self {
+            counts: Default::default(),
+            slots: Arc::new(Semaphore::new(WRITES_IN_FLIGHT)),
+        }
+    }
+}
+
+impl UseOutcomeWrites {
     pub(crate) fn record(&self, outcome: UseOutcomeWrite) {
-        self.0[outcome as usize].fetch_add(1, Ordering::Relaxed);
+        self.counts[outcome as usize].fetch_add(1, Ordering::Relaxed);
         if !matches!(
             outcome,
             UseOutcomeWrite::Written | UseOutcomeWrite::Replayed
@@ -93,9 +108,42 @@ impl UseOutcomeCounts {
         }
     }
 
+    /// The returned job holds a write slot through `write` and the outcome count, or until it is dropped. `write` returning `None` counts `kernel_unavailable`. Slot exhaustion counts `deadline` and returns `None`.
+    pub(crate) fn job(
+        self: &Arc<Self>,
+        write: impl FnOnce() -> Option<UseOutcomeWrite> + Send + 'static,
+    ) -> Option<impl FnOnce() + Send + 'static> {
+        let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() else {
+            self.record(UseOutcomeWrite::Deadline);
+            return None;
+        };
+        let writes = Arc::clone(self);
+        Some(move || {
+            writes.record(write().unwrap_or(UseOutcomeWrite::KernelUnavailable));
+            drop(slot);
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn get(&self, outcome: UseOutcomeWrite) -> u64 {
-        self.0[outcome as usize].load(Ordering::Relaxed)
+        self.counts[outcome as usize].load(Ordering::Relaxed)
+    }
+
+    /// Waits until completed or dropped jobs have released every write slot.
+    #[cfg(test)]
+    pub(crate) async fn settled(&self) {
+        let _every_slot = self
+            .slots
+            .acquire_many(WRITES_IN_FLIGHT as u32)
+            .await
+            .expect("the slots semaphore stays open");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn occupy_every_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.slots
+            .try_acquire_many(WRITES_IN_FLIGHT as u32)
+            .expect("no write is in flight")
     }
 }
 

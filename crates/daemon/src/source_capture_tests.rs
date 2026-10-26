@@ -133,7 +133,7 @@ fn kernel_store(handler: &Handler) -> Arc<KernelStore> {
 /// document pass that folds HARD over a new served set writes one beside whatever capture commits.
 fn capture_tip(handler: &Handler) -> i64 {
     let serves = handler
-        .use_outcome_counts
+        .use_outcome_writes
         .get(crate::use_outcome_writer::UseOutcomeWrite::Written);
     kernel_store(handler).tip().unwrap() - i64::try_from(serves).unwrap()
 }

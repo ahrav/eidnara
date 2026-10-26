@@ -9,7 +9,7 @@ Record kind: proposed obligation; its owning ticket #1157 activates it.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `dd84f77af`).
 
 - The counts derive from `served_sessions_for`.
 

@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `dd84f77af`).
 
 - Writes happen only when state changed: `crates/daemon/src/transform.rs:3262`,
   `crates/daemon/src/transform.rs:3761`, `crates/daemon/src/transform.rs:5382`.

@@ -46,7 +46,7 @@ fn served(handler: &Handler, project: &Path) -> Vec<kernel::UseOutcomeRecord> {
 fn counts(handler: &Handler) -> Vec<(&'static str, u64)> {
     UseOutcomeWrite::ALL
         .iter()
-        .map(|outcome| (outcome.name(), handler.use_outcome_counts.get(*outcome)))
+        .map(|outcome| (outcome.name(), handler.use_outcome_writes.get(*outcome)))
         .filter(|(_, count)| *count > 0)
         .collect()
 }
@@ -859,6 +859,106 @@ async fn only_an_unready_kernel_leaves_the_pass_to_retry_its_serve() {
         assert_eq!(counts(&handler), expected, "{fault:?}");
         assert_eq!(served(&handler, &project).len(), records, "{fault:?}");
     }
+}
+
+/// Holds the Kernel writer on its own thread until the returned sender is sent to or dropped.
+fn hold_kernel_writer(
+    kernel: &Arc<kernel::KernelStore>,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (entered, writer_held) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let kernel = Arc::clone(kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(intent("hold-writer-across-a-pass"), |_| {
+                    entered.send(()).unwrap();
+                    let _ = released.recv();
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    writer_held.recv().unwrap();
+    (release, holder)
+}
+
+/// The response can return while a serve write the pass handed off remains pending.
+async fn transform_leaving_serves_pending(
+    handler: &Handler,
+    messages: Vec<IngressMessage>,
+) -> Value {
+    let request = handler.test_client_prepare_request(request(messages));
+    let outcome = handler
+        .handle_transform_with_runner(
+            test_route(7),
+            request.clone(),
+            &transform_unit::DetachedRunner::default(),
+        )
+        .await;
+    match handler.test_client_apply(&request, outcome) {
+        PreparedOutcome::Response(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        other => panic!("unexpected handler outcome: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hard_fold_answers_while_another_writer_holds_the_kernel_writer() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    seed_memories(&kernel, &project, &[("mem-a", "Rule a.")]);
+    let (release, holder) = hold_kernel_writer(&kernel);
+
+    let response = transform_leaving_serves_pending(&handler, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(response["action"], "HARD", "{response}");
+    assert_eq!(
+        response["project_memory"]["kind"], "canonical",
+        "{response}"
+    );
+    assert!(
+        counts(&handler).is_empty(),
+        "the response arrives while the serve write is pending: {:?}",
+        counts(&handler)
+    );
+    assert!(served(&handler, &project).is_empty());
+
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    handler.use_outcome_writes.settled().await;
+    assert_eq!(counts(&handler), [("written", 1)]);
+    let records = served(&handler, &project);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    seed_memories(
+        &handler.kernel.kernel_store().unwrap(),
+        &project,
+        &[("mem-a", "Rule a.")],
+    );
+    let occupied = handler.use_outcome_writes.occupy_every_slot();
+    let first = transform_leaving_serves_pending(&handler, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(first["action"], "HARD", "{first}");
+    assert_eq!(counts(&handler), [("deadline", 1)]);
+    assert!(served(&handler, &project).is_empty());
+    drop(occupied);
+
+    let repaired = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+    assert_eq!(
+        repaired["project_memory"], first["project_memory"],
+        "{repaired}"
+    );
+    let records = served(&handler, &project);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+    assert_eq!(counts(&handler), [("written", 1), ("deadline", 1)]);
 }
 
 /// A committed HARD fold whose boundary read then fails answers an error, and the composition its commit froze is still recorded once.

@@ -9,12 +9,12 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `dd84f77af`).
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:117`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:165`; the request
   digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:175`)).
-- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9637`) runs after
+  (`crates/daemon/src/use_outcome_writer.rs:223`)).
+- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9655`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
@@ -39,7 +39,11 @@ its parent is `a9060af05`).
   `an_emergency_pass_that_reruns_records_one_serve`
   (`crates/daemon/src/use_outcome_writer_tests.rs:809`);
   `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:837`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:837`);
+  `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:906`);
+  `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:937`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:214`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
@@ -86,10 +90,16 @@ between; a CAS retry.
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A deadline, an unready Kernel, or a lost fence leaves the serve for
   a later write at its digest: a rerun in the same pass when the Kernel was not
-  Ready and no write was attempted (every Kernel outcome settles the pass, so a
-  pass spends at most one write budget), or a later HARD fold that another
-  input requests over the same served set, such as context pressure. A session
-  whose composition never folds HARD again at that set stays unrecorded. A
-  conflict and a refusal are not repaired by a later fold.
+  Ready at the hand-off and no write was handed off (a write handed to a Ready
+  Kernel settles the pass whatever its outcome), or a later HARD fold that
+  another input requests over the same served set, such as context pressure.
+  The pass hands the write to a tracked blocking job and answers while the job
+  waits for the Kernel writer
+  (`a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`); when
+  every write slot is taken, the write is counted `deadline` and repaired the
+  same way
+  (`a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`).
+  A session whose composition never folds HARD again at that set stays
+  unrecorded. A conflict and a refusal are not repaired by a later fold.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.

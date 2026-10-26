@@ -9,9 +9,9 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `a9060af05`).
+its parent is `dd84f77af`).
 
-- Role: `crates/daemon/src/use_outcome_writer.rs:132`.
+- Role: `crates/daemon/src/use_outcome_writer.rs:180`.
 
 - Guarantee under test: The stored `session_role` is `subagent` exactly when the
   writing pass's effective subagent flag was true.
