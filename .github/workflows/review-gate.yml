@@ -16,7 +16,9 @@ concurrency:
 jobs:
   gate-record:
     name: gate record covers the head
-    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
+    if: >-
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -25,6 +27,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          filter: blob:none
 
       # oven-sh/setup-bun v2.2.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6

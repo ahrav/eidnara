@@ -4,7 +4,7 @@ export interface Round {
     head: string;
 }
 
-const ROUND = /\bRound\s+(\d+)\s+reviewed\s+`?([0-9a-f]{7,40})`?\s*\.\.\s*`?([0-9a-f]{7,40})`?/gi;
+const ROUND = /\bRound\s+(\d+)\s+reviewed\s+`?([^\s`]+?)`?\s*\.\.\s*`?([0-9a-f]{7,40})`?/gi;
 
 export function lastRound(body: string): Round | undefined {
     let last: Round | undefined;
@@ -56,13 +56,13 @@ export function checkGateRecord(body: string, head: string, change: Change): str
     ];
 }
 
-function git(args: string[]): { code: number; out: string } {
-    const result = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+function git(cwd: string | undefined, args: string[]): { code: number; out: string } {
+    const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
     return { code: result.exitCode, out: result.stdout.toString() };
 }
 
-function gitOk(args: string[]): string {
-    const { code, out } = git(args);
+function gitOk(cwd: string | undefined, args: string[]): string {
+    const { code, out } = git(cwd, args);
     if (code !== 0) throw new Error(`git ${args.join(" ")} exited ${code}`);
     return out;
 }
@@ -71,16 +71,20 @@ function names(out: string): string[] {
     return out.split("\0").filter(Boolean);
 }
 
-export function gitChange(base: string, head: string): Change {
-    const mergeBase = gitOk(["merge-base", base, head]).trim();
+export function gitChange(base: string, head: string, cwd?: string): Change {
+    const mergeBase = gitOk(cwd, ["merge-base", base, head]).trim();
+    // `--no-renames` lists both paths of a rename, so the check sees a deleted source path.
+    const diffNames = (from: string, to: string) =>
+        names(gitOk(cwd, ["diff", "--name-only", "--no-renames", "-z", from, to]));
     return {
-        files: names(gitOk(["diff", "--name-only", "-z", mergeBase, head])),
+        files: diffNames(mergeBase, head),
         resolve: (revision) => {
-            const { code, out } = git(["rev-parse", "--verify", "--quiet", `${revision}^{commit}`]);
+            const { code, out } = git(cwd, ["rev-parse", "--verify", "--quiet", `${revision}^{commit}`]);
             return code === 0 ? out.trim() : undefined;
         },
-        isAncestor: (ancestor, descendant) => git(["merge-base", "--is-ancestor", ancestor, descendant]).code === 0,
-        changedBetween: (from, to) => names(gitOk(["diff", "--name-only", "-z", from, to])),
+        isAncestor: (ancestor, descendant) =>
+            git(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]).code === 0,
+        changedBetween: diffNames,
     };
 }
 
