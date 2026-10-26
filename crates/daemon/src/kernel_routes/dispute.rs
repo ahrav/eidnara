@@ -174,13 +174,8 @@ fn encode(value: &str) -> String {
     encoded
 }
 
-const fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
+fn hex_value(byte: u8) -> Option<u8> {
+    char::from(byte).to_digit(16).and_then(|digit| u8::try_from(digit).ok())
 }
 
 /// The bytes `value` encodes, as UTF-8; `None` for a `%` without two hex
