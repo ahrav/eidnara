@@ -248,6 +248,36 @@ describe("checkAnchors", () => {
         expect(checkAnchors(repo)).toEqual({ findings: [], notices: [] });
     });
 
+    test("an anchor kept on an edited document line still reports a shift, a dangling range, or a rename", () => {
+        const repo = repository(
+            {
+                "docs/p/catalog.md": "Now `src/a.rs:20`, `src/c.rs:38-45`, `src/old.rs:20`.\n",
+                "src/a.rs": SOURCE,
+                "src/c.rs": SOURCE,
+                "src/new.rs": SOURCE,
+            },
+            {
+                "docs/p/catalog.md": modified("docs/p/catalog.md"),
+                "src/a.rs": modified("src/a.rs"),
+                "src/c.rs": modified("src/c.rs"),
+                "src/new.rs": modified("src/old.rs"),
+            },
+            {
+                "docs/p/catalog.md": parseHunks("@@ -1 +1 @@\n"),
+                "src/a.rs": parseHunks("@@ -4,0 +5,3 @@\n@@ -20 +23 @@\n"),
+                "src/c.rs": parseHunks("@@ -38,10 +38,3 @@\n"),
+                "src/new.rs": parseHunks("@@ -20 +20 @@\n"),
+            },
+            { "src/old.rs": "src/new.rs" },
+            { "docs/p/catalog.md": "Was `src/a.rs:20`, `src/c.rs:38-45`, `src/old.rs:20`.\n" },
+        );
+        expect(messages(checkAnchors(repo).findings)).toEqual([
+            "docs/p/catalog.md:1: src/a.rs:20 cites lines that moved to src/a.rs:23-23",
+            "docs/p/catalog.md:1: src/c.rs:38-45 cites past the end of src/c.rs (40 lines)",
+            "docs/p/catalog.md:1: src/old.rs:20 cites lines this change edits in src/new.rs",
+        ]);
+    });
+
     test("maps a bare anchor that was ambiguous at the base once a deletion makes it unique", () => {
         const repo = repository(
             { "docs/a.md": "`x.rs:20`\n", "a/x.rs": SOURCE },
@@ -467,16 +497,22 @@ describe("gitRepository", () => {
 
     test("the command prints findings as error annotations and exits 1", () => {
         write("src/a.rs", SOURCE);
+        write("src/b.rs", SOURCE);
         write("docs/a.md", "intro\n");
+        write("docs/b.md", "`src/b.rs:5`\n");
         git("add", ".");
         git("commit", "-q", "-m", "base");
         const base = git("rev-parse", "HEAD");
-        write("docs/a.md", "intro\n`src/a.rs:99` 100% sure\n");
+        write("docs/a.md", "intro\n`src/a.rs:99`\n");
+        write("src/b.rs", `inserted\n${SOURCE}`);
         git("add", ".");
         git("commit", "-q", "-m", "change");
         const run = spawnSync("bun", [SCRIPT, base], { cwd: repo, encoding: "utf8" });
         expect(run.status).toBe(1);
-        expect(run.stdout).toBe("::error file=docs/a.md,line=2::src/a.rs:99 cites past the end of src/a.rs (40 lines)\n");
+        expect(run.stdout).toBe(
+            "::notice file=docs/b.md,line=1::src/b.rs:5 cites lines that moved to src/b.rs:6-6\n" +
+                "::error file=docs/a.md,line=2::src/a.rs:99 cites past the end of src/a.rs (40 lines)\n",
+        );
         expect(spawnSync("bun", [SCRIPT], { cwd: repo, encoding: "utf8" }).status).toBe(2);
     });
 

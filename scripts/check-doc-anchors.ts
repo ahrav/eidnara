@@ -79,12 +79,17 @@ export function parseHunks(diff: string): Hunk[] {
     return hunks;
 }
 
-export function addedLines(hunks: Hunk[]): Set<number> {
-    const added = new Set<number>();
+function hunkLines(hunks: Hunk[], side: "old" | "new"): Set<number> {
+    const lines = new Set<number>();
     for (const hunk of hunks) {
-        for (let offset = 0; offset < hunk.newCount; offset++) added.add(hunk.newStart + offset);
+        const [start, count] = side === "old" ? [hunk.oldStart, hunk.oldCount] : [hunk.newStart, hunk.newCount];
+        for (let offset = 0; offset < count; offset++) lines.add(start + offset);
     }
-    return added;
+    return lines;
+}
+
+export function addedLines(hunks: Hunk[]): Set<number> {
+    return hunkLines(hunks, "new");
 }
 
 /**
@@ -92,10 +97,7 @@ export function addedLines(hunks: Hunk[]): Set<number> {
  * changed, so it still maps through its target's hunks.
  */
 function removedAnchors(baseText: string, hunks: Hunk[]): Set<string> {
-    const removed = new Set<number>();
-    for (const hunk of hunks) {
-        for (let offset = 0; offset < hunk.oldCount; offset++) removed.add(hunk.oldStart + offset);
-    }
+    const removed = hunkLines(hunks, "old");
     return new Set(findAnchors(baseText).filter((anchor) => removed.has(anchor.line)).map((anchor) => anchor.text));
 }
 
@@ -235,14 +237,22 @@ export function checkAnchors(repo: Repository): Report {
                 continue;
             }
             const { base, head } = located;
-            const mapped = mapRange(repo.hunks(base, head), anchor.start, anchor.end);
+            const hunks = repo.hunks(base, head);
+            let mapped = mapRange(hunks, anchor.start, anchor.end);
             const renamedTo = located.kind === "renamed" ? ` in ${head}` : "";
-            if (mapped.kind === "changed") {
-                // An anchor kept on an edited document line is reaffirmed: edited cited lines pass
-                // while the range exists at HEAD, and a shifted range still reports as moved.
-                const message = edited ? outOfBounds(head) : `cites lines this change edits${renamedTo}`;
-                if (message !== undefined) push(entries, message);
-            } else if (mapped.kind === "moved") push(entries, `cites lines that moved to ${head}:${mapped.start}-${mapped.end}`);
+            if (mapped.kind === "changed" && edited && located.kind === "modified") {
+                // An anchor kept on an edited document line is reaffirmed: an in-place edit of its
+                // cited lines passes while the range exists at HEAD. Hunks above the range still
+                // shift it, and that shift reports as moved.
+                const above = hunks.filter((hunk) => Math.max(hunk.oldStart, hunk.oldStart + hunk.oldCount - 1) < anchor.start);
+                mapped = mapRange(above, anchor.start, anchor.end);
+                if (mapped.kind === "same") {
+                    const message = outOfBounds(head);
+                    if (message !== undefined) push(entries, message);
+                }
+            }
+            if (mapped.kind === "changed") push(entries, `cites lines this change edits${renamedTo}`);
+            else if (mapped.kind === "moved") push(entries, `cites lines that moved to ${head}:${mapped.start}-${mapped.end}`);
             else if (located.kind === "renamed") push(entries, `cites a file this change renames to ${head}`);
         }
     }

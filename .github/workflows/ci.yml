@@ -606,7 +606,7 @@ jobs:
           bun test scripts/forbid-oracle-adapter-imports.test.ts
           bun scripts/forbid-oracle-adapter-imports.ts
 
-      - name: Line anchors in changed Markdown
+      - name: check-doc-anchors unit tests
         run: bun test scripts/check-doc-anchors.test.ts
 
       - name: Line anchors in changed Markdown cite current lines
