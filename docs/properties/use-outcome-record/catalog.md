@@ -1153,8 +1153,10 @@ committed its Kernel step, before the memory-store delete; route teardown leaves
 it null.
 Check: `always` - after `ok` every record of the session has `deleted_at` set
 and the memory rows are gone; after teardown it is null; after
-`kernel_unavailable` the memory rows are intact and it is null; one repeat with
-the Kernel Ready completes `ok` (R9).
+`kernel_unavailable` the memory rows are intact, and `deleted_at` is null when
+the Kernel was not Ready and set when the step's commit ran and its answer was
+an error; one repeat with the Kernel Ready completes `ok` and keeps the first
+timestamp (R9).
 Fault/timing angle: A stop between the stores, then a retry.
 Required faults and enabling state: A delete with the Kernel available; one with
 it starting; a route close without delete.
