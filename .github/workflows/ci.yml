@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
@@ -174,6 +175,14 @@ jobs:
               # `crates/eval-core/tests/method_records.rs` reads the evaluator
               # catalog and its evidence files, so the part is a test input.
               - 'docs/properties/evaluator/**'
+              - 'docs/evaluator.md'
+              - 'fixtures/schema/storage-inventory-v1.json'
+              - 'packages/opencode-plugin/src/config/__fixtures__/project-docs-parity.json'
+              - 'packages/opencode-plugin/src/config/__fixtures__/source-capture-parity.json'
+              - 'packages/opencode-plugin/src/hooks/context/module-transport.ts'
+              - 'packages/pi-plugin/src/transform/__fixtures__/pi-codec-parity.json'
+              - 'packages/e2e-tests/src/source-corpus/corpus.ts'
+              - 'packages/e2e-tests/src/source-corpus/expected.ts'
             native:
               - *workflow
               - *cargo
@@ -213,6 +222,14 @@ jobs:
               # The delivery campaign's decay oracle checks itself against the
               # decay ladder's golden vectors.
               - 'crates/context-core/testdata/decay-golden.json'
+              - 'crates/daemon/tests/fixtures/**'
+              - 'crates/host-runtime/tests/fixtures/**'
+              - 'crates/daemon/assets/**'
+              - 'crates/daemon/src/lib.rs'
+              - 'crates/daemon/src/source_corpus_tests.rs'
+              - 'crates/daemon/testdata/merged-reasoning-adapter-golden.json'
+              - 'crates/daemon/testdata/history_summarizer-system-prompt.txt'
+              - 'crates/eval-core/testdata/scale/writer-rows.jsonl'
 
   gates:
     name: gates
