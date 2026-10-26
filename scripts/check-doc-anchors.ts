@@ -103,11 +103,13 @@ export interface Repository {
     hunks(basePath: string, headPath: string): Hunk[];
 }
 
-function normalize(path: string): string {
+function normalize(path: string): string | undefined {
     const parts: string[] = [];
     for (const part of path.split("/")) {
-        if (part === "..") parts.pop();
-        else if (part !== "." && part !== "") parts.push(part);
+        if (part === "..") {
+            if (parts.length === 0) return undefined;
+            parts.pop();
+        } else if (part !== "." && part !== "") parts.push(part);
     }
     return parts.join("/");
 }
@@ -124,7 +126,7 @@ function lineCount(text: string): number {
 export function resolveAnchor(paths: Set<string>, doc: string, anchor: Anchor): string | undefined {
     if (anchor.form === "link") {
         const path = normalize(`${dirname(doc)}/${anchor.path}`);
-        return paths.has(path) ? path : undefined;
+        return path !== undefined && paths.has(path) ? path : undefined;
     }
     if (paths.has(anchor.path)) return anchor.path;
     const suffix = `/${anchor.path}`;
@@ -178,35 +180,55 @@ export function checkAnchors(repo: Repository): Report {
                 }
                 continue;
             }
-            let base: string;
-            let head: string;
-            if (target === undefined) {
-                const suffix = `/${anchor.path}`;
-                const stillTracked =
-                    anchor.form === "bare" && [...repo.tracked].some((path) => path.endsWith(suffix));
-                const gone = stillTracked ? undefined : resolveAnchor(removedPaths, doc, anchor);
-                if (gone === undefined) continue;
-                const renamed = repo.removed.get(gone) ?? null;
-                if (renamed === null) {
-                    push(entries, "cites a file this change deletes");
-                    continue;
-                }
-                base = gone;
-                head = renamed;
-            } else {
-                const change = repo.changes.get(target);
-                if (change?.kind !== "modified") continue;
-                base = change.base;
-                head = target;
+            const located = locate(repo, removedPaths, doc, docChange, anchor, target);
+            if (located === undefined) continue;
+            if (located === "deleted") {
+                push(entries, "cites a file this change deletes");
+                continue;
             }
+            if (located.kind === "relink") {
+                push(entries, `cites no tracked file from the document's new path; the target is ${located.path}`);
+                continue;
+            }
+            const { base, head } = located;
             const mapped = mapRange(hunksOf(base, head), anchor.start, anchor.end);
-            const renamedTo = head === base ? "" : ` in ${head}`;
+            const renamedTo = located.kind === "renamed" ? ` in ${head}` : "";
             if (mapped.kind === "changed") push(entries, `cites lines this change edits${renamedTo}`);
             else if (mapped.kind === "moved") push(entries, `cites lines that moved to ${head}:${mapped.start}-${mapped.end}`);
-            else if (head !== base) push(entries, `cites a file this change renames to ${head}`);
+            else if (located.kind === "renamed") push(entries, `cites a file this change renames to ${head}`);
         }
     }
     return report;
+}
+
+type Located =
+    | { kind: "modified" | "renamed"; base: string; head: string }
+    | { kind: "relink"; path: string }
+    | "deleted"
+    | undefined;
+
+function locate(
+    repo: Repository,
+    removedPaths: Set<string>,
+    doc: string,
+    docChange: FileChange | undefined,
+    anchor: Anchor,
+    target: string | undefined,
+): Located {
+    if (target !== undefined) {
+        const change = repo.changes.get(target);
+        return change?.kind === "modified" ? { kind: "modified", base: change.base, head: target } : undefined;
+    }
+    if (anchor.form === "link" && docChange?.kind === "modified" && docChange.base !== doc) {
+        const path = normalize(`${dirname(docChange.base)}/${anchor.path}`);
+        if (path !== undefined && (repo.tracked.has(path) || repo.removed.has(path))) return { kind: "relink", path };
+    }
+    const suffix = `/${anchor.path}`;
+    if (anchor.form === "bare" && [...repo.tracked].some((path) => path.endsWith(suffix))) return undefined;
+    const gone = resolveAnchor(removedPaths, doc, anchor);
+    if (gone === undefined) return undefined;
+    const renamed = repo.removed.get(gone) ?? null;
+    return renamed === null ? "deleted" : { kind: "renamed", base: gone, head: renamed };
 }
 
 function git(cwd: string | undefined, args: string[]): string {

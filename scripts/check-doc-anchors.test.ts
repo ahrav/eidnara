@@ -15,6 +15,9 @@ import {
     type Repository,
 } from "./check-doc-anchors";
 
+// Signing, hooks, and merge settings in a developer's git config can fail these commits.
+const ISOLATED_GIT = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+
 function modified(base: string): FileChange {
     return { kind: "modified", base };
 }
@@ -166,11 +169,23 @@ describe("checkAnchors", () => {
     });
 });
 
+describe("checkAnchors on a renamed target", () => {
+    test("accepts an unchanged anchor that already names the renamed file's new path", () => {
+        const repo = repository(
+            { "docs/a.md": "`src/x.rs:5`\nnew\n", "crates/b/src/x.rs": SOURCE },
+            { "docs/a.md": modified("docs/a.md"), "crates/b/src/x.rs": modified("crates/a/src/x.rs") },
+            { "docs/a.md": parseHunks("@@ -1,0 +2 @@\n") },
+            { "crates/a/src/x.rs": "crates/b/src/x.rs" },
+        );
+        expect(checkAnchors(repo)).toEqual({ findings: [], notices: [] });
+    });
+});
+
 describe("gitRepository", () => {
     let repo: string;
 
     function git(...args: string[]): string {
-        const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+        const result = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: ISOLATED_GIT });
         if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
         return result.stdout.trim();
     }
@@ -207,6 +222,27 @@ describe("gitRepository", () => {
             "docs/a.md:1: src/old.rs:30 cites a file this change renames to src/new.rs",
             "docs/a.md:1: src/b.rs:30 cites lines that moved to src/b.rs:31-31",
             "docs/a.md:2: ](../src/new.rs#L41) cites past the end of src/new.rs (40 lines)",
+        ]);
+    });
+
+    test("reads deletions, added documents, and a renamed document's relative links", () => {
+        write("src/gone.rs", SOURCE);
+        write("src/b.rs", SOURCE);
+        write("docs/a.md", "`src/gone.rs:3`\nintro\n");
+        write("docs/old/c.md", "[b](../../src/b.rs#L2)\n");
+        git("add", ".");
+        git("commit", "-q", "-m", "base");
+        const base = git("rev-parse", "HEAD");
+        git("rm", "-q", "src/gone.rs");
+        write("docs/a.md", "`src/gone.rs:3`\nintro\nmore\n");
+        write("docs/new.md", "[y](../src/b.rs#L99)\n");
+        git("mv", "docs/old/c.md", "docs/c.md");
+        git("add", ".");
+        git("commit", "-q", "-m", "change");
+        expect(messages(checkAnchors(gitRepository(base, repo)).findings)).toEqual([
+            "docs/a.md:1: src/gone.rs:3 cites a file this change deletes",
+            "docs/c.md:1: ](../../src/b.rs#L2) cites no tracked file from the document's new path; the target is src/b.rs",
+            "docs/new.md:1: ](../src/b.rs#L99) cites past the end of src/b.rs (40 lines)",
         ]);
     });
 });
