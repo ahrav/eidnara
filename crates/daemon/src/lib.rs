@@ -9763,7 +9763,7 @@ impl HandlerCore {
         }
     }
 
-    /// The touch advances `last_transform_at` on the session's live records using the remainder of the pass's 250 ms Kernel wait budget and counts failed writes as skips. The Kernel rechecks staleness before taking the writer and skips the write when another pass has already advanced the records.
+    /// The touch advances `last_transform_at` on the session's live records using the remainder of the pass's 250 ms Kernel wait budget and counts failed writes as skips. The update runs only after [`Self::use_outcomes_to_touch`] found a stale record, and its filter leaves a record another pass already advanced.
     fn touch_use_outcomes(&self, env: &PassEnv, kernel: &kernel::KernelStore) {
         let write = env.kernel_writes.spend(|budget| {
             use_outcome_writer::touch_session(

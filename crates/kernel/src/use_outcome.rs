@@ -435,7 +435,7 @@ impl KernelStore {
         Ok(sessions)
     }
 
-    /// Whether a live record of one session holds a `last_transform_at` that is null or before `at`, read on a pooled reader within `budget`. This is the check [`Self::advance_use_outcome_last_transform`] makes before it takes the writer.
+    /// Whether a live record of one session holds a `last_transform_at` that is null or before `at`, read on a pooled reader within `budget`. A caller makes this check before [`Self::advance_use_outcome_last_transform`], so a session with nothing to advance takes no writer.
     ///
     /// # Errors
     ///
@@ -460,7 +460,7 @@ impl KernelStore {
             .map_err(map_sqlite)
     }
 
-    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. A session with nothing to advance takes no writer. The connection waits, the transaction's begin, and its statements stop at the budget; the commit runs to completion once reached.
+    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. The write holds only the writer: the caller's [`Self::use_outcome_last_transform_is_stale`] check keeps a session with nothing to advance off the writer, and the update's own filter skips a record another pass advanced since that check. The connection waits, the transaction's begin, and its statements stop at the budget; the commit runs to completion once reached.
     ///
     /// # Errors
     ///
@@ -473,14 +473,8 @@ impl KernelStore {
         session_id: &str,
         at: i64,
     ) -> Result<usize, KernelError> {
-        if !self.use_outcome_last_transform_is_stale(
-            budget,
-            project_digest,
-            harness,
-            session_id,
-            at,
-        )? {
-            return Ok(0);
+        if at < 0 {
+            return Err(KernelError::InvalidInput);
         }
         let limit = budget.acquire_limit();
         let args = params![project_digest, harness, session_id, at];

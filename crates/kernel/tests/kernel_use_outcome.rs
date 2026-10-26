@@ -946,7 +946,6 @@ fn last_transform_at_advances_live_records_without_a_commit() {
     assert_eq!(store.tip().unwrap(), tip);
 }
 
-/// With the Kernel writer held, an advance that has rows to move stops at its budget with `Deadline`, and one with nothing to move answers without waiting for the writer.
 #[test]
 fn a_held_writer_bounds_the_advance_and_an_idle_session_skips_it() {
     let root = tempfile::tempdir().unwrap();
@@ -974,8 +973,8 @@ fn a_held_writer_bounds_the_advance_and_an_idle_session_skips_it() {
         assert_eq!(advanced, Err(KernelError::Deadline));
         assert!(started.elapsed() >= wait);
         assert_eq!(
-            store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s9", 10),
-            Ok(0)
+            store.use_outcome_last_transform_is_stale(&budget(wait), &project(), HARNESS, "s9", 10),
+            Ok(false)
         );
         release.send(()).unwrap();
         holder.join().unwrap();
@@ -1041,4 +1040,23 @@ fn the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing() {
     assert_eq!(stale(wait, 99), Ok(false));
     assert_eq!(stale(wait, 101), Ok(true));
     assert_eq!(store.tip().unwrap(), tip);
+}
+
+#[test]
+fn the_advance_takes_no_pooled_reader() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let advanced = store.with_readers_held_for_test(|| {
+        store.advance_use_outcome_last_transform(
+            &budget(std::time::Duration::from_millis(100)),
+            &project(),
+            HARNESS,
+            "s1",
+            10,
+        )
+    });
+    assert_eq!(advanced, Ok(1));
+    assert_eq!(lifecycle(&store, "s1"), [(None, Some(10))]);
 }

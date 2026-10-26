@@ -15,11 +15,11 @@ Every location was read at the #1156 branch tip.
 | `unrecognized_stored_classes_read_back_restrictive` | `crates/kernel/src/cas/mod.rs:797` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only` | unaudited |
 | `a_replayed_expiry_receipt_is_not_counted_as_a_retirement` | `crates/kernel/src/local_file.rs:728` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
 | `a_capture_pinned_after_it_was_selected_for_expiry_is_kept` | `crates/kernel/src/local_file.rs:751` | `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
-| `a_record_cited_after_selection_is_kept` | `crates/kernel/src/use_outcome.rs:757` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_page_another_sweep_committed_at_the_same_cutoff_replays` | `crates/kernel/src/use_outcome.rs:785` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_record_retired_after_selection_at_another_cutoff_is_skipped` | `crates/kernel/src/use_outcome.rs:848` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited` | `crates/kernel/src/use_outcome.rs:869` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `the_sweep_and_the_reads_use_their_indexes` | `crates/kernel/src/use_outcome.rs:886` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_record_cited_after_selection_is_kept` | `crates/kernel/src/use_outcome.rs:751` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_page_another_sweep_committed_at_the_same_cutoff_replays` | `crates/kernel/src/use_outcome.rs:779` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_record_retired_after_selection_at_another_cutoff_is_skipped` | `crates/kernel/src/use_outcome.rs:842` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited` | `crates/kernel/src/use_outcome.rs:863` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `the_sweep_and_the_reads_use_their_indexes` | `crates/kernel/src/use_outcome.rs:880` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
 | `both_latest_decision_formulations_choose_the_same_row` | `crates/kernel/tests/kernel_admission.rs:2252` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
 | `dispositions_and_sensitivity_only_reduce_visibility` | `crates/kernel/tests/kernel_admission.rs:2735` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
 | `every_non_active_disposition_has_the_contracted_surface_row` | `crates/kernel/tests/kernel_admission.rs:2890` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
@@ -48,9 +48,10 @@ Every location was read at the #1156 branch tip.
 | `the_cited_count_covers_the_rows_read_before_the_page_fills` | `crates/kernel/tests/kernel_use_outcome.rs:770` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
 | `a_session_delete_marks_each_live_record_once` | `crates/kernel/tests/kernel_use_outcome.rs:843` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `last_transform_at_advances_live_records_without_a_commit` | `crates/kernel/tests/kernel_use_outcome.rs:892` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it` | `crates/kernel/tests/kernel_use_outcome.rs:951` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `an_outside_file_lock_bounds_the_advance_at_begin` | `crates/kernel/tests/kernel_use_outcome.rs:988` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing` | `crates/kernel/tests/kernel_use_outcome.rs:1015` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it` | `crates/kernel/tests/kernel_use_outcome.rs:950` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `an_outside_file_lock_bounds_the_advance_at_begin` | `crates/kernel/tests/kernel_use_outcome.rs:987` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing` | `crates/kernel/tests/kernel_use_outcome.rs:1014` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `the_advance_takes_no_pooled_reader` | `crates/kernel/tests/kernel_use_outcome.rs:1046` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 
 ## Daemon
 

@@ -901,9 +901,9 @@ Required faults and enabling state: An expired record; an expired cited record;
 70 expired records; a citation inserted after selection.
 Confidence: high -
 [evidence](evidence/uo-p-sweep-retires-only-expired-uncited-rows.md).
-`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:502`); predicate
+`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:496`); predicate
 `crates/kernel/src/use_outcome.rs:169`; recheck `retire_due_use_outcome`
-(`crates/kernel/src/use_outcome.rs:616`); receipt
+(`crates/kernel/src/use_outcome.rs:610`); receipt
 `crates/kernel/src/local_file.rs:438`.
 Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
 (`crates/kernel/tests/kernel_use_outcome.rs:474`);
@@ -912,17 +912,17 @@ Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
 `an_expired_record_cited_by_a_live_report_is_retained`
 (`crates/kernel/tests/kernel_use_outcome.rs:604`);
 `a_record_cited_after_selection_is_kept`
-(`crates/kernel/src/use_outcome.rs:757`);
+(`crates/kernel/src/use_outcome.rs:751`);
 `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-(`crates/kernel/src/use_outcome.rs:785`);
+(`crates/kernel/src/use_outcome.rs:779`);
 `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-(`crates/kernel/src/use_outcome.rs:848`);
+(`crates/kernel/src/use_outcome.rs:842`);
 `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-(`crates/kernel/src/use_outcome.rs:869`);
+(`crates/kernel/src/use_outcome.rs:863`);
 `the_cited_count_covers_the_rows_read_before_the_page_fills`
 (`crates/kernel/tests/kernel_use_outcome.rs:770`);
 `the_sweep_and_the_reads_use_their_indexes`
-(`crates/kernel/src/use_outcome.rs:886`);
+(`crates/kernel/src/use_outcome.rs:880`);
 `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
 `a_cancelled_slice_stops_before_the_use_outcome_sweep`
@@ -1219,7 +1219,7 @@ response returns (`crates/daemon/src/lib.rs:10046`, `touch_use_outcomes`
 (`crates/daemon/src/lib.rs:9767`)), within what remains of the pass's Kernel
 wait (`crates/daemon/src/use_outcome_writer.rs:253`); the Kernel update moves
 only live records whose value is null or earlier, in one fenced transaction
-with no commit (`advance_use_outcome_last_transform`
+with no commit that holds only the writer (`advance_use_outcome_last_transform`
 (`crates/kernel/src/use_outcome.rs:468`)).
 Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:220`);
@@ -1234,11 +1234,13 @@ Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 `last_transform_at_advances_live_records_without_a_commit`
 (`crates/kernel/tests/kernel_use_outcome.rs:892`),
 `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-(`crates/kernel/tests/kernel_use_outcome.rs:951`),
+(`crates/kernel/tests/kernel_use_outcome.rs:950`),
 `an_outside_file_lock_bounds_the_advance_at_begin`
-(`crates/kernel/tests/kernel_use_outcome.rs:988`),
+(`crates/kernel/tests/kernel_use_outcome.rs:987`),
 `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-(`crates/kernel/tests/kernel_use_outcome.rs:1015`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1014`),
+`the_advance_takes_no_pooled_reader`
+(`crates/kernel/tests/kernel_use_outcome.rs:1046`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.

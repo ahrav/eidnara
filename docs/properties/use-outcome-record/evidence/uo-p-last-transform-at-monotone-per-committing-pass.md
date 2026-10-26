@@ -17,7 +17,8 @@ its parent is `dc07f442a`).
   runs on a scoped thread beside the response build, and the settle joins it
   before the response returns (`crates/daemon/src/lib.rs:10052`).
 - Update: `crates/kernel/src/use_outcome.rs:43` selects the live records with a
-  null or earlier value; a session with none takes no writer.
+  null or earlier value. A session with none takes no writer, because the
+  check above skips it; the update itself holds only the writer.
 - Outcomes: `crates/daemon/src/use_outcome_writer.rs:209` counts
   `transform_touched`, `transform_skipped_deadline`, or
   `transform_skipped_unavailable`.
@@ -37,11 +38,13 @@ its parent is `dc07f442a`).
   `last_transform_at_advances_live_records_without_a_commit`
   (`crates/kernel/tests/kernel_use_outcome.rs:892`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-  (`crates/kernel/tests/kernel_use_outcome.rs:951`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:950`),
   `an_outside_file_lock_bounds_the_advance_at_begin`
-  (`crates/kernel/tests/kernel_use_outcome.rs:988`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:987`),
   `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1015`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:1014`),
+  `the_advance_takes_no_pooled_reader`
+  (`crates/kernel/tests/kernel_use_outcome.rs:1046`). Status: unaudited.
 
 ## Failure scenario
 
