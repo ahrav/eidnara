@@ -24,7 +24,7 @@ Every kind once, asserting the stored row decodes to a condition written out lit
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/kernel/tests/kernel_anchor_write.rs:300`, `:372`, `:448`, `:673`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/kernel/tests/kernel_anchor_write.rs:311`, `:383`, `:459`, `:684`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

@@ -2,15 +2,15 @@
 
 ## Discovery trigger
 
-Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed obligation. Reachability witness for the N2 to N5 safety records. Owner: the U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135) to `partial` and the U4 ticket [#1136](https://github.com/ahrav/eidnara/issues/1136) to `active`.
+Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed reachability obligation for N2 to N5, activated with partial exercise by the U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135).
 
 ## Evidence trail
 
-No capture decision carries an anchor or a citation at the branch tip.
+The U3 tests commit an anchored and cited decision, and decisions for `source_capture_off`, `source_id_unjoinable`, `descriptor_not_found`, and `head_unavailable` (`crates/daemon/src/source_capture_tests.rs:3474`, `:3624`).
 
 ## Failure scenario
 
-A campaign that ends with a legal state never constructed, leaving the safety records vacuous.
+A campaign missing a legal state leaves the safety records that guard it vacuous.
 
 ## Timing windows and dependencies
 
@@ -18,13 +18,13 @@ None.
 
 ## What a test must construct
 
-A decision with an anchor and a citation, and one decision per miss reason.
+The five citation states and both anchor states; the `publish_budget_expired` state needs the U4 settlement record.
 
 ## Investigation log
 
-### Q: Does code for this obligation exist at the branch tip?
+### Q: Which state is missing?
 
-- Sources examined: the surfaces named in the trail, read at the branch that adds this part.
-- Findings: No. The record stays `proposed` until its owner lands the behavior and the check.
-- Missing evidence: the implementation.
-- Conclusion: unresolved, needs the U3 ticket [#1135](https://github.com/ahrav/eidnara/issues/1135) to `partial` and the U4 ticket [#1136](https://github.com/ahrav/eidnara/issues/1136) to `active`.
+- Sources examined: the U3 tests.
+- Findings: `publish_budget_expired`.
+- Missing evidence: the U4 settlement record.
+- Conclusion: unresolved, needs #1136.

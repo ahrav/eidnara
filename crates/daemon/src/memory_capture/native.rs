@@ -122,6 +122,7 @@ impl HandlerCore {
             binding,
             cancel: self.cancel.clone(),
             commit_gate: Arc::clone(&self.capture_commit_gate),
+            source_capture: Arc::clone(&self.source_capture),
         }
     }
 

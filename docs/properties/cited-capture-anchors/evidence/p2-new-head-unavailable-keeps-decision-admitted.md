@@ -81,7 +81,11 @@ and that both jobs publish (`crates/daemon/src/lib.rs:24619`).
 
 ### Q: Are the rationale reason and the no-anchor clause checked?
 
-- Sources examined: the publish closure at U2.
-- Findings: no rationale reason or anchor exists yet.
-- Missing evidence: the U3 rationale and anchor insert.
-- Conclusion: unresolved, needs #1135.
+- Sources examined: the publish closure and tests at the U3 branch.
+- Findings: a `HeadUnavailable` plan builds no anchor spec, every decision
+  records `anchor: "head_unavailable"` with `anchor_id` empty, and
+  `decisions_head_unavailable` counts each; `crates/daemon/src/source_capture_tests.rs:3624` checks a plain and
+  an unborn root, and `crates/daemon/src/lib.rs:24729` a plan without
+  `head`.
+- Missing evidence: none.
+- Conclusion: resolved with answer.

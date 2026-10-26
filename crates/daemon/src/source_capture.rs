@@ -111,7 +111,26 @@ counts! {
     DocumentsRefused => "documents_refused",
     ExpiryRetired => "expiry_retired",
     ExpiryRetained => "expiry_retained",
+    DecisionsCited => "decisions_cited",
+    DecisionsSourceCaptureOff => "decisions_source_capture_off",
+    DecisionsSourceIdUnjoinable => "decisions_source_id_unjoinable",
+    DecisionsPublishBudgetExpired => "decisions_publish_budget_expired",
+    DecisionsDescriptorNotFound => "decisions_descriptor_not_found",
+    DecisionsAnchored => "decisions_anchored",
+    DecisionsHeadUnavailable => "decisions_head_unavailable",
 }
+
+/// The memory-capture decision reasons: five citation reasons, then two
+/// anchor reasons.
+const DECISION_COUNTS: [Count; 7] = [
+    Count::DecisionsCited,
+    Count::DecisionsSourceCaptureOff,
+    Count::DecisionsSourceIdUnjoinable,
+    Count::DecisionsPublishBudgetExpired,
+    Count::DecisionsDescriptorNotFound,
+    Count::DecisionsAnchored,
+    Count::DecisionsHeadUnavailable,
+];
 
 struct Counters([AtomicU64; Count::ALL.len()]);
 
@@ -557,6 +576,23 @@ impl SourceCapture {
     pub(crate) fn record_expiry(&self, expiry: kernel::CaptureExpiry) {
         self.counters.add(Count::ExpiryRetired, expiry.retired);
         self.counters.add(Count::ExpiryRetained, expiry.retained);
+    }
+
+    /// Adds one committed memory-capture publish's decisions, one citation
+    /// reason and one anchor reason each, and logs each reason's count.
+    pub(crate) fn record_capture_decisions(&self, reasons: &[Count]) {
+        debug_assert!(
+            reasons
+                .iter()
+                .all(|reason| DECISION_COUNTS.contains(reason))
+        );
+        for reason in DECISION_COUNTS {
+            let count = reasons.iter().filter(|seen| **seen == reason).count();
+            if count > 0 {
+                self.counters.add(reason, count);
+                log("memory decisions", reason, count);
+            }
+        }
     }
 
     /// The observability set: every [`Count`] by name, the active slot reported as draining once shutdown began, and the age of the oldest pending unit.

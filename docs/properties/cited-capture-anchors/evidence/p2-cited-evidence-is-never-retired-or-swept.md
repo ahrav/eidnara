@@ -24,7 +24,7 @@ A `harness_capture` row past `retain_until` cited by a live decision event; a pi
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/kernel/tests/kernel_source_descriptors.rs:1895`; `crates/daemon/tests/harness_sources.rs:3482`; `crates/kernel/src/local_file.rs:791`, `:889`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/kernel/tests/kernel_source_descriptors.rs:1895`; `crates/daemon/tests/harness_sources.rs:3500`; `crates/kernel/src/local_file.rs:791`, `:889`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
@@ -32,6 +32,6 @@ A `harness_capture` row past `retain_until` cited by a live decision event; a pi
 ### Q: Did the expiry test move?
 
 - Sources examined: `crates/daemon/tests/harness_sources.rs` at `a0e3f2993` and at the branch tip.
-- Findings: `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` moved from line 3331 to 3482.
+- Findings: `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` moved from line 3331 at `a0e3f2993` to 3482 at `a734661b6`, and sits at line 3500 at HEAD.
 - Missing evidence: none.
 - Conclusion: resolved with answer: the record cites the current line.

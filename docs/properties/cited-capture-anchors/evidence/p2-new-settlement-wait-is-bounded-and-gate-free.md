@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-`CAPTURE_BUDGET` (`crates/daemon/src/source_capture.rs:35`) bounds the source job from its slot acquisition in `into_job` (`:596`). U4 adds a per-session settlement record and a bounded wait in the submit task before the blocking hop that takes the gate.
+`CAPTURE_BUDGET` (`crates/daemon/src/source_capture.rs:35`) bounds the source job from its slot acquisition in `into_job` (`:632`). U4 adds a per-session settlement record and a bounded wait in the submit task before the blocking hop that takes the gate.
 
 ## Failure scenario
 

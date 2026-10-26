@@ -20,15 +20,20 @@ part.
 | Live parents | `crates/kernel/src/slice/write.rs:1095` (`require_parents`) | decision parents are live at insert | unaudited |
 | Sensitivity fold | `crates/kernel/src/slice/write.rs:980` (`fold_cited_evidence_class`) | a citing row is no less restrictive than its evidence | unaudited |
 | Cited-evidence predicate | `crates/kernel/src/slice/write.rs:42` (`EVIDENCE_CITED_SQL`), `:585` (`retire_evidence`); `crates/kernel/src/local_file.rs:245` (`expire_harness_captures`) | cited evidence is never retired or swept | unaudited |
-| Capture receipt key and digest | `crates/daemon/src/memory_capture.rs:1162` (`publish_captured_memories`) | replay by job key and frozen-plan digest | unaudited |
-| Quote and source validation | `crates/daemon/src/memory_capture.rs:208` (`parse_capture_batch`), `:270` (`validate_capture_memories`) | quotes are substrings of their own batch source | unaudited |
+| Capture receipt key and digest | `crates/daemon/src/memory_capture.rs:1176` (`publish_captured_memories`) | replay by job key and frozen-plan digest | unaudited |
+| Quote and source validation | `crates/daemon/src/memory_capture.rs:211` (`parse_capture_batch`), `:273` (`validate_capture_memories`) | quotes are substrings of their own batch source | unaudited |
 | Job identity | `crates/memory-store/src/memory_capture.rs:112` (`job_id`) | job id derives from the source tuple and redacted text | unaudited |
-| Hashed fragment id | `crates/daemon/src/memory_capture.rs:315` (`native_capture_fragments`) | out-of-grammar or oversized ids become `{sha256}:{offset}` | unaudited |
-| Capture commit gate | `crates/daemon/src/memory_capture.rs:983`; `crates/daemon/src/lib.rs:6909` | publish, checkpoint, source publish, and delete serialize | unaudited |
-| Message unit identity | `crates/daemon/src/harness_sources.rs:189` (`SessionIdentity::message_unit`) | one unit per text block | unaudited |
-| Evidence id from receipt key | `crates/daemon/src/harness_sources.rs:992` (`evidence_request`) | `srcev:` plus the unit key | unaudited |
+| Hashed fragment id | `crates/daemon/src/memory_capture.rs:318` (`native_capture_fragments`) | out-of-grammar or oversized ids become `{sha256}:{offset}` | unaudited |
+| Capture commit gate | `crates/daemon/src/memory_capture.rs:987`; `crates/daemon/src/lib.rs:6909` | publish, checkpoint, source publish, and delete serialize | unaudited |
+| Message unit identity | `crates/daemon/src/harness_sources.rs:207` (`SessionIdentity::message_unit`) | one unit per text block | unaudited |
+| Evidence id from receipt key | `crates/daemon/src/harness_sources.rs:1013` (`evidence_request`) | `srcev:` plus the unit key | unaudited |
 | Isolated bounded open | `crates/daemon/src/git_sources.rs:131` (`isolated_options`), `:138` (`open`), `:148` (`open_with_slots`) | isolation, replacement refs ignored, allocation limit; `open_with_slots` sizes the pack index slot map and, for a given size, refuses the repositories the default sizing refuses | unaudited |
-| HEAD observation | `crates/daemon/src/memory_capture/head.rs:32` (`observe_head`), called once per submit at `crates/daemon/src/memory_capture/native.rs:562` | HEAD resolved once through the ref store, following a branch that is itself symbolic to the end of its chain (`head_id`, `crates/daemon/src/memory_capture/head.rs:62`); the header of that one object id read from the loose object or pack files (`crates/daemon/src/git_sources.rs:205`, `file_object_kind`) or the object store (`:329`, `store_object_kind`); unborn, unreadable, unsupported, non-commit, absent-object, and non-repository roots, and a HEAD held by a corrupt pack (an index paired with another pack's data, or a delta chain that revisits an entry), are `HeadUnavailable` | unaudited |
+| HEAD observation | `crates/daemon/src/memory_capture/head.rs:32` (`observe_head`), called once per submit at `crates/daemon/src/memory_capture/native.rs:563` | HEAD resolved once through the ref store, following a branch that is itself symbolic to the end of its chain (`head_id`, `crates/daemon/src/memory_capture/head.rs:62`); the header of that one object id read from the loose object or pack files (`crates/daemon/src/git_sources.rs:205`, `file_object_kind`) or the object store (`:329`, `store_object_kind`); unborn, unreadable, unsupported, non-commit, absent-object, and non-repository roots, and a HEAD held by a corrupt pack (an index paired with another pack's data, or a delta chain that revisits an entry), are `HeadUnavailable` | unaudited |
+| Capture anchor | `crates/daemon/src/memory_capture/cite.rs:382` (`anchor_spec`), inserted at `crates/daemon/src/memory_capture.rs:1235` | one `reachable_from` anchor per job, ids derived from the job id and the frozen oid, before the job's first decision | unaudited |
+| Citation lookup and reasons | `crates/daemon/src/memory_capture/cite.rs:282` (`Citation::lookup`), `:118` (`is_hashed_source_id`) | reads only the job's own lineages inside the envelope; one closed reason per decision | unaudited |
+| Block location and target | `crates/daemon/src/memory_capture/cite.rs:180` (`locate`), `:212` (`target`) | digest-located blocks; `block`, `span`, or `first` | unaudited |
+| Citation events | `crates/daemon/src/memory_capture/cite.rs:358` (`append_citations`) | one event per cited block, evidence live, decision row uncited | unaudited |
+| Capture-decision counters | `crates/daemon/src/source_capture.rs:583` (`record_capture_decisions`); `crates/host-runtime/src/control.rs:709` (`SOURCE_CAPTURE_COUNTERS`) | counts added after a non-replayed receipt; names forwarded by the host | unaudited |
 | Anchor write validation | `crates/kernel/src/anchor_write.rs:296` (`validate_anchor`), `:287` (`validate_anchor_row`) | written anchor rows pass the engine's bound check and decoder and round-trip | unaudited |
 | Anchor write order | `crates/kernel/src/anchor_write.rs:409` (`insert_anchor_inner`) | registry row, anchor row, and change record in one envelope | unaudited |
 
@@ -50,23 +55,23 @@ part.
 | `crates/kernel/tests/kernel_applicability_engine.rs:148`, `:206`, `:518`, `:1029`, `:1064`, `:2621`, `:2659`, `:2881`, `:3080`, `:3434`, `:3676`, `:3943`, `:4024`, `:4095` | `p2-anchor-verdict-cache-key-covers-row-head-and-boundary` | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:196` `slice_payloads_redact_before_storage_and_missing_parents_are_typed` | `p2-decision-parents-must-be-live-at-insert` | unaudited |
 | `crates/kernel/tests/kernel_envelope.rs:669` `a_constraint_violation_is_a_conflict_rather_than_an_io_failure` | same | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:393` `a_decision_inserted_before_its_anchor_is_not_found_and_the_commit_rolls_back` | same (anchor clause); `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:404` `a_decision_inserted_before_its_anchor_is_not_found_and_the_commit_rolls_back` | same (anchor clause); `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:1453` `a_decision_citing_evidence_is_classified_no_lower_than_that_evidence` | `p2-citing-decision-carries-at-least-its-evidence-class` | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:1526` `a_decision_serves_no_lower_than_its_cited_evidence_reads_today` | same | unaudited |
 | `crates/kernel/tests/kernel_review_acceptance.rs:988` `an_accepted_decision_serves_no_lower_than_the_support_it_cites_reads_today` | same | unaudited |
 | `crates/kernel/tests/kernel_source_descriptors.rs:1895` `retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence` | `p2-cited-evidence-is-never-retired-or-swept` | unaudited |
-| `crates/daemon/tests/harness_sources.rs:3482` `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` | same | unaudited |
+| `crates/daemon/tests/harness_sources.rs:3500` `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` | same | unaudited |
 | `crates/kernel/src/local_file.rs:791` `a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept` | same | unaudited |
 | `crates/kernel/src/local_file.rs:889` `a_refused_harness_capture_rolls_back_alone_inside_its_page_commit` | same | unaudited |
-| `crates/daemon/src/memory_capture.rs:1674` `correction_supersedes_and_replay_or_duplicate_creates_no_extra_memory` | `p2-capture-commit-replays-by-job-key-and-frozen-digest`; `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
+| `crates/daemon/src/memory_capture.rs:1969` `correction_supersedes_and_replay_or_duplicate_creates_no_extra_memory` | `p2-capture-commit-replays-by-job-key-and-frozen-digest`; `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
 | `crates/kernel/tests/kernel_envelope.rs:160` `receipt_replay_is_effect_free_and_digest_conflict_is_typed` | `p2-capture-commit-replays-by-job-key-and-frozen-digest` | unaudited |
 | `crates/daemon/src/lib.rs:24489` `automatic_capture_commits_once_and_is_explicitly_retrievable` | same; identity record | unaudited |
-| `crates/daemon/src/memory_capture.rs:1285`, `:1318`, `:1350`, `:1391`, `:1398` | `p2-capture-quote-is-an-exact-substring-of-its-own-batch-source` | unaudited |
-| `crates/daemon/src/lib.rs:24880` `automatic_capture_rejection_stays_pending_not_successful_empty_memory` | same | unaudited |
+| `crates/daemon/src/memory_capture.rs:1367`, `:1400`, `:1432`, `:1473`, `:1480` | `p2-capture-quote-is-an-exact-substring-of-its-own-batch-source` | unaudited |
+| `crates/daemon/src/lib.rs:24884` `automatic_capture_rejection_stays_pending_not_successful_empty_memory` | same | unaudited |
 | `crates/memory-store/src/memory_capture.rs:755` `job_identity_derives_from_redacted_text_so_a_stored_digest_cannot_confirm_a_secret` | `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
-| `crates/daemon/src/memory_capture.rs:1417`, `:1466`, `:1566`, `:1588`; `crates/daemon/src/lib.rs:25796` | same | unaudited |
-| `crates/daemon/src/lib.rs:25028`, `:25366`, `:25571`, `:26119`, `:24777`; `crates/daemon/src/source_capture_tests.rs:1036` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |
-| `crates/daemon/src/source_capture_tests.rs:866`, `:1258`; `crates/kernel/tests/kernel_source_descriptors.rs:494`, `:2484`, `:2593`, `:2717`, `:2795`, `:2871`; `crates/daemon/tests/harness_sources.rs:1706` | `p2-messages-descriptor-identity-is-per-block-and-evidence-id-is-the-receipt-key` | unaudited |
+| `crates/daemon/src/memory_capture.rs:1499`, `:1548`, `:1853`, `:1875`; `crates/daemon/src/lib.rs:25800` | same | unaudited |
+| `crates/daemon/src/lib.rs:25032`, `:25370`, `:25575`, `:26123`, `:24781`; `crates/daemon/src/source_capture_tests.rs:1036` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |
+| `crates/daemon/src/source_capture_tests.rs:866`, `:1258`; `crates/kernel/tests/kernel_source_descriptors.rs:494`, `:2484`, `:2593`, `:2717`, `:2795`, `:2871`; `crates/daemon/tests/harness_sources.rs:1724` | `p2-messages-descriptor-identity-is-per-block-and-evidence-id-is-the-receipt-key` | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:180`, `:428`, `:464`, `:1072`, `:1233` | `p2-deferred-source-units-publish-on-a-later-pass` | unaudited |
 | `crates/daemon/tests/git_sources.rs:549` `refused_selections_publish_nothing_and_encodings_are_dispositions` | `p2-git-open-is-isolated-and-allocation-bounded` | unaudited |
 | `crates/daemon/tests/git_sources.rs:827` `delta_packed_commit_against_an_oversized_base_is_refused` | same | unaudited |
@@ -78,16 +83,29 @@ part.
 | `crates/daemon/src/memory_capture/head.rs:556` `a_hinted_pack_index_is_read_before_the_directory_scan`; `:568` `a_pack_index_of_another_repository_never_answers`; `:658` `the_newest_pack_index_answers_and_a_deleted_hint_falls_back_to_the_scan` | `p2-new-head-unavailable-keeps-decision-admitted` (the pack index hint orders reads only) | unaudited |
 | `crates/daemon/src/memory_capture/head.rs:595` `a_delta_chain_that_revisits_an_entry_is_unavailable_without_a_store_read`; `:609` `an_index_paired_with_another_pack_is_unavailable_without_a_store_read`; `:631` `slot_exhaustion_while_resolving_a_delta_base_reads_as_exhausted` | `p2-new-head-unavailable-keeps-decision-admitted` (a pack whose delta chain revisits an entry, an index paired with another pack's data); `p2-git-open-is-isolated-and-allocation-bounded` (slot exhaustion reported from inside a delta-base lookup) | unaudited |
 | `crates/daemon/src/memory_capture/head.rs:690` `a_head_commit_in_an_alternate_freezes_when_the_store_holds_more_indices_than_its_first_slots` | `p2-git-open-is-isolated-and-allocation-bounded`; `p2-new-head-observed-once-and-frozen` (slot retry, alternates) | unaudited |
-| `crates/daemon/src/memory_capture/head.rs:716` `frozen_heads_serialize_as_tagged_values_and_round_trip`; `crates/daemon/src/memory_capture.rs:1654` `a_plan_frozen_without_a_head_reads_as_head_unavailable` | same (C13 compatibility) | unaudited |
+| `crates/daemon/src/memory_capture/head.rs:716` `frozen_heads_serialize_as_tagged_values_and_round_trip`; `crates/daemon/src/memory_capture.rs:1949` `a_plan_frozen_without_a_head_reads_as_head_unavailable` | same (C13 compatibility) | unaudited |
 | `crates/daemon/src/lib.rs:24619` `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it` | `p2-new-head-observed-once-and-frozen`; `p2-new-head-unavailable-keeps-decision-admitted` | unaudited |
 | `crates/daemon/src/lib.rs:24729` `a_plan_frozen_without_a_head_publishes_as_before` | `p2-new-head-observed-once-and-frozen` (C13: a plan without `head` publishes) | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:300` `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference` | `p2-new-anchor-row-decodes-on-write`; `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:372` `git_anchors_with_an_empty_capture_list_store_a_null_payload` | `p2-new-anchor-row-decodes-on-write` | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:448` `invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause` | same | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:673` `a_raw_row_with_an_unowned_column_is_conflicting_columns` | same | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:423` `a_decision_failure_after_the_anchor_rolls_back_both` | `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:700` `a_missing_domain_is_not_found` | same | unaudited |
-| `crates/kernel/tests/kernel_anchor_write.rs:721` `a_duplicate_anchor_id_is_a_conflict_within_and_across_commits` | same; Kernel half of `p2-new-capture-anchor-identity-is-deterministic` | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:797` `a_written_reachable_from_anchor_holds_through_descendants_and_not_after_a_rewrite` | `p2-reachable-from-holds-on-ancestor-of-head` (seam 2) | unaudited |
+| `crates/daemon/src/source_capture_tests.rs:3474` `captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_head` | `p2-new-citation-is-alias-only`; `p2-new-citation-block-target-rule`; `p2-new-anchor-and-citation-add-no-authority`; `p2-new-capture-anchor-identity-is-deterministic`; `p2-new-miss-counters-track-rationale`; `p2-new-cited-decision-pair-observed` | unaudited |
+| `crates/daemon/src/source_capture_tests.rs:3624` `misses_carry_one_closed_reason_each_and_the_counters_follow_them` | `p2-new-miss-reason-matches-outcome`; `p2-new-head-unavailable-keeps-decision-admitted`; `p2-new-miss-counters-track-rationale` | unaudited |
+| `crates/daemon/src/source_capture_tests.rs:3715` `an_invented_source_id_is_refused_before_any_citation_lookup` | `p2-new-citation-is-alias-only` | unaudited |
+| `crates/daemon/src/source_capture_tests.rs:3761` `cited_capture_evidence_survives_expiry_and_refuses_retirement` | `p2-new-citation-folds-sensitivity-and-pins-evidence`; `p2-cited-evidence-is-never-retired-or-swept` | unaudited |
+| `crates/daemon/src/source_capture_tests.rs:3800` `a_replayed_publish_adds_no_rows_and_no_counts` | `p2-new-capture-anchor-identity-is-deterministic`; `p2-new-miss-counters-track-rationale` | unaudited |
+| `crates/daemon/src/memory_capture.rs:1700` `one_job_and_plan_always_write_the_same_anchor_and_decision_rows` | `p2-new-capture-anchor-identity-is-deterministic` | unaudited |
+| `crates/daemon/src/memory_capture.rs:1738` `a_retry_after_a_rolled_back_publish_writes_one_anchor_and_the_same_rows` | `p2-new-capture-anchor-identity-is-deterministic` (rolled-back commit, then retry) | unaudited |
+| `crates/daemon/src/memory_capture/cite.rs:451`, `:481`, `:508`, `:864`, `:878` (locate, target, hashed shape, located-at-own-bytes property, quote-join property) | `p2-new-citation-block-target-rule`; `p2-new-miss-reason-matches-outcome` | unaudited |
+| `crates/daemon/src/memory_capture/cite.rs:462`, `:842` (location by byte length against a SHA-256 finalized at every `\n`: empty blocks, a block past the text, a malformed digest, random joins and edits) | `p2-new-citation-block-target-rule` | unaudited |
+| `crates/daemon/src/memory_capture/cite.rs:774` `stopping_at_the_walk_cites_what_reading_every_index_cites`; `:663` `a_chunked_lookup_cites_what_reading_every_index_one_by_one_cites` | `p2-new-citation-is-alias-only`; `p2-new-citation-block-target-rule` (reading stops at the walk; chunk boundaries at indexes 4, 16, and 64 against one-by-one reads on a Kernel) | unaudited |
+| `crates/kernel/tests/kernel_source_descriptors.rs:2965` `a_writer_reads_the_live_revision_of_one_lineage`; `crates/kernel/src/source_identity.rs:1041` `the_occurrence_id_agrees_with_the_full_encoding` | `p2-new-citation-is-alias-only` (the batch read returns the single read's row or error per lineage; the varying-last-field encoder returns the full encoder's lineage ids) | unaudited |
+| `crates/host-runtime/src/control.rs:1960` `the_wire_document_names_exactly_the_forwarded_fields` | `p2-new-miss-counters-track-rationale` (wire names) | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:311` `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference` | `p2-new-anchor-row-decodes-on-write`; `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:383` `git_anchors_with_an_empty_capture_list_store_a_null_payload` | `p2-new-anchor-row-decodes-on-write` | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:459` `invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause` | same | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:684` `a_raw_row_with_an_unowned_column_is_conflicting_columns` | same | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:434` `a_decision_failure_after_the_anchor_rolls_back_both` | `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:711` `a_missing_domain_is_not_found` | same | unaudited |
+| `crates/kernel/tests/kernel_anchor_write.rs:732` `a_duplicate_anchor_id_is_a_conflict_within_and_across_commits` | same; Kernel half of `p2-new-capture-anchor-identity-is-deterministic` | unaudited |
 | `crates/daemon/tests/claim_sources.rs:1508` `anchor_commits_pass_through_the_claim_materializer` | `p2-new-anchor-and-registry-share-one-envelope` (consumer side) | unaudited |
 
 ## Empty categories
@@ -95,14 +113,14 @@ part.
 - Property-based or model-checked tests over anchor rows: none found.
 - Production assertions on the anchor writer beyond typed refusals: none
   found; the writer returns `InvalidInput`, `NotFound`, or `Conflict`.
-- Checks for the 10 proposed records: none found; their code does not exist.
+- Checks for the 2 proposed records: none found; their code does not exist.
 
 ## Suspiciously quiet areas
 
 - No production path reads `anchors` rows into applicability candidates, so
   every S1 check runs on fixtures (specification K3).
-- The capture prompt rule at `crates/daemon/src/memory_capture.rs:130` is the
+- The capture prompt rule at `crates/daemon/src/memory_capture.rs:133` is the
   only statement of the quote contract the model sees; no test pins the
   prompt text to the validator.
-- No test joins a capture fragment id to a `messages` descriptor identity; the
-  hashed-id case (specification K6, OQ2-12) has no witness.
+- No test publishes one message id in two sessions to show the citation
+  lookup keeps them apart; the lineage encoding includes the session id.
