@@ -184,7 +184,7 @@ export interface MemoryMarkInput {
     cause?: string;
     /** The reporter's source kind: `user` for the command by default, `assistant` for the model tool. */
     sourceKind?: "user" | "assistant";
-    /** Separator-free identity of the human command surface, such as `user:opencode`. */
+    /** Separator-free identity of the calling surface: `user:opencode` or `user:pi` for the command, the tool actor for a model dispute. */
     actor: string;
     args: MemoryMarkArgs;
     /**

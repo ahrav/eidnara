@@ -578,7 +578,14 @@ export async function executeEidnaraMemory(input: ExecuteEidnaraMemoryArgs): Pro
     };
 
     if (action === "dispute") {
-        return executeDispute({ client, args, identity, actor });
+        return executeDispute({
+            client,
+            args,
+            operationId,
+            toolCallId: identity.toolCallId,
+            actor,
+            ...(signal ? { signal } : {}),
+        });
     }
     if (action === "get") {
         const wanted = uniqueIds(args.objectIds);

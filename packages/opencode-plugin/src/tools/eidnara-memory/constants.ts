@@ -50,7 +50,7 @@ Memories created here are available through explicit search as labeled model inf
 
 /** Appended to the description when the allowlist admits `dispute`. */
 const EIDNARA_MEMORY_DISPUTE_DESCRIPTION = `
-dispute: objectId + event (mark_disputed or contradict) + evidenceId, or path + gitObjectId, or both. It marks a served memory disputed or contradicted with evidence the daemon checks: a live evidence id of this project, or a relative repository path at a 40- or 64-character lowercase hex git object id. It can only lower the memory's standing. The result names the applied disposition and whether served visibility changed.`;
+dispute: objectId + event (mark_disputed or contradict) + evidenceId, or path + gitObjectId, or both. It marks a served memory disputed or contradicted and cites evidence: a live evidence id of this project, which the daemon checks is live, or a relative repository path at a 40- or 64-character lowercase hex git object id, whose form the daemon checks but whose existence it does not. It can only lower the memory's standing; a dispute on an approval also demotes the memories that rest on it. The result names the applied disposition and whether served visibility changed.`;
 
 /** `a, b, or c`: how the schema's `action` field names the admitted actions. */
 export function actionList(actions: readonly EidnaraMemoryAction[]): string {

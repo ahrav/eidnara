@@ -1424,6 +1424,25 @@ describe("eidnara_memory dispute", () => {
         });
     });
 
+    test("an aborted tool call commits nothing", async () => {
+        const h = disputeHarness();
+        const controller = new AbortController();
+        controller.abort();
+        const text = await h.definition.execute(
+            byId as never,
+            {
+                sessionID: SESSION,
+                directory: ROOT,
+                callID: "call-abort",
+                agent: "primary",
+                abort: controller.signal,
+            } as never,
+        );
+        expect(text).toStartWith("Error: dispute refused at commit");
+        expect(h.kernel.receipts.size).toBe(0);
+        expect(commits(h.transport).filter((body) => body.preview !== true)).toHaveLength(0);
+    });
+
     test("a retry with the same tool-call id replays; a new tool-call id is a second write", async () => {
         const h = disputeHarness();
         const first = JSON.parse(await h.execute(byId, "call-a"));
@@ -1479,9 +1498,7 @@ describe("eidnara_memory dispute", () => {
             },
             "call-refused",
         );
-        expect(refused).toBe(
-            "Error: dispute refused at preview: " + refused.split(": ").slice(2).join(": "),
-        );
+        expect(refused).toStartWith("Error: dispute refused at preview: ");
         expect(refused).toContain("(invalid:invalid_input)");
     });
 });

@@ -8,12 +8,7 @@
  * for confirmation.
  */
 
-import {
-    type KernelClient,
-    OPERATION_KEY_SEPARATOR,
-    renderToolStateText,
-    stateKey,
-} from "../../shared/kernel-client";
+import { type KernelClient, renderToolStateText, stateKey } from "../../shared/kernel-client";
 import { runMemoryMarkCommand } from "../../shared/memory-mark-command";
 import { EIDNARA_MEMORY_DISPUTE_EVENTS, type EidnaraMemoryArgs } from "./types";
 
@@ -23,8 +18,12 @@ const DISPUTE_USAGE =
 export interface ExecuteDisputeArgs {
     client: KernelClient;
     args: EidnaraMemoryArgs;
-    identity: { sessionId: string; toolCallId: string };
+    /** The `(session, tool-call id)` key every tool write commits under. */
+    operationId: string;
+    toolCallId: string;
     actor: string;
+    /** The host tool call's abort signal; once aborted, nothing is committed. */
+    signal?: AbortSignal;
 }
 
 function isDisputeEvent(value: unknown): value is (typeof EIDNARA_MEMORY_DISPUTE_EVENTS)[number] {
@@ -32,7 +31,7 @@ function isDisputeEvent(value: unknown): value is (typeof EIDNARA_MEMORY_DISPUTE
 }
 
 export async function executeDispute(input: ExecuteDisputeArgs): Promise<string> {
-    const { args, identity } = input;
+    const { args } = input;
     const objectId = args.objectId?.trim();
     const evidenceId = args.evidenceId ?? undefined;
     const path = args.path ?? undefined;
@@ -42,20 +41,23 @@ export async function executeDispute(input: ExecuteDisputeArgs): Promise<string>
         return `Error: dispute event '${String(args.event)}' is not supported; use mark_disputed or contradict.`;
     }
     if ((path === undefined) !== (gitObjectId === undefined)) return DISPUTE_USAGE;
-    if (evidenceId === undefined && path === undefined) return DISPUTE_USAGE;
+    const evidenceRef =
+        path !== undefined && gitObjectId !== undefined
+            ? { path, git_object_id: gitObjectId }
+            : undefined;
+    if (evidenceId === undefined && evidenceRef === undefined) return DISPUTE_USAGE;
     const outcome = await runMemoryMarkCommand({
         client: input.client,
-        operationId: `${identity.sessionId}${OPERATION_KEY_SEPARATOR}${identity.toolCallId}`,
+        operationId: input.operationId,
         actor: input.actor,
-        cause: `eidnara_memory dispute ${identity.toolCallId}`,
+        cause: `eidnara_memory dispute ${input.toolCallId}`,
         sourceKind: "assistant",
+        isCancelled: () => input.signal?.aborted === true,
         args: {
             event: args.event,
             objectId,
             ...(evidenceId === undefined ? {} : { evidenceId }),
-            ...(path === undefined || gitObjectId === undefined
-                ? {}
-                : { evidenceRef: { path, git_object_id: gitObjectId } }),
+            ...(evidenceRef === undefined ? {} : { evidenceRef }),
             confirmed: true,
         },
     });

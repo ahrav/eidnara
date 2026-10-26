@@ -56,20 +56,6 @@ const AntiMemorySchema = Type.Object(
  */
 export const PI_EIDNARA_MEMORY_ACTOR = "agent:pi";
 
-/** The `action` field lists exactly the actions the tool admits. */
-function paramsSchema(actions: readonly EidnaraMemoryAction[]) {
-    return Type.Object(
-        {
-            action: Type.Optional(
-                Type.String({ enum: [...actions], description: actionList(actions) }),
-            ),
-            ...SHARED_PARAMS,
-            ...(actions.includes("dispute") ? DISPUTE_PARAMS : {}),
-        },
-        { additionalProperties: true },
-    );
-}
-
 const SHARED_PARAMS = {
     content: Type.Optional(Type.String({ description: "Memory content for create/revise/merge" })),
     category: Type.Optional(
@@ -91,6 +77,7 @@ const SHARED_PARAMS = {
 
 /** The fields only `dispute` reads; exposed exactly when the allowlist admits it. */
 const DISPUTE_PARAMS = {
+    objectId: Type.Optional(Type.String({ description: "Object id for revise/archive/dispute" })),
     event: Type.Optional(
         Type.String({
             enum: [...EIDNARA_MEMORY_DISPUTE_EVENTS],
@@ -105,6 +92,20 @@ const DISPUTE_PARAMS = {
         Type.String({ description: "40- or 64-character lowercase hex git object id for path" }),
     ),
 };
+
+/** The `action` field lists exactly the actions the tool admits. */
+function paramsSchema(actions: readonly EidnaraMemoryAction[]) {
+    return Type.Object(
+        {
+            action: Type.Optional(
+                Type.String({ enum: [...actions], description: actionList(actions) }),
+            ),
+            ...SHARED_PARAMS,
+            ...(actions.includes("dispute") ? DISPUTE_PARAMS : {}),
+        },
+        { additionalProperties: true },
+    );
+}
 
 type ParamsSchema = ReturnType<typeof paramsSchema>;
 type EidnaraMemoryParams = Static<ParamsSchema>;

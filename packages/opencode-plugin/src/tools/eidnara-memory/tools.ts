@@ -80,6 +80,7 @@ const eidnaraMemoryArgsShape = {
 
 /** The fields only `dispute` reads; exposed exactly when the allowlist admits it. */
 const disputeArgsShape = {
+    objectId: tool.schema.string().optional().describe("Object id for revise/archive/dispute"),
     event: tool.schema
         .enum([...EIDNARA_MEMORY_DISPUTE_EVENTS])
         .optional()

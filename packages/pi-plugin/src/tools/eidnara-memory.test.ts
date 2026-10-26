@@ -444,7 +444,7 @@ describe("Pi eidnara_memory dispute", () => {
             source_kind: string;
             operations: unknown[];
         };
-        expect(commit.intent.actor).toBe(PI_EIDNARA_MEMORY_ACTOR);
+        expect(commit.intent.actor).toBe("agent:pi");
         expect(commit.intent.cause).toBe("eidnara_memory dispute call-dispute");
         expect(commit.source_kind).toBe("assistant");
         expect(commit.operations).toEqual([
@@ -453,6 +453,28 @@ describe("Pi eidnara_memory dispute", () => {
                 object_id: "mem_rule",
                 event: "contradict",
                 evidence_ref: { path: "src/a.rs", git_object_id: disputeArgs.gitObjectId },
+            },
+        ]);
+    });
+
+    it("needs a stable tool-call identity and sends an evidence id as evidence_id", async () => {
+        const h = seeded(EIDNARA_MEMORY_ACTIONS);
+        const byId = {
+            action: "dispute",
+            objectId: "mem_rule",
+            event: "mark_disputed",
+            evidenceId: "ev-1",
+        };
+        expect(textOf(await h.execute(byId, ""))).toContain("requires a stable tool-call identity");
+        expect(h.transport.calls).toHaveLength(0);
+        await h.execute(byId, "call-id");
+        const commit = h.transport.calls.at(-1)?.body as { operations: unknown[] };
+        expect(commit.operations).toEqual([
+            {
+                op: "disposition",
+                object_id: "mem_rule",
+                event: "mark_disputed",
+                evidence_id: "ev-1",
             },
         ]);
     });

@@ -104,11 +104,11 @@ usage` (`memory-mark-command.test.ts:126`) covers the TypeScript side.
 counts unchanged; it asserts the error variant, not the refusal name. Tool
 arm (#1161): `refuses missing evidence and unsupported events before
 sending; renders denials and refusals`
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1447`)
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1466`)
 calls `dispute` with neither evidence input, with `path` and no
 `gitObjectId`, and with no `objectId`, and asserts the usage error with no
 daemon call; the Pi test `refuses a dispute without evidence before
-sending anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:460`)
+sending anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:482`)
 asserts the same for Pi. A route request from the tool with neither field
 is the raw-body case the route test above already refuses
 `invalid_input`, since the tool sends the same `disposition` body.
@@ -160,6 +160,16 @@ Open questions:
   `crates/daemon/src`, `crates/kernel/src`, and `packages/*/src`). Whether
   the Kernel should enforce the requirement itself stays open. (needs
   human input)
+- The model tool arm (#1161) bounds a model-filed dispute by evidence
+  form and, for an `evidence_id`, liveness and visibility. A `path` with
+  `gitObjectId` is checked for form only, so a model can cite a reference
+  it invented. The tool also admits `contradict`, which moves the subject
+  to `contradicted` (audit-only serving), past the `disputed` blast radius
+  spec N3 records, and a dispute on an approval demotes its dependents.
+  Nothing caps disputes per session beyond the per-request operation cap;
+  the allowlist, which omits `dispute` by default, is the rollout lever.
+  Whether to limit the tool to `mark_disputed` or add a per-session cap
+  before enabling it is an owner decision. (needs human input)
 
 ### cited-evidence-live-at-dispute-commit
 
