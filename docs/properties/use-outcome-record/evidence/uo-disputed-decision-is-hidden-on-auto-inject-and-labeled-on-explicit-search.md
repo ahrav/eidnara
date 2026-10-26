@@ -10,8 +10,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `bd1216847`).
+References are verified at the #1155 branch tip (the commit that adds this file;
+its parent is `d5ebb3598`).
 
 - Disposition mapping: `crates/kernel/src/admission.rs:4161`.
 - Row and surface: `visibility_row` (`crates/kernel/src/admission.rs:4248`),

@@ -1,10 +1,10 @@
 # Existing checks: use-outcome record
 
 Status is per METHOD: `unaudited` means the check exists and runs in the
-#1154 PR's gate run but has had no independent adequacy review. Adequacy
+#1155 PR's gate run but has had no independent adequacy review. Adequacy
 belongs to `/testing:invariant-test-review`; production guard adequacy
 belongs to `/low-level-systems:defensive-assertions-and-invariant-guards`.
-Every location was read at the #1154 branch tip.
+Every location was read at the #1155 branch tip.
 
 ## Kernel
 
@@ -35,15 +35,11 @@ Every location was read at the #1154 branch tip.
 | `an_admission_citation_names_a_recorded_use_outcome_and_never_changes` | `crates/kernel/tests/kernel_schema.rs:2376` | `uo-p-served-set-and-identity-never-rewritten` | unaudited |
 | `kernel_schema_digest_is_pinned_to_the_frozen_v1_shape` | `crates/kernel/tests/kernel_schema.rs:599` | `uo-kernel-opens-only-at-the-compiled-baseline-identity`, `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
 | `retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence` | `crates/kernel/tests/kernel_source_descriptors.rs:1895` | `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
-| `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve` | `crates/kernel/tests/kernel_use_outcome.rs:163` | `uo-p-no-row-for-withheld-composition` | unaudited |
-| `duplicate_and_malformed_serves_are_refused_without_rows` | `crates/kernel/tests/kernel_use_outcome.rs:214` | `uo-p-served-set-once-per-session-revision`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
 | `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote` | `crates/kernel/tests/kernel_use_outcome.rs:322` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only`, `uo-p-classification-sensitive-local-only-no-remote-egress` | unaudited |
 | `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage` | `crates/kernel/tests/kernel_use_outcome.rs:341` | `uo-admission-reads-require-a-non-null-commit-seq`, `uo-p-disputed-after-serve-from-committed-events-only`, `uo-p-record-survives-session-delete`, `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
 | `expiry_retires_an_expired_record_under_a_reserved_receipt` | `crates/kernel/tests/kernel_use_outcome.rs:474` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
 | `an_expiry_backlog_drains_one_page_per_call` | `crates/kernel/tests/kernel_use_outcome.rs:534` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
 | `an_expired_record_cited_by_a_live_report_is_retained` | `crates/kernel/tests/kernel_use_outcome.rs:604` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts` | `crates/kernel/tests/kernel_use_outcome.rs:694` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `session_roles_round_trip_and_the_served_set_digest_is_order_free` | `crates/kernel/tests/kernel_use_outcome.rs:715` | `uo-p-served-ids-equal-frozen-composition`, `uo-p-producer-matches-request-subagent-flag` | unaudited |
 | `disputed_after_serve_is_judged_against_each_serve` | `crates/kernel/tests/kernel_use_outcome.rs:730` | `uo-p-disputed-after-serve-from-committed-events-only` | unaudited |
 | `the_cited_count_covers_the_rows_read_before_the_page_fills` | `crates/kernel/tests/kernel_use_outcome.rs:770` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
 
@@ -51,14 +47,15 @@ Every location was read at the #1154 branch tip.
 
 | Check | Location | Records | Status |
 | --- | --- | --- | --- |
-| `revision_changes_only_when_the_rendered_inputs_change` | `crates/daemon/src/canonical_memory.rs:315` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
-| `rows_the_renderer_drops_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:373` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
-| `bytes_past_the_render_cap_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:390` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
-| `rows_past_the_memory_budget_are_neither_injected_nor_digested` | `crates/daemon/src/canonical_memory.rs:412` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
+| `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes` | `crates/daemon/src/canonical_memory.rs:335` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `revision_changes_only_when_the_rendered_inputs_change` | `crates/daemon/src/canonical_memory.rs:372` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
+| `rows_the_renderer_drops_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:430` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
+| `bytes_past_the_render_cap_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:447` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
+| `rows_past_the_memory_budget_are_neither_injected_nor_digested` | `crates/daemon/src/canonical_memory.rs:469` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
 | `a_subagent_pass_under_native_authority_reports_native_authority` | `crates/daemon/src/fold_authority_handler_tests.rs:143` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds` | unaudited |
-| `route_teardown_keeps_an_admitted_checkpoint_alive` | `crates/daemon/src/lib.rs:24892` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
-| `session_delete_waits_for_the_capture_gate_off_the_runtime_worker` | `crates/daemon/src/lib.rs:25942` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
-| `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired` | `crates/daemon/src/lib.rs:39447` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
+| `route_teardown_keeps_an_admitted_checkpoint_alive` | `crates/daemon/src/lib.rs:24940` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
+| `session_delete_waits_for_the_capture_gate_off_the_runtime_worker` | `crates/daemon/src/lib.rs:25990` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
+| `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired` | `crates/daemon/src/lib.rs:39495` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
 | `the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair` | `crates/daemon/src/memory_reviewer/activation.rs:385` | `uo-activation-gate-closes-on-kernel-baseline-or-incarnation-change` | unaudited |
 | `the_gate_opens_only_for_a_matching_attested_owner_only_record` | `crates/daemon/src/memory_reviewer/activation.rs:448` | `uo-activation-gate-closes-on-kernel-baseline-or-incarnation-change` | unaudited |
 | `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed` | `crates/daemon/src/memory_reviewer/lifecycle.rs:829` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
@@ -68,9 +65,20 @@ Every location was read at the #1154 branch tip.
 | `session_delete_with_the_kernel_starting_deletes_nothing` | `crates/daemon/src/source_capture_tests.rs:1617` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
 | `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages` | `crates/daemon/src/source_capture_tests.rs:1689` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
 | `the_capture_report_reaches_host_status_field_for_field` | `crates/daemon/src/source_capture_tests.rs:835` | `uo-status-counters-are-closed-vocabulary-exact-integers-with-unavailable-not-zero` | unaudited |
-| `canonical_memory_composes_the_project_memory_block_and_pins_the_snapshot` | `crates/daemon/src/transform.rs:13872` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
-| `project_memory_revision_change_requests_a_hard_fold` | `crates/daemon/src/transform.rs:13979` | `uo-served-rows-are-the-frozen-m0-rows-between-hard-folds` | unaudited |
-| `subagent_first_active_render_commits_tagged_bytes_before_replay` | `crates/daemon/src/transform.rs:23731` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds` | unaudited |
+| `canonical_memory_composes_the_project_memory_block_and_pins_the_snapshot` | `crates/daemon/src/transform.rs:13883` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
+| `project_memory_revision_change_requests_a_hard_fold` | `crates/daemon/src/transform.rs:13990` | `uo-served-rows-are-the-frozen-m0-rows-between-hard-folds` | unaudited |
+| `a_pressure_refold_reports_its_frozen_composition` | `crates/daemon/src/transform.rs:20892` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
+| `subagent_first_active_render_commits_tagged_bytes_before_replay` | `crates/daemon/src/transform.rs:23778` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds` | unaudited |
+| `an_equal_digest_replays_and_another_harness_or_role_conflicts` | `crates/daemon/src/use_outcome_writer_tests.rs:121` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `only_an_available_composition_is_recorded` | `crates/daemon/src/use_outcome_writer_tests.rs:170` | `uo-consent-gate-source-is-the-route-frozen-config`, `uo-p-no-row-when-memory-disabled`, `uo-p-no-row-for-withheld-composition` | unaudited |
+| `a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it` | `crates/daemon/src/use_outcome_writer_tests.rs:219` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
+| `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one` | `crates/daemon/src/use_outcome_writer_tests.rs:280` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `the_session_role_follows_the_pass_subagent_flag_on_each_engine` | `crates/daemon/src/use_outcome_writer_tests.rs:315` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds`, `uo-p-producer-matches-request-subagent-flag` | unaudited |
+| `an_equal_served_set_at_a_later_known_as_of_replays` | `crates/daemon/src/use_outcome_writer_tests.rs:359` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_dispute_between_folds_records_the_next_served_set_without_it` | `crates/daemon/src/use_outcome_writer_tests.rs:395` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `a_withheld_read_then_an_available_read_of_the_same_rows_records_once` | `crates/daemon/src/use_outcome_writer_tests.rs:431` | `uo-p-no-row-for-withheld-composition` | unaudited |
+| `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:465` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
+| `a_hard_fold_records_its_frozen_composition_once_per_served_set` | `crates/daemon/src/use_outcome_writer_tests.rs:60` | `uo-p-served-set-once-per-session-revision`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
 | `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it` | `crates/daemon/tests/harness_sources.rs:3338` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
 | `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` | `crates/daemon/tests/harness_sources.rs:3482` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts`, `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
 | `route_teardown_releases_the_staged_upload_while_the_session_stays_bound` | `crates/daemon/tests/kernel_routes.rs:3849` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
@@ -94,21 +102,17 @@ Every location was read at the #1154 branch tip.
 
 ## Categories with no check
 
-- Daemon writer at the composition freeze (#1155): none found; the records
-  `uo-p-served-set-once-per-session-revision`,
-  `uo-p-served-ids-equal-frozen-composition`, `uo-p-no-row-when-memory-disabled`,
-  `uo-p-no-row-for-withheld-composition`, and
-  `uo-p-producer-matches-request-subagent-flag` are proposed.
 - Outcome-column writers (#1156): none found.
 - The per-decision count read (#1157): none found.
 - Route teardown across both stores: no test asserts that teardown deletes no
   durable row in either store.
-- Wrapup consent under a reloaded config: no test.
+- A file-backed config reload between bind and a pass or wrapup: no test; the wrapup test uses a live config that differs from the frozen binding.
 
 ## Suspiciously quiet areas
 
-- The folding engine's pressure-refold freeze site has no dedicated test.
-- No test asserts the absence of a block for a subagent pass under
-  `eidnara_folds`.
+- The pressure-refold freeze site is checked through its marker only; no handler test drives a refold with a Canonical read.
+- No test asserts the absence of a `<project-memory>` block for a subagent pass
+  under `eidnara_folds`; the #1155 test asserts it folds no HARD and records
+  nothing.
 - The `source_capture` status block carries no state flag, and no client
   decodes it (lead L4).

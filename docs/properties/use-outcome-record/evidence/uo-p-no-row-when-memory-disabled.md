@@ -4,18 +4,19 @@
 
 Spec #1145 C2.
 
-Record kind: proposed obligation; its owning ticket #1155 activates it.
+Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `bd1216847`).
+References are verified at the #1155 branch tip (the commit that adds this file;
+its parent is `d5ebb3598`).
 
-- The writer reads only the composition the pass froze.
+- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9628`).
 
 - Guarantee under test: A route bound with `memory.enabled` off produces no
   serving record on any pass.
-- Existing check: none; proposed. The writer lands with #1155.
+- Existing check: `only_an_available_composition_is_recorded`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:170`). Status: unaudited.
 
 ## Failure scenario
 

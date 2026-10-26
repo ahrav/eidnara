@@ -4,22 +4,24 @@
 
 Spec #1145 C2.
 
-Record kind: proposed obligation; its owning ticket #1155 activates it.
+Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `bd1216847`).
+References are verified at the #1155 branch tip (the commit that adds this file;
+its parent is `d5ebb3598`).
 
-- The writer distinguishes withheld from empty.
+- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9628`).
+- An Available composition read at sequence 0 names no commit and is refused by
+  the Kernel, counted `refused`.
 
 - Guarantee under test: A fold that persists a withheld composition writes no
   serving record; an Available snapshot with zero rows writes a record with zero
   decision rows.
-- Existing check: Kernel half only:
-  `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:163`). The writer is proposed.
-  Status: unaudited.
+- Existing check: `only_an_available_composition_is_recorded`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
+  `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:431`). Status: unaudited.
 
 ## Failure scenario
 

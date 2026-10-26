@@ -104,6 +104,7 @@ pub mod window_coverage;
 pub mod wire;
 
 pub mod transform;
+pub(crate) mod use_outcome_writer;
 
 pub mod production_inputs;
 pub mod projection_admission;
@@ -2830,6 +2831,10 @@ pub struct HandlerCore {
     reduction_injection: Mutex<HashMap<String, Vec<ReductionDecision>>>,
     #[cfg(test)]
     after_transform_commit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Stands in for the Kernel's answer to the next serve write, between the fold's Memory Store commit and the write.
+    #[cfg(test)]
+    use_outcome_fault: Mutex<Option<kernel::KernelError>>,
+    use_outcome_counts: use_outcome_writer::UseOutcomeCounts,
     #[cfg(test)]
     between_transform_and_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -3835,6 +3840,9 @@ impl Handler {
             #[cfg(test)]
             after_transform_commit: Mutex::new(None),
             #[cfg(test)]
+            use_outcome_fault: Mutex::new(None),
+            use_outcome_counts: Default::default(),
+            #[cfg(test)]
             between_transform_and_prepare: Mutex::new(None),
             #[cfg(test)]
             wrapup_operation_budget: Mutex::new(None),
@@ -4358,6 +4366,8 @@ impl Handler {
             test_client: Mutex::new(HashMap::new()),
             reduction_injection: Mutex::new(HashMap::new()),
             after_transform_commit: Mutex::new(None),
+            use_outcome_fault: Mutex::new(None),
+            use_outcome_counts: Default::default(),
             between_transform_and_prepare: Mutex::new(None),
             wrapup_operation_budget: Mutex::new(None),
             unknown_module_retry_delay: Mutex::new(None),
@@ -9609,8 +9619,44 @@ impl HandlerCore {
                 .unwrap_or_default(),
         };
         let mut pass = transform_with_projection_cached(store, parsed, &producer_ctx)?;
+        self.record_use_outcome(env, &pass);
         self.promote_derived_state(store, env, &mut pass);
         pass.finished()
+    }
+
+    /// Records the serve when this attempt froze an Available composition and its Memory Store commit landed. The commit already decided the pass, so the write's outcome is only counted.
+    fn record_use_outcome(&self, env: &PassEnv, pass: &TransformWithProjection) {
+        if !(pass.froze_composition && pass.response.committed) {
+            return;
+        }
+        let Some(canonical_memory::CanonicalMemoryRead::Available(snapshot)) =
+            env.project_memory.as_ref()
+        else {
+            return;
+        };
+        #[cfg(test)]
+        if let Some(error) = self
+            .use_outcome_fault
+            .lock()
+            .expect("use-outcome fault mutex")
+            .take()
+        {
+            self.use_outcome_counts
+                .record(use_outcome_writer::UseOutcomeWrite::from_error(error));
+            return;
+        }
+        let outcome = use_outcome_writer::record_serve(
+            &self.kernel,
+            &use_outcome_writer::Serve {
+                project: &env.binding.kernel_project,
+                harness: &env.binding.harness,
+                session_id: &env.parsed.session_id,
+                is_subagent: env.parsed.is_subagent,
+                snapshot,
+                recorded_at: env.pass_now,
+            },
+        );
+        self.use_outcome_counts.record(outcome);
     }
 
     fn promote_derived_state(
@@ -18877,6 +18923,8 @@ mod tests {
     mod source_recovery_tests;
     #[path = "tool_vocabulary_tests.rs"]
     mod tool_vocabulary_tests;
+    #[path = "use_outcome_writer_tests.rs"]
+    mod use_outcome_writer_tests;
     #[path = "transform/window_admission.rs"]
     mod window_admission;
     #[path = "window_cap_tests.rs"]

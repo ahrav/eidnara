@@ -4,23 +4,28 @@
 
 Spec #1145 C4.
 
-Record kind: proposed obligation; its owning ticket #1155 activates it.
+Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `bd1216847`).
+References are verified at the #1155 branch tip (the commit that adds this file;
+its parent is `d5ebb3598`).
 
-- Digest: `served_set_digest` (`crates/kernel/src/use_outcome.rs:56`).
+- Ids: the rendered rows of `CanonicalMemorySnapshot::new`, ascending
+  (`served_ids` (`crates/daemon/src/canonical_memory.rs:80`)).
+- Freeze marker: `froze_composition` set at each freeze site
+  (`crates/daemon/src/transform.rs:3117`, `crates/daemon/src/transform.rs:4739`,
+  `crates/daemon/src/transform.rs:4895`).
 
 - Guarantee under test: The stored decision set equals, as a set, the object ids
   of the snapshot rows whose composition the same fold persisted.
-- Existing check: Kernel half only:
-  `duplicate_and_malformed_serves_are_refused_without_rows`
-  (`crates/kernel/tests/kernel_use_outcome.rs:214`);
-  `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-  (`crates/kernel/tests/kernel_use_outcome.rs:715`). The writer is proposed.
-  Status: unaudited.
+- Existing check:
+  `a_hard_fold_records_its_frozen_composition_once_per_served_set`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:60`);
+  `a_dispute_between_folds_records_the_next_served_set_without_it`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:395`);
+  `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
+  (`crates/daemon/src/canonical_memory.rs:335`). Status: unaudited.
 
 ## Failure scenario
 

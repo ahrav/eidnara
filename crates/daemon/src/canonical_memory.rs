@@ -35,6 +35,9 @@ pub struct CanonicalMemorySnapshot {
     truncated: bool,
     rows: Vec<CanonicalMemory>,
     revision: u64,
+    /// The decision object ids of the rendered rows, ascending, and their served-set digest: the identity a use-outcome record of this composition carries.
+    served_ids: Vec<String>,
+    served_set_digest: String,
 }
 
 impl CanonicalMemorySnapshot {
@@ -55,16 +58,32 @@ impl CanonicalMemorySnapshot {
         rendered.sort_by(|left, right| left.object_id.cmp(&right.object_id));
         let mut hasher = DefaultHasher::new();
         "eidnara-project-memory-revision-v1".hash(&mut hasher);
-        for row in rendered {
+        for row in &rendered {
             row.category.hash(&mut hasher);
             render_memory_line(row).hash(&mut hasher);
         }
+        let mut served_ids: Vec<String> =
+            rendered.iter().map(|row| row.object_id.clone()).collect();
+        served_ids.dedup();
+        let served_set_digest = kernel::served_set_digest(served_ids.iter().map(String::as_str));
         Self {
             known_as_of,
             truncated,
             rows,
             revision: hasher.finish(),
+            served_ids,
+            served_set_digest,
         }
+    }
+
+    /// The decision object ids the block renders, ascending and distinct.
+    pub fn served_ids(&self) -> &[String] {
+        &self.served_ids
+    }
+
+    /// The domain-separated SHA-256 over [`Self::served_ids`]: equal digests name one served id set whatever bytes rendered it.
+    pub fn served_set_digest(&self) -> &str {
+        &self.served_set_digest
     }
 
     /// The kernel commit sequence the rows were read at.
@@ -309,6 +328,44 @@ mod tests {
                 content: "Keep the public contract.".to_string(),
             }]
         );
+    }
+
+    /// The served-set digest names the rendered rows' ids: it ignores order and rendered bytes, drops rows the renderer drops, and changes with the id set.
+    #[test]
+    fn the_served_set_digest_names_the_rendered_ids_and_not_their_bytes() {
+        let row = |object_id: &str, category: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let first = CanonicalMemorySnapshot::new(
+            7,
+            false,
+            vec![
+                row("b", "PROJECT_RULES", "Rule b."),
+                row("a", "NAMING", "Name a."),
+                row("dropped", "not-a-memory-category", "Dropped."),
+            ],
+        );
+        assert_eq!(first.served_ids(), ["a", "b"]);
+        assert_eq!(
+            first.served_set_digest(),
+            kernel::served_set_digest(["a", "b"])
+        );
+        let reworded = CanonicalMemorySnapshot::new(
+            8,
+            false,
+            vec![
+                row("a", "NAMING", "Name a, reworded."),
+                row("b", "PROJECT_RULES", "Rule b."),
+            ],
+        );
+        assert_ne!(first.revision(), reworded.revision());
+        assert_eq!(first.served_set_digest(), reworded.served_set_digest());
+        let smaller = CanonicalMemorySnapshot::new(8, false, vec![row("a", "NAMING", "Name a.")]);
+        assert_ne!(first.served_set_digest(), smaller.served_set_digest());
+        let empty = CanonicalMemorySnapshot::new(8, false, Vec::new());
+        assert_eq!(empty.served_set_digest(), kernel::served_set_digest([]));
     }
 
     #[test]
