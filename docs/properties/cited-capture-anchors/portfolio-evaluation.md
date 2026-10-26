@@ -35,7 +35,7 @@ that order and splits the fixture-rows item into its two tables.
 Line drift between `a0e3f2993` and the branch tip moved several daemon
 references: the `crates/daemon/src/lib.rs` capture tests by 31 lines and
 `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
-from line 3331 to 3482. Each record cites the current line; the test names
+from line 3331 to 3500. Each record cites the current line; the test names
 match the specification's.
 
 The per-field capture secret scan moved Kernel references: in
