@@ -14,6 +14,7 @@ pub(crate) mod conditional_note_evaluation;
 pub(crate) mod config;
 pub(crate) mod confined_path;
 pub mod context_capabilities;
+pub mod contradiction_candidates;
 pub mod coverage;
 pub mod decay_render;
 mod derived_state;
