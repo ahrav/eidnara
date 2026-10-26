@@ -35,6 +35,15 @@ describe("lastRound", () => {
     test("ignores a range without the round prefix", () => {
         expect(lastRound("Reviewed aaaaaaa..bbbbbbb")).toBeUndefined();
     });
+
+    test("ignores a round without the skills suffix", () => {
+        expect(lastRound("Round 1 reviewed aaaaaaa..bbbbbbb\nRound 2 reviewed aaaaaaa..ccccccc:\n")).toBeUndefined();
+        expect(lastRound("Round 1 reviewed `aaaaaaa`..`bbbbbbb`: no rerun - docs only")).toEqual({
+            number: 1,
+            base: "aaaaaaa",
+            head: "bbbbbbb",
+        });
+    });
 });
 
 describe("needsGate", () => {

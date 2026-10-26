@@ -4,7 +4,8 @@ export interface Round {
     head: string;
 }
 
-const ROUND = /\bRound\s+(\d+)\s+reviewed\s+`?([^\s`]+?)`?\s*\.\.\s*`?([0-9a-f]{7,40})`?/gi;
+// A record is `Round N reviewed <base>..<head>: <skills or no rerun - reason>`; the suffix is required.
+const ROUND = /\bRound\s+(\d+)\s+reviewed\s+`?([^\s`]+?)`?\s*\.\.\s*`?([0-9a-f]{7,40})`?\s*:\s*(?=\S)/gi;
 
 export function lastRound(body: string): Round | undefined {
     let last: Round | undefined;
@@ -35,7 +36,7 @@ export function checkGateRecord(body: string, head: string, change: Change): str
     if (round === undefined) {
         return [
             `the pull request changes ${gated.length} gated files and its body records no ` +
-                "`Round N reviewed <base>..<head>` line (REVIEW.md, Sub-agents)",
+                "`Round N reviewed <base>..<head>: <skills>` line (REVIEW.md, Sub-agents)",
         ];
     }
     const reviewed = change.resolve(round.head);
