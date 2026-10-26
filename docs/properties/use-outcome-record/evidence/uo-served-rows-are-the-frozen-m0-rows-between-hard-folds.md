@@ -19,7 +19,7 @@ References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
   `meta.project_memory`; the response field `project_memory` is read from meta
   (`apply_additive_only` (`crates/daemon/src/transform.rs:2854`)).
 - Each pass still reads the Kernel (`project_memory_read`
-  (`crates/daemon/src/lib.rs:5526`)); the read feeds only the m1 revision
+  (`crates/daemon/src/lib.rs:5527`)); the read feeds only the m1 revision
   signal, and a changed revision requests a HARD fold
   (`project_memory_revision_change_requests_a_hard_fold`
   (`crates/daemon/src/transform.rs:13993`)).

@@ -13,8 +13,8 @@ References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
 `main` at `d3b772026`.
 
 - Handler and step order: `handle_session_delete_value`
-  (`crates/daemon/src/lib.rs:6924`).
-- Test hook `stop_after_retirement`: `crates/daemon/src/lib.rs:6960`.
+  (`crates/daemon/src/lib.rs:6925`).
+- Test hook `stop_after_retirement`: `crates/daemon/src/lib.rs:6961`.
 - Correction: the spec's `lib.rs:25158, 25911` were test functions that moved by
   31 lines.
 
@@ -29,7 +29,7 @@ References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
   `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
   (`crates/daemon/src/source_capture_tests.rs:1699`);
   `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-  (`crates/daemon/src/lib.rs:26262`). Status: unaudited.
+  (`crates/daemon/src/lib.rs:26263`). Status: unaudited.
 
 ## Failure scenario
 

@@ -57,7 +57,6 @@ retry.
 ### Q: Does any open question remain for this record?
 
 - Sources examined: the specification catalog entry, the code and tests cited above.
-- Findings: the Kernel half cited above agrees with the guarantee at this tip;
-  the writer is proposed and no code at this tip establishes its behavior.
-- Missing evidence: the writer path, which lands with the owning ticket.
-- Conclusion: unresolved, needs the writer; the Kernel half is settled.
+- Findings: the cited code and tests agree with the guarantee at this tip.
+- Missing evidence: none for the guarantee as stated.
+- Conclusion: resolved with answer - no open question.

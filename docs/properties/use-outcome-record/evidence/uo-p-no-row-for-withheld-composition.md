@@ -11,14 +11,15 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
 `main` at `d3b772026`.
 
-- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9668`); one
+- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9669`); one
   write per pass covers its reruns.
 - A composition read at sequence 0 precedes every commit; the handler skips its
   write, and the next fold after a commit records the serve.
 
 - Guarantee under test: A fold that persists a withheld composition writes no
-  serving record; an Available snapshot with zero rows writes a record with zero
-  decision rows.
+  serving record; an Available snapshot with zero rows attempts a record with
+  zero decision rows, which exists once the write lands as `written` or
+  `replayed`.
 - Existing check: `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
   `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`

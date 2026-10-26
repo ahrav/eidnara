@@ -12,15 +12,15 @@ re-verified at this branch tip.
 References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
 `main` at `d3b772026`.
 
-- Teardown: `unbind_route` (`crates/daemon/src/lib.rs:4700`); purge:
-  `purge_session_state` (`crates/daemon/src/lib.rs:4740`).
+- Teardown: `unbind_route` (`crates/daemon/src/lib.rs:4701`); purge:
+  `purge_session_state` (`crates/daemon/src/lib.rs:4741`).
 - Correction: the spec's `lib.rs:32181` maps to a `session.delete` test at this
   tip.
 
 - Guarantee under test: Route teardown purges process-local session state and
   deletes no durable row in either store.
 - Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-  (`crates/daemon/src/lib.rs:25212`);
+  (`crates/daemon/src/lib.rs:25213`);
   `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
   (`crates/daemon/tests/kernel_routes.rs:3849`). Status: unaudited.
 

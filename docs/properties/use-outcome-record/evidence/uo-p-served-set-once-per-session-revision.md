@@ -14,7 +14,7 @@ References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
 - Key and digest: `crates/daemon/src/use_outcome_writer.rs:165`; the request
   digest binds the ids, the harness, and the role (`request_digest`
   (`crates/daemon/src/use_outcome_writer.rs:223`)).
-- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9668`) runs after
+- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9669`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
