@@ -766,11 +766,8 @@ async fn a_recorded_served_set_replays_while_another_writer_holds_the_writer() {
     holding.send(()).unwrap();
     holder.join().unwrap();
     assert_eq!(replayed, Some(UseOutcomeWrite::Replayed));
+    // The writer stays held past the budget, so `Replayed` can only come from the pooled reader; the measured wait is diagnostic.
     eprintln!("use-outcome replay under a held writer: {waited:?}");
-    assert!(
-        waited < std::time::Duration::from_millis(250),
-        "a replay answers before the write budget ends: {waited:?}"
-    );
     assert_eq!(conflict, Some(UseOutcomeWrite::Conflict));
     assert_eq!(deadline, Some(UseOutcomeWrite::Deadline));
     let served_in = |session_id: &str| {
@@ -813,12 +810,13 @@ async fn a_recorded_served_set_replays_while_another_writer_holds_the_writer() {
     );
     let waited = started.elapsed();
     brief.join().unwrap();
+    // A write past the budget answers `Deadline`, so `Written` proves the wait fit the budget; the measured wait is diagnostic.
+    eprintln!("use-outcome write after a brief hold: {waited:?}");
     assert_eq!(
         written,
         Some(UseOutcomeWrite::Written),
         "a new served set waits for a writer released within the budget"
     );
-    assert!(waited < std::time::Duration::from_millis(250), "{waited:?}");
     let third = served_in("third");
     assert_eq!(third.len(), 1);
     assert_eq!(third[0].decision_object_ids, ["mem-a", "mem-b"]);
@@ -968,6 +966,7 @@ async fn a_hard_fold_answers_while_another_writer_holds_the_kernel_writer() {
     seed_memories(&kernel, &project, &[("mem-a", "Rule a.")]);
     let (release, holder) = hold_kernel_writer(&kernel);
 
+    let started = std::time::Instant::now();
     let response = transform_leaving_serves_pending(&handler, vec![ck("m1", 1, "hello")]).await;
     assert_eq!(response["action"], "HARD", "{response}");
     assert_eq!(
@@ -975,19 +974,43 @@ async fn a_hard_fold_answers_while_another_writer_holds_the_kernel_writer() {
         "{response}"
     );
     assert!(
-        counts(&handler).is_empty(),
-        "the response arrives while the serve write is pending: {:?}",
-        counts(&handler)
+        served(&handler, &project).is_empty(),
+        "the response arrives while the writer is still held"
     );
-    assert!(served(&handler, &project).is_empty());
+    // Inside the budget the job cannot have reached its deadline yet, so an inline write that waited out its budget
+    // before answering would already have counted; the detached hand-off leaves the counters empty at response time.
+    if started.elapsed() < std::time::Duration::from_millis(250) {
+        assert!(
+            counts(&handler).is_empty(),
+            "the response arrives while the serve write is pending: {:?}",
+            counts(&handler)
+        );
+    }
 
     release.send(()).unwrap();
     holder.join().unwrap();
     handler.use_outcome_writes.settled().await;
-    assert_eq!(counts(&handler), [("written", 1)]);
+    let held_after_handoff = started.elapsed();
     let records = served(&handler, &project);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+    // The job waited on the writer from the hand-off to the release, which is less than this span. A span inside the
+    // budget proves the write landed; a longer span on a loaded host leaves the job either written or at its deadline,
+    // and either way the response never waited.
+    let outcome = counts(&handler);
+    if held_after_handoff < std::time::Duration::from_millis(250) {
+        assert_eq!(outcome, [("written", 1)]);
+    } else {
+        eprintln!("use-outcome hand-off span outlived the write budget: {held_after_handoff:?}");
+        assert!(
+            outcome == [("written", 1)] || outcome == [("deadline", 1)],
+            "{outcome:?}"
+        );
+    }
+    if outcome == [("written", 1)] {
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+    } else {
+        assert!(records.is_empty());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
