@@ -118,7 +118,8 @@ These recur as false positives here; check them before reporting:
   reached `main` are out of scope.
 - A resource finding needs an untrusted producer or a producer bound above the
   consumer's enforced budget.
-- A decision the ticket settled is out of scope unless the change breaks it.
+- A decision the ticket settled is out of scope unless the change breaks it or
+  the decision violates a project contract or the Security priority.
 - A new diagnostic `message` value is a wire change only when
   `docs/host-wire-protocol.md` states its exact text.
 - A "no issues", rate-limit, or incomplete-run summary from a review bot is not
@@ -136,8 +137,10 @@ for other languages, run the testing-approach owner the router names. Run the
 language code reviewer for every changed language, including ported or copied
 code; a design review does not substitute for it.
 
-Use `/research-planning:ask-skills` against the ticket and the actual diff to
-select the additional skills the change needs. Classify the diff by the
+Use `/research-planning:ask-skills` against the requirements source and the
+actual diff to select the additional skills the change needs. The requirements
+source is the ticket, or for a fix outside the ticket flow the issue report or
+contract that states the required behavior. Classify the diff by the
 mechanisms it changes, not only its language or ticket topic: SQL, persisted or
 wire schemas, durable publication, cross-transaction fences, spawned work and
 cancellation, limits, budgets and deadlines, untrusted input, credentials and
@@ -154,11 +157,9 @@ invocation, apply the `ask-skills` contract in-context and record
 Run every selected review in separate, fresh-context, read-only sub-agents
 against the same diff and base; run them concurrently, in waves at the host's
 sub-agent cap when one applies. Give each reviewer this file, the scoped
-`AGENTS.md` files, the requirements source (the ticket, or for a fix outside the
-ticket flow the issue report or contract that states the required behavior),
-and the production consumers of the changed code. At least one applicable
-reviewer derives the required behavior from that source and the consumers
-before reading the author's explanation.
+`AGENTS.md` files, the requirements source, and the production consumers of the
+changed code. At least one applicable reviewer derives the required behavior
+from that source and the consumers before reading the author's explanation.
 Each returns location, severity, evidence, and rationale; none posts comments or
 edits code. The main reviewer consolidates and deduplicates findings, keeps the
 contributing reviewers, and verifies each finding against the implementation
