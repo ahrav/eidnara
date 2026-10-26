@@ -364,7 +364,7 @@ async fn a_discarded_attempt_leaves_no_serve_and_the_retry_records_one() {
     assert_eq!(counts(&handler), [("written", 1)]);
 }
 
-/// On the additive engine a subagent pass that freezes a Canonical composition records the `subagent` role; on the `eidnara_folds` engine the same request freezes no composition and records nothing.
+/// On the additive engine a subagent pass that freezes a Canonical composition records the `subagent` role; on the `eidnara_folds` engine the same request plans no HARD, is served no block and no composition, and records nothing. A primary pass records `primary` on each engine.
 #[tokio::test(flavor = "current_thread")]
 async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
     for (config, is_subagent, expected) in [
@@ -379,6 +379,11 @@ async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
             Some(kernel::SessionRole::Primary),
         ),
         (default_test_config(), true, None),
+        (
+            default_test_config(),
+            false,
+            Some(kernel::SessionRole::Primary),
+        ),
     ] {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, project) =
@@ -401,7 +406,15 @@ async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
         assert_eq!(response["status"], "ok", "{response}");
         if expected.is_none() {
             assert_ne!(response["action"], "HARD", "{response}");
+            assert!(response["project_memory"].is_null(), "{response}");
         }
+        assert_eq!(
+            serde_json::to_string(&response)
+                .unwrap()
+                .contains("<project-memory>"),
+            expected.is_some(),
+            "{response}"
+        );
         let roles: Vec<_> = served(&handler, &project)
             .iter()
             .map(|record| record.serve.session_role)

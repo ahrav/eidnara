@@ -26,7 +26,7 @@ revision; its parent is `1fe3dfbad`).
   `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
   `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:510`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_writer_tests.rs:539`). Status: unaudited.
 
 ## Failure scenario
 
