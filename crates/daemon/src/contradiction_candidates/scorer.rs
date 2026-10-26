@@ -15,6 +15,15 @@
 //! the total order score descending, `matched_terms` descending,
 //! `decision_terms` ascending, decision object id bytes ascending.
 //!
+//! The gates count terms, and one identifier contributes its atom and each of
+//! its parts, so a summary of one three-part identifier holds four terms.
+//! `to_lowercase` is not full case folding: `İ` lowers to `i` and a combining
+//! dot, and `ß` stays `ß`; both sides use the same rule, so only spellings
+//! that lower to the same string match. NFC and NFD spellings are different
+//! terms, and their scalar counts can differ at the floor. A decision object
+//! id appears at most once in a result: the better-ranked entry wins, with
+//! `decision_id` as the last key.
+//!
 //! A descriptor over its bound is refused whole. A summary over its bound, or
 //! with no term left after the floor, is reported unscorable and excluded; the
 //! other summaries still score.
@@ -51,18 +60,27 @@ pub const MIN_DECISION_TERMS: usize = 4;
 pub const CANDIDATE_SCORE_THRESHOLD: (usize, usize) = (1, 2);
 /// K: the most candidates one descriptor keeps.
 pub const CANDIDATES_PER_DESCRIPTOR: usize = 4;
-/// At least the 64 KiB publish unit bound, so a published descriptor is never refused. n atoms need at least 2n - 1 bytes, so an atom bound one past half the byte bound is never the binding refusal.
+/// At least the publish unit bound, so a published descriptor is never refused.
 pub const DESCRIPTOR_BOUNDS: LexicalBounds = bounds(65_536);
+const _: () = assert!(
+    DESCRIPTOR_BOUNDS.max_input_bytes.get() >= crate::harness_sources::MAX_SOURCE_UNIT_BYTES
+);
+/// The bound one decision summary is analyzed under.
 pub const SUMMARY_BOUNDS: LexicalBounds = bounds(8_192);
 /// The matcher's own copy of the user-hint gate's stopwords.
 pub const STOPWORDS: [&str; 16] = [
     "and", "are", "but", "for", "from", "have", "into", "not", "that", "the", "this", "use", "was",
     "with", "you", "your",
 ];
+const TERM_SOURCE_ID: &str = "atoms-and-parts-as-a-set.v1";
 const FOLD_RULE_ID: &str = "str-to-lowercase-per-term.v1";
 const FLOOR_RULE_ID: &str = "min-scalars,alphanumeric,not-all-numeric,stopwords.v1";
 const SCORE_FORMULA_ID: &str = "decision-side-containment.v1";
+const ORDER_RULE_ID: &str =
+    "score-desc,matched-desc,decision-terms-asc,object-id-asc,decision-id-asc,one-per-object.v1";
 
+/// n atoms need at least 2n - 1 bytes, so an atom bound one past half the
+/// byte bound is never the binding refusal.
 const fn bounds(max_input_bytes: usize) -> LexicalBounds {
     let (Some(max_input_bytes), Some(max_atoms)) = (
         NonZeroUsize::new(max_input_bytes),
@@ -193,9 +211,28 @@ impl DescriptorTerms {
 pub struct TopCandidates(Vec<ScoredCandidate>);
 
 impl TopCandidates {
-    /// Keeps `candidate` when it ranks within K; a later duplicate of a kept
-    /// decision object id keeps the better-ranked entry.
-    pub fn offer(&mut self, candidate: ScoredCandidate) {
+    /// Scores one decision's summary against `terms` and keeps it when it passes
+    /// every gate and ranks within K; the score is returned so the caller can
+    /// count unscorable summaries.
+    pub fn record(&mut self, terms: &DescriptorTerms, input: CandidateInput<'_>) -> SummaryScore {
+        let score = terms.score(input.summary);
+        if let SummaryScore::Candidate {
+            matched_terms,
+            decision_terms,
+        } = score
+        {
+            self.offer(ScoredCandidate {
+                decision_object_id: input.decision_object_id.to_string(),
+                decision_id: input.decision_id.to_string(),
+                matched_terms,
+                decision_terms,
+            });
+        }
+        score
+    }
+
+    /// A later duplicate of a kept decision object id keeps the better-ranked entry.
+    fn offer(&mut self, candidate: ScoredCandidate) {
         if let Some(index) = self
             .0
             .iter()
@@ -219,7 +256,7 @@ impl TopCandidates {
 }
 
 /// One descriptor's result: the kept candidates in rank order, and the
-/// decisions whose summaries were unscorable, in input order.
+/// decisions whose summaries were unscorable, in id order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescriptorScore {
     pub candidates: Vec<ScoredCandidate>,
@@ -239,20 +276,11 @@ pub fn score_descriptor(
     let mut top = TopCandidates::default();
     let mut unscorable = Vec::new();
     for candidate in candidates {
-        match terms.score(candidate.summary) {
-            SummaryScore::Candidate {
-                matched_terms,
-                decision_terms,
-            } => top.offer(ScoredCandidate {
-                decision_object_id: candidate.decision_object_id.to_string(),
-                decision_id: candidate.decision_id.to_string(),
-                matched_terms,
-                decision_terms,
-            }),
-            SummaryScore::Below { .. } => {}
-            SummaryScore::Unscorable => unscorable.push(candidate.decision_object_id.to_string()),
+        if top.record(&terms, *candidate) == SummaryScore::Unscorable {
+            unscorable.push(candidate.decision_object_id.to_string());
         }
     }
+    unscorable.sort_unstable();
     Ok(DescriptorScore {
         candidates: top.into_vec(),
         unscorable,
@@ -265,7 +293,7 @@ pub fn matcher_preimage() -> String {
     let (major, minor, update) = char::UNICODE_VERSION;
     let mut stopwords = String::new();
     for word in STOPWORDS {
-        stopwords.push_str(&format!("{}:{word}\n", word.len()));
+        push_field(&mut stopwords, word);
     }
     let stopwords = format!("{:x}", Sha256::digest(stopwords.as_bytes()));
     let (numerator, denominator) = CANDIDATE_SCORE_THRESHOLD;
@@ -273,6 +301,7 @@ pub fn matcher_preimage() -> String {
         ("matcher_epoch", CANDIDATE_MATCHER_EPOCH.to_string()),
         ("analysis_epoch", ANALYSIS_CONTRACT_EPOCH.to_string()),
         ("unicode", format!("{major}.{minor}.{update}")),
+        ("terms", TERM_SOURCE_ID.to_string()),
         ("fold", FOLD_RULE_ID.to_string()),
         ("floor", FLOOR_RULE_ID.to_string()),
         ("min_term_scalars", MIN_TERM_SCALARS.to_string()),
@@ -285,16 +314,21 @@ pub fn matcher_preimage() -> String {
             "candidates_per_descriptor",
             CANDIDATES_PER_DESCRIPTOR.to_string(),
         ),
+        ("order", ORDER_RULE_ID.to_string()),
         ("descriptor_bounds", bounds_field(DESCRIPTOR_BOUNDS)),
         ("summary_bounds", bounds_field(SUMMARY_BOUNDS)),
     ];
     let mut preimage = String::new();
     for (name, value) in fields {
-        for field in [name, value.as_str()] {
-            preimage.push_str(&format!("{}:{field}\n", field.len()));
-        }
+        push_field(&mut preimage, name);
+        push_field(&mut preimage, &value);
     }
     preimage
+}
+
+/// `{len}:{field}\n`, so `("a", "bc")` and `("ab", "c")` stay distinct.
+fn push_field(out: &mut String, field: &str) {
+    out.push_str(&format!("{}:{field}\n", field.len()));
 }
 
 fn bounds_field(bounds: LexicalBounds) -> String {
