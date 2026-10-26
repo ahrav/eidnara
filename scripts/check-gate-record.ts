@@ -1,0 +1,105 @@
+export interface Round {
+    number: number;
+    base: string;
+    head: string;
+}
+
+const ROUND = /\bRound\s+(\d+)\s+reviewed\s+`?([0-9a-f]{7,40})`?\s*\.\.\s*`?([0-9a-f]{7,40})`?/gi;
+
+export function lastRound(body: string): Round | undefined {
+    let last: Round | undefined;
+    for (const match of body.matchAll(ROUND)) {
+        const round = { number: Number(match[1]), base: match[2] ?? "", head: match[3] ?? "" };
+        if (last === undefined || round.number >= last.number) last = round;
+    }
+    return last;
+}
+
+export function needsGate(path: string): boolean {
+    return !path.endsWith(".md");
+}
+
+export interface Change {
+    files: string[];
+    resolve(revision: string): string | undefined;
+    isAncestor(ancestor: string, descendant: string): boolean;
+    changedBetween(from: string, to: string): string[];
+}
+
+export function checkGateRecord(body: string, head: string, change: Change): string[] {
+    const gated = change.files.filter(needsGate);
+    if (gated.length === 0) return [];
+    const round = lastRound(body);
+    if (round === undefined) {
+        return [
+            `the pull request changes ${gated.length} non-Markdown files and its body records no ` +
+                "`Round N reviewed <base>..<head>` line (REVIEW.md, Sub-agents)",
+        ];
+    }
+    const reviewed = change.resolve(round.head);
+    if (reviewed === undefined) {
+        return [`Round ${round.number} names ${round.head}, which is not a commit in this repository`];
+    }
+    if (!change.isAncestor(reviewed, head)) {
+        return [`Round ${round.number} reviewed ${round.head}, which is not an ancestor of the head ${head}`];
+    }
+    const files = new Set(change.files);
+    const unreviewed = change
+        .changedBetween(reviewed, head)
+        .filter((path) => files.has(path) && needsGate(path))
+        .sort();
+    if (unreviewed.length === 0) return [];
+    return [
+        `these files changed after Round ${round.number} reviewed ${round.head}; ` +
+            "rerun the reviews that cover them and record a new round:",
+        ...unreviewed.map((path) => `  ${path}`),
+    ];
+}
+
+function git(args: string[]): { code: number; out: string } {
+    const result = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+    return { code: result.exitCode, out: result.stdout.toString() };
+}
+
+function gitOk(args: string[]): string {
+    const { code, out } = git(args);
+    if (code !== 0) throw new Error(`git ${args.join(" ")} exited ${code}`);
+    return out;
+}
+
+function names(out: string): string[] {
+    return out.split("\0").filter(Boolean);
+}
+
+export function gitChange(base: string, head: string): Change {
+    const mergeBase = gitOk(["merge-base", base, head]).trim();
+    return {
+        files: names(gitOk(["diff", "--name-only", "-z", mergeBase, head])),
+        resolve: (revision) => {
+            const { code, out } = git(["rev-parse", "--verify", "--quiet", `${revision}^{commit}`]);
+            return code === 0 ? out.trim() : undefined;
+        },
+        isAncestor: (ancestor, descendant) => git(["merge-base", "--is-ancestor", ancestor, descendant]).code === 0,
+        changedBetween: (from, to) => names(gitOk(["diff", "--name-only", "-z", from, to])),
+    };
+}
+
+if (import.meta.main) {
+    const [base, head] = process.argv.slice(2);
+    if (base === undefined || head === undefined) {
+        console.error("usage: PR_BODY=... bun scripts/check-gate-record.ts <base-sha> <head-sha>");
+        process.exit(2);
+    }
+    let findings: string[];
+    try {
+        findings = checkGateRecord(process.env.PR_BODY ?? "", head, gitChange(base, head));
+    } catch (error) {
+        console.error(String(error));
+        process.exit(2);
+    }
+    if (findings.length > 0) {
+        for (const finding of findings) console.error(finding);
+        process.exit(1);
+    }
+    console.log("gate record: the last recorded round covers every non-Markdown change");
+}
