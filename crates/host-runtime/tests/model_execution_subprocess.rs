@@ -2613,11 +2613,13 @@ fn pi_quadratic_update_stream_completes_within_the_retained_bound() {
 fn pi_runaway_update_stream_stopped_by_the_streamed_bound() {
     const FLOOD_SECRET: &str = "UPDATE-FLOOD-SENTINEL";
     let setup = RunSetup::new();
+    // `discard_lines` keeps one newline byte per complete line selected by `discard`.
+    // Setting `max_stdout_bytes` to `usize::MAX` makes the streamed bound the effective output-size limit.
     let limits = SubprocessLimits {
         run_timeout: Duration::from_secs(30),
         termination_grace: Duration::from_secs(2),
         drain_grace: Duration::from_millis(200),
-        max_stdout_bytes: 64 * 1024,
+        max_stdout_bytes: usize::MAX,
         max_streamed_stdout_bytes: 8 * 1024 * 1024,
         max_stderr_bytes: 16 * 1024,
     };
