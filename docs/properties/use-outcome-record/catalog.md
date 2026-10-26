@@ -1365,7 +1365,11 @@ Existing check:
 (`crates/daemon/tests/memory_reviewer_wire.rs:686`);
 `review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:505`);
+`packages/cli/src/commands/review-wire.contract.test.ts:107`;
 `packages/cli/src/commands/review-wire.contract.test.ts:125`;
+`packages/cli/src/commands/review-wire.contract.test.ts:137`;
+`packages/cli/src/commands/review.test.ts:781`;
+`packages/cli/src/commands/review.test.ts:822`;
 `packages/cli/src/commands/review.test.ts:849`; Kernel half:
 `disputed_after_serve_is_judged_against_each_serve`
 (`crates/kernel/tests/kernel_use_outcome.rs:826`) and
