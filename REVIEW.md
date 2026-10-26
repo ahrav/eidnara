@@ -164,11 +164,11 @@ and record a new round for the new head that names the reruns or states
 `no rerun - <reason>`. When a commit adds a language or mechanism outside the
 recorded review set, rerun skill selection for the new head and run the newly
 required reviews; a gate scoped to tests or docs no longer applies once
-production files enter the diff. The skill that raised a finding reviews its fix. After a
-rebase, compare the old and new ranges with `git range-diff` and classify the
-commits that changed. When `main` has changed a crate or package the PR touches,
-merge or rebase and rerun CI before merge. A gate record naming an older head
-than the PR head is a blocked gate.
+production files enter the diff. The skill that raised a finding reviews its
+fix. After a rebase, compare the old and new ranges with `git range-diff` and
+classify the commits that changed. When `main` has changed a crate or package
+the PR touches, merge or rebase and rerun CI before merge. A gate record naming
+an older head than the PR head is a blocked gate.
 
 Merge after the bot reviews requested on the head commit finish, or record that
 they were unavailable. If a required skill or the concurrent-agent capability is
