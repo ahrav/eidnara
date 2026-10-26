@@ -9734,24 +9734,47 @@ impl HandlerCore {
             .record(attempt.unwrap_or(use_outcome_writer::UseOutcomeWrite::KernelUnavailable));
     }
 
-    /// Advances `last_transform_at` on the session's live records once per settled committed pass, within what remains of the pass's Kernel wait. The write never fails the pass; a skipped write is counted, and the next committing pass catches up. A route with memory disabled takes no Kernel read, so it writes no record and touches none.
-    fn touch_use_outcomes(&self, env: &PassEnv) {
+    /// The Kernel to advance `last_transform_at` in after a settled committed pass, when a live record of the session needs it: the check reads within what remains of the pass's Kernel wait, and a skip is counted. A route with memory disabled takes no Kernel read, so it writes no record and touches none.
+    fn use_outcomes_to_touch(&self, env: &PassEnv) -> Option<Arc<kernel::KernelStore>> {
         if !self.kernel.expected() || env.project_memory.is_none() {
-            return;
+            return None;
         }
-        let write = match self.kernel.kernel_store() {
-            Ok(store) => env.kernel_writes.spend(|budget| {
-                use_outcome_writer::touch_session(
-                    &store,
-                    budget,
-                    &env.binding.kernel_project,
-                    &env.binding.harness,
-                    &env.parsed.session_id,
-                    env.pass_now,
-                )
-            }),
-            Err(_) => Some(use_outcome_writer::LifecycleWrite::TransformSkippedUnavailable),
+        let Ok(kernel) = self.kernel.kernel_store() else {
+            self.use_outcome_lifecycle
+                .record(use_outcome_writer::LifecycleWrite::TransformSkippedUnavailable);
+            return None;
         };
+        let needed = env.kernel_writes.spend(|budget| {
+            use_outcome_writer::touch_needed(
+                &kernel,
+                budget,
+                &env.binding.kernel_project,
+                &env.binding.harness,
+                &env.parsed.session_id,
+                env.pass_now,
+            )
+        });
+        match needed {
+            Ok(needed) => needed.then_some(kernel),
+            Err(skipped) => {
+                self.use_outcome_lifecycle.record(skipped);
+                None
+            }
+        }
+    }
+
+    /// The touch advances `last_transform_at` on the session's live records using the remainder of the pass's 250 ms Kernel wait budget and counts failed writes as skips. The update runs only after [`Self::use_outcomes_to_touch`] found a stale record, and its filter leaves a record another pass already advanced.
+    fn touch_use_outcomes(&self, env: &PassEnv, kernel: &kernel::KernelStore) {
+        let write = env.kernel_writes.spend(|budget| {
+            use_outcome_writer::touch_session(
+                kernel,
+                budget,
+                &env.binding.kernel_project,
+                &env.binding.harness,
+                &env.parsed.session_id,
+                env.pass_now,
+            )
+        });
         if let Some(write) = write {
             self.use_outcome_lifecycle.record(write);
         }
@@ -10020,18 +10043,46 @@ impl HandlerCore {
                 return outcome;
             }
         }
+        if pass.result.response.committed
+            && let Some(kernel) = self.use_outcomes_to_touch(env)
+        {
+            // A scoped thread makes the touch's Kernel write while this thread builds the response
+            // and makes its memory-store writes, so the two stores' waits overlap; neither reads
+            // the other's state, and both finish before the response returns.
+            return std::thread::scope(|scope| {
+                let touch =
+                    || host_runtime::redact_panics(|| self.touch_use_outcomes(env, &kernel));
+                let Ok(touching) = std::thread::Builder::new().spawn_scoped(scope, touch) else {
+                    self.touch_use_outcomes(env, &kernel);
+                    return self.respond_to_settled_pass(env, pass, diagnostics);
+                };
+                let outcome = self.respond_to_settled_pass(env, pass, diagnostics);
+                touching
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                outcome
+            });
+        }
+        self.respond_to_settled_pass(env, pass, diagnostics)
+    }
+
+    /// Builds the settled pass's response from the window it served and records its timings.
+    fn respond_to_settled_pass(
+        &self,
+        env: &PassEnv,
+        pass: TransformedPass,
+        diagnostics: HistorySummarizerDiagnostics,
+    ) -> PreparedOutcome {
+        let store = &env.store;
         let TransformedPass {
             mut result,
             trigger_timings,
             native_attached,
             ..
         } = pass;
-        if result.response.committed {
-            self.touch_use_outcomes(env);
-        }
         // Everything after the pass reads the window it served.
         let served_request = result.served_request.take();
-        let parsed = served_request.as_deref().unwrap_or(parsed);
+        let parsed = served_request.as_deref().unwrap_or(&env.parsed);
         let timings = &env.timings;
         let post_attach_started_at = Instant::now();
         let revert_epoch = result.revert_epoch;

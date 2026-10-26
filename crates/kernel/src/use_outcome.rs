@@ -462,7 +462,32 @@ impl KernelStore {
         Ok(sessions)
     }
 
-    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. A session with nothing to advance takes no writer. The connection waits, the transaction's begin, and its statements stop at the budget; the commit runs to completion once reached.
+    /// Whether a live record of one session holds a `last_transform_at` that is null or before `at`, read on a pooled reader within `budget`. A caller makes this check before [`Self::advance_use_outcome_last_transform`], so a session with nothing to advance takes no writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for a negative `at`, `Deadline` when the budget ends first, and mapped storage errors otherwise.
+    pub fn use_outcome_last_transform_is_stale(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        project_digest: &str,
+        harness: &str,
+        session_id: &str,
+        at: i64,
+    ) -> Result<bool, KernelError> {
+        if at < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        self.reader_with_limit(&budget.acquire_limit())?
+            .query_row_cached(
+                &STALE_TRANSFORM_SQL,
+                params![project_digest, harness, session_id, at],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite)
+    }
+
+    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. The write holds only the writer: the caller's [`Self::use_outcome_last_transform_is_stale`] check keeps a session with nothing to advance off the writer, and the update's own filter skips a record another pass advanced since that check. The connection waits, the transaction's begin, and its statements stop at the budget; the commit runs to completion once reached.
     ///
     /// # Errors
     ///
@@ -480,13 +505,6 @@ impl KernelStore {
         }
         let limit = budget.acquire_limit();
         let args = params![project_digest, harness, session_id, at];
-        let stale: bool = self
-            .reader_with_limit(&limit)?
-            .query_row_cached(&STALE_TRANSFORM_SQL, args, |row| row.get(0))
-            .map_err(map_sqlite)?;
-        if !stale {
-            return Ok(0);
-        }
         let mut writer = self.writer_with_limit(&limit)?;
         let tx = writer.transaction(rusqlite::TransactionBehavior::Immediate)?;
         super::envelope::check_fence(&tx, self.lease_epoch())?;

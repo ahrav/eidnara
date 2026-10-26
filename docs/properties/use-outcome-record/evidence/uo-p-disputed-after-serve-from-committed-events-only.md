@@ -43,7 +43,7 @@ and before n; a null row and another lineage by SQL.
 
 ## Investigation log
 
-### Q: A decision disputed then re-approved still counts: event existence cou
+### Q: A decision disputed then re-approved still counts: event existence counts (resolved at #1154 ticketing)
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A decision disputed then re-approved still counts: event existence

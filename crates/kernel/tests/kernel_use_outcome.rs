@@ -1040,7 +1040,6 @@ fn last_transform_at_advances_live_records_without_a_commit() {
     assert_eq!(store.tip().unwrap(), tip);
 }
 
-/// With the Kernel writer held, an advance that has rows to move stops at its budget with `Deadline`, and one with nothing to move answers without waiting for the writer.
 #[test]
 fn a_held_writer_bounds_the_advance_and_an_idle_session_skips_it() {
     let root = tempfile::tempdir().unwrap();
@@ -1068,8 +1067,8 @@ fn a_held_writer_bounds_the_advance_and_an_idle_session_skips_it() {
         assert_eq!(advanced, Err(KernelError::Deadline));
         assert!(started.elapsed() >= wait);
         assert_eq!(
-            store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s9", 10),
-            Ok(0)
+            store.use_outcome_last_transform_is_stale(&budget(wait), &project(), HARNESS, "s9", 10),
+            Ok(false)
         );
         release.send(()).unwrap();
         holder.join().unwrap();
@@ -1134,4 +1133,56 @@ fn a_held_reader_pool_bounds_the_count_read() {
             disputed_after_serve: 0,
         })
     );
+}
+
+/// The staleness check answers `true` while a live record of the session holds a `last_transform_at` that is null or before the time, and writes nothing when it does; a spent budget answers `Deadline`. The live-record filter it shares with the advance is covered by `last_transform_at_advances_live_records_without_a_commit`.
+#[test]
+fn the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let stale = |wait: std::time::Duration, at: i64| {
+        store.use_outcome_last_transform_is_stale(&budget(wait), &project(), HARNESS, "s1", at)
+    };
+    let wait = std::time::Duration::from_secs(5);
+    let tip = store.tip().unwrap();
+
+    assert_eq!(stale(wait, 100), Ok(true), "a null value is stale");
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(None, None)],
+        "the check writes nothing"
+    );
+    assert_eq!(
+        stale(std::time::Duration::ZERO, 100),
+        Err(KernelError::Deadline)
+    );
+    assert_eq!(
+        store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s1", 100),
+        Ok(1)
+    );
+    assert_eq!(stale(wait, 100), Ok(false));
+    assert_eq!(stale(wait, 99), Ok(false));
+    assert_eq!(stale(wait, 101), Ok(true));
+    assert_eq!(store.tip().unwrap(), tip);
+}
+
+#[test]
+fn the_advance_takes_no_pooled_reader() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let advanced = store.with_readers_held_for_test(|| {
+        store.advance_use_outcome_last_transform(
+            &budget(std::time::Duration::from_millis(100)),
+            &project(),
+            HARNESS,
+            "s1",
+            10,
+        )
+    });
+    assert_eq!(advanced, Ok(1));
+    assert_eq!(lifecycle(&store, "s1"), [(None, Some(10))]);
 }

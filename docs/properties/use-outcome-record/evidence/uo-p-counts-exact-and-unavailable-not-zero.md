@@ -33,7 +33,7 @@ its parent is `d85de937b`).
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
   (`crates/kernel/tests/kernel_use_outcome.rs:341`); the read bound:
   `a_held_reader_pool_bounds_the_count_read`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1108`) and
+  (`crates/kernel/tests/kernel_use_outcome.rs:1107`) and
   `review_use_outcome_reads_the_kernel_under_a_bounded_budget`
   (`crates/daemon/tests/memory_reviewer_wire.rs:787`). Status: unaudited.
 
@@ -54,7 +54,7 @@ two sessions with one later dispute.
 
 ## Investigation log
 
-### Q: OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome` m
+### Q: OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome` method answering the Kernel state outcome when unready
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome`

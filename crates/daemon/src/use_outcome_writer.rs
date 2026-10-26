@@ -223,10 +223,28 @@ pub(crate) fn touch_session(
     ) {
         Ok(0) => None,
         Ok(_) => Some(LifecycleWrite::TransformTouched),
-        Err(error) => Some(match UseOutcomeWrite::from_error(error) {
-            UseOutcomeWrite::Deadline => LifecycleWrite::TransformSkippedDeadline,
-            _ => LifecycleWrite::TransformSkippedUnavailable,
-        }),
+        Err(error) => Some(skipped_touch(error)),
+    }
+}
+
+/// Whether a live record of the session needs `last_transform_at` advanced to `at`, read within `budget`. A Kernel failure answers the skip [`touch_session`] would count for it.
+pub(crate) fn touch_needed(
+    store: &KernelStore,
+    budget: &EvalBudget,
+    project: &ProjectBinding,
+    harness: &str,
+    session_id: &str,
+    at: i64,
+) -> Result<bool, LifecycleWrite> {
+    store
+        .use_outcome_last_transform_is_stale(budget, project.digest(), harness, session_id, at)
+        .map_err(skipped_touch)
+}
+
+fn skipped_touch(error: KernelError) -> LifecycleWrite {
+    match UseOutcomeWrite::from_error(error) {
+        UseOutcomeWrite::Deadline => LifecycleWrite::TransformSkippedDeadline,
+        _ => LifecycleWrite::TransformSkippedUnavailable,
     }
 }
 

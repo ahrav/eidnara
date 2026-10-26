@@ -11,9 +11,9 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1157 branch tip (the commit that adds this file;
 its parent is `d85de937b`).
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:266`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:284`; the request
   digest binds the ids, the harness, and the role (`length_prefixed_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:321`)).
+  (`crates/daemon/src/use_outcome_writer.rs:339`)).
 - Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9684`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
@@ -60,7 +60,7 @@ between; a CAS retry.
 
 ## Investigation log
 
-### Q: Receipts last for the database incarnation and serving records for the
+### Q: Receipts last for the database incarnation and serving records for the retention window, so a fold at a served set whose record expired replays with no live record; recorded as a gap beside G2 (needs human input)
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: Receipts last for the database incarnation and serving records for
@@ -69,7 +69,7 @@ between; a CAS retry.
 - Missing evidence: an owner decision or the named read.
 - Conclusion: needs human input.
 
-### Q: The receipt key omits the harness while the record identity carries it
+### Q: The receipt key omits the harness while the record identity carries it, so one session id served under two harnesses at one served set is a lasting conflict; the design takes session ids as unique within a project (needs human input)
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: The receipt key omits the harness while the record identity carries
@@ -79,7 +79,7 @@ between; a CAS retry.
 - Missing evidence: an owner decision or the named read.
 - Conclusion: needs human input.
 
-### Q: A deadline, an unready Kernel, or a lost fence leaves the serve for a 
+### Q: A deadline, an unready Kernel, or a lost fence leaves the serve for a later write at its digest: a rerun in the same pass when the Kernel was not Ready and no write was attempted (every commit outcome settles the pass, so a pass waits on the writer at most once), or a later HARD fold that another input requests over the same served set, such as context pressure
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A deadline, an unready Kernel, or a lost fence leaves the serve for

@@ -464,3 +464,58 @@ async fn review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_coun
         assert!(answer.get("disputed_after_serve").is_none(), "{answer}");
     }
 }
+
+/// A touch that waits on a held Kernel writer runs beside the rest of the settle: the pass's completion lands in the memory store's pass trace while the touch waits, the holder then releases the writer, and the touch advances `last_transform_at`. The thread scope joins the touch before the response returns. The response build and its trace write must fit in what remains of the pass's 250 ms Kernel wait, or the touch counts `transform_skipped_deadline`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response() {
+    let (handler, store, _dir, project) = served_handler().await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let touched = served(&handler, &project)[0]
+        .serve
+        .last_transform_at
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let completed = |store: &MemoryStore| {
+        store
+            .load_pass_trace("ses")
+            .unwrap()
+            .unwrap()
+            .last_completed_at_ms
+    };
+    let before = completed(&store);
+    let (entered, held) = std::sync::mpsc::channel();
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            kernel
+                .commit(kernel_route_fixtures::intent("hold-writer"), |_| {
+                    entered.send(()).unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while completed(&store) == before {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the pass completed only after its touch"
+                        );
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    held.recv().unwrap();
+    let next = call_transform(&handler, vec![ck("m1", 1, "hello"), ck("m2", 2, "more")]).await;
+    holder.join().unwrap();
+    assert_eq!(next["committed"], true, "{next}");
+    let counts = lifecycle_counts(&handler);
+    assert!(
+        served(&handler, &project)[0]
+            .serve
+            .last_transform_at
+            .unwrap()
+            > touched,
+        "the touch did not land beside the settle: {counts:?}"
+    );
+    assert_eq!(counts, [("transform_touched", 2)]);
+}

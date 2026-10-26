@@ -15,7 +15,7 @@ its parent is `d85de937b`).
   `use_outcomes_deleted_at_set_once`,
   `use_outcomes_last_transform_at_monotonic`, `use_outcomes_retire_once`,
   `use_outcomes_no_delete` in the `use_outcomes` component
-  (`crates/kernel/src/schema.rs:187`); decision-row triggers
+  (`crates/kernel/src/schema.rs:188`); decision-row triggers
   `use_outcome_decisions_written_with_record`,
   `use_outcome_decisions_no_update`, and `use_outcome_decisions_no_delete` in
   the `use_outcome_decisions` component (`crates/kernel/src/schema.rs:191`).

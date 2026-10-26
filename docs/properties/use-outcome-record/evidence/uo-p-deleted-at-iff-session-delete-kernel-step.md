@@ -57,7 +57,7 @@ it starting; a route close without delete.
 
 ## Investigation log
 
-### Q: A record written after the delete commits, by a pass on a route still 
+### Q: A record written after the delete commits, by a pass on a route still bound to the session (OQ3-10), stays live until a later delete marks it; each delete selects the live records afresh under its own attempt key
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A record written after the delete commits, by a pass on a route
@@ -69,7 +69,7 @@ it starting; a route close without delete.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: A fold after a delete over a composition the deleted record already ho
+### Q: A fold after a delete over a composition the deleted record already holds replays that record, so the continued session gains no live record for it until its composition changes (needs human input)
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A fold after a delete over a composition the deleted record already
@@ -78,7 +78,7 @@ it starting; a route close without delete.
 - Missing evidence: an owner decision or the named read.
 - Conclusion: needs human input.
 
-### Q: A conflict or invalid input in the step answers `source_retirement_fai
+### Q: A conflict or invalid input in the step answers `source_retirement_failed` and counts no lifecycle name; the closed names cover the marked, nothing-live, and unavailable outcomes only
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A conflict or invalid input in the step answers
