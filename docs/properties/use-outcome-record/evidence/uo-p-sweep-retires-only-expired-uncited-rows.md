@@ -9,9 +9,9 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `6d91bfa92`).
+its parent is `ed75b9e5b`).
 
-- Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:567`) reads one
+- Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:568`) reads one
   statement, so one snapshot, in `retain_until`, id order through
   `idx_use_outcomes_live_retention` (`crates/kernel/src/use_outcome.rs:204`); it
   pages up to 64 uncited records and counts the cited ones it reads before the
@@ -19,9 +19,9 @@ its parent is `6d91bfa92`).
   grows with the cited expired records while its writes stay bounded by the
   page.
 - Commit: one page commit keyed by the cutoff and a digest of the page's ids
-  (`page_key` (`crates/kernel/src/use_outcome.rs:525`), `expire_use_outcomes`
-  (`crates/kernel/src/use_outcome.rs:477`)); inside it `retire_due_use_outcome`
-  (`crates/kernel/src/use_outcome.rs:591`) rechecks retirement and citation
+  (`page_key` (`crates/kernel/src/use_outcome.rs:526`), `expire_use_outcomes`
+  (`crates/kernel/src/use_outcome.rs:478`)); inside it `retire_due_use_outcome`
+  (`crates/kernel/src/use_outcome.rs:592`) rechecks retirement and citation
   (`crates/kernel/src/use_outcome.rs:212`), sets `invalidated_commit_seq`, and
   records the record's own reserved receipt. The deadline is immutable, so the
   recheck reads only liveness and citation. A citation found under the writer
@@ -47,17 +47,17 @@ its parent is `6d91bfa92`).
   `an_expired_record_cited_by_a_live_report_is_retained`
   (`crates/kernel/tests/kernel_use_outcome.rs:604`);
   `a_record_cited_after_selection_is_kept`
-  (`crates/kernel/src/use_outcome.rs:732`);
+  (`crates/kernel/src/use_outcome.rs:733`);
   `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-  (`crates/kernel/src/use_outcome.rs:760`);
+  (`crates/kernel/src/use_outcome.rs:761`);
   `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-  (`crates/kernel/src/use_outcome.rs:823`);
+  (`crates/kernel/src/use_outcome.rs:824`);
   `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-  (`crates/kernel/src/use_outcome.rs:844`);
+  (`crates/kernel/src/use_outcome.rs:845`);
   `the_cited_count_covers_the_rows_read_before_the_page_fills`
   (`crates/kernel/tests/kernel_use_outcome.rs:770`);
   `the_sweep_and_the_reads_use_their_indexes`
-  (`crates/kernel/src/use_outcome.rs:861`);
+  (`crates/kernel/src/use_outcome.rs:862`);
   `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
   (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
   `a_cancelled_slice_stops_before_the_use_outcome_sweep`

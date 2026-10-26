@@ -435,11 +435,11 @@ impl KernelStore {
         Ok(sessions)
     }
 
-    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. A session with nothing to advance takes no writer. The waits for a pooled reader and the writer connection stop at the budget; SQLite's own busy wait on the file lock, which only a writer outside this process can cause, is not bounded by it.
+    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. A session with nothing to advance takes no writer. The connection waits, the transaction's begin, and its statements stop at the budget; the commit runs to completion once reached.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` for a negative `at`, `Deadline` when the budget ends before a connection is held, `FenceLost` when the process lease moved, and mapped storage errors otherwise.
+    /// Returns `InvalidInput` for a negative `at`, `Deadline` when the budget ends first, `Busy` when a writer outside this process holds the file lock past the busy timeout, `FenceLost` when the process lease moved, and mapped storage errors otherwise.
     pub fn advance_use_outcome_last_transform(
         &self,
         budget: &crate::applicability::EvalBudget,
@@ -454,18 +454,19 @@ impl KernelStore {
         let limit = budget.acquire_limit();
         let args = params![project_digest, harness, session_id, at];
         let stale: bool = self
-            .lock_reader_within(&limit)?
+            .reader_with_limit(&limit)?
             .query_row_cached(&STALE_TRANSFORM_SQL, args, |row| row.get(0))
             .map_err(map_sqlite)?;
         if !stale {
             return Ok(0);
         }
-        let mut writer = self.lock_writer_within(&limit)?;
-        let tx = super::retention::begin_fenced_write(&mut writer, self.lease_epoch())?;
+        let mut writer = self.writer_with_limit(&limit)?;
+        let tx = writer.transaction(rusqlite::TransactionBehavior::Immediate)?;
+        super::envelope::check_fence(&tx, self.lease_epoch())?;
         let advanced = tx
             .execute_cached(&ADVANCE_TRANSFORM_SQL, args)
             .map_err(map_sqlite)?;
-        tx.commit().map_err(map_sqlite)?;
+        tx.commit()?;
         Ok(advanced)
     }
 

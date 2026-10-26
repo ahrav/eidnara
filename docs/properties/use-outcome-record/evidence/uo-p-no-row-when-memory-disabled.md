@@ -9,9 +9,9 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `6d91bfa92`).
+its parent is `ed75b9e5b`).
 
-- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9687`).
+- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9684`).
 
 - Guarantee under test: A route bound with `memory.enabled` off produces no
   serving record on any pass.

@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `6d91bfa92`).
+its parent is `ed75b9e5b`).
 
 - Teardown: `unbind_route` (`crates/daemon/src/lib.rs:4683`); purge:
   `purge_session_state` (`crates/daemon/src/lib.rs:4723`).
@@ -20,11 +20,11 @@ its parent is `6d91bfa92`).
 - Guarantee under test: Route teardown purges process-local session state and
   deletes no durable row in either store.
 - Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-  (`crates/daemon/src/lib.rs:25075`);
+  (`crates/daemon/src/lib.rs:25088`);
   `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
   (`crates/daemon/tests/kernel_routes.rs:3849`);
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:194`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:201`). Status: unaudited.
 
 ## Failure scenario
 

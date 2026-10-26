@@ -155,6 +155,13 @@ async fn a_delete_step_with_an_unknown_outcome_converges_on_retry() {
             1,
             "{code}"
         );
+        assert_eq!(
+            handler
+                .use_outcome_lifecycle
+                .get(LifecycleWrite::DeleteKernelUnavailable),
+            u64::from(code == "kernel_unavailable"),
+            "{code}"
+        );
     }
 }
 
@@ -195,6 +202,13 @@ async fn a_route_torn_down_after_a_hard_fold_leaves_its_records_live() {
     let (handler, store, _dir, project) = served_handler().await;
     let tip = handler.kernel.kernel_store().unwrap().tip().unwrap();
     handler.unbind_route(test_route(7));
+    assert!(
+        matches!(
+            handler.resolve_binding(test_route(7), "ses"),
+            Err(BindingError::Unbound)
+        ),
+        "the route was torn down"
+    );
     assert_eq!(served(&handler, &project)[0].serve.deleted_at, None);
     assert!(store.load("ses").unwrap().row_version.is_some());
     assert_eq!(handler.kernel.kernel_store().unwrap().tip().unwrap(), tip);
@@ -331,5 +345,34 @@ async fn a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up(
     assert_eq!(
         lifecycle_counts(&handler),
         [("transform_touched", 2), ("transform_skipped_deadline", 1)]
+    );
+}
+
+/// A pass's Kernel writes share one wait: once an earlier write spent it, a later touch answers `Deadline` with a free writer and leaves the record as it was.
+#[tokio::test(flavor = "current_thread")]
+async fn a_spent_pass_budget_skips_the_touch() {
+    let (handler, _store, _dir, project) = served_handler().await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let binding = bound(&project);
+    let touched = served(&handler, &project)[0]
+        .serve
+        .last_transform_at
+        .unwrap();
+    let budget = crate::use_outcome_writer::PassWriteBudget::default();
+    budget.spend(|_| std::thread::sleep(Duration::from_millis(260)));
+    let write = budget.spend(|budget| {
+        crate::use_outcome_writer::touch_session(
+            &kernel,
+            budget,
+            &binding.kernel_project,
+            &binding.harness,
+            "ses",
+            touched + 1,
+        )
+    });
+    assert_eq!(write, Some(LifecycleWrite::TransformSkippedDeadline));
+    assert_eq!(
+        served(&handler, &project)[0].serve.last_transform_at,
+        Some(touched)
     );
 }

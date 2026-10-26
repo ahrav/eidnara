@@ -9,15 +9,15 @@ Record kind: new obligation activated by #1156.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `6d91bfa92`).
+its parent is `ed75b9e5b`).
 
 - Step: `delete_kernel_step` (`crates/daemon/src/lib.rs:6850`) retires the
   captured sources, then `mark_use_outcomes_deleted`
-  (`crates/daemon/src/lib.rs:6877`) commits one envelope keyed by
+  (`crates/daemon/src/lib.rs:6875`) commits one envelope keyed by
   `use-outcome-delete` and a fresh attempt nonce
   (`crates/daemon/src/use_outcome_writer.rs:167`); an envelope that marks
   nothing rolls back.
-- Order: the step runs at `crates/daemon/src/lib.rs:6977`, before the
+- Order: the step runs at `crates/daemon/src/lib.rs:6974`, before the
   `stop_after_retirement` hook and the memory delete; a `kernel_unavailable`
   from either part counts `delete_kernel_unavailable`.
 - A retry after a stop between the stores, or after an unknown commit outcome,
@@ -34,9 +34,9 @@ its parent is `6d91bfa92`).
   `a_delete_step_with_an_unknown_outcome_converges_on_retry`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:134`);
   `a_second_delete_marks_records_written_after_the_first`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:163`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:170`);
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:194`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:201`); Kernel half:
   `a_session_delete_marks_each_live_record_once`
   (`crates/kernel/tests/kernel_use_outcome.rs:843`). Status: unaudited.
 

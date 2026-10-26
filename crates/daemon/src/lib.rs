@@ -6858,20 +6858,18 @@ impl HandlerCore {
         let outcome = self
             .kernel
             .kernel_store()
-            .map_err(|state| PreparedOutcome::Error {
-                code: "kernel_unavailable".to_string(),
-                message: state.state_key(),
-            })
+            .map_err(|state| DeleteStepError::Unavailable(state.state_key()))
             .and_then(|kernel| {
                 Self::retire_captured_sources(&kernel, binding, session_id)?;
                 self.mark_use_outcomes_deleted(&kernel, binding, session_id)
             });
-        if matches!(&outcome, Err(PreparedOutcome::Error { code, .. }) if code == "kernel_unavailable")
-        {
-            self.use_outcome_lifecycle
-                .record(use_outcome_writer::LifecycleWrite::DeleteKernelUnavailable);
-        }
-        outcome
+        outcome.map_err(|error| {
+            if matches!(error, DeleteStepError::Unavailable(_)) {
+                self.use_outcome_lifecycle
+                    .record(use_outcome_writer::LifecycleWrite::DeleteKernelUnavailable);
+            }
+            error.into_outcome()
+        })
     }
 
     fn mark_use_outcomes_deleted(
@@ -6879,7 +6877,7 @@ impl HandlerCore {
         kernel: &kernel::KernelStore,
         binding: &SessionBinding,
         session_id: &str,
-    ) -> Result<(), PreparedOutcome> {
+    ) -> Result<(), DeleteStepError> {
         let marked = use_outcome_writer::mark_session_deleted(
             kernel,
             &binding.kernel_project,
@@ -6908,7 +6906,7 @@ impl HandlerCore {
         kernel: &kernel::KernelStore,
         binding: &SessionBinding,
         session_id: &str,
-    ) -> Result<(), PreparedOutcome> {
+    ) -> Result<(), DeleteStepError> {
         let session = source_capture::CapturedSession {
             project_id: binding.kernel_project.digest(),
             harness: &binding.harness,
@@ -6922,10 +6920,9 @@ impl HandlerCore {
         if retired {
             Ok(())
         } else {
-            Err(PreparedOutcome::Error {
-                code: "kernel_unavailable".to_string(),
-                message: "captured sources not retired: the page bound ran out".to_string(),
-            })
+            Err(DeleteStepError::Unavailable(
+                "captured sources not retired: the page bound ran out".to_string(),
+            ))
         }
     }
 
@@ -16607,17 +16604,33 @@ fn invalid_params_error(message: impl Into<String>) -> PreparedOutcome {
     }
 }
 
-/// Maps a Kernel failure in `session.delete`'s Kernel step: a conflict, a corrupt row, or invalid input recurs on retry and is `source_retirement_failed`; every other failure is the retryable `kernel_unavailable`.
-fn delete_step_error(context: &str, error: kernel::KernelError) -> PreparedOutcome {
-    let code = match error {
+/// A failure of `session.delete`'s Kernel step: `Unavailable` is the retryable `kernel_unavailable`, and `Failed` is `source_retirement_failed`, which a retry meets again.
+enum DeleteStepError {
+    Unavailable(String),
+    Failed(String),
+}
+
+impl DeleteStepError {
+    fn into_outcome(self) -> PreparedOutcome {
+        let (code, message) = match self {
+            Self::Unavailable(message) => ("kernel_unavailable", message),
+            Self::Failed(message) => ("source_retirement_failed", message),
+        };
+        PreparedOutcome::Error {
+            code: code.to_string(),
+            message,
+        }
+    }
+}
+
+/// Classifies a Kernel failure in `session.delete`'s Kernel step: a conflict, a corrupt row, or invalid input recurs on retry; every other failure is transient.
+fn delete_step_error(context: &str, error: kernel::KernelError) -> DeleteStepError {
+    let message = format!("{context}: {error}");
+    match error {
         kernel::KernelError::Conflict
         | kernel::KernelError::CorruptCanonicalRow
-        | kernel::KernelError::InvalidInput => "source_retirement_failed",
-        _ => "kernel_unavailable",
-    };
-    PreparedOutcome::Error {
-        code: code.to_string(),
-        message: format!("{context}: {error}"),
+        | kernel::KernelError::InvalidInput => DeleteStepError::Failed(message),
+        _ => DeleteStepError::Unavailable(message),
     }
 }
 

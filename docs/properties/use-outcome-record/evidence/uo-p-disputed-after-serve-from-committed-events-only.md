@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `6d91bfa92`).
+its parent is `ed75b9e5b`).
 
 - Join: `crates/kernel/src/use_outcome.rs:183`; read: `served_sessions_for`
   (`crates/kernel/src/use_outcome.rs:419`).
