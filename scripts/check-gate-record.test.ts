@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { type Change, checkGateRecord, gitChange, lastRound } from "./check-gate-record";
+import { type Change, checkGateRecord, gitChange, lastRound, needsGate } from "./check-gate-record";
 
 // Signing, hooks, and merge settings in a developer's git config can fail these commits.
 const ISOLATED_GIT = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
@@ -37,9 +37,26 @@ describe("lastRound", () => {
     });
 });
 
+describe("needsGate", () => {
+    test("gates code and the Markdown claims under docs/, and exempts guidance and other Markdown", () => {
+        expect(needsGate("src/a.rs")).toBe(true);
+        expect(needsGate("docs/host-wire-protocol.md")).toBe(true);
+        expect(needsGate("docs/properties/tokenizer/evidence/a.md")).toBe(true);
+        expect(needsGate("docs/agents/issue-tracker.md")).toBe(false);
+        expect(needsGate("README.md")).toBe(false);
+        expect(needsGate("crates/storage/AGENTS.md")).toBe(false);
+    });
+});
+
 describe("checkGateRecord", () => {
-    test("a Markdown-only change needs no record", () => {
-        expect(checkGateRecord("", "c3", change(["docs/a.md"], {}))).toEqual([]);
+    test("a Markdown-only change outside docs/ needs no record", () => {
+        expect(checkGateRecord("", "c3", change(["README.md", "docs/agents/issue-tracker.md"], {}))).toEqual([]);
+    });
+
+    test("a change to a Markdown claim under docs/ with no recorded round fails", () => {
+        const findings = checkGateRecord("", "c3", change(["docs/properties/tokenizer/README.md"], {}));
+        expect(findings).toHaveLength(1);
+        expect(findings[0]).toContain("records no");
     });
 
     test("a code change with no recorded round fails", () => {
@@ -60,13 +77,17 @@ describe("checkGateRecord", () => {
             "c3",
             change(["src/a.rs", "docs/a.md"], { c3: ["src/a.rs", "docs/a.md"] }),
         );
-        expect(findings.slice(1)).toEqual(["  src/a.rs"]);
+        expect(findings[0]).toContain("not the head c3");
+        expect(findings.slice(2)).toEqual(["  docs/a.md", "  src/a.rs"]);
     });
 
-    test("a later Markdown commit and a main merge that touches only other files pass", () => {
+    test("a later commit that changes no gated file still needs a round for the head", () => {
         const body = "Round 1 reviewed c0aaaaa..c2aaaaa: rust";
-        const edits = { c3: ["docs/a.md", "crates/other/src/lib.rs"] };
-        expect(checkGateRecord(body, "c3", change(["src/a.rs", "docs/a.md"], edits))).toEqual([]);
+        const edits = { c3: ["README.md", "crates/other/src/lib.rs"] };
+        const findings = checkGateRecord(body, "c3", change(["src/a.rs", "README.md"], edits));
+        expect(findings).toHaveLength(2);
+        expect(findings[0]).toContain("not the head c3");
+        expect(findings[1]).toContain("no rerun");
     });
 
     test("a reviewed head outside the branch history fails", () => {
@@ -118,10 +139,10 @@ describe("gitChange", () => {
         const reviewed = commit("copy", { "y.rs": `${lines}extra\n` });
         const head = commit("delete", {}, ["x.rs"]);
         const findings = checkGateRecord(`Round 1 reviewed ${base}..${reviewed}: rust`, head, gitChange(base, head, repo));
-        expect(findings.slice(1)).toEqual(["  x.rs"]);
+        expect(findings.slice(2)).toEqual(["  x.rs"]);
     });
 
-    test("a merge of main that touches only other files and a later Markdown edit keep the round current", () => {
+    test("a merge of main that touches only other files and a later Markdown edit need a round for the head", () => {
         const base = commit("base", { "a.rs": "a\n", "b.rs": "b\n" });
         git("checkout", "-q", "-b", "pr");
         const reviewed = commit("pr change", { "a.rs": "a2\n" });
@@ -131,7 +152,17 @@ describe("gitChange", () => {
         git("merge", "-q", "--no-edit", "main");
         const head = commit("docs", { "notes.md": "notes\n" });
         const body = `Round 1 reviewed ${base}..${reviewed}: rust`;
-        expect(checkGateRecord(body, head, gitChange("main", head, repo))).toEqual([]);
+        const findings = checkGateRecord(body, head, gitChange("main", head, repo));
+        expect(findings).toHaveLength(2);
+        expect(findings[0]).toContain(`not the head ${head}`);
+        expect(findings[1]).toContain("no rerun");
+    });
+
+    test("a round that names the head passes", () => {
+        const base = commit("base", { "a.rs": "a\n" });
+        const head = commit("pr change", { "a.rs": "a2\n" });
+        const body = `Round 1 reviewed ${base}..${head.slice(0, 9)}: rust`;
+        expect(checkGateRecord(body, head, gitChange(base, head, repo))).toEqual([]);
     });
 
     test("a merge of main that touches a file the pull request changes needs a new round", () => {
@@ -144,6 +175,6 @@ describe("gitChange", () => {
         git("merge", "-q", "--no-edit", "main");
         const head = git("rev-parse", "HEAD");
         const body = `Round 1 reviewed ${base}..${reviewed}: rust`;
-        expect(checkGateRecord(body, head, gitChange("main", head, repo)).slice(1)).toEqual(["  a.rs"]);
+        expect(checkGateRecord(body, head, gitChange("main", head, repo)).slice(2)).toEqual(["  a.rs"]);
     });
 });

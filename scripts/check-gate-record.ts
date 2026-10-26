@@ -15,8 +15,10 @@ export function lastRound(body: string): Round | undefined {
     return last;
 }
 
+// REVIEW.md gates production code and the Markdown contract, property, and
+// test-evidence claims, which live under `docs/`; `docs/agents/` holds guidance.
 export function needsGate(path: string): boolean {
-    return !path.endsWith(".md");
+    return !path.endsWith(".md") || (path.startsWith("docs/") && !path.startsWith("docs/agents/"));
 }
 
 export interface Change {
@@ -32,7 +34,7 @@ export function checkGateRecord(body: string, head: string, change: Change): str
     const round = lastRound(body);
     if (round === undefined) {
         return [
-            `the pull request changes ${gated.length} non-Markdown files and its body records no ` +
+            `the pull request changes ${gated.length} gated files and its body records no ` +
                 "`Round N reviewed <base>..<head>` line (REVIEW.md, Sub-agents)",
         ];
     }
@@ -40,6 +42,7 @@ export function checkGateRecord(body: string, head: string, change: Change): str
     if (reviewed === undefined) {
         return [`Round ${round.number} names ${round.head}, which is not a commit in this repository`];
     }
+    if (reviewed === head) return [];
     if (!change.isAncestor(reviewed, head)) {
         return [`Round ${round.number} reviewed ${round.head}, which is not an ancestor of the head ${head}`];
     }
@@ -48,10 +51,12 @@ export function checkGateRecord(body: string, head: string, change: Change): str
         .changedBetween(reviewed, head)
         .filter((path) => files.has(path) && needsGate(path))
         .sort();
-    if (unreviewed.length === 0) return [];
     return [
-        `these files changed after Round ${round.number} reviewed ${round.head}; ` +
-            "rerun the reviews that cover them and record a new round:",
+        `Round ${round.number} reviewed ${round.head}, which is not the head ${head}; ` +
+            "record a new round for the head (REVIEW.md, Sub-agents)",
+        unreviewed.length === 0
+            ? "  no gated file the pull request changes differs between them; state `no rerun - <reason>`"
+            : "  rerun the reviews that cover these files:",
         ...unreviewed.map((path) => `  ${path}`),
     ];
 }
@@ -105,5 +110,5 @@ if (import.meta.main) {
         for (const finding of findings) console.error(finding);
         process.exit(1);
     }
-    console.log("gate record: the last recorded round covers every non-Markdown change");
+    console.log("gate record: the last recorded round names the head");
 }
