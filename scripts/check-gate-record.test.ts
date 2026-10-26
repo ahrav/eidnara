@@ -38,6 +38,8 @@ describe("lastRound", () => {
 
     test("ignores a round without the skills suffix", () => {
         expect(lastRound("Round 1 reviewed aaaaaaa..bbbbbbb\nRound 2 reviewed aaaaaaa..ccccccc:\n")).toBeUndefined();
+        expect(lastRound("Round 1 reviewed aaaaaaa..bbbbbbb:\n## Notes")).toBeUndefined();
+        expect(lastRound("Round 1 reviewed aaaaaaa..bbbbbbb\n: rust")).toBeUndefined();
         expect(lastRound("Round 1 reviewed `aaaaaaa`..`bbbbbbb`: no rerun - docs only")).toEqual({
             number: 1,
             base: "aaaaaaa",
@@ -47,13 +49,16 @@ describe("lastRound", () => {
 });
 
 describe("needsGate", () => {
-    test("gates code and the Markdown claims under docs/, and exempts guidance and other Markdown", () => {
+    test("gates code, Markdown claims under docs/, and Markdown fixtures; exempts guidance and readmes", () => {
         expect(needsGate("src/a.rs")).toBe(true);
         expect(needsGate("docs/host-wire-protocol.md")).toBe(true);
-        expect(needsGate("docs/properties/tokenizer/evidence/a.md")).toBe(true);
+        expect(needsGate("docs/properties/tokenizer/README.md")).toBe(true);
+        expect(needsGate("packages/opencode-plugin/src/shared/prompt-surface-a1-golden.md")).toBe(true);
         expect(needsGate("docs/agents/issue-tracker.md")).toBe(false);
         expect(needsGate("README.md")).toBe(false);
+        expect(needsGate("REVIEW.md")).toBe(false);
         expect(needsGate("crates/storage/AGENTS.md")).toBe(false);
+        expect(needsGate("crates/daemon/testdata/corpus/README.md")).toBe(false);
     });
 });
 
@@ -159,7 +164,7 @@ describe("gitChange", () => {
         commit("main change", { "b.rs": "b2\n" });
         git("checkout", "-q", "pr");
         git("merge", "-q", "--no-edit", "main");
-        const head = commit("docs", { "notes.md": "notes\n" });
+        const head = commit("docs", { "README.md": "notes\n" });
         const body = `Round 1 reviewed ${base}..${reviewed}: rust`;
         const findings = checkGateRecord(body, head, gitChange("main", head, repo));
         expect(findings).toHaveLength(2);

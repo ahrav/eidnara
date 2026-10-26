@@ -4,8 +4,9 @@ export interface Round {
     head: string;
 }
 
-// A record is `Round N reviewed <base>..<head>: <skills or no rerun - reason>`; the suffix is required.
-const ROUND = /\bRound\s+(\d+)\s+reviewed\s+`?([^\s`]+?)`?\s*\.\.\s*`?([0-9a-f]{7,40})`?\s*:\s*(?=\S)/gi;
+// A record is `Round N reviewed <base>..<head>: <skills or no rerun - reason>`.
+// The suffix starts on the colon's line.
+const ROUND = /\bRound\s+(\d+)\s+reviewed\s+`?([^\s`]+?)`?\s*\.\.\s*`?([0-9a-f]{7,40})`?[ \t]*:[ \t]*(?=\S)/gi;
 
 export function lastRound(body: string): Round | undefined {
     let last: Round | undefined;
@@ -17,9 +18,13 @@ export function lastRound(body: string): Round | undefined {
 }
 
 // REVIEW.md gates production code and the Markdown contract, property, and
-// test-evidence claims, which live under `docs/`; `docs/agents/` holds guidance.
+// test-evidence claims. Markdown is gated by default: `docs/` holds the claims
+// and `docs/agents/` holds guidance; outside `docs/`, README, AGENTS, and REVIEW
+// files are guidance, and the gate treats all other Markdown as a fixture or claim.
 export function needsGate(path: string): boolean {
-    return !path.endsWith(".md") || (path.startsWith("docs/") && !path.startsWith("docs/agents/"));
+    if (!path.endsWith(".md")) return true;
+    if (path.startsWith("docs/")) return !path.startsWith("docs/agents/");
+    return !/(^|\/)(README|AGENTS|REVIEW)\.md$/.test(path);
 }
 
 export interface Change {
