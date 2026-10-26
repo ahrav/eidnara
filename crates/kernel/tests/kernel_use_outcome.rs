@@ -5,6 +5,7 @@ use kernel::{
     served_set_digest, use_outcome_id,
 };
 use rusqlite::{Connection, params};
+use sha2::Digest;
 
 const HARNESS: &str = "opencode";
 const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
@@ -478,6 +479,7 @@ fn expiry_retires_an_expired_record_under_a_reserved_receipt() {
     let expired = insert(&store, "old", spec("s1", &["d1"], served_at, 0)).unwrap();
     let due = insert(&store, "due", spec("s2", &["d1"], served_at, 1)).unwrap();
     let now = USE_OUTCOME_RETENTION_MS + 1;
+    let digest = format!("{:x}", sha2::Sha256::digest(expired.as_bytes()));
 
     assert_eq!(
         store.expire_use_outcomes(now).unwrap(),
@@ -494,7 +496,8 @@ fn expiry_retires_an_expired_record_under_a_reserved_receipt() {
                  JOIN use_outcomes u ON u.invalidated_commit_seq=r.commit_seq
                  JOIN commit_log c ON c.commit_seq=r.commit_seq
                  WHERE r.producer='eidnara-kernel/use-outcome-expiry'
-                   AND r.operation_key='{now}:{expired}' AND c.producer=r.producer
+                   AND r.operation_key='{now}:{expired}' AND r.request_digest='{digest}'
+                   AND c.producer=r.producer
                    AND c.operation_key GLOB '{now}:page:*'
                    AND u.use_outcome_id='{expired}'"
             )
@@ -763,6 +766,37 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         )
         .unwrap();
     assert_eq!(answer(&store), [(second, false)]);
+}
+
+/// The by-decision read answers serves oldest first by creating commit even when their ids, which the decision index orders, sort otherwise.
+#[test]
+fn served_sessions_are_ordered_by_creating_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["x"]);
+    let served_at = tick(&store, "tick");
+    let ids: Vec<String> = (0..6)
+        .map(|serve| {
+            insert(
+                &store,
+                &format!("serve-{serve}"),
+                spec(&format!("s{serve}"), &["x"], served_at, 100),
+            )
+            .unwrap()
+        })
+        .collect();
+    let mut by_id = ids.clone();
+    by_id.sort();
+    assert_ne!(
+        by_id, ids,
+        "the serves' ids differ from their creation order"
+    );
+    let answer: Vec<String> = store
+        .served_sessions_for("x")
+        .unwrap()
+        .into_iter()
+        .map(|session| session.serve.use_outcome_id)
+        .collect();
+    assert_eq!(answer, ids);
 }
 
 /// A cited record whose deadline is later than a full page of uncited records is not read by the call that fills the page, and is counted by the call that reaches it.
