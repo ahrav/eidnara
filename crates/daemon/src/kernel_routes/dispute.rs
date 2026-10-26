@@ -175,7 +175,9 @@ fn encode(value: &str) -> String {
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
-    char::from(byte).to_digit(16).and_then(|digit| u8::try_from(digit).ok())
+    char::from(byte)
+        .to_digit(16)
+        .and_then(|digit| u8::try_from(digit).ok())
 }
 
 /// The bytes `value` encodes, as UTF-8; `None` for a `%` without two hex
