@@ -9,7 +9,7 @@ Record kind: proposed obligation; its owning ticket #1156 activates it.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `ea5115e1b`).
+its parent is `03c6b2b95`).
 
 - The update is `MAX(last_transform_at, now)` over live records.
 

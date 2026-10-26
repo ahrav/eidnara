@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `ea5115e1b`).
+its parent is `03c6b2b95`).
 
 - Writer binding: the INSERT at `crates/kernel/src/admission.rs:1748` binds
   `self.commit_seq` at `crates/kernel/src/admission.rs:1781`.

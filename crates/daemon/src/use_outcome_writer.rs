@@ -88,7 +88,10 @@ impl UseOutcomeCounts {
             outcome,
             UseOutcomeWrite::Written | UseOutcomeWrite::Replayed
         ) {
-            eprintln!("daemon: use-outcome record not written: {}", outcome.name());
+            eprintln!(
+                "daemon: use-outcome record not confirmed: {}",
+                outcome.name()
+            );
         }
     }
 

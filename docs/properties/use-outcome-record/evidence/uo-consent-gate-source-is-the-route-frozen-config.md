@@ -10,9 +10,9 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `ea5115e1b`).
+its parent is `03c6b2b95`).
 
-- Bind: `crates/daemon/src/lib.rs:13335`.
+- Bind: `crates/daemon/src/lib.rs:13348`.
 - Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:5983`) reads
   `self.effective_config` at `crates/daemon/src/lib.rs:6025`.
 - Correction: the spec cited `config.rs:2630, 2753, 2762`, which are config
@@ -22,11 +22,11 @@ its parent is `ea5115e1b`).
   `route.open`; the wrapup fire reads the live effective config.
 - Existing check:
   `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-  (`crates/daemon/src/lib.rs:39524`);
+  (`crates/daemon/src/lib.rs:39537`);
   `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
   `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:486`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_writer_tests.rs:498`). Status: unaudited.
 
 ## Failure scenario
 

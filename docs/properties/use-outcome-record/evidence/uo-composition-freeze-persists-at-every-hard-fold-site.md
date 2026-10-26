@@ -11,7 +11,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `ea5115e1b`).
+its parent is `03c6b2b95`).
 
 - Additive engine: `crates/daemon/src/transform.rs:3122` inside
   `apply_additive_only` (`apply_additive_only`
@@ -32,7 +32,7 @@ its parent is `ea5115e1b`).
   `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
   (`crates/daemon/tests/transform_canonical_memory.rs:46`);
   `a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:225`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:237`);
   `a_pressure_refold_reports_its_frozen_composition`
   (`crates/daemon/src/transform.rs:20895`). Status: unaudited.
 

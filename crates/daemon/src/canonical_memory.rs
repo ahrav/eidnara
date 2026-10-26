@@ -63,7 +63,9 @@ impl CanonicalMemorySnapshot {
             row.category.hash(&mut hasher);
             render_memory_line(row).hash(&mut hasher);
         }
-        let served_ids: Vec<String> = rendered.iter().map(|row| row.object_id.clone()).collect();
+        let mut served_ids: Vec<String> =
+            rendered.iter().map(|row| row.object_id.clone()).collect();
+        served_ids.dedup();
         let served_set_digest = kernel::served_set_digest(served_ids.iter().map(String::as_str));
         Self {
             known_as_of,
@@ -343,6 +345,7 @@ mod tests {
             vec![
                 row("b", "PROJECT_RULES", "Rule b."),
                 row("a", "NAMING", "Name a."),
+                row("a", "PROJECT_RULES", "A second row of one object."),
                 row("dropped", "not-a-memory-category", "Dropped."),
             ],
         );

@@ -75,9 +75,9 @@ reviewed fix moves a line.
 `uo-p-served-ids-equal-frozen-composition`, `uo-p-no-row-when-memory-disabled`,
 `uo-p-no-row-for-withheld-composition`, and
 `uo-p-producer-matches-request-subagent-flag`, and owns the eight writer
-markers. E1 and E2 close with those activations: the writer's tests check the
-insert contract, the digest agreement, and the deterministic key from the
-daemon side. G1 closes by
+markers. E1 and E2 close with those activations: the Kernel tests check the
+insert contract, and the writer's tests check the key, the digest, and the
+role from the daemon side. G1 closes by
 `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`. The R13 crash
 arm is constructed by the test-only fault point between the fold's Memory
 Store commit and the Kernel write.

@@ -209,15 +209,27 @@ async fn only_an_available_composition_is_recorded() {
         );
     }
 
-    let (withheld, _store, _dir, _project) =
-        handler_with_store(Arc::clone(&producer), default_test_config());
-    let response = call_transform(&withheld, vec![ck("m1", 1, "hello")]).await;
-    assert_eq!(response["project_memory"]["kind"], "withheld", "{response}");
-    assert_eq!(response["action"], "HARD", "{response}");
-    assert!(
-        counts(&withheld).is_empty(),
-        "a withheld read attempts no write"
-    );
+    for engine in [
+        default_test_config(),
+        fold_authority_handler_tests::native_config(),
+    ] {
+        let (withheld, _store, _dir, withheld_project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        withheld.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: engine,
+                ..bound(&withheld_project)
+            },
+        );
+        let response = call_transform(&withheld, vec![ck("m1", 1, "hello")]).await;
+        assert_eq!(response["project_memory"]["kind"], "withheld", "{response}");
+        assert_eq!(response["action"], "HARD", "{response}");
+        assert!(
+            counts(&withheld).is_empty(),
+            "a withheld read attempts no write"
+        );
+    }
 }
 
 /// A Kernel that fails after the fold's Memory Store commit leaves the response bytes and the frozen composition equal to a run with no fault, the pass answers `ok`, the outcome is counted, and a later HARD fold at the same served set records the serve.
@@ -269,20 +281,12 @@ async fn a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_re
         assert!(served(&faulted, &faulted_project).is_empty(), "{name}");
         assert_eq!(counts(&faulted), [(name, 1)], "{name}");
 
-        // A deleted session's next pass folds afresh over the same composition.
-        let deleted = faulted
-            .core
-            .handle_session_delete_value(
-                test_route(7),
-                &json!({"method":"session.delete","session_id":"ses"}),
-            )
-            .await;
-        assert!(
-            matches!(deleted, PreparedOutcome::Response(_)),
-            "{deleted:?}"
+        // Context pressure folds HARD again over the unchanged composition.
+        let repaired = call_transform_with_usage(&faulted, big_messages(), 48_000, 50_000).await;
+        assert_eq!(
+            repaired["project_memory"], observed["project_memory"],
+            "{name}: the served set is unchanged"
         );
-        let repaired = call_transform(&faulted, vec![ck("m1", 1, "hello")]).await;
-        assert_eq!(repaired["action"], "HARD", "{name}: {repaired}");
         let records = served(&faulted, &faulted_project);
         assert_eq!(records.len(), 1, "{name}");
         assert_eq!(records[0].decision_object_ids, ["mem-a"], "{name}");
@@ -304,22 +308,30 @@ async fn a_discarded_attempt_leaves_no_serve_and_the_retry_records_one() {
         .dispatch_value(test_route(7), seed_batch(0, 1, 0, 0))
         .await;
     assert!(matches!(synced, PreparedOutcome::Response(_)), "{synced:?}");
+    let synced_version = store.load("ses").unwrap().row_version.unwrap();
     let rival = Arc::clone(&store);
-    let raced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let raced = Arc::new(Mutex::new(None));
     let fired = Arc::clone(&raced);
     crate::transform::install_transform_attempt_hook("ses", move || {
         let loaded = rival.load("ses").unwrap();
         rival
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
-        fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        *fired.lock().unwrap() = Some(loaded.meta.project_memory);
     });
     let response = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
-    assert!(
-        raced.load(std::sync::atomic::Ordering::SeqCst),
-        "the rival commit ran"
+    assert_eq!(
+        *raced.lock().unwrap(),
+        Some(None),
+        "the rival committed before the attempt's commit, while no composition was stored"
     );
     assert_eq!(response["action"], "HARD", "{response}");
+    let after = store.load("ses").unwrap();
+    assert!(
+        after.row_version > Some(synced_version + 1),
+        "the rival's commit and the retried attempt's commit both landed"
+    );
+    assert!(after.meta.project_memory.is_some());
     assert_eq!(served(&handler, &project).len(), 1);
     assert_eq!(counts(&handler), [("written", 1)]);
 }
@@ -630,30 +642,49 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     assert!(served(&fresh, &fresh_project).is_empty());
 }
 
-/// Every Kernel error maps to one closed outcome name, and the vocabulary indexes its counters in order.
+/// The outcome vocabulary indexes its counters in order, and the Kernel errors the writer meets map to their closed names.
 #[test]
 fn every_kernel_error_maps_to_a_closed_outcome() {
     for (index, outcome) in UseOutcomeWrite::ALL.iter().enumerate() {
         assert_eq!(*outcome as usize, index);
     }
-    let mapped: Vec<_> = KernelError::ALL
-        .iter()
-        .map(|error| (*error, UseOutcomeWrite::from_error(*error)))
-        .collect();
-    let expected = |error: KernelError| match error {
-        KernelError::Conflict => UseOutcomeWrite::Conflict,
-        KernelError::Deadline | KernelError::Busy => UseOutcomeWrite::Deadline,
-        KernelError::Held
-        | KernelError::EngineUnsupported
-        | KernelError::Foreign
-        | KernelError::Inconclusive
-        | KernelError::Io
-        | KernelError::IdentityMismatch
-        | KernelError::FenceLost
-        | KernelError::InvalidRestore => UseOutcomeWrite::KernelUnavailable,
-        _ => UseOutcomeWrite::Refused,
-    };
-    for (error, outcome) in mapped {
-        assert_eq!(outcome, expected(error), "{error:?}");
+    for (error, outcome) in [
+        (KernelError::Conflict, UseOutcomeWrite::Conflict),
+        (KernelError::Busy, UseOutcomeWrite::Deadline),
+        (KernelError::Deadline, UseOutcomeWrite::Deadline),
+        (KernelError::FenceLost, UseOutcomeWrite::KernelUnavailable),
+        (KernelError::Held, UseOutcomeWrite::KernelUnavailable),
+        (KernelError::InvalidInput, UseOutcomeWrite::Refused),
+        (KernelError::NotFound, UseOutcomeWrite::Refused),
+    ] {
+        assert_eq!(UseOutcomeWrite::from_error(error), outcome, "{error:?}");
     }
+}
+
+/// An emergency pass that reruns after its HARD first run records one serve: every attempt of the pass freezes the same pinned read, and the first settled write covers the rerun.
+#[tokio::test(flavor = "current_thread")]
+async fn an_emergency_pass_that_reruns_records_one_serve() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+    seed_memories(
+        &handler.kernel.kernel_store().unwrap(),
+        &project,
+        &[("mem-a", "Rule a.")],
+    );
+    let emergency = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+    assert_eq!(
+        emergency["history_summarizer"]["fired"], true,
+        "{emergency}"
+    );
+    let runs = tool_body(handler.handle_session_status_value(
+        test_route(7),
+        &json!({ "method": "session.status", "session_id": "ses" }),
+    ))["pass_trace"]["scheduler_history"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(runs >= 2, "the pass reran");
+    assert_eq!(served(&handler, &project).len(), 1);
+    assert_eq!(counts(&handler), [("written", 1)]);
 }

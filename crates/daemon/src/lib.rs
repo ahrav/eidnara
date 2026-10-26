@@ -3463,7 +3463,7 @@ struct PassIntake {
 }
 
 /// The fixed context of one transform pass. Every transform attempt and the settle read it;
-/// nothing mutates it.
+/// its one mutable field is the latch that settles the pass's serve write.
 struct PassEnv {
     store: Arc<MemoryStore>,
     parsed: Arc<TransformRequest>,
@@ -3474,8 +3474,8 @@ struct PassEnv {
     project_path: String,
     note_project_path: String,
     project_memory: Option<canonical_memory::CanonicalMemoryRead>,
-    /// Set by the pass's first serve write: every attempt of a pass freezes the same pinned read, so one write per pass covers its reruns.
-    use_outcome_attempted: std::sync::atomic::AtomicBool,
+    /// Set once a serve write of this pass reached a settled outcome: every attempt of a pass freezes the same pinned read, so one settled write covers its reruns.
+    use_outcome_settled: std::sync::atomic::AtomicBool,
     snapshot_generation: u64,
     pass_now: i64,
     timings: PassTimings,
@@ -9518,7 +9518,7 @@ impl HandlerCore {
             project_path,
             note_project_path,
             project_memory,
-            use_outcome_attempted: std::sync::atomic::AtomicBool::new(false),
+            use_outcome_settled: std::sync::atomic::AtomicBool::new(false),
             snapshot_generation,
             pass_now,
             timings: PassTimings {
@@ -9624,9 +9624,11 @@ impl HandlerCore {
         };
         let mut pass = transform_with_projection_cached(store, parsed, &producer_ctx)?;
         self.promote_derived_state(store, env, &mut pass);
-        let pass = pass.finished()?;
-        self.record_use_outcome(env, &pass);
-        Ok(pass)
+        // A boundary read failure fails the pass after its commit froze the composition, so the serve is recorded here; a successful pass records it after the bookkeeping its commit implies.
+        if pass.boundary_read_error.is_some() {
+            self.record_use_outcome(env, &pass);
+        }
+        pass.finished()
     }
 
     /// Records the serve when this attempt froze an Available composition, its Memory Store commit landed, and the pass has not yet written one. The commit already decided the pass, so the write's outcome is only counted.
@@ -9641,18 +9643,18 @@ impl HandlerCore {
         };
         debug_assert_eq!(
             pass.response.project_memory,
-            Some(memory_store::ProjectMemoryComposition::Canonical {
-                known_as_of: snapshot.known_as_of(),
-                truncated: snapshot.truncated(),
-                revision: snapshot.revision(),
-            }),
+            env.project_memory
+                .as_ref()
+                .map(canonical_memory::CanonicalMemoryRead::composition),
             "the recorded snapshot is the composition the pass froze"
         );
         // A read at sequence 0 precedes every commit, so its serve has no commit to name.
-        if snapshot.known_as_of() == 0
-            || env
-                .use_outcome_attempted
-                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        if snapshot.known_as_of() == 0 {
+            return;
+        }
+        if env
+            .use_outcome_settled
+            .load(std::sync::atomic::Ordering::Relaxed)
         {
             return;
         }
@@ -9672,6 +9674,15 @@ impl HandlerCore {
             },
             use_outcome_writer::UseOutcomeWrite::from_error,
         );
+        // A write the Kernel did not reach leaves the latch open, so a rerun in this pass retries it.
+        if !matches!(
+            outcome,
+            use_outcome_writer::UseOutcomeWrite::Deadline
+                | use_outcome_writer::UseOutcomeWrite::KernelUnavailable
+        ) {
+            env.use_outcome_settled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.use_outcome_counts.record(outcome);
     }
 
@@ -9752,6 +9763,7 @@ impl HandlerCore {
             .map_err(|error| Self::reject_transform(env, error))?;
         project_docs::restore_reads(env.document_reads.as_deref(), first_run_reads);
         pass.native_attached = false;
+        self.record_use_outcome(env, &pass.result);
         drop(derived);
         // The first run decided this pass's hint for its tail and persisted
         // it; the rerun finds that decision already made. The pass's decision
@@ -9846,6 +9858,7 @@ impl HandlerCore {
         // The guidance pin is stale once a pass commits; the removal moves with the commit,
         // since nothing else recomputes it before the next pass renders.
         self.forget_guidance_pin_on_commit(env, &result);
+        self.record_use_outcome(env, &result);
         let emergency_pre_floor = if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
             Self::read_publication_floor(env)
         } else {
