@@ -18,7 +18,7 @@ its parent is `8ace6c9f8`).
   teardown leaves it null.
 - Existing check: Kernel half only:
   `use_outcome_identity_and_served_set_are_never_rewritten`
-  (`crates/kernel/tests/kernel_schema.rs:2175`). The delete step is proposed.
+  (`crates/kernel/tests/kernel_schema.rs:2176`). The delete step is proposed.
   Status: unaudited.
 
 ## Failure scenario

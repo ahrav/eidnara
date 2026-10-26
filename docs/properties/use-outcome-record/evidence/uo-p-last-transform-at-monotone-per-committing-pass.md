@@ -17,7 +17,7 @@ its parent is `8ace6c9f8`).
   serving record, and only a pass whose response committed updates it.
 - Existing check: Kernel half only:
   `use_outcome_identity_and_served_set_are_never_rewritten`
-  (`crates/kernel/tests/kernel_schema.rs:2175`). The pass hook is proposed.
+  (`crates/kernel/tests/kernel_schema.rs:2176`). The pass hook is proposed.
   Status: unaudited.
 
 ## Failure scenario

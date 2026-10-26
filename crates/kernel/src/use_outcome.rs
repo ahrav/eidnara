@@ -254,16 +254,18 @@ impl Envelope<'_> {
             .execute_cached(
                 "INSERT INTO use_outcomes(
                      use_outcome_id,project_digest,harness,session_id,served_set_digest,
-                     composition_revision,served_commit_seq,session_role,recorded_at,
+                     decision_count,composition_revision,served_commit_seq,session_role,recorded_at,
                      created_commit_seq,retention_class,retain_until,sensitivity_class,
                      provider_egress_class
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'sensitive','local_only')",
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'sensitive','local_only')",
                 params![
                     id,
                     spec.project_digest,
                     spec.harness,
                     spec.session_id,
                     spec.served_set_digest,
+                    i64::try_from(spec.decision_object_ids.len())
+                        .map_err(|_| KernelError::InvalidInput)?,
                     spec.composition_revision.cast_signed(),
                     spec.served_commit_seq,
                     spec.session_role.as_str(),

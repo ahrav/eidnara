@@ -16,7 +16,7 @@ its parent is `8ace6c9f8`).
   (`crates/kernel/src/local_file.rs:558`).
 - Reserved receipt: `expiry_intent` (`crates/kernel/src/local_file.rs:433`).
 - The use-outcome sweep follows the same shape at `expire_use_outcomes`
-  (`crates/kernel/src/use_outcome.rs:451`).
+  (`crates/kernel/src/use_outcome.rs:453`).
 - Correction: the spec cited `harness_sources.rs:3331, 3187`; the tests moved to
   the lines under Existing check.
 

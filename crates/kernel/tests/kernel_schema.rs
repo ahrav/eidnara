@@ -181,7 +181,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "7a97653cf6d844d0d9f7e497a3c2280d44d5577a37da10f8c08f1b1e311105ec";
+    "a4c1c116c0e74eb047f6ca07f7a1976da147809bcdf677e129f4517ba9ff672c";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -2043,6 +2043,7 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("table", "use_outcome_decisions"),
         ("table", "use_outcomes"),
         ("table", "writer_fence"),
+        ("trigger", "admission_decisions_citation_no_delete"),
         ("trigger", "admission_decisions_use_outcome_immutable"),
         (
             "trigger",
@@ -2155,10 +2156,10 @@ fn a_nonpositive_busy_timeout_is_refused_instead_of_removing_the_busy_handler() 
 fn seed_use_outcome(conn: &Connection, id: &str, object_id: &str, served: i64, created: i64) {
     conn.execute(
         "INSERT INTO use_outcomes(
-             use_outcome_id,project_digest,harness,session_id,served_set_digest,
+             use_outcome_id,project_digest,harness,session_id,served_set_digest,decision_count,
              composition_revision,served_commit_seq,session_role,recorded_at,created_commit_seq,
              retention_class,retain_until,sensitivity_class,provider_egress_class
-         ) VALUES (?1,?2,'opencode','session-1',?3,7,?4,'primary',10,?5,
+         ) VALUES (?1,?2,'opencode','session-1',?3,1,7,?4,'primary',10,?5,
                    'use_outcome_capture',20,'sensitive','local_only')",
         params![id, "a".repeat(64), "b".repeat(64), served, created],
     )
@@ -2181,6 +2182,15 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
     let id = "c".repeat(64);
     let created = next_commit(&conn, "tx-created");
     seed_use_outcome(&conn, &id, "decision-1", root, created);
+    // A decision row inserted after recording aborts while `created` is still the newest commit.
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT INTO use_outcome_decisions(use_outcome_id,object_id)
+             VALUES ('{id}','decision-2')"
+        ),
+        "use_outcome_decisions are written with their record",
+    );
     let later = next_commit(&conn, "tx-later");
 
     for (column, value) in [
@@ -2189,6 +2199,7 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
         ("harness", "'pi'".to_string()),
         ("session_id", "'session-2'".to_string()),
         ("served_set_digest", format!("'{}'", "f".repeat(64))),
+        ("decision_count", "2".to_string()),
         ("composition_revision", "8".to_string()),
         ("served_commit_seq", later.to_string()),
         ("session_role", "'subagent'".to_string()),
@@ -2271,11 +2282,11 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
         &conn,
         &format!(
             "INSERT OR REPLACE INTO use_outcomes(
-                 use_outcome_id,project_digest,harness,session_id,served_set_digest,
+                 use_outcome_id,project_digest,harness,session_id,served_set_digest,decision_count,
                  composition_revision,served_commit_seq,session_role,recorded_at,
                  created_commit_seq,retention_class,retain_until,sensitivity_class,
                  provider_egress_class
-             ) VALUES ('{id}','{}','opencode','session-1','{}',7,{root},'primary',10,{created},
+             ) VALUES ('{id}','{}','opencode','session-1','{}',1,7,{root},'primary',10,{created},
                        'use_outcome_capture',20,'sensitive','local_only')",
             "a".repeat(64),
             "b".repeat(64)
@@ -2306,6 +2317,7 @@ fn use_outcome_classification_and_identity_shapes_are_checked() {
         ("harness", "'opencode'".to_string()),
         ("session_id", "'session-1'".to_string()),
         ("served_set_digest", digest.clone()),
+        ("decision_count", "0".to_string()),
         ("composition_revision", "7".to_string()),
         ("served_commit_seq", served.to_string()),
         ("session_role", "'primary'".to_string()),
@@ -2351,6 +2363,7 @@ fn use_outcome_classification_and_identity_shapes_are_checked() {
         ("use_outcome_id", format!("'{}'", "g".repeat(64))),
         ("harness", "''".to_string()),
         ("session_id", "''".to_string()),
+        ("decision_count", "-1".to_string()),
         ("served_commit_seq", created.to_string()),
         ("invalidated_commit_seq", created.to_string()),
         ("recorded_at", "-1".to_string()),
@@ -2437,4 +2450,32 @@ fn an_admission_citation_names_a_recorded_use_outcome_and_never_changes() {
         [],
     )
     .expect("rewriting the same citation changes nothing");
+    // Deleting a citing row aborts, including the delete REPLACE runs on the conflicting row.
+    assert_aborts_with(
+        &conn,
+        "DELETE FROM admission_decisions WHERE admission_decision_id='report'",
+        "an admission citation of a use outcome is written with its row",
+    );
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT OR REPLACE INTO admission_decisions(
+                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+             ) VALUES ('report','decision-1','test','decision-1',1,'explicit_user','user_explicit',
+                       'contradict','candidate','candidate','contradicted','automatic','admit',
+                       'normal',1,'fixture',{created},1)"
+        ),
+        "an admission citation of a use outcome is written with its row",
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT use_outcome_id FROM admission_decisions WHERE admission_decision_id='report'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        id
+    );
 }

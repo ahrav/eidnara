@@ -12,7 +12,7 @@ References are verified at the #1154 branch tip (the commit that adds this file;
 its parent is `8ace6c9f8`).
 
 - Join: `crates/kernel/src/use_outcome.rs:163`; read: `served_sessions_for`
-  (`crates/kernel/src/use_outcome.rs:418`).
+  (`crates/kernel/src/use_outcome.rs:420`).
 - The read takes the newest qualifying commit sequence once for the object and
   compares each serve's `served_commit_seq` against it, so a serve is disputed
   exactly when some qualifying event is later than it.

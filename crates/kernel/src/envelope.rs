@@ -570,7 +570,7 @@ impl Envelope<'_> {
     ///
     /// # Errors
     ///
-    /// Returns `Conflict` when the key is already recorded, and `InvalidInput` for a reserved producer or a malformed intent.
+    /// `record_receipt` returns `InvalidInput` for a reserved producer, a malformed intent, or a `result` above `MAX_REDACTABLE_BYTES`, and `Conflict` when the key is already recorded.
     pub fn record_receipt(
         &mut self,
         intent: CommitIntent,
