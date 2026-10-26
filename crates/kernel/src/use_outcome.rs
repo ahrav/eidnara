@@ -26,6 +26,10 @@ const PAGE_KEY_DOMAIN: &[u8] = b"eidnara-use-outcome-expiry-page-v1\n";
 /// The reserved producer suffix of expiry commits, also their actor.
 const EXPIRY_PRODUCER: &str = "use-outcome-expiry";
 const EXPIRY_CAUSE: &str = "use outcome retention expired";
+/// The live records of one session (project digest, harness, session) whose `last_transform_at` is null or before `?4`.
+const STALE_TRANSFORM_WHERE: &str = "project_digest=?1 AND harness=?2 AND session_id=?3
+     AND invalidated_commit_seq IS NULL AND deleted_at IS NULL
+     AND (last_transform_at IS NULL OR last_transform_at<?4)";
 
 /// Whether the served session was a primary session or a subagent session at the serve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -291,6 +295,37 @@ impl Envelope<'_> {
     }
 }
 
+impl Envelope<'_> {
+    /// Sets `deleted_at` on each named record that is still live (unretired, `deleted_at` null) and answers how many it marked. A record already marked keeps its first value, and a retired record keeps its state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for a negative `deleted_at`, and mapped storage errors otherwise.
+    pub fn mark_use_outcomes_deleted(
+        &mut self,
+        use_outcome_ids: &[String],
+        deleted_at: i64,
+    ) -> Result<usize, KernelError> {
+        self.guarded(|envelope| {
+            if deleted_at < 0 {
+                return Err(KernelError::InvalidInput);
+            }
+            use_outcome_ids.iter().try_fold(0, |marked, id| {
+                let changed = envelope
+                    .tx
+                    .execute_cached(
+                        "UPDATE use_outcomes SET deleted_at=?1
+                         WHERE use_outcome_id=?2 AND deleted_at IS NULL
+                           AND invalidated_commit_seq IS NULL",
+                        params![deleted_at, id],
+                    )
+                    .map_err(map_sqlite)?;
+                Ok(marked + changed)
+            })
+        })
+    }
+}
+
 fn serve_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<UseOutcomeServe> {
     let role_index = row.as_ref().column_index("session_role")?;
     let role: String = row.get(role_index)?;
@@ -385,6 +420,49 @@ impl KernelStore {
                 .map_err(map_read)
         })?;
         Ok(sessions)
+    }
+
+    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. A session with nothing to advance takes no writer. The waits for the reader and the writer stop at the budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for a negative `at`, `Deadline` when the budget ends before a connection is held, `FenceLost` when the process lease moved, and mapped storage errors otherwise.
+    pub fn advance_use_outcome_last_transform(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        project_digest: &str,
+        harness: &str,
+        session_id: &str,
+        at: i64,
+    ) -> Result<usize, KernelError> {
+        if at < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        let limit = budget.acquire_limit();
+        let args = params![project_digest, harness, session_id, at];
+        let stale: bool = self
+            .lock_reader_within(&limit)?
+            .query_row_cached(
+                &format!("SELECT EXISTS(SELECT 1 FROM use_outcomes WHERE {STALE_TRANSFORM_WHERE})"),
+                args,
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite)?;
+        if !stale {
+            return Ok(0);
+        }
+        let mut writer = self.lock_writer_within(&limit)?;
+        let tx = super::retention::begin_fenced_write(&mut writer, self.lease_epoch())?;
+        let advanced = tx
+            .execute_cached(
+                &format!(
+                    "UPDATE use_outcomes SET last_transform_at=?4 WHERE {STALE_TRANSFORM_WHERE}"
+                ),
+                args,
+            )
+            .map_err(map_sqlite)?;
+        tx.commit().map_err(map_sqlite)?;
+        Ok(advanced)
     }
 
     /// Retires serving records whose `retain_until` is before `now` and that no committed admission row with a live subject cites: at most [`MAX_EXPIRED_USE_OUTCOMES_PER_CALL`] per call, oldest deadline first, in one commit. Each record is rechecked under the writer and gets its own reserved receipt keyed by `now` and its id, so a citation committed after selection keeps it and a record another sweep retired since selection is skipped. The commit's own receipt is keyed by `now` and a digest of the page's ids, so only a repeat of the same page at this cutoff replays; a replay retires nothing and reports the cited rows its scan read. A page that retires nothing commits nothing.

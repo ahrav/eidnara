@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `62659617c`).
+References are verified at the #1156 branch tip (the commit that adds this file;
+its parent is `a9060af05`).
 
 - Writes happen only when state changed: `crates/daemon/src/transform.rs:3262`,
   `crates/daemon/src/transform.rs:3761`, `crates/daemon/src/transform.rs:5382`.
@@ -20,7 +20,9 @@ its parent is `62659617c`).
   with the session.
 - Existing check:
   `delete_session_sweeps_every_session_table_once_and_scopes_notes`
-  (`crates/memory-store/src/lib.rs:22343`). Status: unaudited.
+  (`crates/memory-store/src/lib.rs:22343`);
+  `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`). Status: unaudited.
 
 ## Failure scenario
 

@@ -8,13 +8,13 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `62659617c`).
+References are verified at the #1156 branch tip (the commit that adds this file;
+its parent is `a9060af05`).
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:113`; the request
-  digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:161`)).
-- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9637`) runs after
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:251`; the request
+  digest binds the ids, the harness, and the role (`length_prefixed_digest`
+  (`crates/daemon/src/use_outcome_writer.rs:306`)).
+- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9687`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
@@ -23,21 +23,21 @@ its parent is `62659617c`).
   any `known_as_of`, replays and writes nothing.
 - Existing check:
   `a_hard_fold_records_its_frozen_composition_once_per_served_set`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:60`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:64`);
   `an_equal_digest_replays_and_another_harness_or_role_conflicts`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:121`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:125`);
   `an_equal_served_set_at_a_later_known_as_of_replays`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:403`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:407`);
   `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:298`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:302`);
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:565`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:569`);
   `every_kernel_error_maps_to_a_closed_outcome`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:663`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:667`);
   `an_emergency_pass_that_reruns_records_one_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:682`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:686`);
   `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:710`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:714`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:214`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`

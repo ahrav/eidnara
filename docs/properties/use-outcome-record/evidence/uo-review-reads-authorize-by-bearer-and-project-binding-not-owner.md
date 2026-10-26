@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `62659617c`).
+References are verified at the #1156 branch tip (the commit that adds this file;
+its parent is `a9060af05`).
 
 - Scope: `kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:414`).
 - Correction: `memory_reviewer_wire.rs:409` tests `review.accept`, not reads.

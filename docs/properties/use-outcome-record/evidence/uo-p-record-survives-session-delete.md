@@ -9,11 +9,11 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `62659617c`).
+References are verified at the #1156 branch tip (the commit that adds this file;
+its parent is `a9060af05`).
 
 - Delete triggers: `crates/kernel/src/schema.rs:187`.
-- Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:340`) answers
+- Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:375`) answers
   retired records.
 
 - Guarantee under test: After `session.delete` answers `ok`, the session's
@@ -23,7 +23,11 @@ its parent is `62659617c`).
   (`crates/kernel/tests/kernel_schema.rs:2175`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
   (`crates/kernel/tests/kernel_use_outcome.rs:341`) (a retired record stays
-  readable). Status: unaudited.
+  readable);
+  `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`);
+  `a_delete_with_nothing_live_or_no_ready_kernel_marks_nothing`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:84`). Status: unaudited.
 
 ## Failure scenario
 
@@ -35,17 +39,17 @@ None.
 
 ## What a test must construct
 
-#1156 adds the `session.delete` route test.
+The `session.delete` route test above (marker
+`uo_delete_stopped_between_stores`).
 
 Required faults and enabling state: A session with records, then a delete
 (Kernel arm: direct SQL deletes).
 
 ## Investigation log
 
-### Q: The `session.delete` arm lands with #1156, which extends `Exercised`.
+### Q: Does any open question remain for this record?
 
-- Sources examined: the specification (#1145) open questions and the code cited above.
-- Findings: The `session.delete` arm lands with #1156, which extends
-  `Exercised`.
-- Missing evidence: none beyond what the question names.
-- Conclusion: resolved with answer - see the question text.
+- Sources examined: the specification catalog entry, the code and tests cited above.
+- Findings: the cited code and tests agree with the guarantee at this tip.
+- Missing evidence: none for the guarantee as stated.
+- Conclusion: resolved with answer - no open question.

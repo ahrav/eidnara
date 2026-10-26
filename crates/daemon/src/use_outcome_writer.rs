@@ -1,11 +1,11 @@
-//! Records a frozen Canonical composition as a Kernel use-outcome serve: which decision objects one session was served.
+//! Records a frozen Canonical composition as a Kernel use-outcome serve: which decision objects one session was served. Also writes the record lifecycle: `session.delete` marks a session's live records deleted, and a committing pass advances their `last_transform_at`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
-use kernel::{CommitIntent, KernelError, SessionRole, UseOutcomeSpec};
+use kernel::{CommitIntent, KernelError, KernelStore, SessionRole, UseOutcomeSpec};
 use sha2::{Digest, Sha256};
 
 use crate::canonical_memory::CanonicalMemorySnapshot;
@@ -14,6 +14,9 @@ use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
 const PRODUCER: &str = "eidnara-daemon/use-outcome";
 const FAMILY: &str = "use-outcome";
 const REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-serve-v1\n";
+const DELETE_PRODUCER: &str = "eidnara-daemon/use-outcome-delete";
+const DELETE_FAMILY: &str = "use-outcome-delete";
+const DELETE_REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-delete-v1\n";
 /// Bounds the wait for the Kernel writer; the insert runs to completion once the writer is held.
 const WRITE_BUDGET: Duration = Duration::from_millis(250);
 
@@ -98,6 +101,141 @@ impl UseOutcomeCounts {
     }
 }
 
+/// Closed names for the lifecycle writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifecycleWrite {
+    DeletedMarked,
+    DeleteNothingLive,
+    DeleteKernelUnavailable,
+    TransformTouched,
+    TransformSkippedDeadline,
+    TransformSkippedUnavailable,
+}
+
+impl LifecycleWrite {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::DeletedMarked,
+        Self::DeleteNothingLive,
+        Self::DeleteKernelUnavailable,
+        Self::TransformTouched,
+        Self::TransformSkippedDeadline,
+        Self::TransformSkippedUnavailable,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::DeletedMarked => "deleted_marked",
+            Self::DeleteNothingLive => "delete_nothing_live",
+            Self::DeleteKernelUnavailable => "delete_kernel_unavailable",
+            Self::TransformTouched => "transform_touched",
+            Self::TransformSkippedDeadline => "transform_skipped_deadline",
+            Self::TransformSkippedUnavailable => "transform_skipped_unavailable",
+        }
+    }
+
+    const fn logged(self) -> bool {
+        match self {
+            Self::DeletedMarked | Self::DeleteNothingLive | Self::TransformTouched => false,
+            Self::DeleteKernelUnavailable
+            | Self::TransformSkippedDeadline
+            | Self::TransformSkippedUnavailable => true,
+        }
+    }
+}
+
+const _: () =
+    assert!(LifecycleWrite::TransformSkippedUnavailable as usize + 1 == LifecycleWrite::ALL.len());
+
+#[derive(Debug, Default)]
+pub(crate) struct LifecycleCounts([AtomicU64; LifecycleWrite::ALL.len()]);
+
+impl LifecycleCounts {
+    pub(crate) fn record(&self, write: LifecycleWrite) {
+        self.0[write as usize].fetch_add(1, Ordering::Relaxed);
+        if write.logged() {
+            eprintln!("daemon: use-outcome lifecycle write: {}", write.name());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self, write: LifecycleWrite) -> u64 {
+        self.0[write as usize].load(Ordering::Relaxed)
+    }
+}
+
+/// `session.delete`'s use-outcome step: lists the session's live records and, when any exist, commits one envelope that sets `deleted_at = now` on exactly those. The key carries a fresh attempt nonce, so a receipt never answers a later delete as a replay; idempotence rests on the live listing, and a record already marked keeps its first timestamp.
+pub(crate) fn mark_session_deleted(
+    store: &KernelStore,
+    project: &ProjectBinding,
+    harness: &str,
+    session_id: &str,
+    now: i64,
+) -> Result<LifecycleWrite, KernelError> {
+    let live: Vec<String> = store
+        .served_set(project.digest(), harness, session_id)?
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|record| {
+            record.serve.invalidated_commit_seq.is_none() && record.serve.deleted_at.is_none()
+        })
+        .map(|record| record.serve.use_outcome_id)
+        .collect();
+    if live.is_empty() {
+        return Ok(LifecycleWrite::DeleteNothingLive);
+    }
+    let mut nonce = [0u8; 16];
+    getrandom::getrandom(&mut nonce).map_err(|_| KernelError::Io)?;
+    let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let operation_key = project
+        .operation_key(DELETE_FAMILY, &format!("{session_id}:{nonce}"))
+        .ok_or(KernelError::InvalidInput)?;
+    let now_text = now.to_string();
+    let intent = CommitIntent {
+        producer: DELETE_PRODUCER.to_string(),
+        operation_key,
+        request_digest: length_prefixed_digest(
+            DELETE_REQUEST_DOMAIN,
+            live.iter().map(String::as_str).chain([now_text.as_str()]),
+        ),
+        actor: "daemon".to_string(),
+        cause: "session deleted".to_string(),
+    };
+    store.commit(intent, |envelope| {
+        envelope
+            .mark_use_outcomes_deleted(&live, now)
+            .map(|marked| marked.to_string())
+    })?;
+    Ok(LifecycleWrite::DeletedMarked)
+}
+
+/// Advances `last_transform_at` to `at` on the session's live records after a committed pass. Answers `None` when no record needed it; a deadline or any other Kernel failure skips the write, and the next committing pass catches up.
+pub(crate) fn touch_session(
+    kernel: &KernelOpenCoordinator,
+    project: &ProjectBinding,
+    harness: &str,
+    session_id: &str,
+    at: i64,
+) -> Option<LifecycleWrite> {
+    let Ok(store) = kernel.kernel_store() else {
+        return Some(LifecycleWrite::TransformSkippedUnavailable);
+    };
+    let budget = EvalBudget::new(Some(Instant::now() + WRITE_BUDGET), Arc::default());
+    match store.advance_use_outcome_last_transform(
+        &budget,
+        project.digest(),
+        harness,
+        session_id,
+        at,
+    ) {
+        Ok(0) => None,
+        Ok(_) => Some(LifecycleWrite::TransformTouched),
+        Err(KernelError::Deadline | KernelError::Busy) => {
+            Some(LifecycleWrite::TransformSkippedDeadline)
+        }
+        Err(_) => Some(LifecycleWrite::TransformSkippedUnavailable),
+    }
+}
+
 pub(crate) struct Serve<'a> {
     pub(crate) project: &'a ProjectBinding,
     pub(crate) harness: &'a str,
@@ -131,7 +269,14 @@ pub(crate) fn record_serve(
     let intent = CommitIntent {
         producer: PRODUCER.to_string(),
         operation_key,
-        request_digest: request_digest(snapshot.served_ids(), serve.harness, session_role),
+        request_digest: length_prefixed_digest(
+            REQUEST_DOMAIN,
+            snapshot
+                .served_ids()
+                .iter()
+                .map(String::as_str)
+                .chain([serve.harness, session_role.as_str()]),
+        ),
         actor: "daemon".to_string(),
         cause: "use outcome served".to_string(),
     };
@@ -158,14 +303,10 @@ pub(crate) fn record_serve(
     )
 }
 
-fn request_digest(served_ids: &[String], harness: &str, role: SessionRole) -> String {
+fn length_prefixed_digest<'a>(domain: &[u8], fields: impl Iterator<Item = &'a str>) -> String {
     let mut hash = Sha256::new();
-    hash.update(REQUEST_DOMAIN);
-    for field in served_ids
-        .iter()
-        .map(String::as_str)
-        .chain([harness, role.as_str()])
-    {
+    hash.update(domain);
+    for field in fields {
         hash.update(field.len().to_string().as_bytes());
         hash.update(b":");
         hash.update(field.as_bytes());

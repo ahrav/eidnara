@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `62659617c`).
+References are verified at the #1156 branch tip (the commit that adds this file;
+its parent is `a9060af05`).
 
 - Append: `crates/kernel/src/admission.rs:1748`.
 - Newest wins: `crates/kernel/src/admission.rs:675`.

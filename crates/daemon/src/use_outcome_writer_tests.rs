@@ -3,12 +3,16 @@ use crate::use_outcome_writer::{Serve, UseOutcomeWrite, record_serve};
 use kernel::KernelError;
 use kernel_route_fixtures::{MEMORY_DOMAIN, commit_verified_memory, ensure_domain, intent};
 
-fn bound(project: &Path) -> SessionBinding {
+pub(super) fn bound(project: &Path) -> SessionBinding {
     binding(project.to_str().unwrap(), "ses")
 }
 
 /// Commits the project's scope and one verified memory decision per `(object_id, summary)`.
-fn seed_memories(kernel: &kernel::KernelStore, project: &Path, memories: &[(&str, &str)]) {
+pub(super) fn seed_memories(
+    kernel: &kernel::KernelStore,
+    project: &Path,
+    memories: &[(&str, &str)],
+) {
     let binding = bound(project);
     let scope_id = binding.kernel_project.scope_id();
     kernel
@@ -32,7 +36,7 @@ fn seed_memories(kernel: &kernel::KernelStore, project: &Path, memories: &[(&str
     }
 }
 
-fn served(handler: &Handler, project: &Path) -> Vec<kernel::UseOutcomeRecord> {
+pub(super) fn served(handler: &Handler, project: &Path) -> Vec<kernel::UseOutcomeRecord> {
     let binding = bound(project);
     handler
         .kernel

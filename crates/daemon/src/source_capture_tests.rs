@@ -1524,7 +1524,7 @@ async fn a_rerun_keeps_one_live_generation_across_a_restart() {
     assert_eq!(live_generations(&store), ["1700000002000"]);
 }
 
-async fn delete_session(handler: &Handler, session_id: &str) -> Value {
+pub(super) async fn delete_session(handler: &Handler, session_id: &str) -> Value {
     delete_on(&handler.core, session_id).await
 }
 

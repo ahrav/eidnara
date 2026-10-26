@@ -806,3 +806,163 @@ fn the_cited_count_covers_the_rows_read_before_the_page_fills() {
         }
     );
 }
+
+fn lifecycle(store: &KernelStore, session: &str) -> Vec<(Option<i64>, Option<i64>)> {
+    store
+        .served_set(&project(), HARNESS, session)
+        .unwrap()
+        .unwrap_or_default()
+        .iter()
+        .map(|record| (record.serve.deleted_at, record.serve.last_transform_at))
+        .collect()
+}
+
+fn mark_deleted(
+    store: &KernelStore,
+    key: &str,
+    ids: &[String],
+    at: i64,
+) -> Result<usize, KernelError> {
+    let marked = std::cell::Cell::new(0);
+    store.commit(intent(key), |envelope| {
+        marked.set(envelope.mark_use_outcomes_deleted(ids, at)?);
+        Ok(String::new())
+    })?;
+    Ok(marked.get())
+}
+
+fn budget(wait: std::time::Duration) -> kernel::applicability::EvalBudget {
+    kernel::applicability::EvalBudget::new(
+        Some(std::time::Instant::now() + wait),
+        std::sync::Arc::default(),
+    )
+}
+
+/// Marking a session deleted sets `deleted_at` once on each named live record: a repeat keeps the first value, a retired record keeps its state, and a negative time is refused with no row changed.
+#[test]
+fn a_session_delete_marks_each_live_record_once() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1", "d2"]);
+    let served_at = tick(&store, "tick");
+    let now = USE_OUTCOME_RETENTION_MS + 1;
+    let first = insert(&store, "a", spec("s1", &["d1"], served_at, now)).unwrap();
+    let second = insert(&store, "b", spec("s1", &["d2"], served_at, now)).unwrap();
+    let expired = insert(&store, "c", spec("s2", &["d1"], served_at, 0)).unwrap();
+    assert_eq!(store.expire_use_outcomes(now).unwrap().retired, 1);
+    let ids = [first, second];
+
+    assert_eq!(
+        mark_deleted(&store, "neg", &ids, -1),
+        Err(KernelError::InvalidInput)
+    );
+    assert_eq!(lifecycle(&store, "s1"), [(None, None), (None, None)]);
+    assert_eq!(mark_deleted(&store, "del-1", &ids, 10), Ok(2));
+    assert_eq!(mark_deleted(&store, "del-2", &ids, 20), Ok(0));
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(Some(10), None), (Some(10), None)]
+    );
+    assert_eq!(mark_deleted(&store, "del-3", &[expired], 30), Ok(0));
+    assert_eq!(lifecycle(&store, "s2"), [(None, None)]);
+    let records = store
+        .served_set(&project(), HARNESS, "s1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(records[0].decision_object_ids, ["d1"]);
+    assert_eq!(records[1].decision_object_ids, ["d2"]);
+}
+
+/// `last_transform_at` moves forward only on the session's live records, through a write that appends no commit-log row, receipt, or outbox entry; an earlier time, a deleted record, a retired record, and another session are left alone.
+#[test]
+fn last_transform_at_advances_live_records_without_a_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1", "d2"]);
+    let served_at = tick(&store, "tick");
+    let now = USE_OUTCOME_RETENTION_MS + 1;
+    let first = insert(&store, "a", spec("s1", &["d1"], served_at, now)).unwrap();
+    insert(&store, "b", spec("s1", &["d2"], served_at, now)).unwrap();
+    insert(&store, "c", spec("s2", &["d1"], served_at, now)).unwrap();
+    insert(&store, "d", spec("s3", &["d1"], served_at, 0)).unwrap();
+    assert_eq!(store.expire_use_outcomes(now).unwrap().retired, 1);
+    let advance = |session: &str, at: i64| {
+        store.advance_use_outcome_last_transform(
+            &budget(std::time::Duration::from_secs(5)),
+            &project(),
+            HARNESS,
+            session,
+            at,
+        )
+    };
+    let tip = store.tip().unwrap();
+    let durable = |root: &std::path::Path| {
+        (
+            count(root, "SELECT COUNT(*) FROM commit_log"),
+            count(root, "SELECT COUNT(*) FROM operation_receipts"),
+            count(root, "SELECT COUNT(*) FROM change_event"),
+        )
+    };
+    let before = durable(root.path());
+
+    assert_eq!(advance("s1", -1), Err(KernelError::InvalidInput));
+    assert_eq!(advance("s1", 100), Ok(2));
+    assert_eq!(advance("s1", 50), Ok(0));
+    assert_eq!(advance("s1", 100), Ok(0));
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(None, Some(100)), (None, Some(100))]
+    );
+    assert_eq!(lifecycle(&store, "s2"), [(None, None)]);
+    assert_eq!(
+        advance("s3", 100),
+        Ok(0),
+        "a retired record is not advanced"
+    );
+    assert_eq!(lifecycle(&store, "s3"), [(None, None)]);
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(durable(root.path()), before);
+
+    assert_eq!(mark_deleted(&store, "del", &[first], 150), Ok(1));
+    assert_eq!(advance("s1", 200), Ok(1));
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(Some(150), Some(100)), (None, Some(200))],
+        "a deleted record receives no update"
+    );
+}
+
+/// With the Kernel writer held, an advance that has rows to move stops at its budget with `Deadline`, and one with nothing to move answers without waiting for the writer.
+#[test]
+fn a_held_writer_bounds_the_advance_and_an_idle_session_skips_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let wait = std::time::Duration::from_millis(100);
+    std::thread::scope(|scope| {
+        let (entered, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let store = &store;
+        let holder = scope.spawn(move || {
+            store
+                .commit(intent("hold"), |_| {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                    Ok(String::new())
+                })
+                .unwrap();
+        });
+        held.recv().unwrap();
+        let started = std::time::Instant::now();
+        let advanced =
+            store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s1", 10);
+        assert_eq!(advanced, Err(KernelError::Deadline));
+        assert!(started.elapsed() >= wait);
+        assert_eq!(
+            store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s9", 10),
+            Ok(0)
+        );
+        release.send(()).unwrap();
+        holder.join().unwrap();
+    });
+    assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
+}

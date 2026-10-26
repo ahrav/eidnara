@@ -9,10 +9,10 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `62659617c`).
+References are verified at the #1156 branch tip (the commit that adds this file;
+its parent is `a9060af05`).
 
-- Gate: `project_memory_read` (`crates/daemon/src/lib.rs:5498`); the pass calls
+- Gate: `project_memory_read` (`crates/daemon/src/lib.rs:5501`); the pass calls
   it with the route-frozen config.
 - With `None`, `project_memory_composition()` is `None`, so meta and the
   response carry no composition.
