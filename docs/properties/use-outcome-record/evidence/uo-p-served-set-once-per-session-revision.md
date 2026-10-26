@@ -100,10 +100,20 @@ between; a CAS retry.
   every write slot is taken, the write is counted `deadline` and repaired the
   same way
   (`a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`).
-  This placement departs from the ticket's OQ3-5 resolution, an inline write
-  within the pass's remaining budget; the job's 250 ms writer wait is the budget
-  AC6 names (owner decision, taken at the #1155 review rounds).
   A session whose composition never folds HARD again at that set stays
   unrecorded. A conflict and a refusal are not repaired by a later fold.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
+
+### Q: Does the detached write stand as the resolution of OQ3-5, which resolved the write as inline within the pass's remaining budget?
+
+- Sources examined: the ticket's OQ3-5 and AC6, commit `6d15ee29c`, and
+  `record_use_outcome`'s hand-off to `TaskAdmission::spawn_blocking`.
+- Findings: the pass hands the write to a tracked blocking job and answers; the
+  job's own 250 ms writer wait is the budget AC6 then names, and the measured
+  wait the ticket asked for is recorded by
+  `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`. The
+  repository records the move and no approval of it.
+- Missing evidence: the owner's confirmation that the detached placement
+  resolves OQ3-5.
+- Conclusion: needs human input.
