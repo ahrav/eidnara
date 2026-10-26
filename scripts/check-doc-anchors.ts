@@ -11,7 +11,7 @@ export interface Anchor {
 
 const LINK = /\]\(([^)\s#]+)#L(\d+)(?:-L?(\d+))?\)/g;
 const BARE =
-    /(?<![\w/.-])((?:[\w.-]+\/)*[\w.-]+\.(?:rs|ts|tsx|js|mjs|sql|toml|ya?ml|sh|json|md|py)):(\d+)(?:-(\d+))?(?![\w-]|\.\d)/g;
+    /(?<![\w/.-])((?:[\w.-]+\/)*[\w.-]+\.(?:rs|ts|tsx|js|mjs|sql|toml|ya?ml|sh|json|md|py)):(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)(?![\w-]|\.\d)/g;
 const SCHEME = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 
 export function findAnchors(text: string): Anchor[] {
@@ -26,15 +26,19 @@ export function findAnchors(text: string): Anchor[] {
             anchors.push({ line: index + 1, text: match[0], path, form: "link", start, end: Number(match[3] ?? start) });
         }
         for (const match of plain.matchAll(BARE)) {
-            const start = Number(match[2]);
-            anchors.push({
-                line: index + 1,
-                text: match[0],
-                path: match[1] ?? "",
-                form: "bare",
-                start,
-                end: Number(match[3] ?? start),
-            });
+            const path = match[1] ?? "";
+            for (const range of (match[2] ?? "").split(",")) {
+                const [first, second] = range.split("-");
+                const start = Number(first);
+                anchors.push({
+                    line: index + 1,
+                    text: `${path}:${range}`,
+                    path,
+                    form: "bare",
+                    start,
+                    end: Number(second ?? first),
+                });
+            }
         }
     });
     return anchors;
@@ -68,6 +72,20 @@ export function addedLines(hunks: Hunk[]): Set<number> {
     return added;
 }
 
+/**
+ * An anchor that reappears on a replacement line is an existing citation whose surrounding prose
+ * changed, so it still maps through its target's hunks.
+ */
+function removedAnchors(baseText: string, hunks: Hunk[]): Set<string> {
+    const lines = baseText.split("\n");
+    const texts = new Set<string>();
+    for (const hunk of hunks) {
+        const removed = lines.slice(hunk.oldStart - 1, hunk.oldStart - 1 + hunk.oldCount).join("\n");
+        for (const anchor of findAnchors(removed)) texts.add(anchor.text);
+    }
+    return texts;
+}
+
 export type Mapped = { kind: "same" } | { kind: "moved"; start: number; end: number } | { kind: "changed" };
 
 /**
@@ -96,6 +114,7 @@ export type FileChange = { kind: "added" } | { kind: "modified"; base: string };
 export interface Repository {
     tracked: Set<string>;
     text(path: string): string;
+    baseText(path: string): string;
     /** `changes` maps HEAD paths to file changes. */
     changes: Map<string, FileChange>;
     /** `removed` maps a base path to its HEAD path after a rename, or to `null` after a deletion. */
@@ -166,14 +185,18 @@ export function checkAnchors(repo: Repository): Report {
     for (const doc of docs) {
         const docChange = repo.changes.get(doc);
         const docAdded = docChange?.kind === "added";
-        const added =
-            docChange?.kind === "modified" ? addedLines(hunksOf(docChange.base, doc)) : new Set<number>();
+        const docHunks = docChange?.kind === "modified" ? hunksOf(docChange.base, doc) : [];
+        const added = addedLines(docHunks);
+        const kept =
+            docChange?.kind === "modified" && docHunks.some((hunk) => hunk.oldCount > 0)
+                ? removedAnchors(repo.baseText(docChange.base), docHunks)
+                : new Set<string>();
         const entries = docChange === undefined ? report.notices : report.findings;
         for (const anchor of findAnchors(repo.text(doc))) {
             const push = (sink: Entry[], message: string) =>
                 sink.push({ doc, line: anchor.line, message: `${anchor.text} ${message}` });
             const target = resolveAnchor(repo.tracked, doc, anchor);
-            if (docAdded || added.has(anchor.line)) {
+            if (docAdded || (added.has(anchor.line) && !kept.has(anchor.text))) {
                 if (target === undefined) {
                     if (anchor.form === "link") push(report.findings, "cites no tracked file");
                     continue;
@@ -191,7 +214,8 @@ export function checkAnchors(repo: Repository): Report {
                 continue;
             }
             if (located.kind === "relink") {
-                push(entries, `cites no tracked file from the document's new path; the target is ${located.path}`);
+                const cites = target === undefined ? "cites no tracked file" : `cites ${target}`;
+                push(entries, `${cites} from the document's new path; the target is ${located.path}`);
                 continue;
             }
             const { base, head } = located;
@@ -219,16 +243,15 @@ function locate(
     anchor: Anchor,
     target: string | undefined,
 ): Located {
+    if (anchor.form === "link" && docChange?.kind === "modified" && dirname(docChange.base) !== dirname(doc)) {
+        const path = normalize(`${dirname(docChange.base)}/${anchor.path}`);
+        const cited = path === undefined ? undefined : repo.tracked.has(path) ? path : repo.removed.get(path);
+        if (cited === null) return "deleted";
+        if (cited !== undefined && cited !== target) return { kind: "relink", path: cited };
+    }
     if (target !== undefined) {
         const change = repo.changes.get(target);
         return change?.kind === "modified" ? { kind: "modified", base: change.base, head: target } : undefined;
-    }
-    if (anchor.form === "link" && docChange?.kind === "modified" && dirname(docChange.base) !== dirname(doc)) {
-        const path = normalize(`${dirname(docChange.base)}/${anchor.path}`);
-        if (path !== undefined && repo.tracked.has(path)) return { kind: "relink", path };
-        const now = path === undefined ? undefined : repo.removed.get(path);
-        if (now === null) return "deleted";
-        if (now !== undefined) return { kind: "relink", path: now };
     }
     if (anchor.form === "bare" && bareMatches(repo.tracked, anchor.path).length > 0) return undefined;
     const gone = resolveAnchor(removedPaths, doc, anchor);
@@ -267,18 +290,21 @@ export function gitRepository(base: string, cwd?: string): Repository {
         index += 2;
     }
     const texts = new Map<string, string>();
+    const show = (revision: string, path: string): string => {
+        const key = `${revision}:${path}`;
+        let content = texts.get(key);
+        if (content === undefined) {
+            content = git(cwd, ["show", key]);
+            texts.set(key, content);
+        }
+        return content;
+    };
     return {
         tracked,
         changes,
         removed,
-        text: (path) => {
-            let content = texts.get(path);
-            if (content === undefined) {
-                content = git(cwd, ["show", `HEAD:${path}`]);
-                texts.set(path, content);
-            }
-            return content;
-        },
+        text: (path) => show("HEAD", path),
+        baseText: (path) => show(mergeBase, path),
         hunks: (basePath, headPath) =>
             parseHunks(
                 git(cwd, ["diff", "-U0", "--no-color", "--no-ext-diff", `${mergeBase}:${basePath}`, `HEAD:${headPath}`]),
