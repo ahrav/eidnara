@@ -20,7 +20,7 @@ its parent is `8ace6c9f8`).
   and `use_outcome_capture`, the DDL refuses any other value, and no serve
   creates a registry object, evidence row, change event, or outbox entry.
 - Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
-  (`crates/kernel/tests/kernel_schema.rs:2308`);
+  (`crates/kernel/tests/kernel_schema.rs:2334`);
   `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
   (`crates/kernel/tests/kernel_use_outcome.rs:339`). Status: unaudited.
 

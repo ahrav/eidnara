@@ -18,8 +18,9 @@ its parent is `8ace6c9f8`).
   `use_outcomes_no_delete` in the `use_outcomes` component
   (`crates/kernel/src/schema.rs:188`); decision-row triggers
   `use_outcome_decisions_written_with_record` (refuses a row once the record's
-  `decision_count` rows exist, so the set is sealed in any later transaction,
-  including the window before the next commit),
+  `decision_count` rows exist or once a later commit exists: a Kernel-written
+  set is complete at its commit, and any record's set is sealed by the next
+  commit),
   `use_outcome_decisions_no_update`, and `use_outcome_decisions_no_delete` in
   the `use_outcome_decisions` component (`crates/kernel/src/schema.rs:192`).
 - Citation rule: the `admission_decisions.use_outcome_id` foreign key, the
@@ -42,9 +43,9 @@ its parent is `8ace6c9f8`).
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
   (`crates/kernel/tests/kernel_schema.rs:2176`);
   `use_outcome_classification_and_identity_shapes_are_checked`
-  (`crates/kernel/tests/kernel_schema.rs:2308`);
+  (`crates/kernel/tests/kernel_schema.rs:2334`);
   `an_admission_citation_names_a_recorded_use_outcome_and_never_changes`
-  (`crates/kernel/tests/kernel_schema.rs:2389`). Status: unaudited.
+  (`crates/kernel/tests/kernel_schema.rs:2415`). Status: unaudited.
 
 ## Failure scenario
 
@@ -52,9 +53,11 @@ A cleared `deleted_at` would make a deleted session read as live.
 
 ## Timing windows and dependencies
 
-The window between the recording commit and the next commit: under a tip-based
-guard a raw writer could append a decision row there. The `decision_count`
-bound closes it; the test appends in that window and asserts the abort.
+The window between the recording commit and the next commit: under a tip-only
+guard a raw writer could append a decision row there, and under a count-only
+guard a raw writer that recorded fewer rows than its `decision_count` could add
+them in any later transaction. The trigger applies both bounds; the test
+appends in the window and after a later commit and asserts both aborts.
 
 ## What a test must construct
 

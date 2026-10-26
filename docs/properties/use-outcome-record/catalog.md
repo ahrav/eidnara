@@ -59,7 +59,7 @@ engine names both in its `Confidence` line (bias B1).
 | explicit-config-only | 4 |
 | test-only | 1 |
 
-Check semantics: 31 `always`, 1 `always-or-unreached`, 2 `always(!X)`. No record pairs `always(!X)` with a `sometimes(X)` marker.
+Check semantics: 32 `always`, 1 `always-or-unreached`, 1 `always(!X)`. No record pairs `always(!X)` with a `sometimes(X)` marker.
 
 ## Index
 
@@ -94,7 +94,7 @@ Check semantics: 31 `always`, 1 `always-or-unreached`, 2 `always(!X)`. No record
 | [`uo-p-served-set-once-per-session-revision`](#uo-p-served-set-once-per-session-revision) | proposed (#1155) | safety | `always` | default-production | not yet | active - PROPOSED (owner: #1155) |
 | [`uo-p-served-ids-equal-frozen-composition`](#uo-p-served-ids-equal-frozen-composition) | proposed (#1155) | safety | `always` | default-production | not yet | active - PROPOSED (owner: #1155) |
 | [`uo-p-no-row-when-memory-disabled`](#uo-p-no-row-when-memory-disabled) | proposed (#1155) | safety | `always(!X)` | explicit-config-only | not yet | active - PROPOSED (owner: #1155) |
-| [`uo-p-no-row-for-withheld-composition`](#uo-p-no-row-for-withheld-composition) | proposed (#1155) | safety | `always(!X)` | default-production | not yet | active - PROPOSED (owner: #1155) |
+| [`uo-p-no-row-for-withheld-composition`](#uo-p-no-row-for-withheld-composition) | proposed (#1155) | safety | `always` | default-production | not yet | active - PROPOSED (owner: #1155) |
 | [`uo-p-producer-matches-request-subagent-flag`](#uo-p-producer-matches-request-subagent-flag) | proposed (#1155) | safety | `always` | default-production | not yet | active - PROPOSED (owner: #1155) |
 | [`uo-p-deleted-at-iff-session-delete-kernel-step`](#uo-p-deleted-at-iff-session-delete-kernel-step) | proposed (#1156) | safety | `always` | default-production | not yet | active - PROPOSED (owner: #1156) |
 | [`uo-p-last-transform-at-monotone-per-committing-pass`](#uo-p-last-transform-at-monotone-per-committing-pass) | proposed (#1156) | safety | `always` | default-production | not yet | active - PROPOSED (owner: #1156) |
@@ -595,7 +595,7 @@ Confidence: high -
 `classify_existing_family` (`crates/kernel/src/open.rs:796`);
 `classify_open_kernel` (`crates/kernel/src/open.rs:852`). Disposition B:
 re-verified against the #1154 digest
-`a4c1c116c0e74eb047f6ca07f7a1976da147809bcdf677e129f4517ba9ff672c`.
+`39b44d5010050e9eb4eb9fdfb92793c0c235d284228309b35cefcdf16a8103d6`.
 Existing check: `every_conclusive_kernel_mismatch_is_refused_and_left_untouched`
 (`crates/kernel/tests/kernel_open.rs:183`);
 `a_family_created_under_the_previous_baseline_is_refused_untouched`
@@ -776,7 +776,8 @@ deleted.
 Check: `always` - every forbidden update or delete aborts under a named trigger,
 `INSERT OR REPLACE` aborts through the delete trigger on every table including
 `admission_decisions`, a decision row inserted once `decision_count` rows exist
-aborts (also between the recording commit and the next commit), a row with
+or once a later commit exists aborts (so a Kernel-written set is sealed at its
+commit, and any record's set is sealed by the next commit), a row with
 `served_commit_seq >= created_commit_seq` or `decision_count < 0` fails its
 CHECK, and an admission row naming an unrecorded serve fails its foreign key.
 Fault/timing angle: A raw insert after the recording commit while that commit
@@ -792,9 +793,9 @@ every Kernel connection.
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
 (`crates/kernel/tests/kernel_schema.rs:2176`);
 `use_outcome_classification_and_identity_shapes_are_checked`
-(`crates/kernel/tests/kernel_schema.rs:2308`);
+(`crates/kernel/tests/kernel_schema.rs:2334`);
 `an_admission_citation_names_a_recorded_use_outcome_and_never_changes`
-(`crates/kernel/tests/kernel_schema.rs:2389`). Status: unaudited.
+(`crates/kernel/tests/kernel_schema.rs:2415`). Status: unaudited.
 Impact: History rewriting defeats the witness the record exists to be.
 Open questions:
 - OQ3-10: a session that continues after its delete reuses its identity at an
@@ -822,7 +823,7 @@ CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:188`); the insert
 names the classes as literals (`insert_use_outcome`
 (`crates/kernel/src/use_outcome.rs:246`)).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
-(`crates/kernel/tests/kernel_schema.rs:2308`);
+(`crates/kernel/tests/kernel_schema.rs:2334`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
 (`crates/kernel/tests/kernel_use_outcome.rs:339`). Status: unaudited.
 Impact: A stop condition of the plan: a Remote-eligible serving record.

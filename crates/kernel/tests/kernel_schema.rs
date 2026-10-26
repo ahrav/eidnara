@@ -181,7 +181,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "a4c1c116c0e74eb047f6ca07f7a1976da147809bcdf677e129f4517ba9ff672c";
+    "39b44d5010050e9eb4eb9fdfb92793c0c235d284228309b35cefcdf16a8103d6";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -2298,6 +2298,32 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
         &format!(
             "INSERT OR REPLACE INTO use_outcome_decisions(use_outcome_id,object_id)
              VALUES ('{id}','decision-1')"
+        ),
+        "use_outcome_decisions are written with their record",
+    );
+    // A later commit seals the decision set even when its size is below `decision_count`.
+    let short = "e".repeat(64);
+    conn.execute(
+        "INSERT INTO use_outcomes(
+             use_outcome_id,project_digest,harness,session_id,served_set_digest,decision_count,
+             composition_revision,served_commit_seq,session_role,recorded_at,created_commit_seq,
+             retention_class,retain_until,sensitivity_class,provider_egress_class
+         ) VALUES (?1,?2,'opencode','session-short',?3,2,7,?4,'primary',10,?5,
+                   'use_outcome_capture',20,'sensitive','local_only')",
+        params![short, "a".repeat(64), "b".repeat(64), root, again],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO use_outcome_decisions(use_outcome_id,object_id) VALUES (?1,'decision-1')",
+        [&short],
+    )
+    .unwrap();
+    next_commit(&conn, "tx-after-short");
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT INTO use_outcome_decisions(use_outcome_id,object_id)
+             VALUES ('{short}','decision-2')"
         ),
         "use_outcome_decisions are written with their record",
     );
