@@ -28,7 +28,7 @@ revision.
   `subagent_first_active_render_commits_tagged_bytes_before_replay`
   (`crates/daemon/src/transform.rs:23784`);
   `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:369`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_writer_tests.rs:375`). Status: unaudited.
 
 ## Failure scenario
 

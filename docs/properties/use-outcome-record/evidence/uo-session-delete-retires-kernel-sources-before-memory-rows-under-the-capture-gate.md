@@ -29,7 +29,7 @@ revision.
   `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
   (`crates/daemon/src/source_capture_tests.rs:1699`);
   `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-  (`crates/daemon/src/lib.rs:26265`). Status: unaudited.
+  (`crates/daemon/src/lib.rs:26267`). Status: unaudited.
 
 ## Failure scenario
 

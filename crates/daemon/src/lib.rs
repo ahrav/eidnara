@@ -9716,6 +9716,7 @@ impl HandlerCore {
         let is_subagent = env.parsed.is_subagent;
         let snapshot = snapshot.clone();
         let recorded_at = env.pass_now;
+        let write_budget = self.use_outcome_writes.write_budget();
         let Some(job) = self.use_outcome_writes.job(move || match injected {
             Some(error) => Some(use_outcome_writer::UseOutcomeWrite::from_error(error)),
             None => use_outcome_writer::record_serve(
@@ -9728,6 +9729,7 @@ impl HandlerCore {
                     snapshot: &snapshot,
                     recorded_at,
                 },
+                write_budget,
             ),
         }) else {
             return;

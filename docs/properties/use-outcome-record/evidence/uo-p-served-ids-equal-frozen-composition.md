@@ -23,15 +23,15 @@ revision.
   of the snapshot rows whose composition the same fold persisted.
 - Existing check:
   `a_hard_fold_records_its_frozen_composition_once_per_served_set`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:60`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:66`);
   `a_dispute_between_folds_records_the_next_served_set_without_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:468`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:474`);
   `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
   (`crates/daemon/src/canonical_memory.rs:342`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
   (`crates/daemon/src/canonical_memory.rs:477`);
   `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1018`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1004`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `session_roles_round_trip_and_the_served_set_digest_is_order_free`

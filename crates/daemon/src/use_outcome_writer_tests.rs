@@ -1,10 +1,16 @@
 use super::*;
-use crate::use_outcome_writer::{Serve, UseOutcomeWrite, record_serve};
+use crate::kernel_routes::KernelOpenCoordinator;
+use crate::use_outcome_writer::{Serve, UseOutcomeWrite, WRITE_BUDGET};
 use kernel::KernelError;
 use kernel_route_fixtures::{MEMORY_DOMAIN, commit_verified_memory, ensure_domain, intent};
 
 fn bound(project: &Path) -> SessionBinding {
     binding(project.to_str().unwrap(), "ses")
+}
+
+/// The production writer wait, as the handler hands it off.
+fn record_serve(kernel: &KernelOpenCoordinator, serve: &Serve<'_>) -> Option<UseOutcomeWrite> {
+    crate::use_outcome_writer::record_serve(kernel, serve, WRITE_BUDGET)
 }
 
 /// Commits the project's scope and one verified memory decision per `(object_id, summary)`.
@@ -936,9 +942,13 @@ async fn a_hard_fold_answers_while_another_writer_holds_the_kernel_writer() {
         handler_with_store_and_kernel(producer, default_test_config()).await;
     let kernel = handler.kernel.kernel_store().unwrap();
     seed_memories(&kernel, &project, &[("mem-a", "Rule a.")]);
+    // A writer wait far past the pass means an inline write would hold the response until the release below, which
+    // this test never sends before the response arrives; a detached job keeps waiting while the pass answers.
+    handler
+        .use_outcome_writes
+        .set_write_budget(std::time::Duration::from_secs(30));
     let (release, holder) = hold_kernel_writer(&kernel);
 
-    let started = std::time::Instant::now();
     let response = transform_leaving_serves_pending(&handler, vec![ck("m1", 1, "hello")]).await;
     assert_eq!(response["action"], "HARD", "{response}");
     assert_eq!(
@@ -946,43 +956,19 @@ async fn a_hard_fold_answers_while_another_writer_holds_the_kernel_writer() {
         "{response}"
     );
     assert!(
-        served(&handler, &project).is_empty(),
-        "the response arrives while the writer is still held"
+        counts(&handler).is_empty(),
+        "the response arrives while the serve write is pending: {:?}",
+        counts(&handler)
     );
-    // Inside the budget the job cannot have reached its deadline yet, so an inline write that waited out its budget
-    // before answering would already have counted; the detached hand-off leaves the counters empty at response time.
-    if started.elapsed() < std::time::Duration::from_millis(250) {
-        assert!(
-            counts(&handler).is_empty(),
-            "the response arrives while the serve write is pending: {:?}",
-            counts(&handler)
-        );
-    }
+    assert!(served(&handler, &project).is_empty());
 
     release.send(()).unwrap();
     holder.join().unwrap();
     handler.use_outcome_writes.settled().await;
-    let held_after_handoff = started.elapsed();
+    assert_eq!(counts(&handler), [("written", 1)]);
     let records = served(&handler, &project);
-    // The job waited on the writer from the hand-off to the release, which is less than this span. A span inside the
-    // budget proves the write landed; a longer span on a loaded host leaves the job either written or at its deadline,
-    // and either way the response never waited.
-    let outcome = counts(&handler);
-    if held_after_handoff < std::time::Duration::from_millis(250) {
-        assert_eq!(outcome, [("written", 1)]);
-    } else {
-        eprintln!("use-outcome hand-off span outlived the write budget: {held_after_handoff:?}");
-        assert!(
-            outcome == [("written", 1)] || outcome == [("deadline", 1)],
-            "{outcome:?}"
-        );
-    }
-    if outcome == [("written", 1)] {
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].decision_object_ids, ["mem-a"]);
-    } else {
-        assert!(records.is_empty());
-    }
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
