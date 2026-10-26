@@ -19,8 +19,9 @@ revision; its parent is `1fe3dfbad`).
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
 - Guarantee under test: For one (project digest, harness, session, served-set
-  digest), at most one serve commit exists; a later fold at an equal digest, at
-  any `known_as_of`, replays and writes nothing.
+  digest), at most one serve commit exists; a later fold at an equal digest
+  under the same harness and session role, at any `known_as_of`, replays and
+  writes nothing, while another harness or role at that key conflicts.
 - Existing check:
   `a_hard_fold_records_its_frozen_composition_once_per_served_set`
   (`crates/daemon/src/use_outcome_writer_tests.rs:60`);

@@ -59,7 +59,7 @@ engine names both in its `Confidence` line (bias B1).
 | explicit-config-only | 4 |
 | test-only | 1 |
 
-Check semantics: 32 `always`, 1 `always-or-unreached`, 1 `always(!X)`. No record pairs `always(!X)` with a `sometimes(X)` marker.
+Check semantics: 31 `always`, 1 `always-or-unreached`, 2 `always(!X)`. No record pairs `always(!X)` with a `sometimes(X)` marker.
 
 ## Index
 
@@ -209,9 +209,10 @@ Existing check:
 Impact: A site that skipped the assignment would leave the writer (#1155) with
 no composition to record.
 Open questions:
-- Gap G1: does a CAS-discarded attempt leave any durable effect outside the
-  Memory Store? Owner #1155 (AC7); the writer runs only after the attempt's
-  memory-store commit succeeded.
+- Gap G1: does a CAS-discarded attempt leave a use-outcome serve? Owner #1155
+  (AC7); the writer runs only after the attempt's memory-store commit succeeded,
+  and `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one` asserts
+  that a discarded attempt writes none.
 
 ### uo-subagent-pass-serves-no-composition-under-eidnara-folds
 
@@ -968,8 +969,9 @@ Status: active
 Exercised: yes - the handler records one serve per served set across folds,
 replays an equal set, and records one serve across a CAS retry
 Guarantee: For one (project digest, harness, session, served-set digest), at
-most one serve commit exists; a later fold at an equal digest, at any
-`known_as_of`, replays and writes nothing.
+most one serve commit exists; a later fold at an equal digest under the same
+harness and session role, at any `known_as_of`, replays and writes nothing,
+while another harness or role at that key conflicts.
 Check: `always` - commit-log rows under the serve key number 0 or 1, and a
 replayed fold leaves the count unchanged.
 Fault/timing angle: A CAS conflict that re-runs the attempt within one pass.
