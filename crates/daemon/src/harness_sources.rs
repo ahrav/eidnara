@@ -267,9 +267,9 @@ struct ToolBlock<'a> {
     is_error: bool,
 }
 
-/// Units of one OpenCode `MessageV2` record: user text at `time.created`, assistant text at `time.completed`, and settled tool parts at `state.time.end`. Text block indices are part positions; a tool's output block index is 0, its one exact output or error string. Ignored text and other part kinds contribute nothing.
+/// Units of one OpenCode `MessageV2` record: user text at `time.created`, assistant text at `time.completed`, and settled tool parts at `state.time.end`. Text block indices are part positions; a tool's output block index is 0, its one exact output or error string. Ignored text, synthetic text, and other part kinds contribute nothing.
 ///
-/// Assistant text without a completion timestamp is deferred. A valid completion timestamp makes non-ignored text eligible even when `info.error` is present. Settled tools contribute independently, except a call the turn's abort interrupted (`state.metadata.interrupted`), which waits for the completion timestamp so its outcome reads the abort's final error. The adapter uses no separate edit revision for user text or completed assistant text; changing bytes at the same native identity and timestamp conflicts at publication.
+/// Assistant text without a completion timestamp is deferred. A valid completion timestamp makes non-ignored, non-synthetic text eligible even when `info.error` is present. Settled tools contribute independently, except a call the turn's abort interrupted (`state.metadata.interrupted`), which waits for the completion timestamp so its outcome reads the abort's final error. The adapter uses no separate edit revision for user text or completed assistant text; changing bytes at the same native identity and timestamp conflicts at publication.
 ///
 /// # Errors
 ///
@@ -321,8 +321,11 @@ pub fn opencode_units_within(
     let mut kept = Kept::new(admit);
     for (index, part) in parts.iter().enumerate() {
         match part.get("type").and_then(Value::as_str) {
-            // An ignored text part is not conversation text.
-            Some("text") if part.get("ignored").and_then(Value::as_bool) == Some(true) => {}
+            // Conversation text is a text part with `ignored` and `synthetic`
+            // both absent or false; a synthetic part is injected context.
+            Some("text")
+                if part.get("ignored").and_then(Value::as_bool) == Some(true)
+                    || part.get("synthetic").and_then(Value::as_bool) == Some(true) => {}
             Some("text") if role == "assistant" && completed.is_none() => {}
             Some("text") => {
                 let text = part
