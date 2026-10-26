@@ -26,7 +26,7 @@ or merge verdict.
 | R9 | Convergence as a bound: one repeat with the Kernel Ready completes `ok` | refinement | Applied to `uo-p-deleted-at-iff-session-delete-kernel-step` |
 | R10 | Convergence as a bound: N records drain in ceil(N / 64) calls | refinement | Applied to `uo-p-sweep-retires-only-expired-uncited-rows` and checked by `an_expiry_backlog_drains_one_page_per_call` |
 | R11, R12 | Engine-specific reachability | refinement | Applied: the freeze and subagent records name both engines |
-| R13 | The freeze sites' crash arm marked not yet | refinement | Applied |
+| R13 | The freeze sites' crash arm marked not yet | refinement | Applied at #1154; at #1155 the arm is partial: a handled post-commit Kernel failure is injected, a restart is not |
 | R14 | A config seam for the consent-source record | refinement | Applied: `SessionBinding.config` versus `effective_config` |
 | R15 | The `source_capture` block's missing state flag | refinement | Applied as lead L4 on the status-counter record |
 | B1 | Reachability per record across two engines | bias | Surfaced: a record carries one label; the `Confidence` line names the other engine |
@@ -37,7 +37,7 @@ or merge verdict.
 
 | ID | Lens | Finding | Class | Disposition |
 | --- | --- | --- | --- | --- |
-| E1 | Coverage balance | No active record states the insert contract (`Conflict` for a duplicate identity, `InvalidInput` for a malformed spec, no row after a refused commit) | gap | Queued: the ticket fixes the record count at 34, and the contract is the Kernel half of `uo-p-served-set-once-per-session-revision` and `uo-p-served-ids-equal-frozen-composition`; both now cite `duplicate_and_malformed_serves_are_refused_without_rows` as their Kernel-half check, and #1155 activates them |
+| E1 | Coverage balance | No active record states the insert contract (`Conflict` for a duplicate identity, `InvalidInput` for a malformed spec, no row after a refused commit) | gap | Applied in part at #1155: the duplicate-identity `Conflict` is the Kernel half of `uo-p-served-set-once-per-session-revision`, and the digest check the Kernel half of `uo-p-served-ids-equal-frozen-composition`; the malformed-spec `InvalidInput` and the no-row-after-refusal clauses stay open, checked by `duplicate_and_malformed_serves_are_refused_without_rows` and stated by no record |
 | E2 | Coverage balance | The digest agreement and the deterministic `use_outcome_id` have no #1154 record | gap | Digest half applied at #1155 through `uo-p-served-ids-equal-frozen-composition`; the deterministic-id half stays open, checked by a Kernel test and stated by no record |
 | E3 | Wildcard | The served-before-recorded bound, the secret refusal, and the revision round trip have no record | gap | Applied in part: `uo-p-served-set-and-identity-never-rewritten` now states the served-before-recorded rule, which #1154 also made a DDL CHECK; the secret refusal and the revision round trip are checked by `duplicate_and_malformed_serves_are_refused_without_rows` and `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve` and queued with E1 |
 | E4 | Wildcard | G4 is answerable by one read of the reattach path | gap | Applied: the consent record cites the reattach path's live config read |
@@ -75,11 +75,14 @@ reviewed fix moves a line.
 `uo-p-served-ids-equal-frozen-composition`, `uo-p-no-row-when-memory-disabled`,
 `uo-p-no-row-for-withheld-composition`, and
 `uo-p-producer-matches-request-subagent-flag`, and owns the eight writer
-markers. E1 and the digest half of E2 close with those activations: the Kernel
-tests check the insert contract, and the writer's tests check the key, the
-digest, and the role from the daemon side. The deterministic `use_outcome_id`
-half of E2 stays open: `duplicate_and_malformed_serves_are_refused_without_rows`
-checks it and no record states it. G1 closes by
+markers. The duplicate-identity half of E1 and the digest half of E2 close with
+those activations: the two records' Kernel halves state them, and the writer's
+tests check the key, the digest, and the role from the daemon side. The
+malformed-spec and no-row-after-refusal clauses of E1 and the deterministic
+`use_outcome_id` half of E2 stay open: `duplicate_and_malformed_serves_are_refused_without_rows`
+checks them and no record states them. G1 closes by
 `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`. The R13 crash
-arm is constructed by the test-only fault point between the fold's Memory
-Store commit and the Kernel write.
+arm stays partial: the test-only fault point between the fold's Memory Store
+commit and the Kernel write injects a handled Kernel failure in a live process
+and shows a later fold repairs it; a process stop and restart between the two
+stores, with recovery on reopen, is not constructed.

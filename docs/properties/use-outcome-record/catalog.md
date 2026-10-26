@@ -67,7 +67,7 @@ Check semantics: 31 `always`, 1 `always-or-unreached`, 2 `always(!X)`. No record
 | --- | --- | --- | --- | --- | --- | --- |
 | [`uo-served-rows-are-the-frozen-m0-rows-between-hard-folds`](#uo-served-rows-are-the-frozen-m0-rows-between-hard-folds) | existing | safety | `always` | default-production | partial | active |
 | [`uo-composition-revision-digests-exactly-the-rendered-rows`](#uo-composition-revision-digests-exactly-the-rendered-rows) | existing | safety | `always` | default-production | yes | active |
-| [`uo-composition-freeze-persists-at-every-hard-fold-site`](#uo-composition-freeze-persists-at-every-hard-fold-site) | existing | safety | `always` | default-production | yes | active |
+| [`uo-composition-freeze-persists-at-every-hard-fold-site`](#uo-composition-freeze-persists-at-every-hard-fold-site) | existing | safety | `always` | default-production | partial | active |
 | [`uo-subagent-pass-serves-no-composition-under-eidnara-folds`](#uo-subagent-pass-serves-no-composition-under-eidnara-folds) | existing | safety | `always-or-unreached` | explicit-config-only | yes | active |
 | [`uo-known-as-of-is-the-tip-bound-read-sequence`](#uo-known-as-of-is-the-tip-bound-read-sequence) | existing | safety | `always` | default-production | partial | active |
 | [`uo-memory-disabled-route-takes-no-canonical-read`](#uo-memory-disabled-route-takes-no-canonical-read) | existing | safety | `always` | explicit-config-only | yes | active |
@@ -177,10 +177,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - the additive site and the folding fold record serves through
-the handler tests, the pressure refold persists the pinned read's composition
-and reports its freeze, and the fault after the Memory Store commit leaves the
-composition and response equal to a fault-free run (R13)
+Exercised: partial - the additive site and the folding fold record serves
+through the handler tests, the pressure refold persists the pinned read's
+composition and reports its freeze, and a handled Kernel failure injected after
+the Memory Store commit leaves the composition and response equal to a
+fault-free run (R13); a crash and restart between the two stores is not
+constructed
 Guarantee: Every pass whose plan is `Hard` or `MigrateHard` assigns the pinned
 read's composition to session meta at one of three sites, made durable by the
 pass's memory-store commit.
@@ -981,7 +983,7 @@ between; a CAS retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-set-once-per-session-revision.md). the writer
 keys its commit by the project binding, `use-outcome`, the session, and the
-served-set digest (`crates/daemon/src/use_outcome_writer.rs:165`); the Kernel
+served-set digest (`crates/daemon/src/use_outcome_writer.rs:180-183`); the Kernel
 holds one record per identity tuple.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 (`crates/daemon/src/use_outcome_writer_tests.rs:60`);
@@ -1154,7 +1156,7 @@ with a Canonical read; a primary on each engine.
 Confidence: high -
 [evidence](evidence/uo-p-producer-matches-request-subagent-flag.md). the role
 comes from the pass's `is_subagent`
-(`crates/daemon/src/use_outcome_writer.rs:179`). Reachability per engine (B1):
+(`crates/daemon/src/use_outcome_writer.rs:187`). Reachability per engine (B1):
 `subagent` rows arise only on the additive engine.
 Existing check: `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
 (`crates/daemon/src/use_outcome_writer_tests.rs:369`); Kernel half:

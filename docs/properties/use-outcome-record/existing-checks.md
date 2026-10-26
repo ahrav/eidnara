@@ -120,6 +120,7 @@ Every location was read at the #1155 branch tip.
   durable row in either store.
 - A file-backed config reload between bind and a pass or wrapup: no test; the wrapup test uses a live config that differs from the frozen binding.
 - A Kernel that is Starting at a pass's read and Ready by its write: no test; the withheld-read tests leave the Kernel unopened for the whole pass.
+- A process stop between a fold's Memory Store commit and its Kernel write, with recovery on reopen: no test; the post-commit fault test injects a handled Kernel failure in a live process.
 
 ## Suspiciously quiet areas
 

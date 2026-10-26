@@ -11,9 +11,9 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1155 branch tip, the commit that carries this
 revision.
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:165`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:180-183`; the request
   digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:223`)).
+  (`crates/daemon/src/use_outcome_writer.rs:231`)).
 - Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9669`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).

@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use crate::canonical_memory::CanonicalMemorySnapshot;
+use crate::kernel_routes::read::{MAX_READ_ROW_BYTES, MAX_READ_ROWS};
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
 
 const PRODUCER: &str = "eidnara-daemon/use-outcome";
@@ -81,6 +82,13 @@ impl UseOutcomeWrite {
 const _: () = assert!(UseOutcomeWrite::Refused as usize + 1 == UseOutcomeWrite::ALL.len());
 
 const WRITES_IN_FLIGHT: usize = 4;
+/// Heap bytes a snapshot row holds beside its serialized text: three string headers and the vector slot.
+const SNAPSHOT_ROW_OVERHEAD_BYTES: u64 = 128;
+/// The compositions in-flight jobs retain after their passes' responses released their charges: at most
+/// [`WRITES_IN_FLIGHT`] clones, each of a Kernel read bounded by [`MAX_READ_ROW_BYTES`] of serialized rows
+/// and [`MAX_READ_ROWS`] rows.
+pub(crate) const RETAINED_SNAPSHOT_BYTES_BOUND: u64 = WRITES_IN_FLIGHT as u64
+    * (MAX_READ_ROW_BYTES as u64 + MAX_READ_ROWS as u64 * SNAPSHOT_ROW_OVERHEAD_BYTES);
 
 #[derive(Debug)]
 pub(crate) struct UseOutcomeWrites {

@@ -50,7 +50,8 @@ the same pinned read.
 
 A pressure refold on the folding engine with a Canonical read, asserting
 `meta.project_memory` equals the read; a fault point after the memory-store
-commit (the #1155 seam).
+commit (the #1155 seam). The seam injects a handled Kernel failure in a live
+process; a stop and restart between the two stores is not constructed.
 
 Required faults and enabling state: A HARD fold on each engine, a pressure
 refold on the folding engine, and a CAS conflict inside one pass.
