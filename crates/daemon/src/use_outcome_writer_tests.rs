@@ -304,35 +304,47 @@ async fn a_discarded_attempt_leaves_no_serve_and_the_retry_records_one() {
         &project,
         &[("mem-a", "Rule a.")],
     );
-    let synced = handler
-        .dispatch_value(test_route(7), seed_batch(0, 1, 0, 0))
-        .await;
-    assert!(matches!(synced, PreparedOutcome::Response(_)), "{synced:?}");
-    let synced_version = store.load("ses").unwrap().row_version.unwrap();
+    // A session of its own keeps the process-wide attempt hook from firing on another test's pass.
+    let session = "discarded-attempt";
+    let session_binding = binding(project.to_str().unwrap(), session);
+    handler.bind_route(test_route(9), session_binding.clone());
     let rival = Arc::clone(&store);
     let raced = Arc::new(Mutex::new(None));
     let fired = Arc::clone(&raced);
-    crate::transform::install_transform_attempt_hook("ses", move || {
-        let loaded = rival.load("ses").unwrap();
+    crate::transform::install_transform_attempt_hook(session, move || {
+        let loaded = rival.load(session).unwrap();
         rival
-            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
         *fired.lock().unwrap() = Some(loaded.meta.project_memory);
     });
-    let response = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
+    let mut raced_request = request(vec![ck("m1", 1, "hello")]);
+    raced_request["session_id"] = json!(session);
+    let response = call_transform_request_on_channel(&handler, 9, raced_request).await;
     assert_eq!(
         *raced.lock().unwrap(),
         Some(None),
         "the rival committed before the attempt's commit, while no composition was stored"
     );
     assert_eq!(response["action"], "HARD", "{response}");
-    let after = store.load("ses").unwrap();
+    let after = store.load(session).unwrap();
     assert!(
-        after.row_version > Some(synced_version + 1),
+        after.row_version > Some(1),
         "the rival's commit and the retried attempt's commit both landed"
     );
     assert!(after.meta.project_memory.is_some());
-    assert_eq!(served(&handler, &project).len(), 1);
+    let records = handler
+        .kernel
+        .kernel_store()
+        .unwrap()
+        .served_set(
+            session_binding.kernel_project.digest(),
+            &session_binding.harness,
+            session,
+        )
+        .unwrap()
+        .unwrap_or_default();
+    assert_eq!(records.len(), 1);
     assert_eq!(counts(&handler), [("written", 1)]);
 }
 
@@ -686,5 +698,85 @@ async fn an_emergency_pass_that_reruns_records_one_serve() {
         .len();
     assert!(runs >= 2, "the pass reran");
     assert_eq!(served(&handler, &project).len(), 1);
+    assert_eq!(counts(&handler), [("written", 1)]);
+}
+
+/// Within one rerunning pass, a write that met an unready Kernel is retried by the rerun, while a write that waited out its budget or met a conflict settles the pass: one writer wait per pass at most.
+#[tokio::test(flavor = "current_thread")]
+async fn only_an_unready_kernel_leaves_the_pass_to_retry_its_serve() {
+    for (fault, expected, records) in [
+        (
+            KernelError::Held,
+            vec![("written", 1), ("kernel_unavailable", 1)],
+            1,
+        ),
+        (KernelError::Deadline, vec![("deadline", 1)], 0),
+        (KernelError::Conflict, vec![("conflict", 1)], 0),
+    ] {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+        seed_memories(
+            &handler.kernel.kernel_store().unwrap(),
+            &project,
+            &[("mem-a", "Rule a.")],
+        );
+        *handler.use_outcome_fault.lock().unwrap() = Some(fault);
+        let emergency = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+        assert_eq!(emergency["status"], "ok", "{fault:?}: {emergency}");
+        assert_eq!(counts(&handler), expected, "{fault:?}");
+        assert_eq!(served(&handler, &project).len(), records, "{fault:?}");
+    }
+}
+
+/// A committed HARD fold whose boundary read then fails answers an error, and the composition its commit froze is still recorded once.
+#[tokio::test(flavor = "current_thread")]
+async fn a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, dir, project) =
+        handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+    seed_memories(
+        &handler.kernel.kernel_store().unwrap(),
+        &project,
+        &[("mem-a", "Rule a.")],
+    );
+    let descriptor = dev_descriptor_at(dir.path().join("data").to_str().unwrap());
+    let StorageBackend::Sqlite { path } = descriptor.backend else {
+        panic!("the test store is SQLite");
+    };
+    // A session of its own keeps the process-wide attempt hook from firing on another test's pass.
+    let session = "boundary-read-fails";
+    handler.bind_route(test_route(9), binding(project.to_str().unwrap(), session));
+    crate::transform::install_transform_attempt_hook(
+        &format!("rendered_boundary:{session}"),
+        move || {
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute(
+                    "ALTER TABLE history_segments RENAME TO history_segments_moved",
+                    [],
+                )
+                .unwrap();
+        },
+    );
+    let mut boundary_request = request(vec![ck("m1", 1, "hello")]);
+    boundary_request["session_id"] = json!(session);
+    let outcome = handler
+        .handle_transform_applied_for_test(test_route(9), boundary_request)
+        .await;
+    assert!(
+        matches!(outcome, PreparedOutcome::Error { .. }),
+        "{outcome:?}"
+    );
+    let binding = bound(&project);
+    let records = handler
+        .kernel
+        .kernel_store()
+        .unwrap()
+        .served_set(binding.kernel_project.digest(), &binding.harness, session)
+        .unwrap()
+        .unwrap_or_default();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
     assert_eq!(counts(&handler), [("written", 1)]);
 }

@@ -11,7 +11,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `03c6b2b95`).
+its parent is `757cada42`).
 
 - Additive engine: `crates/daemon/src/transform.rs:3122` inside
   `apply_additive_only` (`apply_additive_only`

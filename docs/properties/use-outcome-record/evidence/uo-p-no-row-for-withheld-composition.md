@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `03c6b2b95`).
+its parent is `757cada42`).
 
 - Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9635`); one
   write per pass covers its reruns.
@@ -22,9 +22,9 @@ its parent is `03c6b2b95`).
 - Existing check: `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
   `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:463`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:475`);
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:553`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:565`); Kernel half:
   `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
   (`crates/kernel/tests/kernel_use_outcome.rs:163`). Status: unaudited.
 

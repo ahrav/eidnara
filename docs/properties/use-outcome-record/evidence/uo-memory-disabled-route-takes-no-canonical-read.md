@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `03c6b2b95`).
+its parent is `757cada42`).
 
 - Gate: `project_memory_read` (`crates/daemon/src/lib.rs:5496`); the pass calls
   it with the route-frozen config.

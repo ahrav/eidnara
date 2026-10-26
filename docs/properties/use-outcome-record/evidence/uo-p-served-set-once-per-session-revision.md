@@ -9,11 +9,11 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `03c6b2b95`).
+its parent is `757cada42`).
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:113`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:120`; the request
   digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:158`)).
+  (`crates/daemon/src/use_outcome_writer.rs:165`)).
 - Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9635`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
@@ -27,15 +27,17 @@ its parent is `03c6b2b95`).
   `an_equal_digest_replays_and_another_harness_or_role_conflicts`
   (`crates/daemon/src/use_outcome_writer_tests.rs:121`);
   `an_equal_served_set_at_a_later_known_as_of_replays`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:391`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:403`);
   `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
   (`crates/daemon/src/use_outcome_writer_tests.rs:298`);
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:553`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:565`);
   `every_kernel_error_maps_to_a_closed_outcome`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:647`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:659`);
   `an_emergency_pass_that_reruns_records_one_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:666`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:678`);
+  `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:706`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:214`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
@@ -81,9 +83,10 @@ between; a CAS retry.
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A deadline, an unready Kernel, or a lost fence leaves the serve for
-  a later write at its digest: a rerun in the same pass, or a later HARD fold
-  that another input requests over the same served set, such as context
-  pressure. A session whose composition never folds HARD again at that set stays
-  unrecorded. A conflict and a refusal are not repaired by a later fold.
+  a later write at its digest: a rerun in the same pass when the Kernel was
+  unready (a pass waits on the writer at most once), or a later HARD fold that
+  another input requests over the same served set, such as context pressure. A
+  session whose composition never folds HARD again at that set stays unrecorded.
+  A conflict and a refusal are not repaired by a later fold.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.

@@ -48,6 +48,16 @@ impl UseOutcomeWrite {
         }
     }
 
+    /// Whether this outcome ends the pass's serve writes. Only an unready Kernel, which costs no writer wait, leaves a later attempt in the same pass to retry, so a pass waits on the writer at most once.
+    pub(crate) const fn settles(self) -> bool {
+        match self {
+            Self::Written | Self::Replayed | Self::Conflict | Self::Deadline | Self::Refused => {
+                true
+            }
+            Self::KernelUnavailable => false,
+        }
+    }
+
     pub(crate) fn from_error(error: KernelError) -> Self {
         match error {
             KernelError::Conflict => Self::Conflict,
@@ -88,10 +98,7 @@ impl UseOutcomeCounts {
             outcome,
             UseOutcomeWrite::Written | UseOutcomeWrite::Replayed
         ) {
-            eprintln!(
-                "daemon: use-outcome record not confirmed: {}",
-                outcome.name()
-            );
+            eprintln!("daemon: use-outcome serve write: {}", outcome.name());
         }
     }
 

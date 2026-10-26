@@ -3463,7 +3463,7 @@ struct PassIntake {
 }
 
 /// The fixed context of one transform pass. Every transform attempt and the settle read it;
-/// its one mutable field is the latch that settles the pass's serve write.
+/// its one interior-mutable field is the latch that settles the pass's serve write.
 struct PassEnv {
     store: Arc<MemoryStore>,
     parsed: Arc<TransformRequest>,
@@ -9674,12 +9674,7 @@ impl HandlerCore {
             },
             use_outcome_writer::UseOutcomeWrite::from_error,
         );
-        // A write the Kernel did not reach leaves the latch open, so a rerun in this pass retries it.
-        if !matches!(
-            outcome,
-            use_outcome_writer::UseOutcomeWrite::Deadline
-                | use_outcome_writer::UseOutcomeWrite::KernelUnavailable
-        ) {
+        if outcome.settles() {
             env.use_outcome_settled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -9763,7 +9758,6 @@ impl HandlerCore {
             .map_err(|error| Self::reject_transform(env, error))?;
         project_docs::restore_reads(env.document_reads.as_deref(), first_run_reads);
         pass.native_attached = false;
-        self.record_use_outcome(env, &pass.result);
         drop(derived);
         // The first run decided this pass's hint for its tail and persisted
         // it; the rerun finds that decision already made. The pass's decision
@@ -9788,6 +9782,7 @@ impl HandlerCore {
             pass.result.response.user_hint = decided_before;
         }
         self.forget_guidance_pin_on_commit(env, &pass.result);
+        self.record_use_outcome(env, &pass.result);
         Ok(())
     }
 
