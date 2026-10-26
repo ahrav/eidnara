@@ -385,7 +385,7 @@ fn decision_object_ids(tx: &Transaction<'_>, id: &str) -> Result<Vec<String>, Ke
 }
 
 impl KernelStore {
-    /// Every serving record of one session, retired or not, oldest first, each with its decision ids; `None` when the session has no record. A record with no decision rows is a serve of an empty composition. The read issues one decision-row query per record, so its cost follows the distinct compositions the session was served within the retention window.
+    /// `served_set` returns all serving records of one session, including retired records, oldest first with their decision ids, or `None` when the session has no record. A record with zero decision rows represents a serve of an empty composition. Records persist after retirement, so the result size and the number of decision-row queries grow with the session's lifetime count of distinct served compositions.
     ///
     /// # Errors
     ///
