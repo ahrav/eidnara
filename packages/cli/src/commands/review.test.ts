@@ -157,6 +157,12 @@ describe("parseReviewArgs", () => {
             json: true,
         });
         expect(parseReviewArgs(["status", "--json"])).toEqual({ command: "status", json: true });
+        expect(parseReviewArgs(["outcome", "mem-1", "--project", "/p"])).toEqual({
+            command: "outcome",
+            project: "/p",
+            objectId: "mem-1",
+            json: false,
+        });
         for (const bad of [
             ["list", "--limit", "0"],
             ["list", "--limit", "65"],
@@ -170,6 +176,10 @@ describe("parseReviewArgs", () => {
             ["status", "--project", "/p"],
             ["status", "--limit", "1"],
             ["show", HEX, "--after", HEX],
+            ["outcome"],
+            ["outcome", "a", "b"],
+            ["outcome", "x".repeat(513)],
+            ["outcome", "mem-1", "--limit", "1"],
             ["nonsense"],
         ]) {
             expect(typeof parseReviewArgs(bad)).toBe("string");
@@ -763,6 +773,85 @@ describe("review show", () => {
             });
             expect(await runReviewCommand(["show", HEX], deps)).toBe(1);
             expect(recorded.stdout).toEqual([`The response could not be validated: ${detail}.`]);
+        }
+    });
+});
+
+describe("review outcome", () => {
+    test("sends one review.use_outcome read with exact integers and renders both counts", async () => {
+        const { deps, recorded } = harness({
+            respond: () => ({
+                kind: "counts",
+                object_id: "mem-1",
+                served_sessions: 9007199254740992n,
+                disputed_after_serve: 1,
+            }),
+        });
+        expect(await runReviewCommand(["outcome", "mem-1"], deps)).toBe(0);
+        expect(recorded.requests).toEqual([
+            {
+                session_id: expect.stringMatching(/^eidnara-review:/),
+                project_root: "/work/project/real",
+                method: "review.use_outcome",
+                object_id: "mem-1",
+            },
+        ]);
+        expect(recorded.requestOptions).toEqual([{ exactIntegers: true }]);
+        expect(recorded.stdout.join("\n")).toContain("Served sessions: 9007199254740992");
+        expect(recorded.stdout.join("\n")).toContain("Disputed after serve: 1");
+        expect(recorded.closes).toBe(1);
+
+        const json = harness({
+            respond: () => ({
+                kind: "counts",
+                object_id: "mem-1",
+                served_sessions: 2,
+                disputed_after_serve: 0,
+            }),
+        });
+        expect(await runReviewCommand(["outcome", "mem-1", "--json"], json.deps)).toBe(0);
+        expect(JSON.parse(json.recorded.stdout[0])).toEqual({
+            kind: "counts",
+            project_root: "/work/project/real",
+            object_id: "mem-1",
+            served_sessions: 2,
+            disputed_after_serve: 0,
+        });
+    });
+
+    test("an unready Kernel, a count past 2^53, and every other answer render unavailable, never zero", async () => {
+        const counts = (served: unknown, disputed: unknown, objectId = "mem-1") => ({
+            kind: "counts",
+            object_id: objectId,
+            served_sessions: served,
+            disputed_after_serve: disputed,
+        });
+        for (const answer of [
+            { state: { kind: "unavailable", reason: "store_starting" } },
+            { state: { kind: "unavailable", reason: "store_unavailable" } },
+            { state: { kind: "invalid", reason: "project_mismatch" } },
+            counts(9007199254740993n, 0),
+            counts(1, 9007199254740993n),
+            counts(-1, 0),
+            counts(1.5, 0),
+            counts(null, 0),
+            counts(undefined, undefined),
+            counts(1, 2),
+            counts(1, 0, "mem-2"),
+            { kind: "terminal", terminal: "disabled" },
+            { kind: "page", items: [], next: null },
+            "counts",
+        ]) {
+            const { deps, recorded } = harness({ respond: () => answer });
+            expect(await runReviewCommand(["outcome", "mem-1"], deps)).toBe(1);
+            const text = recorded.stdout.join("\n");
+            expect(text).toStartWith("Use-outcome counts: unavailable (");
+            expect(text).not.toMatch(/Served sessions|: 0\b/);
+            const json = harness({ respond: () => answer });
+            expect(await runReviewCommand(["outcome", "mem-1", "--json"], json.deps)).toBe(1);
+            const rendered = JSON.parse(json.recorded.stdout[0]);
+            expect(rendered.kind).toBe("unavailable");
+            expect(rendered.served_sessions).toBeUndefined();
         }
     });
 });

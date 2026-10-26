@@ -176,9 +176,9 @@ pub use source_hold::{
     SourceHoldBounds, SourceHoldError, SourceHoldInvalidity,
 };
 pub use use_outcome::{
-    MAX_EXPIRED_USE_OUTCOMES_PER_CALL, ServedSession, SessionRole, USE_OUTCOME_RETENTION_CLASS,
-    USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeRecord, UseOutcomeServe, UseOutcomeSpec,
-    served_set_digest, use_outcome_id,
+    MAX_EXPIRED_USE_OUTCOMES_PER_CALL, ServedCounts, ServedSession, SessionRole,
+    USE_OUTCOME_RETENTION_CLASS, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeRecord,
+    UseOutcomeServe, UseOutcomeSpec, served_set_digest, use_outcome_id,
 };
 
 /// `Connection::execute` and `Connection::query_row` prepare their statement

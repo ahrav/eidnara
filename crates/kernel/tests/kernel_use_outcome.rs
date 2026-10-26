@@ -1,6 +1,6 @@
 use kernel::{
     ArtifactDestination, CommitIntent, DomainSpec, EligibilityDeniedReason, KernelError,
-    KernelStore, MAX_EXPIRED_USE_OUTCOMES_PER_CALL, Sensitivity, SessionRole,
+    KernelStore, MAX_EXPIRED_USE_OUTCOMES_PER_CALL, Sensitivity, ServedCounts, SessionRole,
     USE_OUTCOME_RETENTION_CLASS, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
     served_set_digest, use_outcome_id,
 };
@@ -725,7 +725,7 @@ fn session_roles_round_trip_and_the_served_set_digest_is_order_free() {
     assert_ne!(served_set_digest([]), served_set_digest([""]));
 }
 
-/// The dispute comparison is per serve: a dispute between two serves of one object counts for the earlier serve only, and retiring one serve leaves the other answered.
+/// The dispute comparison is per serve: a dispute between two serves of one object counts for the earlier serve only, and retiring one serve leaves the other answered. The counts read the same rows: two serves with one disputed, then one with none, and an object never served counts zero of each.
 #[test]
 fn disputed_after_serve_is_judged_against_each_serve() {
     let root = tempfile::tempdir().unwrap();
@@ -756,6 +756,15 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         answer(&store),
         [(first.clone(), true), (second.clone(), false)]
     );
+    let counts = |served_sessions, disputed_after_serve| ServedCounts {
+        served_sessions,
+        disputed_after_serve,
+    };
+    assert_eq!(store.served_counts_for("x").unwrap(), counts(2, 1));
+    assert_eq!(
+        store.served_counts_for("never-served").unwrap(),
+        counts(0, 0)
+    );
     writer(root.path())
         .execute(
             "UPDATE use_outcomes SET invalidated_commit_seq=?1 WHERE use_outcome_id=?2",
@@ -763,6 +772,11 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         )
         .unwrap();
     assert_eq!(answer(&store), [(second, false)]);
+    assert_eq!(
+        store.served_counts_for("x").unwrap(),
+        counts(1, 0),
+        "a retired record is not counted"
+    );
 }
 
 /// A cited record whose deadline is later than a full page of uncited records is not read by the call that fills the page, and is counted by the call that reaches it.

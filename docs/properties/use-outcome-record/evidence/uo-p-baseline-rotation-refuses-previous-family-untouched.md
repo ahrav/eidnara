@@ -8,8 +8,8 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `1bd335e33`).
+References are verified at the #1157 branch tip (the commit that adds this file;
+its parent is `dc07f442a`).
 
 - Components: `crates/kernel/src/schema.rs:187` and
   `crates/kernel/src/schema.rs:191`; the admission citing column and

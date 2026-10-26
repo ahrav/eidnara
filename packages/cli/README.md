@@ -109,6 +109,7 @@ does not invoke lifecycle policy.
 ```bash
 eidnara review list [--project PATH] [--limit 1..64] [--after CURSOR] [--json]
 eidnara review show <causal-identity> [--project PATH] [--json]
+eidnara review outcome <decision-object-id> [--project PATH] [--json]
 eidnara review status [--json]
 ```
 
@@ -132,6 +133,12 @@ support and contradiction spans, limitations, uncertainty, manifest reference,
 and the live review expiry. A `retain` or `no_change` proposal changes,
 extends, and corroborates nothing.
 
+`outcome` issues one `review.use_outcome` read for a decision object id and
+prints the number of unretired serves of that decision and the number of those
+serves a `mark_disputed` or `contradict` followed. Each count is exact through
+2^53. An unready Kernel, a count outside that range, or any other answer prints
+`unavailable`, never zero, and exits `1`.
+
 `status` reads `host.status` only and names no project: the MemoryReviewer
 store state, the activation state, and every counter the wire document lists.
 A counter prints as `unavailable` when the store is not ready or the value is
@@ -146,7 +153,7 @@ Integers print with their exact digits in text and as exact number tokens in
 JSON. Text output strips control and escape sequences; `--json` output is for
 programs and is not made terminal-safe. A refusal prints as the protocol's closed terminal, the Kernel's state, or
 a validation message; peer payloads, provider text, and error bodies are never
-echoed. Exit code `0` means an outcome, proposal, or status was rendered; `1`
+echoed. Exit code `0` means an outcome, proposal, counts, or status was rendered; `1`
 means a refusal, a transport failure, or a response that failed validation;
 `2` means invalid arguments. The daemon connection is a bearer key, not an OS
 sandbox.

@@ -327,6 +327,35 @@ export function decodeSelected(
     });
 }
 
+export interface UseOutcomeCounts {
+    object_id: string;
+    served_sessions: number;
+    disputed_after_serve: number;
+}
+
+/**
+ * `requested` is the decision object id the read named; the answer echoes it. Each count is exact through 2^53, so
+ * `9007199254740993` and every value outside the count domain fail validation, as does any answer that is not `counts`:
+ * the caller renders all of them as unavailable, never as zero.
+ */
+export function decodeUseOutcome(
+    raw: unknown,
+    requested: string,
+): ReviewAnswer<never, UseOutcomeCounts> {
+    return classify(raw, [], "counts", (body) => {
+        if (body.object_id !== requested) return "object_id is not the requested decision";
+        const served_sessions = exactCount(body.served_sessions);
+        const disputed_after_serve = exactCount(body.disputed_after_serve);
+        if (served_sessions === null || disputed_after_serve === null) {
+            return "a count is not an exact integer from 0 through 2^53";
+        }
+        if (disputed_after_serve > served_sessions) {
+            return "disputed_after_serve exceeds served_sessions";
+        }
+        return { object_id: requested, served_sessions, disputed_after_serve };
+    });
+}
+
 export const MEMORY_REVIEWER_STATES = ["ready", "starting", "unavailable"] as const;
 export const ACTIVATION_STATES = [
     "open",

@@ -8,11 +8,11 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `1bd335e33`).
+References are verified at the #1157 branch tip (the commit that adds this file;
+its parent is `dc07f442a`).
 
-- Join: `crates/kernel/src/use_outcome.rs:183`; read: `served_sessions_for`
-  (`crates/kernel/src/use_outcome.rs:419`).
+- Join: `crates/kernel/src/use_outcome.rs:190`; read: `served_sessions_for`
+  (`crates/kernel/src/use_outcome.rs:434`).
 - The flag is computed in the read and stored nowhere; the read changes no
   visibility.
 

@@ -14,6 +14,7 @@ import {
     decodePage,
     decodeReviewStatus,
     decodeSelected,
+    decodeUseOutcome,
     integerText,
     isHex64,
     MAX_IDENTITY_BYTES,
@@ -80,6 +81,7 @@ export type ReviewArgs =
           json: boolean;
       }
     | { command: "show"; project: string | null; causalIdentity: string; json: boolean }
+    | { command: "outcome"; project: string | null; objectId: string; json: boolean }
     | { command: "status"; json: boolean };
 
 export function usage(): string {
@@ -87,12 +89,15 @@ export function usage(): string {
         "Usage:",
         "  eidnara review list [--project PATH] [--limit 1..64] [--after CURSOR] [--json]",
         "  eidnara review show <causal-identity> [--project PATH] [--json]",
+        "  eidnara review outcome <decision-object-id> [--project PATH] [--json]",
         "  eidnara review status [--json]",
         "",
         "Reads completed MemoryReviewer outcomes for the project bound to PATH or the current",
         "directory, one page or one selected proposal per invocation. Nothing here changes",
         "canonical memory, accepts a proposal, or starts review work; retain and no_change",
         "proposals do not change, extend, or corroborate the memory they name.",
+        "Outcome prints how many sessions a decision was served to and how many of those serves",
+        "a dispute or contradiction followed, or unavailable when the Kernel cannot answer.",
         "Status is host-wide and names no project. An open activation state means the",
         "deployment owner admits model disclosure; it is not compaction status and applies",
         "nothing. The daemon connection is a bearer key, not an OS sandbox.",
@@ -101,7 +106,8 @@ export function usage(): string {
 
 export function parseReviewArgs(args: string[]): ReviewArgs | string {
     const [command, ...rest] = args;
-    if (command !== "list" && command !== "show" && command !== "status") return usage();
+    if (command !== "list" && command !== "show" && command !== "outcome" && command !== "status")
+        return usage();
     let project: string | null = null;
     let limit = DEFAULT_LIMIT;
     let after: string | null = null;
@@ -150,6 +156,13 @@ export function parseReviewArgs(args: string[]): ReviewArgs | string {
         }
         return { command, project, causalIdentity: positional[0], json };
     }
+    if (command === "outcome") {
+        const objectId = positional.length === 1 ? positional[0] : "";
+        if (objectId.length === 0 || utf8Bytes(objectId) > MAX_IDENTITY_BYTES) {
+            return `review outcome requires one decision object id of 1 to ${MAX_IDENTITY_BYTES} bytes`;
+        }
+        return { command, project, objectId, json };
+    }
     if (positional.length > 0) {
         return `Unexpected review ${command} argument: ${printableLine(positional[0], 64)}`;
     }
@@ -175,6 +188,10 @@ function terminalText(terminal: ReadTerminal): string {
         default:
             return "A disclosed input no longer passes the Kernel for a local reader.";
     }
+}
+
+function utf8Bytes(text: string): number {
+    return new TextEncoder().encode(text).byteLength;
 }
 
 /** JSON output with every `bigint` as an exact number token; safe integers already serialize exactly. */
@@ -396,6 +413,45 @@ async function render(
                 : `Next page: ${nextPageCommand(projectRoot, parsed.limit, next)}`,
         );
         return { ok: true, text: lines.join("\n") };
+    }
+    if (parsed.command === "outcome") {
+        const raw = await connection.request(
+            handle,
+            { ...envelope, method: "review.use_outcome", object_id: parsed.objectId },
+            { exactIntegers: true },
+        );
+        const answer = decodeUseOutcome(raw, parsed.objectId);
+        if (answer.kind !== "body") {
+            const detail =
+                answer.kind === "state"
+                    ? `Kernel state ${stateKey(answer.state)}`
+                    : answer.kind === "malformed"
+                      ? `the response could not be validated: ${answer.detail}`
+                      : "the response is not counts";
+            return {
+                ok: false,
+                text: parsed.json
+                    ? toJson({ kind: "unavailable", project_root: projectRoot, answer })
+                    : `Use-outcome counts: unavailable (${detail}).`,
+            };
+        }
+        const counts = answer.body;
+        if (parsed.json) {
+            return {
+                ok: true,
+                text: toJson({ kind: "counts", project_root: projectRoot, ...counts }),
+            };
+        }
+        return {
+            ok: true,
+            text: [
+                `Project: ${printableLine(projectRoot, MAX_PATH_LINE)}`,
+                `Decision: ${printableLine(counts.object_id, MAX_IDENTITY_BYTES)}`,
+                `Served sessions: ${counts.served_sessions}`,
+                `Disputed after serve: ${counts.disputed_after_serve}`,
+                "Counts cover unretired serves in the retention window; a serve is counted disputed when a dispute or contradiction committed after it.",
+            ].join("\n"),
+        };
     }
     const raw = await connection.request(
         handle,

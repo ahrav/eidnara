@@ -153,6 +153,13 @@ pub struct ServedSession {
     pub disputed_after_serve: bool,
 }
 
+/// How many unretired serves name one decision object, and how many of them a `mark_disputed` or `contradict` on its lineage followed; both are read at one snapshot, so `disputed_after_serve <= served_sessions`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServedCounts {
+    pub served_sessions: u64,
+    pub disputed_after_serve: u64,
+}
+
 /// What one use-outcome expiry sweep did: `retired` records were retired by this call; `cited` expired records were kept because a committed admission row with a live subject cites them, counted among the rows the call read while filling its page. A cited record is kept, so a later call counts it again while its citation holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UseOutcomeExpiry {
@@ -197,6 +204,14 @@ static SERVED_SESSIONS_SQL: LazyLock<String> = LazyLock::new(|| {
         disputed = EventKind::MarkDisputed.as_str(),
         contradict = EventKind::Contradict.as_str(),
         lineage = super::admission::same_lineage_as_registry_object("a"),
+    )
+});
+
+/// [`SERVED_SESSIONS_SQL`]'s rows counted in one statement.
+static SERVED_COUNTS_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT COUNT(*),COALESCE(SUM(disputed_after_serve),0) FROM ({})",
+        *SERVED_SESSIONS_SQL
     )
 });
 
@@ -468,6 +483,25 @@ impl KernelStore {
             .map_err(map_sqlite)?;
         tx.commit()?;
         Ok(advanced)
+    }
+
+    /// [`Self::served_sessions_for`] as counts, derived in one statement at one snapshot; an object never served counts `(0, 0)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage and lock errors, and `CorruptCanonicalRow` for a negative count.
+    pub fn served_counts_for(&self, object_id: &str) -> Result<ServedCounts, KernelError> {
+        let (served, disputed): (i64, i64) = self
+            .lock_reader()?
+            .query_row_cached(&SERVED_COUNTS_SQL, [object_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(map_sqlite)?;
+        Ok(ServedCounts {
+            served_sessions: u64::try_from(served).map_err(|_| KernelError::CorruptCanonicalRow)?,
+            disputed_after_serve: u64::try_from(disputed)
+                .map_err(|_| KernelError::CorruptCanonicalRow)?,
+        })
     }
 
     /// Retires serving records whose `retain_until` is before `now` and that no committed admission row with a live subject cites: at most [`MAX_EXPIRED_USE_OUTCOMES_PER_CALL`] per call, oldest deadline first, in one commit. Each record is rechecked under the writer and gets its own reserved receipt keyed by `now` and its id, so a citation committed after selection keeps it and a record another sweep retired since selection is skipped. The commit's own receipt is keyed by `now` and a digest of the page's ids, so only a repeat of the same page at this cutoff replays; a replay retires nothing and reports the cited rows its scan read. A page that retires nothing commits nothing.

@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `1bd335e33`).
+References are verified at the #1157 branch tip (the commit that adds this file;
+its parent is `dc07f442a`).
 
 - Bind: `crates/daemon/src/lib.rs:13422`.
 - Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:5996`) reads
@@ -22,7 +22,7 @@ its parent is `1bd335e33`).
   `route.open`; the wrapup fire reads the live effective config.
 - Existing check:
   `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-  (`crates/daemon/src/lib.rs:39643`);
+  (`crates/daemon/src/lib.rs:39646`);
   `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:190`);
   `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`

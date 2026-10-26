@@ -651,3 +651,103 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
         }
     }
 }
+
+/// Records one serve of `objects` for `session` under the daemon's project, read at the current tip.
+fn serve(daemon: &KernelDaemon, key: &str, session: &str, objects: &[&str], recorded_at: i64) {
+    let kernel = daemon.store();
+    let served_commit_seq = kernel.tip().unwrap();
+    kernel
+        .commit(daemon::kernel_route_fixtures::intent(key), |envelope| {
+            envelope.insert_use_outcome(kernel::UseOutcomeSpec {
+                project_digest: daemon.project_digest(),
+                harness: "test".to_owned(),
+                session_id: session.to_owned(),
+                served_set_digest: kernel::served_set_digest(objects.iter().copied()),
+                composition_revision: 1,
+                served_commit_seq,
+                session_role: kernel::SessionRole::Primary,
+                recorded_at,
+                decision_object_ids: objects.iter().map(|id| (*id).to_owned()).collect(),
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// `review.use_outcome` counts the unretired serves of one decision and those a later `contradict` followed, at one snapshot: two serves with a contradiction between them answer (2, 1), a retired serve is not counted, and a decision never served answers (0, 0). It reads through the kernel-route scope alone, so a root without MODULE memories authority, where `review.list` is `disabled`, still answers; an observational route receives the same answer; an unknown or misspelled field is `invalid_params`.
+#[tokio::test]
+async fn review_use_outcome_counts_serves_and_later_disputes_of_one_decision() {
+    let daemon = KernelDaemon::start().await;
+    let project = daemon.project().to_path_buf();
+    let kernel = daemon.store();
+    daemon::kernel_route_fixtures::seed_domain(&kernel);
+    let created = daemon
+        .commit("create", vec![support::kernel_daemon::insert_decision(1)])
+        .await;
+    assert_eq!(created["state"]["kind"], "available", "{created}");
+    let decision = "decision-object-1";
+    let now = now_ms();
+    serve(&daemon, "serve-1", "ses-1", &[decision], now);
+    let contradicted = daemon
+        .commit(
+            "contradict",
+            vec![json!({"op": "disposition", "object_id": decision, "event": "contradict"})],
+        )
+        .await;
+    assert_eq!(contradicted["state"]["kind"], "available", "{contradicted}");
+    serve(&daemon, "serve-2", "ses-2", &[decision], now);
+    serve(&daemon, "serve-3", "ses-3", &[decision], 0);
+    assert_eq!(
+        kernel
+            .expire_use_outcomes(kernel::USE_OUTCOME_RETENTION_MS + 1)
+            .unwrap()
+            .retired,
+        1
+    );
+
+    let counts = |object_id: &str| {
+        envelope(
+            "review.use_outcome",
+            &project,
+            json!({ "object_id": object_id }),
+        )
+    };
+    assert_eq!(
+        daemon
+            .call(envelope("review.list", &project, json!({})))
+            .await,
+        json!({ "kind": "terminal", "terminal": "disabled" })
+    );
+    let answer = daemon.call(counts(decision)).await;
+    assert_eq!(
+        answer,
+        json!({
+            "kind": "counts",
+            "object_id": decision,
+            "served_sessions": 2,
+            "disputed_after_serve": 1,
+        })
+    );
+    assert_eq!(
+        daemon.call(counts("never-served")).await,
+        json!({
+            "kind": "counts",
+            "object_id": "never-served",
+            "served_sessions": 0,
+            "disputed_after_serve": 0,
+        })
+    );
+    let observer = daemon.bind_another(9, daemon::OBSERVATIONAL_HARNESS).await;
+    assert_eq!(daemon.call_on(observer, counts(decision)).await, answer);
+    for body in [
+        json!({ "object_id": decision, "limit": 1 }),
+        json!({ "object": decision }),
+        json!({ "object_id": "" }),
+    ] {
+        let request = envelope("review.use_outcome", &project, body.clone());
+        let PreparedOutcome::Error { code, .. } = daemon.outcome(request).await else {
+            panic!("{body}");
+        };
+        assert_eq!(code, "invalid_params", "{body}");
+    }
+}
