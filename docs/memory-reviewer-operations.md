@@ -250,6 +250,12 @@ Batch K1 changes the Kernel baseline digest in place, once per release. Its DDL 
 
 A `kernel.sqlite` family created under the previous baseline refuses to open under this binary and is left byte-identical: the Kernel reports `kernel_state: unavailable` with `unavailable_reason: store_unsupported`, as the mismatch table above describes, and the activation gate is not evaluated. Nothing migrates it: there is no migration, no version ledger, no silent reset, and no change to the Memory Store baseline. A deployment that keeps the previous family runs without a Kernel. To run with one, stop the daemon, move the closed `kernel/` root aside, and start the daemon, which creates an empty Kernel under the new baseline with a new incarnation. Rows bound to the previous Kernel incarnation, such as MemoryReviewer receipts, holds, and staged proposals, are nonportable and are refused where they are met. The previous activation record then fails closed on `kernel_baseline_digest` and `kernel_incarnation` until the deployment owner writes a renewed record naming the new `kernel_baseline_digest` and the new `kernel_incarnation`.
 
+### Memory Store baseline: Batch M1
+
+Batch M1 changes the Memory Store baseline digest once. Its one change adds the `contradiction_candidates` table, keyed by project digest, descriptor evidence id, and decision object id and holding ids, integers, and times only, with the `idx_contradiction_candidates_decision` and `idx_contradiction_candidates_eviction` indexes. The daemon writes the table only with `contradiction_candidates.enabled` set.
+
+A database created under the previous baseline refuses to open under this binary with `StoreError::Baseline` and is left byte-identical; recreate it with the Memory Store reset in section 5. The previous activation record closes the gate on `memstore_baseline_digest` until the deployment owner writes a renewed record naming the new digest and the new store's `memstore_incarnation`. There is no migration, backfill, version ledger, or change to the Kernel baseline.
+
 ## 6. Exposure bounds (Q38)
 
 Provider exposure is bounded by receipts and quotas, not by a spending cap; the daemon holds no billing ledger and none is added.

@@ -1295,4 +1295,6 @@ CREATE INDEX idx_contradiction_candidates_decision
             );
 
 CREATE INDEX idx_contradiction_candidates_eviction
-            ON contradiction_candidates(project_digest, score_bp, created_at_ms);
+            ON contradiction_candidates(
+                project_digest, score_bp, created_at_ms, evidence_id, decision_object_id
+            );
