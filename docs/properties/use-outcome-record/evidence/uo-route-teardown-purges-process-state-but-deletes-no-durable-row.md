@@ -37,7 +37,10 @@ None.
 ## What a test must construct
 
 A HARD fold, a route close, then a read of both stores (marker
-`uo_route_torn_down_after_hard`, owner #1156).
+`uo_route_torn_down_after_hard`, owner #1156):
+`a_route_torn_down_after_a_hard_fold_leaves_its_records_live` reads the Kernel
+record and the session's memory rows after the teardown. An exhaustive check
+over every table of both stores is still to construct.
 
 Required faults and enabling state: A route closed without `session.delete`
 after a HARD fold.
@@ -47,9 +50,13 @@ after a HARD fold.
 ### Q: Does any open question remain for this record?
 
 - Sources examined: the specification catalog entry, the code and tests cited above.
-- Findings: the cited code and tests agree with the guarantee at this tip for
-  process-local state; no test reads both stores after a route teardown.
-- Missing evidence: a HARD fold, a route close, then a read of both stores
-  (marker `uo_route_torn_down_after_hard`, owner #1156).
+- Findings: the cited code and tests agree with the guarantee at this tip.
+  `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:203`) reads both stores
+  after the teardown: the Kernel record stays live with `deleted_at` null and
+  the Kernel tip unchanged, and the session's memory rows load. It reads the
+  rows the fold wrote, not every table of either store.
+- Missing evidence: an exhaustive check that no durable row of the session in
+  any table of either store changed across the teardown.
 - Conclusion: resolved with answer - no design question is open; coverage stays
-  partial until #1156 constructs the two-store read.
+  partial until a test asserts every table of both stores unchanged.
