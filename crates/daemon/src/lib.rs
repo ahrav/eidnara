@@ -3475,7 +3475,8 @@ struct PassEnv {
     project_path: String,
     note_project_path: String,
     project_memory: Option<canonical_memory::CanonicalMemoryRead>,
-    /// Set once a serve write of this pass reached a settled outcome: every attempt of a pass freezes the same pinned read, so one settled write covers its reruns.
+    /// Set once a serve write of this pass reached a Kernel commit, whatever its outcome; a Kernel that is not Ready leaves it
+    /// clear so a rerun retries. Every attempt of a pass freezes the same pinned read, so one commit covers its reruns.
     use_outcome_settled: std::sync::atomic::AtomicBool,
     snapshot_generation: u64,
     pass_now: i64,
@@ -9677,14 +9678,12 @@ impl HandlerCore {
         );
         // A Kernel that is not Ready cost no writer wait, so a rerun in this pass may retry; any commit outcome
         // settles the pass, which bounds a pass to one writer wait.
-        let Some(outcome) = attempt else {
-            self.use_outcome_counts
-                .record(use_outcome_writer::UseOutcomeWrite::KernelUnavailable);
-            return;
-        };
-        env.use_outcome_settled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.use_outcome_counts.record(outcome);
+        if attempt.is_some() {
+            env.use_outcome_settled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.use_outcome_counts
+            .record(attempt.unwrap_or(use_outcome_writer::UseOutcomeWrite::KernelUnavailable));
     }
 
     #[cfg(test)]

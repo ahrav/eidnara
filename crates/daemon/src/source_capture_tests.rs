@@ -129,6 +129,15 @@ fn kernel_store(handler: &Handler) -> Arc<KernelStore> {
     handler.kernel.kernel_store().unwrap()
 }
 
+/// The Kernel tip minus the use-outcome serves the handler wrote: each written serve is one commit, and a
+/// document pass that folds HARD over a new served set writes one beside whatever capture commits.
+fn capture_tip(handler: &Handler) -> i64 {
+    let serves = handler
+        .use_outcome_counts
+        .get(crate::use_outcome_writer::UseOutcomeWrite::Written);
+    kernel_store(handler).tip().unwrap() - i64::try_from(serves).unwrap()
+}
+
 fn live(store: &KernelStore, class: OccurrenceClass) -> Vec<LiveDescriptor> {
     let budget = kernel::applicability::EvalBudget::new(
         Some(Instant::now() + Duration::from_secs(5)),
@@ -2007,9 +2016,9 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
     std::fs::write(&doc, "# Architecture\n\nOne daemon.\n").unwrap();
 
     // Unchanged: nothing commits.
-    let tip = store.tip().unwrap();
+    let tip = capture_tip(&handler);
     document_pass(&handler, "base-2").await;
-    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(capture_tip(&handler), tip);
     assert_eq!(
         report(&handler)["documents_unchanged"],
         2,
@@ -2093,10 +2102,10 @@ async fn a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_
     document_pass(&handler, "base-7").await;
     assert!(live_document(&store, "ARCHITECTURE.md").is_empty());
     assert_eq!(report(&handler)["documents_retired"], 2);
-    let tip = store.tip().unwrap();
+    let tip = capture_tip(&handler);
     let missing = report(&handler)["documents_missing"].as_u64().unwrap();
     document_pass(&handler, "base-8").await;
-    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(capture_tip(&handler), tip);
     assert_eq!(
         report(&handler)["documents_missing"].as_u64().unwrap(),
         missing + 2
@@ -2303,10 +2312,10 @@ async fn a_document_is_judged_against_its_own_project_among_many() {
     document_pass(&handler, "base-1").await;
     let store = kernel_store(&handler);
     assert_eq!(live(&store, OccurrenceClass::RepositoryDocuments).len(), 11);
-    let tip = store.tip().unwrap();
+    let tip = capture_tip(&handler);
     document_pass(&handler, "base-2").await;
     assert_eq!(
-        store.tip().unwrap(),
+        capture_tip(&handler),
         tip,
         "an unchanged file publishes nothing"
     );
@@ -2842,7 +2851,7 @@ async fn two_worktrees_share_a_repository_identity_and_keep_their_lineages() {
     for row in &rows {
         assert_eq!(identity_of(row)[1], ("repository_id", repository.as_str()));
     }
-    let tip = store.tip().unwrap();
+    let tip = capture_tip(&handler);
     let retired = count(&handler, "documents_retired");
     for base in ["base-2", "base-3"] {
         document_pass_at(&handler, &project, 300, base).await;
@@ -2859,7 +2868,7 @@ async fn two_worktrees_share_a_repository_identity_and_keep_their_lineages() {
             .map(|row| (row.object_id.clone(), row.detail.revision.clone()))
             .collect::<Vec<_>>()
     );
-    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(capture_tip(&handler), tip);
 }
 
 /// `ri-failed-derivation-refuses-pass-and-memoizes-nothing`: a derivation that cannot read an object or outlasts its share of the job's budget refuses both of the pass's document reads, retires and publishes no document, and memoizes nothing, so the next pass derives and publishes.
@@ -3075,12 +3084,12 @@ async fn a_configured_document_list_captures_each_entry_under_its_configured_pat
     let (retired, missing, tip) = (
         count(&handler, "documents_retired"),
         count(&handler, "documents_missing"),
-        store.tip().unwrap(),
+        capture_tip(&handler),
     );
     document_pass(&handler, "base-3").await;
     assert_eq!(count(&handler, "documents_retired"), retired);
     assert_eq!(count(&handler, "documents_missing"), missing);
-    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(capture_tip(&handler), tip);
     assert_eq!(document_identities(&store, "README.md").len(), 1);
 }
 

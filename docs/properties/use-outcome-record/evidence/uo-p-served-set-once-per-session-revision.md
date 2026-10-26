@@ -9,12 +9,12 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `75408189f`).
+its parent is `62659617c`).
 
 - Key and digest: `crates/daemon/src/use_outcome_writer.rs:113`; the request
   digest binds the ids, the harness, and the role (`request_digest`
   (`crates/daemon/src/use_outcome_writer.rs:161`)).
-- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9636`) runs after
+- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9637`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 

@@ -10,11 +10,11 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `75408189f`).
+its parent is `62659617c`).
 
-- Bind: `crates/daemon/src/lib.rs:13349`.
-- Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:5984`) reads
-  `self.effective_config` at `crates/daemon/src/lib.rs:6026`.
+- Bind: `crates/daemon/src/lib.rs:13348`.
+- Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:5985`) reads
+  `self.effective_config` at `crates/daemon/src/lib.rs:6027`.
 - Correction: the spec cited `config.rs:2630, 2753, 2762`, which are config
   tests at this tip.
 
@@ -22,7 +22,7 @@ its parent is `75408189f`).
   `route.open`; the wrapup fire reads the live effective config.
 - Existing check:
   `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-  (`crates/daemon/src/lib.rs:39538`);
+  (`crates/daemon/src/lib.rs:39537`);
   `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
   `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
@@ -59,10 +59,10 @@ that turns it off (and the reverse), then a pass and a wrapup.
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: Gap G4: the summarizer reattach path reads `memory_enabled` from the
-  live effective config (`crates/daemon/src/lib.rs:5211`, used at
-  `crates/daemon/src/lib.rs:5358`), a third consent source beside the frozen
+  live effective config (`crates/daemon/src/lib.rs:5212`, used at
+  `crates/daemon/src/lib.rs:5359`), a third consent source beside the frozen
   binding and the live wrapup config; the fire path states the frozen-config
-  rule in its own comment (`crates/daemon/src/lib.rs:5868`). Recorded, not
+  rule in its own comment (`crates/daemon/src/lib.rs:5869`). Recorded, not
   fixed; whether the reattach should follow the frozen config is an owner
   decision (needs human input).
 - Missing evidence: an owner decision or the named read.

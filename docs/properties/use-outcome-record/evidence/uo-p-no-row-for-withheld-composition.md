@@ -9,9 +9,9 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `75408189f`).
+its parent is `62659617c`).
 
-- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9636`); one
+- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9637`); one
   write per pass covers its reruns.
 - A composition read at sequence 0 precedes every commit; the handler skips its
   write, and the next fold after a commit records the serve.
