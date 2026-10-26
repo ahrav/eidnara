@@ -29,25 +29,26 @@ revision.
 - Guarantee under test: `last_transform_at` never decreases on a session's
   serving record, and only a pass whose response committed updates it.
 - Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:222`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:227`);
   `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:307`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:314`);
   `a_spent_pass_budget_skips_the_touch`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:355`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:362`) (the writer function
+  under a spent `PassWriteBudget`, not a pass);
   `a_serve_deadline_leaves_the_touch_its_own_kernel_wait`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:384`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:391`);
   `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:421`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:428`); Kernel half:
   `last_transform_at_advances_live_records_without_a_commit`
-  (`crates/kernel/tests/kernel_use_outcome.rs:984`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1024`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1042`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1099`),
   `an_outside_file_lock_bounds_the_advance_at_begin`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1079`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1136`),
   `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1106`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1160`),
   `the_advance_takes_no_pooled_reader`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1138`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:1192`). Status: unaudited.
 
 ## Failure scenario
 

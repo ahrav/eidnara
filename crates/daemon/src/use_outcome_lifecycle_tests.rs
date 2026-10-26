@@ -131,40 +131,45 @@ async fn a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_conver
     );
 }
 
-/// A delete step whose commit ran but whose answer was an error leaves the memory rows intact and the records marked: a transient error answers `kernel_unavailable` and the repeat answers `ok` with nothing live and the first timestamp kept, while a conflict answers `source_retirement_failed`.
+/// A delete step whose commit ran but whose answer was an I/O error leaves the memory rows intact and the records marked: the step answers `kernel_unavailable`, counted, and the repeat answers `ok` with nothing live and the first timestamp kept. The fault seam replaces the step's answer after the commit, so it models an unknown commit outcome; a Kernel conflict rolls its transaction back before answering, so the `Conflict` arm below checks only the step's classification, `source_retirement_failed` with no lifecycle count.
 #[tokio::test(flavor = "current_thread")]
 async fn a_delete_step_with_an_unknown_outcome_converges_on_retry() {
-    for (fault, code) in [
-        (kernel::KernelError::Io, "kernel_unavailable"),
-        (kernel::KernelError::Conflict, "source_retirement_failed"),
-    ] {
-        let (handler, store, _dir, project) = served_handler().await;
-        *handler.use_outcome_delete_fault.lock().unwrap() = Some(fault);
-        let failed = delete_session(&handler, "ses").await;
-        assert_eq!(failed["error"], code, "{failed}");
-        assert!(store.load("ses").unwrap().row_version.is_some(), "{code}");
-        let deleted_at = served(&handler, &project)[0].serve.deleted_at;
-        assert!(deleted_at.is_some(), "{code}: the commit ran");
-        let tip = handler.kernel.kernel_store().unwrap().tip().unwrap();
-        let retried = delete_session(&handler, "ses").await;
-        assert_eq!(retried["ok"], true, "{code}: {retried}");
-        assert_eq!(served(&handler, &project)[0].serve.deleted_at, deleted_at);
-        assert_eq!(handler.kernel.kernel_store().unwrap().tip().unwrap(), tip);
-        assert_eq!(
-            handler
-                .use_outcome_lifecycle
-                .get(LifecycleWrite::DeleteNothingLive),
-            1,
-            "{code}"
-        );
-        assert_eq!(
-            handler
-                .use_outcome_lifecycle
-                .get(LifecycleWrite::DeleteKernelUnavailable),
-            u64::from(code == "kernel_unavailable"),
-            "{code}"
-        );
-    }
+    let (handler, store, _dir, project) = served_handler().await;
+    *handler.use_outcome_delete_fault.lock().unwrap() = Some(kernel::KernelError::Io);
+    let failed = delete_session(&handler, "ses").await;
+    assert_eq!(failed["error"], "kernel_unavailable", "{failed}");
+    assert!(store.load("ses").unwrap().row_version.is_some());
+    let deleted_at = served(&handler, &project)[0].serve.deleted_at;
+    assert!(deleted_at.is_some(), "the commit ran");
+    let tip = handler.kernel.kernel_store().unwrap().tip().unwrap();
+    let retried = delete_session(&handler, "ses").await;
+    assert_eq!(retried["ok"], true, "{retried}");
+    assert_eq!(served(&handler, &project)[0].serve.deleted_at, deleted_at);
+    assert_eq!(handler.kernel.kernel_store().unwrap().tip().unwrap(), tip);
+    assert_eq!(
+        lifecycle_counts(&handler),
+        [
+            ("delete_nothing_live", 1),
+            ("delete_kernel_unavailable", 1),
+            ("transform_touched", 1)
+        ]
+    );
+
+    let (handler, store, _dir, _project) = served_handler().await;
+    *handler.use_outcome_delete_fault.lock().unwrap() = Some(kernel::KernelError::Conflict);
+    let conflicted = delete_session(&handler, "ses").await;
+    assert_eq!(
+        conflicted["error"], "source_retirement_failed",
+        "{conflicted}"
+    );
+    assert!(store.load("ses").unwrap().row_version.is_some());
+    assert_eq!(
+        handler
+            .use_outcome_lifecycle
+            .get(LifecycleWrite::DeleteKernelUnavailable),
+        0,
+        "a conflict is counted under no lifecycle name"
+    );
 }
 
 /// The route stays bound after `session.delete`, so the session can keep passing; a later delete marks the records its later folds wrote, because each delete commits under its own attempt key. A later fold over a composition the deleted record already holds replays that record.
@@ -237,6 +242,8 @@ async fn last_transform_at_moves_forward_only_on_committing_passes() {
     };
     let tip = kernel.tip().unwrap();
 
+    // A later clock makes a touch on this pass observable, so the assertion holds only when the pass skips it.
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let repeat = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
     assert_eq!(repeat["committed"], false, "{repeat}");
     assert_eq!(read(), [(None, Some(first))]);

@@ -564,7 +564,7 @@ Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
 `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
 (`crates/daemon/tests/kernel_routes.rs:3849`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:203`). Status: unaudited.
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:208`). Status: unaudited.
 Impact: A teardown that wrote `deleted_at` would mark a live session deleted
 (AC10).
 Open questions: None.
@@ -1006,8 +1006,8 @@ between; a CAS retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-set-once-per-session-revision.md). the writer
 keys its commit by the project binding, `use-outcome`, the session, and the
-served-set digest (`crates/daemon/src/use_outcome_writer.rs:365`); the Kernel
-holds one record per identity tuple.
+served-set digest (`crates/daemon/src/use_outcome_writer.rs:372-375`); the
+Kernel holds one record per identity tuple.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 (`crates/daemon/src/use_outcome_writer_tests.rs:64`);
 `an_equal_digest_replays_and_another_harness_or_role_conflicts`
@@ -1161,7 +1161,8 @@ Impact: A record claiming a serve that did not render.
 Open questions:
 - OQ3-11 resolved at #1155 ticketing: an empty Canonical composition writes a
   record with zero decision rows.
-- Tip 0, raised in #1176 review: `UseOutcomeSpec` (`crates/kernel/src/use_outcome.rs:110`)
+- Tip 0, raised in #1176 review: `UseOutcomeSpec::validated_retain_until`
+  (`crates/kernel/src/use_outcome.rs:239-240`)
   requires `1 <= served_commit_seq < created_commit_seq` and the column
   references `commit_log`, so a serve at tip 0 is not recordable. The first
   commit of any kind ends that state. Resolved for this catalog by the carve-out
@@ -1231,13 +1232,13 @@ Existing check:
 `a_delete_step_with_an_unknown_outcome_converges_on_retry`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:136`);
 `a_second_delete_marks_records_written_after_the_first`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:172`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:177`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:203`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:208`);
 `a_session_id_that_reads_as_a_secret_still_deletes`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:476`); Kernel half:
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:483`); Kernel half:
 `a_session_delete_marks_each_live_record_once`
-(`crates/kernel/tests/kernel_use_outcome.rs:935`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:969`). Status: unaudited.
 Impact: A deleted session reads as live, or a live one as deleted.
 Open questions:
 - A record written after the delete commits, by a pass on a route still bound to
@@ -1259,9 +1260,10 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - a committing pass advances the value, a non-committing pass and
-a pass whose clock reads before the stored value leave it, a Kernel unavailable,
-a held writer, or a spent pass budget skips it with the pass `ok`, and the next
-committing pass catches up
+a pass whose clock reads before the stored value leave it, a Kernel unavailable
+or a held writer skips it with the pass `ok`, and the next committing pass
+catches up; the spent-budget arm is checked at the writer function with a
+spent `PassWriteBudget`, not through a pass
 Guarantee: `last_transform_at` never decreases on a session's serving record,
 and only a pass whose response committed updates it.
 Check: `always` - after every pass the value is at least the old value, and
@@ -1285,25 +1287,25 @@ only live records whose value is null or earlier, in one fenced transaction
 with no commit that holds only the writer (`advance_use_outcome_last_transform`
 (`crates/kernel/src/use_outcome.rs:533`)).
 Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:222`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:227`);
 `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:307`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:314`);
 `a_spent_pass_budget_skips_the_touch`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:355`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:362`);
 `a_serve_deadline_leaves_the_touch_its_own_kernel_wait`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:384`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:391`);
 `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:421`); Kernel half:
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:428`); Kernel half:
 `last_transform_at_advances_live_records_without_a_commit`
-(`crates/kernel/tests/kernel_use_outcome.rs:984`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1024`),
 `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-(`crates/kernel/tests/kernel_use_outcome.rs:1042`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1099`),
 `an_outside_file_lock_bounds_the_advance_at_begin`
-(`crates/kernel/tests/kernel_use_outcome.rs:1079`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1136`),
 `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-(`crates/kernel/tests/kernel_use_outcome.rs:1106`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1160`),
 `the_advance_takes_no_pooled_reader`
-(`crates/kernel/tests/kernel_use_outcome.rs:1138`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1192`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.

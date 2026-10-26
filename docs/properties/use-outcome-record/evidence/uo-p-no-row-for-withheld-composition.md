@@ -21,7 +21,7 @@ revision.
   commit attempts a record with zero decision rows, which exists once the write
   lands as `written` or as `replayed` against a live record; a receipt that
   outlives its expired record replays with no live row. At tip 0 the composition names no commit and
-  the writer records nothing (`crates/daemon/src/lib.rs:9723`).
+  the writer records nothing (`crates/daemon/src/lib.rs:9737-9739`).
 - Existing check: `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:174`);
   `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`

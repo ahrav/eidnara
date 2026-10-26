@@ -11,7 +11,7 @@ Record kind: new obligation activated by #1154.
 References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Join: `crates/kernel/src/use_outcome.rs:163-164`; read: `served_sessions_for`
+- Join: `crates/kernel/src/use_outcome.rs:183-201`; read: `served_sessions_for`
   (`crates/kernel/src/use_outcome.rs:475`).
 - The read takes the newest qualifying commit sequence once for the object and
   compares each serve's `served_commit_seq` against it, so a serve is disputed
