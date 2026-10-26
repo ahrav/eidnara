@@ -11,7 +11,7 @@ Record kind: new obligation activated by #1154.
 References are verified at the #1156 branch tip (the commit that adds this file;
 its parent is `dc07f442a`).
 
-- Components: `crates/kernel/src/schema.rs:187` and
+- Components: `crates/kernel/src/schema.rs:188` and
   `crates/kernel/src/schema.rs:191`; the admission citing column and
   `idx_admission_use_outcome_fk` in the `admission_decisions` component
   (`crates/kernel/src/schema.rs:163`).

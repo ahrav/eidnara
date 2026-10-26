@@ -801,7 +801,7 @@ including REPLACE.
 Confidence: high -
 [evidence](evidence/uo-p-served-set-and-identity-never-rewritten.md). triggers
 in the `use_outcomes` and `use_outcome_decisions` components
-(`crates/kernel/src/schema.rs:187`); `recursive_triggers` is on for every Kernel
+(`crates/kernel/src/schema.rs:188`); `recursive_triggers` is on for every Kernel
 connection.
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
 (`crates/kernel/tests/kernel_schema.rs:2175`);
@@ -832,7 +832,7 @@ Required faults and enabling state: Inserts with `normal` and `remote_allowed`;
 a serve through the envelope.
 Confidence: high -
 [evidence](evidence/uo-p-classification-sensitive-local-only-no-remote-egress.md).
-CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:187`); the insert
+CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:188`); the insert
 names the classes as literals (`insert_use_outcome`
 (`crates/kernel/src/use_outcome.rs:252`)).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
@@ -1151,8 +1151,9 @@ marks records written after the first; a route teardown leaves the records live
 Guarantee: `deleted_at` is set exactly when a `session.delete` for the session
 committed its Kernel step, before the memory-store delete; route teardown leaves
 it null.
-Check: `always` - after `ok` every record of the session has `deleted_at` set
-and the memory rows are gone; after teardown it is null; after
+Check: `always` - after `ok` every live record of the session has `deleted_at`
+set and the memory rows are gone, and a record expiry retired before the delete
+keeps its state with `deleted_at` null; after teardown it is null; after
 `kernel_unavailable` the memory rows are intact, and `deleted_at` is null when
 the Kernel was not Ready and set when the step's commit ran and its answer was
 an error; one repeat with the Kernel Ready completes `ok` and keeps the first
@@ -1166,7 +1167,7 @@ runs inside the capture gate after the descriptor retirement and before the
 memory delete (`delete_kernel_step` (`crates/daemon/src/lib.rs:6850`)); the
 envelope selects the session's live records under the writer
 (`mark_use_outcomes_deleted` (`crates/kernel/src/use_outcome.rs:320`)), and the
-set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:187`).
+set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:188`).
 Existing check:
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`);

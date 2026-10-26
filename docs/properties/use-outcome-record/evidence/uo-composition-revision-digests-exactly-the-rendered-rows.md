@@ -51,7 +51,7 @@ renderer drops, bytes past the render cap, or rows past the memory budget.
 
 ## Investigation log
 
-### Q: The `DefaultHasher` output is unspecified across toolchain releases; #
+### Q: The `DefaultHasher` output is unspecified across toolchain releases; #1154 resolves OQ3-12 by keying the record on `served_set_digest` and storing the revision as an informational column
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: The `DefaultHasher` output is unspecified across toolchain releases;

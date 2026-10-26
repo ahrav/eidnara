@@ -12,7 +12,7 @@ Record kind: new obligation activated by #1154.
 References are verified at the #1156 branch tip (the commit that adds this file;
 its parent is `dc07f442a`).
 
-- Delete triggers: `crates/kernel/src/schema.rs:187`.
+- Delete triggers: `crates/kernel/src/schema.rs:188`.
 - Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:388`) answers
   retired records.
 

@@ -71,7 +71,7 @@ Kernel unavailable at the write.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: The pass budget is the 250 ms Kernel wait the pass shares across its s
+### Q: The pass budget is the 250 ms Kernel wait the pass shares across its serve and touch writes (`PassWriteBudget`); the daemon carries no other pass deadline
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: The pass budget is the 250 ms Kernel wait the pass shares across its
@@ -96,7 +96,7 @@ Kernel unavailable at the write.
 - Missing evidence: an owner decision or the named read.
 - Conclusion: needs human input.
 
-### Q: A pass that commits and then fails its boundary read answers an error 
+### Q: A pass that commits and then fails its boundary read answers an error before the settle step, so it records its serve and touches nothing; the next committing pass catches up
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A pass that commits and then fails its boundary read answers an
@@ -105,7 +105,7 @@ Kernel unavailable at the write.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: A session rebound to a route with memory disabled keeps its records un
+### Q: A session rebound to a route with memory disabled keeps its records untouched by those passes, because such a route takes no Kernel read (C2)
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A session rebound to a route with memory disabled keeps its records
@@ -113,7 +113,7 @@ Kernel unavailable at the write.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: A pass with an earlier clock selects no record, because the update fil
+### Q: A pass with an earlier clock selects no record, because the update filters on a stored value before `now`; the trigger never sees a decrease, and the pass ignores any write failure (C11)
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A pass with an earlier clock selects no record, because the update

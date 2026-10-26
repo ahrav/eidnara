@@ -38,7 +38,7 @@ two sessions with one later dispute.
 
 ## Investigation log
 
-### Q: OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome` m
+### Q: OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome` method answering the Kernel state outcome when unready
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome`
