@@ -5,8 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
-use kernel::{CommitIntent, KernelError, KernelStore, SessionRole, UseOutcomeSpec};
+use kernel::{
+    CommitIntent, CommitReceipt, Envelope, KernelError, KernelStore, SessionRole, UseOutcomeSpec,
+};
 use sha2::{Digest, Sha256};
+use tokio::sync::Semaphore;
 
 use crate::canonical_memory::CanonicalMemorySnapshot;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
@@ -17,8 +20,9 @@ const REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-serve-v1\n";
 const DELETE_PRODUCER: &str = "eidnara-daemon/use-outcome-delete";
 const DELETE_FAMILY: &str = "use-outcome-delete";
 const DELETE_REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-delete-v1\n";
-/// Bounds one pass's total wait for Kernel connections across its writes; a write runs to completion once its connection is held.
+/// `WRITE_BUDGET` bounds writer waits and the pooled-reader replay check; the insert runs to completion once the writer is held.
 const WRITE_BUDGET: Duration = Duration::from_millis(250);
+const WRITER_FIRST_WAIT: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UseOutcomeWrite {
@@ -81,12 +85,34 @@ impl UseOutcomeWrite {
 
 const _: () = assert!(UseOutcomeWrite::Refused as usize + 1 == UseOutcomeWrite::ALL.len());
 
-#[derive(Debug, Default)]
-pub(crate) struct UseOutcomeCounts([AtomicU64; UseOutcomeWrite::ALL.len()]);
+const WRITES_IN_FLIGHT: usize = 4;
+/// One retained composition: the figure `memory_capture::RETAINED_BYTES_BOUND` declares per worker for the same
+/// bounded canonical read, 8 MiB of decision payload plus the rows' ids, categories, and string headers, which
+/// the read's payload cut leaves uncounted.
+const RETAINED_SNAPSHOT_BYTES_PER_WRITE: u64 = 32 * 1024 * 1024;
+/// The compositions in-flight jobs retain after their passes' responses released their charges: at most
+/// [`WRITES_IN_FLIGHT`] clones.
+pub(crate) const RETAINED_SNAPSHOT_BYTES_BOUND: u64 =
+    WRITES_IN_FLIGHT as u64 * RETAINED_SNAPSHOT_BYTES_PER_WRITE;
 
-impl UseOutcomeCounts {
+#[derive(Debug)]
+pub(crate) struct UseOutcomeWrites {
+    counts: [AtomicU64; UseOutcomeWrite::ALL.len()],
+    slots: Arc<Semaphore>,
+}
+
+impl Default for UseOutcomeWrites {
+    fn default() -> Self {
+        Self {
+            counts: Default::default(),
+            slots: Arc::new(Semaphore::new(WRITES_IN_FLIGHT)),
+        }
+    }
+}
+
+impl UseOutcomeWrites {
     pub(crate) fn record(&self, outcome: UseOutcomeWrite) {
-        self.0[outcome as usize].fetch_add(1, Ordering::Relaxed);
+        self.counts[outcome as usize].fetch_add(1, Ordering::Relaxed);
         if !matches!(
             outcome,
             UseOutcomeWrite::Written | UseOutcomeWrite::Replayed
@@ -95,9 +121,42 @@ impl UseOutcomeCounts {
         }
     }
 
+    /// The returned job holds a write slot through `write` and the outcome count, or until it is dropped. `write` returning `None` counts `kernel_unavailable`. Slot exhaustion counts `deadline` and returns `None`.
+    pub(crate) fn job(
+        self: &Arc<Self>,
+        write: impl FnOnce() -> Option<UseOutcomeWrite> + Send + 'static,
+    ) -> Option<impl FnOnce() + Send + 'static> {
+        let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() else {
+            self.record(UseOutcomeWrite::Deadline);
+            return None;
+        };
+        let writes = Arc::clone(self);
+        Some(move || {
+            writes.record(write().unwrap_or(UseOutcomeWrite::KernelUnavailable));
+            drop(slot);
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn get(&self, outcome: UseOutcomeWrite) -> u64 {
-        self.0[outcome as usize].load(Ordering::Relaxed)
+        self.counts[outcome as usize].load(Ordering::Relaxed)
+    }
+
+    /// Waits until completed or dropped jobs have released every write slot.
+    #[cfg(test)]
+    pub(crate) async fn settled(&self) {
+        let _every_slot = self
+            .slots
+            .acquire_many(WRITES_IN_FLIGHT as u32)
+            .await
+            .expect("the slots semaphore stays open");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn occupy_every_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.slots
+            .try_acquire_many(WRITES_IN_FLIGHT as u32)
+            .expect("no write is in flight")
     }
 }
 
@@ -241,6 +300,24 @@ pub(crate) fn touch_needed(
         .map_err(skipped_touch)
 }
 
+/// The touch a serve job makes for its pass after its serve write, with a Kernel wait budget of its own: the staleness check and the update each spend what remains of it. Answers `None` when no live record needed the update.
+pub(crate) fn touch_after_serve(
+    store: &KernelStore,
+    project: &ProjectBinding,
+    harness: &str,
+    session_id: &str,
+    at: i64,
+) -> Option<LifecycleWrite> {
+    let budget = PassWriteBudget::default();
+    match budget.spend(|budget| touch_needed(store, budget, project, harness, session_id, at)) {
+        Ok(true) => {
+            budget.spend(|budget| touch_session(store, budget, project, harness, session_id, at))
+        }
+        Ok(false) => None,
+        Err(skipped) => Some(skipped),
+    }
+}
+
 fn skipped_touch(error: KernelError) -> LifecycleWrite {
     match UseOutcomeWrite::from_error(error) {
         UseOutcomeWrite::Deadline => LifecycleWrite::TransformSkippedDeadline,
@@ -248,7 +325,7 @@ fn skipped_touch(error: KernelError) -> LifecycleWrite {
     }
 }
 
-/// The Kernel wait one pass may spend across its serve and touch writes. Each write gets what remains and spends its elapsed time, so a pass waits on the Kernel for at most `WRITE_BUDGET` in total.
+/// `PassWriteBudget` gives each operation the remaining `WRITE_BUDGET` and deducts its elapsed time. Transform passes hand serve writes to tracked jobs with separate waits.
 #[derive(Debug)]
 pub(crate) struct PassWriteBudget(Mutex<Duration>);
 
@@ -279,15 +356,18 @@ pub(crate) struct Serve<'a> {
 }
 
 /// Writes the serve record, or answers `None` when the Kernel is not Ready and no write was attempted.
+/// The first commit waits at most [`WRITER_FIRST_WAIT`] for the writer. When another writer holds it longer, a served set already
+/// recorded under the key replays from a pooled reader, and a new one waits for the writer until [`WRITE_BUDGET`] ends.
+/// A reader replay reads only the stored receipt, which commits with its record; the writer's fence check applies to commits.
 /// `kernel_unavailable` from a commit can follow a writer wait, and after a post-commit `Io` or `Inconclusive`
 /// the record may exist; a later write at the same key replays it.
 pub(crate) fn record_serve(
     kernel: &KernelOpenCoordinator,
-    budget: &PassWriteBudget,
     serve: &Serve<'_>,
 ) -> Option<UseOutcomeWrite> {
     let store = kernel.kernel_store().ok()?;
     let snapshot = serve.snapshot;
+    let served_ids = snapshot.served_ids();
     let digest = snapshot.served_set_digest();
     let Some(operation_key) = serve
         .project
@@ -300,39 +380,49 @@ pub(crate) fn record_serve(
     } else {
         SessionRole::Primary
     };
-    let intent = CommitIntent {
+    let request_digest = request_digest(&served_ids, serve.harness, session_role);
+    let intent = || CommitIntent {
         producer: PRODUCER.to_string(),
-        operation_key,
-        request_digest: length_prefixed_digest(
-            REQUEST_DOMAIN,
-            snapshot
-                .served_ids()
-                .iter()
-                .map(String::as_str)
-                .chain([serve.harness, session_role.as_str()]),
-        ),
+        operation_key: operation_key.clone(),
+        request_digest: request_digest.clone(),
         actor: "daemon".to_string(),
         cause: "use outcome served".to_string(),
     };
-    let spec = UseOutcomeSpec {
-        project_digest: serve.project.digest().to_string(),
-        harness: serve.harness.to_string(),
-        session_id: serve.session_id.to_string(),
-        served_set_digest: digest.to_string(),
-        composition_revision: snapshot.revision(),
-        served_commit_seq: snapshot.known_as_of(),
-        session_role,
-        recorded_at: serve.recorded_at,
-        decision_object_ids: snapshot.served_ids().to_vec(),
+    let insert = |envelope: &mut Envelope<'_>| {
+        envelope.insert_use_outcome(UseOutcomeSpec {
+            project_digest: serve.project.digest().to_string(),
+            harness: serve.harness.to_string(),
+            session_id: serve.session_id.to_string(),
+            served_set_digest: digest.to_string(),
+            composition_revision: snapshot.revision(),
+            served_commit_seq: snapshot.known_as_of(),
+            session_role,
+            recorded_at: serve.recorded_at,
+            decision_object_ids: served_ids.iter().map(|id| (*id).to_string()).collect(),
+        })
     };
-    Some(
-        match budget.spend(|budget| {
-            store.commit_within_budget(budget, intent, |envelope| envelope.insert_use_outcome(spec))
-        }) {
-            Ok(receipt) if receipt.replayed => UseOutcomeWrite::Replayed,
-            Ok(_) => UseOutcomeWrite::Written,
-            Err(error) => UseOutcomeWrite::from_error(error),
-        },
+    let commit = |until: Instant| -> Result<CommitReceipt, KernelError> {
+        let budget = EvalBudget::new(Some(until), Arc::default());
+        store.commit_within_budget(&budget, intent(), insert)
+    };
+    let deadline = Instant::now() + WRITE_BUDGET;
+    let outcome = match commit(Instant::now() + WRITER_FIRST_WAIT) {
+        Err(KernelError::Deadline) => store
+            .preview(deadline, |preview| preview.stored_receipt(intent()))
+            .and_then(|(_, stored)| stored.map_or_else(|| commit(deadline), Ok)),
+        settled => settled,
+    };
+    Some(match outcome {
+        Ok(receipt) if receipt.replayed => UseOutcomeWrite::Replayed,
+        Ok(_) => UseOutcomeWrite::Written,
+        Err(error) => UseOutcomeWrite::from_error(error),
+    })
+}
+
+fn request_digest(served_ids: &[&str], harness: &str, role: SessionRole) -> String {
+    length_prefixed_digest(
+        REQUEST_DOMAIN,
+        served_ids.iter().copied().chain([harness, role.as_str()]),
     )
 }
 

@@ -731,6 +731,8 @@ pub struct LiveDescriptor {
     pub domain_id: String,
     pub sensitivity: Sensitivity,
     pub created_commit_seq: i64,
+    /// The byte length of the cited evidence artifact, the whole buffer that `detail.artifact_digest` names.
+    pub byte_length: u64,
     pub detail: SourceDescriptorDetail,
 }
 
@@ -813,6 +815,7 @@ fn checked(raw: LiveDescriptorRaw, class: OccurrenceClass) -> Result<LiveDescrip
         domain_id: raw.domain_id,
         sensitivity: Sensitivity::from_stored(&raw.sensitivity),
         created_commit_seq: raw.created_commit_seq,
+        byte_length,
         detail,
     })
 }
@@ -829,8 +832,7 @@ fn descriptor_rows(
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     // The bound is written into the statement text, so each bound has its own cached statement.
     let sql = format!(
-        "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
-                o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest,e.byte_length
+        "SELECT {DESCRIPTOR_COLUMNS}
          {rows}
            AND o.source_kind=?1 AND o.object_kind='observation'
            AND {live}
@@ -845,28 +847,56 @@ fn descriptor_rows(
     let mut params: Vec<&dyn rusqlite::ToSql> = vec![&code, &requested];
     params.extend(values.iter().map(|value| value as &dyn rusqlite::ToSql));
     statement
-        .query_map(params.as_slice(), |row| {
-            Ok(LiveDescriptorRaw {
-                object_id: row.get(0)?,
-                domain_id: row.get(1)?,
-                sensitivity: row.get(2)?,
-                registry_sensitivity: row.get(3)?,
-                created_commit_seq: row.get(4)?,
-                payload: row.get(5)?,
-                revision: row.get(6)?,
-                source_id: row.get(7)?,
-                invalidated_commit_seq: row.get(8)?,
-                observation_created: row.get(9)?,
-                observation_invalidated: row.get(10)?,
-                evidence_id: row.get(11)?,
-                artifact_digest: row.get(12)?,
-                byte_length: row.get(13)?,
-            })
-        })
+        .query_map(params.as_slice(), raw_descriptor)
         .map_err(map_sqlite)?
         .collect::<rusqlite::Result<_>>()
         .map_err(map_sqlite)
 }
+
+/// The stored descriptor row columns [`raw_descriptor`] reads, in its order.
+const DESCRIPTOR_COLUMNS: &str = "o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
+                o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest,e.byte_length";
+
+fn raw_descriptor(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveDescriptorRaw> {
+    Ok(LiveDescriptorRaw {
+        object_id: row.get(0)?,
+        domain_id: row.get(1)?,
+        sensitivity: row.get(2)?,
+        registry_sensitivity: row.get(3)?,
+        created_commit_seq: row.get(4)?,
+        payload: row.get(5)?,
+        revision: row.get(6)?,
+        source_id: row.get(7)?,
+        invalidated_commit_seq: row.get(8)?,
+        observation_created: row.get(9)?,
+        observation_invalidated: row.get(10)?,
+        evidence_id: row.get(11)?,
+        artifact_digest: row.get(12)?,
+        byte_length: row.get(13)?,
+    })
+}
+
+/// The live descriptor rows of `class` at `?2` in the object id ranges of the
+/// lineages the JSON array `?3` names, each followed by its lineage's array
+/// index. The array drives the join, so each
+/// lineage's `srcdesc:{lineage}:` range is searched in the page index once,
+/// as [`Envelope::live_source_descriptor_of_lineage`] searches one.
+static LINEAGE_ROWS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "SELECT {DESCRIPTOR_COLUMNS},j.key
+         FROM json_each(?3) j
+         CROSS JOIN object_registry o INDEXED BY idx_objects_source_descriptor_page
+         CROSS JOIN observations b ON b.object_id=o.object_id
+         CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
+         WHERE o.object_id GLOB '{DESCRIPTOR_OBJECT_ID_PREFIX}*'
+           AND b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
+           AND o.source_kind=?1 AND o.object_kind='observation'
+           AND {live}
+           AND o.object_id>='{DESCRIPTOR_OBJECT_ID_PREFIX}'||j.value||':'
+           AND o.object_id<'{DESCRIPTOR_OBJECT_ID_PREFIX}'||j.value||';'",
+        live = Descriptors::LiveAtEnd.predicate("?2", "0"),
+    )
+});
 
 impl Envelope<'_> {
     /// [`KernelStore::source_lineage_head`] in this envelope's view, so a preview reads the head and the live rows under one reader wait.
@@ -909,6 +939,52 @@ impl Envelope<'_> {
             return Err(KernelError::CorruptCanonicalRow);
         }
         Ok(Some(row))
+    }
+
+    /// [`Self::live_source_descriptor_of_lineage`] for each of `lineage_ids`, in input order, read with one statement that searches each lineage's object id range once.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::live_source_descriptor_of_lineage`] for any lineage.
+    pub fn live_source_descriptors_of_lineages(
+        &self,
+        class: OccurrenceClass,
+        lineage_ids: &[String],
+    ) -> Result<Vec<Option<LiveDescriptor>>, KernelError> {
+        let mut found: Vec<Option<LiveDescriptor>> = vec![None; lineage_ids.len()];
+        if lineage_ids.is_empty() {
+            return Ok(found);
+        }
+        let lineages = serde_json::to_string(lineage_ids).map_err(|_| KernelError::InvalidInput)?;
+        let mut statement = self
+            .tx
+            .prepare_cached(&LINEAGE_ROWS_SQL)
+            .map_err(map_sqlite)?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![class.code(), self.commit_seq, lineages],
+                |row| Ok((raw_descriptor(row)?, row.get::<_, i64>(14)?)),
+            )
+            .map_err(map_sqlite)?;
+        for row in rows {
+            let (raw, position) = row.map_err(map_sqlite)?;
+            let position =
+                usize::try_from(position).map_err(|_| KernelError::CorruptCanonicalRow)?;
+            let (Some(slot), Some(lineage_id)) =
+                (found.get_mut(position), lineage_ids.get(position))
+            else {
+                return Err(KernelError::CorruptCanonicalRow);
+            };
+            if slot.is_some() {
+                return Err(KernelError::CorruptCanonicalRow);
+            }
+            let row = checked(raw, class)?;
+            if row.detail.lineage_id != *lineage_id {
+                return Err(KernelError::CorruptCanonicalRow);
+            }
+            *slot = Some(row);
+        }
+        Ok(found)
     }
 
     /// The descriptors of `class` live in this envelope's view whose identity field `field` holds one of `values`, keyset-paged by object id from `after`. The view is the committed rows and the rows this commit wrote, less the rows it retired, so a writer can read the matching descriptors and act on them in one transaction. Every returned row passes [`KernelStore::live_source_descriptors`]' liveness predicate and integrity checks, and its decoded identity holds one of `values` at the field's position in the class's field order. A page examines at most `max_rows` live descriptors of the class, matching or not, so one call's work is bounded and a caller can stop between pages. A page can hold fewer rows than `max_rows`, none included, while `next` names a later page, so a caller reads until `next` is `None`. An empty `values` examines no descriptor: its page is empty and ends the inventory.

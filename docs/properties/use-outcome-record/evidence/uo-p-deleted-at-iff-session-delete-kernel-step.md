@@ -8,16 +8,16 @@ Record kind: new obligation activated by #1156.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `dc07f442a`).
+References are verified at the #1156 branch tip, the commit that carries this
+revision.
 
-- Step: `delete_kernel_step` (`crates/daemon/src/lib.rs:6850`) retires the
+- Step: `delete_kernel_step` (`crates/daemon/src/lib.rs:6883`) retires the
   captured sources, then `mark_use_outcomes_deleted`
-  (`crates/daemon/src/lib.rs:6875`) commits one envelope keyed by
+  (`crates/daemon/src/lib.rs:6908`) commits one envelope keyed by
   `use-outcome-delete` and a fresh attempt nonce
-  (`crates/daemon/src/use_outcome_writer.rs:167`); an envelope that marks
+  (`crates/daemon/src/use_outcome_writer.rs:226`); an envelope that marks
   nothing rolls back.
-- Order: the step runs at `crates/daemon/src/lib.rs:6974`, before the
+- Order: the step runs at `crates/daemon/src/lib.rs:7007`, before the
   `stop_after_retirement` hook and the memory delete; a `kernel_unavailable`
   from either part counts `delete_kernel_unavailable`.
 - A retry after a stop between the stores, or after an unknown commit outcome,
@@ -28,17 +28,17 @@ its parent is `dc07f442a`).
   teardown leaves it null.
 - Existing check:
   `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`);
   `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:84`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:86`);
   `a_delete_step_with_an_unknown_outcome_converges_on_retry`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:134`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:136`);
   `a_second_delete_marks_records_written_after_the_first`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:170`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:172`);
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:201`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:203`); Kernel half:
   `a_session_delete_marks_each_live_record_once`
-  (`crates/kernel/tests/kernel_use_outcome.rs:843`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:935`). Status: unaudited.
 
 ## Failure scenario
 

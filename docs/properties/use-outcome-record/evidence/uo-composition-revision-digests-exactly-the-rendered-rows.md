@@ -9,15 +9,15 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `dc07f442a`).
+References are verified at the #1156 branch tip, the commit that carries this
+revision.
 
 - `CanonicalMemorySnapshot::new` seeds the hasher with
   `eidnara-project-memory-revision-v1` and hashes category plus rendered line
-  per positive row (`crates/daemon/src/canonical_memory.rs:61`).
+  per positive row (`crates/daemon/src/canonical_memory.rs:55`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
-  (`crates/daemon/src/canonical_memory.rs:204`)).
+  (`crates/daemon/src/canonical_memory.rs:210`)).
 - The four tests named under Existing check are unchanged since `a0e3f2993`; the
   spec cited their `fn` lines, and the production code was not cited.
 
@@ -25,13 +25,13 @@ its parent is `dc07f442a`).
   rendered positive-category rows, sorted by object id, after the token-budget
   trim.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:374`);
+  (`crates/daemon/src/canonical_memory.rs:380`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:432`);
+  (`crates/daemon/src/canonical_memory.rs:438`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:449`);
+  (`crates/daemon/src/canonical_memory.rs:455`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:471`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:477`). Status: unaudited.
 
 ## Failure scenario
 
@@ -51,7 +51,7 @@ renderer drops, bytes past the render cap, or rows past the memory budget.
 
 ## Investigation log
 
-### Q: The `DefaultHasher` output is unspecified across toolchain releases; #1154 resolves OQ3-12 by keying the record on `served_set_digest` and storing the revision as an informational column
+### Q: Is a composition revision from `DefaultHasher` stable across toolchain releases?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: The `DefaultHasher` output is unspecified across toolchain releases;

@@ -9,22 +9,22 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `dc07f442a`).
+References are verified at the #1156 branch tip, the commit that carries this
+revision.
 
-- Teardown: `unbind_route` (`crates/daemon/src/lib.rs:4683`); purge:
-  `purge_session_state` (`crates/daemon/src/lib.rs:4723`).
+- Teardown: `unbind_route` (`crates/daemon/src/lib.rs:4716`); purge:
+  `purge_session_state` (`crates/daemon/src/lib.rs:4756`).
 - Correction: the spec's `lib.rs:32181` maps to a `session.delete` test at this
   tip.
 
 - Guarantee under test: Route teardown purges process-local session state and
   deletes no durable row in either store.
 - Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-  (`crates/daemon/src/lib.rs:25139`);
+  (`crates/daemon/src/lib.rs:25400`);
   `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
   (`crates/daemon/tests/kernel_routes.rs:3849`);
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:201`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:203`). Status: unaudited.
 
 ## Failure scenario
 
@@ -47,6 +47,9 @@ after a HARD fold.
 ### Q: Does any open question remain for this record?
 
 - Sources examined: the specification catalog entry, the code and tests cited above.
-- Findings: the cited code and tests agree with the guarantee at this tip.
-- Missing evidence: none for the guarantee as stated.
-- Conclusion: resolved with answer - no open question.
+- Findings: the cited code and tests agree with the guarantee at this tip for
+  process-local state; no test reads both stores after a route teardown.
+- Missing evidence: a HARD fold, a route close, then a read of both stores
+  (marker `uo_route_torn_down_after_hard`, owner #1156).
+- Conclusion: resolved with answer - no design question is open; coverage stays
+  partial until #1156 constructs the two-store read.

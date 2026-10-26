@@ -8,43 +8,46 @@ Record kind: new obligation activated by #1156.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `dc07f442a`).
+References are verified at the #1156 branch tip, the commit that carries this
+revision.
 
-- Hook: `crates/daemon/src/lib.rs:10046` in the settle step, after any rerun,
+- Hook: `crates/daemon/src/lib.rs:10150` in the settle step, after any rerun,
   when the final response committed and the check
-  (`crates/daemon/src/lib.rs:9738`) finds a live record to advance. The update
+  (`crates/daemon/src/lib.rs:9813`) finds a live record to advance. The update
   runs on a scoped thread beside the response build, and the settle joins it
-  before the response returns (`crates/daemon/src/lib.rs:10052`).
+  before the response returns (`crates/daemon/src/lib.rs:10156`). A pass that
+  handed its serve to a tracked job sets `touch_delegated`
+  (`crates/daemon/src/lib.rs:9837`) and the job touches after its serve commits
+  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:304`)).
 - Update: `crates/kernel/src/use_outcome.rs:43` selects the live records with a
   null or earlier value. A session with none takes no writer, because the
   check above skips it; the update itself holds only the writer.
-- Outcomes: `crates/daemon/src/use_outcome_writer.rs:209` counts
+- Outcomes: `crates/daemon/src/use_outcome_writer.rs:268` counts
   `transform_touched`, `transform_skipped_deadline`, or
   `transform_skipped_unavailable`.
 
 - Guarantee under test: `last_transform_at` never decreases on a session's
   serving record, and only a pass whose response committed updates it.
 - Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:220`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:222`);
   `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:305`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:307`);
   `a_spent_pass_budget_skips_the_touch`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:353`);
-  `the_serve_and_the_touch_of_one_pass_share_one_kernel_wait`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:382`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:355`);
+  `a_serve_deadline_leaves_the_touch_its_own_kernel_wait`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:384`);
   `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:432`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:421`); Kernel half:
   `last_transform_at_advances_live_records_without_a_commit`
-  (`crates/kernel/tests/kernel_use_outcome.rs:892`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:984`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-  (`crates/kernel/tests/kernel_use_outcome.rs:950`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1042`),
   `an_outside_file_lock_bounds_the_advance_at_begin`
-  (`crates/kernel/tests/kernel_use_outcome.rs:987`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1079`),
   `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1014`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1106`),
   `the_advance_takes_no_pooled_reader`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1046`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:1138`). Status: unaudited.
 
 ## Failure scenario
 
@@ -71,13 +74,17 @@ Kernel unavailable at the write.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: The pass budget is the 250 ms Kernel wait the pass shares across its serve and touch writes (`PassWriteBudget`); the daemon carries no other pass deadline
+### Q: What bounds the touch's Kernel wait, and does the serve write share it?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
-- Findings: The pass budget is the 250 ms Kernel wait the pass shares across its
-  serve and touch writes (`PassWriteBudget`); the daemon carries no other pass
-  deadline. The touch bounds its connection waits, its begin, and its statements
-  by that budget; the serve write bounds its connection wait.
+- Findings: The pass budget is the 250 ms Kernel wait the pass spends across the
+  touch's staleness read and its write (`PassWriteBudget`); the daemon carries no
+  other pass deadline. The touch bounds its connection waits, its begin, and its
+  statements by that budget. A pass that handed its serve to a tracked job
+  makes no touch of its own: the job touches after its serve under a budget of
+  the same size, so the serving pass's record carries that pass's time. A serve
+  refused for want of a write slot leaves the pass its own touch and its full
+  budget (`a_serve_deadline_leaves_the_touch_its_own_kernel_wait`).
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 

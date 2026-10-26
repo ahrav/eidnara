@@ -9,11 +9,11 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `dc07f442a`).
+References are verified at the #1156 branch tip, the commit that carries this
+revision.
 
 - Tip capture and bound read: `read_project_memory`
-  (`crates/daemon/src/canonical_memory.rs:161`).
+  (`crates/daemon/src/canonical_memory.rs:167`).
 - Snapshot copy into the composition:
   `crates/daemon/src/canonical_memory.rs:34`.
 - R8 applied: the read is an as-of read; the Kernel answers rows visible at the
