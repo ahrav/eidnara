@@ -4,40 +4,55 @@ export interface Anchor {
     line: number;
     text: string;
     path: string;
-    form: "link" | "bare";
+    /** `relative` paths resolve from the document's directory. */
+    form: "relative" | "bare";
     start: number;
     end: number;
 }
 
 const LINK = /\]\(([^)\s#]+)#L(\d+)(?:-L?(\d+))?\)/g;
-const BARE =
-    /(?<![\w/.-])((?:[\w.-]+\/)*[\w.-]+\.(?:rs|ts|tsx|js|mjs|sql|toml|ya?ml|sh|json|md|py)):(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)(?![\w-]|\.\d)/g;
+const DEFINITION = /^\s*\[[^\]]+\]:\s*(\S+?)#L(\d+)(?:-L?(\d+))?\s*$/;
+const RANGES = String.raw`\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*`;
+const BARE = new RegExp(
+    String.raw`(?<![\w/.-])((?:[\w.-]+\/)*[\w.-]+\.(?:rs|ts|tsx|js|mjs|sql|toml|ya?ml|sh|json|md|py|lock|tiktoken)):(${RANGES})(?![\w-]|\.\d)|` +
+        String.raw`\x60:(${RANGES})\x60`,
+    "g",
+);
 const SCHEME = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 
+/**
+ * A backticked range such as `` `:2045-2064` `` inherits the path of the last bare anchor with an
+ * explicit path on the same or preceding line. Blank lines and table rows end that reach.
+ */
 export function findAnchors(text: string): Anchor[] {
     const anchors: Anchor[] = [];
+    let previous: string | undefined;
+    let previousLine = 0;
     text.split("\n").forEach((content, index) => {
+        const line = index + 1;
+        if (content.trim() === "" || content.startsWith("|") || previousLine < line - 1) previous = undefined;
+        const definition = content.match(DEFINITION);
+        const links = definition === null ? [...content.matchAll(LINK)] : [definition];
         let plain = content;
-        for (const match of content.matchAll(LINK)) {
+        for (const match of links) {
             plain = plain.replace(match[0], "");
             const path = match[1] ?? "";
             if (SCHEME.test(path)) continue;
             const start = Number(match[2]);
-            anchors.push({ line: index + 1, text: match[0], path, form: "link", start, end: Number(match[3] ?? start) });
+            anchors.push({ line, text: match[0].trim(), path, form: "relative", start, end: Number(match[3] ?? start) });
         }
         for (const match of plain.matchAll(BARE)) {
-            const path = match[1] ?? "";
-            for (const range of (match[2] ?? "").split(",")) {
+            const path = match[1] ?? previous;
+            if (path === undefined) continue;
+            if (match[1] !== undefined) {
+                previous = path;
+                previousLine = line;
+            }
+            const form = path.startsWith("./") || path.startsWith("../") ? "relative" : "bare";
+            for (const range of (match[2] ?? match[3] ?? "").split(",")) {
                 const [first, second] = range.split("-");
                 const start = Number(first);
-                anchors.push({
-                    line: index + 1,
-                    text: `${path}:${range}`,
-                    path,
-                    form: "bare",
-                    start,
-                    end: Number(second ?? first),
-                });
+                anchors.push({ line, text: `${path}:${range}`, path, form, start, end: Number(second ?? first) });
             }
         }
     });
@@ -77,13 +92,11 @@ export function addedLines(hunks: Hunk[]): Set<number> {
  * changed, so it still maps through its target's hunks.
  */
 function removedAnchors(baseText: string, hunks: Hunk[]): Set<string> {
-    const lines = baseText.split("\n");
-    const texts = new Set<string>();
+    const removed = new Set<number>();
     for (const hunk of hunks) {
-        const removed = lines.slice(hunk.oldStart - 1, hunk.oldStart - 1 + hunk.oldCount).join("\n");
-        for (const anchor of findAnchors(removed)) texts.add(anchor.text);
+        for (let offset = 0; offset < hunk.oldCount; offset++) removed.add(hunk.oldStart + offset);
     }
-    return texts;
+    return new Set(findAnchors(baseText).filter((anchor) => removed.has(anchor.line)).map((anchor) => anchor.text));
 }
 
 export type Mapped = { kind: "same" } | { kind: "moved"; start: number; end: number } | { kind: "changed" };
@@ -143,7 +156,7 @@ function lineCount(text: string): number {
 }
 
 export function resolveAnchor(paths: Set<string>, doc: string, anchor: Anchor): string | undefined {
-    if (anchor.form === "link") {
+    if (anchor.form === "relative") {
         const path = normalize(`${dirname(doc)}/${anchor.path}`);
         return path !== undefined && paths.has(path) ? path : undefined;
     }
@@ -198,7 +211,7 @@ export function checkAnchors(repo: Repository): Report {
             const target = resolveAnchor(repo.tracked, doc, anchor);
             if (docAdded || (added.has(anchor.line) && !kept.has(anchor.text))) {
                 if (target === undefined) {
-                    if (anchor.form === "link") push(report.findings, "cites no tracked file");
+                    if (anchor.form === "relative") push(report.findings, "cites no tracked file");
                     continue;
                 }
                 const count = lineCount(repo.text(target));
@@ -243,7 +256,7 @@ function locate(
     anchor: Anchor,
     target: string | undefined,
 ): Located {
-    if (anchor.form === "link" && docChange?.kind === "modified" && dirname(docChange.base) !== dirname(doc)) {
+    if (anchor.form === "relative" && docChange?.kind === "modified" && dirname(docChange.base) !== dirname(doc)) {
         const path = normalize(`${dirname(docChange.base)}/${anchor.path}`);
         const cited = path === undefined ? undefined : repo.tracked.has(path) ? path : repo.removed.get(path);
         if (cited === null) return "deleted";

@@ -51,7 +51,7 @@ describe("findAnchors", () => {
             "See [`a.rs:3`](../src/a.rs#L3-L5) and `crates/b/src/b.rs:7` and c.ts:9-11 and docs/x.md:4.\n",
         );
         expect(anchors.map(({ form, path, start, end }) => ({ form, path, start, end }))).toEqual([
-            { form: "link", path: "../src/a.rs", start: 3, end: 5 },
+            { form: "relative", path: "../src/a.rs", start: 3, end: 5 },
             { form: "bare", path: "a.rs", start: 3, end: 3 },
             { form: "bare", path: "crates/b/src/b.rs", start: 7, end: 7 },
             { form: "bare", path: "c.ts", start: 9, end: 11 },
@@ -76,6 +76,47 @@ describe("findAnchors", () => {
             { line: 1, text: "crates/m/src/lib.rs:131-133", path: "crates/m/src/lib.rs", form: "bare", start: 131, end: 133 },
             { line: 1, text: "crates/m/src/lib.rs:255-257", path: "crates/m/src/lib.rs", form: "bare", start: 255, end: 257 },
             { line: 1, text: "crates/m/src/lib.rs:300", path: "crates/m/src/lib.rs", form: "bare", start: 300, end: 300 },
+        ]);
+    });
+
+    test("a pathless backticked range continues the preceding path in its paragraph", () => {
+        const text =
+            "(`crates/d/src/t.rs:2019-2027`, `:2045-2064`, `:2110`) and (`:5`)\nwrapped `:7` and 3:4 and {\"k\":9}\ntwo lines down `:8`\n\n`:11` after a blank line\n| `:12` in a table row |\n";
+        expect(findAnchors(text).map(({ line, text, start, end }) => ({ line, text, start, end }))).toEqual([
+            { line: 1, text: "crates/d/src/t.rs:2019-2027", start: 2019, end: 2027 },
+            { line: 1, text: "crates/d/src/t.rs:2045-2064", start: 2045, end: 2064 },
+            { line: 1, text: "crates/d/src/t.rs:2110", start: 2110, end: 2110 },
+            { line: 1, text: "crates/d/src/t.rs:5", start: 5, end: 5 },
+            { line: 2, text: "crates/d/src/t.rs:7", start: 7, end: 7 },
+        ]);
+    });
+
+    test("reads lock files and token assets as bare anchors", () => {
+        expect(findAnchors("`Cargo.lock:1668-1669`, `bun.lock:793`, `assets/claude.tiktoken:57534`\n").map((a) => a.text)).toEqual([
+            "Cargo.lock:1668-1669",
+            "bun.lock:793",
+            "assets/claude.tiktoken:57534",
+        ]);
+    });
+
+    test("a bare path that starts with ./ or ../ is relative to its document", () => {
+        expect(findAnchors("`../../rendering/existing-checks.md:32-33` and `./local.rs:4`\n").map(({ form, path }) => ({ form, path }))).toEqual([
+            { form: "relative", path: "../../rendering/existing-checks.md" },
+            { form: "relative", path: "./local.rs" },
+        ]);
+    });
+
+    test("reads a reference-style link definition and skips one with a scheme", () => {
+        const text = "[pass]: ../../../../crates/daemon/src/lib.rs#L8191-L8271\n  [perma]: https://github.com/o/r/blob/abc/src/a.rs#L3\n[plain]: ../a.md\n";
+        expect(findAnchors(text)).toEqual([
+            {
+                line: 1,
+                text: "[pass]: ../../../../crates/daemon/src/lib.rs#L8191-L8271",
+                path: "../../../../crates/daemon/src/lib.rs",
+                form: "relative",
+                start: 8191,
+                end: 8271,
+            },
         ]);
     });
 });
@@ -142,6 +183,36 @@ describe("checkAnchors", () => {
         expect(messages(checkAnchors(repo).notices)).toEqual([
             "docs/p/catalog.md:1: src/a.rs:20-21 cites lines that moved to src/a.rs:22-23",
         ]);
+    });
+
+    test("resolves a relative bare anchor and a reference definition from the document", () => {
+        const repo = repository(
+            {
+                "docs/a/b/c.md": "intro\n`../../x.md:20` and `../../gone.md:2`\n[ref]: ../../../src/a.rs#L20\n",
+                "docs/x.md": SOURCE,
+                "src/a.rs": SOURCE,
+                "other/x.md": SOURCE,
+            },
+            { "docs/a/b/c.md": modified("docs/a/b/c.md"), "docs/x.md": modified("docs/x.md"), "src/a.rs": modified("src/a.rs") },
+            {
+                "docs/a/b/c.md": parseHunks("@@ -0,0 +1 @@\n"),
+                "docs/x.md": parseHunks("@@ -1,0 +2,2 @@\n"),
+                "src/a.rs": parseHunks("@@ -1,0 +2,3 @@\n"),
+            },
+        );
+        expect(messages(checkAnchors(repo).findings)).toEqual([
+            "docs/a/b/c.md:2: ../../x.md:20 cites lines that moved to docs/x.md:22-22",
+            "docs/a/b/c.md:3: [ref]: ../../../src/a.rs#L20 cites lines that moved to src/a.rs:23-23",
+        ]);
+    });
+
+    test("fails an added relative bare anchor that resolves to no tracked file", () => {
+        const repo = repository(
+            { "docs/a/c.md": "`../gone.md:2` and `gone.md:2`\n", "docs/x.md": SOURCE },
+            { "docs/a/c.md": { kind: "added" } },
+            {},
+        );
+        expect(messages(checkAnchors(repo).findings)).toEqual(["docs/a/c.md:1: ../gone.md:2 cites no tracked file"]);
     });
 
     test("maps an anchor kept on an edited document line through the cited file's hunks", () => {
