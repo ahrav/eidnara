@@ -121,8 +121,10 @@ These recur as false positives here; check them before reporting:
   reaches it.
 - On a stacked PR, code from the parent PR and intermediate shapes that never
   reached `main` are out of scope.
-- A resource finding needs an untrusted producer or a producer bound above the
-  consumer's enforced budget.
+- A resource finding names an input or an accumulation across repetition,
+  concurrency, retention, or decoding that exceeds the consumer's enforced
+  budget; a trusted, bounded input processed once and released within that
+  budget is not one.
 - A decision the ticket settled is out of scope unless the change breaks it or
   the decision violates a project contract or the Security priority.
 - A new diagnostic `message` value is a wire change only when
