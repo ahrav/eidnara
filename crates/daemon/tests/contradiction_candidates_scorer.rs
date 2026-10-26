@@ -158,6 +158,18 @@ fn case_folds_identically_on_both_sides_and_diacritics_do_not_fold() {
     }
 }
 
+/// The analyzer splits parts on the original case before the fold, so a case
+/// change inside an identifier changes its parts, not only their case.
+#[test]
+fn a_case_change_inside_an_identifier_changes_its_parts() {
+    assert_eq!(
+        terms("configLoader"),
+        set(&["configloader", "config", "loader"])
+    );
+    assert_eq!(terms("CONFIGLOADER"), set(&["configloader"]));
+    assert_eq!(terms("configloader"), set(&["configloader"]));
+}
+
 #[test]
 fn identifiers_in_the_descriptor_match_prose_in_the_summary() {
     // Summary terms: http, server, config, loader, rules.
