@@ -20,6 +20,8 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_channel1_appends_session"),
     ("index", "idx_chunk_transcripts_session_age"),
     ("index", "idx_chunk_transcripts_session_range"),
+    ("index", "idx_contradiction_candidates_decision"),
+    ("index", "idx_contradiction_candidates_eviction"),
     ("index", "idx_facade_mutation_ledger_scope_newest"),
     ("index", "idx_field_scans_batch"),
     ("index", "idx_history_segment_events_session"),
@@ -67,6 +69,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "channel1_appends"),
     ("table", "chunk_transcript_totals"),
     ("table", "chunk_transcripts"),
+    ("table", "contradiction_candidates"),
     ("table", "covered_system_messages"),
     ("table", "facade_mutation_ledger"),
     ("table", "fence"),
@@ -482,10 +485,10 @@ fn a_file_with_a_different_baseline_is_refused_as_a_baseline_mismatch() {
 }
 
 /// The preceding Memory Store baseline, frozen byte for byte, and its digest. It holds no
-/// `cache_state_by_activity` index.
+/// `contradiction_candidates` table.
 const PRIOR_BASELINE: &str = include_str!("fixtures/prior_baseline.sql");
 const PRIOR_BASELINE_DIGEST: &str =
-    "45baed0c314ba5d29d925f063ff5caa5e5260bc81240acdd4deee0f622885f36";
+    "a4a933cd154fc7d3f6c7dc6f018f6b6b1bc39f2192b3b52748a5deef9eafe9b7";
 
 /// A store laid down under the prior baseline refuses to open and is left byte-identical.
 #[test]
