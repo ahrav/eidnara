@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import {
     checkAnchors,
@@ -16,7 +16,10 @@ import {
 } from "./check-doc-anchors";
 
 // Signing, hooks, and merge settings in a developer's git config can fail these commits.
-const ISOLATED_GIT = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+// Process-level environment variables extend this isolation to `gitRepository`'s git calls.
+process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+process.env.GIT_CONFIG_NOSYSTEM = "1";
+const SCRIPT = resolve(import.meta.dir, "check-doc-anchors.ts");
 
 function modified(base: string): FileChange {
     return { kind: "modified", base };
@@ -234,10 +237,31 @@ describe("checkAnchors", () => {
         ]);
     });
 
+    test("an anchor kept on an edited document line accepts an in-place edit of its cited lines", () => {
+        const repo = repository(
+            { "docs/p/catalog.md": "Check now: `src/a.rs:20` and `src/a.rs:30-31`.\n", "src/a.rs": SOURCE },
+            { "docs/p/catalog.md": modified("docs/p/catalog.md"), "src/a.rs": modified("src/a.rs") },
+            { "docs/p/catalog.md": parseHunks("@@ -1 +1 @@\n"), "src/a.rs": parseHunks("@@ -20 +20 @@\n@@ -30,2 +30,12 @@\n") },
+            {},
+            { "docs/p/catalog.md": "Check: `src/a.rs:20` and `src/a.rs:30-31`.\n" },
+        );
+        expect(checkAnchors(repo)).toEqual({ findings: [], notices: [] });
+    });
+
+    test("maps a bare anchor that was ambiguous at the base once a deletion makes it unique", () => {
+        const repo = repository(
+            { "docs/a.md": "`x.rs:20`\n", "a/x.rs": SOURCE },
+            { "a/x.rs": modified("a/x.rs") },
+            { "a/x.rs": parseHunks("@@ -1,0 +2,2 @@\n") },
+            { "b/x.rs": null },
+        );
+        expect(messages(checkAnchors(repo).notices)).toEqual(["docs/a.md:1: x.rs:20 cites lines that moved to a/x.rs:22-22"]);
+    });
+
     test("fails an added anchor past the end of its file and an added link to a missing file", () => {
         const repo = repository(
             {
-                "docs/p/catalog.md": "[x](../../src/a.rs#L39-L41)\n[y](../../src/gone.rs#L1)\n",
+                "docs/p/catalog.md": "[x](../../src/a.rs#L39-L41)\n[y](../../src/gone.rs#L1)\n`src/a.rs:0` and `src/a.rs:5-3`\n",
                 "src/a.rs": SOURCE,
             },
             { "docs/p/catalog.md": { kind: "added" } },
@@ -246,6 +270,8 @@ describe("checkAnchors", () => {
         expect(messages(checkAnchors(repo).findings)).toEqual([
             "docs/p/catalog.md:1: ](../../src/a.rs#L39-L41) cites past the end of src/a.rs (40 lines)",
             "docs/p/catalog.md:2: ](../../src/gone.rs#L1) cites no tracked file",
+            "docs/p/catalog.md:3: src/a.rs:0 cites an empty or reversed range",
+            "docs/p/catalog.md:3: src/a.rs:5-3 cites an empty or reversed range",
         ]);
     });
 
@@ -378,7 +404,7 @@ describe("gitRepository", () => {
     let repo: string;
 
     function git(...args: string[]): string {
-        const result = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: ISOLATED_GIT });
+        const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
         if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
         return result.stdout.trim();
     }
@@ -437,5 +463,39 @@ describe("gitRepository", () => {
             "docs/c.md:1: ](../../src/b.rs#L2) cites no tracked file from the document's new path; the target is src/b.rs",
             "docs/new.md:1: ](../src/b.rs#L99) cites past the end of src/b.rs (40 lines)",
         ]);
+    });
+
+    test("the command prints findings as error annotations and exits 1", () => {
+        write("src/a.rs", SOURCE);
+        write("docs/a.md", "intro\n");
+        git("add", ".");
+        git("commit", "-q", "-m", "base");
+        const base = git("rev-parse", "HEAD");
+        write("docs/a.md", "intro\n`src/a.rs:99` 100% sure\n");
+        git("add", ".");
+        git("commit", "-q", "-m", "change");
+        const run = spawnSync("bun", [SCRIPT, base], { cwd: repo, encoding: "utf8" });
+        expect(run.status).toBe(1);
+        expect(run.stdout).toBe("::error file=docs/a.md,line=2::src/a.rs:99 cites past the end of src/a.rs (40 lines)\n");
+        expect(spawnSync("bun", [SCRIPT], { cwd: repo, encoding: "utf8" }).status).toBe(2);
+    });
+
+    test("the first parent of a pull-request merge commit excludes edits the base branch made meanwhile", () => {
+        write("src/a.rs", SOURCE);
+        write("docs/a.md", "`src/a.rs:20`\n");
+        git("add", ".");
+        git("commit", "-q", "-m", "base");
+        const base = git("rev-parse", "HEAD");
+        git("checkout", "-q", "-b", "pr");
+        write("docs/a.md", "`src/a.rs:20`\nmore\n");
+        git("commit", "-q", "-a", "-m", "pr");
+        git("checkout", "-q", "main");
+        write("src/a.rs", `inserted\n${SOURCE}`);
+        git("commit", "-q", "-a", "-m", "main moves on");
+        git("merge", "-q", "--no-ff", "--no-edit", "pr");
+        expect(messages(checkAnchors(gitRepository(base, repo)).findings)).toEqual([
+            "docs/a.md:1: src/a.rs:20 cites lines that moved to src/a.rs:21-21",
+        ]);
+        expect(checkAnchors(gitRepository("HEAD^1", repo))).toEqual({ findings: [], notices: [] });
     });
 });

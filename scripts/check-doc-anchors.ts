@@ -183,16 +183,6 @@ export interface Report {
 
 export function checkAnchors(repo: Repository): Report {
     const report: Report = { findings: [], notices: [] };
-    const hunkCache = new Map<string, Hunk[]>();
-    const hunksOf = (base: string, head: string): Hunk[] => {
-        const key = `${base}\0${head}`;
-        let hunks = hunkCache.get(key);
-        if (hunks === undefined) {
-            hunks = repo.hunks(base, head);
-            hunkCache.set(key, hunks);
-        }
-        return hunks;
-    };
     const baseTracked = new Set(repo.removed.keys());
     for (const path of repo.tracked) {
         const change = repo.changes.get(path);
@@ -202,7 +192,7 @@ export function checkAnchors(repo: Repository): Report {
     for (const doc of docs) {
         const docChange = repo.changes.get(doc);
         const docAdded = docChange?.kind === "added";
-        const docHunks = docChange?.kind === "modified" ? hunksOf(docChange.base, doc) : [];
+        const docHunks = docChange?.kind === "modified" ? repo.hunks(docChange.base, doc) : [];
         const added = addedLines(docHunks);
         const kept =
             docChange?.kind === "modified" && docHunks.some((hunk) => hunk.oldCount > 0)
@@ -213,15 +203,19 @@ export function checkAnchors(repo: Repository): Report {
             const push = (sink: Entry[], message: string) =>
                 sink.push({ doc, line: anchor.line, message: `${anchor.text} ${message}` });
             const target = resolveAnchor(repo.tracked, doc, anchor);
-            if (docAdded || (added.has(anchor.line) && !kept.has(anchor.text))) {
+            const outOfBounds = (file: string): string | undefined => {
+                if (anchor.start < 1 || anchor.end < anchor.start) return "cites an empty or reversed range";
+                const count = lineCount(repo.text(file));
+                return anchor.end > count ? `cites past the end of ${file} (${count} lines)` : undefined;
+            };
+            const edited = added.has(anchor.line);
+            if (docAdded || (edited && !kept.has(anchor.text))) {
                 if (target === undefined) {
                     if (anchor.form === "relative") push(report.findings, "cites no tracked file");
                     continue;
                 }
-                const count = lineCount(repo.text(target));
-                if (anchor.start < 1 || anchor.end < anchor.start || anchor.end > count) {
-                    push(report.findings, `cites past the end of ${target} (${count} lines)`);
-                }
+                const message = outOfBounds(target);
+                if (message !== undefined) push(report.findings, message);
                 continue;
             }
             const located = locate(repo, baseTracked, doc, docChange, anchor, target);
@@ -241,10 +235,14 @@ export function checkAnchors(repo: Repository): Report {
                 continue;
             }
             const { base, head } = located;
-            const mapped = mapRange(hunksOf(base, head), anchor.start, anchor.end);
+            const mapped = mapRange(repo.hunks(base, head), anchor.start, anchor.end);
             const renamedTo = located.kind === "renamed" ? ` in ${head}` : "";
-            if (mapped.kind === "changed") push(entries, `cites lines this change edits${renamedTo}`);
-            else if (mapped.kind === "moved") push(entries, `cites lines that moved to ${head}:${mapped.start}-${mapped.end}`);
+            if (mapped.kind === "changed") {
+                // An anchor kept on an edited document line is reaffirmed: edited cited lines pass
+                // while the range exists at HEAD, and a shifted range still reports as moved.
+                const message = edited ? outOfBounds(head) : `cites lines this change edits${renamedTo}`;
+                if (message !== undefined) push(entries, message);
+            } else if (mapped.kind === "moved") push(entries, `cites lines that moved to ${head}:${mapped.start}-${mapped.end}`);
             else if (located.kind === "renamed") push(entries, `cites a file this change renames to ${head}`);
         }
     }
@@ -286,7 +284,7 @@ function locate(
     if (now === null) return "deleted";
     if (target !== now && now === meant) return { kind: "retargeted", path: now };
     const change = repo.changes.get(now);
-    const kind = now === meant || now === target ? "modified" : "renamed";
+    const kind = now === target ? "modified" : "renamed";
     if (change?.kind === "modified") return { kind, base: change.base, head: now };
     return kind === "renamed" ? { kind, base: meant, head: now } : undefined;
 }
@@ -308,10 +306,10 @@ export function gitRepository(base: string, cwd?: string): Repository {
     for (let index = 0; index + 1 < status.length; ) {
         const code = status[index] ?? "";
         const path = status[index + 1] ?? "";
-        if (code.startsWith("R") || code.startsWith("C")) {
+        if (code.startsWith("R")) {
             const headPath = status[index + 2] ?? "";
             changes.set(headPath, { kind: "modified", base: path });
-            if (code.startsWith("R")) removed.set(path, headPath);
+            removed.set(path, headPath);
             index += 3;
             continue;
         }
@@ -330,16 +328,24 @@ export function gitRepository(base: string, cwd?: string): Repository {
         }
         return content;
     };
+    const hunkCache = new Map<string, Hunk[]>();
     return {
         tracked,
         changes,
         removed,
         text: (path) => show("HEAD", path),
         baseText: (path) => show(mergeBase, path),
-        hunks: (basePath, headPath) =>
-            parseHunks(
-                git(cwd, ["diff", "-U0", "--no-color", "--no-ext-diff", `${mergeBase}:${basePath}`, `HEAD:${headPath}`]),
-            ),
+        hunks: (basePath, headPath) => {
+            const key = `${basePath}\0${headPath}`;
+            let hunks = hunkCache.get(key);
+            if (hunks === undefined) {
+                hunks = parseHunks(
+                    git(cwd, ["diff", "-U0", "--no-color", "--no-ext-diff", `${mergeBase}:${basePath}`, `HEAD:${headPath}`]),
+                );
+                hunkCache.set(key, hunks);
+            }
+            return hunks;
+        },
     };
 }
 
