@@ -15,12 +15,16 @@ None`. PR A adds the fields and the requirement.
   (`crates/daemon/src/kernel_routes/commit.rs:137`, `:155-172`). The
   `reason` field is `#[serde(skip)]` (`:168-171`), so a body that sends
   `reason` is refused as an unknown field and the caller cannot supply it.
+  `a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field`
+  (`crates/daemon/tests/kernel_routes.rs:6252`) sends such a body and
+  asserts an error with the four row counts unchanged; it asserts the
+  error variant, not the refusal name.
 - `compose_reason` (`commit.rs:206-234`) routes dispute events to
   `DisputeReason::validated` and refuses evidence on every other event
   with `InvalidReason::InvalidInput` (`:228-229`); non-dispute events get
   `ADMISSION_REASON` (`:231`, constant at `:100`).
 - `DisputeReason::validated` refuses a dispute with neither field and an
-  empty `evidence_id` (`crates/daemon/src/kernel_routes/dispute.rs:55-62`).
+  empty `evidence_id` (`crates/daemon/src/kernel_routes/dispute.rs:55-64`).
 - The handler runs `compose_reason` for every operation after
   `resolve_classes` and before the intent, preview, or commit
   (`commit.rs:1111-1125`), and answers `state_only(invalid(reason))`, so
@@ -31,8 +35,8 @@ None`. PR A adds the fields and the requirement.
   nothing or another event cites something
   (`packages/opencode-plugin/src/shared/memory-mark-command.ts:129-130`).
   The fake kernel mirrors the rule (`disputeEvidenceWellFormed`,
-  `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:269-287`,
-  applied at `:627-629`).
+  `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:285-307`,
+  applied at `:647-649`).
 - No other production writer files the two dispute events: a search of
   `crates/daemon/src`, `crates/kernel/src`, and `packages/*/src` (non-test)
   for `MarkDisputed`, `EventKind::Contradict`, `mark_disputed`, and
@@ -64,8 +68,15 @@ share it.
 
 All four are constructed: `a_dispute_needs_evidence_and_other_events_take_none`
 (`crates/daemon/tests/kernel_routes.rs:5971`), the unit test of the same
-name (`dispute.rs:339`), and the parser test at
+name (`dispute.rs:370`), and the parser test at
 `memory-mark-command.test.ts:126`.
+
+The check is a per-request route oracle (portfolio refinement R4): it
+reads each disposition operation's `event`, `evidence_id`, and
+`evidence_ref` and the answer. Over stored rows only the dispute clause
+has a screen, through the `v=1` reason; for the other three events the
+constant reason `kernel.commit` is the only marker of a route-written
+row, so a store scan on it is circular.
 
 ## Investigation log
 

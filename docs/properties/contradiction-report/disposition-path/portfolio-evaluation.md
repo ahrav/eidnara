@@ -103,7 +103,7 @@ differ, prior above Candidate, retired id cited); none negates a check.
 - Baseline pins: no-evidence, commit-log, evidence-scope, and the
   accept-retired branch of evidence-existence assert behavior P4 intends to
   change; a test written from them fails on the intended change (B1).
-- Replay after move: `memory-mark-command.test.ts:332` pins that a repeat
+- Replay after move: `memory-mark-command.test.ts:351` pins that a repeat
   reports `applied` with the original verdict while the stored disposition
   differs (`commit.rs:1190-1206`). Safe for the store, possibly misleading
   for the user; no record asks (R5).

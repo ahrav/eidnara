@@ -592,7 +592,7 @@ command callers pass it in (`command-handler.ts:415`,
 Status: active
 Exercised: partial - `kernel_routes.rs:4982` covers replay, reused key,
 and token abort; TypeScript tests cover replay through the command
-(`memory-mark-command.test.ts:321`, `:332`). PR A adds a route test of
+(`memory-mark-command.test.ts:340`, `:351`). PR A adds a route test of
 two dispute identities, replay, and reuse
 (`dispute_identities_land_replay_and_refuse_reuse_like_every_envelope`,
 `kernel_routes.rs:6080`) and a command test of two evidence keys in one
@@ -621,15 +621,15 @@ response.
 Confidence: high - [evidence](evidence/disposition-envelope-identity-replays-without-a-second-write.md).
 Existing check: `kernel_routes.rs:4982`
 (`disposition_operations_share_the_envelope_replay_and_token_rules`),
-`kernel_routes.rs:931`, `:6080`, `memory-mark-command.test.ts:321`,
-`:332`, `:201`. Status unaudited.
+`kernel_routes.rs:931`, `:6080`, `memory-mark-command.test.ts:340`,
+`:351`, `:201`. Status unaudited.
 Impact: a second write under one identity would double-record a dispute
 and break the one-row-per-report assumption P3's join by `commit_seq`
 relies on.
 Open questions:
 - A repeated command after the object moved reports `applied` with the
   original verdict while the stored disposition differs
-  (`memory-mark-command.test.ts:332`; `commit.rs:1190-1206`). Safe for the
+  (`memory-mark-command.test.ts:351`; `commit.rs:1190-1206`). Safe for the
   store; is the replayed verdict the right thing to show the user? (needs
   human input; portfolio refinement R5)
 
@@ -639,7 +639,7 @@ Type: safety
 Reachability: default-production - command registered in both plugins
 (`pi-plugin/src/index.ts:550`; `command-handler.ts:413`).
 Status: active
-Exercised: partial - `memory-mark-command.test.ts:241-495` covers
+Exercised: partial - `memory-mark-command.test.ts:260-514` covers
 confirmation, decline, denial, replay, cancellation, separator refusal,
 refused preview, and mismatched verdicts. PR A's
 `memory-mark-command.test.ts:174` asserts that both calls (preview and
@@ -676,9 +676,9 @@ Required faults and enabling state: a `FakeKernel` or stub returning
 mismatched, empty, or multiple verdicts; a recorded identity; a
 `visibility_changes: true` preview.
 Confidence: high - [evidence](evidence/memory-mark-command-commits-only-the-previewed-operation.md).
-Existing check: `memory-mark-command.test.ts:242`, `:264`, `:285`, `:304`,
-`:321`, `:332`, `:345`, `:363`, `:394`, `:410`, `:424`, and PR A's `:174`,
-`:201`, `:223`. Status unaudited.
+Existing check: `memory-mark-command.test.ts:261`, `:283`, `:304`, `:323`,
+`:340`, `:351`, `:364`, `:382`, `:413`, `:429`, `:443`, and PR A's `:174`,
+`:201`, `:242`. Status unaudited.
 Impact: committing an operation the user did not preview, or treating a
 foreign verdict as the answer, would apply a disposition the confirmation
 dialog never described.
@@ -813,7 +813,7 @@ Reachability: default-production - every admission row passes
 constant `"kernel.commit"` (`commit.rs:100`) for every event except the two
 disputes, which carry the `v=1` structured reason the route composes and
 caps at 4096 bytes (`commit.rs:221-227`;
-`crates/daemon/src/kernel_routes/dispute.rs:14`, `:75-77`).
+`crates/daemon/src/kernel_routes/dispute.rs:14`, `:77-79`).
 Status: active
 Exercised: partial - `kernel_admission.rs:1676` covers a revocation reason
 surviving; no test drives a reason at or above 512 KiB, a blank reason
@@ -834,7 +834,7 @@ Fault/timing angle: none in time; the bound is per request.
 Required faults and enabling state: a store-API caller with a long or
 secret-bearing reason. The route cannot produce either: it refuses a
 dispute reason over 4096 bytes or holding a detection with
-`invalid_input` before the Kernel sees it (`dispute.rs:75-77`).
+`invalid_input` before the Kernel sees it (`dispute.rs:77-79`).
 Confidence: medium - [evidence](evidence/admission-reason-is-redacted-bounded-and-non-blank.md).
 The bound and the blank check are read in code; the redaction-row write
 was read but its message and column mapping were not traced into
@@ -852,8 +852,8 @@ Open questions:
   `redact_durable_text` the route scans with
   (`crates/kernel/src/redaction.rs:41-42`). The scanner detects the test
   token `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678`
-  (`dispute.rs:311-318`), and 64 seeded 40- and 64-hex object ids beside
-  an ordinary repository path carry no detection (`dispute.rs:323-336`).
+  (`dispute.rs:342-349`), and 64 seeded 40- and 64-hex object ids beside
+  an ordinary repository path carry no detection (`dispute.rs:354-367`).
   The evidence file records which rule the token matches and that the
   attribution is inferred from the rule regexes.
 

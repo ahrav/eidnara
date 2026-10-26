@@ -40,7 +40,7 @@ before it becomes a carrier.
   At the PR A tip the route cannot produce a blank, oversize, or
   secret-bearing reason: `DisputeReason::validated` refuses a rendering
   over 4096 bytes or holding a detection
-  (`crates/daemon/src/kernel_routes/dispute.rs:75-77`), and every
+  (`crates/daemon/src/kernel_routes/dispute.rs:77-79`), and every
   rendering starts with `v=1;op=kernel.commit`.
 - Other production reasons: `format!("{kind:?}")` (`lib.rs:14067`),
   `CLASSIFY_KERNEL_PRODUCER` (`lib.rs:15224`), `CAUSE`
@@ -98,7 +98,7 @@ read in this pass.
 - Sources examined: `crates/kernel/src/redaction.rs:41-42`
   (`redact_lossy` calls `context_core::redaction::redact_durable_text`);
   `crates/context-core/src/redaction.rs:462-464`;
-  `crates/daemon/src/kernel_routes/dispute.rs:311-318`, `:323-336`;
+  `crates/daemon/src/kernel_routes/dispute.rs:342-349`, `:354-367`;
   `crates/secret-scanner/conservative_overlay.yaml:5-7`;
   `crates/secret-scanner/default_rules.yaml:410-411`;
   `crates/secret-scanner/src/rules.rs:31`, `:299-306`.

@@ -52,7 +52,12 @@ All constructed:
 - A valid reference previews with counts unchanged, then commits
   (`kernel_routes.rs:5880`).
 - The command reports `refused` at the preview step, writes no receipt,
-  and makes one call (`memory-mark-command.test.ts:223`).
+  and makes one call (`memory-mark-command.test.ts:242`).
+- A tip that moves between preview and commit: the preview answers
+  `available`, the evidence's only project citer retires, and the commit
+  answers `not_found` with nothing written
+  (`a_dispute_previewed_while_its_evidence_was_visible_is_judged_again_at_commit`,
+  `kernel_routes.rs:6375`). The commit's verdict is the one recorded.
 
 ## Investigation log
 

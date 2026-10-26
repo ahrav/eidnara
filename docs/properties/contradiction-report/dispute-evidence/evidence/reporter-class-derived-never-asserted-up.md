@@ -18,7 +18,7 @@ route's derivation, never from a stronger claim by the client.
   (`commit.rs:411-444`; ranks at `:382-404`).
 - The handler passes the resolved taint to `compose_reason`
   (`commit.rs:1111-1125`), which renders it as `reporter_taint`
-  (`crates/daemon/src/kernel_routes/dispute.rs:83-87`).
+  (`crates/daemon/src/kernel_routes/dispute.rs:85-89`).
 - `disposition_request` builds the admission request with the subject's
   prior classes (`commit.rs:725-726`), so the row's class columns are the
   subject's; the Kernel refuses a request whose classes differ from the
@@ -57,6 +57,12 @@ All constructed except the tool arm:
 - The command sends `source_kind: "user"` on preview and commit
   (`memory-mark-command.test.ts:174`).
 - Not constructed: the model tool arm's own surface (#1161).
+
+The check is a per-request route oracle (portfolio refinement R4). It
+reads the request's `source_kind`, `asserted_source_class`, and
+`asserted_taint_class` (`commit.rs:115-119`). `commit_log` stores no
+`source_kind`, and the admission row's `source_kind` column holds the
+subject's facts, so no store scan can evaluate it.
 
 ## Investigation log
 

@@ -42,12 +42,13 @@ and `dispute-evidence/domain-model.md` section 0.
 | Part | Surfaces | Records | Origin | Companions |
 | --- | --- | --- | --- | --- |
 | `disposition-path/` | the daemon route (`Operation::Disposition`, `DispositionEvent`, `disposition_request`, `derive_classes`, preview, scope filtering, refusal mapping, envelope replay); Kernel admission for the five disposition events (`evaluate_admission`, `event_effect`, `disposition_restrictiveness`, `write_admission`, `load_subject_facts`); the shared TypeScript command runner and client intent derivation; evidence liveness primitives; caller-asserted intent fields | 15 (14 active, 1 invalidated) | implemented | `system-model.md`, `existing-checks.md`, `fault-map.md`, `portfolio-evaluation.md`, `evidence/` |
-| `dispute-evidence/` | evidence fields on the dispute operation; daemon-side liveness, visibility, and form validation; reporter class; dispute identity; preview parity; structured `reason`; use-outcome link | 10 (9 active, 1 proposed for PR B) | implemented by PR A, one proposed | `existing-checks.md`, `fault-map.md`, `portfolio-evaluation.md` (pending), `evidence/`, `domain-model.md`, `certificate.md`, `open-questions.md` |
+| `dispute-evidence/` | evidence fields on the dispute operation; daemon-side liveness, visibility, and form validation; reporter class; dispute identity; preview parity; structured `reason`; use-outcome link | 10 active (9 implemented, 1 proposed for PR B) | implemented by PR A, one proposed | `existing-checks.md`, `fault-map.md`, `portfolio-evaluation.md`, `evidence/`, `domain-model.md`, `certificate.md`, `open-questions.md` |
 
 Record origin: every record under `disposition-path/catalog.md` is
 implemented behavior; PR A invalidates one and re-labels two (see that
-catalog's PR A revision note). Under `dispute-evidence/catalog.md`, nine
-records are active and exercised by PR A tests; the tenth,
+catalog's PR A revision note). Under `dispute-evidence/catalog.md`, all
+ten records carry `Status: active`; nine are implemented and exercised by
+PR A tests; the tenth,
 `use-outcome-link-names-own-session-prior-serve`, stays a proposed
 obligation with its `Lifecycle:`, `Falsifier:`, and `Legal witness:` lines
 and no evidence file until PR B
@@ -59,8 +60,14 @@ of the dispute surface lands with
 the implemented part. Its refinements are applied in `catalog.md`; PR A
 resolves its gaps G1 to G4 (a new record, an open question, and two
 evidence-file investigations) and the owned coverage markers of bias B2 are
-named in `disposition-path/fault-map.md`. The dispute-evidence part's
-fresh-context evaluation is pending.
+named in `disposition-path/fault-map.md`.
+`dispute-evidence/portfolio-evaluation.md` is the fresh-context
+evaluation of the dispute-evidence part, with citations corrected to
+HEAD `f68e895ca` (after the review-round code commits `511cd6d73` and
+`f68e895ca`). Its refinements R1 to R6 are
+applied; gap G2 is closed by a route test; gap G1 is an open question on
+`cited-evidence-visible-to-bound-project` (needs human input); biases B1
+and B2 are surfaced for a human.
 
 ## Slug index and specification crosswalk
 

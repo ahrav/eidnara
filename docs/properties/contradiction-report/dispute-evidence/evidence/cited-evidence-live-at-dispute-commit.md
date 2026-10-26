@@ -42,10 +42,22 @@ read inside the transaction, the dispute either sees the retirement
   the writer lock; the read and the admission write share the dispute's
   transaction. This is read from code.
 - Not constructed: a retirement waiting on the writer lock while the
-  dispute holds it. A test would need a second writer thread blocked at
-  the lock and a deterministic release point; no test in
-  `crates/daemon/tests` or `crates/kernel/tests` builds that schedule.
-  The record claims the as-of predicate only from the ordering argument.
+  dispute holds it. For the cited evidence row itself the state cannot
+  be built: a dispute's evidence has a live citer in the bound project,
+  and `retire_evidence` refuses evidence a live row cites with
+  `Conflict` (`crates/kernel/src/slice/write.rs:585-608`). The reachable
+  form is a retirement of that citer queued behind the dispute. A test
+  would need a second writer thread blocked at the lock and a
+  deterministic release point; no test in `crates/daemon/tests` or
+  `crates/kernel/tests` builds that schedule. The record claims the
+  as-of predicate only from the ordering argument.
+- Constructed in sequence: a preview answers `available`, the only
+  project citer retires in a separate commit, and the commit answers
+  `not_found` with nothing written
+  (`a_dispute_previewed_while_its_evidence_was_visible_is_judged_again_at_commit`,
+  `crates/daemon/tests/kernel_routes.rs:6375`). The evidence row stays
+  live; the refusal comes from the scope loop that shares the read, so
+  the test shows the read runs again inside the commit transaction.
 - A later retirement is permitted: the check is stated as of the row's
   `commit_seq`.
 

@@ -44,10 +44,10 @@ today.
   `retire_decision` only (`client.ts:644-651`), so a disposition commit
   sends no tokens; `previewDispositions` sends `commitBody(.., true)`,
   which adds `preview: true` (`:597-641`, `:773`, `:789`).
-- Tests: `memory-mark-command.test.ts:241-495`, including the mismatched-
-  verdict matrix at `:424`; PR A adds `:174` (both bodies carry the same
+- Tests: `memory-mark-command.test.ts:260-514`, including the mismatched-
+  verdict matrix at `:443`; PR A adds `:174` (both bodies carry the same
   operation with its evidence and `source_kind: "user"`), `:201`, and
-  `:223`.
+  `:242`.
 
 ## Failure scenario
 

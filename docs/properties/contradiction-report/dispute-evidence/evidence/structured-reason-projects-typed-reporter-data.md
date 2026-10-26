@@ -16,15 +16,18 @@ therefore be a faithful, parseable carrier.
   `dispute.rs` module header points there,
   `crates/daemon/src/kernel_routes/dispute.rs:1-2`).
 - `render` writes the fields in order, percent-encoding every value
-  (`dispute.rs:81-99`); `encode` keeps RFC 3986 unreserved bytes and
+  (`dispute.rs:83-101`); `encode` keeps RFC 3986 unreserved bytes and
   writes every other byte as `%` and two uppercase hex digits
-  (`dispute.rs:159-173`).
+  (`dispute.rs:161-175`).
 - `parse` reads the fields in order, rejects an unknown version, an
   unknown event or taint, a value that decodes to a different string a
   second time, a path without an oid or the reverse, and any input whose
-  re-rendering differs (`dispute.rs:101-146`).
+  re-rendering differs (`dispute.rs:103-148`).
 - `validated` refuses a rendering over `MAX_REASON_BYTES` (4096,
-  `dispute.rs:14`) or holding a detection (`dispute.rs:75-77`).
+  `dispute.rs:14`) or holding a detection (`dispute.rs:77-79`). Since
+  `511cd6d73` it also refuses a raw `evidence_id` holding a detection
+  before rendering (`dispute.rs:58-64`); the scan of the composed reason
+  alone could miss a secret the percent-encoding breaks up.
 - The Kernel stores `redact(reason)` (`crates/kernel/src/admission.rs:1689`);
   `redact_lossy` calls the same `redact_durable_text`
   (`crates/kernel/src/redaction.rs:41-42`), so a reason the route accepted
@@ -47,19 +50,28 @@ None in time. The reason depends on the scanner's rule set, as in
 ## What a test must construct
 
 - The documented rendering for one reference
-  (`the_documented_rendering_parses_back`, `dispute.rs:235`).
+  (`the_documented_rendering_parses_back`, `dispute.rs:232`).
 - Round trip over `;`, `=`, `%`, a malformed escape, `@`, spaces,
   non-ASCII, and unreserved punctuation, for both events, with an evidence
   id holding `;=%` (`render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes`,
-  `dispute.rs:249`).
+  `dispute.rs:246`).
+- `encode` and `decode` on reserved and multi-byte input give uppercase
+  escapes and the original string
+  (`reserved_and_multi_byte_values_encode_to_uppercase_escapes`,
+  `dispute.rs:280`). Every accepted path and optional id renders an ASCII
+  reason within the cap that parses back to its inputs (proptest
+  `every_accepted_reference_parses_back_to_its_inputs`, `dispute.rs:292`).
 - Refusal of every rendering `render` does not produce
   (`parse_refuses_every_rendering_render_does_not_produce`,
-  `dispute.rs:373`) and of a reason over the cap
-  (`a_reason_over_the_cap_is_invalid_input`, `dispute.rs:359`).
+  `dispute.rs:404`) and of a reason over the cap
+  (`a_reason_over_the_cap_is_invalid_input`, `dispute.rs:390`).
+- A client cannot supply the reason: a body carrying `reason` answers an
+  error with nothing written (`kernel_routes.rs:6252`).
 - Stored reasons through the route parse back, re-render to the stored
   bytes, and are ASCII (`kernel_routes.rs:5880`); event, reporter taint,
   and evidence id parse back (`kernel_routes.rs:5723`); the cascade row's
-  reason parses (`kernel_routes.rs:6199`).
+  reason parses (`kernel_routes.rs:6199`); a reason carrying both an
+  evidence id and a reference parses back (`kernel_routes.rs:6284`).
 - Not constructed: a read of `durable_text_redactions` after a landed
   dispute. The absence of a redaction row is argued from the shared
   detector.

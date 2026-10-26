@@ -19,6 +19,13 @@ restrictive disposition.
 - `disposition_restrictiveness` orders the dispositions
   (`admission.rs:4168-4175`); a strict decrease without a valid approval
   is recorded denied with the prior kept (rule at `admission.rs:321-334`).
+  A valid approval permits the relaxation: `denied` is
+  `requires_approval && !approval_valid` (`admission.rs:330`), and
+  `approval_valid` comes from `validate_approval` on the request's
+  `approval_object_id` (`admission.rs:1587-1591`). The record's
+  restrictiveness clause therefore holds unless the row names a valid
+  approval, matching AC8 "no relaxation without a valid approval"
+  (portfolio refinement R1).
 - The route builds the request with `approval_object_id` from the body
   and evidence from the body (`crates/daemon/src/kernel_routes/commit.rs:722-734`);
   no evidence field reaches `trigger_object_id`, which stays `None`
@@ -54,6 +61,14 @@ All constructed:
   kept, evidence on the row; `stale` prior: lands `disputed`
   (`a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale`,
   `kernel_routes.rs:6146`).
+- A `contradicted` prior disputed with evidence: without an approval,
+  `denied: true` and `contradicted` kept; with a valid
+  `approval_object_id`, `denied: false`, `disputed`, `outcome = deny`, and
+  the evidence id on the row
+  (`a_dispute_relaxes_a_contradicted_prior_only_with_a_valid_approval`,
+  `kernel_routes.rs:6418`). The grid test fixes `approval_valid: false`
+  (`admission.rs:4557`), so this route test is the only one that
+  constructs the approved relaxation.
 - An approval above Candidate disputed through the route: historical
   maturity kept, effective maturity `candidate`
   (`kernel_routes.rs:6199`). The test asserts the prior's historical
