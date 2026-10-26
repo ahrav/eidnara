@@ -578,12 +578,12 @@ Required faults and enabling state: A session with committed passes, then
 `session.delete`.
 Confidence: high -
 [evidence](evidence/uo-per-session-pass-timestamps-die-with-the-session.md).
-field `crates/memory-store/src/lib.rs:2512`; writes
+field `crates/memory-store/src/lib.rs:2513`; writes
 `crates/daemon/src/transform.rs:3262`; delete `delete_session`
-(`crates/memory-store/src/lib.rs:8968`).
+(`crates/memory-store/src/lib.rs:8969`).
 Existing check:
 `delete_session_sweeps_every_session_table_once_and_scopes_notes`
-(`crates/memory-store/src/lib.rs:22343`). Status: unaudited.
+(`crates/memory-store/src/lib.rs:22344`). Status: unaudited.
 Impact: The use-outcome `last_transform_at` column (#1156) is the Kernel-side
 copy that survives the delete.
 Open questions: None.

@@ -103,7 +103,7 @@ Every location was read at the #1155 branch tip.
 
 | Check | Location | Records | Status |
 | --- | --- | --- | --- |
-| `delete_session_sweeps_every_session_table_once_and_scopes_notes` | `crates/memory-store/src/lib.rs:22343` | `uo-per-session-pass-timestamps-die-with-the-session` | unaudited |
+| `delete_session_sweeps_every_session_table_once_and_scopes_notes` | `crates/memory-store/src/lib.rs:22344` | `uo-per-session-pass-timestamps-die-with-the-session` | unaudited |
 
 ## TypeScript
 

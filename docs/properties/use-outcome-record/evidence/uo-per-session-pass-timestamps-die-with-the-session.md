@@ -20,7 +20,7 @@ revision.
   with the session.
 - Existing check:
   `delete_session_sweeps_every_session_table_once_and_scopes_notes`
-  (`crates/memory-store/src/lib.rs:22343`). Status: unaudited.
+  (`crates/memory-store/src/lib.rs:22344`). Status: unaudited.
 
 ## Failure scenario
 
