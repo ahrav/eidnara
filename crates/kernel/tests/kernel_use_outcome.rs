@@ -336,7 +336,7 @@ fn a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote() {
     );
 }
 
-/// For a serve at `known_as_of = n`, `mark_disputed` or `contradict` committed after n sets the flag and a later approval does not clear it; an event at or before n, a `mark_stale`, a null-commit-sequence row, and another source kind, source id, or revision do not; two qualifying events in one commit count once; a retired record is not answered.
+/// For a serve at `known_as_of = n`, `mark_disputed` or `contradict` committed after n sets the flag and a later approval does not clear it; an event at or before n, a `mark_stale`, a null-commit-sequence row, and another source kind, source id, or revision do not; two qualifying events in one commit count once; a retired record is not answered. `served_counts_for` counts each case by the same rule.
 #[test]
 fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage() {
     let objects = [
@@ -424,6 +424,14 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
         let sessions = store.served_sessions_for(object).unwrap();
         assert_eq!(sessions.len(), 1, "{object} has one serve");
         assert_eq!(sessions[0].serve.use_outcome_id, id);
+        assert_eq!(
+            store.served_counts_for(&project(), object).unwrap(),
+            ServedCounts {
+                served_sessions: 1,
+                disputed_after_serve: u64::from(sessions[0].disputed_after_serve),
+            },
+            "{object}: the counts apply the by-decision read's rule"
+        );
         sessions[0].disputed_after_serve
     };
     for object in [
@@ -447,6 +455,10 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
         assert!(!disputed(object), "{object}");
     }
     assert!(store.served_sessions_for("unserved").unwrap().is_empty());
+    assert_eq!(
+        store.served_counts_for(&project(), "unserved").unwrap(),
+        ServedCounts::default()
+    );
 
     writer(root.path())
         .execute("UPDATE use_outcomes SET invalidated_commit_seq=?1", [after])
@@ -456,6 +468,13 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
             .served_sessions_for("later-dispute")
             .unwrap()
             .is_empty()
+    );
+    assert_eq!(
+        store
+            .served_counts_for(&project(), "later-dispute")
+            .unwrap(),
+        ServedCounts::default(),
+        "a retired record is not counted"
     );
     assert_eq!(
         store

@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `7d2a34fe5`).
+its parent is `d85de937b`).
 
 - Ids: the rendered rows of `CanonicalMemorySnapshot::new`, ascending
   (`served_ids` (`crates/daemon/src/canonical_memory.rs:81`)).
@@ -35,7 +35,7 @@ its parent is `7d2a34fe5`).
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:214`),
   `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-  (`crates/kernel/tests/kernel_use_outcome.rs:715`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:734`). Status: unaudited.
 
 ## Failure scenario
 

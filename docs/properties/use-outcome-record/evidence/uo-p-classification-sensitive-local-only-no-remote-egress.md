@@ -9,10 +9,10 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `7d2a34fe5`).
+its parent is `d85de937b`).
 
 - DDL CHECKs: `crates/kernel/src/schema.rs:187`.
-- Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:267`); it
+- Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:279`); it
   pushes no pending change, so the commit writes no change event or outbox row.
 - Class rule: `denies_destination` (`crates/kernel/src/envelope.rs:71`).
 

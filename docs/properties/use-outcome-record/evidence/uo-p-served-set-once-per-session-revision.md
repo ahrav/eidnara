@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1155.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `7d2a34fe5`).
+its parent is `d85de937b`).
 
 - Key and digest: `crates/daemon/src/use_outcome_writer.rs:266`; the request
   digest binds the ids, the harness, and the role (`length_prefixed_digest`
@@ -41,7 +41,7 @@ its parent is `7d2a34fe5`).
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:214`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-  (`crates/kernel/tests/kernel_use_outcome.rs:694`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:713`). Status: unaudited.
 
 ## Failure scenario
 

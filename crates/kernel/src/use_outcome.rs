@@ -207,11 +207,23 @@ static SERVED_SESSIONS_SQL: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-/// [`SERVED_SESSIONS_SQL`]'s rows of the project `?2`, counted in one statement.
+/// A committed `mark_disputed` or `contradict` on the object's lineage disputes a serve when its `commit_seq` exceeds `served_commit_seq`, as in [`SERVED_SESSIONS_SQL`]; the maximum matching `commit_seq` therefore suffices for the disputed count.
 static SERVED_COUNTS_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "SELECT COUNT(*),COALESCE(SUM(disputed_after_serve),0) FROM ({}) WHERE project_digest=?2",
-        *SERVED_SESSIONS_SQL
+        "SELECT COUNT(*),
+                COALESCE(SUM(u.served_commit_seq<(
+                    SELECT MAX(a.commit_seq) FROM object_registry o
+                    JOIN admission_decisions a ON a.subject_object_id=o.object_id
+                    WHERE o.object_id=?1
+                      AND a.event_kind IN ('{disputed}','{contradict}')
+                      AND {lineage}
+                      AND a.commit_seq IS NOT NULL)),0)
+         FROM use_outcome_decisions d
+         JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
+         WHERE d.object_id=?1 AND u.project_digest=?2 AND u.invalidated_commit_seq IS NULL",
+        disputed = EventKind::MarkDisputed.as_str(),
+        contradict = EventKind::Contradict.as_str(),
+        lineage = super::admission::same_lineage_as_registry_object("a"),
     )
 });
 
@@ -666,8 +678,8 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        EXPIRED_SQL, SERVED_SESSIONS_SQL, SERVED_SET_SQL, SessionRole, USE_OUTCOME_RETENTION_MS,
-        UseOutcomeExpiry, UseOutcomeSpec,
+        EXPIRED_SQL, SERVED_COUNTS_SQL, SERVED_SESSIONS_SQL, SERVED_SET_SQL, SessionRole,
+        USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
     };
     use crate::{CommitIntent, DomainSpec, KernelStore, Sensitivity, served_set_digest};
 
@@ -895,7 +907,7 @@ mod tests {
         assert!(retired(&store, "session"));
     }
 
-    /// The sweep scan reads the live-retention index in its order with no temporary sort and probes citations through the citing index; the by-session read seeks the identity index; the by-decision read starts from the decision-row index and probes disputes through the subject index.
+    /// The sweep scan reads the live-retention index in index order and probes citations through the citing index. The by-session read seeks the identity index. The by-decision read starts from the decision-row index and probes disputes through the subject index. The count read seeks the decision-row index and reads disputes through the subject index in an uncorrelated subquery.
     #[test]
     fn the_sweep_and_the_reads_use_their_indexes() {
         let root = tempfile::tempdir().unwrap();
@@ -937,5 +949,13 @@ mod tests {
             by_decision.contains("idx_admission_subject_latest"),
             "{by_decision}"
         );
+        let counts = plan(&SERVED_COUNTS_SQL, &[&"decision", &digest]);
+        assert!(
+            counts.contains("idx_use_outcome_decisions_object_fk"),
+            "{counts}"
+        );
+        assert!(counts.contains("idx_admission_subject_latest"), "{counts}");
+        assert!(!counts.contains("CORRELATED"), "{counts}");
+        assert!(!counts.contains("TEMP B-TREE"), "{counts}");
     }
 }
