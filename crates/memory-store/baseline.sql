@@ -1263,3 +1263,36 @@ CREATE TABLE scan_detections (
             action TEXT NOT NULL CHECK (action IN ('substitute', 'preserve', 'reject')),
             PRIMARY KEY (scan_id, detection_ordinal)
         ) WITHOUT ROWID;
+
+-- A contradiction candidate names a decision a published descriptor overlapped
+-- lexically at one Kernel tip under one matcher digest. Rows hold ids,
+-- integers, and times only; the daemon re-proves liveness at read time.
+CREATE TABLE contradiction_candidates (
+            project_digest TEXT NOT NULL CHECK (
+                length(project_digest) = 64 AND project_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            evidence_id TEXT NOT NULL CHECK (length(evidence_id) BETWEEN 1 AND 512),
+            decision_object_id TEXT NOT NULL CHECK (length(decision_object_id) BETWEEN 1 AND 512),
+            decision_id TEXT NOT NULL CHECK (length(decision_id) BETWEEN 1 AND 512),
+            matched_terms INTEGER NOT NULL CHECK (matched_terms >= 1),
+            decision_terms INTEGER NOT NULL CHECK (decision_terms >= matched_terms),
+            score_bp INTEGER NOT NULL CHECK (score_bp = matched_terms * 10000 / decision_terms),
+            publish_tip INTEGER NOT NULL CHECK (publish_tip >= 0),
+            kernel_incarnation_id TEXT NOT NULL CHECK (
+                length(kernel_incarnation_id) = 32
+                AND kernel_incarnation_id NOT GLOB '*[^0-9a-f]*'
+            ),
+            matcher_digest TEXT NOT NULL CHECK (
+                length(matcher_digest) = 64 AND matcher_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+            PRIMARY KEY (project_digest, evidence_id, decision_object_id)
+        );
+
+CREATE INDEX idx_contradiction_candidates_decision
+            ON contradiction_candidates(
+                project_digest, decision_object_id, score_bp DESC, created_at_ms DESC, evidence_id
+            );
+
+CREATE INDEX idx_contradiction_candidates_eviction
+            ON contradiction_candidates(project_digest, score_bp, created_at_ms);
