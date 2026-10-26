@@ -20,7 +20,7 @@ revision.
 - Guarantee under test: Route teardown purges process-local session state and
   deletes no durable row in either store.
 - Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-  (`crates/daemon/src/lib.rs:25400`);
+  (`crates/daemon/src/lib.rs:25402`);
   `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
   (`crates/daemon/tests/kernel_routes.rs:3849`);
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`

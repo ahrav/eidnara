@@ -21,7 +21,7 @@ const DELETE_PRODUCER: &str = "eidnara-daemon/use-outcome-delete";
 const DELETE_FAMILY: &str = "use-outcome-delete";
 const DELETE_REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-delete-v1\n";
 /// `WRITE_BUDGET` bounds writer waits and the pooled-reader replay check; the insert runs to completion once the writer is held.
-const WRITE_BUDGET: Duration = Duration::from_millis(250);
+pub(crate) const WRITE_BUDGET: Duration = Duration::from_millis(250);
 const WRITER_FIRST_WAIT: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +99,8 @@ pub(crate) const RETAINED_SNAPSHOT_BYTES_BOUND: u64 =
 pub(crate) struct UseOutcomeWrites {
     counts: [AtomicU64; UseOutcomeWrite::ALL.len()],
     slots: Arc<Semaphore>,
+    /// The writer wait each job is given, in milliseconds; [`WRITE_BUDGET`] outside tests.
+    write_budget_ms: AtomicU64,
 }
 
 impl Default for UseOutcomeWrites {
@@ -106,6 +108,7 @@ impl Default for UseOutcomeWrites {
         Self {
             counts: Default::default(),
             slots: Arc::new(Semaphore::new(WRITES_IN_FLIGHT)),
+            write_budget_ms: AtomicU64::new(WRITE_BUDGET.as_millis() as u64),
         }
     }
 }
@@ -137,9 +140,20 @@ impl UseOutcomeWrites {
         })
     }
 
+    pub(crate) fn write_budget(&self) -> Duration {
+        Duration::from_millis(self.write_budget_ms.load(Ordering::Relaxed))
+    }
+
     #[cfg(test)]
     pub(crate) fn get(&self, outcome: UseOutcomeWrite) -> u64 {
         self.counts[outcome as usize].load(Ordering::Relaxed)
+    }
+
+    /// Lengthens or shortens the writer wait of every later job, so a test can hold the Kernel writer across a pass without racing the budget.
+    #[cfg(test)]
+    pub(crate) fn set_write_budget(&self, budget: Duration) {
+        self.write_budget_ms
+            .store(budget.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// Waits until completed or dropped jobs have released every write slot.
@@ -358,13 +372,15 @@ pub(crate) struct Serve<'a> {
 
 /// Writes the serve record, or answers `None` when the Kernel is not Ready and no write was attempted.
 /// The first commit waits at most [`WRITER_FIRST_WAIT`] for the writer. When another writer holds it longer, a served set already
-/// recorded under the key replays from a pooled reader, and a new one waits for the writer until [`WRITE_BUDGET`] ends.
+/// recorded under the key replays from a pooled reader, and a new one waits for the writer until `write_budget` ends
+/// ([`WRITE_BUDGET`] in production).
 /// A reader replay reads only the stored receipt, which commits with its record; the writer's fence check applies to commits.
 /// `kernel_unavailable` from a commit can follow a writer wait, and after a post-commit `Io` or `Inconclusive`
 /// the record may exist; a later write at the same key replays it.
 pub(crate) fn record_serve(
     kernel: &KernelOpenCoordinator,
     serve: &Serve<'_>,
+    write_budget: Duration,
 ) -> Option<UseOutcomeWrite> {
     let store = kernel.kernel_store().ok()?;
     let snapshot = serve.snapshot;
@@ -406,7 +422,7 @@ pub(crate) fn record_serve(
         let budget = EvalBudget::new(Some(until), Arc::default());
         store.commit_within_budget(&budget, intent(), insert)
     };
-    let deadline = Instant::now() + WRITE_BUDGET;
+    let deadline = Instant::now() + write_budget;
     let outcome = match commit(Instant::now() + WRITER_FIRST_WAIT) {
         Err(KernelError::Deadline) => store
             .preview(deadline, |preview| preview.stored_receipt(intent()))

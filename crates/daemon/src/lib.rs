@@ -9768,6 +9768,7 @@ impl HandlerCore {
         let snapshot = snapshot.clone();
         let recorded_at = env.pass_now;
         // The job touches after its serve, so the serving pass's record carries this pass's time, as a serve made on the pass thread would.
+        let write_budget = self.use_outcome_writes.write_budget();
         let Some(job) = self.use_outcome_writes.job(move || {
             let write = match injected {
                 Some(error) => Some(use_outcome_writer::UseOutcomeWrite::from_error(error)),
@@ -9781,6 +9782,7 @@ impl HandlerCore {
                         snapshot: &snapshot,
                         recorded_at,
                     },
+                    write_budget,
                 ),
             };
             let touch = match kernel.kernel_store() {
