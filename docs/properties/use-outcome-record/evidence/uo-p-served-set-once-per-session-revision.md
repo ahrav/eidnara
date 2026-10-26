@@ -44,7 +44,7 @@ revision.
   `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`
   (`crates/daemon/src/use_outcome_writer_tests.rs:933`);
   `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:980`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:989`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`

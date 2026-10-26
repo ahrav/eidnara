@@ -949,6 +949,15 @@ async fn a_hard_fold_answers_while_another_writer_holds_the_kernel_writer() {
         served(&handler, &project).is_empty(),
         "the response arrives while the writer is still held"
     );
+    // Inside the budget the job cannot have reached its deadline yet, so an inline write that waited out its budget
+    // before answering would already have counted; the detached hand-off leaves the counters empty at response time.
+    if started.elapsed() < std::time::Duration::from_millis(250) {
+        assert!(
+            counts(&handler).is_empty(),
+            "the response arrives while the serve write is pending: {:?}",
+            counts(&handler)
+        );
+    }
 
     release.send(()).unwrap();
     holder.join().unwrap();
