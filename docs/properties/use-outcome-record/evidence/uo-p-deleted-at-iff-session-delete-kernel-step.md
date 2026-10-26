@@ -9,7 +9,7 @@ Record kind: proposed obligation; its owning ticket #1156 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `bd1216847`).
+its parent is `8ace6c9f8`).
 
 - The write sits in the delete handler's Kernel step.
 

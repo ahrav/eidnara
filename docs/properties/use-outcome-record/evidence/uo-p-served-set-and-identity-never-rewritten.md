@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `bd1216847`).
+its parent is `8ace6c9f8`).
 
 - Record triggers: `use_outcomes_identity_immutable`,
   `use_outcomes_deleted_at_set_once`,

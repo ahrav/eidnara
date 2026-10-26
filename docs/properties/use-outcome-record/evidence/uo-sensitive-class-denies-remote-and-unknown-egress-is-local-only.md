@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `bd1216847`).
+its parent is `8ace6c9f8`).
 
 - Class rule: `denies_destination` (`crates/kernel/src/envelope.rs:71`).
 - Egress read-back: `crates/kernel/src/cas/mod.rs:109`.
@@ -26,7 +26,7 @@ its parent is `bd1216847`).
   `unrecognized_stored_classes_read_back_restrictive`
   (`crates/kernel/src/cas/mod.rs:797`);
   `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-  (`crates/kernel/tests/kernel_use_outcome.rs:322`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:323`). Status: unaudited.
 
 ## Failure scenario
 

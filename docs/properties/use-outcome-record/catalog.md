@@ -18,7 +18,7 @@ The specification authored its records at `a0e3f2993` and condensed the
 evidence inline because no part directory existed; this part reconstructs
 the records and their evidence from that catalog. Every `file:line` here was
 re-verified against the #1154 branch tip, the commit that adds this
-directory, whose parent is `bd1216847`. A specification reference that moved or
+directory, whose parent is `8ace6c9f8`. A specification reference that moved or
 pointed at a test rather than production code is corrected in the record's
 evidence file. `Exercised` cites tests that run in the #1154 PR's recorded
 gate run.
@@ -391,7 +391,7 @@ Existing check:
 `malformed_stored_policy_and_sensitivity_fail_closed_without_read_error`
 (`crates/kernel/tests/kernel_admission.rs:2935`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:342`). Status: unaudited.
 Impact: A null row counted as a dispute would report harm with no committed
 event.
 Open questions: None.
@@ -443,14 +443,14 @@ Confidence: high -
 `crates/kernel/src/local_file.rs:26`, `expire_captures`
 (`crates/kernel/src/local_file.rs:250`), `expiry_intent`
 (`crates/kernel/src/local_file.rs:433`), `still_expired`
-(`crates/kernel/src/local_file.rs:467`).
+(`crates/kernel/src/local_file.rs:476`).
 Existing check:
 `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it`
 (`crates/daemon/tests/harness_sources.rs:3338`);
 `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
 (`crates/daemon/tests/harness_sources.rs:3482`);
 `a_replayed_expiry_receipt_is_not_counted_as_a_retirement`
-(`crates/kernel/src/local_file.rs:728`). Status: unaudited.
+(`crates/kernel/src/local_file.rs:737`). Status: unaudited.
 Impact: The use-outcome sweep (#1154) reuses this loop shape; a defect here
 would recur there.
 Open questions: None.
@@ -471,14 +471,14 @@ Required faults and enabling state: An expired capture cited by a live
 observation; one pinned by a live hold.
 Confidence: high -
 [evidence](evidence/uo-expiry-keeps-pinned-and-cited-evidence.md).
-`crates/kernel/src/local_file.rs:514`; `crates/kernel/src/slice/write.rs:42`.
+`crates/kernel/src/local_file.rs:523`; `crates/kernel/src/slice/write.rs:42`.
 Existing check:
 `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
 (`crates/daemon/tests/harness_sources.rs:3482`);
 `retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence`
 (`crates/kernel/tests/kernel_source_descriptors.rs:1895`);
 `a_capture_pinned_after_it_was_selected_for_expiry_is_kept`
-(`crates/kernel/src/local_file.rs:751`). Status: unaudited.
+(`crates/kernel/src/local_file.rs:760`). Status: unaudited.
 Impact: The use-outcome cited-row exception mirrors this liveness idiom; a
 defect here predicts one there.
 Open questions:
@@ -595,7 +595,7 @@ Confidence: high -
 `classify_existing_family` (`crates/kernel/src/open.rs:796`);
 `classify_open_kernel` (`crates/kernel/src/open.rs:852`). Disposition B:
 re-verified against the #1154 digest
-`ed12f254bd6b6471905b6079de58c45c1072d05179892e2433a70506b2c1299e`.
+`7a97653cf6d844d0d9f7e497a3c2280d44d5577a37da10f8c08f1b1e311105ec`.
 Existing check: `every_conclusive_kernel_mismatch_is_refused_and_left_untouched`
 (`crates/kernel/tests/kernel_open.rs:183`);
 `a_family_created_under_the_previous_baseline_is_refused_untouched`
@@ -661,7 +661,7 @@ Existing check: `eligibility_matrix_includes_secret_unknown_and_tombstone`
 `unrecognized_stored_classes_read_back_restrictive`
 (`crates/kernel/src/cas/mod.rs:797`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-(`crates/kernel/tests/kernel_use_outcome.rs:322`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:323`). Status: unaudited.
 Impact: A use-outcome row presented to egress would leave the host.
 Open questions: None.
 
@@ -816,11 +816,11 @@ Confidence: high -
 [evidence](evidence/uo-p-classification-sensitive-local-only-no-remote-egress.md).
 CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:187`); the insert
 names the classes as literals (`insert_use_outcome`
-(`crates/kernel/src/use_outcome.rs:232`)).
+(`crates/kernel/src/use_outcome.rs:241`)).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
 (`crates/kernel/tests/kernel_schema.rs:2297`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-(`crates/kernel/tests/kernel_use_outcome.rs:322`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:323`). Status: unaudited.
 Impact: A stop condition of the plan: a Remote-eligible serving record.
 Open questions:
 - Backup classification: the backup scan reads every table with a
@@ -849,9 +849,9 @@ the join is `crates/kernel/src/use_outcome.rs:163`, using the admission lineage
 text through `crates/kernel/src/admission.rs:910`.
 Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`);
+(`crates/kernel/tests/kernel_use_outcome.rs:342`);
 `disputed_after_serve_is_judged_against_each_serve`
-(`crates/kernel/tests/kernel_use_outcome.rs:730`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:733`). Status: unaudited.
 Impact: A prior dispute or a stale mark counted as harm after the serve.
 Open questions:
 - A decision disputed then re-approved still counts: event existence counts
@@ -883,28 +883,28 @@ Required faults and enabling state: An expired record; an expired cited record;
 70 expired records; a citation inserted after selection.
 Confidence: high -
 [evidence](evidence/uo-p-sweep-retires-only-expired-uncited-rows.md).
-`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:395`); predicate
+`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:451`); predicate
 `crates/kernel/src/use_outcome.rs:149`; recheck `retire_due_use_outcome`
-(`crates/kernel/src/use_outcome.rs:509`); receipt
+(`crates/kernel/src/use_outcome.rs:580`); receipt
 `crates/kernel/src/local_file.rs:438`.
 Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
-(`crates/kernel/tests/kernel_use_outcome.rs:474`);
+(`crates/kernel/tests/kernel_use_outcome.rs:475`);
 `an_expiry_backlog_drains_one_page_per_call`
-(`crates/kernel/tests/kernel_use_outcome.rs:534`);
+(`crates/kernel/tests/kernel_use_outcome.rs:537`);
 `an_expired_record_cited_by_a_live_report_is_retained`
-(`crates/kernel/tests/kernel_use_outcome.rs:604`);
+(`crates/kernel/tests/kernel_use_outcome.rs:607`);
 `a_record_cited_after_selection_is_kept`
-(`crates/kernel/src/use_outcome.rs:650`);
+(`crates/kernel/src/use_outcome.rs:716`);
 `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-(`crates/kernel/src/use_outcome.rs:678`);
+(`crates/kernel/src/use_outcome.rs:744`);
 `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-(`crates/kernel/src/use_outcome.rs:741`);
+(`crates/kernel/src/use_outcome.rs:807`);
 `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-(`crates/kernel/src/use_outcome.rs:762`);
+(`crates/kernel/src/use_outcome.rs:828`);
 `the_cited_count_covers_the_rows_read_before_the_page_fills`
-(`crates/kernel/tests/kernel_use_outcome.rs:770`);
+(`crates/kernel/tests/kernel_use_outcome.rs:804`);
 `the_sweep_and_the_reads_use_their_indexes`
-(`crates/kernel/src/use_outcome.rs:779`);
+(`crates/kernel/src/use_outcome.rs:845`);
 `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
 `a_cancelled_slice_stops_before_the_use_outcome_sweep`
@@ -934,11 +934,11 @@ Required faults and enabling state: A session with records, then a delete
 Confidence: medium -
 [evidence](evidence/uo-p-record-survives-session-delete.md). the Kernel arm
 holds by the delete triggers and the retained read (`served_set`
-(`crates/kernel/src/use_outcome.rs:340`)); the daemon arm is not yet written.
+(`crates/kernel/src/use_outcome.rs:384`)); the daemon arm is not yet written.
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
 (`crates/kernel/tests/kernel_schema.rs:2175`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`) (a retired record stays
+(`crates/kernel/tests/kernel_use_outcome.rs:342`) (a retired record stays
 readable). Status: unaudited.
 Impact: The record dies at the event it witnesses (KTD1).
 Open questions:
@@ -962,14 +962,14 @@ Confidence: medium -
 [evidence](evidence/uo-p-served-set-once-per-session-revision.md). the Kernel
 half exists: one identity has one record
 (`duplicate_and_malformed_serves_are_refused_without_rows`
-(`crates/kernel/tests/kernel_use_outcome.rs:214`)) and an equal intent replays
+(`crates/kernel/tests/kernel_use_outcome.rs:215`)) and an equal intent replays
 (`a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-(`crates/kernel/tests/kernel_use_outcome.rs:694`)).
+(`crates/kernel/tests/kernel_use_outcome.rs:697`)).
 Existing check: Kernel half only:
 `duplicate_and_malformed_serves_are_refused_without_rows`
-(`crates/kernel/tests/kernel_use_outcome.rs:214`);
+(`crates/kernel/tests/kernel_use_outcome.rs:215`);
 `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-(`crates/kernel/tests/kernel_use_outcome.rs:694`). The writer is proposed.
+(`crates/kernel/tests/kernel_use_outcome.rs:697`). The writer is proposed.
 Status: unaudited.
 Impact: Duplicates inflate served counts and P7 removal sets.
 Open questions:
@@ -992,14 +992,14 @@ retry.
 Confidence: medium -
 [evidence](evidence/uo-p-served-ids-equal-frozen-composition.md). the Kernel
 refuses ids that disagree with the digest and ids not strictly ascending
-(`validated_retain_until` (`crates/kernel/src/use_outcome.rs:201`)); the record
+(`validated_retain_until` (`crates/kernel/src/use_outcome.rs:210`)); the record
 id is the SHA-256 of the identity tuple (`use_outcome_id`
 (`crates/kernel/src/use_outcome.rs:67`)).
 Existing check: Kernel half only:
 `duplicate_and_malformed_serves_are_refused_without_rows`
-(`crates/kernel/tests/kernel_use_outcome.rs:214`);
+(`crates/kernel/tests/kernel_use_outcome.rs:215`);
 `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-(`crates/kernel/tests/kernel_use_outcome.rs:715`). The writer is proposed.
+(`crates/kernel/tests/kernel_use_outcome.rs:718`). The writer is proposed.
 Status: unaudited.
 Impact: The record names findings the session never saw.
 Open questions: None.
@@ -1043,7 +1043,7 @@ block (`withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`
 (`crates/daemon/src/transform.rs:13915`)).
 Existing check: Kernel half only:
 `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
-(`crates/kernel/tests/kernel_use_outcome.rs:163`). The writer is proposed.
+(`crates/kernel/tests/kernel_use_outcome.rs:164`). The writer is proposed.
 Status: unaudited.
 Impact: A record claiming a serve that did not render.
 Open questions:
@@ -1071,7 +1071,7 @@ a closed enum with a stored-string round trip
 folding engine serves a subagent no composition (explicit-config-only).
 Existing check: Kernel half only:
 `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-(`crates/kernel/tests/kernel_use_outcome.rs:715`). The writer is proposed.
+(`crates/kernel/tests/kernel_use_outcome.rs:718`). The writer is proposed.
 Status: unaudited.
 Impact: Harm attributed to the wrong session kind.
 Open questions:
@@ -1148,10 +1148,10 @@ two sessions with one later dispute.
 Confidence: medium -
 [evidence](evidence/uo-p-counts-exact-and-unavailable-not-zero.md). the
 by-decision read exists (`served_sessions_for`
-(`crates/kernel/src/use_outcome.rs:371`)).
+(`crates/kernel/src/use_outcome.rs:418`)).
 Existing check: Kernel half only:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`). The routed read is proposed.
+(`crates/kernel/tests/kernel_use_outcome.rs:342`). The routed read is proposed.
 Status: unaudited.
 Impact: A zero misread as "no harm observed".
 Open questions:

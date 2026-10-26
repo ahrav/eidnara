@@ -9,24 +9,26 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `bd1216847`).
+its parent is `8ace6c9f8`).
 
-- Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:485`) reads one
+- Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:556`) reads one
   statement, so one snapshot, in `retain_until`, id order through
-  `idx_use_outcomes_live_retention` (`crates/kernel/src/use_outcome.rs:184`); it
+  `idx_use_outcomes_live_retention` (`crates/kernel/src/use_outcome.rs:185`); it
   pages up to 64 uncited records and counts the cited ones it reads before the
   page fills. The scan reads cited rows ahead of the page, so its read work
   grows with the cited expired records while its writes stay bounded by the
   page.
 - Commit: one page commit keyed by the cutoff and a digest of the page's ids
-  (`page_key` (`crates/kernel/src/use_outcome.rs:443`), `expire_use_outcomes`
-  (`crates/kernel/src/use_outcome.rs:395`)); inside it `retire_due_use_outcome`
-  (`crates/kernel/src/use_outcome.rs:509`) rechecks retirement and citation
-  (`crates/kernel/src/use_outcome.rs:192`), sets `invalidated_commit_seq`, and
-  records the record's own reserved receipt. The deadline is immutable, so the
-  recheck reads only liveness and citation. A citation found under the writer
-  keeps the record and is counted `cited`; a page that retires nothing rolls
-  back and leaves no receipt.
+  (`page_key` (`crates/kernel/src/use_outcome.rs:506`), `expire_use_outcomes`
+  (`crates/kernel/src/use_outcome.rs:451`)); inside it `retire_due_use_outcome`
+  (`crates/kernel/src/use_outcome.rs:580`) sets `invalidated_commit_seq` in one
+  conditional update that rechecks retirement and citation
+  (`crates/kernel/src/use_outcome.rs:194`), and records the record's own
+  reserved receipt. The deadline is immutable, so the recheck reads only
+  liveness and citation. A record the update leaves in place is read again
+  (`crates/kernel/src/use_outcome.rs:201`): a citation found under the writer
+  keeps the record and is counted `cited`, and a record another sweep retired
+  is skipped. A page that retires nothing rolls back and leaves no receipt.
 - Registration: the Kernel maintenance slice runs the sweep after the capture
   sweeps (`crates/daemon/src/memory_reviewer/lifecycle.rs:334`); only
   retirements count as progress, because a cited record is counted again on
@@ -41,23 +43,23 @@ its parent is `bd1216847`).
   inside that commit; a page that retires nothing commits nothing; the Kernel
   maintenance slice calls it once per pass whenever the Kernel is Ready.
 - Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
-  (`crates/kernel/tests/kernel_use_outcome.rs:474`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:475`);
   `an_expiry_backlog_drains_one_page_per_call`
-  (`crates/kernel/tests/kernel_use_outcome.rs:534`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:537`);
   `an_expired_record_cited_by_a_live_report_is_retained`
-  (`crates/kernel/tests/kernel_use_outcome.rs:604`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:607`);
   `a_record_cited_after_selection_is_kept`
-  (`crates/kernel/src/use_outcome.rs:650`);
+  (`crates/kernel/src/use_outcome.rs:716`);
   `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-  (`crates/kernel/src/use_outcome.rs:678`);
+  (`crates/kernel/src/use_outcome.rs:744`);
   `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-  (`crates/kernel/src/use_outcome.rs:741`);
+  (`crates/kernel/src/use_outcome.rs:807`);
   `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-  (`crates/kernel/src/use_outcome.rs:762`);
+  (`crates/kernel/src/use_outcome.rs:828`);
   `the_cited_count_covers_the_rows_read_before_the_page_fills`
-  (`crates/kernel/tests/kernel_use_outcome.rs:770`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:804`);
   `the_sweep_and_the_reads_use_their_indexes`
-  (`crates/kernel/src/use_outcome.rs:779`);
+  (`crates/kernel/src/use_outcome.rs:845`);
   `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
   (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
   `a_cancelled_slice_stops_before_the_use_outcome_sweep`

@@ -9,7 +9,7 @@ Record kind: proposed obligation; its owning ticket #1155 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `bd1216847`).
+its parent is `8ace6c9f8`).
 
 - The writer distinguishes withheld from empty.
 
@@ -18,7 +18,7 @@ its parent is `bd1216847`).
   decision rows.
 - Existing check: Kernel half only:
   `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:163`). The writer is proposed.
+  (`crates/kernel/tests/kernel_use_outcome.rs:164`). The writer is proposed.
   Status: unaudited.
 
 ## Failure scenario

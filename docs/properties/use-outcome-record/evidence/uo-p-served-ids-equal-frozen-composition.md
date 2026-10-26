@@ -9,7 +9,7 @@ Record kind: proposed obligation; its owning ticket #1155 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `bd1216847`).
+its parent is `8ace6c9f8`).
 
 - Digest: `served_set_digest` (`crates/kernel/src/use_outcome.rs:56`).
 
@@ -17,9 +17,9 @@ its parent is `bd1216847`).
   of the snapshot rows whose composition the same fold persisted.
 - Existing check: Kernel half only:
   `duplicate_and_malformed_serves_are_refused_without_rows`
-  (`crates/kernel/tests/kernel_use_outcome.rs:214`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:215`);
   `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-  (`crates/kernel/tests/kernel_use_outcome.rs:715`). The writer is proposed.
+  (`crates/kernel/tests/kernel_use_outcome.rs:718`). The writer is proposed.
   Status: unaudited.
 
 ## Failure scenario
