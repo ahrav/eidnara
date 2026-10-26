@@ -1346,7 +1346,8 @@ never served, answers an unready Kernel with its state and no count, and the CLI
 accepts 2^53, refuses 2^53 + 1, and renders every other answer unavailable
 Guarantee: Served and disputed-after-serve counts per decision are exact
 unsigned integers at one Kernel snapshot; a Kernel that is not Ready answers
-unavailable with no integer.
+its `unavailable` kernel state with no integer on the wire, which the CLI
+renders as `unavailable`.
 Check: `always` - k unretired records of which j have a later dispute answer (k,
 j); an unready Kernel answers no integer; the client accepts 2^53 and refuses
 2^53 + 1.

@@ -20,7 +20,8 @@ revision.
 
 - Guarantee under test: Served and disputed-after-serve counts per decision are
   exact unsigned integers at one Kernel snapshot; a Kernel that is not Ready
-  answers unavailable with no integer.
+  answers its `unavailable` kernel state with no integer on the wire, which the
+  CLI renders as `unavailable`.
 - Existing check:
   `review_use_outcome_counts_serves_and_later_disputes_of_one_decision`
   (`crates/daemon/tests/memory_reviewer_wire.rs:686`);
