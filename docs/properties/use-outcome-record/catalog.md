@@ -17,8 +17,8 @@ the ticket that activates them.
 The specification authored its records at `a0e3f2993` and condensed the
 evidence inline because no part directory existed; this part reconstructs
 the records and their evidence from that catalog. Every `file:line` here was
-re-verified against the #1155 branch tip, the merge of `6d15ee29c` with `main` at
-`d3b772026`, which carries this revision of the directory. A specification reference that moved or
+re-verified against the #1155 branch tip, the commit that carries this
+revision of the directory, whose parent is `1fe3dfbad`. A specification reference that moved or
 pointed at a test rather than production code is corrected in the record's
 evidence file. `Exercised` cites tests that run in the #1155 PR's recorded
 gate run.

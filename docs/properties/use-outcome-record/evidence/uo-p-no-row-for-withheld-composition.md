@@ -8,8 +8,8 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
-`main` at `d3b772026`.
+References are verified at the #1155 branch tip (the commit that carries this
+revision; its parent is `1fe3dfbad`).
 
 - Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9669`); one
   write per pass covers its reruns.
@@ -17,9 +17,10 @@ References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
   write, and the next fold after a commit records the serve.
 
 - Guarantee under test: A fold that persists a withheld composition writes no
-  serving record; an Available snapshot with zero rows attempts a record with
-  zero decision rows, which exists once the write lands as `written` or
-  `replayed`.
+  serving record; an Available snapshot with zero rows at a tip of at least one
+  commit attempts a record with zero decision rows, which exists once the write
+  lands as `written` or `replayed`. At tip 0 the composition names no commit and
+  the writer records nothing (`crates/daemon/src/lib.rs:9686`).
 - Existing check: `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:170`);
   `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`

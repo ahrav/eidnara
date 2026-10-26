@@ -10,8 +10,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
-`main` at `d3b772026`.
+References are verified at the #1155 branch tip (the commit that carries this
+revision; its parent is `1fe3dfbad`).
 
 - Additive engine: `crates/daemon/src/transform.rs:3122` inside
   `apply_additive_only` (`apply_additive_only`

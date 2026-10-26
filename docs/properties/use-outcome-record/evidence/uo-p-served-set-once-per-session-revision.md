@@ -8,8 +8,8 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
-`main` at `d3b772026`.
+References are verified at the #1155 branch tip (the commit that carries this
+revision; its parent is `1fe3dfbad`).
 
 - Key and digest: `crates/daemon/src/use_outcome_writer.rs:165`; the request
   digest binds the ids, the harness, and the role (`request_digest`

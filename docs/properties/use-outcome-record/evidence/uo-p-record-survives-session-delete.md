@@ -9,8 +9,8 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
-`main` at `d3b772026`.
+References are verified at the #1155 branch tip (the commit that carries this
+revision; its parent is `1fe3dfbad`).
 
 - Delete triggers: `crates/kernel/src/schema.rs:188`.
 - Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:393`) answers
