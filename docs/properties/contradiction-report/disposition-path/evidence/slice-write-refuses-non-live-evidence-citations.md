@@ -73,7 +73,7 @@ predicate runs inside the writer transaction and sees the retirement.
 - Sources examined: `slice/write.rs:1095-1178` (all private `fn`);
   PR A's `Envelope::evidence_citations` (`envelope.rs:532-577`) and
   `require_visible_evidence`
-  (`crates/daemon/src/kernel_routes/commit.rs:755-772`).
+  (`crates/daemon/src/kernel_routes/commit.rs:749-766`).
 - Findings: at `3a3b916b7` no public read returned an evidence row's
   liveness by id. PR A adds `evidence_citations`, which returns the row's
   liveness and the scopes of its live citers inside the envelope's

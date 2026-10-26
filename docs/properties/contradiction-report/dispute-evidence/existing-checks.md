@@ -51,7 +51,7 @@ landing.
 
 | Location | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
-| `crates/kernel/src/admission.rs:4636` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | over every consistent maturity pair, disposition, dispute event, and evidence flag: `Deny`, historical kept, effective not raised, restrictiveness not lowered, prior kept on a relaxing request | standing | unaudited |
+| `crates/kernel/src/admission.rs:4605` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | over every consistent maturity pair, disposition, dispute event, and evidence flag: `Deny`, historical kept, effective not raised, restrictiveness not lowered, prior kept on a relaxing request | standing | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:2159` | `evidence_citations_name_the_scopes_of_live_citers_and_the_rows_liveness` | live decisions, observations, and decision events contribute scopes once and in order; unscoped and retired citers contribute none; retired rows read not live; unknown ids read absent | liveness, visibility | unaudited |
 
 ## TypeScript tests (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts`)
@@ -81,8 +81,8 @@ its contract test is
 |---|---|---|---|
 | `commit.rs:208-236` | `compose_reason`: dispute needs valid evidence; other events take none | requirement, form | unaudited |
 | `dispute.rs:49-81` | `DisputeReason::validated`: presence, empty id, a detection in the raw `evidence_id` (`:58-64`), form, cap, a detection in the composed reason (`:77-79`) | requirement, form, reason | unaudited |
-| `dispute.rs:151-159` | `EvidenceRef::is_well_formed` | form | unaudited |
-| `commit.rs:755-772` | `require_visible_evidence`: live and cited by a scope of the bound project | liveness, visibility | unaudited |
+| `dispute.rs:151-166` | `EvidenceRef::is_well_formed` | form | unaudited |
+| `commit.rs:749-766` | `require_visible_evidence`: live and cited by a scope of the bound project | liveness, visibility | unaudited |
 | `commit.rs:137`, `:168-171` | `deny_unknown_fields` with `reason` skipped, so a body cannot supply `reason` | reason | unaudited |
 | `commit.rs:413-446` | `resolve_classes`: refuse an assertion above the derivation | reporter | unaudited |
 
@@ -92,7 +92,7 @@ its contract test is
   holds it. For the cited evidence row this state is not constructible:
   `retire_evidence` refuses evidence a live row cites
   (`crates/kernel/src/slice/write.rs:585-608`). The reachable form is a
-  citer retirement queued behind the dispute; `kernel_routes.rs:6375`
+  citer retirement queued behind the dispute; `kernel_routes.rs:6381`
   constructs its sequential form only.
 - No test cites evidence through an asserted-edge citer, and no Rust code
   under `crates/` writes `asserted_edges`.

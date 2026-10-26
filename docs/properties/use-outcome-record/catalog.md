@@ -363,10 +363,10 @@ Required faults and enabling state: A decision admitted, then a committed
 Confidence: high -
 [evidence](evidence/uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search.md).
 `visibility_row` maps `Disputed` to `ExplicitLabeled` (`visibility_row`
-(`crates/kernel/src/admission.rs:4352`)); `surface_visibility` hides it on every
-surface but explicit search (`crates/kernel/src/admission.rs:4225`).
+(`crates/kernel/src/admission.rs:4321`)); `surface_visibility` hides it on every
+surface but explicit search (`crates/kernel/src/admission.rs:4194`).
 Existing check: `visibility_matrix_and_sensitivity_ceiling_are_total`
-(`crates/kernel/src/admission.rs:5019`);
+(`crates/kernel/src/admission.rs:4988`);
 `every_non_active_disposition_has_the_contracted_surface_row`
 (`crates/kernel/tests/kernel_admission.rs:2890`);
 `dispositions_and_sensitivity_only_reduce_visibility`
@@ -392,9 +392,9 @@ Confidence: high -
 [evidence](evidence/uo-admission-reads-require-a-non-null-commit-seq.md). the
 predicates filter `commit_seq IS NOT NULL`
 (`crates/kernel/src/admission.rs:691`); the production writer binds the envelope
-sequence at `crates/kernel/src/admission.rs:1881`. The use-outcome dispute join
+sequence at `crates/kernel/src/admission.rs:1850`. The use-outcome dispute join
 and citation predicate filter the same way
-(`crates/kernel/src/use_outcome.rs:178`).
+(`crates/kernel/src/use_outcome.rs:180`).
 Existing check:
 `malformed_stored_policy_and_sensitivity_fail_closed_without_read_error`
 (`crates/kernel/tests/kernel_admission.rs:2935`);
@@ -424,7 +424,7 @@ its single-row seek.
 Existing check: `both_latest_decision_formulations_choose_the_same_row`
 (`crates/kernel/tests/kernel_admission.rs:2252`);
 `an_event_that_names_a_disposition_keeps_its_own_outcome`
-(`crates/kernel/src/admission.rs:5349`). Status: unaudited.
+(`crates/kernel/src/admission.rs:5318`). Status: unaudited.
 Impact: The dispute join counts event existence (C12), so this record bounds
 what a reader sees, not the join.
 Open questions:
@@ -612,7 +612,7 @@ Confidence: high -
 `classify_existing_family` (`crates/kernel/src/open.rs:796`);
 `classify_open_kernel` (`crates/kernel/src/open.rs:852`). Disposition B:
 re-verified against the Batch K1 digest as #1162 extends it
-`3f434cd773bbf349848eb35a74763f26e41c57392fdaca4381794e4ef23d4be5`.
+`62d99b4300e6d700fb1eede02425904fb87696e37a335de1b1121b0dbb7cb854`.
 Existing check: `every_conclusive_kernel_mismatch_is_refused_and_left_untouched`
 (`crates/kernel/tests/kernel_open.rs:183`);
 `a_family_created_under_the_previous_baseline_is_refused_untouched`
@@ -838,7 +838,7 @@ Confidence: high -
 [evidence](evidence/uo-p-classification-sensitive-local-only-no-remote-egress.md).
 CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:188`); the insert
 names the classes as literals (`insert_use_outcome`
-(`crates/kernel/src/use_outcome.rs:279`)).
+(`crates/kernel/src/use_outcome.rs:314`)).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
 (`crates/kernel/tests/kernel_schema.rs:2297`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
@@ -867,7 +867,7 @@ Required faults and enabling state: A serve at n; dispositions at n + k, at n,
 and before n; a null row and another lineage by SQL.
 Confidence: high -
 [evidence](evidence/uo-p-disputed-after-serve-from-committed-events-only.md).
-the join is `crates/kernel/src/use_outcome.rs:190`, using the admission lineage
+the join is `crates/kernel/src/use_outcome.rs:192`, using the admission lineage
 text through `crates/kernel/src/admission.rs:926`.
 Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
@@ -905,9 +905,9 @@ Required faults and enabling state: An expired record; an expired cited record;
 70 expired records; a citation inserted after selection.
 Confidence: high -
 [evidence](evidence/uo-p-sweep-retires-only-expired-uncited-rows.md).
-`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:528`); predicate
-`crates/kernel/src/use_outcome.rs:176`; recheck `retire_due_use_outcome`
-(`crates/kernel/src/use_outcome.rs:642`); receipt
+`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:563`); predicate
+`crates/kernel/src/use_outcome.rs:178`; recheck `retire_due_use_outcome`
+(`crates/kernel/src/use_outcome.rs:677`); receipt
 `crates/kernel/src/local_file.rs:438`.
 Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
 (`crates/kernel/tests/kernel_use_outcome.rs:493`);
@@ -916,17 +916,17 @@ Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
 `an_expired_record_cited_by_a_live_report_is_retained`
 (`crates/kernel/tests/kernel_use_outcome.rs:623`);
 `a_record_cited_after_selection_is_kept`
-(`crates/kernel/src/use_outcome.rs:783`);
+(`crates/kernel/src/use_outcome.rs:818`);
 `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-(`crates/kernel/src/use_outcome.rs:811`);
+(`crates/kernel/src/use_outcome.rs:846`);
 `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-(`crates/kernel/src/use_outcome.rs:874`);
+(`crates/kernel/src/use_outcome.rs:909`);
 `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-(`crates/kernel/src/use_outcome.rs:895`);
+(`crates/kernel/src/use_outcome.rs:930`);
 `the_cited_count_covers_the_rows_read_before_the_page_fills`
 (`crates/kernel/tests/kernel_use_outcome.rs:818`);
 `the_sweep_and_the_reads_use_their_indexes`
-(`crates/kernel/src/use_outcome.rs:912`);
+(`crates/kernel/src/use_outcome.rs:947`);
 `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
 `a_cancelled_slice_stops_before_the_use_outcome_sweep`
@@ -957,9 +957,9 @@ Required faults and enabling state: A session with records, then a delete
 (Kernel arm: direct SQL deletes).
 Confidence: high - [evidence](evidence/uo-p-record-survives-session-delete.md).
 the delete triggers and the retained read hold the Kernel arm (`served_set`
-(`crates/kernel/src/use_outcome.rs:415`)); the `session.delete` step only sets
+(`crates/kernel/src/use_outcome.rs:450`)); the `session.delete` step only sets
 `deleted_at` (`mark_use_outcomes_deleted`
-(`crates/kernel/src/use_outcome.rs:347`)).
+(`crates/kernel/src/use_outcome.rs:382`)).
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
 (`crates/kernel/tests/kernel_schema.rs:2175`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
@@ -1167,7 +1167,7 @@ Confidence: high -
 runs inside the capture gate after the descriptor retirement and before the
 memory delete (`delete_kernel_step` (`crates/daemon/src/lib.rs:6850`)); the
 envelope selects the session's live records under the writer
-(`mark_use_outcomes_deleted` (`crates/kernel/src/use_outcome.rs:347`)), and the
+(`mark_use_outcomes_deleted` (`crates/kernel/src/use_outcome.rs:382`)), and the
 set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:188`).
 Existing check:
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
@@ -1221,7 +1221,7 @@ remains of the pass's Kernel wait
 (`crates/daemon/src/use_outcome_writer.rs:235`); the Kernel update moves only
 live records whose value is null or earlier, in one fenced transaction with no
 commit (`advance_use_outcome_last_transform`
-(`crates/kernel/src/use_outcome.rs:470`)).
+(`crates/kernel/src/use_outcome.rs:505`)).
 Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:220`);
 `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
@@ -1278,7 +1278,7 @@ two sessions with one later dispute.
 Confidence: high -
 [evidence](evidence/uo-p-counts-exact-and-unavailable-not-zero.md). one
 statement counts the by-decision rows at one snapshot (`served_counts_for`
-(`crates/kernel/src/use_outcome.rs:505`)); the handler answers counts or the
+(`crates/kernel/src/use_outcome.rs:540`)); the handler answers counts or the
 kernel state (`crates/daemon/src/memory_reviewer/wire.rs:307`); the client
 decodes each count with `exactCount` and renders any other answer unavailable
 (`packages/cli/src/commands/review-wire.ts:344`).

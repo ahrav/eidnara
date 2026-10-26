@@ -149,12 +149,19 @@ impl DisputeReason {
 }
 
 impl EvidenceRef {
+    /// The JSON a dispute row stores in `event_payload`: `{"path":..,"git_object_id":..}`.
+    #[must_use]
+    pub fn payload(&self) -> String {
+        serde_json::to_string(self).expect("two string fields serialize")
+    }
+
     fn is_well_formed(&self) -> bool {
         is_lower_hex_oid(&self.git_object_id)
             && self.path.len() <= MAX_EVIDENCE_PATH_BYTES
             && confined_path::check(&self.path).is_ok()
             && decodes_to_itself(&self.path)
             && redact_durable_text(&self.path).detections.is_empty()
+            && redact_durable_text(&self.payload()).detections.is_empty()
     }
 }
 
@@ -338,6 +345,20 @@ mod tests {
                 "{path:?} {oid:?}"
             );
         }
+    }
+
+    /// The stored payload is scanned as the commit stores it, so a path whose
+    /// detection appears only in its JSON form is refused before the preview.
+    #[test]
+    fn a_path_detected_only_in_its_payload_form_is_invalid_input() {
+        let path = "a/api_key=\"";
+        assert!(redact_durable_text(path).detections.is_empty());
+        assert!(
+            !redact_durable_text(&reference(path, OID).payload())
+                .detections
+                .is_empty()
+        );
+        assert_eq!(validated(path, OID), Err(InvalidReason::InvalidInput));
     }
 
     #[test]

@@ -13,7 +13,7 @@ its parent is `d85de937b`).
 
 - Hook: `crates/daemon/src/lib.rs:10030` in the settle step, after any rerun,
   when the final response committed.
-- Update: `crates/kernel/src/use_outcome.rs:43` selects the live records with a
+- Update: `crates/kernel/src/use_outcome.rs:45` selects the live records with a
   null or earlier value; a session with none takes no writer.
 - Outcomes: `crates/daemon/src/use_outcome_writer.rs:209` counts
   `transform_touched`, `transform_skipped_deadline`, or

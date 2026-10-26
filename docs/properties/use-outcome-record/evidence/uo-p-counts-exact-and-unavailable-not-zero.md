@@ -11,7 +11,7 @@ Record kind: new obligation activated by #1157.
 References are verified at the #1157 branch tip (the commit that adds this file;
 its parent is `d85de937b`).
 
-- Count read: `crates/kernel/src/use_outcome.rs:211` counts the object's
+- Count read: `crates/kernel/src/use_outcome.rs:213` counts the object's
   decision rows in one statement and compares each serve with the newest
   qualifying dispute, the rule the by-decision read applies per serve.
 - Route: `crates/daemon/src/memory_reviewer/wire.rs:26` binds through

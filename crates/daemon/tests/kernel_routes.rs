@@ -6243,6 +6243,12 @@ async fn a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_depende
     assert_eq!(dependent.commit_seq, approval.commit_seq);
     assert_eq!(dependent.reason, approval.reason);
     assert!(DisputeReason::parse(&dependent.reason).is_some());
+    let (_, source, taint, payload, _, _) = typed_row(&daemon, "decision-object-1");
+    assert_eq!(
+        (source, taint, payload),
+        (None, None, None),
+        "a cascade row is not a dispute"
+    );
     daemon.handler.shutdown().await.unwrap();
 }
 
@@ -6646,13 +6652,9 @@ async fn a_dispute_row_records_its_reporter_and_links_the_sessions_latest_serve(
         (source.as_deref(), taint.as_deref()),
         (Some("model_inference"), Some("user_inferred"))
     );
-    let reference = EvidenceRef {
-        path: path.to_string(),
-        git_object_id: EVIDENCE_OID.to_string(),
-    };
     assert_eq!(
         payload.as_deref(),
-        Some(serde_json::to_string(&reference).unwrap().as_str())
+        Some(format!(r#"{{"path":"docs/a b@c.md","git_object_id":"{EVIDENCE_OID}"}}"#).as_str())
     );
     let rendered = DisputeReason {
         event: EventKind::MarkDisputed,
@@ -6686,8 +6688,14 @@ async fn a_dispute_row_records_its_reporter_and_links_the_sessions_latest_serve(
     );
     assert_eq!(evidence_id.as_deref(), Some(evidence.as_str()));
     assert_eq!(
-        DisputeReason::parse(&reason).unwrap().reporter_taint,
-        TaintClass::AssistantInference
+        DisputeReason {
+            event: EventKind::Contradict,
+            reporter_taint: TaintClass::try_from(taint.as_deref().unwrap()).unwrap(),
+            evidence_id,
+            evidence_ref: None,
+        }
+        .render(),
+        reason
     );
 
     assert_state(

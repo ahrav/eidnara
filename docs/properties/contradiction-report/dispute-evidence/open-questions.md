@@ -36,7 +36,7 @@ only from `decisions` and `observations` (`crates/kernel/src/envelope.rs:
 (`:1903-1904`). `ScopeFilter::matches(None, ..)` returns `false`
 (`crates/daemon/src/kernel_routes/project.rs:204-206`), so
 `scoped_object_state` on an evidence object's `object_id` is always
-`NotFound` (`commit.rs:688-702`). Tables with `scope_id`: `propositions`,
+`NotFound` (`commit.rs:682-696`). Tables with `scope_id`: `propositions`,
 `scopes`, `asserted_edges`, `decisions`, `observations`
 (`crates/kernel/src/schema.rs:118, 126, 143, 167, 175`).
 
@@ -114,7 +114,7 @@ Evidence: `memoryMarkOperationId` is `[sessionId, event, objectId]`
 operations (`client.ts:272-281`); a stored receipt with a different digest
 is `KernelError::Conflict` (`envelope.rs:1365-1367`), which `run` maps to
 `OperationKeyReused` when raised before entering the closure
-(`commit.rs:1100-1108`).
+(`commit.rs:1085-1093`).
 
 Consequence: a user who disputes the same finding twice in one session with
 different evidence gets `operation_key_reused`. The tool's identity is per
@@ -305,7 +305,7 @@ admission. Alternative (b) is a retention-policy change and needs an owner.
 ### Q8. Replay response shape for a committed dispute
 
 Fact: a replayed preview returns `previews: []` with the receipt
-(`commit.rs:1214-1221`); the TS command treats a commit receipt with no
+(`commit.rs:1201-1208`); the TS command treats a commit receipt with no
 matching verdict as `outcome_unknown` (`memory-mark-command.ts:241-242`).
 Whether a replayed commit returns the stored verdict list was not traced
 end to end here.
@@ -384,7 +384,7 @@ No human input needed; record the choice in the route header.
   `docs/host-wire-protocol.md` lists no `kernel.*` method (`:767`), so the
   route doc is the module header plus the `docs/properties` catalogs.
 - KTD4 and R4: `MarkDisputed` and `Contradict` request `Deny` with a more
-  restrictive disposition (`admission.rs:4265-4266`); support is withdrawn
+  restrictive disposition (`admission.rs:4234-4235`); support is withdrawn
   to `Candidate` (`:345-351`); `has_evidence` gates only `Enforce`
   (`:275-277`).
 - Non-goal `ExplicitUser`: `derive_classes` maps every `source_kind` to

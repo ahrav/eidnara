@@ -28,13 +28,13 @@ states what it answers for evidence.
   (`crates/daemon/src/kernel_routes/project.rs:199-206`).
 - `scoped_object_state` returns `Err(KernelError::NotFound)` when the
   filter does not match, "the same answer a missing object gets, prevents
-  cross-project object-id enumeration" (`commit.rs:683-703`).
+  cross-project object-id enumeration" (`commit.rs:677-697`).
 - Every scoped position in the route goes through it: tokens (`:1053`),
   disposition subject (`:706`), approval and chain members (`:714-716`),
   supersede predecessor and replacement (`:947`, `:957`), retire target
   (`:996`), projected dependencies (`:1029`).
 - The preview reads served rows with `served_rows_for(.., Some(scope_
-  term))` (`commit.rs:853`), another scope-bound read that selects
+  term))` (`commit.rs:838`), another scope-bound read that selects
   decision rows, not evidence.
 - The evidence object's registry row carries `object_kind`, `domain_id`,
   `source_kind`, `source_id` (`schema.rs:94`); `source_kind`/`source_id`
@@ -89,7 +89,7 @@ but store no scope on the row.
   definition (a), extended to decision events and asserted edges:
   `Envelope::evidence_citations` (`crates/kernel/src/envelope.rs:532-577`)
   returns the scopes of the live citers, and `require_visible_evidence`
-  (`crates/daemon/src/kernel_routes/commit.rs:755-772`) accepts an id
+  (`crates/daemon/src/kernel_routes/commit.rs:749-766`) accepts an id
   only when the bound project's filter accepts one of them. Evidence
   objects still carry no scope, and this record's guarantee still holds
   for scoped lookups of an evidence object id; the record is re-labelled,

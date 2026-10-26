@@ -10,16 +10,16 @@ Every location was read at the #1157 branch tip.
 
 | Check | Location | Records | Status |
 | --- | --- | --- | --- |
-| `visibility_matrix_and_sensitivity_ceiling_are_total` | `crates/kernel/src/admission.rs:5019` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
-| `an_event_that_names_a_disposition_keeps_its_own_outcome` | `crates/kernel/src/admission.rs:5349` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
+| `visibility_matrix_and_sensitivity_ceiling_are_total` | `crates/kernel/src/admission.rs:4988` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
+| `an_event_that_names_a_disposition_keeps_its_own_outcome` | `crates/kernel/src/admission.rs:5318` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
 | `unrecognized_stored_classes_read_back_restrictive` | `crates/kernel/src/cas/mod.rs:797` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only` | unaudited |
 | `a_replayed_expiry_receipt_is_not_counted_as_a_retirement` | `crates/kernel/src/local_file.rs:728` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
 | `a_capture_pinned_after_it_was_selected_for_expiry_is_kept` | `crates/kernel/src/local_file.rs:751` | `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
-| `a_record_cited_after_selection_is_kept` | `crates/kernel/src/use_outcome.rs:783` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_page_another_sweep_committed_at_the_same_cutoff_replays` | `crates/kernel/src/use_outcome.rs:811` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_record_retired_after_selection_at_another_cutoff_is_skipped` | `crates/kernel/src/use_outcome.rs:874` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited` | `crates/kernel/src/use_outcome.rs:895` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `the_sweep_and_the_reads_use_their_indexes` | `crates/kernel/src/use_outcome.rs:912` | `uo-p-sweep-retires-only-expired-uncited-rows`, `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
+| `a_record_cited_after_selection_is_kept` | `crates/kernel/src/use_outcome.rs:818` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_page_another_sweep_committed_at_the_same_cutoff_replays` | `crates/kernel/src/use_outcome.rs:846` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_record_retired_after_selection_at_another_cutoff_is_skipped` | `crates/kernel/src/use_outcome.rs:909` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited` | `crates/kernel/src/use_outcome.rs:930` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `the_sweep_and_the_reads_use_their_indexes` | `crates/kernel/src/use_outcome.rs:947` | `uo-p-sweep-retires-only-expired-uncited-rows`, `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
 | `both_latest_decision_formulations_choose_the_same_row` | `crates/kernel/tests/kernel_admission.rs:2252` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
 | `dispositions_and_sensitivity_only_reduce_visibility` | `crates/kernel/tests/kernel_admission.rs:2735` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
 | `every_non_active_disposition_has_the_contracted_surface_row` | `crates/kernel/tests/kernel_admission.rs:2890` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |

@@ -19,11 +19,11 @@ which makes the provenance of `source_kind` part of the dispute record.
   (`crates/daemon/src/kernel_routes/commit.rs:108-127`); `resolve_classes`
   derives the classes from `source_kind` and refuses an assertion above
   the derivation (`commit.rs:413-446`); the handler passes the resolved
-  taint to the dispute reason (`commit.rs:1154-1168`).
+  taint to the dispute reason (`commit.rs:1139-1153`).
 - `kernel_route_scope` binds the store, the project, the root, the
   harness, and the capabilities (`crates/daemon/src/kernel_routes/mod.rs:415-441`;
   `RouteScope` at `:405-412`). `handle_kernel_commit` reads only
-  `scope.project` and `scope.store` (`commit.rs:1169`, `:1141`, `:1144`);
+  `scope.project` and `scope.store` (`commit.rs:1154`, `:1141`, `:1144`);
   `scope.harness` is not read on this route.
 - `management_binding` requires a non-empty `session_id` and refuses one
   that differs from the channel's bound session with `session_mismatch`
@@ -72,7 +72,7 @@ runs before body parsing for every `kernel.*` route.
 
 ### Q: Does the route verify `actor` against `RouteScope.harness`?
 
-- Sources examined: `mod.rs:405-441`, `commit.rs:1114-1256`,
+- Sources examined: `mod.rs:405-441`, `commit.rs:1099-1243`,
   `project.rs:138-165`.
 - Findings: no. `harness` is bound and unused on `kernel.commit`; `actor`
   is copied from the body.

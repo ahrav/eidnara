@@ -27,12 +27,12 @@ all 14 `always` checks hold over per-request state.
 |---|---|---|
 | classes | route-level daemon test | reads the written row; store helpers exist (`kernel_routes.rs:4340`) |
 | maturity | kernel unit (evaluator) plus one route row read | `evaluate_admission` is pure (`admission.rs:280-367`) |
-| restrictiveness | kernel unit (7x5 grid) plus route cases for lateral moves | table at `admission.rs:4272-4279` |
+| restrictiveness | kernel unit (7x5 grid) plus route cases for lateral moves | table at `admission.rs:4241-4248` |
 | no-evidence | route-level, raw JSON body | parse refusal at `mod.rs:463-471` |
-| evidence-existence | kernel integration (store API) | the route set `None` at `3a3b916b7`; PR A sets a checked id (`commit.rs:744`) |
+| evidence-existence | kernel integration (store API) | the route set `None` at `3a3b916b7`; PR A sets a checked id (`commit.rs:738`) |
 | slice-liveness | kernel integration; one route case for the `not_found` mapping | helpers private to `write.rs` |
 | evidence-scope | route-level for `not_found`; kernel unit for `scope_id == None` | see R3 |
-| subject | route-level daemon test | predicates in `disposition_request` (`commit.rs:706-730`) |
+| subject | route-level daemon test | predicates in `disposition_request` (`commit.rs:700-724`) |
 | preview | route-level grid test | re-route from stateful-workload-design (R10) |
 | replay | route-level for replay and reuse; TypeScript unit for the reissue | `client.ts:462-466` owns the reissue |
 | command | TypeScript unit test | `FakeKernel` exists |
@@ -105,10 +105,10 @@ differ, prior above Candidate, retired id cited); none negates a check.
   change; a test written from them fails on the intended change (B1).
 - Replay after move: `memory-mark-command.test.ts:351` pins that a repeat
   reports `applied` with the original verdict while the stored disposition
-  differs (`commit.rs:1239-1255`). Safe for the store, possibly misleading
+  differs (`commit.rs:1226-1242`). Safe for the store, possibly misleading
   for the user; no record asks (R5).
 - Preview shows the subject's visibility only; a dispute on an approval
-  demotes dependents the confirmation never names (`commit.rs:845-856`,
+  demotes dependents the confirmation never names (`commit.rs:830-841`,
   `changes_to` at `:537-542`). Gap G2.
 - Superseded to Disputed is lateral at rank 1 and lands without approval;
   the restrictiveness open question names Stale only (R8).
@@ -142,7 +142,7 @@ differ, prior above Candidate, retired id cited); none negates a check.
 - G1: read `kernel_route_scope` (`mod.rs:415-441`), `IntentRequest`
   (`project.rs:138-146`), `resolve_classes`; one record on what the daemon
   verifies about the intent and `source_kind`.
-- G2: read `PreviewRun` (`commit.rs:839-898`); owner decides whether
+- G2: read `PreviewRun` (`commit.rs:824-883`); owner decides whether
   cascade visibility is part of the preview contract; at most one record.
 - G3: read the `crates/secret-scanner` detectors; name one detected token
   and the result for a path and a hex oid. G4: grep callers of

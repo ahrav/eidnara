@@ -453,16 +453,10 @@ struct CommitPlan {
     classes: (SourceClass, TaintClass),
     project: ProjectBinding,
     deadline: Duration,
-    reporter: Reporter,
-}
-
-/// The caller as a dispute row records it: the derived classes and the
-/// reporting session, which names the serving record the row links.
-struct Reporter {
-    classes: (SourceClass, TaintClass),
-    project_digest: String,
-    harness: String,
-    session_id: String,
+    /// The caller as a dispute row records it: the derived classes and the
+    /// reporting session, which names the serving record the row links. Each
+    /// dispute adds its own payload.
+    reporter: DisputeReporter,
 }
 
 pub(crate) enum CommitFailure {
@@ -799,24 +793,15 @@ fn record_disposition(
     envelope: &mut Envelope<'_>,
     filter: &mut ScopeFilter,
     args: DispositionArgs<'_>,
-    reporter: &Reporter,
+    reporter: &DisputeReporter,
 ) -> Result<DispositionResult, KernelError> {
     let (prior, request) = disposition_request(envelope, filter, args)?;
     let decision = if dispute::is_dispute(args.event.kind()) {
-        let event_payload = args
-            .evidence_ref
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|_| KernelError::InvalidInput)?;
         envelope.record_dispute_admission(
             request,
             &DisputeReporter {
-                source_class: reporter.classes.0,
-                taint_class: reporter.classes.1,
-                event_payload,
-                project_digest: reporter.project_digest.clone(),
-                harness: reporter.harness.clone(),
-                session_id: reporter.session_id.clone(),
+                event_payload: args.evidence_ref.map(EvidenceRef::payload),
+                ..reporter.clone()
             },
         )?
     } else {
@@ -1181,8 +1166,10 @@ impl HandlerCore {
             operations: parsed.operations,
             source_kind: parsed.source_kind,
             classes,
-            reporter: Reporter {
-                classes,
+            reporter: DisputeReporter {
+                source_class: classes.0,
+                taint_class: classes.1,
+                event_payload: None,
                 project_digest: scope.project.digest().to_string(),
                 harness: scope.harness,
                 session_id,

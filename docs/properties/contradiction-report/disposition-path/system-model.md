@@ -51,19 +51,19 @@ the difference noted.
   `:366-378`, the function signature is at `:368`). The derived pair is
   stored in `CommitPlan.classes` and used only by `admit` for inserts; the
   disposition path never reads it.
-- Commit path: `run` (`commit.rs:1079-1110`) calls
+- Commit path: `run` (`commit.rs:1064-1095`) calls
   `KernelStore::commit_before`, checks tokens, then `apply`
-  (`commit.rs:934-1076`). Each disposition calls `record_disposition`
-  (`commit.rs:798-831`) which calls `disposition_request`
-  (`commit.rs:706-749`) and `Envelope::record_admission`
+  (`commit.rs:919-1061`). Each disposition calls `record_disposition`
+  (`commit.rs:792-816`) which calls `disposition_request`
+  (`commit.rs:700-743`) and `Envelope::record_admission`
   (`admission.rs:998-1003`).
-- Preview path: `preview` (`commit.rs:910-932`) runs inside
-  `KernelStore::preview`; `PreviewRun::disposition` (`commit.rs:860-898`)
+- Preview path: `preview` (`commit.rs:895-917`) runs inside
+  `KernelStore::preview`; `PreviewRun::disposition` (`commit.rs:845-883`)
   calls the same `disposition_request` and then
-  `Preview::preview_admission` (`admission.rs:1963-1974`).
-- Response: `CommitResult.dispositions` (`commit.rs:512-514`) is
+  `Preview::preview_admission` (`admission.rs:1932-1943`).
+- Response: `CommitResult.dispositions` (`commit.rs:506-508`) is
   serialized into the receipt's `result` and read back by replays
-  (`commit.rs:1239-1255`).
+  (`commit.rs:1226-1242`).
 
 ## Lens: state and persistence
 
@@ -79,7 +79,7 @@ the difference noted.
   operation inside the writer transaction
   (`envelope.rs:1388-1396`).
 - `admission_decisions` (`schema.rs:164`): `source_kind`/`source_id` are
-  the subject's (`load_subject_facts`, `admission.rs:2235-2274`),
+  the subject's (`load_subject_facts`, `admission.rs:2204-2243`),
   `source_class`/`taint_class` are what the request carried,
   `reason TEXT NOT NULL`, `evidence_id TEXT REFERENCES
   evidence_meta(evidence_id) ON DELETE RESTRICT`. No length CHECK on
@@ -93,17 +93,17 @@ the difference noted.
   `envelope.rs:1903-1904` (shared-facts cites "~1870").
 - `ScopeFilter::matches` returns `Ok(false)` for `scope_id = None`
   (`kernel_routes/project.rs:199-206`), so `scoped_object_state`
-  (`commit.rs:688-703`) answers `NotFound` for every evidence object id.
+  (`commit.rs:682-697`) answers `NotFound` for every evidence object id.
 - Liveness primitives on the slice write path: `require_live`
   (`crates/kernel/src/slice/write.rs:1138-1149`), `require_optional_live`
   (`:1110-1120`), `require_live_evidence` (`:1151-1178`), all filtering on
   `invalidated_commit_seq IS NULL` and returning `NotFound`.
 - The admission write path has no liveness check on `evidence_id`:
   `write_admission` passes it through `identity()` only
-  (`admission.rs:1781-1786`) and relies on the FK. A FK violation maps to
+  (`admission.rs:1750-1755`) and relies on the FK. A FK violation maps to
   `KernelError::Conflict` (`crates/kernel/src/lib.rs:213-225`), which the
   route reports as `invalid/already_exists` when raised inside `apply`
-  (`commit.rs:1101-1109`).
+  (`commit.rs:1086-1094`).
 
 ## Lens: concurrency model
 
@@ -112,11 +112,11 @@ the difference noted.
   acquisition only, operation count bounds the hold (`commit.rs:91-93`).
 - Within an envelope, `admission_latest` caches each subject's newest
   decision so a later operation on the same object sees the earlier one as
-  its prior (`write_admission`, `admission.rs:1939-1947`); the preview
-  mirrors this (`admission.rs:1970-1973`) and refuses when an earlier
+  its prior (`write_admission`, `admission.rs:1908-1916`); the preview
+  mirrors this (`admission.rs:1939-1942`) and refuses when an earlier
   previewed decision would have changed an approval chain
-  (`refuse_changed_authority`, `admission.rs:1977-1989`; route maps it to
-  `invalid_params`, `commit.rs:1223-1229`).
+  (`refuse_changed_authority`, `admission.rs:1946-1958`; route maps it to
+  `invalid_params`, `commit.rs:1210-1216`).
 - Preview and commit are separate requests; the object can move between
   them. The TypeScript command treats the commit's verdict as the recorded
   one (`memory-mark-command.ts:243-244`).
@@ -127,7 +127,7 @@ the difference noted.
   derived class but never raise it"; every written row "admitted under
   the derived classes". The second sentence describes inserts; the
   disposition path copies the subject's prior classes instead
-  (`commit.rs:738-739`).
+  (`commit.rs:732-733`).
 - `Operation::Disposition` doc (`commit.rs:152-154`): "the kernel's fixed
   event table decides the resulting disposition, and a transition toward a
   less restrictive disposition needs a valid approval".
@@ -136,7 +136,7 @@ the difference noted.
 - Plan P4 R4: "the report never raises maturity or relaxes a disposition;
   Active to Disputed needs no approval and lands regardless of source
   class". Code: `event_effect` returns `(current, Some(Disputed), Deny)`
-  for MarkDisputed (`admission.rs:4265`); `historical = current.max(target)`
+  for MarkDisputed (`admission.rs:4234`); `historical = current.max(target)`
   with `target == current` (`admission.rs:352-353`); approval is required
   only when `relaxes_disposition` (`:321-330`); the class check compares
   the request to the prior (`:268-273`) and the route sends the prior's
@@ -146,17 +146,17 @@ the difference noted.
   (`admission.rs:361-365`); `historical_maturity` is preserved. The claim
   is precise only when read as effective maturity.
 - Plan: "the event is recorded under the subject's prior source class".
-  Code: `source_class: Some(prior.source_class)` (`commit.rs:738`). Claim
+  Code: `source_class: Some(prior.source_class)` (`commit.rs:732`). Claim
   under test.
 - Plan: "evidence is dropped at the disposition path". Code:
   `evidence_id: None` at `3a3b916b7`; the operation shape had no
   evidence field and `deny_unknown_fields` refused one. Claim under test.
-  PR A: the request carries the dispute's `evidence_id` (`commit.rs:744`).
+  PR A: the request carries the dispute's `evidence_id` (`commit.rs:738`).
 - Index D3: "Authority never derives from model confidence". Code: no
-  disposition event is in `event_can_raise_support` (`admission.rs:4293-4303`).
+  disposition event is in `event_can_raise_support` (`admission.rs:4262-4272`).
   The complement is implemented: a disposition can withdraw
   authority from an approval bearer and cascade demotion
-  (`with_authority_cascade`, `admission.rs:1111-1133`). Claim under test.
+  (`with_authority_cascade`, `admission.rs:1107-1129`). Claim under test.
 
 ## Lens: claimed liveness guarantees
 
@@ -182,7 +182,7 @@ disposition row.
   `InvalidInput` (identity with a secret-like substring, reason above
   512 KiB).
 - A relaxation without approval is not a refusal: it writes a `Deny` row
-  and the response carries `denied: true` (`commit.rs:775-795`;
+  and the response carries `denied: true` (`commit.rs:769-789`;
   `kernel_routes.rs:4479-4503`).
 - TypeScript: a commit whose verdict list does not match the sent
   operation is `unavailable(outcome_unknown)` because a receipt exists
@@ -192,12 +192,12 @@ disposition row.
 
 - The route assumes `subject_admission` returns the object's own latest
   decision (`AdmissionKey::Object`), not the lineage's; `visible_as_of`
-  folds the lineage separately (`admission.rs:2276-2285`). A disposition on
+  folds the lineage separately (`admission.rs:2245-2254`). A disposition on
   an object whose lineage holds a newer source rejection is judged against
   the object row only.
 - `prepare_with_facts` back-fills the stored approval when the request
   names none (`admission.rs:1625-1636`); `disposition_request` scopes
-  `approval_object_id.or(stored_approval)` (`commit.rs:723-729`), so the
+  `approval_object_id.or(stored_approval)` (`commit.rs:717-723`), so the
   two agree on which approval is read, but nothing asserts this
   mechanically.
 - `has_evidence: request.event.evidence_id.is_some()` (`admission.rs:1701`)
@@ -206,7 +206,7 @@ disposition row.
 ## Lens: wildcard
 
 - `disposition_restrictiveness` ranks Stale, Disputed, and Superseded
-  equal (`admission.rs:4272-4279`): Stale to Disputed and Disputed to
+  equal (`admission.rs:4241-4248`): Stale to Disputed and Disputed to
   Stale are neither tightening nor relaxing, so both land without
   approval. R4's "tightening only" wording does not describe this lateral
   move.
@@ -219,7 +219,7 @@ disposition row.
   relaxation denied afterwards; no route test files `mark_disputed`
   against an approval.
 - `Preview` with an already recorded identity replays the receipt and
-  judges nothing (`commit.rs:913-915`); the command then commits, which
+  judges nothing (`commit.rs:898-900`); the command then commits, which
   also replays (`memory-mark-command.ts:226-238`).
 
 ## Contract-versus-code disagreements preserved as leads

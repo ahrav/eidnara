@@ -15,7 +15,7 @@ claim: "never a maturity promotion".
 ## Evidence trail
 
 - `event_effect` returns `(current, Some(<disposition>), <outcome>)` for
-  all five events (`crates/kernel/src/admission.rs:4264-4267`), so
+  all five events (`crates/kernel/src/admission.rs:4233-4236`), so
   `requested == current`.
 - `event_can_raise_support` lists no disposition event (`:4189-4199`), so
   `raises_support` is false (`:318-319`).

@@ -15,7 +15,7 @@ its parent is `d85de937b`).
 - Pin predicate: `crates/kernel/src/local_file.rs:514`.
 - Citation predicate: `crates/kernel/src/slice/write.rs:42`.
 - The use-outcome citation predicate keys liveness on the citing row's subject
-  the same way (`crates/kernel/src/use_outcome.rs:176`).
+  the same way (`crates/kernel/src/use_outcome.rs:178`).
 
 - Guarantee under test: Capture expiry keeps evidence a live hold pins and
   evidence another live row cites.

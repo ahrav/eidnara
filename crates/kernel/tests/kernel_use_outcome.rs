@@ -1173,6 +1173,12 @@ fn a_dispute_links_the_reporting_sessions_latest_prior_serve_of_its_subject() {
     let other_decision =
         insert(&store, "other-decision", spec("s1", &["d2"], third_at, 0)).unwrap();
     insert(&store, "other-session", spec("s2", &["d1"], third_at, 0)).unwrap();
+    let mut other_harness = spec("s1", &["d1"], third_at, 0);
+    other_harness.harness = "pi".to_string();
+    insert(&store, "other-harness", other_harness).unwrap();
+    let mut other_project = spec("s1", &["d1"], third_at, 0);
+    other_project.project_digest = "b".repeat(64);
+    insert(&store, "other-project", other_project).unwrap();
     assert_ne!(older, newer);
 
     let payload =
@@ -1259,8 +1265,32 @@ fn reporter_columns_are_dispute_only_and_checked_by_the_schema() {
         Ok(String::new())
     });
     assert_eq!(refused.unwrap_err(), KernelError::InvalidInput);
+    for (key, request, payload) in [
+        (
+            "no-subject",
+            AdmissionRequest {
+                subject_object_id: None,
+                ..request("d1", EventKind::MarkDisputed)
+            },
+            None,
+        ),
+        (
+            "array-payload",
+            request("d1", EventKind::MarkDisputed),
+            Some("[1]"),
+        ),
+    ] {
+        let refused = store.commit(intent(key), |envelope| {
+            envelope.record_dispute_admission(
+                request,
+                &reporter("s1", TaintClass::UserInferred, payload),
+            )?;
+            Ok(String::new())
+        });
+        assert_eq!(refused.unwrap_err(), KernelError::InvalidInput, "{key}");
+    }
 
-    let insert_row = |id: &str, source: &str, taint: &str, payload: &str| {
+    let insert_row = |id: &str, event: &str, source: &str, taint: &str, payload: &str| {
         writer(root.path()).execute(
             &format!(
                 "INSERT INTO admission_decisions(
@@ -1270,19 +1300,78 @@ fn reporter_columns_are_dispute_only_and_checked_by_the_schema() {
                      policy_revision,reason,decided_at,reporter_source_class,
                      reporter_taint_class,event_payload
                  ) VALUES ('{id}','d1','fixture','d1',1,'model_inference','assistant_inference',
-                           'mark_disputed','candidate','candidate','disputed','explicit_labeled',
+                           '{event}','candidate','candidate','disputed','explicit_labeled',
                            'deny','normal',1,'r',1,{source},{taint},{payload})"
             ),
             [],
         )
     };
-    assert!(insert_row("ok", "'model_inference'", "'user_inferred'", "'{}'").is_ok());
-    for (id, source, taint, payload) in [
-        ("bad-source", "'oracle'", "'user_inferred'", "NULL"),
-        ("bad-taint", "'model_inference'", "'oracle'", "NULL"),
-        ("half", "'model_inference'", "NULL", "NULL"),
-        ("not-json", "'model_inference'", "'user_inferred'", "'{'"),
+    assert!(
+        insert_row(
+            "ok",
+            "mark_disputed",
+            "'model_inference'",
+            "'user_inferred'",
+            "'{}'"
+        )
+        .is_ok()
+    );
+    assert!(insert_row("ok-plain", "mark_stale", "NULL", "NULL", "NULL").is_ok());
+    for (id, event, source, taint, payload) in [
+        (
+            "bad-source",
+            "contradict",
+            "'oracle'",
+            "'user_inferred'",
+            "NULL",
+        ),
+        (
+            "bad-taint",
+            "contradict",
+            "'model_inference'",
+            "'oracle'",
+            "NULL",
+        ),
+        (
+            "half-source",
+            "contradict",
+            "'model_inference'",
+            "NULL",
+            "NULL",
+        ),
+        (
+            "half-taint",
+            "contradict",
+            "NULL",
+            "'user_inferred'",
+            "NULL",
+        ),
+        (
+            "not-json",
+            "contradict",
+            "'model_inference'",
+            "'user_inferred'",
+            "'{'",
+        ),
+        (
+            "not-object",
+            "contradict",
+            "'model_inference'",
+            "'user_inferred'",
+            "'[1]'",
+        ),
+        (
+            "not-a-dispute",
+            "mark_stale",
+            "'model_inference'",
+            "'user_inferred'",
+            "NULL",
+        ),
+        ("payload-alone", "contradict", "NULL", "NULL", "'{}'"),
     ] {
-        assert!(insert_row(id, source, taint, payload).is_err(), "{id}");
+        assert!(
+            insert_row(id, event, source, taint, payload).is_err(),
+            "{id}"
+        );
     }
 }

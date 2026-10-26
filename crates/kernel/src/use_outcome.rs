@@ -11,7 +11,9 @@ use sha2::{Digest, Sha256};
 use super::envelope::{PreparedIntent, commit_with_writer};
 use super::local_file::reserved_expiry_intent;
 use super::redaction::identity;
-use super::{CachedSql, Envelope, EventKind, KernelError, KernelStore, map_sqlite};
+use super::{
+    CachedSql, DisputeReporter, Envelope, EventKind, KernelError, KernelStore, map_sqlite,
+};
 
 /// The retention class every serving record carries.
 pub const USE_OUTCOME_RETENTION_CLASS: &str = "use_outcome_capture";
@@ -267,6 +269,39 @@ impl UseOutcomeSpec {
         self.recorded_at
             .checked_add(USE_OUTCOME_RETENTION_MS)
             .ok_or(KernelError::InvalidInput)
+    }
+}
+
+impl Envelope<'_> {
+    /// The serving record a dispute of `subject` from `reporter`'s session links:
+    /// the one naming the subject with the greatest `served_commit_seq` strictly
+    /// below this commit.
+    pub(super) fn reporting_serve(
+        &self,
+        reporter: &DisputeReporter,
+        subject: Option<&str>,
+    ) -> Result<Option<String>, KernelError> {
+        let Some(subject) = subject else {
+            return Ok(None);
+        };
+        self.tx
+            .query_row_cached(
+                "SELECT u.use_outcome_id FROM use_outcome_decisions d
+                   JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
+                  WHERE d.object_id=?1 AND u.project_digest=?2 AND u.harness=?3
+                    AND u.session_id=?4 AND u.served_commit_seq<?5
+                  ORDER BY u.served_commit_seq DESC, u.use_outcome_id DESC LIMIT 1",
+                params![
+                    subject,
+                    reporter.project_digest,
+                    reporter.harness,
+                    reporter.session_id,
+                    self.commit_seq
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)
     }
 }
 

@@ -12,10 +12,10 @@ re-verified at this branch tip.
 References are verified at the #1157 branch tip (the commit that adds this file;
 its parent is `d85de937b`).
 
-- Writer binding: the INSERT at `crates/kernel/src/admission.rs:1847` binds
-  `self.commit_seq` at `crates/kernel/src/admission.rs:1881`.
+- Writer binding: the INSERT at `crates/kernel/src/admission.rs:1816` binds
+  `self.commit_seq` at `crates/kernel/src/admission.rs:1850`.
 - Reader filters: `crates/kernel/src/admission.rs:691`; the new reader
-  `crates/kernel/src/use_outcome.rs:190`.
+  `crates/kernel/src/use_outcome.rs:192`.
 - Reachability: a null-commit row exists only after direct SQL, so the label is
   test-only.
 

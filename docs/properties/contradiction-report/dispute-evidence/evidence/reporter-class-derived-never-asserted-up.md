@@ -17,10 +17,10 @@ route's derivation, never from a stronger claim by the client.
   with `ClassOverDeclared` and accepts one at or below it
   (`commit.rs:413-446`; ranks at `:382-404`).
 - The handler passes the resolved taint to `compose_reason`
-  (`commit.rs:1154-1168`), which renders it as `reporter_taint`
+  (`commit.rs:1139-1153`), which renders it as `reporter_taint`
   (`crates/daemon/src/kernel_routes/dispute.rs:85-89`).
 - `disposition_request` builds the admission request with the subject's
-  prior classes (`commit.rs:738-739`), so the row's class columns are the
+  prior classes (`commit.rs:732-733`), so the row's class columns are the
   subject's; the Kernel refuses a request whose classes differ from the
   prior (`crates/kernel/src/admission.rs:284-290`).
 - The command sends `sourceKind: "user"`
@@ -70,9 +70,9 @@ subject's facts, so no store scan can evaluate it.
 
 - Sources examined: `kernel_route_scope`
   (`crates/daemon/src/kernel_routes/mod.rs:415-441`), `RouteScope`
-  (`:405-412`), `handle_kernel_commit` (`commit.rs:1114-1256`).
+  (`:405-412`), `handle_kernel_commit` (`commit.rs:1099-1243`).
 - Findings: no. `RouteScope.harness` is bound but `handle_kernel_commit`
-  reads only `scope.project` and `scope.store` (`commit.rs:1169`,
+  reads only `scope.project` and `scope.store` (`commit.rs:1154`,
   `:1141`, `:1144`); `source_kind` is whatever the body says. The
   derivation bounds what a claim can reach: a client can claim `user`
   (taint rank 2) from any surface but never `user_explicit`.

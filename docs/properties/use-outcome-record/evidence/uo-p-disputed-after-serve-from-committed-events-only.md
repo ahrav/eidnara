@@ -11,8 +11,8 @@ Record kind: new obligation activated by #1154.
 References are verified at the #1157 branch tip (the commit that adds this file;
 its parent is `d85de937b`).
 
-- Join: `crates/kernel/src/use_outcome.rs:190`; read: `served_sessions_for`
-  (`crates/kernel/src/use_outcome.rs:446`).
+- Join: `crates/kernel/src/use_outcome.rs:192`; read: `served_sessions_for`
+  (`crates/kernel/src/use_outcome.rs:481`).
 - The flag is computed in the read and stored nowhere; the read changes no
   visibility.
 

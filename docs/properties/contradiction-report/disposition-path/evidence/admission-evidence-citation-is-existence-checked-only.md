@@ -7,7 +7,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 ## Discovery trigger
 
 Plan P4 KTD2: "The Kernel persists `evidence_id` on `admission_decisions`
-(`admission.rs:1848-1883`) but the disposition path does not check
+(`admission.rs:1817-1852`) but the disposition path does not check
 liveness." Shared-facts: "No evidence liveness check exists on this path."
 Lens: data integrity, then failure recovery (what a retired citation does
 to later readers). The record pins what the Kernel enforces so the P4
@@ -16,7 +16,7 @@ daemon check is specified against it.
 ## Evidence trail
 
 - `write_admission` derives `evidence_id` by `identity()` only
-  (`crates/kernel/src/admission.rs:1781-1786`); `identity` rejects a
+  (`crates/kernel/src/admission.rs:1750-1755`); `identity` rejects a
   value with a detected secret (`crates/kernel/src/redaction.rs:81-88`).
 - Between `:1695` and the INSERT (`:1748-1786`) the only reads are the
   bearer and dependent caps (`:1727-1739`); none touches `evidence_meta`.
@@ -31,7 +31,7 @@ daemon check is specified against it.
   (`crates/kernel/src/lib.rs:213-225`). The route's `run` turns a
   `Conflict` raised after entering the operation, with no recorded refusal,
   into `CommitFailure::StorageConstraint`, reported as
-  `invalid/already_exists` (`commit.rs:1101-1109`, `:484`).
+  `invalid/already_exists` (`commit.rs:1086-1094`, `:484`).
 - Production writers that set `Some(evidence_id)`:
   `crates/daemon/src/harness_sources.rs:976` (`EventKind::Other`) only.
   `crates/daemon/src/memory_reviewer/lifecycle.rs:649` was first listed
@@ -39,12 +39,12 @@ daemon check is specified against it.
   `:500`) and an `ObservationSpec`, so it is not a writer of this path
   (refinement R1, applied 2026-10-25). At `3a3b916b7` the disposition
   route set `None`. At the PR A tip it sets the cited id for a dispute
-  (`commit.rs:744`) only after `require_visible_evidence` found the row
+  (`commit.rs:738`) only after `require_visible_evidence` found the row
   live and cited by the bound project in the same transaction
-  (`commit.rs:732-734`, `:742-759`), so the route never reaches this
+  (`commit.rs:726-728`, `:742-759`), so the route never reaches this
   record's accept-retired or dangling-id branch.
 - Contrast: `validate_trigger` requires the trigger's backing evidence to
-  be live (`admission.rs:2872-2878`) and
+  be live (`admission.rs:2841-2847`) and
   `approval_qualifies_predicate` requires cited evidence live
   (`:884-893`); the event's own `evidence_id` has no such predicate.
 - Served folding reads `decision_events` with
@@ -84,7 +84,7 @@ to notice.
 
 ### Q: Should the Kernel refuse a retired `evidence_id` on `write_admission`, or is the daemon the only intended gate?
 
-- Sources examined: P4 KTD2, D5 in the index, `admission.rs:1781-1890`,
+- Sources examined: P4 KTD2, D5 in the index, `admission.rs:1750-1859`,
   `slice/write.rs:1138-1178`.
 - Findings: the slice write path enforces liveness; the admission path
   does not. KTD2 places the check in the daemon. Nothing in the plan says

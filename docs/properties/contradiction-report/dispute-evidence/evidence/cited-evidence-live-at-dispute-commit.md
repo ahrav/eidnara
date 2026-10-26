@@ -10,18 +10,18 @@ live". At `3a3b916b7` the admission write checked only that the id exists
 ## Evidence trail
 
 - `disposition_request` calls `require_visible_evidence` when the
-  operation names an id (`crates/daemon/src/kernel_routes/commit.rs:732-734`).
+  operation names an id (`crates/daemon/src/kernel_routes/commit.rs:726-728`).
 - `require_visible_evidence` reads `Envelope::evidence_citations`, keeps
   the answer only when `citations.live`, and maps absence or a retired row
-  to `KernelError::NotFound` (`commit.rs:760-763`).
+  to `KernelError::NotFound` (`commit.rs:754-757`).
 - `evidence_citations` reads `invalidated_commit_seq IS NULL` for the row
   inside the envelope's transaction and returns `None` for an unknown id
   (`crates/kernel/src/envelope.rs:536-551`). The doc comment states the
   check and a citing write observe one state (`:532-535`).
 - The commit path runs `disposition_request` inside `commit_before`'s
-  closure (`commit.rs:1083-1098`, through `apply` at `:1000-1006` and
+  closure (`commit.rs:1068-1083`, through `apply` at `:1000-1006` and
   `record_disposition` at `:785-791`); the preview path runs it inside
-  `store.preview` (`commit.rs:910-930`, through `PreviewRun::disposition`
+  `store.preview` (`commit.rs:895-915`, through `PreviewRun::disposition`
   at `:835`).
 - The refusal maps to `invalid/not_found` and writes nothing: the commit
   closure returns `Err`, which rolls back the envelope.
@@ -55,7 +55,7 @@ read inside the transaction, the dispute either sees the retirement
   project citer retires in a separate commit, and the commit answers
   `not_found` with nothing written
   (`a_dispute_previewed_while_its_evidence_was_visible_is_judged_again_at_commit`,
-  `crates/daemon/tests/kernel_routes.rs:6375`). The evidence row stays
+  `crates/daemon/tests/kernel_routes.rs:6381`). The evidence row stays
   live; the refusal comes from the scope loop that shares the read, so
   the test shows the read runs again inside the commit transaction.
 - A later retirement is permitted: the check is stated as of the row's

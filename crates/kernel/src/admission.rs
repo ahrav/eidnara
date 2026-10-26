@@ -999,7 +999,7 @@ impl Envelope<'_> {
         &mut self,
         request: AdmissionRequest,
     ) -> Result<AdmissionDecision, KernelError> {
-        self.guarded(|envelope| envelope.record_admission_inner(request))
+        self.guarded(|envelope| envelope.record_admission_inner(request, None))
     }
 
     /// [`Self::record_admission`] for a `mark_disputed` or `contradict`, storing
@@ -1009,31 +1009,26 @@ impl Envelope<'_> {
     ///
     /// # Errors
     ///
-    /// As [`Self::record_admission`]; `InvalidInput` for another event kind or a
-    /// payload a secret detector matches.
+    /// As [`Self::record_admission`]; `InvalidInput` for another event kind, a
+    /// request without a subject, or a payload that is not a JSON object or
+    /// that a secret detector matches.
     pub fn record_dispute_admission(
         &mut self,
         request: AdmissionRequest,
         reporter: &DisputeReporter,
     ) -> Result<AdmissionDecision, KernelError> {
         self.guarded(|envelope| {
-            if !matches!(
+            let is_dispute = matches!(
                 request.event.kind,
                 EventKind::MarkDisputed | EventKind::Contradict
-            ) {
+            );
+            let payload_is_object = reporter.event_payload.as_deref().is_none_or(|payload| {
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(payload).is_ok()
+            });
+            if !is_dispute || request.subject_object_id.is_none() || !payload_is_object {
                 return Err(KernelError::InvalidInput);
             }
-            let subject_object_id = request.subject_object_id.clone();
-            let reason = request.event.reason.clone();
-            envelope.with_authority_cascade(
-                subject_object_id.as_deref(),
-                None,
-                &reason,
-                |envelope| {
-                    let prepared = envelope.prepare_admission(request)?;
-                    envelope.write_reported_admission(prepared, None, Some(reporter))
-                },
-            )
+            envelope.record_admission_inner(request, Some(reporter))
         })
     }
 
@@ -1092,6 +1087,7 @@ impl Envelope<'_> {
     fn record_admission_inner(
         &mut self,
         request: AdmissionRequest,
+        reporter: Option<&DisputeReporter>,
     ) -> Result<AdmissionDecision, KernelError> {
         refuse_succession_events(&request)?;
         let subject_object_id = request.subject_object_id.clone();
@@ -1101,7 +1097,7 @@ impl Envelope<'_> {
             subject_object_id.as_deref(),
             candidate_id.as_deref(),
             &reason,
-            |envelope| envelope.apply_admission(request),
+            |envelope| envelope.apply_admission(request, reporter),
         )
     }
 
@@ -1195,9 +1191,10 @@ impl Envelope<'_> {
     fn apply_admission(
         &mut self,
         request: AdmissionRequest,
+        reporter: Option<&DisputeReporter>,
     ) -> Result<AdmissionDecision, KernelError> {
         let prepared = self.prepare_admission(request)?;
-        self.write_admission(prepared, None)
+        self.write_reported_admission(prepared, None, reporter)
     }
 
     /// Writes the revocation of a source-scoped decision. The lineage, not a
@@ -1556,19 +1553,22 @@ impl Envelope<'_> {
         let source_class = SourceClass::try_from(source_class.as_str())?;
         let taint_class = TaintClass::try_from(taint_class.as_str())?;
         let decision = match subject {
-            DependentSubject::Object(object_id) => self.apply_admission(AdmissionRequest {
-                candidate_id: None,
-                subject_object_id: Some(object_id),
-                source_class: Some(source_class),
-                taint_class: Some(taint_class),
-                event: AdmissionEvent {
-                    kind: EventKind::ApprovalRevoked,
-                    trigger_object_id: None,
-                    approval_object_id: None,
-                    evidence_id: None,
-                    reason: reason.to_string(),
+            DependentSubject::Object(object_id) => self.apply_admission(
+                AdmissionRequest {
+                    candidate_id: None,
+                    subject_object_id: Some(object_id),
+                    source_class: Some(source_class),
+                    taint_class: Some(taint_class),
+                    event: AdmissionEvent {
+                        kind: EventKind::ApprovalRevoked,
+                        trigger_object_id: None,
+                        approval_object_id: None,
+                        evidence_id: None,
+                        reason: reason.to_string(),
+                    },
                 },
-            })?,
+                None,
+            )?,
             DependentSubject::Lineage(lineage) => {
                 self.apply_lineage_revocation(lineage, source_class, taint_class, reason)?
             }
@@ -1729,37 +1729,6 @@ impl Envelope<'_> {
         materialized: Option<ObjectRow>,
     ) -> Result<AdmissionDecision, KernelError> {
         self.write_reported_admission(prepared, materialized, None)
-    }
-
-    /// The serving record a dispute of `subject` from `reporter`'s session links:
-    /// the one naming the subject with the greatest `served_commit_seq` strictly
-    /// below this commit.
-    fn reporting_serve(
-        &self,
-        reporter: &DisputeReporter,
-        subject: Option<&str>,
-    ) -> Result<Option<String>, KernelError> {
-        let Some(subject) = subject else {
-            return Ok(None);
-        };
-        self.tx
-            .query_row_cached(
-                "SELECT u.use_outcome_id FROM use_outcome_decisions d
-                   JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
-                  WHERE d.object_id=?1 AND u.project_digest=?2 AND u.harness=?3
-                    AND u.session_id=?4 AND u.served_commit_seq<?5
-                  ORDER BY u.served_commit_seq DESC, u.use_outcome_id DESC LIMIT 1",
-                params![
-                    subject,
-                    reporter.project_digest,
-                    reporter.harness,
-                    reporter.session_id,
-                    self.commit_seq
-                ],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(map_sqlite)
     }
 
     fn write_reported_admission(
