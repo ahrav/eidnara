@@ -26,7 +26,7 @@ part.
 | Hashed fragment id | `crates/daemon/src/memory_capture.rs:319` (`native_capture_fragments`) | out-of-grammar or oversized ids become `{sha256}:{offset}` | unaudited |
 | Capture commit gate | `crates/daemon/src/memory_capture.rs:1013`; `crates/daemon/src/lib.rs:6918` | publish, checkpoint, source publish, and delete serialize | unaudited |
 | Message unit identity | `crates/daemon/src/harness_sources.rs:214` (`SessionIdentity::message_unit`) | one unit per text block | unaudited |
-| Evidence id from receipt key | `crates/daemon/src/harness_sources.rs:1017` (`evidence_request`) | `srcev:` plus the unit key | unaudited |
+| Evidence id from receipt key | `crates/daemon/src/harness_sources.rs:1020` (`evidence_request`) | `srcev:` plus the unit key | unaudited |
 | Isolated bounded open | `crates/daemon/src/git_sources.rs:131` (`isolated_options`), `:138` (`open`), `:148` (`open_with_slots`) | isolation, replacement refs ignored, allocation limit; `open_with_slots` sizes the pack index slot map and, for a given size, refuses the repositories the default sizing refuses | unaudited |
 | HEAD observation | `crates/daemon/src/memory_capture/head.rs:32` (`observe_head`), called once per submit at `crates/daemon/src/memory_capture/native.rs:614` | HEAD resolved once through the ref store, following a branch that is itself symbolic to the end of its chain (`head_id`, `crates/daemon/src/memory_capture/head.rs:62`); the header of that one object id read from the loose object or pack files (`crates/daemon/src/git_sources.rs:205`, `file_object_kind`) or the object store (`:329`, `store_object_kind`); unborn, unreadable, unsupported, non-commit, absent-object, and non-repository roots, and a HEAD held by a corrupt pack (an index paired with another pack's data, or a delta chain that revisits an entry), are `HeadUnavailable` | unaudited |
 | Capture anchor | `crates/daemon/src/memory_capture/cite.rs:403` (`anchor_spec`), inserted at `crates/daemon/src/memory_capture.rs:1274` | one `reachable_from` anchor per job, ids derived from the job id and the frozen oid, before the job's first decision | unaudited |
@@ -62,7 +62,7 @@ part.
 | `crates/kernel/tests/kernel_slice.rs:1526` `a_decision_serves_no_lower_than_its_cited_evidence_reads_today` | same | unaudited |
 | `crates/kernel/tests/kernel_review_acceptance.rs:988` `an_accepted_decision_serves_no_lower_than_the_support_it_cites_reads_today` | same | unaudited |
 | `crates/kernel/tests/kernel_source_descriptors.rs:1895` `retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence` | `p2-cited-evidence-is-never-retired-or-swept` | unaudited |
-| `crates/daemon/tests/harness_sources.rs:3482` `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` | same | unaudited |
+| `crates/daemon/tests/harness_sources.rs:3500` `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` | same | unaudited |
 | `crates/kernel/src/local_file.rs:791` `a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept` | same | unaudited |
 | `crates/kernel/src/local_file.rs:889` `a_refused_harness_capture_rolls_back_alone_inside_its_page_commit` | same | unaudited |
 | `crates/daemon/src/memory_capture.rs:2016` `correction_supersedes_and_replay_or_duplicate_creates_no_extra_memory` | `p2-capture-commit-replays-by-job-key-and-frozen-digest`; `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
@@ -73,7 +73,7 @@ part.
 | `crates/memory-store/src/memory_capture.rs:755` `job_identity_derives_from_redacted_text_so_a_stored_digest_cannot_confirm_a_secret` | `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
 | `crates/daemon/src/memory_capture.rs:1538`, `:1587`, `:1900`, `:1922`; `crates/daemon/src/lib.rs:25813` | same | unaudited |
 | `crates/daemon/src/lib.rs:25045`, `:25383`, `:25588`, `:26136`, `:24794`; `crates/daemon/src/source_capture_tests.rs:1037` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |
-| `crates/daemon/src/source_capture_tests.rs:867`, `:1259`; `crates/kernel/tests/kernel_source_descriptors.rs:494`, `:2484`, `:2593`, `:2717`, `:2795`, `:2871`; `crates/daemon/tests/harness_sources.rs:1706` | `p2-messages-descriptor-identity-is-per-block-and-evidence-id-is-the-receipt-key` | unaudited |
+| `crates/daemon/src/source_capture_tests.rs:867`, `:1259`; `crates/kernel/tests/kernel_source_descriptors.rs:494`, `:2484`, `:2593`, `:2717`, `:2795`, `:2871`; `crates/daemon/tests/harness_sources.rs:1724` | `p2-messages-descriptor-identity-is-per-block-and-evidence-id-is-the-receipt-key` | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:181`, `:429`, `:465`, `:1073`, `:1234` | `p2-deferred-source-units-publish-on-a-later-pass` | unaudited |
 | `crates/daemon/tests/git_sources.rs:549` `refused_selections_publish_nothing_and_encodings_are_dispositions` | `p2-git-open-is-isolated-and-allocation-bounded` | unaudited |
 | `crates/daemon/tests/git_sources.rs:827` `delta_packed_commit_against_an_oversized_base_is_refused` | same | unaudited |
