@@ -595,7 +595,7 @@ Confidence: high -
 `classify_existing_family` (`crates/kernel/src/open.rs:796`);
 `classify_open_kernel` (`crates/kernel/src/open.rs:852`). Disposition B:
 re-verified against the #1154 digest
-`68217c8971a474c9b6042b3a229a75e417bc9fc37132e2f7fba6da4dd050a4fb`.
+`40cf9b503ce6458c98e352324df95e4a7ad97066f6e9b4b5e699bd62140e150b`.
 Existing check: `every_conclusive_kernel_mismatch_is_refused_and_left_untouched`
 (`crates/kernel/tests/kernel_open.rs:183`);
 `a_family_created_under_the_previous_baseline_is_refused_untouched`
@@ -771,8 +771,8 @@ Guarantee: After commit, the identity columns, `served_commit_seq`,
 the decision rows never change; `deleted_at` is set once, `last_transform_at`
 never decreases, retirement is set once, no row is deleted, a record is served
 at a commit before the one that records it, and an admission citation names a
-recorded serve when its row is written, never changes, and its row is never
-deleted.
+recorded serve when its row is written, never changes, keeps its subject and
+commit sequence, and its row is never deleted.
 Check: `always` - every forbidden update or delete aborts under a named trigger,
 `INSERT OR REPLACE` aborts through the delete trigger on every table including
 `admission_decisions`, a decision row inserted once `decision_count` rows exist

@@ -181,7 +181,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "68217c8971a474c9b6042b3a229a75e417bc9fc37132e2f7fba6da4dd050a4fb";
+    "40cf9b503ce6458c98e352324df95e4a7ad97066f6e9b4b5e699bd62140e150b";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -2431,6 +2431,7 @@ fn an_admission_citation_names_a_recorded_use_outcome_and_never_changes() {
     apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
     let root = seed_root_domain(&mut conn);
     seed_object(&conn, "decision-1", "decision", root);
+    seed_object(&conn, "decision-2", "decision", root);
     let created = next_commit(&conn, "tx-created");
     let id = "c".repeat(64);
     seed_use_outcome(&conn, &id, "decision-1", root, created);
@@ -2453,6 +2454,21 @@ fn an_admission_citation_names_a_recorded_use_outcome_and_never_changes() {
         "a citation of an unrecorded use outcome",
     );
     cite("report", &id).expect("a citation of a recorded use outcome inserts");
+    // The sweep recognizes a citation by its subject and its committed sequence, so a citing row keeps both.
+    for assignment in [
+        "subject_object_id='decision-2'",
+        "subject_object_id=NULL",
+        "commit_seq=NULL",
+        &format!("commit_seq={}", created + 1),
+    ] {
+        assert_aborts_with(
+            &conn,
+            &format!(
+                "UPDATE admission_decisions SET {assignment} WHERE admission_decision_id='report'"
+            ),
+            "an admission citation of a use outcome is written with its row",
+        );
+    }
     for value in ["NULL".to_string(), format!("'{}'", "d".repeat(64))] {
         assert_aborts_with(
             &conn,

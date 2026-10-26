@@ -16,7 +16,7 @@ its parent is `8ace6c9f8`).
   `idx_admission_use_outcome_fk` in the `admission_decisions` component
   (`crates/kernel/src/schema.rs:163`).
 - Pinned digest: `crates/kernel/tests/kernel_schema.rs:183`
-  (`68217c8971a474c9b6042b3a229a75e417bc9fc37132e2f7fba6da4dd050a4fb`).
+  (`40cf9b503ce6458c98e352324df95e4a7ad97066f6e9b4b5e699bd62140e150b`).
 - Component-name list: `crates/kernel/tests/kernel_schema.rs:14`; object
   inventory: `kernel_schema_object_inventory_is_pinned_by_kind_and_name`
   (`crates/kernel/tests/kernel_schema.rs:1900`).

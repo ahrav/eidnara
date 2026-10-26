@@ -28,7 +28,9 @@ its parent is `8ace6c9f8`).
   `use_outcome_decisions_no_update`, and `use_outcome_decisions_no_delete` in
   the `use_outcome_decisions` component (`crates/kernel/src/schema.rs:192`).
 - Citation rule: the `admission_decisions.use_outcome_id` foreign key, the
-  `admission_decisions_use_outcome_immutable` trigger, and the
+  `admission_decisions_use_outcome_immutable` trigger (which also freezes
+  `subject_object_id` and `commit_seq` on a citing row, the two columns the
+  sweep's citation predicate reads), and the
   `admission_decisions_citation_no_delete` trigger, which refuses the delete
   that `INSERT OR REPLACE` runs on a citing row
   (`crates/kernel/src/schema.rs:163`). P4 U3 writes the value with the admission
@@ -43,7 +45,7 @@ its parent is `8ace6c9f8`).
   `last_transform_at` never decreases, retirement is set once, no row is deleted,
   a record is served at a commit before the one that records it, and an
   admission citation names a recorded serve when its row is written, never
-  changes, and its row is never deleted.
+  changes, keeps its subject and commit sequence, and its row is never deleted.
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
   (`crates/kernel/tests/kernel_schema.rs:2177`);
   `use_outcome_classification_and_identity_shapes_are_checked`
