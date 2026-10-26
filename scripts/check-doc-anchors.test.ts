@@ -169,6 +169,43 @@ describe("checkAnchors", () => {
     });
 });
 
+describe("checkAnchors on a moved document", () => {
+    test("points a moved document's link at the cited file's current path, or reports its deletion", () => {
+        const repo = repository(
+            { "docs/c.md": "[r](../../src/old.rs#L2)\n[g](../../src/gone.rs#L2)\n", "src/new.rs": SOURCE },
+            { "docs/c.md": modified("docs/old/c.md"), "src/new.rs": modified("src/old.rs") },
+            {},
+            { "docs/old/c.md": "docs/c.md", "src/old.rs": "src/new.rs", "src/gone.rs": null },
+        );
+        expect(messages(checkAnchors(repo).findings)).toEqual([
+            "docs/c.md:1: ](../../src/old.rs#L2) cites no tracked file from the document's new path; the target is src/new.rs",
+            "docs/c.md:2: ](../../src/gone.rs#L2) cites a file this change deletes",
+        ]);
+    });
+
+    test("a rename within one directory reports a deleted link target as deleted", () => {
+        const repo = repository(
+            { "docs/b.md": "[x](../src/x.rs#L3)\n" },
+            { "docs/b.md": modified("docs/a.md") },
+            {},
+            { "docs/a.md": "docs/b.md", "src/x.rs": null },
+        );
+        expect(messages(checkAnchors(repo).findings)).toEqual(["docs/b.md:1: ](../src/x.rs#L3) cites a file this change deletes"]);
+    });
+
+    test("a rename within one directory reports a renamed link target as a renamed file", () => {
+        const repo = repository(
+            { "docs/b.md": "[x](../src/x.rs#L3)\n", "src/y.rs": SOURCE },
+            { "docs/b.md": modified("docs/a.md"), "src/y.rs": modified("src/x.rs") },
+            {},
+            { "docs/a.md": "docs/b.md", "src/x.rs": "src/y.rs" },
+        );
+        expect(messages(checkAnchors(repo).findings)).toEqual([
+            "docs/b.md:1: ](../src/x.rs#L3) cites a file this change renames to src/y.rs",
+        ]);
+    });
+});
+
 describe("checkAnchors on a renamed target", () => {
     test("accepts an unchanged anchor that already names the renamed file's new path", () => {
         const repo = repository(

@@ -128,10 +128,14 @@ export function resolveAnchor(paths: Set<string>, doc: string, anchor: Anchor): 
         const path = normalize(`${dirname(doc)}/${anchor.path}`);
         return path !== undefined && paths.has(path) ? path : undefined;
     }
-    if (paths.has(anchor.path)) return anchor.path;
-    const suffix = `/${anchor.path}`;
-    const matches = [...paths].filter((path) => path.endsWith(suffix));
+    const matches = bareMatches(paths, anchor.path);
     return matches.length === 1 ? matches[0] : undefined;
+}
+
+function bareMatches(paths: Set<string>, path: string): string[] {
+    if (paths.has(path)) return [path];
+    const suffix = `/${path}`;
+    return [...paths].filter((candidate) => candidate.endsWith(suffix));
 }
 
 export interface Entry {
@@ -219,12 +223,14 @@ function locate(
         const change = repo.changes.get(target);
         return change?.kind === "modified" ? { kind: "modified", base: change.base, head: target } : undefined;
     }
-    if (anchor.form === "link" && docChange?.kind === "modified" && docChange.base !== doc) {
+    if (anchor.form === "link" && docChange?.kind === "modified" && dirname(docChange.base) !== dirname(doc)) {
         const path = normalize(`${dirname(docChange.base)}/${anchor.path}`);
-        if (path !== undefined && (repo.tracked.has(path) || repo.removed.has(path))) return { kind: "relink", path };
+        if (path !== undefined && repo.tracked.has(path)) return { kind: "relink", path };
+        const now = path === undefined ? undefined : repo.removed.get(path);
+        if (now === null) return "deleted";
+        if (now !== undefined) return { kind: "relink", path: now };
     }
-    const suffix = `/${anchor.path}`;
-    if (anchor.form === "bare" && [...repo.tracked].some((path) => path.endsWith(suffix))) return undefined;
+    if (anchor.form === "bare" && bareMatches(repo.tracked, anchor.path).length > 0) return undefined;
     const gone = resolveAnchor(removedPaths, doc, anchor);
     if (gone === undefined) return undefined;
     const renamed = repo.removed.get(gone) ?? null;
