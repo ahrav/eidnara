@@ -31,21 +31,21 @@ Every location was read at the #1154 branch tip.
 | `kernel_schema_has_one_ordered_full_shape` | `crates/kernel/tests/kernel_schema.rs:151` | `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
 | `kernel_schema_object_inventory_is_pinned_by_kind_and_name` | `crates/kernel/tests/kernel_schema.rs:1900` | `uo-kernel-opens-only-at-the-compiled-baseline-identity`, `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
 | `use_outcome_identity_and_served_set_are_never_rewritten` | `crates/kernel/tests/kernel_schema.rs:2177` | `uo-p-served-set-and-identity-never-rewritten`, `uo-p-record-survives-session-delete`, `uo-p-deleted-at-iff-session-delete-kernel-step`, `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `use_outcome_classification_and_identity_shapes_are_checked` | `crates/kernel/tests/kernel_schema.rs:2345` | `uo-p-served-set-and-identity-never-rewritten`, `uo-p-classification-sensitive-local-only-no-remote-egress` | unaudited |
-| `an_admission_citation_names_a_recorded_use_outcome_and_never_changes` | `crates/kernel/tests/kernel_schema.rs:2426` | `uo-p-served-set-and-identity-never-rewritten` | unaudited |
+| `use_outcome_classification_and_identity_shapes_are_checked` | `crates/kernel/tests/kernel_schema.rs:2348` | `uo-p-served-set-and-identity-never-rewritten`, `uo-p-classification-sensitive-local-only-no-remote-egress` | unaudited |
+| `an_admission_citation_names_a_recorded_use_outcome_and_never_changes` | `crates/kernel/tests/kernel_schema.rs:2429` | `uo-p-served-set-and-identity-never-rewritten` | unaudited |
 | `kernel_schema_digest_is_pinned_to_the_frozen_v1_shape` | `crates/kernel/tests/kernel_schema.rs:599` | `uo-kernel-opens-only-at-the-compiled-baseline-identity`, `uo-p-baseline-rotation-refuses-previous-family-untouched` | unaudited |
 | `retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence` | `crates/kernel/tests/kernel_source_descriptors.rs:1895` | `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
 | `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve` | `crates/kernel/tests/kernel_use_outcome.rs:164` | `uo-p-no-row-for-withheld-composition` | unaudited |
 | `duplicate_and_malformed_serves_are_refused_without_rows` | `crates/kernel/tests/kernel_use_outcome.rs:215` | `uo-p-served-set-once-per-session-revision`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
-| `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote` | `crates/kernel/tests/kernel_use_outcome.rs:357` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only`, `uo-p-classification-sensitive-local-only-no-remote-egress` | unaudited |
-| `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage` | `crates/kernel/tests/kernel_use_outcome.rs:376` | `uo-admission-reads-require-a-non-null-commit-seq`, `uo-p-disputed-after-serve-from-committed-events-only`, `uo-p-record-survives-session-delete`, `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
-| `expiry_retires_an_expired_record_under_a_reserved_receipt` | `crates/kernel/tests/kernel_use_outcome.rs:509` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `an_expiry_backlog_drains_one_page_per_call` | `crates/kernel/tests/kernel_use_outcome.rs:571` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `an_expired_record_cited_by_a_live_report_is_retained` | `crates/kernel/tests/kernel_use_outcome.rs:641` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts` | `crates/kernel/tests/kernel_use_outcome.rs:731` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `session_roles_round_trip_and_the_served_set_digest_is_order_free` | `crates/kernel/tests/kernel_use_outcome.rs:752` | `uo-p-served-ids-equal-frozen-composition`, `uo-p-producer-matches-request-subagent-flag` | unaudited |
-| `disputed_after_serve_is_judged_against_each_serve` | `crates/kernel/tests/kernel_use_outcome.rs:767` | `uo-p-disputed-after-serve-from-committed-events-only` | unaudited |
-| `the_cited_count_covers_the_rows_read_before_the_page_fills` | `crates/kernel/tests/kernel_use_outcome.rs:838` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote` | `crates/kernel/tests/kernel_use_outcome.rs:381` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only`, `uo-p-classification-sensitive-local-only-no-remote-egress` | unaudited |
+| `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage` | `crates/kernel/tests/kernel_use_outcome.rs:400` | `uo-admission-reads-require-a-non-null-commit-seq`, `uo-p-disputed-after-serve-from-committed-events-only`, `uo-p-record-survives-session-delete`, `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
+| `expiry_retires_an_expired_record_under_a_reserved_receipt` | `crates/kernel/tests/kernel_use_outcome.rs:533` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `an_expiry_backlog_drains_one_page_per_call` | `crates/kernel/tests/kernel_use_outcome.rs:595` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `an_expired_record_cited_by_a_live_report_is_retained` | `crates/kernel/tests/kernel_use_outcome.rs:665` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts` | `crates/kernel/tests/kernel_use_outcome.rs:755` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `session_roles_round_trip_and_the_served_set_digest_is_order_free` | `crates/kernel/tests/kernel_use_outcome.rs:776` | `uo-p-served-ids-equal-frozen-composition`, `uo-p-producer-matches-request-subagent-flag` | unaudited |
+| `disputed_after_serve_is_judged_against_each_serve` | `crates/kernel/tests/kernel_use_outcome.rs:791` | `uo-p-disputed-after-serve-from-committed-events-only` | unaudited |
+| `the_cited_count_covers_the_rows_read_before_the_page_fills` | `crates/kernel/tests/kernel_use_outcome.rs:862` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
 
 ## Daemon
 

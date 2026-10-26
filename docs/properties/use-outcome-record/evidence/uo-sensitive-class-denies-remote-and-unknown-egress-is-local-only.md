@@ -26,7 +26,7 @@ its parent is `8ace6c9f8`).
   `unrecognized_stored_classes_read_back_restrictive`
   (`crates/kernel/src/cas/mod.rs:797`);
   `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-  (`crates/kernel/tests/kernel_use_outcome.rs:357`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:381`). Status: unaudited.
 
 ## Failure scenario
 

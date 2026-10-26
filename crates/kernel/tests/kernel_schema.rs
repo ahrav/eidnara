@@ -181,7 +181,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "1f1321066d22d1333645aa883c3d516c226f506e5c230999b7f167e303e1d0d5";
+    "68217c8971a474c9b6042b3a229a75e417bc9fc37132e2f7fba6da4dd050a4fb";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -2319,16 +2319,19 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
         [&short],
     )
     .unwrap();
-    // A decision row names a registry object of kind `decision`.
+    // A decision row names a registry object of kind `decision` that was live at the record's served commit.
     seed_object(&conn, "observation-1", "observation", again);
-    assert_aborts_with(
-        &conn,
-        &format!(
-            "INSERT INTO use_outcome_decisions(use_outcome_id,object_id)
-             VALUES ('{short}','observation-1')"
-        ),
-        "use_outcome_decisions name decision objects",
-    );
+    seed_object(&conn, "decision-late", "decision", again);
+    for object in ["observation-1", "decision-late"] {
+        assert_aborts_with(
+            &conn,
+            &format!(
+                "INSERT INTO use_outcome_decisions(use_outcome_id,object_id)
+                 VALUES ('{short}','{object}')"
+            ),
+            "use_outcome_decisions name decision objects live at the served commit",
+        );
+    }
     next_commit(&conn, "tx-after-short");
     assert_aborts_with(
         &conn,

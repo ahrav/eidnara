@@ -25,7 +25,7 @@ its parent is `8ace6c9f8`).
   `malformed_stored_policy_and_sensitivity_fail_closed_without_read_error`
   (`crates/kernel/tests/kernel_admission.rs:2935`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:376`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:400`). Status: unaudited.
 
 ## Failure scenario
 

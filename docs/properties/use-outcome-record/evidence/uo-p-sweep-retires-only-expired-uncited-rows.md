@@ -43,11 +43,11 @@ its parent is `8ace6c9f8`).
   inside that commit; a page that retires nothing commits nothing; the Kernel
   maintenance slice calls it once per pass whenever the Kernel is Ready.
 - Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
-  (`crates/kernel/tests/kernel_use_outcome.rs:509`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:533`);
   `an_expiry_backlog_drains_one_page_per_call`
-  (`crates/kernel/tests/kernel_use_outcome.rs:571`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:595`);
   `an_expired_record_cited_by_a_live_report_is_retained`
-  (`crates/kernel/tests/kernel_use_outcome.rs:641`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:665`);
   `a_record_cited_after_selection_is_kept`
   (`crates/kernel/src/use_outcome.rs:743`);
   `a_page_another_sweep_committed_at_the_same_cutoff_replays`
@@ -57,7 +57,7 @@ its parent is `8ace6c9f8`).
   `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
   (`crates/kernel/src/use_outcome.rs:855`);
   `the_cited_count_covers_the_rows_read_before_the_page_fills`
-  (`crates/kernel/tests/kernel_use_outcome.rs:838`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:862`);
   `the_sweep_and_the_reads_use_their_indexes`
   (`crates/kernel/src/use_outcome.rs:872`);
   `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`

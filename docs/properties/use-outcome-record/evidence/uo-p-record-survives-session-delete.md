@@ -22,7 +22,7 @@ its parent is `8ace6c9f8`).
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
   (`crates/kernel/tests/kernel_schema.rs:2177`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:376`) (a retired record stays
+  (`crates/kernel/tests/kernel_use_outcome.rs:400`) (a retired record stays
   readable). Status: unaudited.
 
 ## Failure scenario

@@ -253,6 +253,30 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
         Err(KernelError::InvalidInput),
         "a decision row names a decision object"
     );
+    writer(root.path())
+        .execute_batch(&format!(
+            "INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES ('d3','decision','domain','fixture','d3',1,{later},'normal');
+             INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,invalidated_commit_seq,sensitivity_class
+             ) VALUES ('d4','decision','domain','fixture','d4',1,1,{served_at},'normal');",
+            later = served_at + 1
+        ))
+        .unwrap();
+    tick(&store, "later");
+    for (context, ids) in [
+        ("created after the serve", ["d1", "d3"]),
+        ("retired at the serve", ["d1", "d4"]),
+    ] {
+        assert_eq!(
+            insert(&store, context, spec("s3", &ids, served_at, 100)),
+            Err(KernelError::InvalidInput),
+            "{context}"
+        );
+    }
     let next = store.tip().unwrap() + 1;
     let with_secret_id = || {
         let mut ids = vec!["d1".to_string(), SECRET.to_string()];
@@ -345,7 +369,7 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
         count(
             root.path(),
             "SELECT COUNT(*) FROM commit_log
-             WHERE operation_key GLOB 'bad-*' OR operation_key IN ('again','unknown','observation')"
+             WHERE operation_key GLOB 'bad-*' OR operation_key IN ('again','unknown','observation','created after the serve','retired at the serve')"
         ),
         0,
         "a refused commit appends no commit-log row"

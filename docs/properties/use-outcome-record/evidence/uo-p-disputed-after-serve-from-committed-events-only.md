@@ -25,9 +25,9 @@ its parent is `8ace6c9f8`).
   sequence greater than n.
 - Existing check:
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:376`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:400`);
   `disputed_after_serve_is_judged_against_each_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:767`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:791`). Status: unaudited.
 
 ## Failure scenario
 
