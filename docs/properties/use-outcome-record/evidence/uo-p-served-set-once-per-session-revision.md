@@ -41,7 +41,7 @@ its parent is `d85de937b`).
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:214`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-  (`crates/kernel/tests/kernel_use_outcome.rs:713`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:729`). Status: unaudited.
 
 ## Failure scenario
 

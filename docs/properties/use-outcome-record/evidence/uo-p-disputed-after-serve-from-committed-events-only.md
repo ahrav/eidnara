@@ -24,7 +24,7 @@ its parent is `d85de937b`).
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
   (`crates/kernel/tests/kernel_use_outcome.rs:341`);
   `disputed_after_serve_is_judged_against_each_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:749`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:765`). Status: unaudited.
 
 ## Failure scenario
 

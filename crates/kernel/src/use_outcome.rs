@@ -504,11 +504,12 @@ impl KernelStore {
     /// Returns storage and lock errors.
     pub fn served_counts_for(
         &self,
+        budget: &crate::applicability::EvalBudget,
         project_digest: &str,
         object_id: &str,
     ) -> Result<ServedCounts, KernelError> {
         let (served, disputed): (i64, i64) = self
-            .lock_reader()?
+            .reader_with_limit(&budget.acquire_limit())?
             .query_row_cached(&SERVED_COUNTS_SQL, [object_id, project_digest], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })

@@ -29,9 +29,13 @@ its parent is `d85de937b`).
   `packages/cli/src/commands/review-wire.contract.test.ts:125`;
   `packages/cli/src/commands/review.test.ts:849`; Kernel half:
   `disputed_after_serve_is_judged_against_each_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:749`) and
+  (`crates/kernel/tests/kernel_use_outcome.rs:765`) and
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:341`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:341`); the read bound:
+  `a_held_reader_pool_bounds_the_count_read`
+  (`crates/kernel/tests/kernel_use_outcome.rs:1108`) and
+  `review_use_outcome_reads_the_kernel_under_a_bounded_budget`
+  (`crates/daemon/tests/memory_reviewer_wire.rs:787`). Status: unaudited.
 
 ## Failure scenario
 
@@ -79,8 +83,10 @@ two sessions with one later dispute.
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A failed read after the Kernel is Ready answers the kernel state its
-  failure maps to; no test drives that arm. AC19 (no identifier in logs or
-  `host.status`) holds by inspection: the handler logs nothing and adds no
-  status field.
+  failure maps to. The read runs under a 5 s budget; a held reader pool stops the
+  Kernel read with `Deadline` (`a_held_reader_pool_bounds_the_count_read`),
+  which maps to `unavailable`/`store_busy`; no daemon test drives that
+  state answer. AC19 (no identifier in logs or `host.status`) holds by
+  inspection: the handler logs nothing and adds no status field.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.

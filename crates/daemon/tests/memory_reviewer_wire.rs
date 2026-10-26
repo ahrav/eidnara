@@ -782,3 +782,23 @@ async fn review_use_outcome_counts_serves_and_later_disputes_of_one_decision() {
         assert!(mismatch.get("served_sessions").is_none(), "{body}");
     }
 }
+
+#[tokio::test]
+async fn review_use_outcome_reads_the_kernel_under_a_bounded_budget() {
+    let daemon = KernelDaemon::start().await;
+    let project = daemon.project().to_path_buf();
+    let kernel = daemon.store();
+    let controlled = kernel.controlled_acquisitions_for_test();
+    let answer = daemon
+        .call(envelope(
+            "review.use_outcome",
+            &project,
+            json!({ "object_id": "never-served" }),
+        ))
+        .await;
+    assert_eq!(answer["kind"], "counts", "{answer}");
+    assert!(
+        kernel.controlled_acquisitions_for_test() > controlled,
+        "the count read took an unbounded reader"
+    );
+}

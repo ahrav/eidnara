@@ -425,7 +425,13 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
         assert_eq!(sessions.len(), 1, "{object} has one serve");
         assert_eq!(sessions[0].serve.use_outcome_id, id);
         assert_eq!(
-            store.served_counts_for(&project(), object).unwrap(),
+            store
+                .served_counts_for(
+                    &kernel::applicability::EvalBudget::unbounded(),
+                    &project(),
+                    object
+                )
+                .unwrap(),
             ServedCounts {
                 served_sessions: 1,
                 disputed_after_serve: u64::from(sessions[0].disputed_after_serve),
@@ -456,7 +462,13 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
     }
     assert!(store.served_sessions_for("unserved").unwrap().is_empty());
     assert_eq!(
-        store.served_counts_for(&project(), "unserved").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "unserved"
+            )
+            .unwrap(),
         ServedCounts::default()
     );
 
@@ -471,7 +483,11 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
     );
     assert_eq!(
         store
-            .served_counts_for(&project(), "later-dispute")
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "later-dispute"
+            )
             .unwrap(),
         ServedCounts::default(),
         "a retired record is not counted"
@@ -780,15 +796,33 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         disputed_after_serve,
     };
     assert_eq!(
-        store.served_counts_for(&project(), "x").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "x"
+            )
+            .unwrap(),
         counts(2, 1)
     );
     assert_eq!(
-        store.served_counts_for(&project(), "never-served").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "never-served"
+            )
+            .unwrap(),
         counts(0, 0)
     );
     assert_eq!(
-        store.served_counts_for(&"b".repeat(64), "x").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &"b".repeat(64),
+                "x"
+            )
+            .unwrap(),
         counts(0, 0),
         "another project's serves are not counted"
     );
@@ -800,14 +834,26 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         .unwrap();
     assert_eq!(answer(&store), [(second, false)]);
     assert_eq!(
-        store.served_counts_for(&project(), "x").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "x"
+            )
+            .unwrap(),
         counts(1, 0),
         "a retired record is not counted"
     );
     let third_at = tick(&store, "third");
     insert(&store, "serve-3", spec("s2", &["x", "y"], third_at, 100)).unwrap();
     assert_eq!(
-        store.served_counts_for(&project(), "x").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "x"
+            )
+            .unwrap(),
         counts(2, 0),
         "one session served at two served sets holds two records"
     );
@@ -1056,4 +1102,36 @@ fn an_outside_file_lock_bounds_the_advance_at_begin() {
         "the busy timeout did not run: {waited:?}"
     );
     assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
+}
+
+#[test]
+fn a_held_reader_pool_bounds_the_count_read() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 100)).unwrap();
+    let wait = std::time::Duration::from_millis(100);
+    let hold = std::time::Duration::from_millis(1_500);
+    let held = std::sync::Barrier::new(2);
+    let (counted, waited) = std::thread::scope(|scope| {
+        let store = &store;
+        let held = &held;
+        let holder = scope.spawn(move || store.hold_readers_for_test(held, hold));
+        held.wait();
+        let started = std::time::Instant::now();
+        let counted = store.served_counts_for(&budget(wait), &project(), "d1");
+        let waited = started.elapsed();
+        holder.join().unwrap();
+        (counted, waited)
+    });
+    assert_eq!(counted, Err(KernelError::Deadline));
+    assert!(waited >= wait, "{waited:?}");
+    assert!(waited < hold, "the read waited for the pool: {waited:?}");
+    assert_eq!(
+        store.served_counts_for(&budget(wait), &project(), "d1"),
+        Ok(ServedCounts {
+            served_sessions: 1,
+            disputed_after_serve: 0,
+        })
+    );
 }
