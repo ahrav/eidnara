@@ -6,7 +6,9 @@ use kernel::schema::{
     verify_kernel_connection_contract,
 };
 use kernel::sqlite_runtime::DIRECT_FORMAT_EPOCH;
-use rusqlite::ffi::{SQLITE_CONSTRAINT_CHECK, SQLITE_CONSTRAINT_UNIQUE};
+use rusqlite::ffi::{
+    SQLITE_CONSTRAINT_CHECK, SQLITE_CONSTRAINT_FOREIGNKEY, SQLITE_CONSTRAINT_UNIQUE,
+};
 use rusqlite::{Connection, ErrorCode, params};
 
 const EXPECTED_COMPONENTS: &[&str] = &[
@@ -48,6 +50,8 @@ const EXPECTED_COMPONENTS: &[&str] = &[
     "observations",
     "observation_dependencies",
     "alignment_projection",
+    "use_outcomes",
+    "use_outcome_decisions",
     "kernel_format_marker",
 ];
 
@@ -177,7 +181,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "13437d62f69c77d1f5bdad72195473d1f409c2647efecdcac660554e5c1db07b";
+    "40cf9b503ce6458c98e352324df95e4a7ad97066f6e9b4b5e699bd62140e150b";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -1907,6 +1911,7 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("index", "idx_admission_source_latest"),
         ("index", "idx_admission_subject_latest"),
         ("index", "idx_admission_trigger_fk"),
+        ("index", "idx_admission_use_outcome_fk"),
         ("index", "idx_alias_active"),
         ("index", "idx_alias_known_as_of"),
         ("index", "idx_alias_lookup"),
@@ -1995,6 +2000,8 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("index", "idx_scopes_domain_fk"),
         ("index", "idx_scopes_known_as_of"),
         ("index", "idx_text_redactions_commit_fk"),
+        ("index", "idx_use_outcome_decisions_object_fk"),
+        ("index", "idx_use_outcomes_live_retention"),
         ("table", "admission_decisions"),
         ("table", "alignment_projection"),
         ("table", "alignment_projection_state"),
@@ -2033,7 +2040,11 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("table", "relation_registry"),
         ("table", "scope_term"),
         ("table", "scopes"),
+        ("table", "use_outcome_decisions"),
+        ("table", "use_outcomes"),
         ("table", "writer_fence"),
+        ("trigger", "admission_decisions_citation_no_delete"),
+        ("trigger", "admission_decisions_use_outcome_immutable"),
         (
             "trigger",
             "artifact_ingestion_reservations_identity_immutable",
@@ -2084,6 +2095,15 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("trigger", "operation_receipts_identity_immutable"),
         ("trigger", "operation_receipts_no_delete"),
         ("trigger", "outbox_consumers_checkpoint_monotonic"),
+        ("trigger", "use_outcome_decisions_name_decisions"),
+        ("trigger", "use_outcome_decisions_no_delete"),
+        ("trigger", "use_outcome_decisions_no_update"),
+        ("trigger", "use_outcome_decisions_written_with_record"),
+        ("trigger", "use_outcomes_deleted_at_set_once"),
+        ("trigger", "use_outcomes_identity_immutable"),
+        ("trigger", "use_outcomes_last_transform_at_monotonic"),
+        ("trigger", "use_outcomes_no_delete"),
+        ("trigger", "use_outcomes_retire_once"),
         ("trigger", "writer_fence_no_delete"),
     ];
     let (_dir, mut conn) = open_profiled();
@@ -2131,4 +2151,387 @@ fn a_nonpositive_busy_timeout_is_refused_instead_of_removing_the_busy_handler() 
             "the profile must not proceed to the WAL switch"
         );
     }
+}
+
+/// Inserts one serving record `id` served at `served` and created at `created`, with one decision row naming `object_id`.
+fn seed_use_outcome(conn: &Connection, id: &str, object_id: &str, served: i64, created: i64) {
+    conn.execute(
+        "INSERT INTO use_outcomes(
+             use_outcome_id,project_digest,harness,session_id,served_set_digest,decision_count,
+             composition_revision,served_commit_seq,session_role,recorded_at,created_commit_seq,
+             retention_class,retain_until,sensitivity_class,provider_egress_class
+         ) VALUES (?1,?2,'opencode','session-1',?3,1,7,?4,'primary',10,?5,
+                   'use_outcome_capture',20,'sensitive','local_only')",
+        params![id, "a".repeat(64), "b".repeat(64), served, created],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO use_outcome_decisions(use_outcome_id,object_id) VALUES (?1,?2)",
+        params![id, object_id],
+    )
+    .unwrap();
+}
+
+/// Every transition outside `deleted_at` set once, `last_transform_at` non-decreasing, and one retirement aborts; no row of either table can be deleted or replaced.
+#[test]
+fn use_outcome_identity_and_served_set_are_never_rewritten() {
+    let (_dir, mut conn) = open_profiled();
+    apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
+    let root = seed_root_domain(&mut conn);
+    seed_object(&conn, "decision-1", "decision", root);
+    seed_object(&conn, "decision-2", "decision", root);
+    let id = "c".repeat(64);
+    let created = next_commit(&conn, "tx-created");
+    seed_use_outcome(&conn, &id, "decision-1", root, created);
+    // A decision row inserted after recording aborts while `created` is still the newest commit.
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT INTO use_outcome_decisions(use_outcome_id,object_id)
+             VALUES ('{id}','decision-2')"
+        ),
+        "use_outcome_decisions are written with their record",
+    );
+    let later = next_commit(&conn, "tx-later");
+
+    for (column, value) in [
+        ("use_outcome_id", format!("'{}'", "d".repeat(64))),
+        ("project_digest", format!("'{}'", "e".repeat(64))),
+        ("harness", "'pi'".to_string()),
+        ("session_id", "'session-2'".to_string()),
+        ("served_set_digest", format!("'{}'", "f".repeat(64))),
+        ("decision_count", "2".to_string()),
+        ("composition_revision", "8".to_string()),
+        ("served_commit_seq", later.to_string()),
+        ("session_role", "'subagent'".to_string()),
+        ("recorded_at", "11".to_string()),
+        ("created_commit_seq", later.to_string()),
+        ("retention_class", "'use_outcome_capture'".to_string()),
+        ("retain_until", "21".to_string()),
+        ("sensitivity_class", "'sensitive'".to_string()),
+        ("provider_egress_class", "'local_only'".to_string()),
+    ] {
+        assert_aborts_with(
+            &conn,
+            &format!("UPDATE use_outcomes SET {column}={value}"),
+            "use_outcomes identity is immutable",
+        );
+    }
+
+    conn.execute("UPDATE use_outcomes SET last_transform_at=30", [])
+        .unwrap();
+    conn.execute("UPDATE use_outcomes SET last_transform_at=30", [])
+        .expect("an equal timestamp is non-decreasing");
+    for value in ["29", "NULL"] {
+        assert_aborts_with(
+            &conn,
+            &format!("UPDATE use_outcomes SET last_transform_at={value}"),
+            "last_transform_at must not move backward",
+        );
+    }
+    conn.execute("UPDATE use_outcomes SET last_transform_at=31", [])
+        .unwrap();
+
+    conn.execute("UPDATE use_outcomes SET deleted_at=40", [])
+        .unwrap();
+    conn.execute("UPDATE use_outcomes SET deleted_at=40", [])
+        .expect("rewriting the same deleted_at changes nothing");
+    for value in ["41", "NULL"] {
+        assert_aborts_with(
+            &conn,
+            &format!("UPDATE use_outcomes SET deleted_at={value}"),
+            "deleted_at is set once",
+        );
+    }
+
+    conn.execute("UPDATE use_outcomes SET invalidated_commit_seq=?1", [later])
+        .unwrap();
+    let again = next_commit(&conn, "tx-again");
+    for value in [again.to_string(), "NULL".to_string()] {
+        assert_aborts_with(
+            &conn,
+            &format!("UPDATE use_outcomes SET invalidated_commit_seq={value}"),
+            "a retired use outcome stays retired",
+        );
+    }
+
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT INTO use_outcome_decisions(use_outcome_id,object_id)
+             VALUES ('{id}','decision-2')"
+        ),
+        "use_outcome_decisions are written with their record",
+    );
+    for (sql, guard) in [
+        (
+            "DELETE FROM use_outcomes",
+            "use_outcomes are retained history",
+        ),
+        (
+            "DELETE FROM use_outcome_decisions",
+            "use_outcome_decisions are retained history",
+        ),
+        (
+            "UPDATE use_outcome_decisions SET object_id='decision-2'",
+            "use_outcome_decisions are immutable",
+        ),
+    ] {
+        assert_aborts_with(&conn, sql, guard);
+    }
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT OR REPLACE INTO use_outcomes(
+                 use_outcome_id,project_digest,harness,session_id,served_set_digest,decision_count,
+                 composition_revision,served_commit_seq,session_role,recorded_at,
+                 created_commit_seq,retention_class,retain_until,sensitivity_class,
+                 provider_egress_class
+             ) VALUES ('{id}','{}','opencode','session-1','{}',1,7,{root},'primary',10,{created},
+                       'use_outcome_capture',20,'sensitive','local_only')",
+            "a".repeat(64),
+            "b".repeat(64)
+        ),
+        "use_outcomes are retained history",
+    );
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT OR REPLACE INTO use_outcome_decisions(use_outcome_id,object_id)
+             VALUES ('{id}','decision-1')"
+        ),
+        "use_outcome_decisions are written with their record",
+    );
+    // A later commit seals the decision set even when its size is below `decision_count`.
+    let short = "e".repeat(64);
+    conn.execute(
+        "INSERT INTO use_outcomes(
+             use_outcome_id,project_digest,harness,session_id,served_set_digest,decision_count,
+             composition_revision,served_commit_seq,session_role,recorded_at,created_commit_seq,
+             retention_class,retain_until,sensitivity_class,provider_egress_class
+         ) VALUES (?1,?2,'opencode','session-short',?3,2,7,?4,'primary',10,?5,
+                   'use_outcome_capture',20,'sensitive','local_only')",
+        params![short, "a".repeat(64), "b".repeat(64), root, again],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO use_outcome_decisions(use_outcome_id,object_id) VALUES (?1,'decision-1')",
+        [&short],
+    )
+    .unwrap();
+    // A decision row names a registry object of kind `decision` that was live at the record's served commit.
+    seed_object(&conn, "observation-1", "observation", again);
+    seed_object(&conn, "decision-late", "decision", again);
+    for object in ["observation-1", "decision-late"] {
+        assert_aborts_with(
+            &conn,
+            &format!(
+                "INSERT INTO use_outcome_decisions(use_outcome_id,object_id)
+                 VALUES ('{short}','{object}')"
+            ),
+            "use_outcome_decisions name decision objects live at the served commit",
+        );
+    }
+    next_commit(&conn, "tx-after-short");
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT INTO use_outcome_decisions(use_outcome_id,object_id)
+             VALUES ('{short}','decision-2')"
+        ),
+        "use_outcome_decisions are written with their record",
+    );
+}
+
+/// A class other than `sensitive`, `local_only`, or `use_outcome_capture`, a role outside `primary` and `subagent`, a malformed digest, an empty identity field, a serve at or after its recording commit, a negative recorded time, a deadline at or before the recorded time, and a retirement at or before creation all fail a CHECK; a duplicate identity fails the UNIQUE constraint.
+#[test]
+fn use_outcome_classification_and_identity_shapes_are_checked() {
+    let (_dir, mut conn) = open_profiled();
+    apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
+    let served = seed_root_domain(&mut conn);
+    let created = next_commit(&conn, "tx-created");
+    let digest = format!("'{}'", "a".repeat(64));
+    let defaults = [
+        ("use_outcome_id", format!("'{}'", "c".repeat(64))),
+        ("project_digest", digest.clone()),
+        ("harness", "'opencode'".to_string()),
+        ("session_id", "'session-1'".to_string()),
+        ("served_set_digest", digest.clone()),
+        ("decision_count", "0".to_string()),
+        ("composition_revision", "7".to_string()),
+        ("served_commit_seq", served.to_string()),
+        ("session_role", "'primary'".to_string()),
+        ("recorded_at", "10".to_string()),
+        ("created_commit_seq", created.to_string()),
+        ("invalidated_commit_seq", "NULL".to_string()),
+        ("retention_class", "'use_outcome_capture'".to_string()),
+        ("retain_until", "20".to_string()),
+        ("sensitivity_class", "'sensitive'".to_string()),
+        ("provider_egress_class", "'local_only'".to_string()),
+    ];
+    let insert = |column: &str, value: &str| {
+        let (columns, values): (Vec<&str>, Vec<&str>) = defaults
+            .iter()
+            .map(|(name, default)| {
+                (
+                    *name,
+                    if *name == column {
+                        value
+                    } else {
+                        default.as_str()
+                    },
+                )
+            })
+            .unzip();
+        conn.execute(
+            &format!(
+                "INSERT INTO use_outcomes({}) VALUES ({})",
+                columns.join(","),
+                values.join(",")
+            ),
+            [],
+        )
+    };
+    for (column, value) in [
+        ("sensitivity_class", "'normal'".to_string()),
+        ("sensitivity_class", "'secret'".to_string()),
+        ("provider_egress_class", "'remote_allowed'".to_string()),
+        ("retention_class", "'canonical'".to_string()),
+        ("session_role", "'producer'".to_string()),
+        ("project_digest", format!("'{}'", "A".repeat(64))),
+        ("served_set_digest", format!("'{}'", "a".repeat(63))),
+        ("use_outcome_id", format!("'{}'", "g".repeat(64))),
+        ("harness", "''".to_string()),
+        ("session_id", "''".to_string()),
+        ("decision_count", "-1".to_string()),
+        ("served_commit_seq", created.to_string()),
+        ("invalidated_commit_seq", created.to_string()),
+        ("recorded_at", "-1".to_string()),
+        ("retain_until", "10".to_string()),
+        ("retain_until", "5".to_string()),
+    ] {
+        assert_constraint_violation(
+            insert(column, &value),
+            SQLITE_CONSTRAINT_CHECK,
+            &format!("{column}={value}"),
+        );
+    }
+    insert("session_role", "'subagent'").expect("a well-formed subagent serve inserts");
+    assert_constraint_violation(
+        insert("use_outcome_id", &format!("'{}'", "d".repeat(64))),
+        SQLITE_CONSTRAINT_UNIQUE,
+        "a second record for one identity tuple",
+    );
+}
+
+/// An admission row can cite only a recorded use outcome, names it when the row is written, and never sets, changes, or clears it afterwards.
+#[test]
+fn an_admission_citation_names_a_recorded_use_outcome_and_never_changes() {
+    let (_dir, mut conn) = open_profiled();
+    apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
+    let root = seed_root_domain(&mut conn);
+    seed_object(&conn, "decision-1", "decision", root);
+    seed_object(&conn, "decision-2", "decision", root);
+    let created = next_commit(&conn, "tx-created");
+    let id = "c".repeat(64);
+    seed_use_outcome(&conn, &id, "decision-1", root, created);
+    let cite = |row: &str, use_outcome: &str| {
+        conn.execute(
+            "INSERT INTO admission_decisions(
+                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,
+                 decided_at,use_outcome_id
+             ) VALUES (?1,'decision-1','test','decision-1',1,'explicit_user','user_explicit',
+                       'contradict','candidate','candidate','contradicted','automatic','admit',
+                       'normal',1,'fixture',?2,1,?3)",
+            params![row, created, use_outcome],
+        )
+    };
+    assert_constraint_violation(
+        cite("dangling", &"d".repeat(64)),
+        SQLITE_CONSTRAINT_FOREIGNKEY,
+        "a citation of an unrecorded use outcome",
+    );
+    cite("report", &id).expect("a citation of a recorded use outcome inserts");
+    // The sweep recognizes a citation by its subject and its committed sequence, so a citing row keeps both.
+    for assignment in [
+        "subject_object_id='decision-2'",
+        "subject_object_id=NULL",
+        "commit_seq=NULL",
+        &format!("commit_seq={}", created + 1),
+    ] {
+        assert_aborts_with(
+            &conn,
+            &format!(
+                "UPDATE admission_decisions SET {assignment} WHERE admission_decision_id='report'"
+            ),
+            "an admission citation of a use outcome is written with its row",
+        );
+    }
+    for value in ["NULL".to_string(), format!("'{}'", "d".repeat(64))] {
+        assert_aborts_with(
+            &conn,
+            &format!(
+                "UPDATE admission_decisions SET use_outcome_id={value}
+                 WHERE admission_decision_id='report'"
+            ),
+            "an admission citation of a use outcome is written with its row",
+        );
+    }
+    conn.execute(
+        "INSERT INTO admission_decisions(
+             admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+             source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+             visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+         ) VALUES ('uncited','decision-1','test','decision-1',1,'explicit_user','user_explicit',
+                   'contradict','candidate','candidate','contradicted','automatic','admit',
+                   'normal',1,'fixture',?1,1)",
+        [created],
+    )
+    .unwrap();
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "UPDATE admission_decisions SET use_outcome_id='{id}'
+             WHERE admission_decision_id='uncited'"
+        ),
+        "an admission citation of a use outcome is written with its row",
+    );
+    conn.execute(
+        &format!(
+            "UPDATE admission_decisions SET use_outcome_id='{id}'
+             WHERE admission_decision_id='report'"
+        ),
+        [],
+    )
+    .expect("rewriting the same citation changes nothing");
+    // Deleting a citing row aborts, including the delete REPLACE runs on the conflicting row.
+    assert_aborts_with(
+        &conn,
+        "DELETE FROM admission_decisions WHERE admission_decision_id='report'",
+        "an admission citation of a use outcome is written with its row",
+    );
+    assert_aborts_with(
+        &conn,
+        &format!(
+            "INSERT OR REPLACE INTO admission_decisions(
+                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+             ) VALUES ('report','decision-1','test','decision-1',1,'explicit_user','user_explicit',
+                       'contradict','candidate','candidate','contradicted','automatic','admit',
+                       'normal',1,'fixture',{created},1)"
+        ),
+        "an admission citation of a use outcome is written with its row",
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT use_outcome_id FROM admission_decisions WHERE admission_decision_id='report'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        id
+    );
 }

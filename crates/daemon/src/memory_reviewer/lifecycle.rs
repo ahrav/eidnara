@@ -309,7 +309,7 @@ pub fn reconcile_review_holds(
     Ok(Some(released))
 }
 
-/// Returns whether capture expiry or staging maintenance advanced, or `None` when `cancelled` fired before a step. The MemoryReviewer and harness capture sweeps run first, so the artifact walk in staging maintenance sees the references they retired; the harness sweep's progress is stored in `harness_expiry` as soon as it returns.
+/// Returns whether capture expiry, use-outcome expiry, or staging maintenance advanced, or `None` when `cancelled` fired before a step. The MemoryReviewer and harness capture sweeps run first, so the artifact walk in staging maintenance sees the references they retired; the harness sweep's progress is stored in `harness_expiry` as soon as it returns. The use-outcome sweep runs after the capture sweeps.
 fn kernel_slice(
     kernel: &kernel::KernelStore,
     now_ms: i64,
@@ -327,6 +327,11 @@ fn kernel_slice(
     let harness = kernel.expire_harness_captures(now_ms)?;
     harness_expiry.set(harness);
     advanced |= harness.retired + harness.retained > 0;
+    if cancelled() {
+        return Ok(None);
+    }
+    // A cited use outcome is kept and counted again on every pass while its citation holds, so only retirements earn the next pass without the idle interval.
+    advanced |= kernel.expire_use_outcomes(now_ms)?.retired > 0;
     Ok(
         maintenance_slice(cancelled, || kernel.run_staging_maintenance(now_ms))?
             .map(|maintained| advanced || maintained),
@@ -778,6 +783,169 @@ mod tests {
                 .is_some_and(|state| state.object.invalidated_commit_seq.is_some()),
             "the expired evidence is retired"
         );
+    }
+
+    fn seed_expired_use_outcome(kernel_store: &kernel::KernelStore) {
+        let intent = |key: &str| kernel::CommitIntent {
+            producer: "lifecycle-test".to_string(),
+            operation_key: key.to_string(),
+            request_digest: "d".repeat(64),
+            actor: "test".to_string(),
+            cause: "proof".to_string(),
+        };
+        let served_at = kernel_store
+            .commit(intent("tick"), |_| Ok(String::new()))
+            .unwrap()
+            .commit_seq;
+        kernel_store
+            .commit(intent("serve"), |envelope| {
+                envelope.insert_use_outcome(kernel::UseOutcomeSpec {
+                    project_digest: "a".repeat(64),
+                    harness: "opencode".to_string(),
+                    session_id: "session".to_string(),
+                    served_set_digest: kernel::served_set_digest([]),
+                    composition_revision: 1,
+                    served_commit_seq: served_at,
+                    session_role: kernel::SessionRole::Primary,
+                    recorded_at: 0,
+                    decision_object_ids: Vec::new(),
+                })
+            })
+            .unwrap();
+    }
+
+    fn use_outcome_retired(kernel_store: &kernel::KernelStore) -> bool {
+        kernel_store
+            .served_set(&"a".repeat(64), "opencode", "session")
+            .unwrap()
+            .unwrap()[0]
+            .serve
+            .invalidated_commit_seq
+            .is_some()
+    }
+
+    /// The maintenance slice runs the use-outcome sweep whenever it is handed a Ready Kernel, with no activation record in place: an expired serving record is retired by one pass that counts as advancing, and the pass after it idles.
+    #[test]
+    fn the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&MemoryStore::test_descriptor(
+            store_dir.path(),
+            "eidnara-memory_reviewer-lifecycle-test",
+        ))
+        .unwrap();
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+        seed_expired_use_outcome(&kernel_store);
+        let sweep_at = kernel::USE_OUTCOME_RETENTION_MS + 1;
+        let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &|| false)
+            .expect("not cancelled");
+        assert!(pass.healthy);
+        assert_eq!(
+            pass.block.activation_state,
+            ActivationStateText(ActivationState::Closed("unknown"))
+        );
+        assert!(
+            pass.advanced,
+            "retiring an expired serving record is progress"
+        );
+        assert!(use_outcome_retired(&kernel_store));
+        let again = sweep_and_sample(&store, Some(&kernel_store), sweep_at + 1, None, &|| false)
+            .expect("not cancelled");
+        assert!(!again.advanced, "nothing was left to retire");
+    }
+
+    /// A cited expired record is kept and counted on every pass while its citation holds, so it is not progress: a pass that only keeps it idles.
+    #[test]
+    fn a_cited_use_outcome_kept_by_the_sweep_is_not_progress() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&MemoryStore::test_descriptor(
+            store_dir.path(),
+            "eidnara-memory_reviewer-lifecycle-test",
+        ))
+        .unwrap();
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+        seed_expired_use_outcome(&kernel_store);
+        let use_outcome_id = kernel_store
+            .served_set(&"a".repeat(64), "opencode", "session")
+            .unwrap()
+            .unwrap()[0]
+            .serve
+            .use_outcome_id
+            .clone();
+        kernel_store
+            .commit(
+                kernel::CommitIntent {
+                    producer: "lifecycle-test".to_string(),
+                    operation_key: "subject".to_string(),
+                    request_digest: "d".repeat(64),
+                    actor: "test".to_string(),
+                    cause: "proof".to_string(),
+                },
+                |envelope| {
+                    envelope.insert_domain(kernel::DomainSpec {
+                        domain_id: "subject-domain".to_string(),
+                        object_id: "subject".to_string(),
+                        name: "subject".to_string(),
+                        source_kind: "fixture".to_string(),
+                        source_id: "subject".to_string(),
+                        source_revision: 1,
+                        sensitivity: kernel::Sensitivity::Normal,
+                    })?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        let connection =
+            rusqlite::Connection::open(kernel_dir.path().join("kernel.sqlite")).unwrap();
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,
+                     source_revision,source_class,taint_class,event_kind,maturity,
+                     effective_maturity,disposition,visibility,outcome,sensitivity_class,
+                     policy_revision,reason,commit_seq,decided_at,use_outcome_id
+                 ) VALUES ('report','subject','fixture','subject',1,'explicit_user',
+                           'user_explicit','contradict','candidate','candidate','contradicted',
+                           'automatic','admit','normal',1,'fixture',1,1,'{use_outcome_id}');"
+            ))
+            .unwrap();
+        let sweep_at = kernel::USE_OUTCOME_RETENTION_MS + 1;
+        assert_eq!(
+            kernel_store.expire_use_outcomes(sweep_at).unwrap().cited,
+            1,
+            "the sweep keeps and counts the cited record"
+        );
+        let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at + 1, None, &|| false)
+            .expect("not cancelled");
+        assert!(pass.healthy);
+        assert!(!pass.advanced, "keeping a cited record is not progress");
+        assert!(!use_outcome_retired(&kernel_store));
+    }
+
+    /// A cancellation observed after the capture sweeps stops the slice before the use-outcome sweep starts.
+    #[test]
+    fn a_cancelled_slice_stops_before_the_use_outcome_sweep() {
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+        seed_expired_use_outcome(&kernel_store);
+        let checks = std::cell::Cell::new(0);
+        let after_the_capture_sweeps = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 2
+        };
+        let harness = std::cell::Cell::new(kernel::CaptureExpiry::default());
+        assert_eq!(
+            kernel_slice(
+                &kernel_store,
+                kernel::USE_OUTCOME_RETENTION_MS + 1,
+                &after_the_capture_sweeps,
+                &harness,
+            ),
+            Ok(None)
+        );
+        assert_eq!(checks.get(), 3, "the capture sweeps ran");
+        assert!(!use_outcome_retired(&kernel_store));
     }
 
     fn maintenance(

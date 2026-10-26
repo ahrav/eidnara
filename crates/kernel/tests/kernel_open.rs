@@ -571,3 +571,50 @@ fn a_database_file_swapped_during_bootstrap_receives_no_schema() {
         "the planted file received a schema"
     );
 }
+
+/// The Kernel baseline before the use-outcome tables, frozen byte for byte as `sqlite_schema` held it, and its digest.
+const PRIOR_BASELINE: &str = include_str!("fixtures/prior_kernel_baseline.sql");
+const PRIOR_BASELINE_DIGEST: &str =
+    "13437d62f69c77d1f5bdad72195473d1f409c2647efecdcac660554e5c1db07b";
+
+/// A family laid down under the previous baseline, with a well-formed marker naming that baseline's digest, is refused as `IdentityMismatch`, and its main file and `-wal` stay byte-identical.
+#[test]
+fn a_family_created_under_the_previous_baseline_is_refused_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = Connection::open(core_path(dir.path())).unwrap();
+    apply_kernel_connection_profile(&mut conn, 5_000).unwrap();
+    conn.pragma_update(None, "application_id", KERNEL_APPLICATION_ID)
+        .unwrap();
+    conn.pragma_update(None, "user_version", DIRECT_FORMAT_EPOCH)
+        .unwrap();
+    conn.execute_batch(PRIOR_BASELINE).unwrap();
+    conn.execute("INSERT INTO writer_fence(id) VALUES(0)", [])
+        .unwrap();
+    let digest = kernel_schema_digest(&conn).unwrap();
+    assert_eq!(digest, PRIOR_BASELINE_DIGEST);
+    assert_ne!(
+        kernel::kernel_baseline_digest().unwrap(),
+        PRIOR_BASELINE_DIGEST
+    );
+    conn.execute(
+        "INSERT INTO kernel_format_marker(
+             singleton,format_epoch,database_incarnation_id,schema_digest,created_at,marker_digest
+         ) VALUES (1,?1,?2,?3,1000,?4)",
+        (
+            DIRECT_FORMAT_EPOCH,
+            INCARNATION,
+            &digest,
+            marker_digest(DIRECT_FORMAT_EPOCH, &digest),
+        ),
+    )
+    .unwrap();
+    drop(conn);
+    let (before_main, before_wal) = write_wal_sentinel_and_snapshot(dir.path(), b"prior wal");
+
+    assert_eq!(
+        KernelStore::open(dir.path()).unwrap_err(),
+        KernelError::IdentityMismatch
+    );
+    assert_family_bytes_unchanged(dir.path(), &before_main, &before_wal, "prior baseline");
+    assert_refusal_left_only_open_scaffolding(dir.path());
+}

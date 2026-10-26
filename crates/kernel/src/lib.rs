@@ -37,6 +37,7 @@ mod source_descriptor;
 mod source_export;
 mod source_hold;
 pub mod source_identity;
+mod use_outcome;
 pub mod write_observer;
 
 pub use admission::{
@@ -178,6 +179,11 @@ pub use source_hold::{
     HeldCursor, HeldDescriptor, HeldPage, MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER,
     MAX_SOURCE_HOLD_LIFETIME_MS, SourceHold, SourceHoldAdmission, SourceHoldBinding,
     SourceHoldBounds, SourceHoldError, SourceHoldInvalidity,
+};
+pub use use_outcome::{
+    MAX_EXPIRED_USE_OUTCOMES_PER_CALL, ServedSession, SessionRole, USE_OUTCOME_RETENTION_CLASS,
+    USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeRecord, UseOutcomeServe, UseOutcomeSpec,
+    served_set_digest, use_outcome_id,
 };
 
 /// `Connection::execute` and `Connection::query_row` prepare their statement

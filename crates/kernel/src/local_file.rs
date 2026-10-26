@@ -431,17 +431,32 @@ impl KernelStore {
 
 /// The intent of one capture's expiry commit, keyed by the cutoff and the evidence id under the reserved producer.
 fn expiry_intent(class: &ExpiringClass, now: i64, evidence_id: &str) -> CommitIntent {
+    reserved_expiry_intent(class.producer, class.cause, now, evidence_id)
+}
+
+/// The intent of one expiring row's receipt under the reserved producer suffix `producer`: keyed by the cutoff and the row id, with a digest over the id. Every expiry sweep keys its receipts this way, so a repeat at one cutoff finds the same key.
+pub(crate) fn reserved_expiry_intent(
+    producer: &str,
+    cause: &str,
+    now: i64,
+    id: &str,
+) -> CommitIntent {
+    let (operation_key, request_digest) = reserved_expiry_key(now, id);
     CommitIntent {
-        producer: format!(
-            "{}{}",
-            CommitIntent::RESERVED_PRODUCER_PREFIX,
-            class.producer
-        ),
-        operation_key: format!("{now}:{evidence_id}"),
-        request_digest: format!("{:x}", sha2::Sha256::digest(evidence_id.as_bytes())),
-        actor: class.producer.to_string(),
-        cause: class.cause.to_string(),
+        producer: format!("{}{producer}", CommitIntent::RESERVED_PRODUCER_PREFIX),
+        operation_key,
+        request_digest,
+        actor: producer.to_string(),
+        cause: cause.to_string(),
     }
+}
+
+/// The operation key and request digest [`reserved_expiry_intent`] gives the row `id` at the cutoff `now`.
+pub(crate) fn reserved_expiry_key(now: i64, id: &str) -> (String, String) {
+    (
+        format!("{now}:{id}"),
+        format!("{:x}", sha2::Sha256::digest(id.as_bytes())),
+    )
 }
 
 fn retire_expired_capture(

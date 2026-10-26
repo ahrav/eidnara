@@ -14,6 +14,7 @@ use kernel::schema::KERNEL_SCHEMA_COMPONENT_NAMES;
 use kernel::{
     ArtifactDeletionKind, ArtifactErrorKind, ArtifactHandle, BackupRequest, ConsumerAbandonment,
     DecisionEventPayload, DecisionEventSpec, RestoreFault, ScopeSpec, ScopeTermSpec, Sensitivity,
+    SessionRole, UseOutcomeSpec, served_set_digest,
 };
 
 use crate::fixtures::{
@@ -131,6 +132,21 @@ fn seeded() -> Seeded {
         Ok(String::new())
     });
     proof.store().rebuild_alignment().unwrap();
+    let served_commit_seq = proof.store().tip().unwrap();
+    proof.commit(intent("serve"), |envelope| {
+        envelope.insert_use_outcome(UseOutcomeSpec {
+            project_digest: "a".repeat(64),
+            harness: "opencode".to_string(),
+            session_id: "session-1".to_string(),
+            served_set_digest: served_set_digest(["decision-object-1"]),
+            composition_revision: 1,
+            served_commit_seq,
+            session_role: SessionRole::Primary,
+            recorded_at: 12,
+            decision_object_ids: vec!["decision-object-1".to_string()],
+        })?;
+        Ok(String::new())
+    });
     proof
         .store()
         .stage_candidate(staging("run-1", "candidate-1", "name"))

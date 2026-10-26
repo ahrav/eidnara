@@ -628,6 +628,9 @@ fn cross_root_compared_clock_columns_are_pinned() {
         "outbox.published_at",
         "outbox_consumers.updated_at",
         "outbox_publication.published_at",
+        "use_outcomes.deleted_at",
+        "use_outcomes.last_transform_at",
+        "use_outcomes.recorded_at",
     ]
     .iter()
     .map(|name| name.to_string())
