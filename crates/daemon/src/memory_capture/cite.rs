@@ -12,7 +12,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use super::FrozenHead;
-use crate::source_capture::Count;
+use crate::harness_sources::{Harness, SessionIdentity};
+use crate::source_capture::{Count, SettlementOutcome};
 
 /// Block indexes a message's citation lookup probes, `0..MAX_CITATION_BLOCKS`.
 pub(super) const MAX_CITATION_BLOCKS: usize = 256;
@@ -24,6 +25,7 @@ pub(super) enum CitationReason {
     Cited,
     SourceCaptureOff,
     SourceIdUnjoinable,
+    PublishBudgetExpired,
     DescriptorNotFound,
 }
 
@@ -33,6 +35,7 @@ impl CitationReason {
             Self::Cited => "cited",
             Self::SourceCaptureOff => "source_capture_off",
             Self::SourceIdUnjoinable => "source_id_unjoinable",
+            Self::PublishBudgetExpired => "publish_budget_expired",
             Self::DescriptorNotFound => "descriptor_not_found",
         }
     }
@@ -42,6 +45,7 @@ impl CitationReason {
             Self::Cited => Count::DecisionsCited,
             Self::SourceCaptureOff => Count::DecisionsSourceCaptureOff,
             Self::SourceIdUnjoinable => Count::DecisionsSourceIdUnjoinable,
+            Self::PublishBudgetExpired => Count::DecisionsPublishBudgetExpired,
             Self::DescriptorNotFound => Count::DecisionsDescriptorNotFound,
         }
     }
@@ -111,6 +115,20 @@ pub(super) struct Citation {
     reason: CitationReason,
     blocks: Vec<Block>,
     located: Vec<Range<usize>>,
+}
+
+/// The settlement key of the source publish a job's citation reads, or
+/// `None` for a harness source capture never serves or a hashed source id,
+/// neither of which a publish can make citable.
+pub(super) fn settlement_key(job: &CaptureJob) -> Option<SessionIdentity> {
+    if is_hashed_source_id(&job.message_id) {
+        return None;
+    }
+    Some(SessionIdentity {
+        project_id: job.project.clone(),
+        harness: Harness::parse(&job.harness)?,
+        session_id: job.session_id.clone(),
+    })
 }
 
 /// The fragment id a capture checkpoint writes for a message it cannot pass
@@ -278,18 +296,19 @@ fn read_blocks(
 impl Citation {
     /// Reads the live descriptors of the job's message inside `envelope`, so
     /// the read, the anchor, the decisions, and their citation events share
-    /// one view. `consent` is the binding's source and memory consent.
+    /// one view. `settlement` is what the session's source publish reached
+    /// before the submit; `Off` means consent is off and nothing is read.
     pub(super) fn lookup(
         envelope: &Envelope<'_>,
         job: &CaptureJob,
-        consent: bool,
+        settlement: SettlementOutcome,
     ) -> Result<Self, KernelError> {
         let empty = |reason| Self {
             reason,
             blocks: Vec::new(),
             located: Vec::new(),
         };
-        if !consent {
+        if settlement == SettlementOutcome::Off {
             return Ok(empty(CitationReason::SourceCaptureOff));
         }
         let (blocks, located) = read_blocks(&job.text, |indexes| {
@@ -311,6 +330,8 @@ impl Citation {
         if blocks.is_empty() {
             return Ok(empty(if is_hashed_source_id(&job.message_id) {
                 CitationReason::SourceIdUnjoinable
+            } else if settlement == SettlementOutcome::BudgetExpired {
+                CitationReason::PublishBudgetExpired
             } else {
                 CitationReason::DescriptorNotFound
             }));
@@ -522,6 +543,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_settlement_key_names_the_jobs_own_session_and_skips_unjoinable_jobs() {
+        let job = |harness: &str, message_id: &str| CaptureJob {
+            job_id: "job".into(),
+            project: "p".repeat(64),
+            harness: harness.into(),
+            session_id: "ses-a".into(),
+            message_id: message_id.into(),
+            role: "user".into(),
+            text: "text".into(),
+            prepared: None,
+            attempts: 0,
+            failures: 0,
+        };
+        assert_eq!(
+            settlement_key(&job("pi", "pi-1")),
+            Some(SessionIdentity {
+                project_id: "p".repeat(64),
+                harness: Harness::Pi,
+                session_id: "ses-a".into(),
+            })
+        );
+        assert_eq!(
+            settlement_key(&job("opencode", "msg_1")).map(|key| key.harness),
+            Some(Harness::OpenCode)
+        );
+        assert_eq!(settlement_key(&job("codex", "msg_1")), None);
+        assert_eq!(
+            settlement_key(&job("pi", &format!("{}:0", "a".repeat(64)))),
+            None
+        );
+    }
+
     /// An identity the source-identity encoder refuses can hold no
     /// descriptor, so the lookup reads nothing and the memory reports a miss
     /// instead of failing its publish.
@@ -552,7 +606,7 @@ mod tests {
                     cause: "lookup".into(),
                 },
                 |envelope| {
-                    let citation = Citation::lookup(envelope, &job, true)?;
+                    let citation = Citation::lookup(envelope, &job, SettlementOutcome::Settled)?;
                     let mut rationale = Map::new();
                     let mut reasons = Vec::new();
                     assert!(
@@ -741,7 +795,7 @@ mod tests {
                     }
                     assert_eq!(every.len(), published.len());
                     let every_located = locate(&job.text, &every);
-                    let citation = Citation::lookup(envelope, &job, true)?;
+                    let citation = Citation::lookup(envelope, &job, SettlementOutcome::Settled)?;
                     assert_eq!(citation.located, every_located, "{edited:?}");
                     assert_eq!(
                         citation.located.len(),

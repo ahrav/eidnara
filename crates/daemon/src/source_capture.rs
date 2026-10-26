@@ -17,6 +17,12 @@ use kernel::source_identity::OccurrenceClass;
 use kernel::{CommitIntent, KernelError, KernelStore, ProviderEgress, Sensitivity};
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+mod settlement;
+#[cfg(test)]
+pub(crate) use settlement::Settlement;
+use settlement::Settlements;
+pub(crate) use settlement::{Observed, SettlementOutcome, settle};
 use tokio_util::sync::CancellationToken;
 
 use crate::harness_sources::{
@@ -261,6 +267,15 @@ pub(crate) struct SourceCapture {
     /// Bumped by every `session.delete` under the capture commit gate; a job taken at an older epoch publishes nothing, and the next pass offers its window again.
     delete_epoch: AtomicU64,
     counters: Counters,
+    /// Each session's latest handoff outcome, which a memory-capture submit
+    /// waits on before its citation lookup.
+    settlements: Mutex<Settlements>,
+    /// Submits that found a `Running` entry and armed a wait.
+    #[cfg(test)]
+    pub(crate) settlement_waits: AtomicU64,
+    /// Memory-capture publications that may run a citation lookup.
+    #[cfg(test)]
+    pub(crate) citation_publishes: AtomicU64,
     #[cfg(test)]
     pub(crate) before_publish: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Runs inside the batch publication after screening and before the commit, where a purge reaches the commit without the pre-screen seeing it.
@@ -290,6 +305,11 @@ impl Default for SourceCapture {
             swept_paths: Mutex::default(),
             delete_epoch: AtomicU64::new(0),
             counters: Counters::default(),
+            settlements: Mutex::default(),
+            #[cfg(test)]
+            settlement_waits: AtomicU64::new(0),
+            #[cfg(test)]
+            citation_publishes: AtomicU64::new(0),
             #[cfg(test)]
             before_publish: Mutex::new(None),
             #[cfg(test)]
@@ -439,12 +459,19 @@ impl CopyCharge<'_> {
 /// Counts the slot as active while the permit lives, so a panicking job releases both.
 struct ActiveSlot {
     capture: Arc<SourceCapture>,
+    session: SessionIdentity,
+    acceptance: u64,
     _permit: OwnedSemaphorePermit,
 }
 
 impl Drop for ActiveSlot {
+    /// A slot released by a job that recorded no end, such as one dropped
+    /// unrun, ends its settlement as `Discarded`.
     fn drop(&mut self) {
         self.capture.counters.sub(Count::Active, 1);
+        self.capture
+            .settlements()
+            .end_if_running(&self.session, self.acceptance, Count::Discarded);
     }
 }
 
@@ -539,6 +566,55 @@ impl SourceCapture {
     pub(crate) fn refuse(&self, refusal: Count) {
         self.counters.add(refusal, 1);
         log("handoff refused", refusal, 1);
+    }
+
+    /// Refuses a pass's handoff and records the session's publish as refused.
+    pub(crate) fn refuse_handoff(&self, refusal: Count, session: &SessionIdentity) {
+        self.refuse(refusal);
+        self.settlements().refuse(session);
+    }
+
+    /// Observes every session's entry under one lock, so at most one of
+    /// them is `Running`; each observation then settles on its own with
+    /// [`settle`], and the waits together end by that one entry's deadline.
+    pub(crate) fn observe_settlements(&self, sessions: &[SessionIdentity]) -> Vec<Observed> {
+        let mut settlements = self.settlements();
+        let observed: Vec<Observed> = sessions
+            .iter()
+            .map(|session| settlements.observe(session))
+            .collect();
+        #[cfg(test)]
+        self.settlement_waits.fetch_add(
+            observed
+                .iter()
+                .filter(|observed| observed.is_running())
+                .count() as u64,
+            Ordering::Relaxed,
+        );
+        observed
+    }
+
+    /// What the session's source publish has reached now, without waiting:
+    /// a running publish reads as `BudgetExpired`.
+    pub(crate) fn settlement_now(&self, session: &SessionIdentity) -> SettlementOutcome {
+        self.settlements().now(session)
+    }
+
+    /// A poisoned record is a lost record: it restarts empty, which reads as
+    /// settled everywhere, and keeps its acceptance count so a running job's
+    /// end never matches a later entry.
+    fn settlements(&self) -> MutexGuard<'_, Settlements> {
+        self.settlements.lock().unwrap_or_else(|poisoned| {
+            self.settlements.clear_poison();
+            let mut settlements = poisoned.into_inner();
+            settlements.clear();
+            settlements
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settlement_for_test(&self, session: &SessionIdentity) -> Option<Settlement> {
+        self.settlements().state(session)
     }
 
     /// A poisoned memo is a lost cache: it starts empty and the kernel's receipts answer.
@@ -636,28 +712,36 @@ impl CaptureHandoff {
         cancel: CancellationToken,
     ) -> Option<CaptureJob> {
         let Ok(permit) = Arc::clone(&self.capture.slot).try_acquire_owned() else {
-            self.capture.refuse(Count::RefusedQueueFull);
+            self.capture
+                .refuse_handoff(Count::RefusedQueueFull, &self.session);
             return None;
         };
         self.capture.counters.add(Count::Active, 1);
+        // One instant starts the job's budget and bounds a submit's wait on it.
+        let accepted_at = tokio::time::Instant::now();
+        let acceptance = self
+            .capture
+            .settlements()
+            .accept(&self.session, accepted_at);
         let interrupt = Arc::new(AtomicBool::new(false));
         Some(CaptureJob {
             budget: EvalBudget::new(
-                Some(Instant::now() + CAPTURE_BUDGET),
+                Some(accepted_at.into_std() + CAPTURE_BUDGET),
                 Arc::clone(&interrupt),
             ),
             interrupt,
             kernel,
             commit_gate,
             cancel,
-            _slot: ActiveSlot {
+            slot: ActiveSlot {
                 capture: Arc::clone(&self.capture),
+                session: self.session.clone(),
+                acceptance,
                 _permit: permit,
             },
             _retained: self.retained,
             capture: self.capture,
             window: self.window,
-            session: self.session,
             project: self.project,
             epoch: self.epoch,
             window_bytes: self.window_bytes,
@@ -674,10 +758,9 @@ pub(crate) struct CaptureJob {
     kernel: Arc<KernelOpenCoordinator>,
     commit_gate: Arc<Mutex<()>>,
     cancel: CancellationToken,
-    _slot: ActiveSlot,
+    slot: ActiveSlot,
     _retained: RetainedCharge,
     window: Vec<Arc<Value>>,
-    session: SessionIdentity,
     project: ProjectBinding,
     epoch: u64,
     window_bytes: usize,
@@ -685,12 +768,18 @@ pub(crate) struct CaptureJob {
 }
 
 impl CaptureJob {
+    /// The session the job publishes for.
+    pub(crate) fn session(&self) -> &SessionIdentity {
+        &self.slot.session
+    }
+
     /// Runs the publication on the blocking pool and returns once it physically completes. Cancellation interrupts the budget, so the job stops before its next kernel wait; the wait for completion is then bounded by the budget, the capture commit gate's current holder, and the adapters' work on the window.
     pub(crate) async fn run(self) -> Count {
         self.capture.counters.add(Count::Admitted, 1);
         let interrupt = Arc::clone(&self.interrupt);
         let cancel = self.cancel.clone();
         let capture = Arc::clone(&self.capture);
+        let (session, acceptance) = (self.slot.session.clone(), self.slot.acceptance);
         let mut join = tokio::task::spawn_blocking(move || self.publish());
         let joined = tokio::select! {
             joined = &mut join => joined,
@@ -706,11 +795,15 @@ impl CaptureJob {
             Err(_) => Count::Discarded,
         };
         capture.counters.add(end, 1);
+        capture.settlements().end(&session, acceptance, end);
         log("job ended", end, 1);
         end
     }
 
     fn end(&self, end: Count) -> Count {
+        self.capture
+            .settlements()
+            .end(&self.slot.session, self.slot.acceptance, end);
         self.capture.counters.add(end, 1);
         if end != Count::Completed {
             log("job ended", end, 1);
@@ -835,7 +928,9 @@ impl CaptureJob {
         }));
         drop(gate);
         match published {
-            Ok(end) => end,
+            // The end is recorded after the gate is released, so a submit
+            // woken by it never waits on the gate behind this job.
+            Ok(end) => self.end(end),
             Err(panic) => std::panic::resume_unwind(panic),
         }
     }
@@ -851,17 +946,17 @@ impl CaptureJob {
         documents: PendingDocuments,
     ) -> Count {
         if self.capture.delete_epoch.load(Ordering::Acquire) != self.epoch {
-            return self.end(Count::SessionInvalidated);
+            return Count::SessionInvalidated;
         }
         if let Err(error) = self.ensure_scope(store, incarnation) {
-            return self.end(kernel_end(error));
+            return kernel_end(error);
         }
         if self.budget.is_exhausted() {
-            return self.end(Count::Deadline);
+            return Count::Deadline;
         }
         if candidates.is_empty() {
             let end = self.capture_documents(store, publisher, incarnation, documents);
-            return self.end(end);
+            return end;
         }
         let observed_at = crate::now_ms();
         let started = Instant::now();
@@ -894,8 +989,7 @@ impl CaptureJob {
                     }
                 }
                 drop(memo);
-                let end = self.capture_documents(store, publisher, incarnation, documents);
-                self.end(end)
+                self.capture_documents(store, publisher, incarnation, documents)
             }
             Err(refusal) => {
                 let culprit = refusal.conflicting_unit();
@@ -922,7 +1016,7 @@ impl CaptureJob {
                 if documents != Count::Completed {
                     log("documents ended", documents, 1);
                 }
-                self.end(kernel_end(refusal.error))
+                kernel_end(refusal.error)
             }
         }
     }
@@ -965,7 +1059,7 @@ impl CaptureJob {
                 };
             }
         };
-        let repository_id = identity.value(&self.session.project_id);
+        let repository_id = identity.value(&self.slot.session.project_id);
         let plan = match self.plan_documents(store, incarnation, repository_id, documents) {
             Ok(plan) => plan,
             Err(error) => {
@@ -1044,7 +1138,7 @@ impl CaptureJob {
         repository_id: &str,
         documents: Vec<(DocumentPath, DocumentRead)>,
     ) -> Result<DocumentPlan, KernelError> {
-        let project_id = self.session.project_id.as_str();
+        let project_id = self.slot.session.project_id.as_str();
         let unswept: Vec<Option<String>> = {
             let swept = self.capture.swept_paths();
             documents
@@ -1090,7 +1184,7 @@ impl CaptureJob {
 
     /// The project's repository identity, derived once per incarnation; an environmental failure memoizes nothing, so the next pass derives again.
     fn repository_identity(&self) -> Result<RepositoryIdentity, DerivationFailure> {
-        let project_id = &self.session.project_id;
+        let project_id = &self.slot.session.project_id;
         if let Some(identity) = self.capture.repository_ids().get(project_id) {
             return Ok(identity.clone());
         }
@@ -1130,7 +1224,7 @@ impl CaptureJob {
             DocumentRead::NotUtf8 => return Ok(DocumentStep::Skip(Count::DocumentsNotUtf8)),
             DocumentRead::Unreadable => return Ok(DocumentStep::Skip(Count::DocumentsUnreadable)),
         };
-        let project_id = self.session.project_id.as_str();
+        let project_id = self.slot.session.project_id.as_str();
         let identity = vec![
             ("project_id", project_id.to_owned()),
             ("repository_id", repository_id.to_owned()),
@@ -1211,9 +1305,9 @@ impl CaptureJob {
         let mut stopped = false;
         for record in &self.window {
             let admit = &mut |bytes| copies.admit(bytes);
-            let adapted = match self.session.harness {
-                Harness::OpenCode => opencode_units_within(&self.session, record, admit),
-                Harness::Pi => pi_units_within(&self.session, record, admit),
+            let adapted = match self.slot.session.harness {
+                Harness::OpenCode => opencode_units_within(&self.slot.session, record, admit),
+                Harness::Pi => pi_units_within(&self.slot.session, record, admit),
             };
             match adapted {
                 Ok(Some(adapted)) => units.extend(adapted),
@@ -1242,7 +1336,7 @@ impl CaptureJob {
             producer: PRODUCER.to_owned(),
             request_digest: kernel::source_identity::identity_digest(operation_key.as_bytes()),
             operation_key,
-            actor: self.session.harness.as_str().to_owned(),
+            actor: self.slot.session.harness.as_str().to_owned(),
             cause: "source capture scope".to_owned(),
         };
         let project = &self.project;

@@ -28,9 +28,9 @@ that order and splits the fixture-rows item into its two tables.
 | R5 | Give the serialization record a gate-hold observation method | applied to `p2-capture-publish-and-session-delete-are-serialized` |
 | R6 | Narrow the deferred-unit record to "can publish from the memo's `Pending` entry" | applied to `p2-deferred-source-units-publish-on-a-later-pass` |
 | R7 | Mark the receipt-conflict coverage marker test-only | applied to `p2-capture-commit-replays-by-job-key-and-frozen-digest` |
-| R8 | Fix the offset `memory_capture.rs:126` | applied: the prompt's quote rule is at `crates/daemon/src/memory_capture.rs:133` at the branch tip |
+| R8 | Fix the offset `memory_capture.rs:126` | applied: the prompt's quote rule is at `crates/daemon/src/memory_capture.rs:134` at the branch tip |
 | R9 | Fix the offset `anchor.rs:329` | applied: references to the decoder use `crates/kernel/src/anchor.rs:273` (`AnchorCondition::decode`) and the interval check inside it |
-| R10 | Fix the offset `source_capture.rs:598` | applied: `into_job` is `crates/daemon/src/source_capture.rs:632` and `CAPTURE_BUDGET` is `:35` at the branch tip |
+| R10 | Fix the offset `source_capture.rs:598` | applied: `into_job` is `crates/daemon/src/source_capture.rs:708` and `CAPTURE_BUDGET` is `:41` at the branch tip |
 
 Line drift between `a0e3f2993` and the branch tip moved several daemon
 references: the `crates/daemon/src/lib.rs` capture tests by 31 lines and
@@ -56,7 +56,7 @@ catalog's `insert_anchor_inner` reference had named line 320, inside
 | G3 | Fragment-id derivation versus descriptor entry id and `block_index` (OQ2-3, OQ2-12) | U3 joins the raw entry id per block index and reports hashed ids as `source_id_unjoinable` |
 | G4 | Lineage succession of a re-published message revision and what a narrowed read returns | U3 reads the lineage's one live descriptor, so a re-published revision cites its newest live row; no test publishes two revisions of one message yet |
 | G5 | `snapshot_checkout` HEAD semantics: detached accepted, unborn `NoHead` (OQ2-11) | U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)) reads HEAD through `git_sources::open` instead and matches the owner decision: detached anchors, unborn is `head_unavailable`; the engine's `snapshot_checkout` stays as it was |
-| G6 | Memo eviction of `Pending` units | U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136)) |
+| G6 | Memo eviction of `Pending` units | U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136)) settles on job end and reads no memo state, so a deferred or evicted `Pending` unit reports `descriptor_not_found` after the job ends (`a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found`); republication after memo eviction stays the receipts' job, as `p2-deferred-source-units-publish-on-a-later-pass` records |
 | G7 | `Deadline` and `InvalidInput` publish failures mapped to `kernel_write_failed` | unassigned |
 
 ## Biases for a human
@@ -65,12 +65,13 @@ catalog's `insert_anchor_inner` reference had named line 320, inside
   while the daemon join seams (G2 to G4) have none. The two N1 records add
   two more test-only records until U3 calls the writer.
 - B2: no liveness record covers existing behavior although the code bounds
-  attempts and deadlines; the only liveness record is proposed (U4).
+  attempts and deadlines; the only liveness record is U4's settlement bound.
 - B3: the specification carried evidence inline; this part supplies the
   per-record evidence files and the mechanical records-equal-evidence check.
-  Evidence files for proposed records are shorter than METHOD's 60 to 120
-  line target because their code does not exist; each states what a test
-  must construct.
+  Evidence files of the records U1 entered as proposed were shorter than
+  METHOD's 60 to 120 line target because their code did not exist; each
+  owner ticket rewrote its records' files with the code and tests it
+  landed.
 - B4: `high` confidence on test-only records rates the code reading, not
   production exposure.
 

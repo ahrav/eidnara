@@ -23,7 +23,7 @@ that adds this part.
 | F12 | Source-capture slot busy, budget spent, cancelled, Kernel starting | constructible: source-capture test module |
 | F13 | Secret-bearing text | constructible: known secret fixtures |
 | F14 | Unsupported object format, oversized delta base, replacement refs; unborn and non-repository roots | constructible: git-source tests and the U2 head-observation fixtures (`crates/daemon/src/memory_capture/head.rs:416`, `:690`) |
-| F15 | Harness capture past `retain_until` while a decision cites it | constructible: capture citation events since U3 (`crates/daemon/src/source_capture_tests.rs:3761`) |
+| F15 | Harness capture past `retain_until` while a decision cites it | constructible: capture citation events since U3 (`crates/daemon/src/source_capture_tests.rs:3783`) |
 | F16 | Fragment id differs from descriptor message id (hashed, chunked, multi-block) | production: messages over 16 KiB or out-of-grammar ids |
 
 ## Per-property required faults
@@ -72,7 +72,9 @@ violation.
   records an `insert_anchor` success followed by a refused write. Constructed
   today by `a_decision_failure_after_the_anchor_rolls_back_both`.
 - `sometimes(settlement_running_at_submit)`: a submit observes a running
-  settlement entry. Owned by U4.
+  settlement entry. Constructed since U4 by
+  `a_submit_during_the_publish_waits_outside_the_gate_and_then_cites`, which
+  counts the armed wait.
 - `sometimes(hashed_fragment_id_at_lookup)`: a citation lookup runs for a
   hashed `message_id`. Constructed since U3 by
   `misses_carry_one_closed_reason_each_and_the_counters_follow_them`.

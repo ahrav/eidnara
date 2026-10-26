@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::dispatch::PreparedOutcome;
 use crate::kernel_routes::{self, KernelOpenCoordinator, ProjectBinding};
 use crate::metered_decode::ResidentReserve;
+use crate::source_capture::SettlementOutcome;
 use crate::{
     HandlerCore, SessionBinding, invalid_params_error, now_ms, respond, store_unavailable_error,
 };
@@ -580,6 +581,29 @@ pub(crate) fn capture_enabled(binding: &SessionBinding) -> bool {
         && binding.config.memory_auto_capture
 }
 
+/// The source and memory consent a capture citation needs. With it off, no
+/// submit waits on a source publish and no decision is looked up.
+fn citation_consent(config: &crate::config::DaemonConfig) -> bool {
+    config.source_capture_enabled && config.memory_enabled
+}
+
+/// Each job session's settlement outcome for one submit; a plan holds at most
+/// `MAX_CAPTURE_MESSAGES` jobs, so a scan finds a session.
+type JobSettlements = Vec<(crate::harness_sources::SessionIdentity, SettlementOutcome)>;
+
+/// The outcome a job's citation lookup reads: its session's, or `Settled` for
+/// a job no source publish can make citable.
+fn job_settlement(settlements: &JobSettlements, job: &CaptureJob) -> SettlementOutcome {
+    cite::settlement_key(job)
+        .and_then(|key| {
+            settlements
+                .iter()
+                .find(|(session, _)| *session == key)
+                .map(|(_, outcome)| *outcome)
+        })
+        .unwrap_or(SettlementOutcome::Settled)
+}
+
 /// Capture storage and leases key on the kernel binding's project digest:
 /// one canonical root is one queue however it is spelled, and two roots that
 /// differ only in bytes a lossy string would fold together stay distinct.
@@ -977,7 +1001,9 @@ impl CaptureWork {
         Ok(())
     }
 
-    fn publish(&self, job: &CaptureJob) -> Result<(), &'static str> {
+    /// `settlement` is what the session's source publish reached when the
+    /// submit took its citation lookup.
+    fn publish(&self, job: &CaptureJob, settlement: SettlementOutcome) -> Result<(), &'static str> {
         let kernel = self
             .kernel
             .kernel_store()
@@ -1001,8 +1027,17 @@ impl CaptureWork {
         if output.version != CAPTURE_SCHEMA_VERSION {
             return Err("invalid_preparation");
         }
-        let consent =
-            self.binding.config.source_capture_enabled && self.binding.config.memory_enabled;
+        let settlement = if citation_consent(&self.binding.config) {
+            settlement
+        } else {
+            SettlementOutcome::Off
+        };
+        #[cfg(test)]
+        if settlement != SettlementOutcome::Off {
+            self.source_capture
+                .citation_publishes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut reasons = Vec::new();
         let receipt = publish_captured_memories(
             &kernel,
@@ -1010,7 +1045,7 @@ impl CaptureWork {
             job,
             &output,
             &prepared,
-            consent,
+            settlement,
             &mut reasons,
         )
         .map_err(|error| {
@@ -1032,8 +1067,12 @@ impl CaptureWork {
     /// A rejected kernel transaction wrote nothing. A revision conflict means a
     /// target moved under the frozen plan, so the source is re-planned; any
     /// other kernel failure keeps the plan and retries on the dispatch backoff.
-    fn publish_or_recover(&self, job: &CaptureJob) -> Result<(), &'static str> {
-        let Err(code) = self.publish(job) else {
+    fn publish_or_recover(
+        &self,
+        job: &CaptureJob,
+        settlement: SettlementOutcome,
+    ) -> Result<(), &'static str> {
+        let Err(code) = self.publish(job, settlement) else {
             return Ok(());
         };
         if code == "reconciliation_conflict" {
@@ -1179,7 +1218,7 @@ fn publish_captured_memories(
     job: &CaptureJob,
     output: &PreparedCapture,
     frozen: &str,
-    consent: bool,
+    settlement: SettlementOutcome,
     reasons: &mut Vec<crate::source_capture::Count>,
 ) -> Result<kernel::CommitReceipt, kernel::KernelError> {
     use sha2::{Digest, Sha256};
@@ -1236,7 +1275,7 @@ fn publish_captured_memories(
                 }
                 let citation = match &mut citation {
                     Some(found) => &*found,
-                    slot => slot.insert(cite::Citation::lookup(envelope, job, consent)?),
+                    slot => slot.insert(cite::Citation::lookup(envelope, job, settlement)?),
                 };
                 let id = format!(
                     "mem_{:x}",
@@ -1665,8 +1704,16 @@ mod tests {
         let kernel = kernel::KernelStore::open(kernel_root).unwrap();
         let frozen = serde_json::to_string(output).unwrap();
         let mut reasons = Vec::new();
-        publish_captured_memories(&kernel, project, job, output, &frozen, true, &mut reasons)
-            .unwrap();
+        publish_captured_memories(
+            &kernel,
+            project,
+            job,
+            output,
+            &frozen,
+            SettlementOutcome::Settled,
+            &mut reasons,
+        )
+        .unwrap();
         assert_eq!(reasons.len(), 2 * output.memories.len());
         let db = rusqlite::Connection::open_with_flags(
             kernel_root.join("kernel.sqlite"),
@@ -1761,7 +1808,7 @@ mod tests {
                 &source,
                 &refused,
                 &serde_json::to_string(&refused).unwrap(),
-                true,
+                SettlementOutcome::Settled,
                 &mut reasons,
             ),
             Err(kernel::KernelError::Conflict)
@@ -1818,7 +1865,7 @@ mod tests {
                 &source,
                 &output,
                 &frozen,
-                true,
+                SettlementOutcome::Settled,
                 &mut Vec::new(),
             )
             .unwrap();
@@ -1940,7 +1987,7 @@ mod tests {
             &job(key),
             &output,
             &frozen,
-            false,
+            SettlementOutcome::Off,
             &mut Vec::new(),
         )
     }
@@ -2162,7 +2209,7 @@ mod tests {
                 &source,
                 &prepared,
                 &serde_json::to_string(&prepared).unwrap(),
-                false,
+                SettlementOutcome::Off,
                 &mut Vec::new(),
             ),
             Err(kernel::KernelError::Conflict)

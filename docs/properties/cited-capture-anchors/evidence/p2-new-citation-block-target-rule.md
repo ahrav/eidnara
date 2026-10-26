@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-`locate` (`crates/daemon/src/memory_capture/cite.rs:180`) places each live block after the previous block's separator, spanning the descriptor's `byte_length`; the block is located when that range ends at a `\n` or at the end of the job text and its SHA-256 equals the block's `artifact_digest`, and the walk stops at the first block it cannot locate. A segment whose digest equals an artifact digest has that artifact's length, so this locates the same blocks as a SHA-256 finalized at every `\n` (`locating_by_length_matches_the_newline_walk`) and hashes each text byte at most once. The job text is the `\n`-join of the message's text items (`native_capture_fragments`), and each descriptor's bytes are one item's text, so an unredacted message locates every block. `target` (`:212`) takes the first occurrence of the quote: inside one located block gives `block`; across located adjacent blocks gives `span`, where the separator after a located block opens a quote in that block and the separator before one closes a quote in it, so the cited blocks joined with `\n` contain the quote; anything else (a quote in an unlocated block, or absent) gives `first`, the lowest live block. Each block's digest is decoded to bytes once and compared raw. `Citation::cite` (`:328`) writes `citation_block`, `citation_blocks`, and `citation_evidence` in ascending order, and `append_citations` (`:358`) writes one event per cited block in the same order.
+`locate` (`crates/daemon/src/memory_capture/cite.rs:198`) places each live block after the previous block's separator, spanning the descriptor's `byte_length`; the block is located when that range ends at a `\n` or at the end of the job text and its SHA-256 equals the block's `artifact_digest`, and the walk stops at the first block it cannot locate. A segment whose digest equals an artifact digest has that artifact's length, so this locates the same blocks as a SHA-256 finalized at every `\n` (`locating_by_length_matches_the_newline_walk`) and hashes each text byte at most once. The job text is the `\n`-join of the message's text items (`native_capture_fragments`), and each descriptor's bytes are one item's text, so an unredacted message locates every block. `target` (`:230`) takes the first occurrence of the quote: inside one located block gives `block`; across located adjacent blocks gives `span`, where the separator after a located block opens a quote in that block and the separator before one closes a quote in it, so the cited blocks joined with `\n` contain the quote; anything else (a quote in an unlocated block, or absent) gives `first`, the lowest live block. Each block's digest is decoded to bytes once and compared raw. `Citation::cite` (`:349`) writes `citation_block`, `citation_blocks`, and `citation_evidence` in ascending order, and `append_citations` (`:379`) writes one event per cited block in the same order.
 
 ## Failure scenario
 
@@ -18,7 +18,7 @@ None.
 
 ## What a test must construct
 
-The end-to-end fixtures at `crates/daemon/src/source_capture_tests.rs:3474`: one block; the third of four items; a quote across two items; a quote starting at a separator; a message whose first block holds a secret, which source capture refuses, so that block has no descriptor. Unit tests at `crates/daemon/src/memory_capture/cite.rs:451` and `:481` cover inner newlines, an empty block, a stopped walk, and a partial located prefix; the property tests at `:864` and `:878` locate every block of random joins and check that a random quote of a fully located message cites blocks whose join holds it.
+The end-to-end fixtures at `crates/daemon/src/source_capture_tests.rs:3496`: one block; the third of four items; a quote across two items; a quote starting at a separator; a message whose first block holds a secret, which source capture refuses, so that block has no descriptor. Unit tests at `crates/daemon/src/memory_capture/cite.rs:472` and `:502` cover inner newlines, an empty block, a stopped walk, and a partial located prefix; the property tests at `:918` and `:932` locate every block of random joins and check that a random quote of a fully located message cites blocks whose join holds it.
 
 ## Investigation log
 
@@ -33,7 +33,7 @@ The end-to-end fixtures at `crates/daemon/src/source_capture_tests.rs:3474`: one
 
 ### Q: Does the walk stay within the 500 ms criterion?
 
-- Sources examined: `citation_cost_measurement` (`crates/daemon/src/memory_capture.rs:1794`) on the CI profile.
+- Sources examined: `citation_cost_measurement` (`crates/daemon/src/memory_capture.rs:1841`) on the CI profile.
 - Findings: each run times 20 publishes (the project's first publish,
   which also creates its domain and scope, is untimed) and 20 walks. Runs
   alternated this code with `f6f08f1ca`, whose walk finalized a SHA-256 at
