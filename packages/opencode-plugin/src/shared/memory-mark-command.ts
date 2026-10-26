@@ -165,7 +165,14 @@ export type MemoryMarkOutcome =
     | { kind: "declined"; preview: DispositionPreview }
     /** A relaxation without a valid approval, refused at the preview or recorded as denied by the commit; the disposition is unchanged. */
     | { kind: "denied"; result: DispositionResult }
-    | { kind: "applied"; result: DispositionResult; commitSeq: number; replayed: boolean }
+    | {
+          kind: "applied";
+          result: DispositionResult;
+          commitSeq: number;
+          replayed: boolean;
+          /** Whether the preview reported a served surface changing; absent when the identity replayed and no preview was judged. */
+          visibilityChanged?: boolean;
+      }
     /** The daemon answered the preview or the commit with a non-available state. */
     | { kind: "refused"; step: "preview" | "commit"; state: MemoryState };
 
@@ -173,6 +180,10 @@ export interface MemoryMarkInput {
     client: KernelClient;
     /** The operation's stable identity; the command derives it with `memoryMarkOperationId`. */
     operationId: string;
+    /** The audit text for `intent.cause`; the command line by default. */
+    cause?: string;
+    /** The reporter's source kind: `user` for the command by default, `assistant` for the model tool. */
+    sourceKind?: "user" | "assistant";
     /** Separator-free identity of the human command surface, such as `user:opencode`. */
     actor: string;
     args: MemoryMarkArgs;
@@ -216,18 +227,20 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
     const intent = {
         actor: input.actor,
         operationId: input.operationId,
-        cause: commandLine(args),
-        sourceKind: "user" as const,
+        cause: input.cause ?? commandLine(args),
+        sourceKind: input.sourceKind ?? ("user" as const),
     };
     const previewed = await client.previewDispositions({ ...intent, operations: [operation] });
     if (!isAvailable(previewed))
         return { kind: "refused", step: "preview", state: previewed.state };
     // A recorded identity replays its receipt whatever the object's state is now, so the preview has nothing to judge and asks nothing.
+    let visibilityChanged: boolean | undefined;
     if (previewed.receipt === undefined) {
         const preview = verdictFor(previewed.previews, operation);
         // The reply decoded but does not answer the operation sent: a daemon contract violation, and nothing was written.
         if (!preview) return { kind: "refused", step: "preview", state: invalid("internal") };
         if (preview.denied) return { kind: "denied", result: preview };
+        visibilityChanged = preview.visibility_changes;
         if (preview.visibility_changes && !args.confirmed) {
             if (!input.confirm) return { kind: "needs_confirmation", preview };
             if (!(await input.confirm(preview))) return { kind: "declined", preview };
@@ -247,6 +260,7 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         result,
         commitSeq: committed.receipt.commit_seq,
         replayed: committed.receipt.replayed,
+        ...(visibilityChanged === undefined ? {} : { visibilityChanged }),
     };
 }
 

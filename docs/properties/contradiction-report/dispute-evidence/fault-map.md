@@ -42,11 +42,11 @@ under `crates/` writes `asserted_edges`.
 
 | Record | Required faults | Enabling state | Exercised |
 |---|---|---|---|
-| `dispute-requires-evidence-from-plugin` | D1, D2, D13 | raw bodies; command parser | partial - command arm |
+| `dispute-requires-evidence-from-plugin` | D1, D2, D13 | raw bodies; command parser; tool executor (#1161) | yes - command and tool arms |
 | `cited-evidence-live-at-dispute-commit` | D3, D10 | retired row; live cited row; citer retired after preview | yes (queued retirement not constructed: retiring cited evidence is refused, and no lock-holding harness exists for a queued citer retirement) |
 | `cited-evidence-visible-to-bound-project` | D4, D5, D10, D11, D12 | two projects; unscoped citer; uncited row; mixed citers; same-envelope citer | yes (asserted-edge citer not constructed: no writer exists) |
 | `evidence-ref-well-formed-and-redaction-stable` | D6, D7 | malformed and reserved-byte references; both fields on one dispute | yes |
-| `reporter-class-derived-never-asserted-up` | D8, F1 | raised and lowered assertions; subject classes unlike the reporter's | partial - command arm |
+| `reporter-class-derived-never-asserted-up` | D8, F1 | raised and lowered assertions; subject classes unlike the reporter's; tool executor (#1161) | yes - command and tool arms |
 | `dispute-with-evidence-never-raises-standing` | F2, F3, F15, D14 | priors in every disposition and maturity; evidence on and off; a valid approval | yes |
 | `dispute-identity-includes-evidence-key` | D9, F10, F11 | two evidence keys; replay; reuse | yes (F12 not constructed) |
 | `dispute-preview-writes-nothing` | D1 to D6, D10 | preview then commit at one tip; a tip that moves between them | yes |

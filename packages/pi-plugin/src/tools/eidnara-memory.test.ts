@@ -10,8 +10,12 @@ import {
 } from "@eidnara/opencode/shared/kernel-client-testing/state-table";
 import { WRITABLE_MEMORY_CATEGORIES } from "@eidnara/opencode/tools/eidnara-memory/constants";
 import { createEidnaraMemoryTools } from "@eidnara/opencode/tools/eidnara-memory/tools";
+import {
+    EIDNARA_MEMORY_ACTIONS,
+    type EidnaraMemoryAction,
+} from "@eidnara/opencode/tools/eidnara-memory/types";
 import { fakeKernelResolver } from "../__tests__/test-utils";
-import { createEidnaraMemoryTool } from "./eidnara-memory";
+import { createEidnaraMemoryTool, PI_EIDNARA_MEMORY_ACTOR } from "./eidnara-memory";
 
 const PROJECT = "git:kernel-pi";
 const CWD = "/tmp/kernel-pi";
@@ -36,12 +40,14 @@ function harness(
     kernel = new FakeKernel(),
     options: {
         kernelClient?: ReturnType<typeof fakeKernelResolver>["kernelClient"];
+        allowedActions?: readonly EidnaraMemoryAction[];
     } = {},
 ) {
     const fake = fakeKernelResolver(kernel);
     const tool = createEidnaraMemoryTool({
         kernelClient: options.kernelClient ?? fake.kernelClient,
         resolveProjectPath: () => PROJECT,
+        ...(options.allowedActions ? { allowedActions: options.allowedActions } : {}),
     });
     const execute = async (args: Record<string, unknown>, callId: string) =>
         tool.execute(callId, args as never, new AbortController().signal, undefined, {
@@ -130,7 +136,7 @@ describe("Pi eidnara_memory create", () => {
         const commit = tool.transport.calls[0]?.body as {
             intent: { actor: string };
         };
-        expect(commit.intent.actor).toBe("agent:opencode");
+        expect(commit.intent.actor).toBe(PI_EIDNARA_MEMORY_ACTOR);
     });
 
     it("replays a duplicate call and creates no second object", async () => {
@@ -395,5 +401,70 @@ describe("Pi eidnara_memory source", () => {
         ]) {
             expect(source).not.toContain(forbidden);
         }
+    });
+});
+
+describe("Pi eidnara_memory dispute", () => {
+    const disputeArgs = {
+        action: "dispute",
+        objectId: "mem_rule",
+        event: "contradict",
+        path: "src/a.rs",
+        gitObjectId: "0123456789abcdef0123456789abcdef01234567",
+    };
+
+    function seeded(allowedActions?: readonly EidnaraMemoryAction[]) {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({ object_id: "mem_rule", decision_kind: "ARCHITECTURE", summary: "r" });
+        return harness(kernel, allowedActions ? { allowedActions } : {});
+    }
+
+    it("is absent from the default schema and refused by the default allowlist", async () => {
+        const h = seeded();
+        expect(h.tool.parameters.properties.action).toMatchObject({
+            enum: ["create", "get", "revise", "archive", "merge"],
+        });
+        expect(h.tool.parameters.properties).not.toHaveProperty("evidenceId");
+        const refused = await h.execute(disputeArgs, "call-default");
+        expect(textOf(refused)).toBe("Error: Action 'dispute' is not allowed in this context.");
+        expect(h.transport.calls).toHaveLength(0);
+    });
+
+    it("files a dispute under agent:pi and the assistant source kind when allowed", async () => {
+        const h = seeded(EIDNARA_MEMORY_ACTIONS);
+        expect(h.tool.parameters.properties.action).toMatchObject({
+            enum: [...EIDNARA_MEMORY_ACTIONS],
+        });
+        const filed = parseResult<{ outcome: string; disposition: string }>(
+            await h.execute(disputeArgs, "call-dispute"),
+        );
+        expect(filed).toMatchObject({ outcome: "applied", disposition: "contradicted" });
+        const commit = h.transport.calls.at(-1)?.body as {
+            intent: { actor: string; cause: string };
+            source_kind: string;
+            operations: unknown[];
+        };
+        expect(commit.intent.actor).toBe(PI_EIDNARA_MEMORY_ACTOR);
+        expect(commit.intent.cause).toBe("eidnara_memory dispute call-dispute");
+        expect(commit.source_kind).toBe("assistant");
+        expect(commit.operations).toEqual([
+            {
+                op: "disposition",
+                object_id: "mem_rule",
+                event: "contradict",
+                evidence_ref: { path: "src/a.rs", git_object_id: disputeArgs.gitObjectId },
+            },
+        ]);
+    });
+
+    it("refuses a dispute without evidence before sending anything", async () => {
+        const h = seeded(EIDNARA_MEMORY_ACTIONS);
+        const result = await h.execute(
+            { action: "dispute", objectId: "mem_rule", event: "contradict" },
+            "call-x",
+        );
+        expect(textOf(result)).toStartWith("Error: dispute needs objectId");
+        expect(result.isError).toBeTrue();
+        expect(h.transport.calls).toHaveLength(0);
     });
 });

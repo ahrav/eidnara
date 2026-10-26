@@ -3,9 +3,23 @@ import type { KernelClientResolver } from "../../shared/kernel-client";
 import type { AntiMemoryPayload } from "../../shared/kernel-client/anti-memory";
 import type { ImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 
-export const EIDNARA_MEMORY_ACTIONS = ["create", "get", "revise", "archive", "merge"] as const;
+export const EIDNARA_MEMORY_ACTIONS = [
+    "create",
+    "get",
+    "revise",
+    "archive",
+    "merge",
+    "dispute",
+] as const;
 
 export type EidnaraMemoryAction = (typeof EIDNARA_MEMORY_ACTIONS)[number];
+
+/** The actions both harnesses expose unless a caller names others: `dispute` is admitted only by an explicit allowlist. */
+export const EIDNARA_MEMORY_DEFAULT_ACTIONS: readonly EidnaraMemoryAction[] =
+    EIDNARA_MEMORY_ACTIONS.filter((action) => action !== "dispute");
+
+/** The events a `dispute` files; both must cite evidence. */
+export const EIDNARA_MEMORY_DISPUTE_EVENTS = ["mark_disputed", "contradict"] as const;
 
 const EIDNARA_MEMORY_READ_ACTIONS: ReadonlySet<EidnaraMemoryAction> = new Set(["get"]);
 
@@ -19,8 +33,15 @@ export interface EidnaraMemoryArgs extends ImitatedReducedArgs {
     content?: string;
     category?: string;
     antiMemory?: AntiMemoryPayload;
-    /** The one target of `revise` or `archive`. */
+    /** The one target of `revise`, `archive`, or `dispute`. */
     objectId?: string;
+    /** The `dispute` event: one of `EIDNARA_MEMORY_DISPUTE_EVENTS`. */
+    event?: string;
+    /** A live Kernel evidence id the `dispute` cites. */
+    evidenceId?: string;
+    /** A repository path the `dispute` cites, with `gitObjectId`. */
+    path?: string;
+    gitObjectId?: string;
     /** `get` targets; for `merge`, the objects folded into one survivor. */
     objectIds?: string[];
     reason?: string;

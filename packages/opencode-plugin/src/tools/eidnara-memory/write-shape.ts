@@ -27,7 +27,16 @@ export function requireTaxonomyCategory(category: string | undefined): string | 
 
 /** The wrappers fall back to unvalidated raw arguments when schema parsing fails, so each optional string field is type-checked before any `.trim()` call can throw a TypeError outside the input-error path. `null` stays admitted: every downstream read treats it as absent. */
 export function assertEidnaraMemoryFieldTypes(args: EidnaraMemoryWriteShape): void {
-    for (const field of ["content", "category", "reason", "objectId"] as const) {
+    for (const field of [
+        "content",
+        "category",
+        "reason",
+        "objectId",
+        "event",
+        "evidenceId",
+        "path",
+        "gitObjectId",
+    ] as const) {
         const value = (args as Record<string, unknown>)[field];
         if (value !== undefined && value !== null && typeof value !== "string") {
             throw new MemoryInputError(`'${field}' must be a string`);

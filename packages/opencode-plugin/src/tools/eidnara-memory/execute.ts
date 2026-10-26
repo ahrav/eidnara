@@ -39,6 +39,7 @@ import {
     GET_MAX_CLAIMS,
     MERGE_MAX_TARGETS,
 } from "./constants";
+import { executeDispute } from "./dispute";
 import type { EidnaraMemoryAction, EidnaraMemoryArgs } from "./types";
 import { assertEidnaraMemoryFieldTypes, assertEidnaraMemoryWriteShape } from "./write-shape";
 
@@ -576,6 +577,9 @@ export async function executeEidnaraMemory(input: ExecuteEidnaraMemoryArgs): Pro
         ...(signal ? { signal } : {}),
     };
 
+    if (action === "dispute") {
+        return executeDispute({ client, args, identity, actor });
+    }
     if (action === "get") {
         const wanted = uniqueIds(args.objectIds);
         if (wanted.length === 0) {

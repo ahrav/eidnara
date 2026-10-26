@@ -88,7 +88,7 @@ Reachability: default-production - `lib.rs:14529` dispatches
 request after class resolution and before the preview or commit
 transaction (`commit.rs:1119-1125`).
 Status: active
-Exercised: partial - command arm: route test
+Exercised: yes - command arm, tool arm, and raw route bodies: route test
 `a_dispute_needs_evidence_and_other_events_take_none`
 (`crates/daemon/tests/kernel_routes.rs:5971`) sends `mark_disputed` and
 `contradict` with neither field and with an empty `evidence_id`, and
@@ -101,8 +101,17 @@ usage` (`memory-mark-command.test.ts:126`) covers the TypeScript side.
 `a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field`
 (`kernel_routes.rs:6252`) sends a `mark_disputed` body carrying a forged
 `reason` field and asserts the route answers an error with the four row
-counts unchanged; it asserts the error variant, not the refusal name. The
-model tool arm sends no disposition at this revision and lands with #1161.
+counts unchanged; it asserts the error variant, not the refusal name. Tool
+arm (#1161): `refuses missing evidence and unsupported events before
+sending; renders denials and refusals`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1447`)
+calls `dispute` with neither evidence input, with `path` and no
+`gitObjectId`, and with no `objectId`, and asserts the usage error with no
+daemon call; the Pi test `refuses a dispute without evidence before
+sending anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:460`)
+asserts the same for Pi. A route request from the tool with neither field
+is the raw-body case the route test above already refuses
+`invalid_input`, since the tool sends the same `disposition` body.
 Guarantee: A `mark_disputed` or `contradict` operation that reaches the
 Kernel writer through `kernel.commit` carries a non-empty `evidence_id`,
 an `evidence_ref`, or both; one with neither, or with an empty id, is
@@ -388,7 +397,7 @@ Reachability: default-production - `resolve_classes` runs on every
 `kernel.commit` (`commit.rs:1111-1118`) and its taint is the reporter
 taint `compose_reason` renders (`commit.rs:1122`).
 Status: active
-Exercised: partial - command arm and raw route bodies:
+Exercised: yes - command arm, tool arm, and raw route bodies:
 `a_dispute_reporter_class_is_derived_and_never_asserted_up`
 (`kernel_routes.rs:6025`) refuses `asserted_taint_class: user_explicit`
 under `source_kind` `assistant` and `user` with `class_over_declared`, an
@@ -398,8 +407,16 @@ unknown `source_kind` with `invalid_input`, nothing written, and records
 and `assistant_inference` for `assistant`, and asserts the row's
 `(source_class, taint_class)` equal the subject's prior row. The
 TypeScript test at `memory-mark-command.test.ts:174` asserts the command
-sends `source_kind: "user"` on both calls. The model tool arm lands with
-#1161.
+sends `source_kind: "user"` on both calls. Tool arm (#1161): `sends the
+evidence under the tool identity, actor, cause, and assistant source kind`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1373`)
+asserts the tool's preview and commit both send `source_kind:
+"assistant"` and no asserted class, and the Pi test `files a dispute under
+agent:pi and the assistant source kind when allowed`
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:433`) asserts the
+same for Pi; the route side stores `assistant_inference` for that source
+kind (`kernel_routes.rs:5723`). The harness fixes `source_kind` in
+`executeDispute`, so the tool cannot send `"user"`.
 Guarantee: The reporter taint recorded in a dispute's reason equals the
 taint `derive_classes(source_kind)` yields, lowered only by an asserted
 class at or below it; the row's own `source_class` and `taint_class` keep

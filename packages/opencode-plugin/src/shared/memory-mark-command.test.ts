@@ -50,6 +50,13 @@ function args(event: MemoryMarkArgs["event"], objectId: string, confirmed = fals
         : { event, objectId, confirmed };
 }
 
+/** A replayed identity answers its receipt without a preview, so it carries no visibility verdict. */
+function replayOf(first: Awaited<ReturnType<typeof runMemoryMarkCommand>>) {
+    if (first.kind !== "applied") throw new Error(first.kind);
+    const { visibilityChanged: _judged, ...receipt } = first;
+    return { ...receipt, replayed: true };
+}
+
 /** Confirmation is refused by default so a test that expects none fails loudly if it is asked. */
 const UNEXPECTED_CONFIRMATION = async (): Promise<boolean> => {
     throw new Error("confirmation was not expected");
@@ -216,7 +223,7 @@ describe("runMemoryMarkCommand evidence", () => {
         expect(second).toMatchObject({ kind: "applied", replayed: false });
         expect(h.kernel.receipts.size).toBe(2);
         const again = await run(h, byId);
-        expect(again).toEqual({ ...first, replayed: true });
+        expect(again).toEqual(replayOf(first));
         expect(h.kernel.receipts.size).toBe(2);
     });
 
@@ -273,6 +280,7 @@ describe("runMemoryMarkCommand", () => {
             },
             commitSeq: 3,
             replayed: false,
+            visibilityChanged: false,
         });
         expect(h.kernel.objects.get("mem_labeled")?.disposition).toBe("stale");
         expect(h.transport.methods()).toEqual(["kernel.commit", "kernel.commit"]);
@@ -341,7 +349,7 @@ describe("runMemoryMarkCommand", () => {
         const h = harness();
         const first = await run(h, args("mark_disputed", "mem_labeled"));
         const again = await run(h, args("mark_disputed", "mem_labeled"));
-        expect(again).toEqual({ ...first, replayed: true });
+        expect(again).toEqual(replayOf(first));
         expect(h.kernel.receipts.size).toBe(1);
         expect(formatMemoryMarkOutcome(again, args("mark_disputed", "mem_labeled"))).toContain(
             "replayed receipt",
@@ -356,7 +364,7 @@ describe("runMemoryMarkCommand", () => {
         const receipts = h.kernel.receipts.size;
         // Judged fresh, `mark_stale` on a quarantined object would be a denied relaxation.
         const again = await run(h, args("mark_stale", "mem_labeled"));
-        expect(again).toEqual({ ...first, replayed: true });
+        expect(again).toEqual(replayOf(first));
         expect(h.kernel.receipts.size).toBe(receipts);
         expect(h.kernel.objects.get("mem_labeled")?.disposition).toBe("quarantined");
     });
