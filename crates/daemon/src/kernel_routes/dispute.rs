@@ -1,22 +1,5 @@
-//! The evidence a `mark_disputed` or `contradict` operation on `kernel.commit`
-//! cites, and the structured `reason` the route stores on its admission row.
-//!
-//! A dispute names an `evidence_id`, an `evidence_ref`, or both. The route
-//! validates each before the writer transaction: the reference's
-//! `git_object_id` is 40 or 64 lowercase hex bytes, its `path` is a relative
-//! repository path of at most [`MAX_EVIDENCE_PATH_BYTES`] bytes that passes the
-//! daemon's confined-path check and holds no secret-scanner detection. The
-//! reason is then composed by [`DisputeReason::render`], whose output
-//! [`DisputeReason::parse`] reads back exactly.
-//!
-//! The reason is one ASCII line of `;`-separated `key=value` pairs in a fixed
-//! order, with absent fields omitted:
-//! `v=1;op=kernel.commit;event=<event>;reporter_taint=<taint>;evidence_id=<pct>;path=<pct>;oid=<hex>`.
-//! Values are percent-encoded: RFC 3986 unreserved bytes (`A-Z a-z 0-9 - . _ ~`)
-//! stand for themselves and every other byte is `%` and two uppercase hex
-//! digits. A value is accepted only when decoding it a second time yields the
-//! same string, so a stored value has one reading. The rendering is at most
-//! [`MAX_REASON_BYTES`] bytes.
+//! The evidence a `kernel.commit` dispute cites and the structured `reason`
+//! the route stores for it; the grammar is specified in the `commit` module.
 
 use context_core::redaction::redact_durable_text;
 use kernel::{EventKind, TaintClass, is_lower_hex_oid};

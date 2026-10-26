@@ -28,9 +28,15 @@
 //!   repository.
 //!
 //! A dispute's admission row carries a structured `reason`, the
-//! [`DisputeReason`] grammar
+//! [`DisputeReason`] grammar: one ASCII line of `;`-separated `key=value`
+//! pairs in the fixed order
 //! `v=1;op=kernel.commit;event=<event>;reporter_taint=<taint>;evidence_id=<pct>;path=<pct>;oid=<hex>`,
-//! at most 4096 bytes. `reporter_taint` is the taint class derived from
+//! absent fields omitted, at most 4096 bytes. Values are percent-encoded: RFC
+//! 3986 unreserved bytes (`A-Z a-z 0-9 - . _ ~`) stand for themselves and every
+//! other byte is `%` and two uppercase hex digits. A value is accepted only
+//! when decoding it a second time yields the same string, so a stored value has
+//! one reading, and [`DisputeReason::parse`] reads back exactly what
+//! [`DisputeReason::render`] wrote. `reporter_taint` is the taint class derived from
 //! `source_kind` and lowered only by an asserted class at or below it; the
 //! row's own class columns keep the subject's prior classes. Every other
 //! event takes neither field and records the constant reason
@@ -38,13 +44,13 @@
 //! `cause`.
 //!
 //! Refusals: a dispute with neither field, an empty value, a malformed
-//! reference, evidence on another event, or a reason over its cap answers
-//! `invalid_input`; a nonexistent, retired, uncited, or foreign evidence id
-//! answers `not_found`; an asserted class above the derivation answers
-//! `class_over_declared`; a Kernel admission refusal answers
-//! `admission_policy`; an identity reused with different bytes answers
-//! `operation_key_reused`. Each refusal writes nothing, and a preview
-//! answers the same name its commit would.
+//! reference, evidence on another event, or a reason over its cap or holding
+//! a secret-scanner detection answers `invalid_input`; a nonexistent,
+//! retired, uncited, or foreign evidence id answers `not_found`; an asserted
+//! class above the derivation answers `class_over_declared`; a Kernel
+//! admission refusal answers `admission_policy`; an identity reused with
+//! different bytes answers `operation_key_reused`. Each refusal writes
+//! nothing, and a preview answers the same name its commit would.
 //!
 //! This route is the validator for plugin-written disputes. Other callers of
 //! `Envelope::record_admission` (the memory classifier, review acceptance,
