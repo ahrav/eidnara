@@ -67,7 +67,7 @@ between; a CAS retry.
 
 ## Investigation log
 
-### Q: Receipts last for the database incarnation and serving records for the
+### Q: Receipts last for the database incarnation and serving records for the retention window
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: Receipts last for the database incarnation and serving records for
@@ -86,7 +86,7 @@ between; a CAS retry.
 - Missing evidence: an owner decision or the named read.
 - Conclusion: needs human input.
 
-### Q: A deadline, an unready Kernel, or a lost fence leaves the serve for a 
+### Q: A deadline, an unready Kernel, or a lost fence leaves the serve for a later write at its digest
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A deadline, an unready Kernel, or a lost fence leaves the serve for

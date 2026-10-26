@@ -15,7 +15,7 @@ or merge verdict.
 
 | ID | Finding | Class | Disposition at #1154 |
 | --- | --- | --- | --- |
-| G1 | A lost CAS attempt leaves no durable effect outside the Memory Store | gap | Queued to #1155 (AC7) as an open question on `uo-composition-freeze-persists-at-every-hard-fold-site` |
+| G1 | A lost CAS attempt leaves no durable effect outside the Memory Store | gap | Queued to #1155 (AC7) as an open question on `uo-composition-freeze-persists-at-every-hard-fold-site`; #1155 resolves the use-outcome-serve part and leaves other durable effects outside the record's question |
 | G2 | A pass on a route still bound after `session.delete` (OQ3-10) | gap | Resolved at #1155 ticketing as an accepted loss; recorded on `uo-p-served-set-and-identity-never-rewritten` and `uo-p-served-set-once-per-session-revision` |
 | G3 | Commit-sequence monotonicity and the tip as its maximum | gap | Resolved by the `commit_log` DDL (`INTEGER PRIMARY KEY AUTOINCREMENT`, no delete); recorded on `uo-known-as-of-is-the-tip-bound-read-sequence` |
 | G4 | The summarizer restart reattach as a third consent source | gap | Confirmed by a read of the reattach path; recorded on `uo-consent-gate-source-is-the-route-frozen-config` (needs human input) |
@@ -80,8 +80,10 @@ those activations: the two records' Kernel halves state them, and the writer's
 tests check the key, the digest, and the role from the daemon side. The
 malformed-spec and no-row-after-refusal clauses of E1 and the deterministic
 `use_outcome_id` half of E2 stay open: `duplicate_and_malformed_serves_are_refused_without_rows`
-checks them and no record states them. G1 closes by
-`a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`. The R13 crash
+checks them and no record states them. G1's use-outcome-serve question closes
+by `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`; whether a
+discarded attempt leaves any other durable effect outside the Memory Store is
+outside that record's question and stays open. The R13 crash
 arm stays partial: the test-only fault point between the fold's Memory Store
 commit and the Kernel write injects a handled Kernel failure in a live process
 and shows a later fold repairs it; a process stop and restart between the two
