@@ -116,7 +116,11 @@ Kernel unavailable at the write.
   thread makes no touch, but it hands off its serve first and the job's touch
   advances the record with that pass's time, because the pass committed
   (`a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
-  asserts `last_transform_at` equals the serve's `recorded_at`).
+  asserts `last_transform_at` equals the serve's `recorded_at`). When every
+  write slot is taken, `UseOutcomeWrites::job` answers `None`, the serve counts
+  `deadline`, and the error path returns before the settle step, so no touch
+  runs and no lifecycle name counts the skip; the next committing pass catches
+  up, as after a touch skipped on a held writer.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 

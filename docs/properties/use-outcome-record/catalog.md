@@ -1333,6 +1333,9 @@ Open questions:
   the settle step; it hands off its serve, and the job's touch advances the
   record with that pass's time, because the pass committed
   (`a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`).
+  When every write slot is taken, the serve counts `deadline`, no job runs, and
+  the error path makes no touch of its own, so the record keeps its earlier
+  value until the next committing pass; no lifecycle name counts that skip.
 - A committing pass that lands while an earlier pass's serve job still waits
   for the writer finds no record at its staleness check and touches nothing;
   the job then advances the record to its own pass's time, and the later
