@@ -1161,15 +1161,24 @@ fn last_transform_at_advances_live_records_without_a_commit() {
         [(None, None), (None, None)],
         "the same session id under another harness or project is not advanced"
     );
-    assert_eq!(
+    // At 100 the advanced record is current while both other bindings' `s1` records are null, so a
+    // predicate that dropped the project or the harness would answer `true` for the first binding.
+    let stale = |project: &str, harness: &str| {
         store.use_outcome_last_transform_is_stale(
             &budget(std::time::Duration::from_secs(5)),
-            &other_project(),
-            HARNESS,
+            project,
+            harness,
             "s1",
-            200
+            100,
+        )
+    };
+    assert_eq!(stale(&project(), HARNESS), Ok(false));
+    assert_eq!(
+        (
+            stale(&other_project(), HARNESS),
+            stale(&project(), OTHER_HARNESS)
         ),
-        Ok(true),
+        (Ok(true), Ok(true)),
         "the staleness check reads the binding it was asked about"
     );
     assert_eq!(store.tip().unwrap(), tip);

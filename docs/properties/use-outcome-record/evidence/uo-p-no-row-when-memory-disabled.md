@@ -16,7 +16,7 @@ revision.
 - Guarantee under test: A route bound with `memory.enabled` off produces no
   serving record on any pass.
 - Existing check: `only_an_available_composition_is_recorded`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:174`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_writer_tests.rs:180`). Status: unaudited.
 
 ## Failure scenario
 

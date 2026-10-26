@@ -11,20 +11,23 @@ Record kind: new obligation activated by #1156.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Hook: `crates/daemon/src/lib.rs:10126` in the settle step, after any rerun,
+- Hook: `crates/daemon/src/lib.rs:10128` in the settle step, after any rerun,
   when the final response committed and the check
-  (`crates/daemon/src/lib.rs:9813`) finds a live record to advance. The update
+  (`crates/daemon/src/lib.rs:9815`) finds a live record to advance. The update
   runs on a scoped thread beside the response build, and the settle joins it
-  before the response returns (`crates/daemon/src/lib.rs:10132`). A pass that
+  before the response returns (`crates/daemon/src/lib.rs:10134`). A pass that
   handed its serve to a tracked job sets `touch_delegated`
-  (`crates/daemon/src/lib.rs:9808`) and the job touches after its serve commits
-  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:305`)).
-- Update: `crates/kernel/src/use_outcome.rs:43` selects the live records with a
-  null or earlier value. A session with none takes no writer, because the
+  (`crates/daemon/src/lib.rs:9810`) and the job touches after its serve commits
+  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:319`)).
+- Update: `crates/kernel/src/use_outcome.rs:43-47` selects the live records with
+  a null or earlier value (the `LIVE_SESSION_WHERE` and `last_transform_at`
+  predicates at lines 45-46). A session with none takes no writer, because the
   check above skips it; the update itself holds only the writer.
-- Outcomes: `crates/daemon/src/use_outcome_writer.rs:269` counts
-  `transform_touched`, `transform_skipped_deadline`, or
-  `transform_skipped_unavailable`.
+- Outcomes: the match in `touch_session`
+  (`crates/daemon/src/use_outcome_writer.rs:283-287`) counts
+  `transform_touched` for an updated row and maps a Kernel error through
+  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:336`) to
+  `transform_skipped_deadline` or `transform_skipped_unavailable`.
 
 - Guarantee under test: `last_transform_at` never decreases on a session's
   serving record, and only a pass whose response committed updates it.
@@ -42,13 +45,13 @@ revision.
   `last_transform_at_advances_live_records_without_a_commit`
   (`crates/kernel/tests/kernel_use_outcome.rs:1118`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1193`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1202`),
   `an_outside_file_lock_bounds_the_advance_at_begin`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1230`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1239`),
   `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1286`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1295`),
   `the_advance_takes_no_pooled_reader`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1318`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:1327`). Status: unaudited.
 
 ## Failure scenario
 
@@ -92,8 +95,10 @@ Kernel unavailable at the write.
 ### Q: Cost
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
-- Findings: Cost: every committing pass of a session with a live record makes
-  one fenced commit, on a scoped thread beside the response build, so its
+- Findings: Cost: every committing pass of a session with a stale live record
+  (a value null or before the pass's time; the staleness read skips the writer
+  otherwise) makes one fenced commit, on a scoped thread beside the response
+  build, so its
   device flush overlaps the memory-store flush of the pass trace. Measured on
   this host (release build, one session with one record, paired runs of 240
   committing passes): with a fixed 1 ms flush on tmpfs the committing pass p50
@@ -111,9 +116,26 @@ Kernel unavailable at the write.
   thread makes no touch, but it hands off its serve first and the job's touch
   advances the record with that pass's time, because the pass committed
   (`a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
-  asserts `last_transform_at` equals the serve's `recorded_at`).
+  asserts `last_transform_at` equals the serve's `recorded_at`). When every
+  write slot is taken, `UseOutcomeWrites::job` answers `None`, the serve counts
+  `deadline`, and the error path returns before the settle step, so no touch
+  runs and no lifecycle name counts the skip; the next committing pass catches
+  up, as after a touch skipped on a held writer.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
+
+### Q: Does a committing pass that lands while an earlier serve job still waits leave its time unrecorded?
+
+- Sources examined: `record_use_outcome` and `use_outcomes_to_touch` (`crates/daemon/src/lib.rs`), `touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs`).
+- Findings: Until the next committing pass, yes. The later pass's staleness
+  check finds no record while the serve job waits on the writer, so it touches
+  nothing; the job then inserts the record and advances it to its own pass's
+  `recorded_at`. The next committing pass advances it again. The window is the
+  serve job's wait, at most its `WRITE_BUDGET`.
+- Missing evidence: an owner decision on whether the attribution must name the
+  later pass without a further pass; a reconciliation would need the job to
+  learn the latest committed pass time, or the per-session writes serialized.
+- Conclusion: needs human input.
 
 ### Q: A session rebound to a route with memory disabled keeps its records untouched by those passes, because such a route takes no Kernel read (C2)
 

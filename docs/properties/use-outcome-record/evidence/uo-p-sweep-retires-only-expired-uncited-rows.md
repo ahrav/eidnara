@@ -13,7 +13,10 @@ revision.
 
 - Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:727`) reads one
   statement, so one snapshot, in `retain_until`, id order through
-  `idx_use_outcomes_live_retention` (`crates/kernel/src/use_outcome.rs:232`); it
+  `idx_use_outcomes_live_retention` (defined in the `use_outcomes` DDL,
+  `crates/kernel/src/schema.rs:188`; the query plan is asserted by
+  `the_sweep_and_the_reads_use_their_indexes`
+  (`crates/kernel/src/use_outcome.rs:1026`)); it
   pages up to 64 uncited records and counts the cited ones it reads before the
   page fills. The scan reads cited rows ahead of the page, so its read work
   grows with the cited expired records while its writes stay bounded by the
