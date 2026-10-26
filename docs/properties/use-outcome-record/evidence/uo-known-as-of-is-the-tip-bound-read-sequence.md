@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+its parent is `18a469fce`).
 
 - Tip capture and bound read: `read_project_memory`
   (`crates/daemon/src/canonical_memory.rs:161`).

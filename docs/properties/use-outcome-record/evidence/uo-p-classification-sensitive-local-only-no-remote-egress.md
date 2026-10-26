@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1154.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+its parent is `18a469fce`).
 
 - DDL CHECKs: `crates/kernel/src/schema.rs:188`.
 - Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:279`); it

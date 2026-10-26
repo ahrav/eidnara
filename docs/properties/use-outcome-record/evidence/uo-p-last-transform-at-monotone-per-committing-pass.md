@@ -9,7 +9,7 @@ Record kind: new obligation activated by #1156.
 ## Evidence trail
 
 References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+its parent is `18a469fce`).
 
 - Hook: `crates/daemon/src/lib.rs:10046` in the settle step, after any rerun,
   when the final response committed and the check
