@@ -70,6 +70,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # The persistent worker pool behind the order-preserving per-block map; already a transitive
 # dependency through host-runtime's embedding tokenizer, so it adds no new supply-chain root.
 rayon = "1.12"
+# The settlement record's hash table and its foldhash hasher; already a transitive
+# dependency through tokenizer, gix, and rusqlite's hashlink, which enables the same
+# hasher, so it adds no new supply-chain root.
+hashbrown = { version = "0.16", default-features = false, features = ["default-hasher"] }
 # The global allocator of `eidnara-host` and the direct-host fixture.
 mimalloc = { version = "0.1", default-features = false }
 sha2 = { workspace = true }

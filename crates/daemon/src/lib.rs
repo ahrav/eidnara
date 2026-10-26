@@ -128,7 +128,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
@@ -585,11 +585,36 @@ impl TaskAdmission {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let _gate = self.gate.lock().expect("module spawn gate mutex");
-        if self.cancel.is_cancelled() {
-            return None;
+        self.try_spawn(future).ok()
+    }
+
+    /// As [`Self::spawn`], handing a refused future back unpolled.
+    fn try_spawn<F, T>(&self, future: F) -> Result<tokio::task::JoinHandle<T>, F>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match self.open_gate() {
+            Some(_gate) => Ok(self.tasks.spawn(future)),
+            None => Err(future),
         }
-        Some(self.tasks.spawn(future))
+    }
+
+    /// As [`Self::spawn`], for work that runs on the blocking pool.
+    fn spawn_blocking<F, T>(&self, work: F) -> Option<tokio::task::JoinHandle<T>>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.open_gate()
+            .map(|_gate| self.tasks.spawn_blocking(work))
+    }
+
+    /// Holds the spawn gate for the caller while admission is open; `None`
+    /// once shutdown has cancelled it.
+    fn open_gate(&self) -> Option<MutexGuard<'_, ()>> {
+        let gate = self.gate.lock().expect("module spawn gate mutex");
+        (!self.cancel.is_cancelled()).then_some(gate)
     }
 }
 
@@ -2569,6 +2594,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 /// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
+/// Each in-flight use-outcome serve write holds one clone of the composition it records after the pass's response released its charges; `use_outcome_writer::RETAINED_SNAPSHOT_BYTES_BOUND` covers every write slot at the bounded read's size.
 /// The transform-serving combined budget is the CK previous-output store plus the native previous-output store, which refuses an entry above `NATIVE_OUTPUT_ENTRY_BUDGET_BYTES` and evicts sessions past `NATIVE_OUTPUT_BUDGET_BYTES`.
 /// A ready transform snapshot holds the CK input and scalar fields, never native messages or a delta fallback, so the snapshot and lease budgets bound what `TransformRequest::snapshot_retained_bytes` charges.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
@@ -2595,6 +2621,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES
     + memory_capture::RETAINED_BYTES_BOUND
     + source_capture::RETAINED_BYTES_BOUND
+    + use_outcome_writer::RETAINED_SNAPSHOT_BYTES_BOUND
     + config::MERGED_CONFIG_RETAINED_BYTES_BOUND;
 
 const NATIVE_OUTPUT_BUDGET_BYTES: usize = 256 * 1024 * 1024;
@@ -2775,9 +2802,9 @@ pub struct HandlerCore {
     /// The kernel store opens after the cache store under the same managed
     /// directory; routes read it through `kernel_store()`, never the slot.
     kernel: Arc<kernel_routes::KernelOpenCoordinator>,
-    /// Outcomes of the serve writes transform passes make after freezing a composition.
-    use_outcome_counts: use_outcome_writer::UseOutcomeCounts,
-    use_outcome_lifecycle: use_outcome_writer::LifecycleCounts,
+    /// Serve writes transform passes hand off after freezing a composition, and their outcome counts.
+    use_outcome_writes: Arc<use_outcome_writer::UseOutcomeWrites>,
+    use_outcome_lifecycle: Arc<use_outcome_writer::LifecycleCounts>,
     /// The MemoryReviewer sampler's published block; `health()` and status read it and never touch the ledger.
     memory_reviewer_status: Arc<memory_reviewer::lifecycle::MemoryReviewerStatus>,
     /// `initialize` decodes the storage descriptor, and `activate` consumes it: malformed descriptors fail before publication, while storage opens after transport publication.
@@ -3479,11 +3506,13 @@ struct PassEnv {
     project_path: String,
     note_project_path: String,
     project_memory: Option<canonical_memory::CanonicalMemoryRead>,
-    /// Set once a serve write of this pass reached a Kernel commit, whatever its outcome; a Kernel that is not Ready leaves it
-    /// clear so a rerun retries. Every attempt of a pass freezes the same pinned read, so one commit covers its reruns.
+    /// `use_outcome_settled` records this pass's serve-write handoff to a Ready Kernel, regardless of outcome. If the Kernel is
+    /// not Ready, `use_outcome_settled` remains clear so a rerun can retry.
     use_outcome_settled: std::sync::atomic::AtomicBool,
-    /// What remains of the pass's Kernel wait across its serve and touch writes.
+    /// What remains of the pass's Kernel wait for the touch it makes on its own thread.
     kernel_writes: use_outcome_writer::PassWriteBudget,
+    /// Set when this pass handed its serve to a tracked job: that job advances `last_transform_at` after its serve commits, so the pass thread makes no touch of its own.
+    touch_delegated: std::sync::atomic::AtomicBool,
     snapshot_generation: u64,
     pass_now: i64,
     timings: PassTimings,
@@ -3669,8 +3698,12 @@ impl Handler {
         request: Value,
     ) -> PreparedOutcome {
         let runner = transform_unit::DetachedRunner::default();
-        self.handle_transform_with_runner(route, request, &runner)
-            .await
+        let outcome = self
+            .handle_transform_with_runner(route, request, &runner)
+            .await;
+        // Callers read settled serve writes when this returns.
+        self.use_outcome_writes.settled().await;
+        outcome
     }
 
     /// Runs a transform as a client would: names the input snapshot, then applies the wire recipe
@@ -3813,8 +3846,8 @@ impl Handler {
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
             source_capture: Arc::default(),
-            use_outcome_counts: Default::default(),
-            use_outcome_lifecycle: Default::default(),
+            use_outcome_writes: Arc::default(),
+            use_outcome_lifecycle: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
@@ -4348,8 +4381,8 @@ impl Handler {
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
             source_capture: Arc::default(),
-            use_outcome_counts: Default::default(),
-            use_outcome_lifecycle: Default::default(),
+            use_outcome_writes: Arc::default(),
+            use_outcome_lifecycle: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
@@ -9226,10 +9259,14 @@ impl HandlerCore {
         let cancel = self.cancel.clone();
         Some(dispatch::AfterResponse::new(move || {
             let capture = handoff.supervisor();
-            if let Some(job) = handoff.into_job(kernel, gate, cancel)
-                && admission.spawn(job.run()).is_none()
-            {
-                capture.refuse(source_capture::Count::RefusedShuttingDown);
+            if let Some(job) = handoff.into_job(kernel, gate, cancel) {
+                let session = job.session().clone();
+                if let Err(refused) = admission.try_spawn(job.run()) {
+                    // Recorded before the unrun job drops, so its slot's
+                    // release cannot end the entry first.
+                    capture.refuse_handoff(source_capture::Count::RefusedShuttingDown, &session);
+                    drop(refused);
+                }
             }
         }))
     }
@@ -9568,6 +9605,7 @@ impl HandlerCore {
             project_memory,
             use_outcome_settled: std::sync::atomic::AtomicBool::new(false),
             kernel_writes: Default::default(),
+            touch_delegated: std::sync::atomic::AtomicBool::new(false),
             snapshot_generation,
             pass_now,
             timings: PassTimings {
@@ -9680,7 +9718,6 @@ impl HandlerCore {
         pass.finished()
     }
 
-    /// Records the serve when this attempt froze an Available composition, its Memory Store commit landed, and the pass has not yet written one. The commit already decided the pass, so the write's outcome is only counted.
     fn record_use_outcome(&self, env: &PassEnv, pass: &TransformWithProjection) {
         if !(pass.froze_composition && pass.response.committed) {
             return;
@@ -9707,36 +9744,79 @@ impl HandlerCore {
         {
             return;
         }
-        let attempt = self.use_outcome_fault().map_or_else(
-            || {
-                use_outcome_writer::record_serve(
-                    &self.kernel,
-                    &env.kernel_writes,
-                    &use_outcome_writer::Serve {
-                        project: &env.binding.kernel_project,
-                        harness: &env.binding.harness,
-                        session_id: &env.parsed.session_id,
-                        is_subagent: env.parsed.is_subagent,
-                        snapshot,
-                        recorded_at: env.pass_now,
-                    },
-                )
-            },
-            |fault| fault.map(use_outcome_writer::UseOutcomeWrite::from_error),
-        );
-        // A Kernel that is not Ready cost no wait, so a rerun in this pass may retry; any commit outcome settles
-        // the pass. `kernel_writes` bounds the pass's total Kernel wait across these writes and the touch.
-        if attempt.is_some() {
-            env.use_outcome_settled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+        let fault = self.use_outcome_fault();
+        let ready = match &fault {
+            Some(injected) => injected.is_some(),
+            None => self.kernel.kernel_store().is_ok(),
+        };
+        // A Kernel that is not Ready at the hand-off leaves the pass eligible to retry in a rerun; a write handed to a
+        // Ready Kernel settles the pass regardless of outcome.
+        if !ready {
+            self.use_outcome_writes
+                .record(use_outcome_writer::UseOutcomeWrite::KernelUnavailable);
+            return;
         }
-        self.use_outcome_counts
-            .record(attempt.unwrap_or(use_outcome_writer::UseOutcomeWrite::KernelUnavailable));
+        env.use_outcome_settled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let injected = fault.flatten();
+        let kernel = Arc::clone(&self.kernel);
+        let lifecycle = Arc::clone(&self.use_outcome_lifecycle);
+        let project = env.binding.kernel_project.clone();
+        let harness = env.binding.harness.clone();
+        let session_id = env.parsed.session_id.clone();
+        let is_subagent = env.parsed.is_subagent;
+        let snapshot = snapshot.clone();
+        let recorded_at = env.pass_now;
+        // The job touches after its serve, so the serving pass's record carries this pass's time, as a serve made on the pass thread would.
+        let Some(job) = self.use_outcome_writes.job(move || {
+            let write = match injected {
+                Some(error) => Some(use_outcome_writer::UseOutcomeWrite::from_error(error)),
+                None => use_outcome_writer::record_serve(
+                    &kernel,
+                    &use_outcome_writer::Serve {
+                        project: &project,
+                        harness: &harness,
+                        session_id: &session_id,
+                        is_subagent,
+                        snapshot: &snapshot,
+                        recorded_at,
+                    },
+                ),
+            };
+            let touch = match kernel.kernel_store() {
+                Ok(store) => use_outcome_writer::touch_after_serve(
+                    &store,
+                    &project,
+                    &harness,
+                    &session_id,
+                    recorded_at,
+                ),
+                Err(_) => Some(use_outcome_writer::LifecycleWrite::TransformSkippedUnavailable),
+            };
+            if let Some(touch) = touch {
+                lifecycle.record(touch);
+            }
+            write
+        }) else {
+            return;
+        };
+        if self.admission().spawn_blocking(job).is_none() {
+            self.use_outcome_writes
+                .record(use_outcome_writer::UseOutcomeWrite::KernelUnavailable);
+            return;
+        }
+        env.touch_delegated
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The Kernel to advance `last_transform_at` in after a settled committed pass, when a live record of the session needs it: the check reads within what remains of the pass's Kernel wait, and a skip is counted. A route with memory disabled takes no Kernel read, so it writes no record and touches none.
     fn use_outcomes_to_touch(&self, env: &PassEnv) -> Option<Arc<kernel::KernelStore>> {
-        if !self.kernel.expected() || env.project_memory.is_none() {
+        if !self.kernel.expected()
+            || env.project_memory.is_none()
+            || env
+                .touch_delegated
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return None;
         }
         let Ok(kernel) = self.kernel.kernel_store() else {
@@ -24844,6 +24924,187 @@ mod tests {
                 .completed,
             1
         );
+    }
+
+    /// The frozen `head` of every job a submission prepared, read while a
+    /// trigger refuses completion so the plans stay in the store.
+    fn frozen_heads(store: &MemoryStore) -> Vec<Value> {
+        store
+            .with_conn_for_test(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT prepared_json FROM memory_capture_jobs
+                     WHERE prepared_json IS NOT NULL ORDER BY rowid",
+                )?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|plan| serde_json::from_str::<Value>(&plan).unwrap()["head"].clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it() {
+        use crate::memory_capture::FrozenHead;
+        use crate::memory_capture::head_fixtures::{commit, declare_sha256, detach, repository};
+        for fixture in ["commits", "detached", "unborn", "plain", "sha256"] {
+            let state = Arc::new(ProducerState::default());
+            let (handler, store, _dir, project) =
+                handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+            let expected = match fixture {
+                "commits" => FrozenHead::Commit(repository(&project, 2).remove(1)),
+                "detached" => {
+                    let first = repository(&project, 2).remove(0);
+                    detach(&project, &first);
+                    FrozenHead::Commit(first)
+                }
+                "unborn" => {
+                    gix::init(&project).unwrap();
+                    FrozenHead::HeadUnavailable
+                }
+                "sha256" => {
+                    repository(&project, 1);
+                    declare_sha256(&project);
+                    FrozenHead::HeadUnavailable
+                }
+                _ => FrozenHead::HeadUnavailable,
+            };
+            handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+            store
+                .execute_tag_sql_for_test(
+                    "CREATE TRIGGER hold_plans BEFORE UPDATE ON memory_capture_jobs
+                     WHEN NEW.commit_seq IS NOT NULL BEGIN SELECT RAISE(ABORT,'held'); END",
+                )
+                .unwrap();
+            let request = json!({"method":"memory.capture","session_id":"ses","messages":[
+                {"id":"native-user-1","role":"user","text":"Use port 4321 for staging."},
+                {"id":"native-user-2","role":"user","text":"Production listens on 8080."},
+            ]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+            let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
+            let work = tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await,
+            );
+            assert_eq!(work["state"], "work", "{fixture}: {work}");
+            let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+            let messages = prompt["messages"].as_array().unwrap();
+            assert_eq!(
+                messages.len(),
+                2,
+                "{fixture}: one submission carries both jobs"
+            );
+            let output = json!({"version":1,"decisions":messages.iter().map(|message| {
+                let text = message["text"].as_str().unwrap();
+                json!({"message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":text,"quote":text}]})
+            }).collect::<Vec<_>>()});
+            let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
+            assert_eq!(
+                tool_body(
+                    handler
+                        .handle_native_capture_submit(test_route(7), &submission)
+                        .await
+                )["state"],
+                "processed",
+                "{fixture}"
+            );
+            let expected = serde_json::to_value(&expected).unwrap();
+            assert_eq!(frozen_heads(&store), vec![expected.clone(); 2], "{fixture}");
+            if fixture == "commits" {
+                commit(&project, "checked out later\n");
+                store
+                    .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+                    .unwrap();
+                assert_eq!(
+                    tool_body(
+                        handler
+                            .handle_native_capture_next(test_route(7), &next)
+                            .await
+                    )["state"],
+                    "pending",
+                    "the held retry publishes again and is refused completion again"
+                );
+                assert_eq!(
+                    frozen_heads(&store),
+                    vec![expected.clone(); 2],
+                    "a retry after a later commit keeps the head frozen at submit"
+                );
+            }
+            store
+                .execute_tag_sql_for_test(
+                    "DROP TRIGGER hold_plans; UPDATE memory_capture_jobs SET retry_at_ms=0",
+                )
+                .unwrap();
+            assert_eq!(
+                tool_body(
+                    handler
+                        .handle_native_capture_next(test_route(7), &next)
+                        .await
+                )["state"],
+                "ready",
+                "{fixture}"
+            );
+            let status = store.memory_capture_status(&capture_key(&project)).unwrap();
+            assert_eq!((status.completed, status.pending), (2, 0), "{fixture}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plan_frozen_without_a_head_publishes_as_before() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let request = json!({"method":"memory.capture","session_id":"ses","messages":[
+            {"id":"native-user-1","role":"user","text":"Use port 4321 for staging."},
+        ]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        let key = capture_key(&project);
+        let job = store
+            .pending_memory_captures(&key, "pi", now_ms())
+            .unwrap()
+            .remove(0);
+        let legacy = json!({"version":1,"model":"custom-native/model","existing":[],"memories":[{
+            "category":"CONFIG_VALUES",
+            "content":"User stated: Use port 4321 for staging.",
+            "quote":"Use port 4321 for staging.",
+        }]})
+        .to_string();
+        store
+            .prepare_memory_capture(&key, &job.job_id, &legacy)
+            .unwrap();
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "ready"
+        );
+        assert_eq!(store.memory_capture_status(&key).unwrap().completed, 1);
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(memories.rows.len(), 1);
+        let decision = memories.decisions.values().next().unwrap();
+        assert_eq!(decision.anchor_id, None);
+        let rationale: Value = serde_json::from_str(&decision.payload.rationale).unwrap();
+        assert_eq!(rationale["anchor"], "head_unavailable");
     }
 
     #[tokio::test]

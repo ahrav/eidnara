@@ -522,6 +522,84 @@ pub fn occurrence_id_preserving_span(
     ))
 }
 
+/// The `lineage_id` [`encode_preserving_span`] reports for `occurrence`, and its refusal when it refuses, without deriving the occurrence id.
+fn lineage_id_preserving_span(occurrence: &Occurrence<'_>) -> Result<String, OccurrenceRefusal> {
+    let (_, prefix, _) = validated_prefix(occurrence)?;
+    Ok(identity_digest(&finish(
+        &prefix,
+        ROLE_LINEAGE,
+        &[occurrence.representation],
+        occurrence.span,
+    )))
+}
+
+/// The `lineage_id`s [`encode_preserving_span`] reports for `occurrence` with the value of its class's last identity field set to each of `values` in turn, ending before the first value it refuses, and none when it refuses `occurrence`. The other fields are checked and encoded once, and the encoding before the varied value is hashed once.
+pub fn lineage_ids_varying_last_field<'v>(
+    occurrence: &Occurrence<'_>,
+    values: impl IntoIterator<Item = &'v str>,
+) -> Vec<String> {
+    let Ok((class, prefix, _)) = validated_prefix(occurrence) else {
+        return Vec::new();
+    };
+    let values = values.into_iter();
+    let last = class.identity_fields()[class.identity_fields().len() - 1];
+    if !checks_only_well_formedness(class, last) {
+        return values
+            .map_while(|value| {
+                let identity: Vec<(&str, &str)> = occurrence
+                    .identity
+                    .iter()
+                    .map(|&(name, current)| (name, if name == last { value } else { current }))
+                    .collect();
+                lineage_id_preserving_span(&Occurrence {
+                    identity: &identity,
+                    ..*occurrence
+                })
+                .ok()
+            })
+            .collect();
+    }
+    // The prefix ends with the last field's length-prefixed value, so the
+    // lineage encoding splits into the bytes before that value, the value,
+    // and the representation and span after it.
+    let current = occurrence
+        .identity
+        .iter()
+        .find(|(name, _)| *name == last)
+        .map_or("", |(_, value)| *value);
+    let encoded = finish(
+        &prefix,
+        ROLE_LINEAGE,
+        &[occurrence.representation],
+        occurrence.span,
+    );
+    debug_assert_eq!(&encoded[2..2 + prefix.len()], prefix.as_slice());
+    let tail_len = encoded.len() - 2 - prefix.len();
+    let head_len = encoded.len() - tail_len - LENGTH_PREFIX_BYTES - current.len();
+    let (head, tail) = (&encoded[..head_len], &encoded[encoded.len() - tail_len..]);
+    let hashed_head = Sha256::new_with_prefix(head);
+    values
+        .map_while(|value| {
+            well_formed_value(value).then(|| {
+                let mut value_bytes = Vec::with_capacity(LENGTH_PREFIX_BYTES + value.len());
+                push_str(&mut value_bytes, value);
+                lower_hex(
+                    &hashed_head
+                        .clone()
+                        .chain_update(value_bytes)
+                        .chain_update(tail)
+                        .finalize(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Whether [`validated_prefix`] checks `field` of `class` only for well-formedness, so every well-formed value of it passes where one does: a harness must be a known harness, and a git identity's oid must fit its object format.
+fn checks_only_well_formedness(class: OccurrenceClass, field: &str) -> bool {
+    field != "harness" && class != OccurrenceClass::GitCommits
+}
+
 /// The occurrence tuple: the identity prefix, then the revision, the representation, and the span.
 fn occurrence_tuple(prefix: &[u8], occurrence: &Occurrence<'_>) -> Vec<u8> {
     finish(
@@ -958,7 +1036,7 @@ mod tests {
         }
     }
 
-    /// The lineage-free identifier is the full encoder's `occurrence_id` and `revision`, and refuses exactly where it refuses.
+    /// The lineage-free identifier is the full encoder's `occurrence_id` and `revision`, the occurrence-free identifier is its `lineage_id`, and each refuses exactly where it refuses; varying the last identity field yields the lineage ids encoded one value at a time, up to the first refused value.
     #[test]
     fn the_occurrence_id_agrees_with_the_full_encoding() {
         let oid = "b".repeat(40);
@@ -969,6 +1047,30 @@ mod tests {
                 vec![("object_id", "obj:\u{e9}")],
                 "3",
                 "rationale",
+            ),
+            (
+                "messages",
+                vec![
+                    ("project_id", "p"),
+                    ("harness", "pi"),
+                    ("session_id", "s"),
+                    ("message_id", "m"),
+                    ("block_index", "3"),
+                ],
+                "1",
+                "text",
+            ),
+            (
+                "messages",
+                vec![
+                    ("block_index", "3"),
+                    ("message_id", "m"),
+                    ("session_id", "s"),
+                    ("harness", "opencode"),
+                    ("project_id", "p"),
+                ],
+                "1",
+                "text",
             ),
             (
                 "raw_tool_spans",
@@ -1036,6 +1138,47 @@ mod tests {
                         .map(|encoded| (encoded.occurrence_id, encoded.revision)),
                     "{occurrence:?}"
                 );
+                assert_eq!(
+                    lineage_id_preserving_span(&occurrence),
+                    encode_preserving_span(&occurrence).map(|encoded| encoded.lineage_id),
+                    "{occurrence:?}"
+                );
+                let Some(class) = OccurrenceClass::from_code(class) else {
+                    continue;
+                };
+                let last = class.identity_fields()[class.identity_fields().len() - 1];
+                let values = ["0", "17", "pi", "", "\u{7}", long.as_str(), "9"];
+                for start in 0..values.len() {
+                    let one_by_one: Vec<String> = values[start..]
+                        .iter()
+                        .map_while(|value| {
+                            let identity: Vec<(&str, &str)> = identity
+                                .iter()
+                                .map(|&(name, current)| {
+                                    (name, if name == last { *value } else { current })
+                                })
+                                .collect();
+                            lineage_id_preserving_span(&Occurrence {
+                                identity: &identity,
+                                ..occurrence
+                            })
+                            .ok()
+                        })
+                        .collect();
+                    let expected = if lineage_id_preserving_span(&occurrence).is_ok() {
+                        one_by_one
+                    } else {
+                        Vec::new()
+                    };
+                    assert_eq!(
+                        lineage_ids_varying_last_field(
+                            &occurrence,
+                            values[start..].iter().copied()
+                        ),
+                        expected,
+                        "{occurrence:?} from {start}"
+                    );
+                }
             }
         }
     }

@@ -8,11 +8,14 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `18a469fce`).
+References are verified at the #1157 branch tip, the commit that carries this
+revision.
 
-- Join: `crates/kernel/src/use_outcome.rs:190`; read: `served_sessions_for`
-  (`crates/kernel/src/use_outcome.rs:446`).
+- Join: `crates/kernel/src/use_outcome.rs:170-171`; read: `served_sessions_for`
+  (`crates/kernel/src/use_outcome.rs:502`).
+- The read takes the newest qualifying commit sequence once for the object and
+  compares each serve's `served_commit_seq` against it, so a serve is disputed
+  exactly when some qualifying event is later than it.
 - The flag is computed in the read and stored nowhere; the read changes no
   visibility.
 
@@ -22,9 +25,9 @@ its parent is `18a469fce`).
   sequence greater than n.
 - Existing check:
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:341`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:400`);
   `disputed_after_serve_is_judged_against_each_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:765`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:826`). Status: unaudited.
 
 ## Failure scenario
 
@@ -43,7 +46,7 @@ and before n; a null row and another lineage by SQL.
 
 ## Investigation log
 
-### Q: A decision disputed then re-approved still counts: event existence counts (resolved at #1154 ticketing)
+### Q: Does a decision disputed then re-approved still count as disputed after serve?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A decision disputed then re-approved still counts: event existence

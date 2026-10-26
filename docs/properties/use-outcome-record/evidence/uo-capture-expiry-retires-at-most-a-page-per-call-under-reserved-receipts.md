@@ -9,14 +9,14 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `18a469fce`).
+References are verified at the #1157 branch tip, the commit that carries this
+revision.
 
 - Page bound and order: `expired_captures_sql`
-  (`crates/kernel/src/local_file.rs:549`).
+  (`crates/kernel/src/local_file.rs:558`).
 - Reserved receipt: `expiry_intent` (`crates/kernel/src/local_file.rs:433`).
 - The use-outcome sweep follows the same shape at `expire_use_outcomes`
-  (`crates/kernel/src/use_outcome.rs:547`).
+  (`crates/kernel/src/use_outcome.rs:612`).
 - Correction: the spec cited `harness_sources.rs:3331, 3187`; the tests moved to
   the lines under Existing check.
 
@@ -25,11 +25,11 @@ its parent is `18a469fce`).
   cutoff and id and rechecked under the writer.
 - Existing check:
   `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it`
-  (`crates/daemon/tests/harness_sources.rs:3338`);
+  (`crates/daemon/tests/harness_sources.rs:3356`);
   `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
-  (`crates/daemon/tests/harness_sources.rs:3482`);
+  (`crates/daemon/tests/harness_sources.rs:3500`);
   `a_replayed_expiry_receipt_is_not_counted_as_a_retirement`
-  (`crates/kernel/src/local_file.rs:728`). Status: unaudited.
+  (`crates/kernel/src/local_file.rs:737`). Status: unaudited.
 
 ## Failure scenario
 

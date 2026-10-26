@@ -1,5 +1,7 @@
 use super::source_capture_tests::delete_session;
-use super::use_outcome_writer_tests::{bound, seed_memories, served};
+use super::use_outcome_writer_tests::{
+    bound, seed_memories, served, transform_with_usage_leaving_serves_pending,
+};
 use super::*;
 use crate::use_outcome_writer::LifecycleWrite;
 
@@ -377,92 +379,41 @@ async fn a_spent_pass_budget_skips_the_touch() {
     );
 }
 
-/// A HARD pass whose serve write waits out the budget on a held writer leaves its touch nothing to wait with: the writer is released as soon as the serve counts `deadline`, and the touch still answers `transform_skipped_deadline` because the pass spent its one Kernel wait.
+/// A HARD pass whose serve write counts `deadline` leaves its touch a full Kernel wait: the serve runs as a tracked job with its own waits, so with the writer free the touch advances `last_transform_at`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_serve_and_the_touch_of_one_pass_share_one_kernel_wait() {
+async fn a_serve_deadline_leaves_the_touch_its_own_kernel_wait() {
     let (handler, _store, _dir, project) = served_handler().await;
-    let kernel = handler.kernel.kernel_store().unwrap();
     seed_memories(
-        &kernel,
+        &handler.kernel.kernel_store().unwrap(),
         &project,
         &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
     );
-    let (entered, held) = std::sync::mpsc::channel();
-    let holder = {
-        let kernel = Arc::clone(&kernel);
-        let core = Arc::clone(&handler.core);
-        std::thread::spawn(move || {
-            kernel
-                .commit(kernel_route_fixtures::intent("hold-writer"), |_| {
-                    entered.send(()).unwrap();
-                    while core
-                        .use_outcome_counts
-                        .get(crate::use_outcome_writer::UseOutcomeWrite::Deadline)
-                        == 0
-                    {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    Ok(String::new())
-                })
-                .unwrap();
-        })
-    };
-    held.recv().unwrap();
-    let refold = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
-    holder.join().unwrap();
+    let touched = served(&handler, &project)[0]
+        .serve
+        .last_transform_at
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let occupied = handler.use_outcome_writes.occupy_every_slot();
+    let refold =
+        transform_with_usage_leaving_serves_pending(&handler, big_messages(), 48_000, 50_000).await;
+    drop(occupied);
     assert_eq!(refold["action"], "HARD", "{refold}");
     assert_eq!(
         handler
-            .use_outcome_lifecycle
-            .get(LifecycleWrite::TransformSkippedDeadline),
+            .use_outcome_writes
+            .get(crate::use_outcome_writer::UseOutcomeWrite::Deadline),
         1,
-        "the writer was free at the touch, and the pass had no wait left"
+        "the serve found no write slot"
     );
-    assert_eq!(
-        handler
-            .use_outcome_lifecycle
-            .get(LifecycleWrite::TransformTouched),
-        1,
-        "only the first fold's pass touched"
+    assert!(
+        served(&handler, &project)[0]
+            .serve
+            .last_transform_at
+            .unwrap()
+            > touched,
+        "the touch advanced the first fold's record"
     );
-}
-
-/// With the Kernel Starting, and again once it is marked unavailable, `review.use_outcome` answers the kernel routes' `unavailable` state and carries no count.
-#[tokio::test(flavor = "current_thread")]
-async fn review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count() {
-    let producer = Arc::new(ProducerState::default());
-    let (starting, _store, _dir, project) =
-        handler_with_store(Arc::clone(&producer), default_test_config());
-    starting.kernel.set_expected(true);
-    let (ready, _store, _dir, ready_project) =
-        handler_with_store_and_kernel(producer, default_test_config()).await;
-    ready
-        .kernel
-        .mark_unavailable(kernel_routes::UnavailableKind::Store);
-    for (handler, project, reason) in [
-        (&starting, &project, "store_starting"),
-        (&ready, &ready_project, "store_unavailable"),
-    ] {
-        let outcome = handler
-            .dispatch_value(
-                test_route(7),
-                json!({
-                    "method": "review.use_outcome",
-                    "session_id": "ses",
-                    "project_root": project,
-                    "object_id": "mem-a",
-                }),
-            )
-            .await;
-        let PreparedOutcome::Response(bytes) = outcome else {
-            panic!("{outcome:?}");
-        };
-        let answer: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(answer["state"]["kind"], "unavailable", "{answer}");
-        assert_eq!(answer["state"]["reason"], reason, "{answer}");
-        assert!(answer.get("served_sessions").is_none(), "{answer}");
-        assert!(answer.get("disputed_after_serve").is_none(), "{answer}");
-    }
+    assert_eq!(lifecycle_counts(&handler), [("transform_touched", 2)]);
 }
 
 /// A touch that waits on a held Kernel writer runs beside the rest of the settle: the pass's completion lands in the memory store's pass trace while the touch waits, the holder then releases the writer, and the touch advances `last_transform_at`. The thread scope joins the touch before the response returns. The response build and its trace write must fit in what remains of the pass's 250 ms Kernel wait, or the touch counts `transform_skipped_deadline`.
@@ -518,4 +469,42 @@ async fn a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_
         "the touch did not land beside the settle: {counts:?}"
     );
     assert_eq!(counts, [("transform_touched", 2)]);
+}
+
+/// With the Kernel Starting, and again once it is marked unavailable, `review.use_outcome` answers the kernel routes' `unavailable` state and carries no count.
+#[tokio::test(flavor = "current_thread")]
+async fn review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count() {
+    let producer = Arc::new(ProducerState::default());
+    let (starting, _store, _dir, project) =
+        handler_with_store(Arc::clone(&producer), default_test_config());
+    starting.kernel.set_expected(true);
+    let (ready, _store, _dir, ready_project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    ready
+        .kernel
+        .mark_unavailable(kernel_routes::UnavailableKind::Store);
+    for (handler, project, reason) in [
+        (&starting, &project, "store_starting"),
+        (&ready, &ready_project, "store_unavailable"),
+    ] {
+        let outcome = handler
+            .dispatch_value(
+                test_route(7),
+                json!({
+                    "method": "review.use_outcome",
+                    "session_id": "ses",
+                    "project_root": project,
+                    "object_id": "mem-a",
+                }),
+            )
+            .await;
+        let PreparedOutcome::Response(bytes) = outcome else {
+            panic!("{outcome:?}");
+        };
+        let answer: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["state"]["kind"], "unavailable", "{answer}");
+        assert_eq!(answer["state"]["reason"], reason, "{answer}");
+        assert!(answer.get("served_sessions").is_none(), "{answer}");
+        assert!(answer.get("disputed_after_serve").is_none(), "{answer}");
+    }
 }

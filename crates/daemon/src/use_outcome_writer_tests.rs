@@ -1,5 +1,5 @@
 use super::*;
-use crate::use_outcome_writer::{PassWriteBudget, Serve, UseOutcomeWrite, record_serve};
+use crate::use_outcome_writer::{Serve, UseOutcomeWrite, record_serve};
 use kernel::KernelError;
 use kernel_route_fixtures::{MEMORY_DOMAIN, commit_verified_memory, ensure_domain, intent};
 
@@ -50,7 +50,7 @@ pub(super) fn served(handler: &Handler, project: &Path) -> Vec<kernel::UseOutcom
 fn counts(handler: &Handler) -> Vec<(&'static str, u64)> {
     UseOutcomeWrite::ALL
         .iter()
-        .map(|outcome| (outcome.name(), handler.use_outcome_counts.get(*outcome)))
+        .map(|outcome| (outcome.name(), handler.use_outcome_writes.get(*outcome)))
         .filter(|(_, count)| *count > 0)
         .collect()
 }
@@ -147,37 +147,21 @@ async fn an_equal_digest_replays_and_another_harness_or_role_conflicts() {
         recorded_at: 1,
     };
     assert_eq!(
-        record_serve(
-            &handler.kernel,
-            &PassWriteBudget::default(),
-            &serve("daemon-test", false)
-        ),
+        record_serve(&handler.kernel, &serve("daemon-test", false)),
         Some(UseOutcomeWrite::Written)
     );
     let tip = kernel_commits(&handler);
     assert_eq!(
-        record_serve(
-            &handler.kernel,
-            &PassWriteBudget::default(),
-            &serve("daemon-test", false)
-        ),
+        record_serve(&handler.kernel, &serve("daemon-test", false)),
         Some(UseOutcomeWrite::Replayed)
     );
     assert_eq!(kernel_commits(&handler), tip, "a replay commits nothing");
     assert_eq!(
-        record_serve(
-            &handler.kernel,
-            &PassWriteBudget::default(),
-            &serve("other-harness", false)
-        ),
+        record_serve(&handler.kernel, &serve("other-harness", false)),
         Some(UseOutcomeWrite::Conflict)
     );
     assert_eq!(
-        record_serve(
-            &handler.kernel,
-            &PassWriteBudget::default(),
-            &serve("daemon-test", true)
-        ),
+        record_serve(&handler.kernel, &serve("daemon-test", true)),
         Some(UseOutcomeWrite::Conflict)
     );
     let records = served(&handler, &project);
@@ -371,10 +355,26 @@ async fn a_discarded_attempt_leaves_no_serve_and_the_retry_records_one() {
         .unwrap()
         .unwrap_or_default();
     assert_eq!(records.len(), 1);
+    let composition = &response["project_memory"];
+    assert_eq!(composition["kind"], "canonical", "{response}");
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+    assert_eq!(
+        records[0].serve.served_commit_seq,
+        composition["known_as_of"].as_i64().unwrap()
+    );
+    assert_eq!(
+        records[0].serve.composition_revision,
+        composition["revision"].as_u64().unwrap()
+    );
+    assert_eq!(
+        after.meta.project_memory,
+        serde_json::from_value(composition.clone()).ok(),
+        "the retry's persisted composition is the one the record names"
+    );
     assert_eq!(counts(&handler), [("written", 1)]);
 }
 
-/// On the additive engine a subagent pass that freezes a Canonical composition records the `subagent` role; on the `eidnara_folds` engine the same request freezes no composition and records nothing.
+/// On the additive engine a subagent pass that freezes a Canonical composition records the `subagent` role; on the `eidnara_folds` engine the same request plans no HARD, is served no block and no composition, and records nothing. A primary pass records `primary` on each engine.
 #[tokio::test(flavor = "current_thread")]
 async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
     for (config, is_subagent, expected) in [
@@ -389,6 +389,11 @@ async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
             Some(kernel::SessionRole::Primary),
         ),
         (default_test_config(), true, None),
+        (
+            default_test_config(),
+            false,
+            Some(kernel::SessionRole::Primary),
+        ),
     ] {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, project) =
@@ -411,7 +416,15 @@ async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
         assert_eq!(response["status"], "ok", "{response}");
         if expected.is_none() {
             assert_ne!(response["action"], "HARD", "{response}");
+            assert!(response["project_memory"].is_null(), "{response}");
         }
+        assert_eq!(
+            serde_json::to_string(&response)
+                .unwrap()
+                .contains("<project-memory>"),
+            expected.is_some(),
+            "{response}"
+        );
         let roles: Vec<_> = served(&handler, &project)
             .iter()
             .map(|record| record.serve.session_role)
@@ -604,7 +617,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
         recorded_at: 1,
     };
     assert_eq!(
-        record_serve(&starting.kernel, &PassWriteBudget::default(), &serve),
+        record_serve(&starting.kernel, &serve),
         None,
         "a Kernel that is not Ready attempts no write"
     );
@@ -640,7 +653,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     };
     writer_held.recv().unwrap();
     let started = std::time::Instant::now();
-    let outcome = record_serve(&held.kernel, &PassWriteBudget::default(), &serve);
+    let outcome = record_serve(&held.kernel, &serve);
     let waited = started.elapsed();
     holding.send(()).unwrap();
     holder.join().unwrap();
@@ -653,7 +666,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     );
     assert!(served(&held, &project).is_empty());
     assert_eq!(
-        record_serve(&held.kernel, &PassWriteBudget::default(), &serve),
+        record_serve(&held.kernel, &serve),
         Some(UseOutcomeWrite::Written)
     );
     let as_subagent = Serve {
@@ -662,7 +675,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     };
     for _ in 0..2 {
         assert_eq!(
-            record_serve(&held.kernel, &PassWriteBudget::default(), &as_subagent),
+            record_serve(&held.kernel, &as_subagent),
             Some(UseOutcomeWrite::Conflict),
             "a conflict is not repaired by a later fold"
         );
@@ -682,6 +695,133 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
         "a read at sequence 0 names no commit, so no write is attempted"
     );
     assert!(served(&fresh, &fresh_project).is_empty());
+}
+
+/// A recorded served set replays from a reader while another writer holds the Kernel writer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recorded_served_set_replays_while_another_writer_holds_the_writer() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    seed_memories(
+        &kernel,
+        &project,
+        &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
+    );
+    let snapshot = canonical_memory::CanonicalMemorySnapshot::new(
+        kernel.tip().unwrap(),
+        false,
+        ["mem-a", "mem-b"]
+            .map(|object_id| canonical_memory::CanonicalMemory {
+                object_id: object_id.to_string(),
+                category: "PROJECT_RULES".to_string(),
+                content: format!("Rule {object_id}."),
+            })
+            .to_vec(),
+    );
+    let binding = bound(&project);
+    let serve = Serve {
+        project: &binding.kernel_project,
+        harness: "daemon-test",
+        session_id: "ses",
+        is_subagent: false,
+        snapshot: &snapshot,
+        recorded_at: 1,
+    };
+    assert_eq!(
+        record_serve(&handler.kernel, &serve),
+        Some(UseOutcomeWrite::Written)
+    );
+    let (holding, release) = std::sync::mpsc::channel::<()>();
+    let (entered, writer_held) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(intent("hold-writer"), |_| {
+                    entered.send(()).unwrap();
+                    release.recv().unwrap();
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    writer_held.recv().unwrap();
+    let started = std::time::Instant::now();
+    let replayed = record_serve(&handler.kernel, &serve);
+    let waited = started.elapsed();
+    let conflict = record_serve(
+        &handler.kernel,
+        &Serve {
+            is_subagent: true,
+            ..serve
+        },
+    );
+    let other_session = Serve {
+        session_id: "other",
+        ..serve
+    };
+    let deadline = record_serve(&handler.kernel, &other_session);
+    holding.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(replayed, Some(UseOutcomeWrite::Replayed));
+    eprintln!("use-outcome replay under a held writer: {waited:?}");
+    assert!(
+        waited < std::time::Duration::from_millis(250),
+        "a replay answers before the write budget ends: {waited:?}"
+    );
+    assert_eq!(conflict, Some(UseOutcomeWrite::Conflict));
+    assert_eq!(deadline, Some(UseOutcomeWrite::Deadline));
+    let served_in = |session_id: &str| {
+        kernel
+            .served_set(binding.kernel_project.digest(), "daemon-test", session_id)
+            .unwrap()
+            .unwrap_or_default()
+    };
+    let records = served_in("ses");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a", "mem-b"]);
+    assert_eq!(records[0].serve.session_role, kernel::SessionRole::Primary);
+    assert!(served_in("other").is_empty());
+    assert_eq!(
+        record_serve(&handler.kernel, &other_session),
+        Some(UseOutcomeWrite::Written)
+    );
+
+    let (entered, writer_held) = std::sync::mpsc::channel::<()>();
+    let brief = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(intent("hold-writer-briefly"), |_| {
+                    entered.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    writer_held.recv().unwrap();
+    let started = std::time::Instant::now();
+    let written = record_serve(
+        &handler.kernel,
+        &Serve {
+            session_id: "third",
+            ..serve
+        },
+    );
+    let waited = started.elapsed();
+    brief.join().unwrap();
+    assert_eq!(
+        written,
+        Some(UseOutcomeWrite::Written),
+        "a new served set waits for a writer released within the budget"
+    );
+    assert!(waited < std::time::Duration::from_millis(250), "{waited:?}");
+    let third = served_in("third");
+    assert_eq!(third.len(), 1);
+    assert_eq!(third[0].decision_object_ids, ["mem-a", "mem-b"]);
 }
 
 /// The outcome vocabulary indexes its counters in order, and the Kernel errors the writer meets map to their closed names.
@@ -758,6 +898,124 @@ async fn only_an_unready_kernel_leaves_the_pass_to_retry_its_serve() {
         assert_eq!(counts(&handler), expected, "{fault:?}");
         assert_eq!(served(&handler, &project).len(), records, "{fault:?}");
     }
+}
+
+/// Holds the Kernel writer on its own thread until the returned sender is sent to or dropped.
+fn hold_kernel_writer(
+    kernel: &Arc<kernel::KernelStore>,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (entered, writer_held) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let kernel = Arc::clone(kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(intent("hold-writer-across-a-pass"), |_| {
+                    entered.send(()).unwrap();
+                    let _ = released.recv();
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    writer_held.recv().unwrap();
+    (release, holder)
+}
+
+/// The response can return while a serve write the pass handed off remains pending.
+pub(super) async fn transform_leaving_serves_pending(
+    handler: &Handler,
+    messages: Vec<IngressMessage>,
+) -> Value {
+    transform_request_leaving_serves_pending(handler, request(messages)).await
+}
+
+/// [`transform_leaving_serves_pending`] for a request carrying usage, so a pass under context pressure refolds.
+pub(super) async fn transform_with_usage_leaving_serves_pending(
+    handler: &Handler,
+    messages: Vec<IngressMessage>,
+    current_total_input_tokens: u64,
+    context_limit_tokens: u64,
+) -> Value {
+    transform_request_leaving_serves_pending(
+        handler,
+        request_with_usage(messages, current_total_input_tokens, context_limit_tokens),
+    )
+    .await
+}
+
+async fn transform_request_leaving_serves_pending(handler: &Handler, request: Value) -> Value {
+    let request = handler.test_client_prepare_request(request);
+    let outcome = handler
+        .handle_transform_with_runner(
+            test_route(7),
+            request.clone(),
+            &transform_unit::DetachedRunner::default(),
+        )
+        .await;
+    match handler.test_client_apply(&request, outcome) {
+        PreparedOutcome::Response(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        other => panic!("unexpected handler outcome: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hard_fold_answers_while_another_writer_holds_the_kernel_writer() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    seed_memories(&kernel, &project, &[("mem-a", "Rule a.")]);
+    let (release, holder) = hold_kernel_writer(&kernel);
+
+    let response = transform_leaving_serves_pending(&handler, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(response["action"], "HARD", "{response}");
+    assert_eq!(
+        response["project_memory"]["kind"], "canonical",
+        "{response}"
+    );
+    assert!(
+        counts(&handler).is_empty(),
+        "the response arrives while the serve write is pending: {:?}",
+        counts(&handler)
+    );
+    assert!(served(&handler, &project).is_empty());
+
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    handler.use_outcome_writes.settled().await;
+    assert_eq!(counts(&handler), [("written", 1)]);
+    let records = served(&handler, &project);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    seed_memories(
+        &handler.kernel.kernel_store().unwrap(),
+        &project,
+        &[("mem-a", "Rule a.")],
+    );
+    let occupied = handler.use_outcome_writes.occupy_every_slot();
+    let first = transform_leaving_serves_pending(&handler, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(first["action"], "HARD", "{first}");
+    assert_eq!(counts(&handler), [("deadline", 1)]);
+    assert!(served(&handler, &project).is_empty());
+    drop(occupied);
+
+    let repaired = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+    assert_eq!(
+        repaired["project_memory"], first["project_memory"],
+        "{repaired}"
+    );
+    let records = served(&handler, &project);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+    assert_eq!(counts(&handler), [("written", 1), ("deadline", 1)]);
 }
 
 /// A committed HARD fold whose boundary read then fails answers an error, and the composition its commit froze is still recorded once.

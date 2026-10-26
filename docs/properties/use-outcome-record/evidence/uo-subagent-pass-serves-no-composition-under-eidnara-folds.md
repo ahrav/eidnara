@@ -9,14 +9,14 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `18a469fce`).
+References are verified at the #1157 branch tip, the commit that carries this
+revision.
 
 - Folding plan rule: `crates/daemon/src/transform.rs:4239` sets `Defer` when the
   scheduler defers and `Soft` otherwise.
 - Subagent stepping: `crates/daemon/src/transform.rs:4478`.
 - Routing: `crates/daemon/src/transform.rs:3363`.
-- Correction: the spec cited `transform.rs:27022`, now inside the test
+- Correction: the spec cited `transform.rs` line 27022, now inside the test
   `terse_text_compression_gates_subagents_reasoning_and_protected_tail`.
 
 - Guarantee under test: Under `eidnara_folds`, a subagent pass plans `Soft` or
@@ -26,7 +26,7 @@ its parent is `18a469fce`).
   `a_subagent_pass_under_native_authority_reports_native_authority`
   (`crates/daemon/src/fold_authority_handler_tests.rs:143`);
   `subagent_first_active_render_commits_tagged_bytes_before_replay`
-  (`crates/daemon/src/transform.rs:23781`);
+  (`crates/daemon/src/transform.rs:23784`);
   `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
   (`crates/daemon/src/use_outcome_writer_tests.rs:379`). Status: unaudited.
 
