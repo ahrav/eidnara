@@ -94,7 +94,7 @@ Check semantics: 31 `always`, 1 `always-or-unreached`, 2 `always(!X)`. No record
 | [`uo-p-served-set-once-per-session-revision`](#uo-p-served-set-once-per-session-revision) | new (#1155) | safety | `always` | default-production | yes | active |
 | [`uo-p-served-ids-equal-frozen-composition`](#uo-p-served-ids-equal-frozen-composition) | new (#1155) | safety | `always` | default-production | yes | active |
 | [`uo-p-no-row-when-memory-disabled`](#uo-p-no-row-when-memory-disabled) | new (#1155) | safety | `always(!X)` | explicit-config-only | yes | active |
-| [`uo-p-no-row-for-withheld-composition`](#uo-p-no-row-for-withheld-composition) | new (#1155) | safety | `always(!X)` | default-production | yes | active |
+| [`uo-p-no-row-for-withheld-composition`](#uo-p-no-row-for-withheld-composition) | new (#1155) | safety | `always(!X)` | default-production | partial | active |
 | [`uo-p-producer-matches-request-subagent-flag`](#uo-p-producer-matches-request-subagent-flag) | new (#1155) | safety | `always` | default-production | yes | active |
 | [`uo-p-deleted-at-iff-session-delete-kernel-step`](#uo-p-deleted-at-iff-session-delete-kernel-step) | proposed (#1156) | safety | `always` | default-production | not yet | active - PROPOSED (owner: #1156) |
 | [`uo-p-last-transform-at-monotone-per-committing-pass`](#uo-p-last-transform-at-monotone-per-committing-pass) | proposed (#1156) | safety | `always` | default-production | not yet | active - PROPOSED (owner: #1156) |
@@ -1033,7 +1033,8 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - the recorded ids equal the snapshot rows of the fold, before
-and after a composition change and a dispute
+and after a composition change and a dispute, and the record a CAS retry
+writes names the retry's persisted composition
 Guarantee: The stored decision set equals, as a set, the object ids of the
 snapshot rows whose composition the same fold persisted.
 Check: `always` - for every committed serve, the stored ids equal the frozen
@@ -1091,9 +1092,11 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - a withheld read attempts no write, an Available read of the
-same rows then records once, and an empty Available composition records a serve
-with no decision rows
+Exercised: partial - a withheld read attempts no write, an Available read of
+the same rows then records once, and an empty Available composition records a
+serve with no decision rows; the withheld arm runs with the Kernel unopened for
+the whole pass, so a Kernel that is Starting at the read and Ready at the write
+is not constructed
 Guarantee: A fold that persists a withheld composition writes no serving record;
 an Available snapshot with zero rows at a tip of at least one commit attempts a
 record with zero decision rows, which exists once the write lands as `written`

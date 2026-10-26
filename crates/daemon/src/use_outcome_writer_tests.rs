@@ -345,6 +345,22 @@ async fn a_discarded_attempt_leaves_no_serve_and_the_retry_records_one() {
         .unwrap()
         .unwrap_or_default();
     assert_eq!(records.len(), 1);
+    let composition = &response["project_memory"];
+    assert_eq!(composition["kind"], "canonical", "{response}");
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+    assert_eq!(
+        records[0].serve.served_commit_seq,
+        composition["known_as_of"].as_i64().unwrap()
+    );
+    assert_eq!(
+        records[0].serve.composition_revision,
+        composition["revision"].as_u64().unwrap()
+    );
+    assert_eq!(
+        after.meta.project_memory,
+        serde_json::from_value(composition.clone()).ok(),
+        "the retry's persisted composition is the one the record names"
+    );
     assert_eq!(counts(&handler), [("written", 1)]);
 }
 

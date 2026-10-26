@@ -43,7 +43,10 @@ None.
 #1155.
 
 Required faults and enabling state: A Kernel starting or a refusing serving
-verdict at read time, then a HARD fold.
+verdict at read time, then a HARD fold. The cited tests withhold the read by
+leaving the Kernel unopened for the whole pass; a Kernel that is Starting at the
+read and Ready by the write, which would separate guarding on the pinned
+`Withheld` result from an unavailable Kernel at the write, is not constructed.
 
 ## Investigation log
 

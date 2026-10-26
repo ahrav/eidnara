@@ -119,6 +119,7 @@ Every location was read at the #1155 branch tip.
 - Route teardown across both stores: no test asserts that teardown deletes no
   durable row in either store.
 - A file-backed config reload between bind and a pass or wrapup: no test; the wrapup test uses a live config that differs from the frozen binding.
+- A Kernel that is Starting at a pass's read and Ready by its write: no test; the withheld-read tests leave the Kernel unopened for the whole pass.
 
 ## Suspiciously quiet areas
 
