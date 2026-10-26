@@ -12,7 +12,7 @@ re-verified at this branch tip.
 References are verified at the #1155 branch tip, the commit that carries this
 revision.
 
-- Gate: `project_memory_read` (`crates/daemon/src/lib.rs:5527`); the pass calls
+- Gate: `project_memory_read` (`crates/daemon/src/lib.rs:5529`); the pass calls
   it with the route-frozen config.
 - With `None`, `project_memory_composition()` is `None`, so meta and the
   response carry no composition.
