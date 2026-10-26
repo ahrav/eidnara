@@ -1009,3 +1009,36 @@ fn an_outside_file_lock_bounds_the_advance_at_begin() {
     );
     assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
 }
+
+/// The staleness check answers `true` while a live record of the session holds a `last_transform_at` that is null or before the time, and writes nothing when it does; a spent budget answers `Deadline`. The live-record filter it shares with the advance is covered by `last_transform_at_advances_live_records_without_a_commit`.
+#[test]
+fn the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let stale = |wait: std::time::Duration, at: i64| {
+        store.use_outcome_last_transform_is_stale(&budget(wait), &project(), HARNESS, "s1", at)
+    };
+    let wait = std::time::Duration::from_secs(5);
+    let tip = store.tip().unwrap();
+
+    assert_eq!(stale(wait, 100), Ok(true), "a null value is stale");
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(None, None)],
+        "the check writes nothing"
+    );
+    assert_eq!(
+        stale(std::time::Duration::ZERO, 100),
+        Err(KernelError::Deadline)
+    );
+    assert_eq!(
+        store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s1", 100),
+        Ok(1)
+    );
+    assert_eq!(stale(wait, 100), Ok(false));
+    assert_eq!(stale(wait, 99), Ok(false));
+    assert_eq!(stale(wait, 101), Ok(true));
+    assert_eq!(store.tip().unwrap(), tip);
+}

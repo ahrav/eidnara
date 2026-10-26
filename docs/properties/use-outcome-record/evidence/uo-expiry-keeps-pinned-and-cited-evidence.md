@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `1bd335e33`).
+its parent is `dc07f442a`).
 
 - Pin predicate: `crates/kernel/src/local_file.rs:514`.
 - Citation predicate: `crates/kernel/src/slice/write.rs:42`.

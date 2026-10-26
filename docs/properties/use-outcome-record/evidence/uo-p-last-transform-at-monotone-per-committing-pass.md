@@ -9,10 +9,13 @@ Record kind: new obligation activated by #1156.
 ## Evidence trail
 
 References are verified at the #1156 branch tip (the commit that adds this file;
-its parent is `1bd335e33`).
+its parent is `dc07f442a`).
 
-- Hook: `crates/daemon/src/lib.rs:10030` in the settle step, after any rerun,
-  when the final response committed.
+- Hook: `crates/daemon/src/lib.rs:10046` in the settle step, after any rerun,
+  when the final response committed and the check
+  (`crates/daemon/src/lib.rs:9738`) finds a live record to advance. The update
+  runs on a scoped thread beside the response build, and the settle joins it
+  before the response returns (`crates/daemon/src/lib.rs:10052`).
 - Update: `crates/kernel/src/use_outcome.rs:43` selects the live records with a
   null or earlier value; a session with none takes no writer.
 - Outcomes: `crates/daemon/src/use_outcome_writer.rs:209` counts
@@ -28,13 +31,17 @@ its parent is `1bd335e33`).
   `a_spent_pass_budget_skips_the_touch`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:353`);
   `the_serve_and_the_touch_of_one_pass_share_one_kernel_wait`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:382`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:382`);
+  `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:432`); Kernel half:
   `last_transform_at_advances_live_records_without_a_commit`
   (`crates/kernel/tests/kernel_use_outcome.rs:892`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
   (`crates/kernel/tests/kernel_use_outcome.rs:951`),
   `an_outside_file_lock_bounds_the_advance_at_begin`
-  (`crates/kernel/tests/kernel_use_outcome.rs:988`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:988`),
+  `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
+  (`crates/kernel/tests/kernel_use_outcome.rs:1015`). Status: unaudited.
 
 ## Failure scenario
 
@@ -75,10 +82,14 @@ Kernel unavailable at the write.
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: Cost: every committing pass of a session with a live record makes
-  one fenced commit. Measured on this host (tmpfs, 200 advances of one record):
-  p50 6.4 ms, p99 22.3 ms, outside the 250 ms wait bound. A coarser stale
-  predicate would skip most of these and changes the per-committing-pass rule
-  (needs human input).
+  one fenced commit, on a scoped thread beside the response build, so its
+  device flush overlaps the memory-store flush of the pass trace. Measured on
+  this host (release build, one session with one record, paired runs of 240
+  committing passes): with a fixed 1 ms flush on tmpfs the committing pass p50
+  is 4.86 ms against 5.90 ms for the touch made before the response build; on
+  XFS over EBS NVMe it is 8.68 to 8.95 ms against 9.99 to 10.17 ms. A coarser
+  stale predicate would skip most of these commits and changes the
+  per-committing-pass rule (needs human input).
 - Missing evidence: an owner decision or the named read.
 - Conclusion: needs human input.
 
