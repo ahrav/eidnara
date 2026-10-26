@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
@@ -174,6 +175,14 @@ jobs:
               # `crates/eval-core/tests/method_records.rs` reads the evaluator
               # catalog and its evidence files, so the part is a test input.
               - 'docs/properties/evaluator/**'
+              - 'docs/evaluator.md'
+              - 'fixtures/schema/storage-inventory-v1.json'
+              - 'packages/opencode-plugin/src/config/__fixtures__/project-docs-parity.json'
+              - 'packages/opencode-plugin/src/config/__fixtures__/source-capture-parity.json'
+              - 'packages/opencode-plugin/src/hooks/context/module-transport.ts'
+              - 'packages/pi-plugin/src/transform/__fixtures__/pi-codec-parity.json'
+              - 'packages/e2e-tests/src/source-corpus/corpus.ts'
+              - 'packages/e2e-tests/src/source-corpus/expected.ts'
             native:
               - *workflow
               - *cargo
@@ -213,6 +222,27 @@ jobs:
               # The delivery campaign's decay oracle checks itself against the
               # decay ladder's golden vectors.
               - 'crates/context-core/testdata/decay-golden.json'
+
+              # TypeScript tests read these Rust sources, fixtures, and release
+              # files directly.
+              - 'crates/daemon/tests/fixtures/daemon-states.fixture.json'
+              - 'crates/daemon/tests/fixtures/kernel-health-blocks.json'
+              - 'crates/daemon/tests/fixtures/kernel-routes/**'
+              - 'crates/daemon/tests/fixtures/sigv4/bedrock-colon.json'
+              - 'crates/daemon/tests/fixtures/transform-edit-recipe-v1.json'
+              - 'crates/host-runtime/tests/fixtures/aws-source-vectors.json'
+              - 'crates/host-runtime/tests/fixtures/source-claim-vectors.json'
+              - 'crates/host-runtime/tests/fixtures/source-health-vectors.json'
+              - 'crates/daemon/assets/**'
+              - 'crates/daemon/src/bin/eidnara-host.rs'
+              - 'crates/daemon/src/differential_goldens.rs'
+              - 'crates/daemon/testdata/differential-golden.json'
+              - 'release/**'
+              - 'crates/daemon/src/lib.rs'
+              - 'crates/daemon/src/source_corpus_tests.rs'
+              - 'crates/daemon/testdata/merged-reasoning-adapter-golden.json'
+              - 'crates/daemon/testdata/history_summarizer-system-prompt.txt'
+              - 'crates/eval-core/testdata/scale/writer-rows.jsonl'
 
   gates:
     name: gates
@@ -539,9 +569,8 @@ jobs:
         run: rustup toolchain install 1.98 --profile minimal --component rustfmt
 
       - name: Incident history and verifier gates
-        # Both validators use the PR base SHA or protected push `before` SHA.
-        # Skip unprotected pushes, schedules, and manual dispatches because
-        # they have no trusted base. The validators import `typescript`:
+        # Both validators require a trusted base: the PR base SHA or a
+        # protected push's `before` SHA. The validators import `typescript`:
         # a path-filtered PR without TypeScript changes installs here instead.
         if: >-
           github.event_name == 'pull_request' ||
