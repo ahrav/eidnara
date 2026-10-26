@@ -62,6 +62,9 @@ refold on the folding engine, and a CAS conflict inside one pass.
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: Gap G1: does a CAS-discarded attempt leave any durable effect
   outside the Memory Store? Owner #1155 (AC7); the writer runs only after the
-  attempt's memory-store commit succeeded.
-- Missing evidence: the AC7 writer and its CAS-conflict test, owned by #1155.
-- Conclusion: unresolved, needs the #1155 writer (AC7).
+  attempt's memory-store commit succeeded, and
+  `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:298`) asserts that a rival
+  commit lands while no composition is stored and that one record results.
+- Missing evidence: none beyond what the question names.
+- Conclusion: resolved with answer - see the question text.
