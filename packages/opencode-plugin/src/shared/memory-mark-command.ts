@@ -48,7 +48,7 @@ const DISPUTE_EVENTS: readonly DispositionEvent[] = ["mark_disputed", "contradic
 export const MEMORY_MARK_USAGE = [
     `Usage: /${MEMORY_MARK_COMMAND} <${DISPOSITION_EVENTS.join("|")}> <object_id> [${MEMORY_MARK_EVIDENCE_FLAG} <id>] [${MEMORY_MARK_PATH_FLAG} <path>@<oid>] [${MEMORY_MARK_CONFIRM_FLAG}]`,
     `${DISPUTE_EVENTS.join(" and ")} cite evidence with ${MEMORY_MARK_EVIDENCE_FLAG}, ${MEMORY_MARK_PATH_FLAG}, or both; the other events take neither.`,
-    `${MEMORY_MARK_EVIDENCE_FLAG} names a live evidence id of this project; ${MEMORY_MARK_PATH_FLAG} names a relative repository path and a 40- or 64-character lowercase hex git object id.`,
+    `${MEMORY_MARK_EVIDENCE_FLAG} names a live evidence id of this project; ${MEMORY_MARK_PATH_FLAG} names a relative repository path without spaces and a 40- or 64-character lowercase hex git object id.`,
     "Refusals: invalid_input (missing or malformed evidence), not_found (unknown, retired, or foreign evidence or object), admission_policy, class_over_declared, operation_key_reused.",
     "The preview reports the named memory's visibility only; a dispute on an approval also demotes the memories that rest on it in the same commit.",
 ].join("\n");

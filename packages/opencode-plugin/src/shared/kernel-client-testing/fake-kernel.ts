@@ -258,29 +258,49 @@ function checkQueryRequest(body: Record<string, unknown>): void {
 }
 
 const GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const PERCENT_ESCAPE = /%[0-9A-Fa-f]{2}/;
+
+/** The daemon's confined-path rule: relative, ordinary components, no protected directory, at most 1024 bytes. */
+function repositoryPathWellFormed(path: string): boolean {
+    if (Buffer.byteLength(path, "utf8") > 1024 || path.includes("\0")) return false;
+    return path
+        .split("/")
+        .every(
+            (component) =>
+                component !== "" &&
+                component !== "." &&
+                component !== ".." &&
+                ![".git", ".eidnara"].includes(component.toLowerCase()),
+        );
+}
 
 /**
  * The route's evidence form rule, checked before any transaction: a
  * `mark_disputed` or `contradict` cites a non-empty `evidence_id`, a
  * well-formed `evidence_ref`, or both, and every other event cites neither.
- * The fake accepts any non-empty id; the daemon also requires it live and
- * cited in the bound project.
+ * A value holding a percent escape is refused, as the route's one-reading
+ * rule refuses it. The daemon's secret scan and its liveness and visibility
+ * checks are left to the daemon.
  */
 function disputeEvidenceWellFormed(operation: Operation): boolean {
     if (operation.op !== "disposition") return true;
-    const { evidence_id: id, evidence_ref: ref } = operation as {
+    const raw = operation as {
         evidence_id?: unknown;
-        evidence_ref?: { path?: unknown; git_object_id?: unknown };
+        evidence_ref?: { path?: unknown; git_object_id?: unknown } | null;
     };
+    const id = raw.evidence_id ?? undefined;
+    const ref = raw.evidence_ref ?? undefined;
     if (operation.event !== "mark_disputed" && operation.event !== "contradict") {
         return id === undefined && ref === undefined;
     }
     if (id === undefined && ref === undefined) return false;
-    if (id !== undefined && (typeof id !== "string" || id.length === 0)) return false;
+    if (id !== undefined && (typeof id !== "string" || id.length === 0 || PERCENT_ESCAPE.test(id)))
+        return false;
     if (ref === undefined) return true;
     return (
         typeof ref.path === "string" &&
-        ref.path.length > 0 &&
+        repositoryPathWellFormed(ref.path) &&
+        !PERCENT_ESCAPE.test(ref.path) &&
         typeof ref.git_object_id === "string" &&
         GIT_OBJECT_ID.test(ref.git_object_id)
     );

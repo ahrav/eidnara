@@ -737,8 +737,8 @@ fn disposition_request(
 
 /// A dispute may cite an evidence row only while it is live and a live row
 /// whose scope names the bound project cites it. Every failing case answers
-/// `NotFound`, the answer a nonexistent id gets, so a refusal reveals nothing
-/// about another project's evidence.
+/// `NotFound`, the answer a nonexistent id gets, so this check answers the
+/// same for another project's evidence as for an unknown id.
 fn require_visible_evidence(
     envelope: &Envelope<'_>,
     filter: &mut ScopeFilter,
@@ -998,7 +998,7 @@ fn apply(
                 result.touched.push(object_id.clone());
             }
             Operation::Disposition { object_id, .. } => {
-                let args = operation.disposition().ok_or(KernelError::InvalidInput)?;
+                let args = operation.disposition().expect("a disposition operation");
                 result
                     .dispositions
                     .push(record_disposition(envelope, filter, args)?);

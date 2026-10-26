@@ -56,7 +56,9 @@ impl DisputeReason {
             return Err(InvalidReason::InvalidInput);
         }
         if let Some(evidence_id) = evidence_id
-            && (evidence_id.is_empty() || !decodes_to_itself(evidence_id))
+            && (evidence_id.is_empty()
+                || !decodes_to_itself(evidence_id)
+                || !redact_durable_text(evidence_id).detections.is_empty())
         {
             return Err(InvalidReason::InvalidInput);
         }
@@ -276,6 +278,40 @@ mod tests {
                 assert_eq!(parsed.evidence_ref.as_ref().unwrap().path, path);
                 assert_eq!(parsed.render(), reason);
             }
+        }
+    }
+
+    #[test]
+    fn reserved_and_multi_byte_values_encode_to_uppercase_escapes() {
+        assert_eq!(encode(";=%ü/a-b.c_d~e"), "%3B%3D%25%C3%BC%2Fa-b.c_d~e");
+        assert_eq!(
+            decode("%3B%3D%25%C3%BC%2Fa-b.c_d~e").as_deref(),
+            Some(";=%ü/a-b.c_d~e")
+        );
+    }
+
+    proptest::proptest! {
+        /// Every accepted value renders to an ASCII reason within the cap
+        /// whose parsed fields equal the inputs.
+        #[test]
+        fn every_accepted_reference_parses_back_to_its_inputs(
+            path in "[^\\x00]{1,64}",
+            evidence_id in proptest::option::of(".{1,64}"),
+        ) {
+            let reference = reference(&path, OID);
+            let Ok(reason) = DisputeReason::validated(
+                EventKind::Contradict,
+                TaintClass::AssistantInference,
+                evidence_id.as_deref(),
+                Some(&reference),
+            ) else {
+                return Ok(());
+            };
+            proptest::prop_assert!(reason.is_ascii() && reason.len() <= MAX_REASON_BYTES);
+            let parsed = DisputeReason::parse(&reason).expect("an accepted reason parses");
+            proptest::prop_assert_eq!(parsed.evidence_ref, Some(reference));
+            proptest::prop_assert_eq!(parsed.evidence_id, evidence_id);
+            proptest::prop_assert_eq!(decode(&encode(&path)), Some(path));
         }
     }
 

@@ -6245,3 +6245,275 @@ async fn a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_depende
     assert!(DisputeReason::parse(&dependent.reason).is_some());
     daemon.handler.shutdown().await.unwrap();
 }
+
+/// A client cannot supply the stored reason: `reason` is not a wire field of
+/// a disposition, so a body carrying one is refused before any work.
+#[tokio::test]
+async fn a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let before = write_counts(&daemon);
+    let mut operation = disposition("decision-object-1", "mark_disputed");
+    operation["reason"] =
+        json!("v=1;op=kernel.commit;event=mark_disputed;reporter_taint=user_explicit");
+    let request = commit_request(&daemon.project, SESSION, "forged", vec![operation], vec![]);
+    let outcome = daemon
+        .handler
+        .dispatch_value_for_test(daemon.route, request)
+        .await;
+    assert!(
+        matches!(outcome, PreparedOutcome::Error { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(write_counts(&daemon), before);
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// One evidence id cited by several rows is visible exactly when one of its
+/// live citers belongs to the bound project, whatever order the scopes sort
+/// in; both evidence fields may ride one dispute, and a malformed reference
+/// is refused by its form even beside an id that would be `not_found`.
+#[tokio::test]
+async fn a_dispute_judges_every_citer_and_both_evidence_fields_together() {
+    let daemon = Daemon::start().await;
+    let store = daemon.store();
+    seed_domain(&store);
+    assert_state(
+        &daemon
+            .commit("create", (1..=2).map(insert_decision).collect(), vec![])
+            .await,
+        "available",
+        None,
+    );
+    // A foreign scope id that sorts before the project's own `project:` scope.
+    store
+        .commit(intent("foreign-scope"), |envelope| {
+            envelope.insert_scope(project_scope_spec("a-foreign-scope", &"b".repeat(64)))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let cite_foreign = |key: &str, evidence_id: &str, index: i64| {
+        store
+            .commit(intent(&format!("foreign-{key}")), |envelope| {
+                let mut spec = store_decision(index, "a-foreign-scope", &format!("foreign-{key}"));
+                spec.evidence_id = Some(evidence_id.to_string());
+                envelope.insert_decision(spec)?;
+                Ok(String::new())
+            })
+            .unwrap();
+    };
+    let shared = daemon.project_evidence("shared", 9).await;
+    cite_foreign("shared", &shared, 50);
+    let foreign_only = store
+        .ingest_artifact(ingest_request(
+            "foreign-only",
+            b"foreign-only",
+            Sensitivity::Normal,
+        ))
+        .unwrap()
+        .evidence_id;
+    cite_foreign("only", &foreign_only, 51);
+
+    let both = json!({
+        "evidence_id": shared,
+        "evidence_ref": {"path": "src/lib.rs", "git_object_id": EVIDENCE_OID},
+    });
+    let applied = daemon
+        .commit(
+            "both",
+            vec![dispute("decision-object-1", "mark_disputed", both)],
+            vec![],
+        )
+        .await;
+    assert_state(&applied, "available", None);
+    let row = latest_admission(&daemon, "decision-object-1");
+    assert_eq!(row.evidence_id.as_deref(), Some(shared.as_str()));
+    let reason = DisputeReason::parse(&row.reason).unwrap();
+    assert_eq!(reason.evidence_id.as_deref(), Some(shared.as_str()));
+    assert_eq!(reason.evidence_ref.unwrap().git_object_id, EVIDENCE_OID);
+
+    daemon
+        .assert_refused_without_writing(
+            "foreign-only",
+            vec![dispute(
+                "decision-object-2",
+                "contradict",
+                cites_id(&foreign_only),
+            )],
+            "not_found",
+        )
+        .await;
+    let malformed_beside_dead = json!({
+        "evidence_id": foreign_only,
+        "evidence_ref": {"path": "src/lib.rs", "git_object_id": EVIDENCE_OID.to_uppercase()},
+    });
+    daemon
+        .assert_refused_without_writing(
+            "malformed-beside-dead",
+            vec![dispute(
+                "decision-object-2",
+                "contradict",
+                malformed_beside_dead,
+            )],
+            "invalid_input",
+        )
+        .await;
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// Visibility is judged when the dispute commits, not when it was previewed:
+/// evidence whose only project citer retires between the two is `not_found`
+/// at the commit and nothing is written.
+#[tokio::test]
+async fn a_dispute_previewed_while_its_evidence_was_visible_is_judged_again_at_commit() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let evidence = daemon.project_evidence("cited", 9).await;
+    let operations = vec![dispute(
+        "decision-object-1",
+        "mark_disputed",
+        cites_id(&evidence),
+    )];
+    assert_state(
+        &daemon.preview("dispute", operations.clone()).await,
+        "available",
+        None,
+    );
+    let retired = daemon
+        .commit(
+            "retire-citer",
+            vec![json!({"op": "retire_decision", "object_id": "decision-object-9"})],
+            vec![],
+        )
+        .await;
+    assert_state(&retired, "available", None);
+    let before = write_counts(&daemon);
+    assert_state(
+        &daemon.commit("dispute", operations, vec![]).await,
+        "invalid",
+        Some("not_found"),
+    );
+    assert_eq!(write_counts(&daemon), before);
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A dispute that names a valid approval may move a `contradicted` decision
+/// to `disputed`, the one relaxation a dispute can make; without the approval
+/// the same dispute is recorded denied.
+#[tokio::test]
+async fn a_dispute_relaxes_a_contradicted_prior_only_with_a_valid_approval() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    seed_approval(&daemon, "approval", Some(&scope_id));
+    let evidence = daemon.project_evidence("cited", 9).await;
+    assert_state(
+        &daemon
+            .commit(
+                "contradict",
+                vec![disposition("decision-object-1", "contradict")],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    let denied = daemon
+        .commit(
+            "unapproved",
+            vec![dispute(
+                "decision-object-1",
+                "mark_disputed",
+                cites_id(&evidence),
+            )],
+            vec![],
+        )
+        .await;
+    assert_eq!(denied["dispositions"][0]["denied"], true, "{denied}");
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "contradicted"
+    );
+    let mut approved = dispute("decision-object-1", "mark_disputed", cites_id(&evidence));
+    approved["approval_object_id"] = json!("approval");
+    let relaxed = daemon.commit("approved", vec![approved], vec![]).await;
+    assert_state(&relaxed, "available", None);
+    assert_eq!(relaxed["dispositions"][0]["denied"], false, "{relaxed}");
+    assert_eq!(stored_disposition(&daemon, "decision-object-1"), "disputed");
+    let row = latest_admission(&daemon, "decision-object-1");
+    assert_eq!(row.outcome, "deny");
+    assert_eq!(row.evidence_id.as_deref(), Some(evidence.as_str()));
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// The visibility check reads the envelope's own writes: an insert earlier in
+/// the same commit that cites evidence makes it citable by a dispute later in
+/// that commit. This records how the definition composes with the insert
+/// path, which accepts any live evidence id.
+#[tokio::test]
+async fn an_insert_citing_evidence_makes_it_citable_later_in_the_same_commit() {
+    let daemon = Daemon::start().await;
+    let store = daemon.store();
+    seed_domain(&store);
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let uncited = store
+        .ingest_artifact(ingest_request("uncited", b"uncited", Sensitivity::Normal))
+        .unwrap()
+        .evidence_id;
+    daemon
+        .assert_refused_without_writing(
+            "alone",
+            vec![dispute(
+                "decision-object-1",
+                "mark_disputed",
+                cites_id(&uncited),
+            )],
+            "not_found",
+        )
+        .await;
+    let together = daemon
+        .commit(
+            "together",
+            vec![
+                citing_decision(2, &uncited),
+                dispute("decision-object-1", "mark_disputed", cites_id(&uncited)),
+            ],
+            vec![],
+        )
+        .await;
+    assert_state(&together, "available", None);
+    assert_eq!(
+        latest_admission(&daemon, "decision-object-1")
+            .evidence_id
+            .as_deref(),
+        Some(uncited.as_str())
+    );
+    daemon.handler.shutdown().await.unwrap();
+}

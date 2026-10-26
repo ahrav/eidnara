@@ -220,6 +220,25 @@ describe("runMemoryMarkCommand evidence", () => {
         expect(h.kernel.receipts.size).toBe(2);
     });
 
+    test("the fake refuses the reference shapes the route refuses", async () => {
+        for (const evidenceRef of [
+            { path: "../a.rs", git_object_id: OID },
+            { path: "/etc/passwd", git_object_id: OID },
+            { path: "src/.Git/config", git_object_id: OID },
+            { path: "double%2Fencoded", git_object_id: OID },
+            { path: `${"a".repeat(1025)}`, git_object_id: OID },
+        ]) {
+            const h = harness();
+            const outcome = await run(h, {
+                event: "mark_disputed",
+                objectId: "mem_labeled",
+                evidenceRef,
+                confirmed: false,
+            });
+            expect(outcome).toMatchObject({ kind: "refused", step: "preview" });
+        }
+    });
+
     test("a dispute the daemon refuses for its evidence is reported by name and writes nothing", async () => {
         const h = harness();
         const outcome = await run(h, {
