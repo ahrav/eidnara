@@ -4,6 +4,11 @@
  * decides the resulting state. The daemon previews the event first; the
  * harness asks for confirmation only when a serving surface would display a
  * different state after the event.
+ *
+ * A dispute (`mark_disputed` or `contradict`) cites evidence: `--evidence <id>`
+ * names a live Kernel evidence id, sent byte for byte, and `--path <path>@<oid>`
+ * names a repository file at a git object id, split at the last `@`. The daemon
+ * validates both; the runner forwards them.
  */
 
 import {
@@ -12,6 +17,7 @@ import {
     type DispositionOperation,
     type DispositionPreview,
     type DispositionResult,
+    type EvidenceRef,
     invalid,
     isAvailable,
     type KernelClient,
@@ -25,16 +31,34 @@ import {
 export const MEMORY_MARK_COMMAND = "eidnara-memory-mark";
 
 export const MEMORY_MARK_DESCRIPTION =
-    "Mark a project memory stale, disputed, rejected, contradicted, or quarantined";
+    "Mark a project memory stale, disputed, rejected, contradicted, or quarantined; a dispute or contradiction cites --evidence <id> or --path <path>@<oid>";
 
 /** `--yes` skips the confirmation a visibility change would otherwise ask for. */
 export const MEMORY_MARK_CONFIRM_FLAG = "--yes";
 
-export const MEMORY_MARK_USAGE = `Usage: /${MEMORY_MARK_COMMAND} <${DISPOSITION_EVENTS.join("|")}> <object_id> [${MEMORY_MARK_CONFIRM_FLAG}]`;
+/** `--evidence <id>` cites a live Kernel evidence id. */
+const MEMORY_MARK_EVIDENCE_FLAG = "--evidence";
+
+/** `--path <path>@<oid>` cites a repository file at a git object id. */
+const MEMORY_MARK_PATH_FLAG = "--path";
+
+/** The events that must cite evidence. */
+const DISPUTE_EVENTS: readonly DispositionEvent[] = ["mark_disputed", "contradict"];
+
+export const MEMORY_MARK_USAGE = [
+    `Usage: /${MEMORY_MARK_COMMAND} <${DISPOSITION_EVENTS.join("|")}> <object_id> [${MEMORY_MARK_EVIDENCE_FLAG} <id>] [${MEMORY_MARK_PATH_FLAG} <path>@<oid>] [${MEMORY_MARK_CONFIRM_FLAG}]`,
+    `${DISPUTE_EVENTS.join(" and ")} cite evidence with ${MEMORY_MARK_EVIDENCE_FLAG}, ${MEMORY_MARK_PATH_FLAG}, or both; the other events take neither.`,
+    `${MEMORY_MARK_EVIDENCE_FLAG} names a live evidence id of this project; ${MEMORY_MARK_PATH_FLAG} names a relative repository path and a 40- or 64-character lowercase hex git object id.`,
+    "Refusals: invalid_input (missing or malformed evidence), not_found (unknown, retired, or foreign evidence or object), admission_policy, class_over_declared, operation_key_reused.",
+    "The preview reports the named memory's visibility only; a dispute on an approval also demotes the memories that rest on it in the same commit.",
+].join("\n");
 
 export interface MemoryMarkArgs {
     event: DispositionEvent;
     objectId: string;
+    /** A live Kernel evidence id, exactly as typed. */
+    evidenceId?: string;
+    evidenceRef?: EvidenceRef;
     /** Whether the user already answered the confirmation, through `--yes` or a dialog. */
     confirmed: boolean;
 }
@@ -47,14 +71,42 @@ function isDispositionEvent(value: string): value is DispositionEvent {
     return (DISPOSITION_EVENTS as readonly string[]).includes(value);
 }
 
-/** Accepts the wire event spelled with `_` or `-`; the flag may appear anywhere. */
+/** Splits `<path>@<oid>` at the last `@`; the oid is hex, so it holds none. */
+function parseEvidenceRef(value: string): EvidenceRef | null {
+    const at = value.lastIndexOf("@");
+    if (at <= 0 || at === value.length - 1) return null;
+    const path = value.slice(0, at);
+    if (path.includes(OPERATION_KEY_SEPARATOR)) return null;
+    return { path, git_object_id: value.slice(at + 1) };
+}
+
+/** Accepts the wire event spelled with `_` or `-`; the flags may appear anywhere, each at most once. */
 export function parseMemoryMarkArgs(raw: string): ParsedMemoryMarkArgs {
     const words = raw
         .trim()
         .split(/\s+/)
         .filter((word) => word.length > 0);
-    const confirmed = words.includes(MEMORY_MARK_CONFIRM_FLAG);
-    const positional = words.filter((word) => word !== MEMORY_MARK_CONFIRM_FLAG);
+    let confirmed = false;
+    let evidenceId: string | undefined;
+    let evidencePath: string | undefined;
+    const positional: string[] = [];
+    for (let index = 0; index < words.length; index += 1) {
+        const word = words[index] as string;
+        if (word === MEMORY_MARK_CONFIRM_FLAG) {
+            confirmed = true;
+        } else if (word === MEMORY_MARK_EVIDENCE_FLAG || word === MEMORY_MARK_PATH_FLAG) {
+            const value = words[index + 1];
+            const repeated = word === MEMORY_MARK_EVIDENCE_FLAG ? evidenceId : evidencePath;
+            if (value === undefined || value.startsWith("--") || repeated !== undefined) {
+                return { ok: false, message: MEMORY_MARK_USAGE };
+            }
+            if (word === MEMORY_MARK_EVIDENCE_FLAG) evidenceId = value;
+            else evidencePath = value;
+            index += 1;
+        } else {
+            positional.push(word);
+        }
+    }
     if (positional.length !== 2) return { ok: false, message: MEMORY_MARK_USAGE };
     const [rawEvent, objectId] = positional as [string, string];
     const event = rawEvent.replaceAll("-", "_");
@@ -64,7 +116,46 @@ export function parseMemoryMarkArgs(raw: string): ParsedMemoryMarkArgs {
     if (objectId.startsWith("-") || objectId.includes(OPERATION_KEY_SEPARATOR)) {
         return { ok: false, message: `Invalid object id "${objectId}". ${MEMORY_MARK_USAGE}` };
     }
-    return { ok: true, args: { event, objectId, confirmed } };
+    if (evidenceId?.includes(OPERATION_KEY_SEPARATOR)) {
+        return { ok: false, message: `Invalid evidence id "${evidenceId}". ${MEMORY_MARK_USAGE}` };
+    }
+    const evidenceRef = evidencePath === undefined ? undefined : parseEvidenceRef(evidencePath);
+    if (evidenceRef === null) {
+        return {
+            ok: false,
+            message: `Invalid evidence path "${evidencePath}". ${MEMORY_MARK_USAGE}`,
+        };
+    }
+    const cites = evidenceId !== undefined || evidenceRef !== undefined;
+    if (cites !== DISPUTE_EVENTS.includes(event)) return { ok: false, message: MEMORY_MARK_USAGE };
+    return {
+        ok: true,
+        args: {
+            event,
+            objectId,
+            ...(evidenceId === undefined ? {} : { evidenceId }),
+            ...(evidenceRef === undefined ? {} : { evidenceRef }),
+            confirmed,
+        },
+    };
+}
+
+/** The evidence a dispute cites, as the command line spells it: `--evidence <id>` and `--path <path>@<oid>`, in that order. */
+function evidenceFlags(args: MemoryMarkArgs): string[] {
+    return [
+        ...(args.evidenceId === undefined ? [] : [MEMORY_MARK_EVIDENCE_FLAG, args.evidenceId]),
+        ...(args.evidenceRef === undefined
+            ? []
+            : [
+                  MEMORY_MARK_PATH_FLAG,
+                  `${args.evidenceRef.path}@${args.evidenceRef.git_object_id}`,
+              ]),
+    ];
+}
+
+/** The command line that names `args`, as a user would type it again. */
+function commandLine(args: MemoryMarkArgs): string {
+    return [`/${MEMORY_MARK_COMMAND}`, args.event, args.objectId, ...evidenceFlags(args)].join(" ");
 }
 
 export type MemoryMarkOutcome =
@@ -80,7 +171,8 @@ export type MemoryMarkOutcome =
 
 export interface MemoryMarkInput {
     client: KernelClient;
-    sessionId: string;
+    /** The operation's stable identity; the command derives it with `memoryMarkOperationId`. */
+    operationId: string;
     /** Separator-free identity of the human command surface, such as `user:opencode`. */
     actor: string;
     args: MemoryMarkArgs;
@@ -94,9 +186,11 @@ export interface MemoryMarkInput {
     isCancelled?: () => boolean;
 }
 
-/** Repeating the same event on the same object in one session reuses the identity, so the daemon replays the receipt instead of recording twice. */
+/** Repeating the same event on the same object with the same evidence in one session reuses the identity, so the daemon replays the receipt instead of recording twice; other evidence is another dispute. */
 export function memoryMarkOperationId(sessionId: string, args: MemoryMarkArgs): string {
-    return [sessionId, args.event, args.objectId].join(OPERATION_KEY_SEPARATOR);
+    return [sessionId, args.event, args.objectId, ...evidenceFlags(args)].join(
+        OPERATION_KEY_SEPARATOR,
+    );
 }
 
 /** The daemon returns one verdict for the single operation sent; only a verdict for `operation` may decide the confirmation and the reported outcome. */
@@ -116,11 +210,13 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         op: "disposition",
         object_id: args.objectId,
         event: args.event,
+        ...(args.evidenceId === undefined ? {} : { evidence_id: args.evidenceId }),
+        ...(args.evidenceRef === undefined ? {} : { evidence_ref: args.evidenceRef }),
     };
     const intent = {
         actor: input.actor,
-        operationId: memoryMarkOperationId(input.sessionId, args),
-        cause: `/${MEMORY_MARK_COMMAND} ${args.event} ${args.objectId}`,
+        operationId: input.operationId,
+        cause: commandLine(args),
         sourceKind: "user" as const,
     };
     const previewed = await client.previewDispositions({ ...intent, operations: [operation] });
@@ -181,7 +277,7 @@ export function formatMemoryMarkOutcome(outcome: MemoryMarkOutcome, args: Memory
             return [
                 `${title} — Confirmation Needed`,
                 "",
-                `Nothing was written. Re-run with ${MEMORY_MARK_CONFIRM_FLAG} to apply: \`/${MEMORY_MARK_COMMAND} ${args.event} ${args.objectId} ${MEMORY_MARK_CONFIRM_FLAG}\``,
+                `Nothing was written. Re-run with ${MEMORY_MARK_CONFIRM_FLAG} to apply: \`${commandLine(args)} ${MEMORY_MARK_CONFIRM_FLAG}\``,
                 "",
                 formatMemoryMarkConfirmation(outcome.preview),
             ].join("\n");

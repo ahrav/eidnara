@@ -8,6 +8,53 @@
 //! stamped with the bound project's scope and admitted under the derived
 //! classes, so visibility follows the kernel's admission rules rather than
 //! anything the caller asserts.
+//!
+//! # Disputes
+//!
+//! A `disposition` operation whose `event` is `mark_disputed` or `contradict`
+//! cites evidence through one or both optional fields:
+//!
+//! - `evidence_id`: a Kernel evidence id. It is accepted when its
+//!   `evidence_meta` row is live at the committing snapshot and a live
+//!   decision, observation, decision event (through its decision), or asserted
+//!   edge whose scope names the bound project cites it. The check and the
+//!   admission write share the commit's writer transaction. The id is stored
+//!   on the admission row's `evidence_id`.
+//! - `evidence_ref`: `{ "path": <string>, "git_object_id": <string> }`. The
+//!   object id is 40 or 64 lowercase hex bytes; the path is a relative
+//!   repository path of at most 1024 bytes that passes the daemon's
+//!   confined-path check and holds no secret-scanner detection. The route
+//!   stores the bytes it received and does not look the object up in the
+//!   repository.
+//!
+//! A dispute's admission row carries a structured `reason`, the
+//! [`DisputeReason`] grammar
+//! `v=1;op=kernel.commit;event=<event>;reporter_taint=<taint>;evidence_id=<pct>;path=<pct>;oid=<hex>`,
+//! at most 4096 bytes. `reporter_taint` is the taint class derived from
+//! `source_kind` and lowered only by an asserted class at or below it; the
+//! row's own class columns keep the subject's prior classes. Every other
+//! event takes neither field and records the constant reason
+//! `kernel.commit`. The commit-log row carries the caller's `actor` and
+//! `cause`.
+//!
+//! Refusals: a dispute with neither field, an empty value, a malformed
+//! reference, evidence on another event, or a reason over its cap answers
+//! `invalid_input`; a nonexistent, retired, uncited, or foreign evidence id
+//! answers `not_found`; an asserted class above the derivation answers
+//! `class_over_declared`; a Kernel admission refusal answers
+//! `admission_policy`; an identity reused with different bytes answers
+//! `operation_key_reused`. Each refusal writes nothing, and a preview
+//! answers the same name its commit would.
+//!
+//! This route is the validator for plugin-written disputes. Other callers of
+//! `Envelope::record_admission` (the memory classifier, review acceptance,
+//! harness sources, Kernel tests) write any `evidence_id` the Kernel's
+//! foreign key accepts, and the `v=1` prefix marks the rows this route wrote.
+//! A citation records that the evidence was live at filing and holds no
+//! retention: a reader checks the evidence row's invalidation. A dispute on
+//! a decision that bears authority demotes its dependents in the same commit
+//! and copies the `reason` onto their `approval_revoked` rows; the preview
+//! reports the subject's visibility only.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -23,6 +70,7 @@ use kernel::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::dispute::{self, DisputeReason, EvidenceRef};
 use super::project::{IntentRequest, ProjectBinding, ScopeFilter};
 use super::{ConflictReason, InvalidReason, KernelOutcome, blocking, kernel_response, state_only};
 use crate::HandlerCore;
@@ -103,7 +151,81 @@ enum Operation {
         event: DispositionEvent,
         #[serde(default)]
         approval_object_id: Option<String>,
+        /// A Kernel evidence id the dispute cites; `mark_disputed` and
+        /// `contradict` only.
+        #[serde(default)]
+        evidence_id: Option<String>,
+        /// A repository file the dispute cites; `mark_disputed` and
+        /// `contradict` only.
+        #[serde(default)]
+        evidence_ref: Option<EvidenceRef>,
+        /// The admission row's `reason`, composed by the handler before any
+        /// transaction runs.
+        #[serde(skip)]
+        reason: String,
     },
+}
+
+/// One disposition operation as the preview and the commit judge it.
+#[derive(Clone, Copy)]
+struct DispositionArgs<'a> {
+    object_id: &'a str,
+    event: DispositionEvent,
+    approval_object_id: Option<&'a str>,
+    evidence_id: Option<&'a str>,
+    reason: &'a str,
+}
+
+impl Operation {
+    fn disposition(&self) -> Option<DispositionArgs<'_>> {
+        match self {
+            Self::Disposition {
+                object_id,
+                event,
+                approval_object_id,
+                evidence_id,
+                reason,
+                ..
+            } => Some(DispositionArgs {
+                object_id,
+                event: *event,
+                approval_object_id: approval_object_id.as_deref(),
+                evidence_id: evidence_id.as_deref(),
+                reason,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Composes a disposition's `reason`: the structured dispute reason for
+    /// `mark_disputed` and `contradict`, the constant route reason for every
+    /// other event. A dispute without valid evidence, or evidence on another
+    /// event, is `InvalidInput`.
+    fn compose_reason(&mut self, reporter_taint: TaintClass) -> Result<(), InvalidReason> {
+        let Self::Disposition {
+            event,
+            evidence_id,
+            evidence_ref,
+            reason,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        *reason = if dispute::is_dispute(event.kind()) {
+            DisputeReason::validated(
+                event.kind(),
+                reporter_taint,
+                evidence_id.as_deref(),
+                evidence_ref.as_ref(),
+            )?
+        } else if evidence_id.is_some() || evidence_ref.is_some() {
+            return Err(InvalidReason::InvalidInput);
+        } else {
+            ADMISSION_REASON.to_string()
+        };
+        Ok(())
+    }
 }
 
 /// The event kinds a host command may name; each is a disposition transition,
@@ -566,10 +688,15 @@ pub(crate) fn scoped_object_state(
 fn disposition_request(
     envelope: &Envelope<'_>,
     filter: &mut ScopeFilter,
-    object_id: &str,
-    event: DispositionEvent,
-    approval_object_id: Option<&str>,
+    args: DispositionArgs<'_>,
 ) -> Result<(PriorDecision, AdmissionRequest), KernelError> {
+    let DispositionArgs {
+        object_id,
+        event,
+        approval_object_id,
+        evidence_id,
+        reason,
+    } = args;
     let state = scoped_object_state(envelope, filter, object_id)?;
     if state.object.object_kind != "decision" || state.object.invalidated_commit_seq.is_some() {
         return Err(KernelError::NotFound);
@@ -583,6 +710,9 @@ fn disposition_request(
             scoped_object_state(envelope, filter, &member)?;
         }
     }
+    if let Some(evidence_id) = evidence_id {
+        require_visible_evidence(envelope, filter, evidence_id)?;
+    }
     let request = AdmissionRequest {
         candidate_id: None,
         subject_object_id: Some(object_id.to_string()),
@@ -592,11 +722,34 @@ fn disposition_request(
             kind: event.kind(),
             trigger_object_id: None,
             approval_object_id: approval_object_id.map(str::to_string),
-            evidence_id: None,
-            reason: ADMISSION_REASON.to_string(),
+            evidence_id: evidence_id.map(str::to_string),
+            reason: reason.to_string(),
         },
     };
     Ok((prior, request))
+}
+
+/// A dispute may cite an evidence row only while it is live and a live row
+/// whose scope names the bound project cites it. Every failing case answers
+/// `NotFound`, the answer a nonexistent id gets, so a refusal reveals nothing
+/// about another project's evidence.
+fn require_visible_evidence(
+    envelope: &Envelope<'_>,
+    filter: &mut ScopeFilter,
+    evidence_id: &str,
+) -> Result<(), KernelError> {
+    let citations = envelope
+        .evidence_citations(evidence_id)?
+        .filter(|citations| citations.live)
+        .ok_or(KernelError::NotFound)?;
+    for scope_id in &citations.citing_scopes {
+        if filter.matches(Some(scope_id), &mut |scope_id| {
+            envelope.scope_terms(scope_id)
+        })? {
+            return Ok(());
+        }
+    }
+    Err(KernelError::NotFound)
 }
 
 impl DispositionResult {
@@ -626,16 +779,13 @@ impl DispositionResult {
 fn record_disposition(
     envelope: &mut Envelope<'_>,
     filter: &mut ScopeFilter,
-    object_id: &str,
-    event: DispositionEvent,
-    approval_object_id: Option<&str>,
+    args: DispositionArgs<'_>,
 ) -> Result<DispositionResult, KernelError> {
-    let (prior, request) =
-        disposition_request(envelope, filter, object_id, event, approval_object_id)?;
+    let (prior, request) = disposition_request(envelope, filter, args)?;
     let decision = envelope.record_admission(request)?;
     Ok(DispositionResult::new(
-        object_id,
-        event,
+        args.object_id,
+        args.event,
         prior,
         decision.outcome,
         decision.disposition,
@@ -657,10 +807,7 @@ impl PreviewRun {
         let ids: Vec<&str> = plan
             .operations
             .iter()
-            .filter_map(|operation| match operation {
-                Operation::Disposition { object_id, .. } => Some(object_id.as_str()),
-                _ => None,
-            })
+            .filter_map(|operation| operation.disposition().map(|args| args.object_id))
             .collect();
         Ok(Self {
             filter: ScopeFilter::new(&plan.project),
@@ -674,17 +821,12 @@ impl PreviewRun {
     fn disposition(
         &mut self,
         preview: &mut Preview<'_>,
-        object_id: &str,
-        event: DispositionEvent,
-        approval_object_id: Option<&str>,
+        args: DispositionArgs<'_>,
     ) -> Result<DispositionPreview, KernelError> {
-        let (prior, request) = disposition_request(
-            preview,
-            &mut self.filter,
-            object_id,
-            event,
-            approval_object_id,
-        )?;
+        let DispositionArgs {
+            object_id, event, ..
+        } = args;
+        let (prior, request) = disposition_request(preview, &mut self.filter, args)?;
         let evaluation = preview.preview_admission(request)?;
         let served = self.served.get(object_id).ok_or(KernelError::NotFound)?;
         let current = match self.judged.get(object_id) {
@@ -735,13 +877,9 @@ fn preview(store: &KernelStore, plan: &CommitPlan) -> Result<(i64, PreviewOutcom
             let mut run = PreviewRun::new(preview, plan)?;
             plan.operations
                 .iter()
-                .map(|operation| match operation {
-                    Operation::Disposition {
-                        object_id,
-                        event,
-                        approval_object_id,
-                    } => run.disposition(preview, object_id, *event, approval_object_id.as_deref()),
-                    _ => Err(KernelError::InvalidInput),
+                .map(|operation| match operation.disposition() {
+                    Some(args) => run.disposition(preview, args),
+                    None => Err(KernelError::InvalidInput),
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(PreviewOutcome::Judged)
@@ -853,18 +991,11 @@ fn apply(
                 envelope.retire_decision(object_id)?;
                 result.touched.push(object_id.clone());
             }
-            Operation::Disposition {
-                object_id,
-                event,
-                approval_object_id,
-            } => {
-                result.dispositions.push(record_disposition(
-                    envelope,
-                    filter,
-                    object_id,
-                    *event,
-                    approval_object_id.as_deref(),
-                )?);
+            Operation::Disposition { object_id, .. } => {
+                let args = operation.disposition().ok_or(KernelError::InvalidInput)?;
+                result
+                    .dispositions
+                    .push(record_disposition(envelope, filter, args)?);
                 result.touched.push(object_id.clone());
             }
             Operation::InsertObservation { spec } => {
@@ -943,7 +1074,7 @@ impl HandlerCore {
         channel: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
-        let (scope, parsed) =
+        let (scope, mut parsed) =
             match self.kernel_request::<CommitRequest>(channel, request, OPERATION) {
                 Ok(bound) => bound,
                 Err(outcome) => return outcome,
@@ -979,6 +1110,13 @@ impl HandlerCore {
             Ok(classes) => classes,
             Err(reason) => return state_only(KernelOutcome::invalid(reason)),
         };
+        // The preview and the commit refuse malformed evidence by the same
+        // name, before any transaction runs.
+        for operation in &mut parsed.operations {
+            if let Err(reason) = operation.compose_reason(classes.1) {
+                return state_only(KernelOutcome::invalid(reason));
+            }
+        }
         let Some(intent) = parsed.intent.into_intent(&scope.project, RECEIPT_FAMILY) else {
             return crate::invalid_params_error(format!(
                 "{OPERATION} intent.operation_key must not be blank"

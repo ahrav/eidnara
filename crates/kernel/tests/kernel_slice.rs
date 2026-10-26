@@ -2131,3 +2131,95 @@ fn linked_decision_evidence_matches_the_window_model_under_seeded_citations() {
         }
     }
 }
+
+fn branch_scope(scope_id: &str) -> kernel::ScopeSpec {
+    kernel::ScopeSpec {
+        scope_id: scope_id.to_string(),
+        object_id: format!("{scope_id}-object"),
+        domain_id: "domain".to_string(),
+        source_kind: "fixture".to_string(),
+        source_id: scope_id.to_string(),
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+        terms: vec![kernel::ScopeTermSpec {
+            dimension: "branch".to_string(),
+            operator: "exact".to_string(),
+            exact_value: Some(scope_id.to_string()),
+            ..kernel::ScopeTermSpec::default()
+        }],
+    }
+}
+
+/// An evidence row's citations as an envelope reads them: the scope of each
+/// live decision, observation, and decision event (through its live decision)
+/// citing it, each scope once and in order; an unscoped or retired citer adds
+/// no scope, a retired row reads as not live, and an unknown id reads as
+/// absent.
+#[test]
+fn evidence_citations_name_the_scopes_of_live_citers_and_the_rows_liveness() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let evidence = ingest_evidence(&store, "cited", 'e');
+    let citations = |evidence_id: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (_, seen) = store
+            .preview(deadline, |preview| preview.evidence_citations(evidence_id))
+            .unwrap();
+        seen.map(|seen| (seen.live, seen.citing_scopes))
+    };
+    assert_eq!(citations(&evidence), Some((true, Vec::new())));
+    assert_eq!(citations("evidence-unknown"), None);
+
+    store
+        .commit(intent("citers", 'c'), |envelope| {
+            for scope_id in ["scope-b", "scope-a", "scope-c", "scope-d"] {
+                envelope.insert_scope(branch_scope(scope_id))?;
+            }
+            let citing = |index: i64, scope_id: Option<&str>, evidence_id: Option<&str>| {
+                let mut spec = decision(index);
+                spec.scope_id = scope_id.map(str::to_string);
+                spec.evidence_id = evidence_id.map(str::to_string);
+                spec
+            };
+            envelope.insert_decision(citing(1, Some("scope-b"), Some(&evidence)))?;
+            envelope.insert_decision(citing(2, Some("scope-b"), Some(&evidence)))?;
+            envelope.insert_decision(citing(3, None, Some(&evidence)))?;
+            envelope.insert_decision(citing(4, Some("scope-c"), None))?;
+            envelope.insert_decision(citing(5, Some("scope-d"), Some(&evidence)))?;
+            let mut observed = observation(1, "decision-object-1");
+            observed.scope_id = Some("scope-a".to_string());
+            observed.evidence_id = Some(evidence.clone());
+            envelope.insert_observation(observed)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    cite_all(&store, "decision-4", "event", 'd', &[Some(&evidence)]);
+    store
+        .commit(intent("retire-citer", 'f'), |envelope| {
+            envelope.retire_decision("decision-object-5")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        citations(&evidence),
+        Some((
+            true,
+            vec![
+                "scope-a".to_string(),
+                "scope-b".to_string(),
+                "scope-c".to_string()
+            ]
+        ))
+    );
+
+    // Evidence retires only once nothing live cites it.
+    let retired = ingest_evidence(&store, "retired", '7');
+    store
+        .commit(intent("retire-evidence", '8'), |envelope| {
+            envelope.retire_evidence("evidence-object-retired")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(citations(&retired), Some((false, Vec::new())));
+}

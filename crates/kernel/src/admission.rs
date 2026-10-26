@@ -4524,6 +4524,74 @@ mod tests {
         check!(Outcome);
     }
 
+    /// A dispute with evidence, judged against every prior maturity pair and
+    /// disposition, denies, never raises maturity, and never moves to a less
+    /// restrictive disposition without an approval; carrying evidence changes
+    /// none of this.
+    #[test]
+    fn a_dispute_with_evidence_never_raises_standing_across_the_grid() {
+        let mut judged = 0;
+        for historical in Maturity::ALL {
+            for effective in Maturity::ALL {
+                if effective.rank() > historical.rank() {
+                    continue;
+                }
+                for disposition in Disposition::ALL {
+                    for event in [EventKind::MarkDisputed, EventKind::Contradict] {
+                        for has_evidence in [true, false] {
+                            let prior = PriorDecision {
+                                historical_maturity: *historical,
+                                effective_maturity: *effective,
+                                disposition: *disposition,
+                                outcome: Outcome::Admit,
+                                source_class: SourceClass::ModelInference,
+                                taint_class: TaintClass::UserInferred,
+                                sensitivity: Sensitivity::Normal,
+                            };
+                            let result = evaluate_admission(EvaluationInputs {
+                                source_class: SourceClass::ModelInference,
+                                taint_class: TaintClass::UserInferred,
+                                prior: Some(prior),
+                                candidate_sensitivity: Sensitivity::Normal,
+                                predecessor_sensitivity: None,
+                                approval_valid: false,
+                                supporting_authority: None,
+                                subject_is_accepted_decision: false,
+                                event,
+                                has_evidence,
+                                remaining_support: None,
+                            })
+                            .unwrap();
+                            let case =
+                                format!("{historical:?} {effective:?} {disposition:?} {event:?}");
+                            assert_eq!(result.outcome, Outcome::Deny, "{case}");
+                            assert_eq!(result.historical_maturity, *historical, "{case}");
+                            assert!(
+                                result.effective_maturity.get().rank() <= effective.rank(),
+                                "{case}"
+                            );
+                            assert!(
+                                disposition_restrictiveness(result.disposition)
+                                    >= disposition_restrictiveness(*disposition),
+                                "{case}"
+                            );
+                            let requested = event.requested_disposition().unwrap();
+                            if disposition_restrictiveness(requested)
+                                < disposition_restrictiveness(*disposition)
+                            {
+                                assert_eq!(result.disposition, *disposition, "{case}");
+                            } else {
+                                assert_eq!(result.disposition, requested, "{case}");
+                            }
+                            judged += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(judged, 15 * Disposition::ALL.len() * 2 * 2);
+    }
+
     #[test]
     fn every_legal_source_taint_pair_enforces_its_automatic_ceiling() {
         let mut legal_pairs = 0;

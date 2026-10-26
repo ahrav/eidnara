@@ -181,6 +181,18 @@ pub struct ObjectState {
     pub latest_change_commit_seq: Option<i64>,
 }
 
+/// One evidence row as a writer transaction sees it: whether it is live, and
+/// the non-null scope ids of the live rows that cite it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceCitations {
+    /// True when the row's `invalidated_commit_seq` is NULL at the transaction's snapshot.
+    pub live: bool,
+    /// The distinct non-null scope ids of the live decisions, observations,
+    /// and asserted edges whose `evidence_id` is this row, and of the live
+    /// decisions whose events cite it, in scope-id order.
+    pub citing_scopes: Vec<String>,
+}
+
 /// Filters observations by dependency edge, observation kind, and writer identity: the registry source kind, domain, and exact scope (`None` selects unscoped rows). Kinds are free-form literals any producer may reuse, so the writer identity is what keeps another producer's rows out of the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DependentObservationQuery<'a> {
@@ -515,6 +527,53 @@ impl Envelope<'_> {
     /// that follows it observe one state.
     pub fn object_state(&self, object_id: &str) -> Result<Option<ObjectState>, KernelError> {
         load_object_state(self.tx, object_id)
+    }
+
+    /// The liveness and citing scopes of the evidence row `evidence_id`, or
+    /// `None` when no row carries it. Reads inside the envelope's transaction,
+    /// so a check against the answer and a write citing the row observe one
+    /// state.
+    pub fn evidence_citations(
+        &self,
+        evidence_id: &str,
+    ) -> Result<Option<EvidenceCitations>, KernelError> {
+        let Some(live) = self
+            .tx
+            .query_row_cached(
+                "SELECT invalidated_commit_seq IS NULL FROM evidence_meta WHERE evidence_id=?1",
+                [evidence_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?
+        else {
+            return Ok(None);
+        };
+        let mut statement = self
+            .tx
+            .prepare_cached(
+                "SELECT scope_id FROM decisions
+                  WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL AND scope_id IS NOT NULL
+                 UNION SELECT scope_id FROM observations
+                  WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL AND scope_id IS NOT NULL
+                 UNION SELECT d.scope_id FROM decision_events e
+                   JOIN decisions d ON d.decision_id=e.decision_id
+                  WHERE e.evidence_id=?1 AND d.invalidated_commit_seq IS NULL
+                    AND d.scope_id IS NOT NULL
+                 UNION SELECT scope_id FROM asserted_edges
+                  WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL AND scope_id IS NOT NULL
+                 ORDER BY 1",
+            )
+            .map_err(map_sqlite)?;
+        let citing_scopes = statement
+            .query_map([evidence_id], |row| row.get::<_, String>(0))
+            .map_err(map_sqlite)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_sqlite)?;
+        Ok(Some(EvidenceCitations {
+            live,
+            citing_scopes,
+        }))
     }
 
     pub fn commit_seq(&self) -> i64 {

@@ -6,6 +6,7 @@ import {
     formatVisibilityDelta,
     MEMORY_MARK_USAGE,
     type MemoryMarkArgs,
+    memoryMarkOperationId,
     parseMemoryMarkArgs,
     runMemoryMarkCommand,
 } from "./memory-mark-command";
@@ -40,8 +41,13 @@ function harness() {
     return { kernel, transport, client };
 }
 
+const OID = "0123456789abcdef0123456789abcdef01234567";
+
+/** A dispute cites a repository file, the evidence `mark_disputed` and `contradict` must carry. */
 function args(event: MemoryMarkArgs["event"], objectId: string, confirmed = false): MemoryMarkArgs {
-    return { event, objectId, confirmed };
+    return event === "mark_disputed" || event === "contradict"
+        ? { event, objectId, evidenceRef: { path: "src/lib.rs", git_object_id: OID }, confirmed }
+        : { event, objectId, confirmed };
 }
 
 /** Confirmation is refused by default so a test that expects none fails loudly if it is asked. */
@@ -57,7 +63,7 @@ async function run(
 ) {
     return runMemoryMarkCommand({
         client: h.client,
-        sessionId: SESSION,
+        operationId: memoryMarkOperationId(SESSION, input),
         actor,
         args: input,
         ...(confirm === "none" ? {} : { confirm }),
@@ -86,6 +92,149 @@ describe("parseMemoryMarkArgs", () => {
             message: MEMORY_MARK_USAGE,
         });
         expect(parseMemoryMarkArgs("mark_stale --force").ok).toBe(false);
+    });
+});
+
+describe("parseMemoryMarkArgs evidence", () => {
+    test("a dispute takes --evidence, --path split at the last @, or both, in any order", () => {
+        expect(parseMemoryMarkArgs("mark-disputed mem_1 --evidence ev:1/x")).toEqual({
+            ok: true,
+            args: {
+                event: "mark_disputed",
+                objectId: "mem_1",
+                evidenceId: "ev:1/x",
+                confirmed: false,
+            },
+        });
+        expect(parseMemoryMarkArgs(`--path docs/a@b.md@${OID} contradict mem_1 --yes`)).toEqual({
+            ok: true,
+            args: {
+                event: "contradict",
+                objectId: "mem_1",
+                evidenceRef: { path: "docs/a@b.md", git_object_id: OID },
+                confirmed: true,
+            },
+        });
+        expect(
+            parseMemoryMarkArgs(`mark_disputed mem_1 --path src/a.rs@${OID} --evidence ev`),
+        ).toMatchObject({
+            ok: true,
+            args: { evidenceId: "ev", evidenceRef: { path: "src/a.rs", git_object_id: OID } },
+        });
+    });
+
+    test("a dispute without evidence, and evidence on another event, print usage", () => {
+        for (const raw of [
+            "mark_disputed mem_1",
+            "contradict mem_1 --yes",
+            "mark_stale mem_1 --evidence ev",
+            `quarantine mem_1 --path src/a.rs@${OID}`,
+        ]) {
+            expect(parseMemoryMarkArgs(raw)).toEqual({ ok: false, message: MEMORY_MARK_USAGE });
+        }
+    });
+
+    test("a flag without a value, a repeated flag, or a malformed path is refused", () => {
+        for (const raw of [
+            "mark_disputed mem_1 --evidence",
+            "mark_disputed mem_1 --evidence --yes",
+            "mark_disputed mem_1 --evidence a --evidence b",
+            `mark_disputed mem_1 --path a@${OID} --path b@${OID}`,
+        ]) {
+            expect(parseMemoryMarkArgs(raw)).toEqual({ ok: false, message: MEMORY_MARK_USAGE });
+        }
+        for (const path of ["src/a.rs", `@${OID}`, "src/a.rs@", `src\u001fa.rs@${OID}`]) {
+            const parsed = parseMemoryMarkArgs(`mark_disputed mem_1 --path ${path}`);
+            expect(parsed).toEqual({
+                ok: false,
+                message: `Invalid evidence path "${path}". ${MEMORY_MARK_USAGE}`,
+            });
+        }
+        expect(parseMemoryMarkArgs("mark_disputed mem_1 --evidence a\u001fb").ok).toBe(false);
+    });
+
+    test("the usage states the evidence requirement, the refusals, and the preview's limit", () => {
+        for (const text of [
+            "--evidence <id>",
+            "--path <path>@<oid>",
+            "mark_disputed and contradict cite evidence",
+            "invalid_input",
+            "not_found",
+            "admission_policy",
+            "class_over_declared",
+            "operation_key_reused",
+            "visibility only",
+        ]) {
+            expect(MEMORY_MARK_USAGE).toContain(text);
+        }
+    });
+});
+
+describe("runMemoryMarkCommand evidence", () => {
+    test("the evidence rides the preview and the commit byte for byte under the user source kind", async () => {
+        const h = harness();
+        const input: MemoryMarkArgs = {
+            event: "mark_disputed",
+            objectId: "mem_labeled",
+            evidenceId: "ev:café/1",
+            evidenceRef: { path: "docs/a@b.md", git_object_id: OID },
+            confirmed: false,
+        };
+        const outcome = await run(h, input);
+        expect(outcome).toMatchObject({ kind: "applied", result: { disposition: "disputed" } });
+        const operation = {
+            op: "disposition",
+            object_id: "mem_labeled",
+            event: "mark_disputed",
+            evidence_id: "ev:café/1",
+            evidence_ref: { path: "docs/a@b.md", git_object_id: OID },
+        };
+        for (const call of h.transport.calls) {
+            expect(call.body).toMatchObject({ source_kind: "user", operations: [operation] });
+            expect(call.body.intent).toMatchObject({
+                cause: `/eidnara-memory-mark mark_disputed mem_labeled --evidence ev:café/1 --path docs/a@b.md@${OID}`,
+            });
+        }
+        expect(h.transport.calls).toHaveLength(2);
+    });
+
+    test("two disputes with different evidence in one session are two commits; the same evidence replays", async () => {
+        const h = harness();
+        const byId: MemoryMarkArgs = {
+            event: "mark_disputed",
+            objectId: "mem_labeled",
+            evidenceId: "ev-a",
+            confirmed: false,
+        };
+        const byFile = args("mark_disputed", "mem_labeled");
+        expect(memoryMarkOperationId(SESSION, byId)).not.toBe(
+            memoryMarkOperationId(SESSION, byFile),
+        );
+        const first = await run(h, byId);
+        const second = await run(h, byFile);
+        expect(first).toMatchObject({ kind: "applied", replayed: false });
+        expect(second).toMatchObject({ kind: "applied", replayed: false });
+        expect(h.kernel.receipts.size).toBe(2);
+        const again = await run(h, byId);
+        expect(again).toEqual({ ...first, replayed: true });
+        expect(h.kernel.receipts.size).toBe(2);
+    });
+
+    test("a dispute the daemon refuses for its evidence is reported by name and writes nothing", async () => {
+        const h = harness();
+        const outcome = await run(h, {
+            event: "contradict",
+            objectId: "mem_labeled",
+            evidenceRef: { path: "src/a.rs", git_object_id: OID.toUpperCase() },
+            confirmed: false,
+        });
+        expect(outcome).toEqual({
+            kind: "refused",
+            step: "preview",
+            state: { kind: "invalid", reason: "invalid_input" },
+        });
+        expect(h.kernel.receipts.size).toBe(0);
+        expect(h.transport.methods()).toEqual(["kernel.commit"]);
     });
 });
 
@@ -216,7 +365,7 @@ describe("runMemoryMarkCommand", () => {
         let ended = false;
         const outcome = await runMemoryMarkCommand({
             client: h.client,
-            sessionId: SESSION,
+            operationId: memoryMarkOperationId(SESSION, args("mark_stale", "mem_labeled")),
             actor: "user:test",
             args: args("mark_stale", "mem_labeled"),
             isCancelled: () => ended,
@@ -226,7 +375,7 @@ describe("runMemoryMarkCommand", () => {
         ended = true;
         const cancelled = await runMemoryMarkCommand({
             client: h.client,
-            sessionId: SESSION,
+            operationId: memoryMarkOperationId(SESSION, args("mark_disputed", "mem_labeled")),
             actor: "user:test",
             args: args("mark_disputed", "mem_labeled"),
             isCancelled: () => ended,
@@ -311,7 +460,7 @@ describe("runMemoryMarkCommand", () => {
                 },
             }) as unknown as KernelClient;
         const base = {
-            sessionId: SESSION,
+            operationId: "op",
             actor: "user:test",
             args: args("mark_stale", "mem_a"),
             confirm: UNEXPECTED_CONFIRMATION,

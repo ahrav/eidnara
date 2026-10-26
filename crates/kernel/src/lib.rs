@@ -101,8 +101,8 @@ pub use eligibility::{
 };
 pub use envelope::{
     AlignmentProjectionSpec, CommitIntent, CommitReceipt, DependentObservationQuery, DomainSpec,
-    Envelope, KnownAsOf, OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState, Preview,
-    RemediationTarget, RepositoryProvenance, Sensitivity, StagingCandidateRow,
+    Envelope, EvidenceCitations, KnownAsOf, OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState,
+    Preview, RemediationTarget, RepositoryProvenance, Sensitivity, StagingCandidateRow,
     StagingCandidateSpec, TokenCheck, TokenConflict,
 };
 pub use facts::{ArtifactBudgetFacts, KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};
@@ -146,7 +146,8 @@ pub use review_staging::{
 pub use scope::{
     CanonicalScope, Dimension, GraphOracle, MatchOutcome, ScopeFormError, ScopeMatchContext,
     ScopeSpec, ScopeTermSpec, ScopeWriteOutcome, TermValue, UnknownGraph, VersionSpec,
-    coerce_version, scope_equivalent, scope_matches, scope_overlaps, scope_subsumes,
+    coerce_version, is_lower_hex_oid, scope_equivalent, scope_matches, scope_overlaps,
+    scope_subsumes,
 };
 pub use slice::{
     ALIGNMENT_DEPENDENCY_KIND, APPROVAL_REVOKE_KIND, AlignmentRebuild, AlignmentRow,

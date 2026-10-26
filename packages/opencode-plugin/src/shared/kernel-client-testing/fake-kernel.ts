@@ -257,6 +257,35 @@ function checkQueryRequest(body: Record<string, unknown>): void {
     }
 }
 
+const GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * The route's evidence form rule, checked before any transaction: a
+ * `mark_disputed` or `contradict` cites a non-empty `evidence_id`, a
+ * well-formed `evidence_ref`, or both, and every other event cites neither.
+ * The fake accepts any non-empty id; the daemon also requires it live and
+ * cited in the bound project.
+ */
+function disputeEvidenceWellFormed(operation: Operation): boolean {
+    if (operation.op !== "disposition") return true;
+    const { evidence_id: id, evidence_ref: ref } = operation as {
+        evidence_id?: unknown;
+        evidence_ref?: { path?: unknown; git_object_id?: unknown };
+    };
+    if (operation.event !== "mark_disputed" && operation.event !== "contradict") {
+        return id === undefined && ref === undefined;
+    }
+    if (id === undefined && ref === undefined) return false;
+    if (id !== undefined && (typeof id !== "string" || id.length === 0)) return false;
+    if (ref === undefined) return true;
+    return (
+        typeof ref.path === "string" &&
+        ref.path.length > 0 &&
+        typeof ref.git_object_id === "string" &&
+        GIT_OBJECT_ID.test(ref.git_object_id)
+    );
+}
+
 /** An assertion above the derived class is refused rather than clamped so the caller learns its claim was not accepted. */
 function resolveClasses(
     body: Record<string, unknown>,
@@ -595,6 +624,9 @@ export class FakeKernel {
         }
         const classes = resolveClasses(body);
         if ("reply" in classes) return classes;
+        if (operations.some((operation) => !disputeEvidenceWellFormed(operation))) {
+            return { reply: invalid("invalid_input") };
+        }
         const intent = body.intent as { operation_key: string; request_digest: string };
         const replayed = this.receipts.get(intent.operation_key) ?? null;
         if (replayed && replayed.request_digest !== intent.request_digest) {
