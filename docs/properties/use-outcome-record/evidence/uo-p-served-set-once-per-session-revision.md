@@ -36,15 +36,15 @@ revision.
   `a_recorded_served_set_replays_while_another_writer_holds_the_writer`
   (`crates/daemon/src/use_outcome_writer_tests.rs:692`);
   `every_kernel_error_maps_to_a_closed_outcome`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:819`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:817`);
   `an_emergency_pass_that_reruns_records_one_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:838`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:836`);
   `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:866`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:864`);
   `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:935`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:933`);
   `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:966`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:980`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
@@ -100,6 +100,9 @@ between; a CAS retry.
   every write slot is taken, the write is counted `deadline` and repaired the
   same way
   (`a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`).
+  This placement departs from the ticket's OQ3-5 resolution, an inline write
+  within the pass's remaining budget; the job's 250 ms writer wait is the budget
+  AC6 names (owner decision, taken at the #1155 review rounds).
   A session whose composition never folds HARD again at that set stays
   unrecorded. A conflict and a refusal are not repaired by a later fold.
 - Missing evidence: none beyond what the question names.

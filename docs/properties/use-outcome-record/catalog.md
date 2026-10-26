@@ -998,15 +998,15 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `a_recorded_served_set_replays_while_another_writer_holds_the_writer`
 (`crates/daemon/src/use_outcome_writer_tests.rs:692`);
 `every_kernel_error_maps_to_a_closed_outcome`
-(`crates/daemon/src/use_outcome_writer_tests.rs:819`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:817`);
 `an_emergency_pass_that_reruns_records_one_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:838`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:836`);
 `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:866`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:864`);
 `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`
-(`crates/daemon/src/use_outcome_writer_tests.rs:935`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:933`);
 `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
-(`crates/daemon/src/use_outcome_writer_tests.rs:966`); Kernel half:
+(`crates/daemon/src/use_outcome_writer_tests.rs:980`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:215`),
 `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
@@ -1026,7 +1026,12 @@ Open questions:
   input requests over the same served set, such as context pressure. The pass
   hands the write to a tracked blocking job and answers while the job waits for
   the Kernel writer; when every write slot is taken, the write is counted
-  `deadline` and repaired the same way. A session whose composition never folds
+  `deadline` and repaired the same way. This placement departs from the
+  ticket's OQ3-5 resolution, an inline write within the pass's remaining
+  budget: the job's own 250 ms writer wait is the budget AC6 names, and the
+  measured wait the ticket asked for is recorded by
+  `the_real_failure_paths_count_their_outcomes_and_bound_the_wait` (owner
+  decision, taken at the #1155 review rounds). A session whose composition never folds
   HARD again at that set stays unrecorded. A conflict and a refusal are not
   repaired by a later fold.
 
@@ -1060,7 +1065,7 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
 (`crates/daemon/src/canonical_memory.rs:477`);
 `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:995`); Kernel half:
+(`crates/daemon/src/use_outcome_writer_tests.rs:1009`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:215`),
 `session_roles_round_trip_and_the_served_set_digest_is_order_free`
