@@ -10,8 +10,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `dd84f77af`).
+References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
+`main` at `d3b772026`.
 
 - Additive engine: `crates/daemon/src/transform.rs:3122` inside
   `apply_additive_only` (`apply_additive_only`
@@ -20,7 +20,7 @@ its parent is `dd84f77af`).
   `crates/daemon/src/transform.rs:4898` (`MaterializeReason::PressureRefold`).
 - All three call `ctx.project_memory_composition()`, which returns the
   composition of the read pinned for that pass.
-- Correction: the spec cited `transform.rs:13972, 20836, 21245`; at this tip
+- Correction: the spec cited `transform.rs` lines 13972, 20836, and 21245; at this tip
   13972 is inside a test, and the production sites are the three lines above.
 
 - Guarantee under test: Every pass whose plan is `Hard` or `MigrateHard` assigns
@@ -63,5 +63,5 @@ refold on the folding engine, and a CAS conflict inside one pass.
 - Findings: Gap G1: does a CAS-discarded attempt leave any durable effect
   outside the Memory Store? Owner #1155 (AC7); the writer runs only after the
   attempt's memory-store commit succeeded.
-- Missing evidence: none beyond what the question names.
-- Conclusion: resolved with answer - see the question text.
+- Missing evidence: the AC7 writer and its CAS-conflict test, owned by #1155.
+- Conclusion: unresolved, needs the #1155 writer (AC7).

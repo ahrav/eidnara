@@ -8,10 +8,10 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `dd84f77af`).
+References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
+`main` at `d3b772026`.
 
-- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9655`); one
+- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9668`); one
   write per pass covers its reruns.
 - A composition read at sequence 0 precedes every commit; the handler skips its
   write, and the next fold after a commit records the serve.
@@ -26,7 +26,7 @@ its parent is `dd84f77af`).
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
   (`crates/daemon/src/use_outcome_writer_tests.rs:565`); Kernel half:
   `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:163`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:164`). Status: unaudited.
 
 ## Failure scenario
 

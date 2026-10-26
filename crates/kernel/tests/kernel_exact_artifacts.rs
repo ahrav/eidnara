@@ -649,6 +649,16 @@ fn a_refused_receipt_poisons_the_envelope_and_a_poisoned_envelope_records_nothin
         assert_eq!(refused, Err(kernel::KernelError::Conflict));
         Ok(String::new())
     });
+    let rebound = store.commit(intent("rebound", b"rebound"), |envelope| {
+        let refused = envelope.record_receipt(intent("recorded", b"other"), "again");
+        assert_eq!(
+            refused,
+            Err(kernel::KernelError::Conflict),
+            "a recorded key under another digest"
+        );
+        Ok(String::new())
+    });
+    assert_eq!(rebound.unwrap_err(), kernel::KernelError::Conflict);
     assert_eq!(
         discarded.unwrap_err(),
         kernel::KernelError::Conflict,

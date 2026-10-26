@@ -8,13 +8,13 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `dd84f77af`).
+References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
+`main` at `d3b772026`.
 
 - Key and digest: `crates/daemon/src/use_outcome_writer.rs:165`; the request
   digest binds the ids, the harness, and the role (`request_digest`
   (`crates/daemon/src/use_outcome_writer.rs:223`)).
-- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9655`) runs after
+- Call site: `record_use_outcome` (`crates/daemon/src/lib.rs:9668`) runs after
   each committed attempt in `run_transform`.
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
@@ -45,9 +45,9 @@ its parent is `dd84f77af`).
   `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
   (`crates/daemon/src/use_outcome_writer_tests.rs:937`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
-  (`crates/kernel/tests/kernel_use_outcome.rs:214`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-  (`crates/kernel/tests/kernel_use_outcome.rs:694`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:755`). Status: unaudited.
 
 ## Failure scenario
 

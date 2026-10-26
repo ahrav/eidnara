@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `dd84f77af`).
+References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
+`main` at `d3b772026`.
 
 - `CanonicalMemorySnapshot::new` seeds the hasher with
   `eidnara-project-memory-revision-v1` and hashes category plus rendered line
@@ -51,7 +51,7 @@ renderer drops, bytes past the render cap, or rows past the memory budget.
 
 ## Investigation log
 
-### Q: The `DefaultHasher` output is unspecified across toolchain releases; #
+### Q: Is a composition revision from `DefaultHasher` stable across toolchain releases?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: The `DefaultHasher` output is unspecified across toolchain releases;

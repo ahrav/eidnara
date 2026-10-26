@@ -8,8 +8,8 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `dd84f77af`).
+References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
+`main` at `d3b772026`.
 
 - Ids: the rendered rows of `CanonicalMemorySnapshot::new`, ascending
   (`served_ids` (`crates/daemon/src/canonical_memory.rs:72`)).
@@ -33,9 +33,9 @@ its parent is `dd84f77af`).
   `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
   (`crates/daemon/src/use_outcome_writer_tests.rs:966`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
-  (`crates/kernel/tests/kernel_use_outcome.rs:214`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-  (`crates/kernel/tests/kernel_use_outcome.rs:715`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:776`). Status: unaudited.
 
 ## Failure scenario
 
@@ -57,6 +57,7 @@ retry.
 ### Q: Does any open question remain for this record?
 
 - Sources examined: the specification catalog entry, the code and tests cited above.
-- Findings: the cited code and tests agree with the guarantee at this tip.
-- Missing evidence: none for the guarantee as stated.
-- Conclusion: resolved with answer - no open question.
+- Findings: the Kernel half cited above agrees with the guarantee at this tip;
+  the writer is proposed and no code at this tip establishes its behavior.
+- Missing evidence: the writer path, which lands with the owning ticket.
+- Conclusion: unresolved, needs the writer; the Kernel half is settled.

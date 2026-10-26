@@ -1274,7 +1274,7 @@ fn request_context_exceeds_bounds(query: &QueryContext, scope_context: &ScopeMat
 
 /// Whether an anchor row's text columns and payload together exceed
 /// `MAX_OBJECT_PAYLOAD_BYTES`. The walk stops at the bound.
-fn anchor_row_exceeds_bounds(anchor: &AnchorRowSpec) -> bool {
+pub(crate) fn anchor_row_exceeds_bounds(anchor: &AnchorRowSpec) -> bool {
     let mut bytes = 0usize;
     let mut charge = |len: usize| {
         bytes = bytes.saturating_add(len);

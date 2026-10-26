@@ -8,8 +8,8 @@ Record kind: proposed obligation; its owning ticket #1157 activates it.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `dd84f77af`).
+References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
+`main` at `d3b772026`.
 
 - The counts derive from `served_sessions_for`.
 
@@ -18,7 +18,7 @@ its parent is `dd84f77af`).
   answers unavailable with no integer.
 - Existing check: Kernel half only:
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:341`). The routed read is
+  (`crates/kernel/tests/kernel_use_outcome.rs:400`). The routed read is
   proposed. Status: unaudited.
 
 ## Failure scenario
@@ -38,7 +38,7 @@ two sessions with one later dispute.
 
 ## Investigation log
 
-### Q: OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome` m
+### Q: OQ3-2 and OQ3-15: what does `review.use_outcome` answer when the Kernel is unready?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome`

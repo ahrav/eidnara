@@ -9,12 +9,12 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `dd84f77af`).
+References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
+`main` at `d3b772026`.
 
 - Handler and step order: `handle_session_delete_value`
-  (`crates/daemon/src/lib.rs:6915`).
-- Test hook `stop_after_retirement`: `crates/daemon/src/lib.rs:6951`.
+  (`crates/daemon/src/lib.rs:6924`).
+- Test hook `stop_after_retirement`: `crates/daemon/src/lib.rs:6960`.
 - Correction: the spec's `lib.rs:25158, 25911` were test functions that moved by
   31 lines.
 
@@ -23,13 +23,13 @@ its parent is `dd84f77af`).
   Kernel failure returns before the Memory Store is touched.
 - Existing check:
   `session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores`
-  (`crates/daemon/src/source_capture_tests.rs:1556`);
+  (`crates/daemon/src/source_capture_tests.rs:1557`);
   `session_delete_with_the_kernel_starting_deletes_nothing`
-  (`crates/daemon/src/source_capture_tests.rs:1626`);
+  (`crates/daemon/src/source_capture_tests.rs:1627`);
   `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
-  (`crates/daemon/src/source_capture_tests.rs:1698`);
+  (`crates/daemon/src/source_capture_tests.rs:1699`);
   `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-  (`crates/daemon/src/lib.rs:26068`). Status: unaudited.
+  (`crates/daemon/src/lib.rs:26262`). Status: unaudited.
 
 ## Failure scenario
 

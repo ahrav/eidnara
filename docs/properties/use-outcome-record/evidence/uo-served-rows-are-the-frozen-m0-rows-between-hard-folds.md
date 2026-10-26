@@ -10,8 +10,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `dd84f77af`).
+References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
+`main` at `d3b772026`.
 
 - The additive engine composes m0 from the pinned read inside its HARD arm and
   assigns the composition at `crates/daemon/src/transform.rs:3122`.
@@ -19,11 +19,11 @@ its parent is `dd84f77af`).
   `meta.project_memory`; the response field `project_memory` is read from meta
   (`apply_additive_only` (`crates/daemon/src/transform.rs:2854`)).
 - Each pass still reads the Kernel (`project_memory_read`
-  (`crates/daemon/src/lib.rs:5517`)); the read feeds only the m1 revision
+  (`crates/daemon/src/lib.rs:5526`)); the read feeds only the m1 revision
   signal, and a changed revision requests a HARD fold
   (`project_memory_revision_change_requests_a_hard_fold`
   (`crates/daemon/src/transform.rs:13993`)).
-- Correction: the spec cited `transform.rs:13972`, which at this tip lies inside
+- Correction: the spec cited `transform.rs` line 13972, which at this tip lies inside
   the test
   `withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`; the
   production sites are the composition assignments named above.

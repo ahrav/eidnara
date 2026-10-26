@@ -63,6 +63,9 @@ pub const ROUTE_IDENTITY_HEADROOM_BYTES: u64 = (MAX_BOUND_ROUTES as u64)
 /// `SubprocessLimits::default` and the capture headroom read this one value.
 pub const MAX_BACKEND_STDOUT_BYTES: usize = 4 * 1024 * 1024;
 
+/// The streamed stdout cap bounds parsing work even when the retained transcript stays small.
+pub const MAX_BACKEND_STREAMED_STDOUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Each concurrent subprocess buffers at most this much stderr for diagnostics.
 pub const MAX_BACKEND_STDERR_BYTES: usize = 64 * 1024;
 

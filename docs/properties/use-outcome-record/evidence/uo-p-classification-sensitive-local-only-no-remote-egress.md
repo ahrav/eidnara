@@ -8,11 +8,11 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `dd84f77af`).
+References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
+`main` at `d3b772026`.
 
-- DDL CHECKs: `crates/kernel/src/schema.rs:187`.
-- Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:232`); it
+- DDL CHECKs: `crates/kernel/src/schema.rs:188`.
+- Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:246`); it
   pushes no pending change, so the commit writes no change event or outbox row.
 - Class rule: `denies_destination` (`crates/kernel/src/envelope.rs:71`).
 
@@ -20,9 +20,9 @@ its parent is `dd84f77af`).
   and `use_outcome_capture`, the DDL refuses any other value, and no serve
   creates a registry object, evidence row, change event, or outbox entry.
 - Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
-  (`crates/kernel/tests/kernel_schema.rs:2297`);
+  (`crates/kernel/tests/kernel_schema.rs:2348`);
   `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-  (`crates/kernel/tests/kernel_use_outcome.rs:322`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:381`). Status: unaudited.
 
 ## Failure scenario
 

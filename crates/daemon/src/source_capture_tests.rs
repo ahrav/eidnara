@@ -8,6 +8,7 @@ use kernel::{ArtifactHandle, KernelStore, LiveDescriptor, SourceClass, Surface, 
 
 use super::*;
 use crate::harness_sources::MAX_SOURCE_BATCH_UNITS;
+use crate::source_capture::{Count, Settlement};
 
 const SESSION: &str = "ses";
 /// A literal that must never reach a log line, a counter, or the health report.
@@ -3255,5 +3256,1302 @@ async fn a_project_keyed_row_beside_the_derived_row_retires_at_the_next_incarnat
     assert_eq!(
         rows[0].detail.artifact_digest,
         crate::project_docs::sha256_hex(edited.as_bytes())
+    );
+}
+
+/// The configuration the citation tests submit capture work under: memory
+/// capture on, and source capture as given.
+fn citing_config(source_capture: bool) -> DaemonConfig {
+    let mut config = capture_config(source_capture);
+    config.memory_auto_capture = true;
+    config
+}
+
+fn bind_pi(handler: &Handler, project: &Path, config: DaemonConfig) {
+    let mut bound = binding_with_harness(project.to_str().unwrap(), "pi", SESSION);
+    bound.config = config;
+    handler.bind_route(test_route(7), bound);
+}
+
+/// Captures `messages` as `(id, text)` user sources and submits one memory per
+/// source quoting `quotes[i]`; returns the submission's state.
+async fn capture_quotes(handler: &Handler, messages: &[(&str, &str)], quotes: &[&str]) -> Value {
+    let submission = prepare_submission(handler, test_route(7), SESSION, messages, quotes).await;
+    submit_state(handler, test_route(7), &submission).await
+}
+
+/// Captures `messages` on `route` and leases them; returns the submission
+/// that answers with one memory per source quoting `quotes[i]`.
+async fn prepare_submission(
+    handler: &Handler,
+    route: RouteHandle,
+    session: &str,
+    messages: &[(&str, &str)],
+    quotes: &[&str],
+) -> Value {
+    let request = json!({"method":"memory.capture","session_id":session,"messages":messages.iter().map(|(id, text)| json!({"id":id,"role":"user","text":text})).collect::<Vec<_>>()});
+    assert_eq!(
+        tool_body(handler.handle_memory_capture(route, &request).await)["state"],
+        "accepted"
+    );
+    let next =
+        json!({"method":"memory.capture.next","session_id":session,"model":"custom-native/model"});
+    let work = tool_body(handler.handle_native_capture_next(route, &next).await);
+    assert_eq!(work["state"], "work", "{work}");
+    let submission = submission_for(&work, session, quotes);
+    let output: Value = serde_json::from_str(submission["output"].as_str().unwrap()).unwrap();
+    assert!(
+        output["decisions"].as_array().unwrap().len() >= messages.len(),
+        "{output}"
+    );
+    submission
+}
+
+/// Answers a leased batch: each message quotes the first quote it contains,
+/// and a message that contains none answers with no memory. The lease spans
+/// the project's pending jobs, so a pass's auto-captured jobs may share it.
+fn submission_for(work: &Value, session: &str, quotes: &[&str]) -> Value {
+    let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+    let decisions: Vec<Value> = prompt["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| {
+            let text = message["text"].as_str().unwrap();
+            let memories: Vec<Value> = quotes
+                .iter()
+                .find(|quote| text.contains(*quote))
+                .map(|quote| json!({"category":"CONFIG_VALUES","content":quote,"quote":quote}))
+                .into_iter()
+                .collect();
+            json!({"message_id":message["id"],"memories":memories})
+        })
+        .collect();
+    let output = json!({"version":1,"decisions":decisions});
+    json!({"method":"memory.capture.submit","session_id":session,"lease":work["lease"],"model":work["model"],"output":output.to_string()})
+}
+
+/// One committed capture decision as the Kernel stores it.
+#[derive(Debug)]
+struct CapturedDecision {
+    decision_id: String,
+    object_id: String,
+    anchor_id: Option<String>,
+    evidence_id: Option<String>,
+    sensitivity: String,
+    rationale: Value,
+    events: Vec<(String, Option<String>)>,
+}
+
+fn kernel_db(dir: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open_with_flags(
+        dir.join("kernel/kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+}
+
+/// Every live capture decision keyed by the message its rationale names.
+fn captured_decisions(dir: &Path) -> BTreeMap<String, CapturedDecision> {
+    let db = kernel_db(dir);
+    let mut statement = db
+        .prepare(
+            "SELECT d.decision_id,d.object_id,d.anchor_id,d.evidence_id,d.sensitivity_class,
+                    d.decision_payload
+             FROM decisions d JOIN object_registry r ON r.object_id=d.object_id
+             WHERE r.source_id='memory_capture' AND d.invalidated_commit_seq IS NULL",
+        )
+        .unwrap();
+    let rows: Vec<CapturedDecision> = statement
+        .query_map([], |row| {
+            let payload: Vec<u8> = row.get(5)?;
+            let payload: Value = serde_json::from_slice(&payload).unwrap();
+            Ok(CapturedDecision {
+                decision_id: row.get(0)?,
+                object_id: row.get(1)?,
+                anchor_id: row.get(2)?,
+                evidence_id: row.get(3)?,
+                sensitivity: row.get(4)?,
+                rationale: serde_json::from_str(payload["rationale"].as_str().unwrap()).unwrap(),
+                events: Vec::new(),
+            })
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    rows.into_iter()
+        .map(|mut decision| {
+            decision.events = db
+                .prepare(
+                    "SELECT event_kind,evidence_id FROM decision_events
+                     WHERE decision_id=?1 ORDER BY event_ordinal",
+                )
+                .unwrap()
+                .query_map([&decision.decision_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            (
+                decision.rationale["message"].as_str().unwrap().to_owned(),
+                decision,
+            )
+        })
+        .collect()
+}
+
+/// The oid of each anchor row, by anchor id.
+fn anchor_oids(dir: &Path) -> BTreeMap<String, String> {
+    kernel_db(dir)
+        .prepare("SELECT anchor_id,reachable_from_oid FROM anchors")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// The evidence id of each live `messages` descriptor, by message id and block index.
+fn message_evidence(store: &KernelStore) -> BTreeMap<(String, usize), String> {
+    live(store, OccurrenceClass::Messages)
+        .iter()
+        .map(|row| {
+            let identity = identity_of(row);
+            let field = |name: &str| {
+                identity
+                    .iter()
+                    .find(|(field, _)| *field == name)
+                    .unwrap()
+                    .1
+                    .to_owned()
+            };
+            (
+                (field("message_id"), field("block_index").parse().unwrap()),
+                row.detail.evidence_id.clone(),
+            )
+        })
+        .collect()
+}
+
+fn counter(handler: &Handler, name: &str) -> u64 {
+    handler.source_capture.report(false, 0)[name]
+        .as_u64()
+        .unwrap()
+}
+
+/// A secret source capture refuses to retain, so its block has no descriptor.
+const CITED_SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
+const CITED_SOURCES: [(&str, &str); 6] = [
+    ("pi-one", "Use port 4321 for staging."),
+    (
+        "pi-four",
+        "The build uses cargo.\nTests run on nextest.\nDeploys go to region us-west-2.\nLogs ship to the collector.",
+    ),
+    ("pi-span", "The cache lives in\nthe shared volume."),
+    ("pi-edge", "Retries are capped.\nBackoff doubles each time."),
+    (
+        "pi-first",
+        concat!(
+            "Rotate the key sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678.",
+            "\nThe key rotates weekly."
+        ),
+    ),
+    ("pi-absent", "The staging host is blue."),
+];
+const CITED_QUOTES: [&str; 6] = [
+    "Use port 4321 for staging.",
+    "Deploys go to region us-west-2.",
+    "lives in\nthe shared",
+    "\nBackoff doubles",
+    "The key rotates weekly.",
+    "The staging host is blue.",
+];
+
+/// Publishes every source but the last as a Pi window of text items, one
+/// item per `\n`-separated line, and returns the HEAD commit of the project
+/// repository.
+async fn publish_cited_sources(handler: &Handler, project: &Path) -> String {
+    let head = crate::memory_capture::head_fixtures::repository(project, 1).remove(0);
+    assert!(CITED_SOURCES[4].1.contains(CITED_SECRET));
+    let rows: Vec<Value> = CITED_SOURCES[..5]
+        .iter()
+        .enumerate()
+        .map(|(index, (id, text))| {
+            let content: Vec<Value> = text
+                .split('\n')
+                .map(|item| json!({"type":"text","text":item}))
+                .collect();
+            pi_row(
+                id,
+                None,
+                json!({"role":"user","content":content,"timestamp":1_700_000_000_000u64 + index as u64}),
+            )
+        })
+        .collect();
+    bind_pi(handler, project, capture_config(true));
+    pass(handler, pi_request(&rows, "base-1")).await;
+    settle(handler).await;
+    bind_pi(handler, project, citing_config(true));
+    head
+}
+
+/// AC3 (anchor), AC4, AC11, and the counters: four published messages cite
+/// by `block`, `block` in the third of four items, `span`, and `first`; an
+/// unpublished sibling reports `descriptor_not_found`. Every decision of a job
+/// names the job's anchor at the submit-time HEAD, and no admission or class
+/// differs between cited and uncited decisions.
+#[tokio::test]
+async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_head() {
+    let (handler, dir, project) = capture_handler(citing_config(true), true).await;
+    let head = publish_cited_sources(&handler, &project).await;
+    let store = kernel_store(&handler);
+    let evidence = message_evidence(&store);
+    assert_eq!(
+        evidence.len(),
+        1 + 4 + 2 + 2 + 1,
+        "the secret block has no descriptor"
+    );
+    assert_eq!(
+        capture_quotes(&handler, &CITED_SOURCES, &CITED_QUOTES).await,
+        "processed"
+    );
+    let decisions = captured_decisions(dir.path());
+    assert_eq!(decisions.len(), 6);
+    let cited = |message: &str, rule: &str, blocks: &[usize]| {
+        let decision = &decisions[message];
+        let expected: Vec<String> = blocks
+            .iter()
+            .map(|block| evidence[&(message.to_owned(), *block)].clone())
+            .collect();
+        assert_eq!(decision.rationale["citation"], "cited", "{message}");
+        assert_eq!(decision.rationale["citation_block"], rule, "{message}");
+        assert_eq!(
+            decision.rationale["citation_blocks"],
+            json!(blocks),
+            "{message}"
+        );
+        assert_eq!(
+            decision.rationale["citation_evidence"],
+            json!(expected),
+            "{message}"
+        );
+        assert_eq!(
+            decision.events,
+            expected
+                .into_iter()
+                .map(|id| (
+                    crate::memory_capture::CITATION_EVENT_KIND.to_owned(),
+                    Some(id)
+                ))
+                .collect::<Vec<_>>(),
+            "{message}"
+        );
+    };
+    cited("pi-one", "block", &[0]);
+    cited("pi-four", "block", &[2]);
+    cited("pi-span", "span", &[0, 1]);
+    cited("pi-edge", "span", &[0, 1]);
+    cited("pi-first", "first", &[1]);
+    let absent = &decisions["pi-absent"];
+    assert_eq!(absent.rationale["citation"], "descriptor_not_found");
+    assert!(absent.events.is_empty());
+    assert!(absent.rationale.get("citation_evidence").is_none());
+
+    let anchors = anchor_oids(dir.path());
+    assert_eq!(anchors.len(), 6, "one anchor per job");
+    for decision in decisions.values() {
+        assert_eq!(decision.rationale["anchor"], "anchored");
+        assert_eq!(anchors[decision.anchor_id.as_ref().unwrap()], head);
+        assert_eq!(decision.evidence_id, None);
+        assert_eq!(decision.sensitivity, "normal");
+    }
+    let admissions: Vec<(String, String, String, String, i64)> = kernel_db(dir.path())
+        .prepare(
+            "SELECT a.source_class,a.taint_class,a.maturity,a.effective_maturity,a.elevated_support
+             FROM admission_decisions a JOIN object_registry r ON r.object_id=a.subject_object_id
+             WHERE r.source_id='memory_capture' AND r.object_kind='decision'",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(admissions.len(), 6, "{admissions:?}");
+    assert!(
+        admissions
+            .iter()
+            .all(|admission| *admission == admissions[0]),
+        "{admissions:?}"
+    );
+    let (source, taint, ..) = admissions[0].clone();
+    assert_eq!(
+        (source.as_str(), taint.as_str()),
+        ("model_inference", "assistant_inference")
+    );
+    let object_ids: Vec<&str> = decisions
+        .values()
+        .map(|decision| decision.object_id.as_str())
+        .collect();
+    let served = store
+        .commit(
+            kernel::CommitIntent {
+                producer: "citation-test".into(),
+                operation_key: "served".into(),
+                request_digest: "0".repeat(64),
+                actor: "test".into(),
+                cause: "read".into(),
+            },
+            |envelope| {
+                let rows = envelope.served_rows_for(&object_ids, None)?;
+                let visibility: BTreeSet<String> = rows
+                    .values()
+                    .map(|row| {
+                        format!(
+                            "{:?}/{:?}/{:?}",
+                            row.visibility(Surface::AutoInject),
+                            row.visibility(Surface::ExplicitSearch),
+                            row.object.sensitivity
+                        )
+                    })
+                    .collect();
+                Ok(serde_json::to_string(&visibility).unwrap())
+            },
+        )
+        .unwrap();
+    let visibility: BTreeSet<String> = serde_json::from_str(&served.result).unwrap();
+    assert_eq!(
+        visibility.into_iter().collect::<Vec<_>>(),
+        vec!["Hidden/Labeled/Normal".to_owned()],
+        "cited and uncited memories serve alike"
+    );
+
+    assert_eq!(counter(&handler, "decisions_cited"), 5);
+    assert_eq!(counter(&handler, "decisions_descriptor_not_found"), 1);
+    assert_eq!(counter(&handler, "decisions_anchored"), 6);
+    for name in [
+        "decisions_source_capture_off",
+        "decisions_source_id_unjoinable",
+        "decisions_publish_budget_expired",
+        "decisions_head_unavailable",
+    ] {
+        assert_eq!(counter(&handler, name), 0, "{name}");
+    }
+}
+
+/// AC6, AC7, and the hashed-id reason: with source capture off no lookup
+/// cites; a hashed source id reports `source_id_unjoinable`; a plain
+/// directory and an unborn repository write no anchor and count
+/// `head_unavailable`; a detached HEAD anchors at its commit.
+#[tokio::test]
+async fn misses_carry_one_closed_reason_each_and_the_counters_follow_them() {
+    let hashed = format!("{}:0", "c".repeat(64));
+    for (fixture, source_capture) in [
+        ("plain", false),
+        ("unborn", true),
+        ("sha256", true),
+        ("detached", true),
+    ] {
+        let (handler, dir, project) = capture_handler(citing_config(source_capture), true).await;
+        let expected_oid = match fixture {
+            "unborn" => {
+                gix::init(&project).unwrap();
+                None
+            }
+            "sha256" => {
+                crate::memory_capture::head_fixtures::repository(&project, 1);
+                crate::memory_capture::head_fixtures::declare_sha256(&project);
+                None
+            }
+            "detached" => {
+                let first = crate::memory_capture::head_fixtures::repository(&project, 2).remove(0);
+                crate::memory_capture::head_fixtures::detach(&project, &first);
+                Some(first)
+            }
+            _ => None,
+        };
+        bind_pi(&handler, &project, citing_config(source_capture));
+        let sources = [
+            ("native-user-1", "Use port 4321 for staging."),
+            (hashed.as_str(), "Production listens on 8080."),
+        ];
+        let quotes = ["Use port 4321 for staging.", "Production listens on 8080."];
+        assert_eq!(
+            capture_quotes(&handler, &sources, &quotes).await,
+            "processed",
+            "{fixture}"
+        );
+        let decisions = captured_decisions(dir.path());
+        let reason = |message: &str| decisions[message].rationale["citation"].clone();
+        if source_capture {
+            assert_eq!(reason("native-user-1"), "descriptor_not_found", "{fixture}");
+            assert_eq!(reason(&hashed), "source_id_unjoinable", "{fixture}");
+            assert_eq!(counter(&handler, "decisions_source_id_unjoinable"), 1);
+        } else {
+            assert_eq!(reason("native-user-1"), "source_capture_off");
+            assert_eq!(reason(&hashed), "source_capture_off");
+            assert_eq!(counter(&handler, "decisions_source_capture_off"), 2);
+        }
+        for decision in decisions.values() {
+            assert!(decision.events.is_empty(), "{fixture}");
+            match &expected_oid {
+                Some(oid) => {
+                    assert_eq!(decision.rationale["anchor"], "anchored");
+                    assert_eq!(
+                        &anchor_oids(dir.path())[decision.anchor_id.as_ref().unwrap()],
+                        oid
+                    );
+                }
+                None => {
+                    assert_eq!(
+                        decision.rationale["anchor"], "head_unavailable",
+                        "{fixture}"
+                    );
+                    assert_eq!(decision.anchor_id, None);
+                }
+            }
+        }
+        let (anchored, unavailable) = if expected_oid.is_some() {
+            (2, 0)
+        } else {
+            (0, 2)
+        };
+        assert_eq!(
+            counter(&handler, "decisions_anchored"),
+            anchored,
+            "{fixture}"
+        );
+        assert_eq!(
+            counter(&handler, "decisions_head_unavailable"),
+            unavailable,
+            "{fixture}"
+        );
+        if expected_oid.is_none() {
+            assert!(anchor_oids(dir.path()).is_empty(), "{fixture}");
+        }
+    }
+}
+
+/// AC5: an output naming a source outside the batch is refused before any
+/// publish, so no lookup, anchor, or decision runs for it.
+#[tokio::test]
+async fn an_invented_source_id_is_refused_before_any_citation_lookup() {
+    let (handler, dir, project) = capture_handler(citing_config(true), true).await;
+    publish_cited_sources(&handler, &project).await;
+    let request = json!({"method":"memory.capture","session_id":SESSION,"messages":[{"id":"pi-one","role":"user","text":CITED_SOURCES[0].1}]});
+    assert_eq!(
+        tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+        "accepted"
+    );
+    let next =
+        json!({"method":"memory.capture.next","session_id":SESSION,"model":"custom-native/model"});
+    let work = tool_body(
+        handler
+            .handle_native_capture_next(test_route(7), &next)
+            .await,
+    );
+    assert_eq!(work["state"], "work", "{work}");
+    // The prompt names its sources `source_1` and on; the native id is not one of them.
+    let output = json!({"version":1,"decisions":[{"message_id":"pi-one","memories":[{"category":"CONFIG_VALUES","content":"x","quote":"Use port"}]}]});
+    let submission = json!({"method":"memory.capture.submit","session_id":SESSION,"lease":work["lease"],"model":work["model"],"output":output.to_string()});
+    assert_eq!(
+        tool_body(
+            handler
+                .handle_native_capture_submit(test_route(7), &submission)
+                .await
+        )["state"],
+        "processed",
+        "a refused output settles its jobs as failed extractions"
+    );
+    let key = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let status = handler
+        .store()
+        .unwrap()
+        .memory_capture_status(&key)
+        .unwrap();
+    assert_eq!(status.completed, 0, "{status:?}");
+    assert!(captured_decisions(dir.path()).is_empty());
+    assert!(anchor_oids(dir.path()).is_empty());
+    assert_eq!(counter(&handler, "decisions_anchored"), 0);
+}
+
+/// AC12: the cited message's `harness_capture` evidence survives the expiry
+/// sweep past its retention deadline while the citing decision is live, and
+/// retiring it is refused.
+#[tokio::test]
+async fn cited_capture_evidence_survives_expiry_and_refuses_retirement() {
+    let (handler, dir, project) = capture_handler(citing_config(true), true).await;
+    publish_cited_sources(&handler, &project).await;
+    assert_eq!(
+        capture_quotes(&handler, &CITED_SOURCES[..1], &CITED_QUOTES[..1]).await,
+        "processed"
+    );
+    let decisions = captured_decisions(dir.path());
+    let cited = decisions["pi-one"].events[0].1.clone().unwrap();
+    let store = kernel_store(&handler);
+    store.expire_harness_captures(i64::MAX / 2).unwrap();
+    let db = kernel_db(dir.path());
+    let (object_id, live): (String, bool) = db
+        .query_row(
+            "SELECT object_id,invalidated_commit_seq IS NULL FROM evidence_meta WHERE evidence_id=?1",
+            [&cited],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(live, "a cited capture outlives its retention deadline");
+    let refused = store
+        .commit(
+            kernel::CommitIntent {
+                producer: "citation-test".into(),
+                operation_key: "retire".into(),
+                request_digest: "1".repeat(64),
+                actor: "test".into(),
+                cause: "retire".into(),
+            },
+            |envelope| Ok(envelope.retire_evidence(&object_id)?.result_json()),
+        )
+        .unwrap_err();
+    assert_eq!(refused, kernel::KernelError::Conflict);
+}
+
+/// AC13 and the replay clause of the counters: a publish whose completion the
+/// store refuses replays its receipt on the retry, leaving one anchor row per
+/// job, one decision per memory, the same events, and the counters unchanged.
+#[tokio::test]
+async fn a_replayed_publish_adds_no_rows_and_no_counts() {
+    let (handler, dir, project) = capture_handler(citing_config(true), true).await;
+    publish_cited_sources(&handler, &project).await;
+    let store = handler.store().unwrap();
+    store
+        .execute_tag_sql_for_test(
+            "CREATE TRIGGER hold_plans BEFORE UPDATE ON memory_capture_jobs
+             WHEN NEW.commit_seq IS NOT NULL BEGIN SELECT RAISE(ABORT,'held'); END",
+        )
+        .unwrap();
+    assert_eq!(
+        capture_quotes(&handler, &CITED_SOURCES[..2], &CITED_QUOTES[..2]).await,
+        "processed"
+    );
+    let first = format!("{:?}", captured_decisions(dir.path()));
+    let anchors = anchor_oids(dir.path());
+    let cited = counter(&handler, "decisions_cited");
+    assert_eq!(cited, 2);
+    store
+        .execute_tag_sql_for_test(
+            "DROP TRIGGER hold_plans; UPDATE memory_capture_jobs SET retry_at_ms=0",
+        )
+        .unwrap();
+    let next =
+        json!({"method":"memory.capture.next","session_id":SESSION,"model":"custom-native/model"});
+    assert_eq!(
+        tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await
+        )["state"],
+        "ready"
+    );
+    assert_eq!(format!("{:?}", captured_decisions(dir.path())), first);
+    assert_eq!(anchor_oids(dir.path()), anchors);
+    assert_eq!(counter(&handler, "decisions_cited"), cited);
+    assert_eq!(counter(&handler, "decisions_anchored"), 2);
+}
+
+/// The settlement key of a Pi session's source publish.
+fn pi_key(project: &Path, session: &str) -> crate::harness_sources::SessionIdentity {
+    crate::harness_sources::SessionIdentity {
+        project_id: kernel_routes::ProjectBinding::new(project)
+            .digest()
+            .to_owned(),
+        harness: crate::harness_sources::Harness::Pi,
+        session_id: session.to_owned(),
+    }
+}
+
+fn settlement(handler: &Handler, project: &Path, session: &str) -> Option<Settlement> {
+    handler
+        .source_capture
+        .settlement_for_test(&pi_key(project, session))
+}
+
+/// Submits that armed a wait on a `Running` entry.
+fn waits(handler: &Handler) -> u64 {
+    handler
+        .source_capture
+        .settlement_waits
+        .load(Ordering::Relaxed)
+}
+
+/// Polls until `waits` reaches `count`, so an assertion about a parked
+/// submit runs only once it is parked.
+async fn await_waits(handler: &Handler, count: u64) {
+    for _ in 0..1_000 {
+        if waits(handler) >= count {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no submit armed wait {count}");
+}
+
+async fn submit_state(handler: &Handler, route: RouteHandle, submission: &Value) -> Value {
+    tool_body(
+        handler
+            .handle_native_capture_submit(route, submission)
+            .await,
+    )["state"]
+        .clone()
+}
+
+fn spawn_submit(
+    handler: &Arc<Handler>,
+    route: RouteHandle,
+    submission: Value,
+) -> tokio::task::JoinHandle<Value> {
+    let handler = Arc::clone(handler);
+    tokio::spawn(async move { submit_state(&handler, route, &submission).await })
+}
+
+/// A Pi user message row; each test's sources carry their own ids, so the
+/// decisions map keys stay distinct across sessions.
+fn user_row(id: &str, text: &str, offset: u64) -> Value {
+    pi_row(
+        id,
+        None,
+        json!({"role":"user","content":text,"timestamp":1_700_000_000_000u64 + offset}),
+    )
+}
+
+const SOURCE: (&str, &str) = ("pi-settled", "Use port 4321 for staging.");
+const OTHER: (&str, &str) = ("pi-other", "Retry the deploy after 90 seconds.");
+
+/// Parks the next source publish inside its job, before the capture commit
+/// gate; returns a receiver signalled when the job parks and a sender that
+/// releases it.
+fn park_source_publish(handler: &Handler) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let go_rx = Arc::new(Mutex::new(go_rx));
+    let entered_tx = Arc::new(Mutex::new(entered_tx));
+    *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+        entered_tx.lock().unwrap().send(()).unwrap();
+        let _ = go_rx.lock().unwrap().recv();
+    }));
+    (entered_rx, go_tx)
+}
+
+async fn wait_parked(entered: mpsc::Receiver<()>) {
+    tokio::task::spawn_blocking(move || {
+        entered
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the source job parks before it ends")
+    })
+    .await
+    .unwrap();
+}
+
+/// A handler whose project is a one-commit repository, bound for Pi capture
+/// with source capture on.
+async fn settling_handler() -> (Arc<Handler>, tempfile::TempDir, PathBuf) {
+    let (handler, dir, project) = capture_handler(citing_config(true), true).await;
+    crate::memory_capture::head_fixtures::repository(&project, 1);
+    bind_pi(&handler, &project, citing_config(true));
+    (Arc::new(handler), dir, project)
+}
+
+/// Runs a pass of `SOURCE` on `SESSION` whose source job parks before the
+/// gate; returns the release sender.
+async fn parked_pass(handler: &Handler) -> mpsc::Sender<()> {
+    let (entered, go) = park_source_publish(handler);
+    pass(
+        handler,
+        pi_request(&[user_row(SOURCE.0, SOURCE.1, 0)], "base-1"),
+    )
+    .await;
+    wait_parked(entered).await;
+    go
+}
+
+/// AC8: a submit after the pass's publish ended arms no wait and cites.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_submit_after_the_publish_ended_arms_no_wait_and_cites() {
+    let (handler, dir, project) = settling_handler().await;
+    pass(
+        &handler,
+        pi_request(&[user_row(SOURCE.0, SOURCE.1, 0)], "base-1"),
+    )
+    .await;
+    settle(&handler).await;
+    assert_eq!(
+        settlement(&handler, &project, SESSION),
+        Some(Settlement::Ended {
+            outcome: Count::Completed
+        })
+    );
+    assert_eq!(
+        capture_quotes(&handler, &[SOURCE], &[SOURCE.1]).await,
+        "processed"
+    );
+    assert_eq!(waits(&handler), 0);
+    assert_eq!(
+        captured_decisions(dir.path())[SOURCE.0].rationale["citation"],
+        "cited"
+    );
+}
+
+/// AC8 and AC9 on the paused tokio clock: a submit after the publish ended
+/// takes zero virtual time; a submit against a parked publish is pending one
+/// millisecond before `accepted_at + 5 s`, runs no lookup, and is released
+/// exactly at the deadline with `publish_budget_expired`.
+#[tokio::test(start_paused = true)]
+async fn on_the_paused_clock_the_wait_is_zero_when_settled_and_ends_exactly_at_the_deadline() {
+    let (handler, dir, project) = settling_handler().await;
+    // Each job's std budget starts from its tokio acceptance instant, which
+    // the paused clock places this far past the test's real start, so a slow
+    // setup cannot spend a budget before its job runs.
+    tokio::time::advance(Duration::from_secs(120)).await;
+    pass(
+        &handler,
+        pi_request(&[user_row(OTHER.0, OTHER.1, 0)], "base-0"),
+    )
+    .await;
+    settle(&handler).await;
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        capture_quotes(&handler, &[OTHER], &[OTHER.1]).await,
+        "processed"
+    );
+    assert_eq!(
+        tokio::time::Instant::now(),
+        started,
+        "no virtual time elapsed"
+    );
+    assert_eq!(
+        captured_decisions(dir.path())[OTHER.0].rationale["citation"],
+        "cited"
+    );
+
+    let publishes = handler
+        .source_capture
+        .citation_publishes
+        .load(Ordering::Relaxed);
+    let go = parked_pass(&handler).await;
+    let Some(Settlement::Running { accepted_at }) = settlement(&handler, &project, SESSION) else {
+        panic!("the parked job holds a Running entry");
+    };
+    let submission =
+        prepare_submission(&handler, test_route(7), SESSION, &[SOURCE], &[SOURCE.1]).await;
+    let submit = spawn_submit(&handler, test_route(7), submission);
+    for _ in 0..10_000 {
+        if waits(&handler) > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(waits(&handler), 1, "the submit armed its wait");
+    let deadline = accepted_at + crate::source_capture::CAPTURE_BUDGET;
+    tokio::time::advance(deadline - tokio::time::Instant::now() - Duration::from_millis(1)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !submit.is_finished(),
+        "pending one millisecond before the deadline"
+    );
+    assert_eq!(
+        handler
+            .source_capture
+            .citation_publishes
+            .load(Ordering::Relaxed),
+        publishes,
+        "no lookup ran before the deadline"
+    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert_eq!(submit.await.unwrap(), "processed");
+    assert_eq!(tokio::time::Instant::now(), deadline);
+    assert_eq!(
+        handler
+            .source_capture
+            .citation_publishes
+            .load(Ordering::Relaxed),
+        publishes + 1,
+        "the lookup ran after the deadline"
+    );
+    assert_eq!(
+        captured_decisions(dir.path())[SOURCE.0].rationale["citation"],
+        "publish_budget_expired"
+    );
+    go.send(()).unwrap();
+    settle(&handler).await;
+}
+
+/// A submit that arrives while the pass's publish runs waits outside the
+/// capture commit gate, runs its lookup only after the publish ends, and
+/// cites the descriptor the publish wrote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_submit_during_the_publish_waits_outside_the_gate_and_then_cites() {
+    let (handler, dir, project) = settling_handler().await;
+    let go = parked_pass(&handler).await;
+    assert!(matches!(
+        settlement(&handler, &project, SESSION),
+        Some(Settlement::Running { .. })
+    ));
+    let submission =
+        prepare_submission(&handler, test_route(7), SESSION, &[SOURCE], &[SOURCE.1]).await;
+    let submit = spawn_submit(&handler, test_route(7), submission);
+    await_waits(&handler, 1).await;
+    assert!(
+        !submit.is_finished(),
+        "the submit waits on the running publish"
+    );
+    // The hook parks the job before the gate, so a free gate here means the
+    // waiting submit holds none.
+    assert!(
+        handler.capture_commit_gate.try_lock().is_ok(),
+        "the waiting submit holds no capture commit gate"
+    );
+    assert_eq!(
+        handler
+            .source_capture
+            .citation_publishes
+            .load(Ordering::Relaxed),
+        0,
+        "no lookup ran while the entry was Running"
+    );
+    assert!(captured_decisions(dir.path()).is_empty());
+    go.send(()).unwrap();
+    assert_eq!(submit.await.unwrap(), "processed");
+    assert_eq!(
+        captured_decisions(dir.path())[SOURCE.0].rationale["citation"],
+        "cited"
+    );
+}
+
+/// The same wait for an OpenCode session: the handoff and the submit build
+/// equal settlement keys for OpenCode too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_opencode_submit_during_the_publish_waits_and_then_cites() {
+    let (handler, dir, _project) = capture_handler(citing_config(true), true).await;
+    let handler = Arc::new(handler);
+    let (entered, go) = park_source_publish(&handler);
+    let source = ("msg_oc1", "Use port 4321 for staging.");
+    let window = [opencode_user(source.0, 1_700_000_000_000, source.1)];
+    pass(&handler, transform_with(&window, "base-1")).await;
+    wait_parked(entered).await;
+    let submission =
+        prepare_submission(&handler, test_route(7), SESSION, &[source], &[source.1]).await;
+    let submit = spawn_submit(&handler, test_route(7), submission);
+    await_waits(&handler, 1).await;
+    go.send(()).unwrap();
+    assert_eq!(submit.await.unwrap(), "processed");
+    assert_eq!(
+        captured_decisions(dir.path())[source.0].rationale["citation"],
+        "cited"
+    );
+}
+
+/// A lease spans the project's pending jobs: a submit on another session
+/// whose batch holds this session's job waits on this session's publish and
+/// cites it, while its own job reads its own refused handoff.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_submit_on_another_session_waits_on_each_job_session_it_carries() {
+    let (handler, dir, project) = settling_handler().await;
+    let go = parked_pass(&handler).await;
+    let mut other = binding_with_harness(project.to_str().unwrap(), "pi", "ses-y");
+    other.config = capture_config(true);
+    handler.bind_route(test_route(8), other.clone());
+    let mut request = pi_request(&[user_row(OTHER.0, OTHER.1, 1)], "base-y");
+    request["session_id"] = json!("ses-y");
+    pass_on(&handler, test_route(8), request).await;
+    assert_eq!(
+        settlement(&handler, &project, "ses-y"),
+        Some(Settlement::Refused)
+    );
+    other.config = citing_config(true);
+    handler.bind_route(test_route(8), other);
+    let submission = prepare_submission(
+        &handler,
+        test_route(8),
+        "ses-y",
+        &[OTHER],
+        &[OTHER.1, SOURCE.1],
+    )
+    .await;
+    let carried: Value = serde_json::from_str(submission["output"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        carried["decisions"].as_array().unwrap().len(),
+        2,
+        "the batch carries the parked session's job"
+    );
+    let submit = spawn_submit(&handler, test_route(8), submission);
+    await_waits(&handler, 1).await;
+    assert!(!submit.is_finished());
+    go.send(()).unwrap();
+    assert_eq!(submit.await.unwrap(), "processed");
+    let decisions = captured_decisions(dir.path());
+    assert_eq!(decisions[SOURCE.0].rationale["citation"], "cited");
+    assert_eq!(
+        decisions[OTHER.0].rationale["citation"], "publish_budget_expired",
+        "each job reads its own session's outcome"
+    );
+}
+
+/// AC9: a publish that outlasts its budget releases the waiting submit at
+/// the budget deadline measured from the handoff's acceptance; the job then
+/// ends on its own budget, and a later submit settles at once on that
+/// `Deadline` end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_publish_past_its_budget_releases_the_submit_at_the_deadline() {
+    let (handler, dir, project) = settling_handler().await;
+    let go = parked_pass(&handler).await;
+    let Some(Settlement::Running { accepted_at }) = settlement(&handler, &project, SESSION) else {
+        panic!("the parked job holds a Running entry");
+    };
+    let submission =
+        prepare_submission(&handler, test_route(7), SESSION, &[SOURCE], &[SOURCE.1]).await;
+    let submit = spawn_submit(&handler, test_route(7), submission);
+    await_waits(&handler, 1).await;
+    assert_eq!(
+        handler
+            .source_capture
+            .citation_publishes
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(submit.await.unwrap(), "processed");
+    let waited = tokio::time::Instant::now() - accepted_at;
+    assert!(
+        waited >= crate::source_capture::CAPTURE_BUDGET
+            && waited < crate::source_capture::CAPTURE_BUDGET + Duration::from_secs(2),
+        "released at the deadline: {waited:?}"
+    );
+    let decision = &captured_decisions(dir.path())[SOURCE.0];
+    assert_eq!(decision.rationale["citation"], "publish_budget_expired");
+    assert!(decision.events.is_empty());
+    assert_eq!(counter(&handler, "decisions_publish_budget_expired"), 1);
+    go.send(()).unwrap();
+    settle(&handler).await;
+    assert_eq!(
+        settlement(&handler, &project, SESSION),
+        Some(Settlement::Ended {
+            outcome: Count::Deadline
+        }),
+        "the stalled job ends on its own budget"
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(
+        capture_quotes(&handler, &[OTHER], &[OTHER.1]).await,
+        "processed"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(waits(&handler), 1, "an Ended entry arms no wait");
+    assert_eq!(
+        captured_decisions(dir.path())[OTHER.0].rationale["citation"],
+        "publish_budget_expired"
+    );
+}
+
+/// AC10: a handoff refused because another session's job holds the slot
+/// settles at once as `publish_budget_expired`; a hashed source id skips the
+/// wait even with a `Running` entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queue_full_refusal_settles_at_once_and_hashed_ids_skip_the_wait() {
+    let (handler, dir, project) = settling_handler().await;
+    // The parked pass captures no memory jobs, so the later batches carry
+    // only their own session's jobs.
+    bind_pi(&handler, &project, capture_config(true));
+    let go = parked_pass(&handler).await;
+    bind_pi(&handler, &project, citing_config(true));
+    let mut other = binding_with_harness(project.to_str().unwrap(), "pi", "ses-y");
+    other.config = capture_config(true);
+    handler.bind_route(test_route(8), other.clone());
+    let mut request = pi_request(&[user_row(OTHER.0, OTHER.1, 1)], "base-y");
+    request["session_id"] = json!("ses-y");
+    pass_on(&handler, test_route(8), request).await;
+    assert_eq!(report(&handler)["refused_queue_full"], 1);
+    assert_eq!(
+        settlement(&handler, &project, "ses-y"),
+        Some(Settlement::Refused)
+    );
+    other.config = citing_config(true);
+    handler.bind_route(test_route(8), other);
+    let submission =
+        prepare_submission(&handler, test_route(8), "ses-y", &[OTHER], &[OTHER.1]).await;
+    let started = std::time::Instant::now();
+    assert_eq!(
+        submit_state(&handler, test_route(8), &submission).await,
+        "processed"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(waits(&handler), 0);
+    assert_eq!(
+        captured_decisions(dir.path())[OTHER.0].rationale["citation"],
+        "publish_budget_expired"
+    );
+
+    let hashed = format!("{}:0", "d".repeat(64));
+    let quote = "Production listens on 8080.";
+    assert_eq!(
+        capture_quotes(&handler, &[(hashed.as_str(), quote)], &[quote]).await,
+        "processed"
+    );
+    assert_eq!(waits(&handler), 0, "a hashed source id arms no wait");
+    assert!(matches!(
+        settlement(&handler, &project, SESSION),
+        Some(Settlement::Running { .. })
+    ));
+    assert_eq!(
+        captured_decisions(dir.path())[&hashed].rationale["citation"],
+        "source_id_unjoinable"
+    );
+    go.send(()).unwrap();
+    settle(&handler).await;
+}
+
+/// Consent off arms no wait even while the session's publish runs, and the
+/// decision reports `source_capture_off`; an error submit arms none either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn consent_off_and_error_submits_arm_no_wait_while_a_publish_runs() {
+    let (handler, dir, project) = settling_handler().await;
+    let go = parked_pass(&handler).await;
+    let submission =
+        prepare_submission(&handler, test_route(7), SESSION, &[OTHER], &[OTHER.1]).await;
+    let failed = json!({"method":"memory.capture.submit","session_id":SESSION,"lease":submission["lease"],"model":submission["model"],"error":"cancelled"});
+    let started = std::time::Instant::now();
+    assert_eq!(
+        submit_state(&handler, test_route(7), &failed).await,
+        "pending"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(waits(&handler), 0, "an error submit arms no wait");
+
+    // The failed jobs back off, so the consent-off submit captures its own.
+    bind_pi(&handler, &project, citing_config(false));
+    let third = ("pi-third", "Rotate the staging key every 30 days.");
+    let submission =
+        prepare_submission(&handler, test_route(7), SESSION, &[third], &[third.1]).await;
+    let started = std::time::Instant::now();
+    assert_eq!(
+        submit_state(&handler, test_route(7), &submission).await,
+        "processed"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(waits(&handler), 0, "consent off arms no wait");
+    assert_eq!(
+        captured_decisions(dir.path())[third.0].rationale["citation"],
+        "source_capture_off"
+    );
+    go.send(()).unwrap();
+    settle(&handler).await;
+}
+
+/// A shutdown refusal on the handoff path records the session's settlement
+/// as refused; the job and its `Running` entry exist only after the
+/// response settles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_settlement_is_written_after_the_response_and_a_shutdown_refusal_records_it() {
+    let (handler, _dir, project) = settling_handler().await;
+    let request = handler
+        .test_client_prepare_request(pi_request(&[user_row(SOURCE.0, SOURCE.1, 0)], "base-1"));
+    let mut outcome = handler
+        .handle_transform_for_test(test_route(7), request.clone())
+        .await;
+    let after = outcome
+        .take_after_response()
+        .expect("the window is charged");
+    assert!(matches!(
+        handler.test_client_apply(&request, outcome),
+        PreparedOutcome::Response(_)
+    ));
+    assert_eq!(
+        settlement(&handler, &project, SESSION),
+        None,
+        "the response is complete before any job or entry exists"
+    );
+    after.run();
+    settle(&handler).await;
+    assert_eq!(
+        settlement(&handler, &project, SESSION),
+        Some(Settlement::Ended {
+            outcome: Count::Completed
+        })
+    );
+
+    let request =
+        handler.test_client_prepare_request(pi_request(&[user_row(OTHER.0, OTHER.1, 5)], "base-2"));
+    let mut outcome = handler
+        .handle_transform_for_test(test_route(7), request)
+        .await;
+    let after = outcome
+        .take_after_response()
+        .expect("the window is charged");
+    handler.shutdown().await.unwrap();
+    after.run();
+    assert_eq!(report(&handler)["refused_shutting_down"], 1);
+    assert_eq!(
+        settlement(&handler, &project, SESSION),
+        Some(Settlement::Refused)
+    );
+}
+
+/// A daemon cancel during the wait returns before the blocking hop, and a
+/// dropped request future stops the same way: no decision is written, the
+/// lease is released, and the jobs stay pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_or_a_dropped_request_during_the_wait_writes_no_decision_and_releases_the_lease() {
+    for cancel in [false, true] {
+        let (handler, dir, project) = settling_handler().await;
+        let digest = kernel_routes::ProjectBinding::new(&project)
+            .digest()
+            .to_owned();
+        let pending = || {
+            handler
+                .store()
+                .unwrap()
+                .memory_capture_status(&digest)
+                .unwrap()
+                .pending
+        };
+        let go = parked_pass(&handler).await;
+        let submission =
+            prepare_submission(&handler, test_route(7), SESSION, &[SOURCE], &[SOURCE.1]).await;
+        let before = pending();
+        let submit = spawn_submit(&handler, test_route(7), submission);
+        await_waits(&handler, 1).await;
+        if cancel {
+            handler.cancel.cancel();
+            assert_eq!(submit.await.unwrap(), "pending");
+        } else {
+            submit.abort();
+            assert!(submit.await.unwrap_err().is_cancelled());
+        }
+        assert!(captured_decisions(dir.path()).is_empty(), "cancel {cancel}");
+        assert_eq!(
+            handler.native_capture.lock().unwrap().reserved_for_test(),
+            0
+        );
+        assert_eq!(pending(), before, "the jobs stay pending");
+        go.send(()).unwrap();
+        settle(&handler).await;
+        assert!(handler.source_capture.is_idle());
+        assert!(!matches!(
+            settlement(&handler, &project, SESSION),
+            Some(Settlement::Running { .. })
+        ));
+    }
+}
+
+/// Every job end leaves its entry `Ended`: a completed publish and a
+/// panicking one, whose slot is idle again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_job_end_leaves_an_ended_settlement_and_an_idle_slot() {
+    let (handler, _dir, project) = settling_handler().await;
+    *handler.source_capture.before_publish.lock().unwrap() =
+        Some(Arc::new(|| panic!("injected worker panic")));
+    pass(
+        &handler,
+        pi_request(&[user_row(SOURCE.0, SOURCE.1, 0)], "base-1"),
+    )
+    .await;
+    settle(&handler).await;
+    assert!(handler.source_capture.is_idle());
+    assert_eq!(
+        settlement(&handler, &project, SESSION),
+        Some(Settlement::Ended {
+            outcome: Count::WorkerPanicked
+        })
+    );
+    *handler.source_capture.before_publish.lock().unwrap() = None;
+    pass(
+        &handler,
+        pi_request(&[user_row(SOURCE.0, SOURCE.1, 1)], "base-2"),
+    )
+    .await;
+    settle(&handler).await;
+    assert_eq!(
+        settlement(&handler, &project, SESSION),
+        Some(Settlement::Ended {
+            outcome: Count::Completed
+        })
+    );
+}
+/// A completed publish can leave a unit deferred: the entry is `Ended {
+/// Completed }`, the submit arms no wait, the published unit cites, and the
+/// deferred one reports `descriptor_not_found`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found() {
+    let (handler, dir, project) = settling_handler().await;
+    let ids: Vec<String> = (0..=MAX_SOURCE_BATCH_UNITS)
+        .map(|index| format!("pi-{index:03}"))
+        .collect();
+    let texts: Vec<String> = (0..=MAX_SOURCE_BATCH_UNITS)
+        .map(|index| format!("Deferred check {index:03} uses port {}.", 4000 + index))
+        .collect();
+    let rows: Vec<Value> = (0..=MAX_SOURCE_BATCH_UNITS)
+        .map(|index| {
+            pi_row(
+                &ids[index],
+                index.checked_sub(1).map(|parent| ids[parent].as_str()),
+                json!({"role":"user","content":texts[index],"timestamp":1_700_000_000_000u64 + index as u64}),
+            )
+        })
+        .collect();
+    pass(&handler, pi_request(&rows, "base-1")).await;
+    settle(&handler).await;
+    assert_eq!(report(&handler)["units_deferred"], 1);
+    assert_eq!(
+        settlement(&handler, &project, SESSION),
+        Some(Settlement::Ended {
+            outcome: Count::Completed
+        })
+    );
+    let (first, last) = (0, MAX_SOURCE_BATCH_UNITS);
+    let sources = [
+        (ids[first].as_str(), texts[first].as_str()),
+        (ids[last].as_str(), texts[last].as_str()),
+    ];
+    let quotes = [texts[first].as_str(), texts[last].as_str()];
+    assert_eq!(
+        capture_quotes(&handler, &sources, &quotes).await,
+        "processed"
+    );
+    // The pass auto-captured every message, so later leases carry the rest.
+    let next =
+        json!({"method":"memory.capture.next","session_id":SESSION,"model":"custom-native/model"});
+    loop {
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        if work["state"] != "work" {
+            break;
+        }
+        let submission = submission_for(&work, SESSION, &quotes);
+        assert_eq!(
+            submit_state(&handler, test_route(7), &submission).await,
+            "processed"
+        );
+    }
+    assert_eq!(waits(&handler), 0);
+    let deferred = live(&kernel_store(&handler), OccurrenceClass::Messages)
+        .iter()
+        .all(|row| identity_of(row)[3] != ("message_id", ids[last].as_str()));
+    assert!(deferred, "the last unit is the deferred one");
+    let decisions = captured_decisions(dir.path());
+    assert_eq!(decisions[&ids[first]].rationale["citation"], "cited");
+    assert_eq!(
+        decisions[&ids[last]].rationale["citation"],
+        "descriptor_not_found"
     );
 }

@@ -8,8 +8,8 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip (the commit that adds this file;
-its parent is `dd84f77af`).
+References are verified at the #1155 branch tip, the merge of `6d15ee29c` with
+`main` at `d3b772026`.
 
 - Role: `crates/daemon/src/use_outcome_writer.rs:180`.
 
@@ -17,7 +17,9 @@ its parent is `dd84f77af`).
   writing pass's effective subagent flag was true.
 - Existing check:
   `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:353`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_writer_tests.rs:353`); Kernel half:
+  `session_roles_round_trip_and_the_served_set_digest_is_order_free`
+  (`crates/kernel/tests/kernel_use_outcome.rs:776`). Status: unaudited.
 
 ## Failure scenario
 
