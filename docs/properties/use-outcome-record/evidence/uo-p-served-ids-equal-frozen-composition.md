@@ -19,7 +19,7 @@ its parent is `8ace6c9f8`).
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`);
   `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-  (`crates/kernel/tests/kernel_use_outcome.rs:718`). The writer is proposed.
+  (`crates/kernel/tests/kernel_use_outcome.rs:734`). The writer is proposed.
   Status: unaudited.
 
 ## Failure scenario
@@ -42,6 +42,7 @@ retry.
 ### Q: Does any open question remain for this record?
 
 - Sources examined: the specification catalog entry, the code and tests cited above.
-- Findings: the cited code and tests agree with the guarantee at this tip.
-- Missing evidence: none for the guarantee as stated.
-- Conclusion: resolved with answer - no open question.
+- Findings: the Kernel half cited above agrees with the guarantee at this tip;
+  the writer is proposed and no code at this tip establishes its behavior.
+- Missing evidence: the writer path, which lands with the owning ticket.
+- Conclusion: unresolved, needs the writer; the Kernel half is settled.

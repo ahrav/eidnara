@@ -11,8 +11,8 @@ Record kind: new obligation activated by #1154.
 References are verified at the #1154 branch tip (the commit that adds this file;
 its parent is `8ace6c9f8`).
 
-- Components: `crates/kernel/src/schema.rs:187` and
-  `crates/kernel/src/schema.rs:191`; the admission citing column and
+- Components: `crates/kernel/src/schema.rs:188` and
+  `crates/kernel/src/schema.rs:192`; the admission citing column and
   `idx_admission_use_outcome_fk` in the `admission_decisions` component
   (`crates/kernel/src/schema.rs:163`).
 - Pinned digest: `crates/kernel/tests/kernel_schema.rs:183`
@@ -49,9 +49,10 @@ None.
 The fixture test; any later K1 change rotates the pinned digest again and
 updates this record.
 
-Required faults and enabling state: A fixture database at the `a0e3f2993` digest
-(`13437d62f69c77d1f5bdad72195473d1f409c2647efecdcac660554e5c1db07b`) opened by
-this binary.
+Required faults and enabling state: A fixture database under the previous
+baseline, digest `13437d62f69c77d1f5bdad72195473d1f409c2647efecdcac660554e5c1db07b`
+(`crates/kernel/tests/fixtures/prior_kernel_baseline.sql`, captured at `main`
+commit `a0e3f2993`), opened by this binary.
 
 ## Investigation log
 

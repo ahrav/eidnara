@@ -51,7 +51,7 @@ renderer drops, bytes past the render cap, or rows past the memory budget.
 
 ## Investigation log
 
-### Q: The `DefaultHasher` output is unspecified across toolchain releases; #
+### Q: Is a composition revision from `DefaultHasher` stable across toolchain releases?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: The `DefaultHasher` output is unspecified across toolchain releases;

@@ -11,7 +11,9 @@ Record kind: proposed obligation; its owning ticket #1156 activates it.
 References are verified at the #1154 branch tip (the commit that adds this file;
 its parent is `8ace6c9f8`).
 
-- The update is `MAX(last_transform_at, now)` over live records.
+- Design (proposed, owner #1156): the pass hook updates
+  `MAX(last_transform_at, now)` over live records. At this tip only the
+  monotonic trigger exists.
 
 - Guarantee under test: `last_transform_at` never decreases on a session's
   serving record, and only a pass whose response committed updates it.
@@ -45,7 +47,7 @@ Kernel unavailable at the write.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: A pass with an earlier clock writes `MAX(last_transform_at, now)`, so 
+### Q: Can a pass with an earlier clock trip the monotonic trigger?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A pass with an earlier clock writes `MAX(last_transform_at, now)`,

@@ -85,7 +85,7 @@ fn length_prefixed(hash: &mut Sha256, field: &str) {
     hash.update(b"\n");
 }
 
-/// One serve to record. `decision_object_ids` are the served registry object ids in strictly ascending order. `served_set_digest` is the writer's own [`served_set_digest`] over them; the insert recomputes it and refuses a mismatch, so the stored digest always names the stored set. `served_commit_seq` is the composition's `known_as_of`, a committed sequence before the recording commit; a composition read at sequence 0 has no commit to name and is not recordable. `composition_revision` is the daemon's informational revision, stored bit for bit.
+/// One serve to record. `decision_object_ids` are the served registry object ids in strictly ascending order. `served_set_digest` is the writer's own [`served_set_digest`] over them; the insert recomputes it and refuses a mismatch, so the stored digest always names the stored set. `served_commit_seq` is the composition's `known_as_of`, a committed sequence before the recording commit; a composition read at sequence 0 has no commit to name and is not recordable. `recorded_at` is the serve's wall-clock time in milliseconds, at most 60 seconds ahead of the Kernel clock, and sets the record's 30-day retention deadline. `composition_revision` is the daemon's informational revision, stored bit for bit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseOutcomeSpec {
     pub project_digest: String,
@@ -212,7 +212,12 @@ impl UseOutcomeSpec {
         let well_formed = crate::cas::is_artifact_digest(&self.project_digest)
             && crate::cas::is_artifact_digest(&self.served_set_digest)
             && identity_fields.iter().all(|field| !field.trim().is_empty());
-        let in_range = self.recorded_at >= 0 && (1..commit_seq).contains(&self.served_commit_seq);
+        // `recorded_at` shares the staging heartbeat's allowance for a timestamp ahead of the Kernel clock.
+        let skew_ceiling = crate::current_time_ms()
+            .checked_add(super::envelope::MAX_STAGING_CLOCK_SKEW_MS)
+            .ok_or(KernelError::InvalidInput)?;
+        let in_range = (0..=skew_ceiling).contains(&self.recorded_at)
+            && (1..commit_seq).contains(&self.served_commit_seq);
         let ids = &self.decision_object_ids;
         let set_agrees = ids.windows(2).all(|pair| pair[0] < pair[1])
             && ids.iter().all(|id| !id.trim().is_empty())

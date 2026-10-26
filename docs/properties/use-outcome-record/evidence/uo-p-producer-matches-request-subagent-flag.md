@@ -17,7 +17,7 @@ its parent is `8ace6c9f8`).
   writing pass's effective subagent flag was true.
 - Existing check: Kernel half only:
   `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-  (`crates/kernel/tests/kernel_use_outcome.rs:718`). The writer is proposed.
+  (`crates/kernel/tests/kernel_use_outcome.rs:734`). The writer is proposed.
   Status: unaudited.
 
 ## Failure scenario

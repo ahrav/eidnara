@@ -11,7 +11,9 @@ Record kind: proposed obligation; its owning ticket #1155 activates it.
 References are verified at the #1154 branch tip (the commit that adds this file;
 its parent is `8ace6c9f8`).
 
-- The writer reads only the composition the pass froze.
+- Design (proposed, owner #1155): the writer reads only the composition the
+  pass froze. At this tip the evidence covers the memory-disabled read path
+  (`uo-memory-disabled-route-takes-no-canonical-read`).
 
 - Guarantee under test: A route bound with `memory.enabled` off produces no
   serving record on any pass.
@@ -37,6 +39,7 @@ then HARD folds on both engines.
 ### Q: Does any open question remain for this record?
 
 - Sources examined: the specification catalog entry, the code and tests cited above.
-- Findings: the cited code and tests agree with the guarantee at this tip.
-- Missing evidence: none for the guarantee as stated.
-- Conclusion: resolved with answer - no open question.
+- Findings: the Kernel half cited above agrees with the guarantee at this tip;
+  the writer is proposed and no code at this tip establishes its behavior.
+- Missing evidence: the writer path, which lands with the owning ticket.
+- Conclusion: unresolved, needs the writer; the Kernel half is settled.

@@ -59,5 +59,5 @@ refold on the folding engine, and a CAS conflict inside one pass.
 - Findings: Gap G1: does a CAS-discarded attempt leave any durable effect
   outside the Memory Store? Owner #1155 (AC7); the writer runs only after the
   attempt's memory-store commit succeeded.
-- Missing evidence: none beyond what the question names.
-- Conclusion: resolved with answer - see the question text.
+- Missing evidence: the AC7 writer and its CAS-conflict test, owned by #1155.
+- Conclusion: unresolved, needs the #1155 writer (AC7).

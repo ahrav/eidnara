@@ -295,7 +295,23 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
             Box::new(move |s| s.served_commit_seq = next),
         ),
         ("negative recorded time", Box::new(|s| s.recorded_at = -1)),
-        ("retention overflow", Box::new(|s| s.recorded_at = i64::MAX)),
+        (
+            "recorded time past the clock skew",
+            Box::new(|s| {
+                s.recorded_at = i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap()
+                    + 10 * 60 * 1_000;
+            }),
+        ),
+        (
+            "far-future recorded time",
+            Box::new(|s| s.recorded_at = i64::MAX),
+        ),
     ];
     for (index, (context, corrupt)) in malformed.into_iter().enumerate() {
         let mut bad = spec("s2", &["d1", "d2"], served_at, 100);

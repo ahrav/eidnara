@@ -43,7 +43,7 @@ committed together.
 
 ## Investigation log
 
-### Q: A decision disputed then re-approved still counts as disputed after se
+### Q: Does a decision disputed then re-approved still count as disputed after serve?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A decision disputed then re-approved still counts as disputed after

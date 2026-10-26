@@ -16,12 +16,12 @@ its parent is `8ace6c9f8`).
   `use_outcomes_deleted_at_set_once`,
   `use_outcomes_last_transform_at_monotonic`, `use_outcomes_retire_once`,
   `use_outcomes_no_delete` in the `use_outcomes` component
-  (`crates/kernel/src/schema.rs:187`); decision-row triggers
+  (`crates/kernel/src/schema.rs:188`); decision-row triggers
   `use_outcome_decisions_written_with_record` (refuses a row once the record's
   `decision_count` rows exist, so the set is sealed in any later transaction,
   including the window before the next commit),
   `use_outcome_decisions_no_update`, and `use_outcome_decisions_no_delete` in
-  the `use_outcome_decisions` component (`crates/kernel/src/schema.rs:191`).
+  the `use_outcome_decisions` component (`crates/kernel/src/schema.rs:192`).
 - Citation rule: the `admission_decisions.use_outcome_id` foreign key, the
   `admission_decisions_use_outcome_immutable` trigger, and the
   `admission_decisions_citation_no_delete` trigger, which refuses the delete

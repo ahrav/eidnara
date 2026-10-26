@@ -11,11 +11,13 @@ Record kind: proposed obligation; its owning ticket #1155 activates it.
 References are verified at the #1154 branch tip (the commit that adds this file;
 its parent is `8ace6c9f8`).
 
-- The writer distinguishes withheld from empty.
+- Requirement under test (proposed, owner #1155): the writer distinguishes a
+  withheld composition from an empty one. No code at this tip establishes it.
 
 - Guarantee under test: A fold that persists a withheld composition writes no
-  serving record; an Available snapshot with zero rows writes a record with zero
-  decision rows.
+  serving record; an Available snapshot with zero rows at a tip of at least one
+  commit writes a record with zero decision rows; at tip 0 the writer records
+  nothing.
 - Existing check: Kernel half only:
   `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
   (`crates/kernel/tests/kernel_use_outcome.rs:164`). The writer is proposed.
