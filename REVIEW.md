@@ -111,11 +111,13 @@ These recur as false positives here; check them before reporting:
 
 - In `docs/properties/`, `METHOD.md` allows a ` - <note>` after an enumerated
   field value; per-part `portfolio-evaluation.md` files and template `### Q:`
-  headings are required; a `Failure scenario` describes a counterfactual, not
-  current behavior.
+  headings are required; a `Failure scenario` states the failure under its
+  trigger, and the record's evidence trail and `Status` say whether current code
+  reaches it.
 - On a stacked PR, code from the parent PR and intermediate shapes that never
   reached `main` are out of scope.
-- A resource finding needs an untrusted or unbounded producer.
+- A resource finding needs an untrusted producer or a producer bound above the
+  consumer's enforced budget.
 - A decision the ticket settled is out of scope unless the change breaks it.
 - A new diagnostic `message` value is a wire change only when
   `docs/host-wire-protocol.md` states its exact text.
@@ -125,8 +127,9 @@ These recur as false positives here; check them before reporting:
 ## Sub-agents
 
 The ticket's Pre-PR Gate names the review set for a change. Every PR that
-changes production code or Markdown contract, property, or test-evidence claims
-records a gate, including fixes outside the ticket flow.
+changes production code, tests, CI workflows, or scripts, or Markdown contract,
+property, or test-evidence claims, records a gate, including fixes outside the
+ticket flow.
 This file sets no count. Always run `ponytail-review` and
 `/code-quality:reduce-complexity`. Run `/testing:test-strategy` for Rust changes;
 for other languages, run the testing-approach owner the router names. Run the
@@ -162,7 +165,8 @@ contributing reviewers, and verifies each finding against the implementation
 before reporting it. A fix listed as applied is verified present at the head.
 
 Record each round in the PR body as `Round N reviewed <base>..<head>: <skills>`,
-with commit SHAs. Before opening, marking ready, and merging, classify every
+with commit SHAs. The recorded scopes together cover every changed line at the
+recorded head. Before opening, marking ready, and merging, classify every
 commit after the last recorded head, including merges of `main` that touch files
 the PR changed, against each review's scope. Rerun each review a commit touches,
 and record a new round for the new head that names the reruns or states
@@ -174,7 +178,8 @@ fix. After a rebase, compare the old and new ranges with `git range-diff` and
 classify the commits that changed. When `main` has changed a crate or package
 the PR touches, one a touched crate depends on, or one that depends on a touched
 crate, merge or rebase and rerun CI before merge. A gate whose latest recorded
-round names an older head than the PR head is blocked.
+round names an older head than the PR head, or a base other than the merge base
+of the PR head and its current target, is blocked.
 
 Merge after the bot reviews requested on the head commit finish, or record that
 they were unavailable. If a required skill or the concurrent-agent capability is
