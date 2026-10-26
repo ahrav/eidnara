@@ -2,7 +2,8 @@
 
 Review for correctness, security, simplicity, and coherence, in that order.
 Prefer the smallest change that preserves the contract, not the fewest lines.
-Stay read-only. Review the diff at the exact base and head; read callers,
+Stay read-only. Review the diff at the exact base and head; for uncommitted local
+changes, record the staged and worktree content identity. Read callers,
 contracts, and tests at those states to verify impact.
 Do not turn a PR review into a repository-wide redesign.
 
@@ -18,8 +19,8 @@ Do not turn a PR review into a repository-wide redesign.
   Use `--locked` for Cargo commands except deliberate dependency-update checks.
   Do not claim an unrun or skipped check passed. When a change adds or edits a
   shared fixture or contract input, confirm the `changed paths` filter runs every
-  consumer's required job. Run `scripts/forbid-comment-markers.sh`,
-  `scripts/forbid-tool-literals.sh`, and `bun run check:repo` before opening a PR.
+  consumer's required job. Run the `gates` job steps from
+  `.github/workflows/ci.yml` locally before opening a PR.
 
 ## Review priorities
 
@@ -122,7 +123,8 @@ These recur as false positives here; check them before reporting:
 ## Sub-agents
 
 The ticket's Pre-PR Gate names the review set for a change. Every PR that
-changes production code records a gate, including fixes outside the ticket flow.
+changes production code or Markdown contract, property, or test-evidence claims
+records a gate, including fixes outside the ticket flow.
 This file sets no count. Always run `ponytail-review` and
 `/code-quality:reduce-complexity`. Run `/testing:test-strategy` for Rust changes;
 for other languages, run the testing-approach owner the router names. Run the
@@ -159,7 +161,10 @@ with commit SHAs. Before opening, marking ready, and merging, classify every
 commit after the last recorded head, including merges of `main` that touch files
 the PR changed, against each review's scope. Rerun each review a commit touches,
 and record a new round for the new head that names the reruns or states
-`no rerun - <reason>`. The skill that raised a finding reviews its fix. After a
+`no rerun - <reason>`. When a commit adds a language or mechanism outside the
+recorded review set, rerun skill selection for the new head and run the newly
+required reviews; a gate scoped to tests or docs no longer applies once
+production files enter the diff. The skill that raised a finding reviews its fix. After a
 rebase, compare the old and new ranges with `git range-diff` and classify the
 commits that changed. When `main` has changed a crate or package the PR touches,
 merge or rebase and rerun CI before merge. A gate record naming an older head
