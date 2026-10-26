@@ -140,12 +140,13 @@ async fn an_equal_digest_replays_and_another_harness_or_role_conflicts() {
         }],
     );
     let binding = bound(&project);
+    let set = snapshot.served_set();
     let serve = |harness: &'static str, is_subagent: bool| Serve {
         project: &binding.kernel_project,
         harness,
         session_id: "ses",
         is_subagent,
-        snapshot: &snapshot,
+        served: &set,
         recorded_at: 1,
     };
     assert_eq!(
@@ -651,8 +652,8 @@ fn seed_long_id_memories(kernel: &kernel::KernelStore, project: &Path, ids: &[St
 }
 
 /// A composition whose rendered block outgrows the Memory Store's durable-text bound fails its commit, so the pass hands
-/// off no serve: the bound that `RETAINED_SNAPSHOT_BYTES_BOUND` declares per write holds because only a committed
-/// block reaches the hand-off.
+/// off no serve: the bound that `RETAINED_SERVED_SET_BYTES_BOUND` declares per write holds because only a committed
+/// block, which renders every served id in full, reaches the hand-off.
 #[tokio::test(flavor = "current_thread")]
 async fn a_block_past_the_durable_text_bound_commits_nothing_and_hands_off_no_serve() {
     let producer = Arc::new(ProducerState::default());
@@ -713,12 +714,13 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     starting.kernel.set_expected(true);
     let snapshot = canonical_memory::CanonicalMemorySnapshot::new(3, false, Vec::new());
     let binding = bound(&project);
+    let set = snapshot.served_set();
     let serve = Serve {
         project: &binding.kernel_project,
         harness: "daemon-test",
         session_id: "ses",
         is_subagent: false,
-        snapshot: &snapshot,
+        served: &set,
         recorded_at: 1,
     };
     assert_eq!(
@@ -734,12 +736,13 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     let snapshot =
         canonical_memory::CanonicalMemorySnapshot::new(kernel.tip().unwrap(), false, Vec::new());
     let binding = bound(&project);
+    let set = snapshot.served_set();
     let serve = Serve {
         project: &binding.kernel_project,
         harness: "daemon-test",
         session_id: "ses",
         is_subagent: false,
-        snapshot: &snapshot,
+        served: &set,
         recorded_at: 1,
     };
     let (holding, release) = std::sync::mpsc::channel::<()>();
@@ -826,12 +829,13 @@ async fn a_recorded_served_set_replays_while_another_writer_holds_the_writer() {
             .to_vec(),
     );
     let binding = bound(&project);
+    let set = snapshot.served_set();
     let serve = Serve {
         project: &binding.kernel_project,
         harness: "daemon-test",
         session_id: "ses",
         is_subagent: false,
-        snapshot: &snapshot,
+        served: &set,
         recorded_at: 1,
     };
     assert_eq!(

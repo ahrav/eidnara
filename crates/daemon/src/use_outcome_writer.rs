@@ -9,7 +9,7 @@ use kernel::{CommitIntent, CommitReceipt, Envelope, KernelError, SessionRole, Us
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::canonical_memory::CanonicalMemorySnapshot;
+use crate::canonical_memory::ServedSet;
 use crate::kernel_routes::read::MAX_READ_ROWS;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
 
@@ -82,18 +82,19 @@ impl UseOutcomeWrite {
 const _: () = assert!(UseOutcomeWrite::Refused as usize + 1 == UseOutcomeWrite::ALL.len());
 
 const WRITES_IN_FLIGHT: usize = 4;
-/// Heap bytes a snapshot row holds beside its rendered text: three string headers and the vector slot.
-const SNAPSHOT_ROW_OVERHEAD_BYTES: u64 = 128;
-/// One retained composition. A job is handed off only after the pass's Memory Store commit, which stores the rendered
-/// block, every served row's id, category, and content, as one durable string bounded by
-/// `memory_store::MAX_DURABLE_TEXT_BYTES`; a block past it fails the commit and no job is handed off. The read bounds
-/// the row count by [`MAX_READ_ROWS`].
-const RETAINED_SNAPSHOT_BYTES_PER_WRITE: u64 = memory_store::MAX_DURABLE_TEXT_BYTES as u64
-    + MAX_READ_ROWS as u64 * SNAPSHOT_ROW_OVERHEAD_BYTES;
-/// The compositions in-flight jobs retain after their passes' responses released their charges: a slot is reserved
-/// before the composition is cloned, so at most [`WRITES_IN_FLIGHT`] clones exist.
-pub(crate) const RETAINED_SNAPSHOT_BYTES_BOUND: u64 =
-    WRITES_IN_FLIGHT as u64 * RETAINED_SNAPSHOT_BYTES_PER_WRITE;
+/// Heap bytes a served id holds beside its text: its string header and the vector slot.
+const SERVED_ID_OVERHEAD_BYTES: u64 = 32;
+/// One retained served set: its ids, digest, revision, and read sequence. A job is handed off only after the pass's
+/// Memory Store commit, which stores the rendered block holding every served id in full as one durable string bounded
+/// by `memory_store::MAX_DURABLE_TEXT_BYTES`; a block past it fails the commit and no job is handed off. The read
+/// bounds the id count by [`MAX_READ_ROWS`].
+const RETAINED_SERVED_SET_BYTES_PER_WRITE: u64 = memory_store::MAX_DURABLE_TEXT_BYTES as u64
+    + MAX_READ_ROWS as u64 * SERVED_ID_OVERHEAD_BYTES
+    + 128;
+/// The served sets in-flight jobs retain after their passes' responses released their charges: a slot is reserved
+/// before the set is built, so at most [`WRITES_IN_FLIGHT`] exist.
+pub(crate) const RETAINED_SERVED_SET_BYTES_BOUND: u64 =
+    WRITES_IN_FLIGHT as u64 * RETAINED_SERVED_SET_BYTES_PER_WRITE;
 
 #[derive(Debug)]
 pub(crate) struct UseOutcomeWrites {
@@ -188,7 +189,7 @@ pub(crate) struct Serve<'a> {
     pub(crate) harness: &'a str,
     pub(crate) session_id: &'a str,
     pub(crate) is_subagent: bool,
-    pub(crate) snapshot: &'a CanonicalMemorySnapshot,
+    pub(crate) served: &'a ServedSet,
     pub(crate) recorded_at: i64,
 }
 
@@ -205,9 +206,8 @@ pub(crate) fn record_serve(
     write_budget: Duration,
 ) -> Option<UseOutcomeWrite> {
     let store = kernel.kernel_store().ok()?;
-    let snapshot = serve.snapshot;
-    let served_ids = snapshot.served_ids();
-    let digest = snapshot.served_set_digest();
+    let served_ids: Vec<&str> = serve.served.ids().collect();
+    let digest = serve.served.digest();
     let Some(operation_key) = serve
         .project
         .operation_key(FAMILY, &format!("{}:{digest}", serve.session_id))
@@ -233,8 +233,8 @@ pub(crate) fn record_serve(
             harness: serve.harness.to_string(),
             session_id: serve.session_id.to_string(),
             served_set_digest: digest.to_string(),
-            composition_revision: snapshot.revision(),
-            served_commit_seq: snapshot.known_as_of(),
+            composition_revision: serve.served.revision(),
+            served_commit_seq: serve.served.known_as_of(),
             session_role,
             recorded_at: serve.recorded_at,
             decision_object_ids: served_ids.iter().map(|id| (*id).to_string()).collect(),
