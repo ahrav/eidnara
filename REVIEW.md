@@ -20,7 +20,9 @@ Do not turn a PR review into a repository-wide redesign.
   Do not claim an unrun or skipped check passed. When a change adds or edits a
   shared fixture or contract input, confirm the `changed paths` filter runs every
   consumer's required job. Run the `gates` job steps from
-  `.github/workflows/ci.yml` locally before opening a PR.
+  `.github/workflows/ci.yml` locally before opening a PR. The `:ci` validator
+  entry points read GitHub event data; locally, run `validate:incident-history`
+  and `validate:incident-verifiers` in `packages/e2e-tests` instead.
 
 ## Review priorities
 
@@ -101,9 +103,9 @@ cites parity with a dependency, an existing validator, or documentation states
 that check's predicate and names the test that exercises the triggering input
 against it; without that test the finding stays unresolved. An unresolved
 finding may remain at merge only when the merged code cannot stall progress,
-report a false state, or exceed a bound the PR claims. Any other unresolved
-correctness finding keeps the readiness verdict incomplete. Bot findings posted
-after merge get a fix or a recorded decline.
+report a false state, exceed a bound the PR claims, or weaken a trust boundary.
+Any other unresolved correctness or security finding keeps the readiness verdict
+incomplete. Bot findings posted after merge get a fix or a recorded decline.
 
 These recur as false positives here; check them before reporting:
 
@@ -146,11 +148,14 @@ priority area marked not applicable. When the host blocks nested router
 invocation, apply the `ask-skills` contract in-context and record
 `contract-applied; nested invocation unavailable`.
 
-Run every selected review concurrently in separate, fresh-context, read-only
-sub-agents against the same diff and base. Give each reviewer this file, the
-scoped `AGENTS.md` files, the ticket requirements, and the production consumers
-of the changed code. At least one applicable reviewer derives the required
-behavior from the ticket and consumers before reading the author's explanation.
+Run every selected review in separate, fresh-context, read-only sub-agents
+against the same diff and base; run them concurrently, in waves at the host's
+sub-agent cap when one applies. Give each reviewer this file, the scoped
+`AGENTS.md` files, the requirements source (the ticket, or for a fix outside the
+ticket flow the issue report or contract that states the required behavior),
+and the production consumers of the changed code. At least one applicable
+reviewer derives the required behavior from that source and the consumers
+before reading the author's explanation.
 Each returns location, severity, evidence, and rationale; none posts comments or
 edits code. The main reviewer consolidates and deduplicates findings, keeps the
 contributing reviewers, and verifies each finding against the implementation
@@ -167,8 +172,9 @@ required reviews; a gate scoped to tests or docs no longer applies once
 production files enter the diff. The skill that raised a finding reviews its
 fix. After a rebase, compare the old and new ranges with `git range-diff` and
 classify the commits that changed. When `main` has changed a crate or package
-the PR touches, merge or rebase and rerun CI before merge. A gate record naming
-an older head than the PR head is a blocked gate.
+the PR touches, one a touched crate depends on, or one that depends on a touched
+crate, merge or rebase and rerun CI before merge. A gate whose latest recorded
+round names an older head than the PR head is blocked.
 
 Merge after the bot reviews requested on the head commit finish, or record that
 they were unavailable. If a required skill or the concurrent-agent capability is
