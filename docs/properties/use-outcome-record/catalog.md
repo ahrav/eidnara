@@ -18,7 +18,7 @@ The specification authored its records at `a0e3f2993` and condensed the
 evidence inline because no part directory existed; this part reconstructs
 the records and their evidence from that catalog. Every `file:line` here was
 re-verified against the #1154 branch tip, the commit that adds this
-directory, whose parent is `438a48b57`. A specification reference that moved or
+directory, whose parent is `bd1216847`. A specification reference that moved or
 pointed at a test rather than production code is corrected in the record's
 evidence file. `Exercised` cites tests that run in the #1154 PR's recorded
 gate run.

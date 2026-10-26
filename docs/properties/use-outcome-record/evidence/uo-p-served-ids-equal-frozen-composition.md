@@ -9,7 +9,7 @@ Record kind: proposed obligation; its owning ticket #1155 activates it.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `438a48b57`).
+its parent is `bd1216847`).
 
 - Digest: `served_set_digest` (`crates/kernel/src/use_outcome.rs:56`).
 

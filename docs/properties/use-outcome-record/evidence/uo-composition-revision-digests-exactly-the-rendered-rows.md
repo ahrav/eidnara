@@ -10,7 +10,7 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `438a48b57`).
+its parent is `bd1216847`).
 
 - `CanonicalMemorySnapshot::new` seeds the hasher with
   `eidnara-project-memory-revision-v1` and hashes category plus rendered line
