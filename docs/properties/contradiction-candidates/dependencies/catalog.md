@@ -646,8 +646,10 @@ Reachability: default-production - `MemoryStore::open` runs on every daemon
 start; `evaluate` runs on every MemoryReviewer pass and before every job
 (`memory-reviewer-operations.md:44`).
 Status: active
-Exercised: yes - `crates/memory-store/tests/baseline.rs:492-514` opens a
-prior-baseline file and observes refusal with unchanged bytes;
+Exercised: yes - `crates/memory-store/tests/baseline.rs:495-517` opens a
+prior-baseline file and observes refusal with unchanged bytes; #1165
+re-exercises it with the fixture frozen at the baseline before
+`contradiction_candidates` (`crates/memory-store/tests/fixtures/prior_baseline.sql`);
 `activation.rs:491-495` observes `IdentityMismatch("memory store baseline")`.
 Guarantee: a Memory Store file opens only when its `format_marker` digest
 equals `memory_store::baseline_digest()`; any baseline text change (such as
