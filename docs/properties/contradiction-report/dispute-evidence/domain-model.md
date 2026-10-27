@@ -112,7 +112,7 @@ Actors:
   default `sourceKind` `"assistant"` (`client.ts:604`; `commit.rs:370-372`).
   Actor claim `agent:<harness>` (R5): OpenCode sends `agent:opencode`
   (`execute.ts:50`) and Pi sends `agent:pi`
-  (`pi-plugin/src/tools/eidnara-memory.ts:57`).
+  (`pi-plugin/src/tools/eidnara-memory.ts:58`).
 - Daemon route: decides admission of the request (fields, evidence, scope),
   derives classes, builds the `AdmissionRequest`.
 - Kernel admission: decides the disposition transition, maturity, outcome,
@@ -595,7 +595,7 @@ conflicts-and-questions.md)
   (KTD2) is the plan's answer; the wording conflict needs a human.
 - C4 (R5 `agent:<harness>`): before #1161 both harnesses sent
   `agent:opencode`; #1161 keeps it for OpenCode (`execute.ts:50`) and
-  gives Pi `agent:pi` (`pi-plugin/src/tools/eidnara-memory.ts:57`). The
+  gives Pi `agent:pi` (`pi-plugin/src/tools/eidnara-memory.ts:58`). The
   daemon can verify against the binding. Decide whether to verify.
 - C5 (A8): at `3a3b916b7` the command's operation identity collided on a
   second evidence. PR A applied the section 7.3 identity

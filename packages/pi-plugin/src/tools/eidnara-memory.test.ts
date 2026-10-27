@@ -430,6 +430,22 @@ describe("Pi eidnara_memory dispute", () => {
         expect(h.transport.calls).toHaveLength(0);
     });
 
+    it("refuses an action outside the canonical set even when a caller's allowlist names it", async () => {
+        // An untyped caller can hand the factory any strings; only canonical actions may dispatch.
+        const h = seeded(["typo", "merge"] as unknown as readonly EidnaraMemoryAction[]);
+        const refused = await h.execute(
+            {
+                action: "typo",
+                objectIds: ["mem_rule", "mem_other"],
+                content: "x",
+                category: "PROJECT_RULES",
+            },
+            "call-typo",
+        );
+        expect(textOf(refused)).toBe("Error: Action 'typo' is not allowed in this context.");
+        expect(h.transport.calls).toHaveLength(0);
+    });
+
     it("files a dispute under agent:pi and the assistant source kind when allowed", async () => {
         const h = seeded(EIDNARA_MEMORY_ACTIONS);
         expect(h.tool.parameters.properties.action).toMatchObject({

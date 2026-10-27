@@ -10,6 +10,7 @@ import {
 } from "@eidnara/opencode/tools/eidnara-memory/constants";
 import { executeEidnaraMemory } from "@eidnara/opencode/tools/eidnara-memory/execute";
 import {
+    EIDNARA_MEMORY_ACTIONS,
     EIDNARA_MEMORY_DEFAULT_ACTIONS,
     EIDNARA_MEMORY_DISPUTE_EVENTS,
     type EidnaraMemoryAction,
@@ -159,8 +160,10 @@ export function createEidnaraMemoryTool(deps: EidnaraMemoryToolDeps): ToolDefini
                         "Error: approve and enforce are human-host-owned commands, not agent actions.",
                     );
                 }
+                // EIDNARA_MEMORY_ACTIONS bounds the actions a caller can authorize through the allowlist.
                 if (
                     typeof rawAction !== "string" ||
+                    !(EIDNARA_MEMORY_ACTIONS as readonly string[]).includes(rawAction) ||
                     !(actions as readonly string[]).includes(rawAction)
                 ) {
                     return err(

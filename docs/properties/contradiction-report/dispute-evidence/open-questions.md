@@ -93,7 +93,7 @@ Evidence: before #1161 both harnesses sent the constant `agent:opencode`;
 #1161 keeps it for OpenCode
 (`packages/opencode-plugin/src/tools/eidnara-memory/execute.ts:50`) and
 gives the Pi tool `agent:pi`
-(`packages/pi-plugin/src/tools/eidnara-memory.ts:57`). The daemon knows
+(`packages/pi-plugin/src/tools/eidnara-memory.ts:58`). The daemon knows
 the bound harness (`RouteScope.harness`, `mod.rs:410`) and does not check
 the actor against it; the actor is a claim (`docs/host-wire-protocol.md:
 26`).
