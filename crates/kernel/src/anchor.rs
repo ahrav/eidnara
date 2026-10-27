@@ -6,6 +6,7 @@
 //! [`GitCondition`] the applicability engine resolves against a checkout
 //! snapshot.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -127,10 +128,10 @@ pub struct PatchIdCapture {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct AnchorCapturePayload {
-    schema: String,
+struct AnchorCapturePayload<'a> {
+    schema: Cow<'a, str>,
     #[serde(default)]
-    captures: Vec<AnchorCapture>,
+    captures: Cow<'a, [AnchorCapture]>,
 }
 
 /// Decoded, typed anchor condition.
@@ -212,7 +213,7 @@ fn decode_captures(
         return Ok(BTreeMap::new());
     }
     let mut captures = BTreeMap::new();
-    for capture in decoded.captures {
+    for capture in decoded.captures.into_owned() {
         // Two representations of one commit disagree about what that commit
         // looked like, and a map would silently keep whichever came last. The
         // fallback rungs conclude reachability from a representation matching,
@@ -232,8 +233,8 @@ fn decode_captures(
 /// decoder reads back. Anchor-authoring fixtures write this at capture time.
 pub fn encode_anchor_captures(captures: &[AnchorCapture]) -> Vec<u8> {
     serde_json::to_vec(&AnchorCapturePayload {
-        schema: ANCHOR_CAPTURE_SCHEMA.to_string(),
-        captures: captures.to_vec(),
+        schema: Cow::Borrowed(ANCHOR_CAPTURE_SCHEMA),
+        captures: Cow::Borrowed(captures),
     })
     .expect("capture payload is serializable")
 }

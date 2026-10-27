@@ -266,6 +266,8 @@ pub struct SubprocessLimits {
     pub drain_grace: Duration,
     /// `stdout_limit` stops a child that exceeds the retained stdout bound.
     pub max_stdout_bytes: usize,
+    /// `run` stops a child whose total stdout, including lines `StdoutFilter::discard_line` compacted away, exceeds this bound.
+    pub max_streamed_stdout_bytes: u64,
     /// The runner retains bounded stderr for diagnostics only.
     pub max_stderr_bytes: usize,
 }
@@ -277,6 +279,7 @@ impl Default for SubprocessLimits {
             termination_grace: Duration::from_secs(5),
             drain_grace: Duration::from_secs(2),
             max_stdout_bytes: super::config::MAX_BACKEND_STDOUT_BYTES,
+            max_streamed_stdout_bytes: super::config::MAX_BACKEND_STREAMED_STDOUT_BYTES,
             max_stderr_bytes: super::config::MAX_BACKEND_STDERR_BYTES,
         }
     }
@@ -348,6 +351,15 @@ pub struct SubprocessResult {
     pub record_retained: bool,
 }
 
+/// `StdoutFilter` holds the per-harness hooks `run` applies to each newly completed stdout-line region.
+#[derive(Clone, Copy, Default)]
+pub struct StdoutFilter {
+    /// `terminal_probe` inspects the region after `discard_line` has compacted it.
+    pub terminal_probe: Option<fn(&[u8]) -> ProbeSignal>,
+    /// `discard_line` receives each line's bytes excluding its newline; `run` retains only the newline when `discard_line` returns `true`.
+    pub discard_line: Option<fn(&[u8]) -> bool>,
+}
+
 /// Returns after the leader is reaped on every path, including timeout, cancellation, and overflow, so lifecycle completion upstream can never observe a live child.
 ///
 /// `terminal_probe` inspects each newly completed stdout-line region exactly once.
@@ -357,7 +369,7 @@ pub async fn run(
     spec: SubprocessSpec,
     limits: &SubprocessLimits,
     cancel: &CancellationToken,
-    terminal_probe: Option<fn(&[u8]) -> ProbeSignal>,
+    filter: StdoutFilter,
 ) -> io::Result<SubprocessResult> {
     let SubprocessSpec {
         executable,
@@ -752,9 +764,10 @@ pub async fn run(
     tokio::pin!(deadline);
     let mut terminal_seen = false;
     let mut arming_revocable = false;
-    // Bytes before `probed_to` have already been probed.
+    // Bytes before `probed_to` form the processed complete-line prefix.
     // line is inspected exactly once no matter how the reads chunk it.
     let mut probed_to = 0usize;
+    let mut streamed: u64 = 0;
 
     let abnormal = loop {
         if !stdout_open && !stderr_open {
@@ -777,48 +790,53 @@ pub async fn run(
                 // A truncated transcript could omit a contradictory terminal.
                 Err(_) => break Some(SubprocessEnd::CaptureFailed),
                 Ok(n) => {
-                    if stdout.len() + n > limits.max_stdout_bytes {
+                    streamed = streamed.saturating_add(n as u64);
+                    if streamed > limits.max_streamed_stdout_bytes
+                        || stdout.len() + n > limits.max_stdout_bytes
+                    {
                         break Some(SubprocessEnd::StdoutOverflow);
                     }
                     stdout.extend_from_slice(&stdout_chunk[..n]);
-                    // Probing continues after revocable arming because revocation arrives later.
-                    if (!terminal_seen || arming_revocable)
-                        && let Some(probe) = terminal_probe {
-                            // Searching only new bytes prevents a long line from making newline search quadratic.
-                            // Bytes preceding the newly appended chunk were already searched and contained no newline.
-                            let appended_at = stdout.len() - n;
-                            if let Some(last_newline) = stdout[appended_at..]
-                                .iter()
-                                .rposition(|byte| *byte == b'\n')
-                            {
-                                let end = appended_at + last_newline + 1;
-                                match probe(&stdout[probed_to..end]) {
-                                    ProbeSignal::Quiet => {}
-                                    signal @ (ProbeSignal::Decisive
-                                    | ProbeSignal::Provisional) => {
-                                        terminal_seen = true;
-                                        arming_revocable =
-                                            signal == ProbeSignal::Provisional;
-                                        let drain_deadline =
-                                            tokio::time::Instant::now() + limits.drain_grace;
-                                        if drain_deadline < deadline.deadline() {
-                                            deadline.as_mut().reset(drain_deadline);
-                                        }
-                                    }
-                                    // The code undoes only revocable arming.
-                                    // A decisive terminal remains valid after subsequent output.
-                                    // The restored deadline may already be past, ending the run as a timeout rather than granting retry free budget.
-                                    ProbeSignal::Continues => {
-                                        if arming_revocable {
-                                            terminal_seen = false;
-                                            arming_revocable = false;
-                                            deadline.as_mut().reset(run_deadline);
-                                        }
+                    // Searching only new bytes prevents a long line from making newline search quadratic.
+                    // Bytes preceding the newly appended chunk were already searched and contained no newline.
+                    let appended_at = stdout.len() - n;
+                    if let Some(last_newline) = stdout[appended_at..]
+                        .iter()
+                        .rposition(|byte| *byte == b'\n')
+                    {
+                        let mut end = appended_at + last_newline + 1;
+                        if let Some(discard) = filter.discard_line {
+                            end = discard_lines(&mut stdout, probed_to, end, discard);
+                        }
+                        // Probing continues after revocable arming because revocation arrives later.
+                        if (!terminal_seen || arming_revocable)
+                            && let Some(probe) = filter.terminal_probe
+                        {
+                            match probe(&stdout[probed_to..end]) {
+                                ProbeSignal::Quiet => {}
+                                signal @ (ProbeSignal::Decisive | ProbeSignal::Provisional) => {
+                                    terminal_seen = true;
+                                    arming_revocable = signal == ProbeSignal::Provisional;
+                                    let drain_deadline =
+                                        tokio::time::Instant::now() + limits.drain_grace;
+                                    if drain_deadline < deadline.deadline() {
+                                        deadline.as_mut().reset(drain_deadline);
                                     }
                                 }
-                                probed_to = end;
+                                // The code undoes only revocable arming.
+                                // A decisive terminal remains valid after subsequent output.
+                                // The restored deadline may already be past, ending the run as a timeout rather than granting retry free budget.
+                                ProbeSignal::Continues => {
+                                    if arming_revocable {
+                                        terminal_seen = false;
+                                        arming_revocable = false;
+                                        deadline.as_mut().reset(run_deadline);
+                                    }
+                                }
                             }
                         }
+                        probed_to = end;
+                    }
                 }
             },
             read = stderr_pipe.read(&mut stderr_chunk), if stderr_open => match read {
@@ -905,6 +923,38 @@ pub async fn run(
         prompt_delivered,
         record_retained,
     })
+}
+
+/// Each complete line in `stdout[start..end]` that `discard` selects shrinks to its newline, so retained bytes track kept lines while later line numbers stay unchanged.
+/// `discard_lines` returns the end of the compacted region; bytes in `stdout[end..]` shift down to follow it.
+fn discard_lines(
+    stdout: &mut Vec<u8>,
+    start: usize,
+    end: usize,
+    discard: fn(&[u8]) -> bool,
+) -> usize {
+    let mut write = start;
+    let mut read = start;
+    while read < end {
+        let line_end = stdout[read..end]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(end, |offset| read + offset + 1);
+        let line = &stdout[read..line_end];
+        match line.strip_suffix(b"\n") {
+            Some(body) if discard(body) => {
+                stdout[write] = b'\n';
+                write += 1;
+            }
+            _ => {
+                stdout.copy_within(read..line_end, write);
+                write += line_end - read;
+            }
+        }
+        read = line_end;
+    }
+    stdout.drain(write..end);
+    write
 }
 
 /// `ESRCH` means the group is already gone; any other failure may leave descendants running.
@@ -2790,6 +2840,22 @@ mod tests {
         CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, CredentialRowError,
         EnvSnapshot, credential_variable_mechanism, provider_row_spec,
     };
+
+    #[test]
+    fn discarded_lines_keep_their_newlines_and_the_partial_tail() {
+        fn drop_x(line: &[u8]) -> bool {
+            line.starts_with(b"x")
+        }
+        let mut stdout = b"keep\nx1\nkept\nx22\nx3\npart".to_vec();
+        let end = stdout.len() - b"part".len();
+        let compacted = super::discard_lines(&mut stdout, 5, end, drop_x);
+        assert_eq!(stdout, b"keep\n\nkept\n\n\npart");
+        assert_eq!(compacted, stdout.len() - b"part".len());
+        assert_eq!(
+            super::discard_lines(&mut stdout, compacted, compacted, drop_x),
+            compacted
+        );
+    }
 
     #[test]
     fn bedrock_failure_text_classifies_retryable_and_credential_errors() {

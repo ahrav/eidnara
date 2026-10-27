@@ -337,6 +337,7 @@ mod tests {
             domain_id: "domain".to_string(),
             sensitivity: kernel::Sensitivity::Normal,
             created_commit_seq: 1,
+            byte_length: 0,
             detail: kernel::SourceDescriptorDetail {
                 descriptor_version: kernel::SOURCE_DESCRIPTOR_DETAIL_VERSION,
                 source_policy: kernel::SourceDescriptorPolicy::Native,

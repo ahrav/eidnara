@@ -1,5 +1,7 @@
 use super::source_capture_tests::delete_session;
-use super::use_outcome_writer_tests::{bound, seed_memories, served};
+use super::use_outcome_writer_tests::{
+    bound, seed_memories, served, transform_with_usage_leaving_serves_pending,
+};
 use super::*;
 use crate::use_outcome_writer::LifecycleWrite;
 
@@ -70,6 +72,10 @@ async fn a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_
     );
     assert_eq!(after[0].decision_object_ids, before[0].decision_object_ids);
     assert_eq!(
+        after[0].serve.last_transform_at, before[0].serve.last_transform_at,
+        "the delete leaves the Kernel timestamp as it was"
+    );
+    assert_eq!(
         lifecycle_counts(&handler),
         [
             ("deleted_marked", 1),
@@ -120,6 +126,10 @@ async fn a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_conver
     );
     assert_eq!(after[0].decision_object_ids, before[0].decision_object_ids);
     assert_eq!(
+        after[0].serve.last_transform_at, before[0].serve.last_transform_at,
+        "the delete leaves the Kernel timestamp as it was"
+    );
+    assert_eq!(
         lifecycle_counts(&handler),
         [
             ("deleted_marked", 1),
@@ -129,40 +139,44 @@ async fn a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_conver
     );
 }
 
-/// A delete step whose commit ran but whose answer was an error leaves the memory rows intact and the records marked: a transient error answers `kernel_unavailable` and the repeat answers `ok` with nothing live and the first timestamp kept, while a conflict answers `source_retirement_failed`.
+/// A delete step whose commit ran but whose answer was an I/O error leaves the memory rows intact and the records marked: the step answers `kernel_unavailable`, counted, and the repeat answers `ok` with nothing live and the first timestamp kept. The fault seam replaces the step's answer after the commit, so it models an unknown commit outcome; a Kernel conflict rolls its transaction back before answering, so the `Conflict` arm below checks only the step's classification, `source_retirement_failed` with no lifecycle count.
 #[tokio::test(flavor = "current_thread")]
 async fn a_delete_step_with_an_unknown_outcome_converges_on_retry() {
-    for (fault, code) in [
-        (kernel::KernelError::Io, "kernel_unavailable"),
-        (kernel::KernelError::Conflict, "source_retirement_failed"),
-    ] {
-        let (handler, store, _dir, project) = served_handler().await;
-        *handler.use_outcome_delete_fault.lock().unwrap() = Some(fault);
-        let failed = delete_session(&handler, "ses").await;
-        assert_eq!(failed["error"], code, "{failed}");
-        assert!(store.load("ses").unwrap().row_version.is_some(), "{code}");
-        let deleted_at = served(&handler, &project)[0].serve.deleted_at;
-        assert!(deleted_at.is_some(), "{code}: the commit ran");
-        let tip = handler.kernel.kernel_store().unwrap().tip().unwrap();
-        let retried = delete_session(&handler, "ses").await;
-        assert_eq!(retried["ok"], true, "{code}: {retried}");
-        assert_eq!(served(&handler, &project)[0].serve.deleted_at, deleted_at);
-        assert_eq!(handler.kernel.kernel_store().unwrap().tip().unwrap(), tip);
-        assert_eq!(
-            handler
-                .use_outcome_lifecycle
-                .get(LifecycleWrite::DeleteNothingLive),
-            1,
-            "{code}"
-        );
-        assert_eq!(
-            handler
-                .use_outcome_lifecycle
-                .get(LifecycleWrite::DeleteKernelUnavailable),
-            u64::from(code == "kernel_unavailable"),
-            "{code}"
-        );
-    }
+    let (handler, store, _dir, project) = served_handler().await;
+    *handler.use_outcome_delete_fault.lock().unwrap() = Some(kernel::KernelError::Io);
+    let failed = delete_session(&handler, "ses").await;
+    assert_eq!(failed["error"], "kernel_unavailable", "{failed}");
+    assert!(store.load("ses").unwrap().row_version.is_some());
+    let deleted_at = served(&handler, &project)[0].serve.deleted_at;
+    assert!(deleted_at.is_some(), "the commit ran");
+    let tip = handler.kernel.kernel_store().unwrap().tip().unwrap();
+    let retried = delete_session(&handler, "ses").await;
+    assert_eq!(retried["ok"], true, "{retried}");
+    assert_eq!(served(&handler, &project)[0].serve.deleted_at, deleted_at);
+    assert_eq!(handler.kernel.kernel_store().unwrap().tip().unwrap(), tip);
+    assert_eq!(
+        lifecycle_counts(&handler),
+        [
+            ("delete_nothing_live", 1),
+            ("delete_kernel_unavailable", 1),
+            ("transform_touched", 1)
+        ]
+    );
+
+    let (handler, store, _dir, _project) = served_handler().await;
+    let before = lifecycle_counts(&handler);
+    *handler.use_outcome_delete_fault.lock().unwrap() = Some(kernel::KernelError::Conflict);
+    let conflicted = delete_session(&handler, "ses").await;
+    assert_eq!(
+        conflicted["error"], "source_retirement_failed",
+        "{conflicted}"
+    );
+    assert!(store.load("ses").unwrap().row_version.is_some());
+    assert_eq!(
+        lifecycle_counts(&handler),
+        before,
+        "a conflict is counted under no lifecycle name"
+    );
 }
 
 /// The route stays bound after `session.delete`, so the session can keep passing; a later delete marks the records its later folds wrote, because each delete commits under its own attempt key. A later fold over a composition the deleted record already holds replays that record.
@@ -235,6 +249,8 @@ async fn last_transform_at_moves_forward_only_on_committing_passes() {
     };
     let tip = kernel.tip().unwrap();
 
+    // A later clock makes a touch on this pass observable, so the assertion holds only when the pass skips it.
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let repeat = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
     assert_eq!(repeat["committed"], false, "{repeat}");
     assert_eq!(read(), [(None, Some(first))]);
@@ -348,6 +364,61 @@ async fn a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up(
     );
 }
 
+/// A committing pass whose record already carries a later time takes no writer: with the writer held by another commit, the staleness read answers `false`, the pass answers `ok` with no touch and no skip counted, and the record keeps its value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_committing_pass_with_a_current_record_takes_no_writer() {
+    let (handler, _store, _dir, project) = served_handler().await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let binding = bound(&project);
+    let ahead = served(&handler, &project)[0]
+        .serve
+        .last_transform_at
+        .unwrap()
+        + 3_600_000;
+    kernel
+        .advance_use_outcome_last_transform(
+            &kernel::applicability::EvalBudget::new(
+                Some(Instant::now() + Duration::from_secs(5)),
+                Arc::default(),
+            ),
+            binding.kernel_project.digest(),
+            &binding.harness,
+            "ses",
+            ahead,
+        )
+        .unwrap();
+    let (entered, held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(kernel_route_fixtures::intent("hold-writer"), |_| {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    held.recv().unwrap();
+    let started = Instant::now();
+    let current = call_transform(&handler, vec![ck("m1", 1, "hello"), ck("m2", 2, "more")]).await;
+    let elapsed = started.elapsed();
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(current["committed"], true, "{current}");
+    assert_eq!(
+        served(&handler, &project)[0].serve.last_transform_at,
+        Some(ahead)
+    );
+    assert_eq!(
+        lifecycle_counts(&handler),
+        [("transform_touched", 1)],
+        "the pass skipped the writer without a deadline: {elapsed:?}"
+    );
+}
+
 /// A pass's Kernel writes share one wait: once an earlier write spent it, a later touch answers `Deadline` with a free writer and leaves the record as it was.
 #[tokio::test(flavor = "current_thread")]
 async fn a_spent_pass_budget_skips_the_touch() {
@@ -377,9 +448,46 @@ async fn a_spent_pass_budget_skips_the_touch() {
     );
 }
 
-/// A HARD pass whose serve write waits out the budget on a held writer leaves its touch nothing to wait with: the writer is released as soon as the serve counts `deadline`, and the touch still answers `transform_skipped_deadline` because the pass spent its one Kernel wait.
+/// A HARD pass whose serve write counts `deadline` leaves its touch a full Kernel wait: the serve runs as a tracked job with its own waits, so with the writer free the touch advances `last_transform_at`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_serve_and_the_touch_of_one_pass_share_one_kernel_wait() {
+async fn a_serve_deadline_leaves_the_touch_its_own_kernel_wait() {
+    let (handler, _store, _dir, project) = served_handler().await;
+    seed_memories(
+        &handler.kernel.kernel_store().unwrap(),
+        &project,
+        &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
+    );
+    let touched = served(&handler, &project)[0]
+        .serve
+        .last_transform_at
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let occupied = handler.use_outcome_writes.occupy_every_slot();
+    let refold =
+        transform_with_usage_leaving_serves_pending(&handler, big_messages(), 48_000, 50_000).await;
+    drop(occupied);
+    assert_eq!(refold["action"], "HARD", "{refold}");
+    assert_eq!(
+        handler
+            .use_outcome_writes
+            .get(crate::use_outcome_writer::UseOutcomeWrite::Deadline),
+        1,
+        "the serve found no write slot"
+    );
+    assert!(
+        served(&handler, &project)[0]
+            .serve
+            .last_transform_at
+            .unwrap()
+            > touched,
+        "the touch advanced the first fold's record"
+    );
+    assert_eq!(lifecycle_counts(&handler), [("transform_touched", 2)]);
+}
+
+/// A tracked serve that waits out its write budget on a held writer still touches afterwards: the job's touch runs under a budget of its own, so once the writer is released the serve counts `deadline` and the touch advances `last_transform_at` for the pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_serve_that_spends_its_wait_leaves_the_touch_a_budget_of_its_own() {
     let (handler, _store, _dir, project) = served_handler().await;
     let kernel = handler.kernel.kernel_store().unwrap();
     seed_memories(
@@ -387,20 +495,96 @@ async fn the_serve_and_the_touch_of_one_pass_share_one_kernel_wait() {
         &project,
         &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
     );
+    let touched = served(&handler, &project)[0]
+        .serve
+        .last_transform_at
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    handler
+        .use_outcome_writes
+        .set_write_budget(Duration::from_millis(40));
+    // The hold lasts from the pass's hand-off until past the 40 ms serve budget and ends well inside
+    // the touch's own 250 ms, so the serve answers `deadline` and a touch that had inherited the
+    // serve's spent wait would too.
     let (entered, held) = std::sync::mpsc::channel();
     let holder = {
         let kernel = Arc::clone(&kernel);
-        let core = Arc::clone(&handler.core);
+        let writes = Arc::clone(&handler.use_outcome_writes);
         std::thread::spawn(move || {
             kernel
                 .commit(kernel_route_fixtures::intent("hold-writer"), |_| {
                     entered.send(()).unwrap();
-                    while core
-                        .use_outcome_counts
-                        .get(crate::use_outcome_writer::UseOutcomeWrite::Deadline)
-                        == 0
-                    {
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !writes.job_in_flight() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the pass never handed off a serve"
+                        );
                         std::thread::sleep(Duration::from_millis(1));
+                    }
+                    std::thread::sleep(Duration::from_millis(80));
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    held.recv().unwrap();
+    let refold =
+        transform_with_usage_leaving_serves_pending(&handler, big_messages(), 48_000, 50_000).await;
+    assert_eq!(refold["action"], "HARD", "{refold}");
+    holder.join().unwrap();
+    handler.use_outcome_writes.settled().await;
+    assert_eq!(
+        handler
+            .use_outcome_writes
+            .get(crate::use_outcome_writer::UseOutcomeWrite::Deadline),
+        1,
+        "the serve spent its wait on the held writer"
+    );
+    assert!(
+        served(&handler, &project)[0]
+            .serve
+            .last_transform_at
+            .unwrap()
+            > touched,
+        "the job's touch advanced the record after the writer was released"
+    );
+    assert_eq!(lifecycle_counts(&handler), [("transform_touched", 2)]);
+}
+
+/// A touch that waits on a held Kernel writer runs beside the rest of the settle: the pass's completion lands in the memory store's pass trace while the touch waits, the holder then releases the writer, and the touch advances `last_transform_at`. The thread scope joins the touch before the response returns. The response build and its trace write must fit in what remains of the pass's 250 ms Kernel wait, or the touch counts `transform_skipped_deadline`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response() {
+    let (handler, store, _dir, project) = served_handler().await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let touched = served(&handler, &project)[0]
+        .serve
+        .last_transform_at
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let completed = |store: &MemoryStore| {
+        store
+            .load_pass_trace("ses")
+            .unwrap()
+            .unwrap()
+            .last_completed_at_ms
+    };
+    let before = completed(&store);
+    let (entered, held) = std::sync::mpsc::channel();
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            kernel
+                .commit(kernel_route_fixtures::intent("hold-writer"), |_| {
+                    entered.send(()).unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while completed(&store) == before {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the pass completed only after its touch"
+                        );
+                        std::thread::sleep(Duration::from_micros(200));
                     }
                     Ok(String::new())
                 })
@@ -408,22 +592,47 @@ async fn the_serve_and_the_touch_of_one_pass_share_one_kernel_wait() {
         })
     };
     held.recv().unwrap();
-    let refold = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+    let next = call_transform(&handler, vec![ck("m1", 1, "hello"), ck("m2", 2, "more")]).await;
     holder.join().unwrap();
-    assert_eq!(refold["action"], "HARD", "{refold}");
-    assert_eq!(
-        handler
-            .use_outcome_lifecycle
-            .get(LifecycleWrite::TransformSkippedDeadline),
-        1,
-        "the writer was free at the touch, and the pass had no wait left"
+    assert_eq!(next["committed"], true, "{next}");
+    let counts = lifecycle_counts(&handler);
+    assert!(
+        served(&handler, &project)[0]
+            .serve
+            .last_transform_at
+            .unwrap()
+            > touched,
+        "the touch did not land beside the settle: {counts:?}"
     );
-    assert_eq!(
-        handler
-            .use_outcome_lifecycle
-            .get(LifecycleWrite::TransformTouched),
+    assert_eq!(counts, [("transform_touched", 2)]);
+}
+
+/// A session id the Kernel's secret detector matches still deletes: the delete receipt key carries a digest of the id, so the identity check passes, a session with nothing live commits nothing, and a session with a live record is marked.
+#[tokio::test(flavor = "current_thread")]
+async fn a_session_id_that_reads_as_a_secret_still_deletes() {
+    let (handler, _store, _dir, project) = served_handler().await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let binding = bound(&project);
+    // Assembled at run time so the repository's secret scanners see no credential-shaped literal.
+    let session_id = format!("{}={}", "token", "abcdefghijklmnopqrstuvwxyz0123456789");
+    let marked = crate::use_outcome_writer::mark_session_deleted(
+        &kernel,
+        &binding.kernel_project,
+        &binding.harness,
+        &session_id,
         1,
-        "only the first fold's pass touched"
+    );
+    assert_eq!(marked, Ok(LifecycleWrite::DeleteNothingLive));
+    assert_eq!(
+        crate::use_outcome_writer::mark_session_deleted(
+            &kernel,
+            &binding.kernel_project,
+            &binding.harness,
+            "ses",
+            1,
+        ),
+        Ok(LifecycleWrite::DeletedMarked),
+        "a plain id still selects and marks its live record"
     );
 }
 

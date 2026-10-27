@@ -9,10 +9,10 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References are verified at the #1157 branch tip, the commit that carries this
+revision.
 
-- Pin predicate: `crates/kernel/src/local_file.rs:514`.
+- Pin predicate: `crates/kernel/src/local_file.rs:523`.
 - Citation predicate: `crates/kernel/src/slice/write.rs:42`.
 - The use-outcome citation predicate keys liveness on the citing row's subject
   the same way (`crates/kernel/src/use_outcome.rs:176`).
@@ -21,11 +21,11 @@ its parent is `d85de937b`).
   evidence another live row cites.
 - Existing check:
   `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
-  (`crates/daemon/tests/harness_sources.rs:3482`);
+  (`crates/daemon/tests/harness_sources.rs:3500`);
   `retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence`
   (`crates/kernel/tests/kernel_source_descriptors.rs:1895`);
   `a_capture_pinned_after_it_was_selected_for_expiry_is_kept`
-  (`crates/kernel/src/local_file.rs:751`). Status: unaudited.
+  (`crates/kernel/src/local_file.rs:760`). Status: unaudited.
 
 ## Failure scenario
 

@@ -8,25 +8,30 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References are verified at the #1157 branch tip, the commit that carries this
+revision.
 
-- Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:618`) reads one
+- Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:732`) reads one
   statement, so one snapshot, in `retain_until`, id order through
-  `idx_use_outcomes_live_retention` (`crates/kernel/src/use_outcome.rs:231`); it
+  `idx_use_outcomes_live_retention` (defined in the `use_outcomes` DDL,
+  `crates/kernel/src/schema.rs:188`; the query plan is asserted by
+  `the_sweep_and_the_reads_use_their_indexes`
+  (`crates/kernel/src/use_outcome.rs:1031`)); it
   pages up to 64 uncited records and counts the cited ones it reads before the
   page fills. The scan reads cited rows ahead of the page, so its read work
   grows with the cited expired records while its writes stay bounded by the
   page.
 - Commit: one page commit keyed by the cutoff and a digest of the page's ids
-  (`page_key` (`crates/kernel/src/use_outcome.rs:576`), `expire_use_outcomes`
-  (`crates/kernel/src/use_outcome.rs:528`)); inside it `retire_due_use_outcome`
-  (`crates/kernel/src/use_outcome.rs:642`) rechecks retirement and citation
-  (`crates/kernel/src/use_outcome.rs:239`), sets `invalidated_commit_seq`, and
-  records the record's own reserved receipt. The deadline is immutable, so the
-  recheck reads only liveness and citation. A citation found under the writer
-  keeps the record and is counted `cited`; a page that retires nothing rolls
-  back and leaves no receipt.
+  (`page_key` (`crates/kernel/src/use_outcome.rs:674`), `expire_use_outcomes`
+  (`crates/kernel/src/use_outcome.rs:619`)); inside it `retire_due_use_outcome`
+  (`crates/kernel/src/use_outcome.rs:756`) sets `invalidated_commit_seq` in one
+  conditional update that rechecks retirement and citation
+  (`crates/kernel/src/use_outcome.rs:241`), and records the record's own
+  reserved receipt. The deadline is immutable, so the recheck reads only
+  liveness and citation. A record the update leaves in place is read again
+  (`crates/kernel/src/use_outcome.rs:248`): a citation found under the writer
+  keeps the record and is counted `cited`, and a record another sweep retired
+  is skipped. A page that retires nothing rolls back and leaves no receipt.
 - Registration: the Kernel maintenance slice runs the sweep after the capture
   sweeps (`crates/daemon/src/memory_reviewer/lifecycle.rs:334`); only
   retirements count as progress, because a cited record is counted again on
@@ -41,23 +46,23 @@ its parent is `d85de937b`).
   inside that commit; a page that retires nothing commits nothing; the Kernel
   maintenance slice calls it once per pass whenever the Kernel is Ready.
 - Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
-  (`crates/kernel/tests/kernel_use_outcome.rs:493`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:568`);
   `an_expiry_backlog_drains_one_page_per_call`
-  (`crates/kernel/tests/kernel_use_outcome.rs:553`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:630`);
   `an_expired_record_cited_by_a_live_report_is_retained`
-  (`crates/kernel/tests/kernel_use_outcome.rs:623`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:700`);
   `a_record_cited_after_selection_is_kept`
-  (`crates/kernel/src/use_outcome.rs:783`);
+  (`crates/kernel/src/use_outcome.rs:902`);
   `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-  (`crates/kernel/src/use_outcome.rs:811`);
+  (`crates/kernel/src/use_outcome.rs:930-931`);
   `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-  (`crates/kernel/src/use_outcome.rs:874`);
+  (`crates/kernel/src/use_outcome.rs:993`);
   `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-  (`crates/kernel/src/use_outcome.rs:895`);
+  (`crates/kernel/src/use_outcome.rs:1014`);
   `the_cited_count_covers_the_rows_read_before_the_page_fills`
-  (`crates/kernel/tests/kernel_use_outcome.rs:818`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:956`);
   `the_sweep_and_the_reads_use_their_indexes`
-  (`crates/kernel/src/use_outcome.rs:912`);
+  (`crates/kernel/src/use_outcome.rs:1031`);
   `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
   (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
   `a_cancelled_slice_stops_before_the_use_outcome_sweep`
@@ -76,7 +81,9 @@ Between selection under the reader and each commit under the writer.
 
 ## What a test must construct
 
-The tests above (markers `uo_expiry_page_full`, `uo_expiry_retained_cited_row`).
+The tests above; the fault map's `uo_expiry_page_full` and
+`uo_expiry_retained_cited_row` rows name them as the constructing tests (marker
+names live only in `fault-map.md`).
 
 Required faults and enabling state: An expired record; an expired cited record;
 70 expired records; a citation inserted after selection.

@@ -696,7 +696,7 @@ impl Envelope<'_> {
     ///
     /// # Errors
     ///
-    /// Returns `Conflict` when the key is already recorded, and `InvalidInput` for a reserved producer or a malformed intent.
+    /// `record_receipt` returns `InvalidInput` for a reserved producer, a malformed intent, or a `result` above `MAX_REDACTABLE_BYTES`, and `Conflict` when the key is already recorded.
     pub fn record_receipt(
         &mut self,
         intent: CommitIntent,
@@ -730,10 +730,8 @@ impl Envelope<'_> {
         self.insert_receipt(&RedactedIntent::new(intent)?, result)
     }
 
+    /// A recorded key, under this digest or another, fails the insert on the `(producer, operation_key)` uniqueness constraint, which maps to `Conflict`.
     fn insert_receipt(&mut self, intent: &RedactedIntent, result: &str) -> Result<(), KernelError> {
-        if stored_receipt(self.tx, intent)?.is_some() {
-            return Err(KernelError::Conflict);
-        }
         let receipt_id = operation_identity(intent);
         let redacted = redact(result)?;
         self.tx
@@ -1401,6 +1399,26 @@ pub(crate) struct PreparedIntent(RedactedIntent);
 impl PreparedIntent {
     pub(crate) fn new(intent: CommitIntent) -> Result<Self, KernelError> {
         RedactedIntent::new(intent).map(Self)
+    }
+
+    /// This intent under `operation_key` and `request_digest`, checked as [`Self::new`] checks them; the producer, actor, and cause keep their redaction, so a caller keying many receipts under one producer scans those fields once.
+    pub(crate) fn rekeyed(
+        &self,
+        operation_key: &str,
+        request_digest: String,
+    ) -> Result<Self, KernelError> {
+        if !context_core::canonical_json::is_lower_hex(&request_digest, 64)
+            || operation_key.trim().is_empty()
+        {
+            return Err(KernelError::InvalidInput);
+        }
+        Ok(Self(RedactedIntent {
+            producer: self.0.producer.clone(),
+            operation_key: identity(operation_key)?,
+            request_digest,
+            actor: self.0.actor.clone(),
+            cause: self.0.cause.clone(),
+        }))
     }
 }
 
@@ -2475,6 +2493,51 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(detections, 2, "{key}");
+        }
+    }
+
+    /// A rekeyed intent names the operation identity, producer, actor, and cause of the intent built with that key and digest, and refuses what [`PreparedIntent::new`] refuses in those two fields.
+    #[test]
+    fn a_rekeyed_intent_is_the_intent_built_with_its_key() {
+        let template = PreparedIntent::new(intent("eidnara-kernel/test", "first")).unwrap();
+        let rekeyed = template.rekeyed("second", "b".repeat(64)).unwrap();
+        let built = PreparedIntent::new(CommitIntent {
+            request_digest: "b".repeat(64),
+            ..intent("eidnara-kernel/test", "second")
+        })
+        .unwrap();
+        assert_eq!(
+            super::operation_identity(&rekeyed.0),
+            super::operation_identity(&built.0)
+        );
+        assert_eq!(
+            (
+                &rekeyed.0.producer,
+                &rekeyed.0.operation_key,
+                &rekeyed.0.request_digest,
+                &rekeyed.0.actor.text,
+                &rekeyed.0.cause.text
+            ),
+            (
+                &built.0.producer,
+                &built.0.operation_key,
+                &built.0.request_digest,
+                &built.0.actor.text,
+                &built.0.cause.text
+            )
+        );
+        for (key, digest) in [
+            ("", "b".repeat(64)),
+            (" \t", "b".repeat(64)),
+            (SECRET, "b".repeat(64)),
+            ("key", "B".repeat(64)),
+            ("key", "b".repeat(63)),
+        ] {
+            assert_eq!(
+                template.rekeyed(key, digest.clone()).err(),
+                Some(crate::KernelError::InvalidInput),
+                "{key:?} {digest}"
+            );
         }
     }
 

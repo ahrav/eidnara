@@ -17,7 +17,7 @@ The specification authored its records at `a0e3f2993` and condensed the
 evidence inline because no part directory existed; this part reconstructs
 the records and their evidence from that catalog. Every `file:line` here was
 re-verified against the #1157 branch tip, the commit that carries this
-revision of the directory, whose parent is `d85de937b`. A specification reference that moved or
+revision of the directory. A specification reference that moved or
 pointed at a test rather than production code is corrected in the record's
 evidence file. `Exercised` cites tests that run in the #1157 PR's recorded
 gate run.
@@ -66,7 +66,7 @@ Check semantics: 31 `always`, 1 `always-or-unreached`, 2 `always(!X)`. No record
 | --- | --- | --- | --- | --- | --- | --- |
 | [`uo-served-rows-are-the-frozen-m0-rows-between-hard-folds`](#uo-served-rows-are-the-frozen-m0-rows-between-hard-folds) | existing | safety | `always` | default-production | partial | active |
 | [`uo-composition-revision-digests-exactly-the-rendered-rows`](#uo-composition-revision-digests-exactly-the-rendered-rows) | existing | safety | `always` | default-production | yes | active |
-| [`uo-composition-freeze-persists-at-every-hard-fold-site`](#uo-composition-freeze-persists-at-every-hard-fold-site) | existing | safety | `always` | default-production | yes | active |
+| [`uo-composition-freeze-persists-at-every-hard-fold-site`](#uo-composition-freeze-persists-at-every-hard-fold-site) | existing | safety | `always` | default-production | partial | active |
 | [`uo-subagent-pass-serves-no-composition-under-eidnara-folds`](#uo-subagent-pass-serves-no-composition-under-eidnara-folds) | existing | safety | `always-or-unreached` | explicit-config-only | yes | active |
 | [`uo-known-as-of-is-the-tip-bound-read-sequence`](#uo-known-as-of-is-the-tip-bound-read-sequence) | existing | safety | `always` | default-production | partial | active |
 | [`uo-memory-disabled-route-takes-no-canonical-read`](#uo-memory-disabled-route-takes-no-canonical-read) | existing | safety | `always` | explicit-config-only | yes | active |
@@ -93,11 +93,11 @@ Check semantics: 31 `always`, 1 `always-or-unreached`, 2 `always(!X)`. No record
 | [`uo-p-served-set-once-per-session-revision`](#uo-p-served-set-once-per-session-revision) | new (#1155) | safety | `always` | default-production | yes | active |
 | [`uo-p-served-ids-equal-frozen-composition`](#uo-p-served-ids-equal-frozen-composition) | new (#1155) | safety | `always` | default-production | yes | active |
 | [`uo-p-no-row-when-memory-disabled`](#uo-p-no-row-when-memory-disabled) | new (#1155) | safety | `always(!X)` | explicit-config-only | yes | active |
-| [`uo-p-no-row-for-withheld-composition`](#uo-p-no-row-for-withheld-composition) | new (#1155) | safety | `always(!X)` | default-production | yes | active |
+| [`uo-p-no-row-for-withheld-composition`](#uo-p-no-row-for-withheld-composition) | new (#1155) | safety | `always(!X)` | default-production | partial | active |
 | [`uo-p-producer-matches-request-subagent-flag`](#uo-p-producer-matches-request-subagent-flag) | new (#1155) | safety | `always` | default-production | yes | active |
 | [`uo-p-deleted-at-iff-session-delete-kernel-step`](#uo-p-deleted-at-iff-session-delete-kernel-step) | new (#1156) | safety | `always` | default-production | yes | active |
 | [`uo-p-last-transform-at-monotone-per-committing-pass`](#uo-p-last-transform-at-monotone-per-committing-pass) | new (#1156) | safety | `always` | default-production | yes | active |
-| [`uo-p-counts-exact-and-unavailable-not-zero`](#uo-p-counts-exact-and-unavailable-not-zero) | new (#1157) | safety | `always` | default-production | yes | active |
+| [`uo-p-counts-exact-and-unavailable-not-zero`](#uo-p-counts-exact-and-unavailable-not-zero) | new (#1157) | safety | `always` | default-production | partial | active |
 
 ## Records
 
@@ -153,17 +153,17 @@ Required faults and enabling state: Snapshots that differ only in rows the
 renderer drops, bytes past the render cap, or rows past the memory budget.
 Confidence: high -
 [evidence](evidence/uo-composition-revision-digests-exactly-the-rendered-rows.md).
-read at `crates/daemon/src/canonical_memory.rs:61`; the revision is a
+read at `crates/daemon/src/canonical_memory.rs:55-58`; the revision is a
 `DefaultHasher` `u64`, which is why #1154 keys the record by a separate
 served-set digest.
 Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-(`crates/daemon/src/canonical_memory.rs:374`);
+(`crates/daemon/src/canonical_memory.rs:418`);
 `rows_the_renderer_drops_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:432`);
+(`crates/daemon/src/canonical_memory.rs:476`);
 `bytes_past_the_render_cap_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:449`);
+(`crates/daemon/src/canonical_memory.rs:493`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:471`). Status: unaudited.
+(`crates/daemon/src/canonical_memory.rs:515`). Status: unaudited.
 Impact: A revision that moved without a byte change would record a second serve
 of the same rows.
 Open questions:
@@ -176,10 +176,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - the additive site and the folding fold record serves through
-the handler tests, the pressure refold reports its freeze, and the fault after
+Exercised: partial - the additive site and the folding fold record serves
+through the handler tests, the pressure refold persists the pinned read's
+composition and reports its freeze, and a handled Kernel failure injected after
 the Memory Store commit leaves the composition and response equal to a
-fault-free run (R13)
+fault-free run (R13); a crash and restart between the two stores is not
+constructed
 Guarantee: Every pass whose plan is `Hard` or `MigrateHard` assigns the pinned
 read's composition to session meta at one of three sites, made durable by the
 pass's memory-store commit.
@@ -202,23 +204,26 @@ Existing check:
 `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
 (`crates/daemon/tests/transform_canonical_memory.rs:46`);
 `a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it`
-(`crates/daemon/src/use_outcome_writer_tests.rs:263`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:282`);
 `a_pressure_refold_reports_its_frozen_composition`
 (`crates/daemon/src/transform.rs:20895`). Status: unaudited.
 Impact: A site that skipped the assignment would leave the writer (#1155) with
 no composition to record.
 Open questions:
-- Gap G1: does a CAS-discarded attempt leave any durable effect outside the
-  Memory Store? Owner #1155 (AC7); the writer runs only after the attempt's
-  memory-store commit succeeded.
+- Gap G1: does a CAS-discarded attempt leave a use-outcome serve? Owner #1155
+  (AC7); the writer runs only after the attempt's memory-store commit succeeded,
+  and `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one` asserts
+  that a discarded attempt writes none: the attempt hook, which runs before the
+  attempt's CAS, observes no write slot held and no write counted.
 
 ### uo-subagent-pass-serves-no-composition-under-eidnara-folds
 
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: yes - a subagent pass under `eidnara_folds` folds no HARD and records
-no serve; under native authority it records a `subagent` serve
+Exercised: yes - a subagent pass under `eidnara_folds` folds no HARD, answers
+with no `<project-memory>` block and no composition, and records no serve; under
+native authority it records a `subagent` serve
 Guarantee: Under `eidnara_folds`, a subagent pass plans `Soft` or `Defer`,
 enters no HARD arm, and is served no new composition; under native authority the
 additive engine applies no subagent plan rule.
@@ -238,9 +243,9 @@ Existing check:
 `a_subagent_pass_under_native_authority_reports_native_authority`
 (`crates/daemon/src/fold_authority_handler_tests.rs:143`);
 `subagent_first_active_render_commits_tagged_bytes_before_replay`
-(`crates/daemon/src/transform.rs:23781`);
+(`crates/daemon/src/transform.rs:23784`);
 `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
-(`crates/daemon/src/use_outcome_writer_tests.rs:379`). Status: unaudited.
+(`crates/daemon/src/use_outcome_writer_tests.rs:420`). Status: unaudited.
 Impact: The record's `subagent` rows would be attributed to the wrong engine.
 Open questions:
 - OQ3-13: is the additive engine's subagent serve intended? Owner: product owner
@@ -268,7 +273,7 @@ commit.
 Confidence: high -
 [evidence](evidence/uo-known-as-of-is-the-tip-bound-read-sequence.md).
 `read_project_memory` captures the tip and passes it as the requested snapshot
-(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:161`)); the route
+(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:205`)); the route
 returns `known_as_of` from the visible read
 (`crates/daemon/src/kernel_routes/read.rs:252`).
 Existing check:
@@ -300,7 +305,7 @@ Required faults and enabling state: A route bound with `/memory/enabled: false`.
 Confidence: high -
 [evidence](evidence/uo-memory-disabled-route-takes-no-canonical-read.md).
 `project_memory_read` wraps the read in `cfg.memory_enabled.then(...)`
-(`project_memory_read` (`crates/daemon/src/lib.rs:5509`)).
+(`project_memory_read` (`crates/daemon/src/lib.rs:5542`)).
 Existing check: `a_memory_disabled_pass_takes_no_canonical_read`
 (`crates/daemon/tests/transform_canonical_memory.rs:320`). Status: unaudited.
 Impact: A disabled route that still read and recorded would breach the consent
@@ -324,25 +329,25 @@ Required faults and enabling state: A route bound with memory on, then a reload
 that turns it off (and the reverse), then a pass and a wrapup.
 Confidence: medium -
 [evidence](evidence/uo-consent-gate-source-is-the-route-frozen-config.md). bind
-freezes `effective_config` into the binding (`crates/daemon/src/lib.rs:13422`);
+freezes `effective_config` into the binding (`crates/daemon/src/lib.rs:13557-13567`);
 wrapup reads the live config (`prepare_wrapup_fire`
-(`crates/daemon/src/lib.rs:5996`)). R14 applied: the config seam is
+(`crates/daemon/src/lib.rs:6029`)). R14 applied: the config seam is
 `SessionBinding.config` versus `effective_config` at the two call sites.
 Existing check:
 `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-(`crates/daemon/src/lib.rs:39646`); `only_an_available_composition_is_recorded`
-(`crates/daemon/src/use_outcome_writer_tests.rs:190`);
+(`crates/daemon/src/lib.rs:39962`); `only_an_available_composition_is_recorded`
+(`crates/daemon/src/use_outcome_writer_tests.rs:181`);
 `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:536`). Status: unaudited.
+(`crates/daemon/src/use_outcome_writer_tests.rs:600`). Status: unaudited.
 Impact: The record could be written under a consent value the route never had.
 Open questions:
 - Lead L5: the pass and the wrapup read consent from different sources. Owner:
   daemon owner (needs human input).
 - Gap G4: the summarizer reattach path reads `memory_enabled` from the live
-  effective config (`crates/daemon/src/lib.rs:5223`, used at
-  `crates/daemon/src/lib.rs:5370`), a third consent source beside the frozen
+  effective config (`crates/daemon/src/lib.rs:5256`, used at
+  `crates/daemon/src/lib.rs:5403`), a third consent source beside the frozen
   binding and the live wrapup config; the fire path states the frozen-config
-  rule in its own comment (`crates/daemon/src/lib.rs:5880`). Recorded, not
+  rule in its own comment (`crates/daemon/src/lib.rs:5913`). Recorded, not
   fixed; whether the reattach should follow the frozen config is an owner
   decision (needs human input).
 
@@ -399,7 +404,7 @@ Existing check:
 `malformed_stored_policy_and_sensitivity_fail_closed_without_read_error`
 (`crates/kernel/tests/kernel_admission.rs:2935`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:400`). Status: unaudited.
 Impact: A null row counted as a dispute would report harm with no committed
 event.
 Open questions: None.
@@ -451,14 +456,14 @@ Confidence: high -
 `crates/kernel/src/local_file.rs:26`, `expire_captures`
 (`crates/kernel/src/local_file.rs:250`), `expiry_intent`
 (`crates/kernel/src/local_file.rs:433`), `still_expired`
-(`crates/kernel/src/local_file.rs:467`).
+(`crates/kernel/src/local_file.rs:476`).
 Existing check:
 `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it`
-(`crates/daemon/tests/harness_sources.rs:3338`);
+(`crates/daemon/tests/harness_sources.rs:3356`);
 `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
-(`crates/daemon/tests/harness_sources.rs:3482`);
+(`crates/daemon/tests/harness_sources.rs:3500`);
 `a_replayed_expiry_receipt_is_not_counted_as_a_retirement`
-(`crates/kernel/src/local_file.rs:728`). Status: unaudited.
+(`crates/kernel/src/local_file.rs:737`). Status: unaudited.
 Impact: The use-outcome sweep (#1154) reuses this loop shape; a defect here
 would recur there.
 Open questions: None.
@@ -479,14 +484,14 @@ Required faults and enabling state: An expired capture cited by a live
 observation; one pinned by a live hold.
 Confidence: high -
 [evidence](evidence/uo-expiry-keeps-pinned-and-cited-evidence.md).
-`crates/kernel/src/local_file.rs:514`; `crates/kernel/src/slice/write.rs:42`.
+`crates/kernel/src/local_file.rs:523`; `crates/kernel/src/slice/write.rs:42`.
 Existing check:
 `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
-(`crates/daemon/tests/harness_sources.rs:3482`);
+(`crates/daemon/tests/harness_sources.rs:3500`);
 `retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence`
 (`crates/kernel/tests/kernel_source_descriptors.rs:1895`);
 `a_capture_pinned_after_it_was_selected_for_expiry_is_kept`
-(`crates/kernel/src/local_file.rs:751`). Status: unaudited.
+(`crates/kernel/src/local_file.rs:760`). Status: unaudited.
 Impact: The use-outcome cited-row exception mirrors this liveness idiom; a
 defect here predicts one there.
 Open questions:
@@ -515,21 +520,21 @@ Required faults and enabling state: A session with captured sources; the
 `stop_after_retirement` hook.
 Confidence: high -
 [evidence](evidence/uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate.md).
-handler `handle_session_delete_value` (`crates/daemon/src/lib.rs:6942`); gate
-`crates/daemon/src/lib.rs:2795`; Kernel step `retire_captured_sources`
-(`crates/daemon/src/lib.rs:6905`); memory delete
-`crates/daemon/src/lib.rs:6987`.
+handler `handle_session_delete_value` (`crates/daemon/src/lib.rs:6975`); gate
+`crates/daemon/src/lib.rs:2822`; Kernel step `retire_captured_sources`
+(`crates/daemon/src/lib.rs:6938`); memory delete
+`crates/daemon/src/lib.rs:7020`.
 Existing check:
 `session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores`
-(`crates/daemon/src/source_capture_tests.rs:1556`);
+(`crates/daemon/src/source_capture_tests.rs:1557`);
 `session_delete_with_the_kernel_starting_deletes_nothing`
-(`crates/daemon/src/source_capture_tests.rs:1626`);
+(`crates/daemon/src/source_capture_tests.rs:1627`);
 `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
-(`crates/daemon/src/source_capture_tests.rs:1698`);
+(`crates/daemon/src/source_capture_tests.rs:1699`);
 `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-(`crates/daemon/src/lib.rs:26141`);
+(`crates/daemon/src/lib.rs:26457`);
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`). Status: unaudited.
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`). Status: unaudited.
 Impact: #1156 places the `deleted_at` write in this Kernel step; a reordering
 would let the record miss the delete.
 Open questions: None.
@@ -552,14 +557,14 @@ Required faults and enabling state: A route closed without `session.delete`
 after a HARD fold.
 Confidence: high -
 [evidence](evidence/uo-route-teardown-purges-process-state-but-deletes-no-durable-row.md).
-`unbind_route` (`crates/daemon/src/lib.rs:4683`) calls `purge_session_state`
-(`crates/daemon/src/lib.rs:4723`), which clears in-memory maps only.
+`unbind_route` (`crates/daemon/src/lib.rs:4716`) calls `purge_session_state`
+(`crates/daemon/src/lib.rs:4756`), which clears in-memory maps only.
 Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-(`crates/daemon/src/lib.rs:25091`);
+(`crates/daemon/src/lib.rs:25407`);
 `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
 (`crates/daemon/tests/kernel_routes.rs:3849`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:201`). Status: unaudited.
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`). Status: unaudited.
 Impact: A teardown that wrote `deleted_at` would mark a live session deleted
 (AC10).
 Open questions: None.
@@ -580,14 +585,14 @@ Required faults and enabling state: A session with committed passes, then
 `session.delete`.
 Confidence: high -
 [evidence](evidence/uo-per-session-pass-timestamps-die-with-the-session.md).
-field `crates/memory-store/src/lib.rs:2512`; writes
+field `crates/memory-store/src/lib.rs:2513`; writes
 `crates/daemon/src/transform.rs:3262`; delete `delete_session`
-(`crates/memory-store/src/lib.rs:8968`).
+(`crates/memory-store/src/lib.rs:8969`).
 Existing check:
 `delete_session_sweeps_every_session_table_once_and_scopes_notes`
-(`crates/memory-store/src/lib.rs:22343`);
+(`crates/memory-store/src/lib.rs:22344`);
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`). Status: unaudited.
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`). Status: unaudited.
 Impact: The use-outcome `last_transform_at` column (#1156) is the Kernel-side
 copy that survives the delete.
 Open questions: None.
@@ -612,7 +617,7 @@ Confidence: high -
 `classify_existing_family` (`crates/kernel/src/open.rs:796`);
 `classify_open_kernel` (`crates/kernel/src/open.rs:852`). Disposition B:
 re-verified against the #1154 digest
-`ed12f254bd6b6471905b6079de58c45c1072d05179892e2433a70506b2c1299e`.
+`40cf9b503ce6458c98e352324df95e4a7ad97066f6e9b4b5e699bd62140e150b`.
 Existing check: `every_conclusive_kernel_mismatch_is_refused_and_left_untouched`
 (`crates/kernel/tests/kernel_open.rs:183`);
 `a_family_created_under_the_previous_baseline_is_refused_untouched`
@@ -678,7 +683,7 @@ Existing check: `eligibility_matrix_includes_secret_unknown_and_tombstone`
 `unrecognized_stored_classes_read_back_restrictive`
 (`crates/kernel/src/cas/mod.rs:797`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-(`crates/kernel/tests/kernel_use_outcome.rs:322`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:381`). Status: unaudited.
 Impact: A use-outcome row presented to egress would leave the host.
 Open questions: None.
 
@@ -687,8 +692,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - the daemon report test and two CLI tests; the use-outcome read
-renders unavailable for a non-ready Kernel or a count past 2^53
+Exercised: yes - the daemon report test and two CLI tests
 Guarantee: `host.status` blocks carry closed-name counters, and the CLI renders
 the MemoryReviewer counters unavailable unless the block state is ready, through
 an exact-integer decoder bounded at 2^53.
@@ -703,12 +707,11 @@ Confidence: medium -
 `packages/cli/src/commands/review-wire.ts:434`;
 `packages/opencode-plugin/src/shared/host-client/exact-json.ts:11`. Lead L4: the
 `source_capture` block has no state flag
-(`crates/daemon/src/source_capture.rs:563`).
+(`crates/daemon/src/source_capture.rs:675`).
 Existing check: `the_capture_report_reaches_host_status_field_for_field`
-(`crates/daemon/src/source_capture_tests.rs:844`);
-`packages/cli/src/commands/review.test.ts:887`;
-`packages/cli/src/commands/review.test.ts:938`;
-`packages/cli/src/commands/review.test.ts:849`. Status: unaudited.
+(`crates/daemon/src/source_capture_tests.rs:845`);
+`packages/cli/src/commands/review.test.ts:901`;
+`packages/cli/src/commands/review.test.ts:952`. Status: unaudited.
 Impact: A zero read as "no harm observed" when the store was not ready.
 Open questions:
 - Gap G6: does the status surface name no identifiers? The `source_capture` and
@@ -734,7 +737,7 @@ bound to one project.
 Confidence: high -
 [evidence](evidence/uo-review-reads-authorize-by-bearer-and-project-binding-not-owner.md).
 `kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:414`);
-`bind_review` (`crates/daemon/src/memory_reviewer/wire.rs:202`);
+`bind_review` (`crates/daemon/src/memory_reviewer/wire.rs:203`);
 `crates/daemon/src/lib.rs:275`.
 Existing check:
 `review_operations_are_disabled_without_module_authority_and_list_and_read_receipts_under_it`
@@ -789,30 +792,37 @@ Reachability: default-production
 Status: active
 Exercised: yes - direct SQL attempts every forbidden transition on both tables
 Guarantee: After commit, the identity columns, `served_commit_seq`,
-`session_role`, `recorded_at`, the classification columns, and the decision rows
-never change; `deleted_at` is set once, `last_transform_at` never decreases,
-retirement is set once, no row is deleted, a record is served at a commit before
-the one that records it, and an admission citation names a recorded serve when
-its row is written and never changes.
+`session_role`, `recorded_at`, the classification columns, `decision_count`, and
+the decision rows never change; `deleted_at` is set once, `last_transform_at`
+never decreases, retirement is set once, no row is deleted, a record is served
+at a commit before the one that records it, and an admission citation names a
+recorded serve when its row is written, never changes, keeps its subject and
+commit sequence, and its row is never deleted.
 Check: `always` - every forbidden update or delete aborts under a named trigger,
-`INSERT OR REPLACE` aborts through the delete trigger, a decision row inserted
-once a later commit exists aborts, a row with `served_commit_seq >=
-created_commit_seq` fails its CHECK, and an admission row naming an unrecorded
-serve fails its foreign key.
-Fault/timing angle: none
+`INSERT OR REPLACE` aborts through the delete trigger on every table including
+`admission_decisions`, a decision row inserted once `decision_count` rows exist
+or once a later commit exists aborts (so a Kernel-written set is sealed at its
+commit, and any record's set is sealed by the next commit), a row with
+`served_commit_seq >= created_commit_seq` or `decision_count < 0` fails its
+CHECK, a decision row naming a registry object of another kind or one that was
+absent or retired at `served_commit_seq` aborts, and an admission row naming an
+unrecorded serve fails its foreign key.
+Fault/timing angle: A raw insert after the recording commit while that commit
+is still the newest.
 Required faults and enabling state: Direct SQL for each forbidden transition,
-including REPLACE.
+including REPLACE and a post-commit decision-row append.
 Confidence: high -
 [evidence](evidence/uo-p-served-set-and-identity-never-rewritten.md). triggers
 in the `use_outcomes` and `use_outcome_decisions` components
-(`crates/kernel/src/schema.rs:187`); `recursive_triggers` is on for every Kernel
-connection.
+(`crates/kernel/src/schema.rs:188`); the `admission_decisions_citation_no_delete`
+trigger (`crates/kernel/src/schema.rs:163`); `recursive_triggers` is on for
+every Kernel connection.
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-(`crates/kernel/tests/kernel_schema.rs:2175`);
+(`crates/kernel/tests/kernel_schema.rs:2177`);
 `use_outcome_classification_and_identity_shapes_are_checked`
-(`crates/kernel/tests/kernel_schema.rs:2297`);
+(`crates/kernel/tests/kernel_schema.rs:2348`);
 `an_admission_citation_names_a_recorded_use_outcome_and_never_changes`
-(`crates/kernel/tests/kernel_schema.rs:2376`). Status: unaudited.
+(`crates/kernel/tests/kernel_schema.rs:2429`). Status: unaudited.
 Impact: History rewriting defeats the witness the record exists to be.
 Open questions:
 - OQ3-10: a session that continues after its delete reuses its identity at an
@@ -836,13 +846,13 @@ Required faults and enabling state: Inserts with `normal` and `remote_allowed`;
 a serve through the envelope.
 Confidence: high -
 [evidence](evidence/uo-p-classification-sensitive-local-only-no-remote-egress.md).
-CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:187`); the insert
-names the classes as literals (`insert_use_outcome`
-(`crates/kernel/src/use_outcome.rs:279`)).
+CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:188`); the insert
+names the classes as literals in its `INSERT` statement
+(`crates/kernel/src/use_outcome.rs:307-312`).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
-(`crates/kernel/tests/kernel_schema.rs:2297`);
+(`crates/kernel/tests/kernel_schema.rs:2348`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-(`crates/kernel/tests/kernel_use_outcome.rs:322`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:381`). Status: unaudited.
 Impact: A stop condition of the plan: a Remote-eligible serving record.
 Open questions:
 - Backup classification: the backup scan reads every table with a
@@ -867,13 +877,13 @@ Required faults and enabling state: A serve at n; dispositions at n + k, at n,
 and before n; a null row and another lineage by SQL.
 Confidence: high -
 [evidence](evidence/uo-p-disputed-after-serve-from-committed-events-only.md).
-the join is `crates/kernel/src/use_outcome.rs:190`, using the admission lineage
-text through `crates/kernel/src/admission.rs:910`.
+the join is `crates/kernel/src/use_outcome.rs:190-228`, using the admission
+lineage text through `crates/kernel/src/admission.rs:910`.
 Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`);
+(`crates/kernel/tests/kernel_use_outcome.rs:400`);
 `disputed_after_serve_is_judged_against_each_serve`
-(`crates/kernel/tests/kernel_use_outcome.rs:749`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:826`). Status: unaudited.
 Impact: A prior dispute or a stale mark counted as harm after the serve.
 Open questions:
 - A decision disputed then re-approved still counts: event existence counts
@@ -905,28 +915,28 @@ Required faults and enabling state: An expired record; an expired cited record;
 70 expired records; a citation inserted after selection.
 Confidence: high -
 [evidence](evidence/uo-p-sweep-retires-only-expired-uncited-rows.md).
-`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:528`); predicate
+`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:619`); predicate
 `crates/kernel/src/use_outcome.rs:176`; recheck `retire_due_use_outcome`
-(`crates/kernel/src/use_outcome.rs:642`); receipt
+(`crates/kernel/src/use_outcome.rs:756`); receipt
 `crates/kernel/src/local_file.rs:438`.
 Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
-(`crates/kernel/tests/kernel_use_outcome.rs:493`);
+(`crates/kernel/tests/kernel_use_outcome.rs:568`);
 `an_expiry_backlog_drains_one_page_per_call`
-(`crates/kernel/tests/kernel_use_outcome.rs:553`);
+(`crates/kernel/tests/kernel_use_outcome.rs:630`);
 `an_expired_record_cited_by_a_live_report_is_retained`
-(`crates/kernel/tests/kernel_use_outcome.rs:623`);
+(`crates/kernel/tests/kernel_use_outcome.rs:700`);
 `a_record_cited_after_selection_is_kept`
-(`crates/kernel/src/use_outcome.rs:783`);
+(`crates/kernel/src/use_outcome.rs:902`);
 `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-(`crates/kernel/src/use_outcome.rs:811`);
+(`crates/kernel/src/use_outcome.rs:930-931`);
 `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-(`crates/kernel/src/use_outcome.rs:874`);
+(`crates/kernel/src/use_outcome.rs:993`);
 `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-(`crates/kernel/src/use_outcome.rs:895`);
+(`crates/kernel/src/use_outcome.rs:1014`);
 `the_cited_count_covers_the_rows_read_before_the_page_fills`
-(`crates/kernel/tests/kernel_use_outcome.rs:818`);
+(`crates/kernel/tests/kernel_use_outcome.rs:956`);
 `the_sweep_and_the_reads_use_their_indexes`
-(`crates/kernel/src/use_outcome.rs:912`);
+(`crates/kernel/src/use_outcome.rs:1031`);
 `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
 `a_cancelled_slice_stops_before_the_use_outcome_sweep`
@@ -945,32 +955,40 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - the Kernel arm (no delete of either table succeeds, a retired
-record stays readable) and the `session.delete` arm (the records and decision
-rows read the same before and after `ok`, across a stop between the stores and a
-retry)
-Guarantee: After `session.delete` answers `ok`, the session's serving records
-and decision rows are readable, equal in count and ids to before.
-Check: `always` - the record count and decision ids of the session before and
-after any delete path are equal.
+record stays readable) and the `session.delete` arm (every record and decision
+row read before the delete reads the same after `ok`, across a stop between the
+stores and a retry; the tests run no serve beside the delete)
+Guarantee: After `session.delete` answers `ok`, every serving record and
+decision row of the session that was readable before it is readable after it,
+with the same ids. A serve whose write lands beside the delete may add a record,
+for a served set the session has no record of, and removes none (OQ3-10).
+Check: `always` - the record ids and decision ids of the session read before
+any delete path are a subset of those read after it, and every record read
+before keeps its decision ids.
 Fault/timing angle: A delete with the Kernel unavailable at step 1 and a retry.
 Required faults and enabling state: A session with records, then a delete
 (Kernel arm: direct SQL deletes).
 Confidence: high - [evidence](evidence/uo-p-record-survives-session-delete.md).
 the delete triggers and the retained read hold the Kernel arm (`served_set`
-(`crates/kernel/src/use_outcome.rs:415`)); the `session.delete` step only sets
+(`crates/kernel/src/use_outcome.rs:468`)); the `session.delete` step only sets
 `deleted_at` (`mark_use_outcomes_deleted`
-(`crates/kernel/src/use_outcome.rs:347`)).
+(`crates/kernel/src/use_outcome.rs:358`)).
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-(`crates/kernel/tests/kernel_schema.rs:2175`);
+(`crates/kernel/tests/kernel_schema.rs:2177`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`) (a retired record stays
+(`crates/kernel/tests/kernel_use_outcome.rs:400`) (a retired record stays
 readable);
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`);
 `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:84`). Status: unaudited.
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:90`). Status: unaudited.
 Impact: The record dies at the event it witnesses (KTD1).
-Open questions: None.
+Open questions:
+- A serve write takes no capture gate, so a pass that committed before the
+  delete can insert its record while the delete runs or after its Kernel step
+  (OQ3-10); the count after the delete can then exceed the count before. The
+  guarantee is preservation of the rows read before, and the cited tests
+  construct no concurrent serve.
 
 ### uo-p-served-set-once-per-session-revision
 
@@ -980,8 +998,9 @@ Status: active
 Exercised: yes - the handler records one serve per served set across folds,
 replays an equal set, and records one serve across a CAS retry
 Guarantee: For one (project digest, harness, session, served-set digest), at
-most one serve commit exists; a later fold at an equal digest, at any
-`known_as_of`, replays and writes nothing.
+most one serve commit exists; a later fold at an equal digest under the same
+harness and session role, at any `known_as_of`, replays and writes nothing,
+while another harness or role at that key conflicts.
 Check: `always` - commit-log rows under the serve key number 0 or 1, and a
 replayed fold leaves the count unchanged.
 Fault/timing angle: A CAS conflict that re-runs the attempt within one pass.
@@ -990,28 +1009,34 @@ between; a CAS retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-set-once-per-session-revision.md). the writer
 keys its commit by the project binding, `use-outcome`, the session, and the
-served-set digest (`crates/daemon/src/use_outcome_writer.rs:266`); the Kernel
-holds one record per identity tuple.
+served-set digest (`crates/daemon/src/use_outcome_writer.rs:424-427`); the
+Kernel holds one record per identity tuple.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
-(`crates/daemon/src/use_outcome_writer_tests.rs:64`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:70`);
 `an_equal_digest_replays_and_another_harness_or_role_conflicts`
-(`crates/daemon/src/use_outcome_writer_tests.rs:125`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:131`);
 `an_equal_served_set_at_a_later_known_as_of_replays`
-(`crates/daemon/src/use_outcome_writer_tests.rs:429`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:487`);
 `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
-(`crates/daemon/src/use_outcome_writer_tests.rs:324`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:343`);
 `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-(`crates/daemon/src/use_outcome_writer_tests.rs:591`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:764`);
+`a_recorded_served_set_replays_while_another_writer_holds_the_writer`
+(`crates/daemon/src/use_outcome_writer_tests.rs:864`);
 `every_kernel_error_maps_to_a_closed_outcome`
-(`crates/daemon/src/use_outcome_writer_tests.rs:689`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:992`);
 `an_emergency_pass_that_reruns_records_one_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:708`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:1011`);
 `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:736`); Kernel half:
+(`crates/daemon/src/use_outcome_writer_tests.rs:1039`);
+`a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`
+(`crates/daemon/src/use_outcome_writer_tests.rs:1126`);
+`a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
+(`crates/daemon/src/use_outcome_writer_tests.rs:1162`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`
-(`crates/kernel/tests/kernel_use_outcome.rs:214`),
+(`crates/kernel/tests/kernel_use_outcome.rs:215`),
 `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-(`crates/kernel/tests/kernel_use_outcome.rs:713`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:790`). Status: unaudited.
 Impact: Duplicates inflate served counts and P7 removal sets.
 Open questions:
 - Receipts last for the database incarnation and serving records for the
@@ -1021,12 +1046,21 @@ Open questions:
   session id served under two harnesses at one served set is a lasting conflict;
   the design takes session ids as unique within a project (needs human input).
 - A deadline, an unready Kernel, or a lost fence leaves the serve for a later
-  write at its digest: a rerun in the same pass when the Kernel was not Ready
-  and no write was attempted (every commit outcome settles the pass, so a pass
-  waits on the writer at most once), or a later HARD fold that another input
-  requests over the same served set, such as context pressure. A session whose
-  composition never folds HARD again at that set stays unrecorded. A conflict
-  and a refusal are not repaired by a later fold.
+  write at its digest: a rerun in the same pass when the Kernel was not Ready at
+  the hand-off and no write was handed off (a write handed to a Ready Kernel
+  settles the pass whatever its outcome), or a later HARD fold that another
+  input requests over the same served set, such as context pressure. The pass
+  hands the write to a tracked blocking job and answers while the job waits for
+  the Kernel writer; when every write slot is taken, the write is counted
+  `deadline` and repaired the same way. A session whose composition never folds
+  HARD again at that set stays unrecorded. A conflict and a refusal are not
+  repaired by a later fold.
+- Does the detached write stand as the resolution of OQ3-5, which resolved the
+  write as inline within the pass's remaining budget? Commit `6d15ee29c` moved
+  it to the tracked blocking job with its own 250 ms writer wait, which is the
+  budget AC6 then names, and the measured wait the ticket asked for is recorded
+  by `the_real_failure_paths_count_their_outcomes_and_bound_the_wait` (needs
+  human input).
 
 ### uo-p-served-ids-equal-frozen-composition
 
@@ -1034,7 +1068,8 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - the recorded ids equal the snapshot rows of the fold, before
-and after a composition change and a dispute
+and after a composition change and a dispute, and the record a CAS retry
+writes names the retry's persisted composition
 Guarantee: The stored decision set equals, as a set, the object ids of the
 snapshot rows whose composition the same fold persisted.
 Check: `always` - for every committed serve, the stored ids equal the frozen
@@ -1045,23 +1080,23 @@ retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-ids-equal-frozen-composition.md). the ids and
 digest come from the pinned snapshot the same fold froze (`served_ids`
-(`crates/daemon/src/canonical_memory.rs:81`), `served_set_digest`
-(`crates/daemon/src/canonical_memory.rs:86`)), and the Kernel refuses ids that
+(`crates/daemon/src/canonical_memory.rs:72`), `served_set_digest`
+(`crates/daemon/src/canonical_memory.rs:82`)), and the Kernel refuses ids that
 disagree with the digest.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
-(`crates/daemon/src/use_outcome_writer_tests.rs:64`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:70`);
 `a_dispute_between_folds_records_the_next_served_set_without_it`
-(`crates/daemon/src/use_outcome_writer_tests.rs:465`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:528`);
 `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
-(`crates/daemon/src/canonical_memory.rs:336`);
+(`crates/daemon/src/canonical_memory.rs:380`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:471`);
+(`crates/daemon/src/canonical_memory.rs:515`);
 `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
-(`crates/daemon/src/use_outcome_writer_tests.rs:765`); Kernel half:
+(`crates/daemon/src/use_outcome_writer_tests.rs:1191`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`
-(`crates/kernel/tests/kernel_use_outcome.rs:214`),
+(`crates/kernel/tests/kernel_use_outcome.rs:215`),
 `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-(`crates/kernel/tests/kernel_use_outcome.rs:734`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:811`). Status: unaudited.
 Impact: The record names findings the session never saw.
 Open questions: None.
 
@@ -1081,9 +1116,9 @@ Required faults and enabling state: A route bound with `/memory/enabled: false`,
 then HARD folds on both engines.
 Confidence: high - [evidence](evidence/uo-p-no-row-when-memory-disabled.md). a
 disabled route takes no read, so `env.project_memory` is `None` and
-`record_use_outcome` (`crates/daemon/src/lib.rs:9684`) returns before any write.
+`record_use_outcome` (`crates/daemon/src/lib.rs:9721`) returns before any write.
 Existing check: `only_an_available_composition_is_recorded`
-(`crates/daemon/src/use_outcome_writer_tests.rs:190`). Status: unaudited.
+(`crates/daemon/src/use_outcome_writer_tests.rs:181`). Status: unaudited.
 Impact: Consent violation (R5).
 Open questions: None.
 
@@ -1092,31 +1127,51 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - a withheld read attempts no write, an Available read of the
-same rows then records once, and an empty Available composition records a serve
-with no decision rows
+Exercised: partial - a withheld read attempts no write, the first Available
+read after it records once, and an empty Available composition records a serve
+with no decision rows; the withheld arm runs with the Kernel unopened for the
+whole pass and the Available read's rows are seeded after it, so a Kernel that is
+Starting at the read and Ready at the write, and a withheld then Available read
+of equal rows, are not constructed
 Guarantee: A fold that persists a withheld composition writes no serving record;
-an Available snapshot with zero rows writes a record with zero decision rows.
+an Available snapshot with zero rows at a tip of at least one commit attempts a
+record with zero decision rows, which exists once the write lands as `written`
+or as `replayed` against a live record; a receipt that outlives its expired
+record replays with no live row (the open question under
+`uo-p-served-set-once-per-session-revision`). At tip 0 (a Kernel with no commit) the
+composition names no commit, `served_commit_seq` has no row to reference, and
+the writer records nothing; the Kernel refuses `served_commit_seq = 0` as
+`InvalidInput`.
 Check: `always(!X)` - X is "a record whose fold persisted a withheld
-composition".
+composition". The positive arm is exercised, not guaranteed: an Available
+zero-row composition whose write lands against a live or absent record leaves
+a record whose `served_set` read answers zero decision ids, while a `deadline`, `kernel_unavailable`, or lost
+fence leaves no record until a later HARD fold at the same served set writes or
+replays it (`uo-p-served-set-once-per-session-revision`).
 Fault/timing angle: A Kernel Ready for the write but starting at the read.
 Required faults and enabling state: A Kernel starting or a refusing serving
 verdict at read time, then a HARD fold.
 Confidence: high - [evidence](evidence/uo-p-no-row-for-withheld-composition.md).
 the writer acts only on `CanonicalMemoryRead::Available` (`record_use_outcome`
-(`crates/daemon/src/lib.rs:9684`)).
+(`crates/daemon/src/lib.rs:9721`)).
 Existing check: `only_an_available_composition_is_recorded`
-(`crates/daemon/src/use_outcome_writer_tests.rs:190`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:181`);
 `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`
-(`crates/daemon/src/use_outcome_writer_tests.rs:501`);
+(`crates/daemon/src/use_outcome_writer_tests.rs:565`);
 `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-(`crates/daemon/src/use_outcome_writer_tests.rs:591`); Kernel half:
+(`crates/daemon/src/use_outcome_writer_tests.rs:764`); Kernel half:
 `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
-(`crates/kernel/tests/kernel_use_outcome.rs:163`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:164`). Status: unaudited.
 Impact: A record claiming a serve that did not render.
 Open questions:
 - OQ3-11 resolved at #1155 ticketing: an empty Canonical composition writes a
   record with zero decision rows.
+- Tip 0, raised in #1176 review: `UseOutcomeSpec::validated_retain_until`
+  (`crates/kernel/src/use_outcome.rs:266-267`)
+  requires `1 <= served_commit_seq < created_commit_seq` and the column
+  references `commit_log`, so a serve at tip 0 is not recordable. The first
+  commit of any kind ends that state. Resolved for this catalog by the carve-out
+  in the guarantee; a genesis sentinel would be a #1155 decision.
 
 ### uo-p-producer-matches-request-subagent-flag
 
@@ -1124,7 +1179,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - a subagent pass records `subagent` on the additive engine and
-nothing on the folding engine
+nothing on the folding engine; a primary pass records `primary` on each engine
 Guarantee: The stored `session_role` is `subagent` exactly when the writing
 pass's effective subagent flag was true.
 Check: `always` - the stored role equals the flag of the pass that wrote the
@@ -1135,10 +1190,12 @@ with a Canonical read; a primary on each engine.
 Confidence: high -
 [evidence](evidence/uo-p-producer-matches-request-subagent-flag.md). the role
 comes from the pass's `is_subagent`
-(`crates/daemon/src/use_outcome_writer.rs:266`). Reachability per engine (B1):
+(`crates/daemon/src/use_outcome_writer.rs:431-435`). Reachability per engine (B1):
 `subagent` rows arise only on the additive engine.
 Existing check: `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
-(`crates/daemon/src/use_outcome_writer_tests.rs:379`). Status: unaudited.
+(`crates/daemon/src/use_outcome_writer_tests.rs:420`); Kernel half:
+`session_roles_round_trip_and_the_served_set_digest_is_order_free`
+(`crates/kernel/tests/kernel_use_outcome.rs:811`). Status: unaudited.
 Impact: Harm attributed to the wrong session kind.
 Open questions:
 - OQ3-9 resolved at #1154 ticketing: the column is `session_role`.
@@ -1152,50 +1209,68 @@ Exercised: yes - a delete marks the records before the memory delete; a stop
 between the stores, an unknown commit outcome, and a Kernel that is not Ready
 each converge on one repeat that keeps the first timestamp; a second delete
 marks records written after the first; a route teardown leaves the records live
-Guarantee: `deleted_at` is set exactly when a `session.delete` for the session
-committed its Kernel step, before the memory-store delete; route teardown leaves
-it null.
-Check: `always` - after `ok` every record of the session has `deleted_at` set
-and the memory rows are gone; after teardown it is null; after
-`kernel_unavailable` the memory rows are intact and it is null; one repeat with
-the Kernel Ready completes `ok` (R9).
+Guarantee: `deleted_at` is set on a record exactly when a `session.delete` for
+the session committed a Kernel step that selected it as live, before the
+memory-store delete; a record expiry retired before that step keeps its state,
+a serve published after it stays live until a later delete (OQ3-10), and route
+teardown leaves it null.
+Check: `always` - after `ok` every record the Kernel step selected as live has
+`deleted_at` set and the memory rows are gone; a record expiry retired before
+the delete keeps its state with `deleted_at` null, and a serve whose job lands
+after the step is live until the next delete (OQ3-10); after teardown it is
+null; after
+`kernel_unavailable` the memory rows are intact, and `deleted_at` is null when
+the Kernel was not Ready and set when the step's commit ran and its answer was
+an error; one repeat with the Kernel Ready completes `ok` and keeps the first
+timestamp (R9).
 Fault/timing angle: A stop between the stores, then a retry.
 Required faults and enabling state: A delete with the Kernel available; one with
 it starting; a route close without delete.
 Confidence: high -
 [evidence](evidence/uo-p-deleted-at-iff-session-delete-kernel-step.md). the step
 runs inside the capture gate after the descriptor retirement and before the
-memory delete (`delete_kernel_step` (`crates/daemon/src/lib.rs:6850`)); the
+memory delete (`delete_kernel_step` (`crates/daemon/src/lib.rs:6883`)); the
 envelope selects the session's live records under the writer
-(`mark_use_outcomes_deleted` (`crates/kernel/src/use_outcome.rs:347`)), and the
-set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:187`).
+(`mark_use_outcomes_deleted` (`crates/kernel/src/use_outcome.rs:358`)), and the
+set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:188`).
 Existing check:
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`);
 `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:84`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:90`);
 `a_delete_step_with_an_unknown_outcome_converges_on_retry`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:134`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:144`);
 `a_second_delete_marks_records_written_after_the_first`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:170`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:184`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:201`); Kernel half:
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`);
+`a_session_id_that_reads_as_a_secret_still_deletes`
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:612`); Kernel half:
 `a_session_delete_marks_each_live_record_once`
-(`crates/kernel/tests/kernel_use_outcome.rs:891`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1063`). Status: unaudited.
 Impact: A deleted session reads as live, or a live one as deleted.
 Open questions:
 - A record written after the delete commits, by a pass on a route still bound to
   the session (OQ3-10), stays live until a later delete marks it; each delete
   selects the live records afresh under its own attempt key. This includes a
-  pass whose Memory Store commit preceded the delete and whose serve write
-  landed after it: the harness received that composition, and the serve writer
-  takes no capture gate, so the record counts as a continued session.
+  pass answered before the delete whose serve job committed after it: the serve
+  write is deferred to a tracked job that takes no capture gate, so a
+  `session.delete` answered `ok` can be followed by a live record of that pass.
+  The accepted loss (gap G2) covers both the continued session and this
+  deferred write.
 - A fold after a delete over a composition the deleted record already holds
   replays that record, so the continued session gains no live record for it
   until its composition changes (needs human input).
 - A conflict or invalid input in the step answers `source_retirement_failed` and
   counts no lifecycle name; the closed names cover the marked, nothing-live, and
   unavailable outcomes only.
+- The step marks every live record of the session in one `UPDATE` under one
+  commit with no row bound or deadline (`mark_session_deleted`,
+  `crates/daemon/src/use_outcome_writer.rs:284-316`), so it holds the writer
+  and the delete's blocking worker for a time that grows with the session's
+  live records; the captured-source retirement before it pages. Whether a
+  session can accumulate enough live records to need paging is an owner
+  decision (needs human input).
 
 ### uo-p-last-transform-at-monotone-per-committing-pass
 
@@ -1203,9 +1278,10 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - a committing pass advances the value, a non-committing pass and
-a pass whose clock reads before the stored value leave it, a Kernel unavailable,
-a held writer, or a spent pass budget skips it with the pass `ok`, and the next
-committing pass catches up
+a pass whose clock reads before the stored value leave it, a Kernel unavailable
+or a held writer skips it with the pass `ok`, and the next committing pass
+catches up; the spent-budget arm is checked at the writer function with a
+spent `PassWriteBudget`, not through a pass
 Guarantee: `last_transform_at` never decreases on a session's serving record,
 and only a pass whose response committed updates it.
 Check: `always` - after every pass the value is at least the old value, and
@@ -1215,42 +1291,89 @@ Required faults and enabling state: A committing then a non-committing pass; a
 Kernel unavailable at the write.
 Confidence: high -
 [evidence](evidence/uo-p-last-transform-at-monotone-per-committing-pass.md). the
-settle step touches the records once per committed pass on a memory-enabled
-route (`touch_use_outcomes` (`crates/daemon/src/lib.rs:9738`)), within what
-remains of the pass's Kernel wait
-(`crates/daemon/src/use_outcome_writer.rs:235`); the Kernel update moves only
-live records whose value is null or earlier, in one fenced transaction with no
-commit (`advance_use_outcome_last_transform`
-(`crates/kernel/src/use_outcome.rs:470`)).
+settle step checks the session's live records once per committed pass on a
+memory-enabled route (`use_outcomes_to_touch`
+(`crates/daemon/src/lib.rs:9817`)) and, when one needs the update, makes it on a
+scoped thread beside the response build that the settle joins before the
+response returns (`crates/daemon/src/lib.rs:10130`, `touch_use_outcomes`
+(`crates/daemon/src/lib.rs:9851`)), within what remains of the pass's Kernel
+wait (`PassWriteBudget::spend`, `crates/daemon/src/use_outcome_writer.rs:391-398`); a pass that handed its
+serve to a tracked job leaves the touch to that job, which checks and updates
+after its serve attempt, whatever that serve answered, with a Kernel wait of its
+own (`touch_after_serve`
+(`crates/daemon/src/use_outcome_writer.rs:356`)); the Kernel update moves
+only live records whose value is null or earlier, in one fenced transaction
+with no commit that holds only the writer (`advance_use_outcome_last_transform`
+(`crates/kernel/src/use_outcome.rs:565`)).
 Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:220`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:234`);
 `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:305`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:321`);
+`a_committing_pass_with_a_current_record_takes_no_writer`
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:369`);
 `a_spent_pass_budget_skips_the_touch`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:353`);
-`the_serve_and_the_touch_of_one_pass_share_one_kernel_wait`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:382`); Kernel half:
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:424`);
+`a_serve_deadline_leaves_the_touch_its_own_kernel_wait`
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:453`);
+`a_serve_that_spends_its_wait_leaves_the_touch_a_budget_of_its_own`
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:490`);
+`a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:557`); Kernel half:
 `last_transform_at_advances_live_records_without_a_commit`
-(`crates/kernel/tests/kernel_use_outcome.rs:940`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1118`),
 `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-(`crates/kernel/tests/kernel_use_outcome.rs:999`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1203`),
 `an_outside_file_lock_bounds_the_advance_at_begin`
-(`crates/kernel/tests/kernel_use_outcome.rs:1036`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1244`),
+`the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
+(`crates/kernel/tests/kernel_use_outcome.rs:1290`),
+`the_advance_takes_no_pooled_reader`
+(`crates/kernel/tests/kernel_use_outcome.rs:1322`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.
-- The pass budget is the 250 ms Kernel wait the pass shares across its serve and
-  touch writes (`PassWriteBudget`); the daemon carries no other pass deadline.
-  The touch bounds its connection waits, its begin, and its statements by that
-  budget; the serve write bounds its connection wait.
-- Cost: every committing pass of a session with a live record makes one fenced
-  commit. Measured on this host (tmpfs, 200 advances of one record): p50 6.4 ms,
-  p99 22.3 ms, outside the 250 ms wait bound. A coarser stale predicate would
-  skip most of these and changes the per-committing-pass rule (needs human
-  input).
+- The pass budget is the 250 ms Kernel wait the pass spends across the touch's
+  staleness read and its write (`PassWriteBudget`); the daemon carries no other
+  pass deadline. The touch bounds its connection waits, its begin, and its
+  statements by that budget. A pass that handed its serve to a tracked job
+  makes no touch of its own: the job touches after its serve attempt, whatever
+  the serve answered, under a budget of
+  the same size, so the serving pass's record carries that pass's time and the
+  response waits on neither write.
+- Cost: every committing pass of a session with a stale live record (a value
+  null or before the pass's time; the staleness read skips the writer
+  otherwise) makes one fenced
+  commit, on a scoped thread beside the response build, so its device flush
+  overlaps the memory-store flush of the pass trace. Measured on this host
+  (release build, one session with one record, paired runs of 240 committing
+  passes): with a fixed 1 ms flush on tmpfs the committing pass p50 is 4.86 ms
+  against 5.90 ms for the touch made before the response build; on XFS over
+  EBS NVMe it is 8.68 to 8.95 ms against 9.99 to 10.17 ms. A coarser stale
+  predicate would skip most of these commits and changes the
+  per-committing-pass rule (needs human input).
 - A pass that commits and then fails its boundary read answers an error before
-  the settle step, so it records its serve and touches nothing; the next
-  committing pass catches up.
+  the settle step; it hands off its serve, and the job's touch advances the
+  record with that pass's time, because the pass committed
+  (`a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`).
+  When every write slot is taken, the serve counts `deadline`, no job runs, and
+  the error path makes no touch of its own, so the record keeps its earlier
+  value until the next committing pass; no lifecycle name counts that skip. A
+  committed boundary-failure pass that froze no composition hands off no serve
+  and makes no touch either, with the same catch-up on the next committing
+  pass.
+- A committing pass that lands while an earlier pass's serve job still waits
+  for the writer finds no record at its staleness check and touches nothing;
+  the job then advances the record to its own pass's time, and the later
+  pass's time is recorded by the next committing pass. This is the convergence
+  a skipped touch already has; whether the attribution must name that later
+  pass without a further pass is an owner decision (needs human input).
+- The advance updates every stale live record of the session in one statement
+  under the pass budget (`crates/kernel/src/use_outcome.rs:43-47`); a row set
+  the budget cannot cover is interrupted and rolled back whole, and each later
+  committing pass repeats the attempt, so a session with enough stale records
+  never catches up. Paging the update, or one activity timestamp per session,
+  would bound it; the row count a session can reach is an owner decision
+  (needs human input).
 - A session rebound to a route with memory disabled keeps its records untouched
   by those passes, because such a route takes no Kernel read (C2).
 - A pass with an earlier clock selects no record, because the update filters on
@@ -1262,13 +1385,16 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - the routed read answers (2, 1) for two serves with a
+Exercised: partial - the routed read answers (2, 1) for two serves with a
 contradiction between them, skips a retired serve, answers (0, 0) for a decision
-never served, answers an unready Kernel with its state and no count, and the CLI
-accepts 2^53, refuses 2^53 + 1, and renders every other answer unavailable
+never served, and answers an unready Kernel with its state and no count; the
+Kernel read answers `Deadline` under a held reader pool; the CLI accepts 2^53,
+refuses 2^53 + 1, and renders every other answer unavailable. The route's answer
+for a read that fails while the Kernel is Ready has no daemon test.
 Guarantee: Served and disputed-after-serve counts per decision are exact
 unsigned integers at one Kernel snapshot; a Kernel that is not Ready answers
-unavailable with no integer.
+its `unavailable` kernel state with no integer on the wire, which the CLI
+renders as `unavailable`.
 Check: `always` - k unretired records of which j have a later dispute answer (k,
 j); an unready Kernel answers no integer; the client accepts 2^53 and refuses
 2^53 + 1.
@@ -1278,34 +1404,44 @@ two sessions with one later dispute.
 Confidence: high -
 [evidence](evidence/uo-p-counts-exact-and-unavailable-not-zero.md). one
 statement counts the by-decision rows at one snapshot (`served_counts_for`
-(`crates/kernel/src/use_outcome.rs:505`)); the handler answers counts or the
-kernel state (`crates/daemon/src/memory_reviewer/wire.rs:307`); the client
+(`crates/kernel/src/use_outcome.rs:593`)); the handler answers counts or the
+kernel state (`crates/daemon/src/memory_reviewer/wire.rs:308`); the client
 decodes each count with `exactCount` and renders any other answer unavailable
 (`packages/cli/src/commands/review-wire.ts:344`).
 Existing check:
 `review_use_outcome_counts_serves_and_later_disputes_of_one_decision`
 (`crates/daemon/tests/memory_reviewer_wire.rs:686`);
 `review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:432`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:641`);
+`packages/cli/src/commands/review-wire.contract.test.ts:107`;
 `packages/cli/src/commands/review-wire.contract.test.ts:125`;
-`packages/cli/src/commands/review.test.ts:849`; Kernel half:
+`packages/cli/src/commands/review-wire.contract.test.ts:137`;
+`packages/cli/src/commands/review.test.ts:781`;
+`packages/cli/src/commands/review.test.ts:822-861`;
+`packages/cli/src/commands/review.test.ts:863`; Kernel half:
 `disputed_after_serve_is_judged_against_each_serve`
-(`crates/kernel/tests/kernel_use_outcome.rs:749`) and
+(`crates/kernel/tests/kernel_use_outcome.rs:826`) and
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:400`); the read bound:
+`a_held_reader_pool_bounds_the_count_read`
+(`crates/kernel/tests/kernel_use_outcome.rs:1267`) and
+`review_use_outcome_reads_the_kernel_under_a_bounded_budget`
+(`crates/daemon/tests/memory_reviewer_wire.rs:787`). Status: unaudited.
 Impact: A zero misread as "no harm observed".
 Open questions:
 - OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome` method
   answering the Kernel state outcome when unready.
-- `served_sessions` counts unretired serving records, one per (session, served
-  set), so a session served the decision at two served sets counts twice; the
-  name follows the ticket.
+- `served_sessions` counts unretired serving records, one per (harness,
+  session, served set), so a session served the decision at two served sets
+  counts twice; the name follows the ticket.
 - The counts cover the bound project only; another project's serves of the same
   decision are not counted.
 - A failed read after the Kernel is Ready answers the kernel state its failure
-  maps to; no test drives that arm. AC19 (no identifier in logs or
-  `host.status`) holds by inspection: the handler logs nothing and adds no
-  status field.
+  maps to. The read runs under a 5 s budget; a held reader pool stops the
+  Kernel read with `Deadline` (`a_held_reader_pool_bounds_the_count_read`),
+  which maps to `unavailable`/`store_busy`; no daemon test drives that
+  state answer. AC19 (no identifier in logs or `host.status`) holds by
+  inspection: the handler logs nothing and adds no status field.
 
 ## Relationship map
 
