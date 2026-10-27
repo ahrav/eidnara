@@ -709,8 +709,8 @@ Confidence: medium -
 (`crates/daemon/src/source_capture.rs:675`).
 Existing check: `the_capture_report_reaches_host_status_field_for_field`
 (`crates/daemon/src/source_capture_tests.rs:845`);
-`packages/cli/src/commands/review.test.ts:887`;
-`packages/cli/src/commands/review.test.ts:938`. Status: unaudited.
+`packages/cli/src/commands/review.test.ts:901`;
+`packages/cli/src/commands/review.test.ts:952`. Status: unaudited.
 Impact: A zero read as "no harm observed" when the store was not ready.
 Open questions:
 - Gap G6: does the status surface name no identifiers? The `source_capture` and
@@ -1402,8 +1402,8 @@ Existing check:
 `packages/cli/src/commands/review-wire.contract.test.ts:125`;
 `packages/cli/src/commands/review-wire.contract.test.ts:137`;
 `packages/cli/src/commands/review.test.ts:781`;
-`packages/cli/src/commands/review.test.ts:822-847`;
-`packages/cli/src/commands/review.test.ts:849`; Kernel half:
+`packages/cli/src/commands/review.test.ts:822-861`;
+`packages/cli/src/commands/review.test.ts:863`; Kernel half:
 `disputed_after_serve_is_judged_against_each_serve`
 (`crates/kernel/tests/kernel_use_outcome.rs:826`) and
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`

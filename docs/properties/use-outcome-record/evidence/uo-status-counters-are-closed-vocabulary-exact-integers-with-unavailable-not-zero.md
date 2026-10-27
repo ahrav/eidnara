@@ -23,8 +23,8 @@ revision.
   ready, through an exact-integer decoder bounded at 2^53.
 - Existing check: `the_capture_report_reaches_host_status_field_for_field`
   (`crates/daemon/src/source_capture_tests.rs:845`);
-  `packages/cli/src/commands/review.test.ts:887`;
-  `packages/cli/src/commands/review.test.ts:938`. Status: unaudited.
+  `packages/cli/src/commands/review.test.ts:901`;
+  `packages/cli/src/commands/review.test.ts:952`. Status: unaudited.
 
 ## Failure scenario
 

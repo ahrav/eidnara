@@ -31,8 +31,8 @@ revision.
   `packages/cli/src/commands/review-wire.contract.test.ts:125`;
   `packages/cli/src/commands/review-wire.contract.test.ts:137`;
   `packages/cli/src/commands/review.test.ts:781`;
-  `packages/cli/src/commands/review.test.ts:822-847`;
-  `packages/cli/src/commands/review.test.ts:849`; Kernel half:
+  `packages/cli/src/commands/review.test.ts:822-861`;
+  `packages/cli/src/commands/review.test.ts:863`; Kernel half:
   `disputed_after_serve_is_judged_against_each_serve`
   (`crates/kernel/tests/kernel_use_outcome.rs:826`) and
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
