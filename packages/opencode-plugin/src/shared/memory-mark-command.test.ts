@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type DispositionPreview, KernelClient } from "./kernel-client";
+import { type DispositionPreview, deriveRequestDigest, KernelClient } from "./kernel-client";
 import { FakeKernel, FakeKernelTransport } from "./kernel-client-testing/fake-kernel";
 import {
     formatMemoryMarkOutcome,
@@ -518,5 +518,39 @@ describe("runMemoryMarkCommand", () => {
             state: { kind: "unavailable", reason: "outcome_unknown" },
         });
         expect(commits).toBe(1);
+    });
+});
+
+describe("runMemoryMarkCommand request digest", () => {
+    test("the preview and the commit carry one digest of the operation and the source kind", async () => {
+        for (const sourceKind of ["user", "assistant"] as const) {
+            const h = harness();
+            const input = args("contradict", "mem_verified", true);
+            const outcome = await runMemoryMarkCommand({
+                client: h.client,
+                operationId: memoryMarkOperationId(SESSION, input),
+                actor: "user:test",
+                args: input,
+                ...(sourceKind === "user" ? {} : { sourceKind }),
+            });
+            expect(outcome).toMatchObject({ kind: "applied", replayed: false });
+            const bodies = h.transport.calls.map((call) => call.body as Record<string, any>);
+            expect(bodies.map((body) => body.preview === true)).toEqual([true, false]);
+            const digest = deriveRequestDigest({
+                operations: [
+                    {
+                        op: "disposition",
+                        object_id: "mem_verified",
+                        event: "contradict",
+                        evidence_ref: { path: "src/lib.rs", git_object_id: OID },
+                    },
+                ],
+                sourceKind,
+            });
+            for (const body of bodies) {
+                expect(body.source_kind).toBe(sourceKind);
+                expect(body.intent.request_digest).toBe(digest);
+            }
+        }
     });
 });

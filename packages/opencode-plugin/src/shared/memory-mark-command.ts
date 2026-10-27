@@ -17,6 +17,7 @@ import {
     type DispositionOperation,
     type DispositionPreview,
     type DispositionResult,
+    deriveRequestDigest,
     type EvidenceRef,
     invalid,
     isAvailable,
@@ -224,13 +225,16 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         ...(args.evidenceId === undefined ? {} : { evidence_id: args.evidenceId }),
         ...(args.evidenceRef === undefined ? {} : { evidence_ref: args.evidenceRef }),
     };
+    const operations = [operation];
+    const sourceKind = input.sourceKind ?? ("user" as const);
     const intent = {
         actor: input.actor,
         operationId: input.operationId,
         cause: input.cause ?? commandLine(args),
-        sourceKind: input.sourceKind ?? ("user" as const),
+        sourceKind,
+        requestDigest: deriveRequestDigest({ operations, sourceKind }),
     };
-    const previewed = await client.previewDispositions({ ...intent, operations: [operation] });
+    const previewed = await client.previewDispositions({ ...intent, operations });
     if (!isAvailable(previewed))
         return { kind: "refused", step: "preview", state: previewed.state };
     // A recorded identity replays its receipt whatever the object's state is now, so the preview has nothing to judge and asks nothing.
@@ -248,7 +252,7 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
     }
     if (input.isCancelled?.())
         return { kind: "refused", step: "commit", state: { kind: "cancelled" } };
-    const committed = await client.commit({ ...intent, operations: [operation] });
+    const committed = await client.commit({ ...intent, operations });
     if (!isAvailable(committed)) return { kind: "refused", step: "commit", state: committed.state };
     const result = verdictFor(committed.dispositions, operation);
     // The receipt exists, so the commit may have been applied; a verdict list that does not answer the operation leaves its effect unknown rather than refused.
