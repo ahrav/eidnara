@@ -236,6 +236,26 @@ on well-tested code (Exercised yes or partial for all six).
 | G6 | low-medium | Sweep candidate scan cost under retained-and-cited captures (W1 x W2) | `expired_captures_sql` (`local_file.rs:551-562`) step count versus retained rows |
 | G7 | low | Sensitivity and egress class of descriptor-derived data | `publish_batch` admission classes (`source_capture.rs:710-716`); what S7/S8 reads may carry |
 
+Dispositions recorded by the unit tickets:
+
+- G1 (#1167, bounded read): the pass applies the project scope term in SQL
+  and then `ScopeFilter::matches`
+  (`crates/daemon/src/kernel_routes/project.rs:207`), which drops a `None`
+  scope, so every candidate names the bound project; recorded on
+  `cc-candidate-set-bounded-with-counted-truncation`. The `set` operator
+  semantics were not probed.
+- G2 (#1167, bounded read): every pass read uses the one tip captured at the
+  pass start, so the candidate set is one snapshot; no test commits between
+  the pass's reads. Recorded on the same record.
+- G3 (#1167, bounded read): a replayed unit is scored again (tested through
+  the job); a revision corrects only the predecessor descriptor
+  (`crates/kernel/src/source_descriptor.rs:546`), so the predecessor's rows
+  stay until its evidence retires or the sweep's age bound removes them. No
+  test publishes a revision. Recorded on `cc-row-key-unique-and-caps-enforced`.
+- G4 to G6 (#1166): recorded on
+  `cc-sweep-drops-only-dead-targets-bounded-idempotent-kernel-untouched`.
+- G7 (#1165): resolved on the read record.
+
 ### Refinements (apply directly)
 
 R1. S6 records (`p5dep-harness-sweep-retires-owners-before-evidence`,

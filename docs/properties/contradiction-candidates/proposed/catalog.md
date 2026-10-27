@@ -9,7 +9,7 @@ for unbuilt behavior. #1164 builds the scorer
 `crates/daemon/src/contradiction_candidates/scorer.rs`) and converts the
 three S-A records to `Status: active` with `Exercised: yes`; their tests are
 in `crates/daemon/tests/contradiction_candidates_scorer.rs`, and their
-references are verified at the #1164 branch tip. The other 12 records keep
+references are verified at the #1164 branch tip. The records not yet converted keep
 `Status: active - PROPOSED`: each is a specification input and a test target
 for the unit that builds its behavior, and no claim is made that the
 implementation exists. The store (#1165), sweep (#1166), pass (#1167), and
@@ -25,8 +25,8 @@ substance.
 
 Reachability labels on proposed records name the intended class once the
 unit lands, per the preamble reproduced below, and are re-verified at
-implementation time. The three active records carry the class verified at
-the branch tip, `test-only`, because nothing in the daemon calls the scorer.
+implementation time. The active records carry the class verified at the
+branch tip.
 
 Companion files: [existing-checks.md](existing-checks.md),
 [fault-map.md](fault-map.md),
@@ -38,10 +38,10 @@ for the active records, [certificate.md](certificate.md),
 
 | Slug | Surface | Type | Semantics | Reachability | Status |
 | --- | --- | --- | --- | --- | --- |
-| cc-scorer-output-deterministic-under-contract-version | S-A | safety | always | test-only (intended explicit-config-only) | active, exercised yes |
-| cc-oversize-text-refused-whole-never-truncated | S-A | safety | always | test-only (intended explicit-config-only) | active, exercised partial (scorer arm) |
-| cc-case-fold-applied-identically-to-both-sides | S-A | safety | always | test-only (intended explicit-config-only) | active, exercised yes |
-| cc-pass-starts-only-after-publication-job-terminal | S-B | safety | always | explicit-config-only | active, exercised yes (#1167) |
+| cc-scorer-output-deterministic-under-contract-version | S-A | safety | always | explicit-config-only | active, exercised yes |
+| cc-oversize-text-refused-whole-never-truncated | S-A | safety | always | explicit-config-only | active, exercised partial (scorer arm) |
+| cc-case-fold-applied-identically-to-both-sides | S-A | safety | always | explicit-config-only | active, exercised yes |
+| cc-pass-starts-only-after-publication-job-terminal | S-B | safety | always | explicit-config-only | active, exercised partial (#1167) |
 | cc-passes-in-flight-bounded-and-overflow-counted | S-B | safety | always | explicit-config-only | active, exercised yes (#1167) |
 | cc-candidate-set-bounded-with-counted-truncation | S-C | safety | always | explicit-config-only | active, exercised partial (#1167) |
 | cc-partial-result-is-descriptor-granular-prefix | S-C | safety | always | explicit-config-only | active, exercised yes (#1167) |
@@ -54,11 +54,12 @@ for the active records, [certificate.md](certificate.md),
 | cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm | S-H | safety | always | intended explicit-config-only | proposed (#1168) |
 | cc-pass-and-sweep-write-no-kernel-event-and-no-signal | R5 | safety | always(!X) | explicit-config-only | active, exercised partial (#1166, #1167) |
 
-15 records: 3 active, 12 proposed. Semantics distribution: 15 `always`
-(13 plain and 2 written `always(!X)` for forbidden states), 0
+15 records at the #1167 tip: 11 active, 4 proposed.
+Semantics distribution: 15 `always` (13 plain and 2 written `always(!X)` for
+forbidden states), 0
 `always-or-unreached`, 0 `sometimes`, 0 `reachable`, 0 `unreachable`; all 15
-are safety. Reachability: 3 `test-only` at the branch tip; intended classes
-13 `explicit-config-only`, 2 `default-production`. The ticket mapping in the
+are safety. Reachability: 13 `explicit-config-only`, 2 `default-production`
+(verified for the active records, intended for the proposed ones). The ticket mapping in the
 Status column follows the #1163 decomposition; each ticket re-verifies the
 records it converts.
 
@@ -91,14 +92,11 @@ the fold function F, the formula, threshold, and K.
 ### cc-scorer-output-deterministic-under-contract-version
 
 Type: safety
-Reachability: test-only - the scorer
-(`crates/daemon/src/contradiction_candidates/scorer.rs`) is the public module
-`daemon::contradiction_candidates::scorer` (`crates/daemon/src/lib.rs:17`,
-`crates/daemon/src/contradiction_candidates/mod.rs:4`) and nothing in the
-daemon calls it; its only callers are the tests in
-`crates/daemon/tests/contradiction_candidates_scorer.rs`. The intended class is
-`explicit-config-only` once the pass (#1167) calls it behind
-`contradiction_candidates.enabled`.
+Reachability: explicit-config-only - the candidate pass calls the scorer
+(`DescriptorTerms::new` and `TopCandidates`,
+`crates/daemon/src/contradiction_candidates/pass.rs:288,292`) for every
+publication it scores, and the pass runs only under the route's frozen
+`contradiction_candidates.enabled` (#1167).
 Status: active
 Exercised: yes - `the_top_k_is_the_same_under_every_input_order`
 (`crates/daemon/tests/contradiction_candidates_scorer.rs:276-318`) scores one
@@ -151,14 +149,11 @@ Open questions:
 ### cc-oversize-text-refused-whole-never-truncated
 
 Type: safety
-Reachability: test-only - the scorer
-(`crates/daemon/src/contradiction_candidates/scorer.rs`) is the public module
-`daemon::contradiction_candidates::scorer` (`crates/daemon/src/lib.rs:17`,
-`crates/daemon/src/contradiction_candidates/mod.rs:4`) and nothing in the
-daemon calls it; its only callers are the tests in
-`crates/daemon/tests/contradiction_candidates_scorer.rs`. The intended class is
-`explicit-config-only` once the pass (#1167) calls it behind
-`contradiction_candidates.enabled`.
+Reachability: explicit-config-only - the candidate pass calls the scorer
+(`DescriptorTerms::new` and `TopCandidates`,
+`crates/daemon/src/contradiction_candidates/pass.rs:288,292`) for every
+publication it scores, and the pass runs only under the route's frozen
+`contradiction_candidates.enabled` (#1167).
 Status: active
 Exercised: partial - scorer arm only, and one Check clause unasserted.
 `an_oversize_descriptor_is_refused_whole_and_an_exact_fit_is_analyzed`
@@ -229,14 +224,11 @@ Open questions:
 ### cc-case-fold-applied-identically-to-both-sides
 
 Type: safety
-Reachability: test-only - the scorer
-(`crates/daemon/src/contradiction_candidates/scorer.rs`) is the public module
-`daemon::contradiction_candidates::scorer` (`crates/daemon/src/lib.rs:17`,
-`crates/daemon/src/contradiction_candidates/mod.rs:4`) and nothing in the
-daemon calls it; its only callers are the tests in
-`crates/daemon/tests/contradiction_candidates_scorer.rs`. The intended class is
-`explicit-config-only` once the pass (#1167) calls it behind
-`contradiction_candidates.enabled`.
+Reachability: explicit-config-only - the candidate pass calls the scorer
+(`DescriptorTerms::new` and `TopCandidates`,
+`crates/daemon/src/contradiction_candidates/pass.rs:288,292`) for every
+publication it scores, and the pass runs only under the route's frozen
+`contradiction_candidates.enabled` (#1167).
 Status: active
 Exercised: yes - the case-fold test
 `case_folds_identically_on_both_sides_and_diacritics_do_not_fold`
@@ -310,7 +302,7 @@ Reachability: explicit-config-only - `capture_after_response`
 (`crates/daemon/src/lib.rs:9246`) offers a pass only when the route's frozen
 `contradiction_candidates.enabled` and a memory store are both present.
 Status: active
-Exercised: yes - #1167, `crates/daemon/src/candidate_pass_tests.rs`:
+Exercised: partial - #1167, `crates/daemon/src/candidate_pass_tests.rs`:
 `a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate` (`:282`)
 holds the `before_publish` hook and observes zero offers and zero rows, then
 observes the pass start with the capture slot idle and the commit gate free
@@ -318,23 +310,26 @@ and score every descriptor with the gate free, one `completed` pass, and one
 row; a memo-hit job that publishes nothing offers no pass; each job ends in
 one terminal count; a replayed unit is scored again with its rows' tip at or
 above the earlier one. `publish_latency_with_candidates_on_stays_within_the_off_baseline`
-(`:1041`) commits every second publication beside a running pass and keeps
+(`:1041`) commits at least one publication beside a running pass and keeps
 the median publication hold within three times the flag-off median plus
 50 ms. The job hands its kept texts out through `CaptureJob::run_settled`
 (`crates/daemon/src/source_capture.rs:675`) after the blocking closure has
 dropped the slot permit, and the pass runs under its own `EvalBudget`
-(`crates/daemon/src/contradiction_candidates/pass.rs:165`).
-Guarantee: The candidate pass starts only after `CaptureJob::run`
-(`source_capture.rs:653-676`) has produced its terminal `Count` and the
-capture commit gate guard has been dropped (`source_capture.rs:800`); it runs
+(`crates/daemon/src/contradiction_candidates/pass.rs:165`), a fact read from
+the code. Not constructed: the `between_screen_and_commit` hook held, a
+cancel while the job waits in a hook, and the `refused_shutting_down`
+branch.
+Guarantee: The candidate pass starts only after `CaptureJob::run_settled`
+(`source_capture.rs:675-697`) has produced its terminal `Count` and the
+capture commit gate guard has been dropped (`source_capture.rs:869`); it runs
 under an `EvalBudget` whose origin is the pass start and whose interrupt is the
 daemon cancel, never the job's budget; the response bytes were handed to the
-wire writer before the `AfterResponse` closure ran (`lib.rs:9219-9238`).
-Check: `always` - with the `before_publish` and `between_screen_and_commit`
-test hooks (`source_capture.rs:781, 839`) blocked, the candidate table has
-zero rows and the pass counter `admitted` is zero; after the hooks release and
-the job returns, the pass runs; the pass's budget object is not the job's; the
-semantics is `always` because every publication must respect the ordering.
+wire writer before the `AfterResponse` closure ran (`lib.rs:9242-9283`).
+Check: `always` - with the `before_publish` or `between_screen_and_commit`
+test hook (`source_capture.rs:850, 908`) blocked, the candidate table has
+zero rows and no pass is offered; after the hook releases and the job
+returns, the pass runs; the semantics is `always` because every publication
+must respect the ordering.
 Fault/timing angle: the window between `publish_screened_between` returning
 and `drop(gate)`; the window between the job's terminal and the pass start;
 daemon cancel during either.
@@ -364,12 +359,13 @@ descriptor's rows, `descriptors_unscored` = 2, and `active` back at 0;
 (`:983`) shows a panicking pass counted with its permit and charge released
 and shutdown waiting for a parked pass. P = 1 per store through a
 non-waiting permit (`crates/daemon/src/contradiction_candidates/pass.rs:112`).
-Guarantee: At most P candidate passes exist at once (P a named constant,
-proposed 1 per project binding); an offer that finds the bound full is refused
-and counted, never queued without bound; daemon cancel ends every running
-pass within its budget.
+Guarantee: At most P = 1 candidate pass exists at once per store; an offer
+that finds the permit taken is refused and counted `refused_pass_busy`, never
+queued; a daemon cancel ends a running pass at its next budget check, after
+at most one unbudgeted Kernel read (the visible-decision or payload-size
+read).
 Check: `always` - after N rapid publications with the pass blocked on a test
-hook, running passes are at most P and `refused_busy` equals N - P; the
+hook, running passes are at most 1 and `refused_pass_busy` equals N - 1; the
 semantics is `always` because every offer is subject to the bound.
 Fault/timing angle: a burst of publications faster than one pass completes;
 a pass blocked on a slow Kernel read.
@@ -393,25 +389,25 @@ Status: active
 Exercised: partial - #1167, `crates/daemon/src/candidate_pass_tests.rs`:
 `the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_counts_the_cut`
 (`:560`) seeds N + 1 visible decisions with the cap at N = 4: the oldest is
-cut, `candidates_truncated` = 1, the other project's decision is never read,
+cut, `candidates_truncated` = 1, the other project's decision is never scored,
 and stale and disputed decisions are scored while the contradicted one is
 hidden by explicit search; `a_superseded_decision_is_never_scored_and_the_default_bounds_are_the_named_constants`
 (`:603`) pins the production values (N = 4096) and shows a superseded
 decision unread; `the_summary_byte_cut_skips_payloads_before_any_load`
 (`:667`) cuts payloads before any load and counts their bytes. Not
 constructed at the production N: the tests cut at a reduced cap. The
-`eligible` filter in the pass (`crates/daemon/src/contradiction_candidates/pass.rs:363`) rejects nothing explicit search
-serves at HEAD, so no test shows it as the reason a decision is dropped.
+no test shows the pass's `eligible` filter
+(`crates/daemon/src/contradiction_candidates/pass.rs:363`) as the reason a
+decision is dropped.
 Guarantee: The pass's candidate set is built by the project scope term
 prefilter (`admission.rs:3138-3144`, `project.rs:106-111`) and the
-`ScopeFilter` judge, then cut to at most N decisions in a deterministic
-newest-first order with a counted truncation when more were eligible; summary
-bytes are bounded before any payload is loaded
-(`decision_payload_sizes_as_of`, `slice/read.rs:330`, or
-`decision_page_within_budget`'s `max_payload_bytes`, `:126-133`); the pass
-never loads more than N summaries or more than the byte bound.
+`ScopeFilter` judge, then cut to at most N visible, scope-matched decisions
+in a deterministic newest-first order with a counted truncation when more
+were visible, before the eligibility filter; summary bytes are bounded before
+any payload is loaded (`decision_payload_sizes_as_of`, `slice/read.rs:330`);
+the pass never loads more than N summaries or more than the byte bound.
 Check: `always` - with N + 1 eligible decisions the pass scores exactly N, the
-oldest is the one omitted, and `candidate_set_truncated` increments by one; a
+oldest is the one omitted, and `candidates_truncated` increments by one; a
 decision with an oversize payload is skipped before load and counted; the
 semantics is `always` because every pass must stay inside the bound.
 Fault/timing angle: a project whose `memory` decisions exceed N; a decision
@@ -442,7 +438,8 @@ of descriptors 1 and 2, none for 3 to 5, `descriptors_unscored` = 3, and
 `deadline` = 1; `a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor`
 (`:759`) and the cancel case of
 `a_second_offer_while_a_pass_runs_is_refused_and_a_cancel_still_ends_the_pass`
-(`:398`) cover the empty prefix and a cancel between descriptors. The pass
+(`:398`) cover the empty prefix and a cancel at the second of three
+descriptors. The pass
 writes each descriptor's rows in one store write after its full candidate
 set is scored (`crates/daemon/src/contradiction_candidates/pass.rs:243`).
 Guarantee: When the pass's budget is exhausted or interrupted, the rows
@@ -489,25 +486,26 @@ key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_
 project cap in the write transaction; the daemon owns the values. Pass arm
 (#1167): `the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows`
 (`crates/daemon/src/candidate_pass_tests.rs:779`) scores K + 1 overlaps into K rows, cuts a pass at M in publish
-order with `rows_written` = M and the rest counted `dropped_at_cap`, keeps a
-project at its cap with the eviction counted, rescoring at a newer tip keeps
+order with `rows_written` = M and the rest counted `dropped_at_cap`, counts
+the rows one write drops at the project cap (the store tests cover evicting
+held rows), rescoring at a newer tip keeps
 each key with a higher `publish_tip`, and a descriptor past M keeps the rows
 it already holds; the handler test at `:282` republishes a replayed unit
 through the job and keeps the same keys. The over-M count is
 `dropped_at_cap`; the C13 vocabulary has no `pass_cap_reached`.
-Guarantee: The table key is (project digest, descriptor evidence object id,
-decision object id); a write for an existing key replaces `decision_id`,
+Guarantee: The table key is (project digest, descriptor evidence row id
+`srcev:{key}`, decision object id); a write for an existing key replaces `decision_id`,
 `score`, `matched_atoms`, `publish_tip`, `created_at_ms`; one pass writes at
 most K rows per evidence id and at most M rows in total, stopping at M with a
 count; the row carries no column that any command reads for admission.
 Check: `always` - after any sequence of passes, `SELECT COUNT(*) GROUP BY
 key` is 1 for every key; after one pass with a descriptor matching K + 1
 decisions the evidence id has K rows; after one pass whose descriptors would
-match more than M, exactly M rows are written and `pass_cap_reached`
-increments; the semantics is `always` because the predicate holds at every
+match more than M, exactly M rows are written and the rest are counted
+`dropped_at_cap`; the semantics is `always` because the predicate holds at every
 pass commit.
 Fault/timing angle: a replayed publication (`Published.replayed`,
-`harness_sources.rs:530`) re-scoring the same evidence id; two passes for one
+`harness_sources.rs:531`) re-scoring the same evidence id; two passes for one
 project interleaving (bounded by P).
 Required faults and enabling state: flag on; a descriptor overlapping K + 1
 decisions; a batch whose total matches exceed M; the same unit published
@@ -757,7 +755,8 @@ with (`a_route_keeps_the_candidate_flag_it_was_bound_with_and_health_reports_the
 `crates/daemon/src/lib.rs:21340`), which also shows the status block
 carrying the key with every counter zero. Pass arm (#1167):
 `a_route_without_consent_offers_no_pass_and_writes_no_row` (`crates/daemon/src/candidate_pass_tests.rs:251`)
-publishes three windows with source capture on and consent off and observes
+sets the offer's consent off directly, publishes three windows with source
+capture on, and observes
 every counter at zero and no row; `the_route_consent_reaches_the_pass_through_a_transform`
 (`:933`) binds the route against the opposite daemon value and shows the
 offer follows the route's frozen value. No statement trace exists, so the
@@ -782,9 +781,9 @@ bound (the route keeps false, while the sweep follows the reload on its next
 pass); a daemon restart with the flag on (new routes see true).
 Required faults and enabling state: a default config; publications with
 source capture on; a `candidates` call and an owner read under the default.
-Confidence: low - only the sweep and status arm exist; the pass and read
-arms are unbuilt
-Existing check: the sweep-arm tests named under Exercised (#1166),
+Confidence: medium - the sweep and pass arms are tested; the read arm is
+unbuilt and no statement trace exists
+Existing check: the sweep-arm and pass-arm tests named under Exercised,
 unaudited.
 Impact: an unmeasured matcher reaches users (KTD4) and a surprise write load
 appears in deployments that did not opt in.

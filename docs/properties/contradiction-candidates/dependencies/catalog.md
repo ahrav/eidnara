@@ -379,7 +379,7 @@ Read the signature at `admission.rs:3165-3176` and `visible_selected_as_of`.
 Existing check: none for the Kernel-side count; the daemon-side cap test
 (`kernel_routes.rs:1958`) constructs over-cap rows and so would witness this
 state if instrumented. Status unaudited.
-Re-exercised by #1167: the pass calls
+Relied on by #1167: the pass calls
 `visible_domain_decisions_as_of_in_scope` without a row or budget bound (the
 `sometimes` witness); the pass's own bound applies after the read.
 Impact: the plan's R2 reads the whole scope-filtered domain per pass; the
@@ -626,7 +626,7 @@ Read `harness_sources.rs:612-616`, `:1557`, `:1602-1603`;
 `source_capture.rs:832-840`, `:904-980`.
 Existing check: the 33-unit test; `a_refused_window_still_captures_its_documents`
 (`:2227`) shows the documents batch is independent. Status unaudited.
-Re-exercised by #1167: the pass scores the units one job published, so its
+Relied on by #1167: the pass scores the units one job published, so its
 descriptor count is bounded by the window batch plus the documents batch.
 Impact: the P5 trigger's per-pass input is at most 32 window descriptors plus
 the documents batch's descriptors, not 32 total (D3 corrects the plan's "one
@@ -671,9 +671,9 @@ Re-exercised by #1167: the job's `Count` vocabulary is unchanged, and
 `a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate`
 (`crates/daemon/src/candidate_pass_tests.rs:282`) checks two jobs end in two
 `completed` counts with consent on.
-Impact: a P5 trigger that waits for a post-publish hook has nothing to wait
-on at HEAD; it must be inserted at `admission.spawn(job.run())`
-(`lib.rs:9231`) or inside `run`.
+Impact: the P5 trigger waits for the job's terminal: the capture task runs
+`job.run_settled()` and offers the pass after it returns
+(`lib.rs:9242-9283`).
 Open questions: None.
 
 ### p5dep-baseline-digest-change-closes-the-activation-gate
