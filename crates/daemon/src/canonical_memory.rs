@@ -102,6 +102,44 @@ impl CanonicalMemorySnapshot {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+
+    /// What a use-outcome serve records of this snapshot, owned, so a write can outlive the pass without its rows.
+    pub fn served_set(&self) -> ServedSet {
+        ServedSet {
+            ids: self.served_ids().into_iter().map(str::to_string).collect(),
+            digest: self.served_set_digest.clone(),
+            revision: self.revision,
+            known_as_of: self.known_as_of,
+        }
+    }
+}
+
+/// The identity a serve record carries: the rendered decision ids, ascending and distinct, their digest, the
+/// revision, and the commit sequence the rows were read at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedSet {
+    ids: Vec<String>,
+    digest: String,
+    revision: u64,
+    known_as_of: i64,
+}
+
+impl ServedSet {
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.ids.iter().map(String::as_str)
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn known_as_of(&self) -> i64 {
+        self.known_as_of
+    }
 }
 
 /// The rows the block renders, in object-id order; the revision and the served-set digest derive from them.
