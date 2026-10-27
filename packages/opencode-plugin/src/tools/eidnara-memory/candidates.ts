@@ -2,11 +2,14 @@ import { isAvailable, type KernelClient, renderToolStateText } from "../../share
 import { MemoryInputError } from "../../shared/kernel-client/anti-memory";
 import type { EidnaraMemoryArgs } from "./types";
 
-const CANDIDATES_NOTE =
-    "A candidate is a lexical overlap between a published source and this memory, not a judgment that they contradict. File a confirm form only with independent evidence that the source conflicts with the memory; otherwise report the candidate to the user. The form uses mark_disputed; change event to contradict only when the source directly contradicts the memory.";
+const OVERLAP_NOTE =
+    "A candidate is a lexical overlap between a published source and this memory, not a judgment that they contradict.";
 
-const DISPUTE_UNAVAILABLE_NOTE =
-    " The dispute action is not admitted in this context, so show the form to the user instead of filing it.";
+const FILE_FORM_NOTE =
+    " File a confirm form only with independent evidence that the source conflicts with the memory; otherwise report the candidate to the user. The form uses mark_disputed; change event to contradict only when the source directly contradicts the memory.";
+
+const REPORT_FORM_NOTE =
+    " The dispute action is not admitted in this context, so show each form to the user instead of filing it.";
 
 export interface ExecuteCandidatesArgs {
     client: KernelClient;
@@ -59,7 +62,7 @@ export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<s
     return JSON.stringify({
         action: "candidates",
         objectId,
-        note: input.disputeAdmitted ? CANDIDATES_NOTE : CANDIDATES_NOTE + DISPUTE_UNAVAILABLE_NOTE,
+        note: OVERLAP_NOTE + (input.disputeAdmitted ? FILE_FORM_NOTE : REPORT_FORM_NOTE),
         asOf: result.as_of,
         candidates: result.items.map((item) => ({
             evidenceId: item.evidence_id,

@@ -44,6 +44,6 @@ open and one whose open failed; an eligible decision with zero rows. All in
 
 - Sources examined: `crates/daemon/src/candidate_pass_tests.rs:1590`, `:1607`.
 - Findings: a Kernel not yet open answers `unavailable`/`store_starting`;
-  opening at a file path answers another `unavailable` reason.
+  opening at a file path answers `unavailable`/`store_unavailable`.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

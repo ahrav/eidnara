@@ -12,9 +12,9 @@ the ids the dispute validates, and the confirm must stay a Kernel decision.
 - `crates/daemon/src/harness_sources.rs:527` `Published.evidence_id` is the
   evidence row id a dispute cites; the pass writes it as the row's
   `evidence_id`.
-- `packages/opencode-plugin/src/tools/eidnara-memory/candidates.ts:72`
+- `packages/opencode-plugin/src/tools/eidnara-memory/candidates.ts:75`
   renders `confirm: {action: "dispute", event: "mark_disputed", objectId,
-  evidenceId}` from the row, and `:56` refuses a page naming another memory.
+  evidenceId}` from the row, and `:59` refuses a page naming another memory.
 - `crates/daemon/src/kernel_routes/dispute.rs` validates the evidence at
   commit; `crates/daemon/src/candidate_pass_tests.rs:1749` checks that it and
   `commit.rs` name no candidate store method.

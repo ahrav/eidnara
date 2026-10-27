@@ -1604,7 +1604,7 @@ async fn review_candidates_answers_the_store_and_kernel_states_before_any_page()
     .await
     .unwrap();
     assert_eq!(answer["state"]["kind"], "unavailable", "{answer}");
-    assert_ne!(answer["state"]["reason"], "store_starting", "{answer}");
+    assert_eq!(answer["state"]["reason"], "store_unavailable", "{answer}");
     assert!(answer.get("items").is_none());
 
     let dir = tempfile::tempdir().unwrap();
@@ -1765,7 +1765,7 @@ fn the_confirm_path_never_reads_the_candidate_table() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_publication_without_consent_runs_no_candidate_table_statement() {
-    let (handler, store, dir, project) = candidate_handler(candidate_config(true, false)).await;
+    let (handler, store, dir, project) = candidate_handler(candidate_config(true, true)).await;
     let binding = kernel_routes::ProjectBinding::new(&project);
     seed(
         &kernel_of(&handler),

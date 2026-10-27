@@ -739,7 +739,7 @@ decision with no rows answers
 `{"kind":"page","as_of":tip,"items":[],"next":null}` (`:1478`).
 `review_candidates_answers_the_store_and_kernel_states_before_any_page`
 (`:1575`) answers the kernel route's `unavailable`/`store_starting` state for
-a Kernel not yet open (`:1590`), a non-starting `unavailable` state for a
+a Kernel not yet open (`:1590`), `unavailable`/`store_unavailable` for a
 Kernel whose open failed (`:1607`), and `store_unavailable` for a daemon with
 no Memory Store (`:1638`), each without `items`. The OpenCode tool renders
 each terminal by name and `disabled` as a plain statement

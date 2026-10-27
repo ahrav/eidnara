@@ -1638,6 +1638,9 @@ describe("eidnara_memory candidates", () => {
         );
         expect(parsed.note).not.toContain("not admitted");
         expect(parsed.candidates[0].confirm.action).toBe("dispute");
+        expect(note).not.toContain("File a confirm form");
+        expect(byDefault.definition.description).not.toContain("independent evidence");
+        expect(admitted.definition.description).toContain("independent evidence");
     });
 
     test("refuses a page naming another memory and paging fields the schema would refuse", async () => {
@@ -1660,6 +1663,9 @@ describe("eidnara_memory candidates", () => {
         );
         expect(await h.execute({ action: "candidates", objectId: "m", after: 5 })).toBe(
             "Error: 'after' must be a string or null",
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m", limit: 65 })).toBe(
+            "Error: 'limit' must be an integer from 1 to 64",
         );
         expect(h.calls).toHaveLength(1);
     });
