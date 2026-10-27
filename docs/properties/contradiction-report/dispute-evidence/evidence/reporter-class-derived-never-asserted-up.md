@@ -18,7 +18,7 @@ route's derivation, never from a stronger claim by the client.
   (`commit.rs:411-444`; ranks at `:382-404`).
 - The handler passes the resolved taint to `compose_reason`
   (`commit.rs:1109-1123`), which renders it as `reporter_taint`
-  (`crates/daemon/src/kernel_routes/dispute.rs:80-84`).
+  (`crates/daemon/src/kernel_routes/dispute.rs:83-87`).
 - `disposition_request` builds the admission request with the subject's
   prior classes (`commit.rs:725-726`), so the row's class columns are the
   subject's; the Kernel refuses a request whose classes differ from the

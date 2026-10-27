@@ -650,7 +650,9 @@ commit) carry the same disposition operation with its evidence fields,
 one expected object rather than comparing the two bodies, and it does not
 assert the whole intent equal.
 Guarantee: The command sends exactly one disposition operation, identical
-in preview and commit, under `sourceKind: "user"` and the same intent;
+in preview and commit, under the caller's `sourceKind` (`"user"` from
+both command callers, `"assistant"` from `executeDispute`) and the same
+intent;
 asks confirmation at most once and only when `visibility_changes &&
 !confirmed`; commits nothing after a denied preview, a decline, or
 cancellation; and reports `outcome_unknown` when the commit's verdict list
@@ -658,7 +660,8 @@ does not answer the sent operation.
 Check: `always` - for one invocation: `previewBody.operations ==
 commitBody.operations == [{op:"disposition", object_id, event,
 evidence_id?, evidence_ref?}]` (`memory-mark-command.ts:247-254`),
-`previewBody.intent == commitBody.intent`, `source_kind == "user"`;
+`previewBody.intent == commitBody.intent`, `source_kind` equal to the
+caller's (`"user"` for the command);
 `confirm` called at most once; `commit` not called when the preview
 verdict is `denied`, when `confirm` returns false, or when `isCancelled()`
 is true; `verdictFor` returns null whenever `results.length != 1 ||

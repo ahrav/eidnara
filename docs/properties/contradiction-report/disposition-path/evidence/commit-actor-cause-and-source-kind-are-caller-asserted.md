@@ -32,7 +32,7 @@ which makes the provenance of `source_kind` part of the dispute record.
   body (`ENVELOPE_KEYS`, `mod.rs:461`; `parse_request_body`,
   `:463-474`), so the session reaches no Kernel row.
 - The Kernel redacts `actor` and `cause` before the `commit_log` insert
-  (`RedactedIntent`; insert at `crates/kernel/src/envelope.rs:1419-1435`).
+  (`RedactedIntent`; insert at `crates/kernel/src/envelope.rs:1484-1499`).
 - The commands send `actor = "user:opencode"`
   (`packages/opencode-plugin/src/hooks/context/command-handler.ts:391`) or
   `"user:pi"` (`packages/pi-plugin/src/commands/eidnara-memory-mark.ts:18`)
