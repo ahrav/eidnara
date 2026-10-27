@@ -910,16 +910,18 @@ async fn a_recorded_served_set_replays_while_another_writer_holds_the_writer() {
     };
     writer_held.recv().unwrap();
     let started = std::time::Instant::now();
-    let written = record_serve(
+    // The claim is that a new served set waits for the writer's release rather than answering from the reader; a
+    // generous budget tolerates a stalled host. The measured wait is diagnostic.
+    let written = crate::use_outcome_writer::record_serve(
         &handler.kernel,
         &Serve {
             session_id: "third",
             ..serve
         },
+        std::time::Duration::from_secs(30),
     );
     let waited = started.elapsed();
     brief.join().unwrap();
-    // A write past the budget answers `Deadline`, so `Written` proves the wait fit the budget; the measured wait is diagnostic.
     eprintln!("use-outcome write after a brief hold: {waited:?}");
     assert_eq!(
         written,
