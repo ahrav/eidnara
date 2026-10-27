@@ -145,9 +145,11 @@ At authoring (`3a3b916b7`), with the PR A state noted:
 - The disposition row's class and maturity columns for the three
   non-dispute events: those route tests read `disposition` only
   (`stored_disposition`, `kernel_routes.rs:4348`).
-- The admission path's `evidence_id` handling: two production writers set
-  it (`harness_sources.rs:976`, `memory_reviewer/lifecycle.rs:649`) and no
-  test exercises a retired or dangling id on that path.
+- The admission path's `evidence_id` handling: one production writer sets
+  it (`harness_sources.rs:976`); the `memory_reviewer/lifecycle.rs:649`
+  citation is an `ObservationSpec` inside `#[cfg(test)]` (module at
+  `:500`), so it is test-only and not a writer of this path. No test
+  exercises a retired or dangling id on that path.
 - The lateral disposition moves at equal restrictiveness rank other than
   Stale to Disputed.
 - `derive_classes` is unit-tested (`commit.rs:1213-1291`) but its output

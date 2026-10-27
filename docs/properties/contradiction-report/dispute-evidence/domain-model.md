@@ -96,7 +96,7 @@ TypeScript encodings (the design reviewers).
 
 Accepted decisions preserved: KTD1 to KTD4, R1 to R7, the plan's non-goals,
 and index D3 and D5. Where evidence shows a decision infeasible as written,
-section 12 and `conflicts-and-questions.md` record the conflict.
+section 12 and `open-questions.md` record the conflict.
 
 ## 2. Behavior before representation
 
@@ -576,7 +576,7 @@ for the SQL, the read set, and the conflict footprint.
   No mutation-authority edge from any projection into admission.
 
 ## 12. Conflicts with accepted decisions (summary; details in
-conflicts-and-questions.md)
+open-questions.md)
 
 - C1 (R2 as written): "visible to the caller's project scope" has no
   direct meaning for evidence objects (`ScopeFilter::matches(None)` is
@@ -646,5 +646,5 @@ STRUCTURE INPUTS: visibility predicate and reason grammar as hidden
 VARIATION / ASSEMBLY: closed two-kind evidence value; no assembly change.
 FALSIFIERS: section 5 table; bounds in section 13.
 HANDOFF: section 14; open conflicts C1-C6 and questions in
-  conflicts-and-questions.md.
+  open-questions.md.
 ```

@@ -41,9 +41,11 @@ which makes the provenance of `source_kind` part of the dispute record.
 
 ## Failure scenario
 
-A model tool, or any client holding a bound channel, sends a dispute with
-`actor: "user:opencode"`, `cause: "/eidnara-memory-mark ..."`, and
-`source_kind: "user"`. The route stores the claims; the dispute row's
+A model tool, or any client holding a bound channel, sends a dispute that
+cites live, project-visible evidence (`evidence_id`, which the route
+checks before any write) with `actor: "user:opencode"`,
+`cause: "/eidnara-memory-mark ..."`, and `source_kind: "user"`. The route
+stores the claims; the dispute row's
 reason records `reporter_taint=user_inferred`. A reader treating `actor`
 as verified would attribute the dispute to the user. The derivation keeps
 the taint at or below `user_inferred`, so standing is unaffected.
