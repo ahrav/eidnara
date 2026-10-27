@@ -1411,7 +1411,7 @@ fn every_candidate_statement_reuses_its_cached_plan() {
         .keys()
         .filter(|sql| sql.contains("contradiction_candidate"))
         .collect();
-    assert_eq!(texts.len(), 14, "every candidate statement ran: {texts:#?}");
+    assert_eq!(texts.len(), 16, "every candidate statement ran: {texts:#?}");
     for sql in texts {
         assert_eq!(reuse[sql], 0, "the statement cache re-created {sql}");
         let reprepared = store
@@ -1524,6 +1524,57 @@ fn the_page_sweep_and_eviction_scans_stop_at_their_bound() {
             run.vm_steps < 500,
             "{needle} took {} VM steps over a 300-row project; the scan must stop at its bound",
             run.vm_steps
+        );
+    }
+}
+
+#[test]
+fn a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores() {
+    let (_dir, store) = open();
+    let caps = CandidateCaps {
+        per_descriptor: 4,
+        per_project: 300,
+    };
+    for (project, created) in [(PROJECT, None), (OTHER_PROJECT, Some(7))] {
+        for index in 0..300_i64 {
+            let rows = [score("decision", 3, 4)];
+            let evidence = format!("ev-{index:03}");
+            store
+                .replace_candidates_for_descriptor(
+                    &write(project, &evidence, 1, created.unwrap_or(index), &rows),
+                    caps,
+                )
+                .unwrap();
+        }
+        let mut expected: Vec<StoredCandidate> = all_rows(&store)
+            .into_iter()
+            .filter(|row| row.project_digest == project)
+            .collect();
+        reader_order(&mut expected);
+        let mut cursor = None;
+        let mut read = Vec::new();
+        for _ in 0..4 {
+            let page = store
+                .candidates_for_decision(project, "decision", cursor.as_deref(), MAX_CANDIDATE_PAGE)
+                .unwrap();
+            read.extend(page.items);
+            cursor = page.next;
+        }
+        assert_eq!(read, expected[..256]);
+        store.start_statement_work_ledger();
+        let page = store
+            .candidates_for_decision(project, "decision", cursor.as_deref(), 2)
+            .unwrap();
+        let work = store.take_statement_work();
+        assert_eq!(page.items, expected[256..258]);
+        let steps: u64 = work
+            .iter()
+            .filter(|run| run.sql.contains("contradiction_candidates"))
+            .map(|run| run.vm_steps)
+            .sum();
+        assert!(
+            steps < 500,
+            "a page 256 rows into a run of equal scores took {steps} VM steps: {work:#?}"
         );
     }
 }
