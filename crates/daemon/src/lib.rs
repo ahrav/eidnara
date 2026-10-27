@@ -9245,10 +9245,9 @@ impl HandlerCore {
     /// Charges the built pass's window for source capture and returns the work that starts its tracked job once the response settles: the job takes the publication slot then, and a closed admission or a busy slot refuses it. A response that never settles drops it unrun.
     fn capture_after_response(
         &self,
-        offer: source_capture::Offer,
+        mut offer: source_capture::Offer,
     ) -> Option<dispatch::AfterResponse> {
         // The route's frozen consent decides whether the job's settled publication is offered to a candidate pass.
-        let mut offer = offer;
         let candidates = offer
             .candidates
             .then(|| {

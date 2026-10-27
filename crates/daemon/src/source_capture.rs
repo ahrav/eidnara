@@ -715,7 +715,7 @@ impl CaptureJob {
         let kept: usize = units
             .iter()
             .map(|(text, published)| {
-                text.len()
+                text.capacity()
                     + published.object_id.len()
                     + published.occurrence_id.len()
                     + published.evidence_object_id.len()

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
-use kernel::{ClaimFactBounds, ClaimFactsError, KernelError, KernelStore, Surface};
+use kernel::{ClaimFactBounds, KernelStore, Surface};
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::{CandidateCaps, CandidateScore, DescriptorCandidates};
 use tokio::sync::OwnedSemaphorePermit;
@@ -132,7 +132,7 @@ impl Candidates {
 }
 
 impl CandidatePass {
-    /// Runs the pass on the blocking pool and returns once it physically completes. The blocking closure records the pass's end and timing before it releases the permit, so an idle permit means the counters are final. Cancellation raises the budget's interrupt; the pass stops at its next check, after at most one Kernel read, one scope-term read, 256 summaries of one descriptor, or one row write.
+    /// Runs the pass on the blocking pool and returns once it physically completes. The blocking closure records the pass's end, a panic included, and its timing before it releases the permit, so an idle permit means those counters are final. Cancellation raises the budget's interrupt; the pass stops at its next check. Between checks it runs one budgeted Kernel read, up to 256 scope-term reads, the unbudgeted visible-decision and payload-size reads, 256 summaries of one descriptor, or one row write.
     pub(crate) async fn run(self) -> Count {
         let counts = Arc::clone(&self.active.counts);
         counts.add(Count::Admitted, 1);
@@ -162,43 +162,48 @@ impl CandidatePass {
         }
     }
 
-    fn finish(self, interrupt: &Arc<AtomicBool>) -> Count {
+    fn finish(mut self, interrupt: &Arc<AtomicBool>) -> Count {
         let started = Instant::now();
-        let counts = &self.active.counts;
-        #[cfg(test)]
-        {
-            let hook = counts.before_pass.lock().unwrap().clone();
-            if let Some(hook) = hook {
-                hook();
-            }
-        }
-        let deadline = Instant::now() + counts.bounds().budget;
-        let budget = EvalBudget::new(Some(deadline), Arc::clone(interrupt));
-        let descriptors: Vec<Descriptor> = self
-            .settled
-            .units
-            .iter()
+        let counts = Arc::clone(&self.active.counts);
+        // The texts move out; the charge stays with `settled` until the pass ends.
+        let descriptors: Vec<Descriptor> = std::mem::take(&mut self.settled.units)
+            .into_iter()
             .map(|(text, published)| Descriptor {
-                evidence_id: published.evidence_id.clone(),
-                text: text.clone(),
+                evidence_id: published.evidence_id,
+                text,
             })
             .collect();
-        let end = match self.kernel.kernel_store() {
-            Ok(kernel) => score_publication(
-                &kernel,
-                &self.store,
-                &self.settled.project,
-                &descriptors,
-                counts,
-                &budget,
-                crate::now_ms(),
-            ),
-            Err(_) => {
-                counts.add(Count::DescriptorsUnscored, descriptors.len() as u64);
-                counts.add(Count::KernelUnavailable, 1);
-                Count::KernelUnavailable
+        let scored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            {
+                let hook = counts.before_pass.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
             }
-        };
+            let deadline = Instant::now() + counts.bounds().budget;
+            let budget = EvalBudget::new(Some(deadline), Arc::clone(interrupt));
+            match self.kernel.kernel_store() {
+                Ok(kernel) => score_publication(
+                    &kernel,
+                    &self.store,
+                    &self.settled.project,
+                    &descriptors,
+                    &counts,
+                    &budget,
+                    crate::now_ms(),
+                ),
+                Err(_) => {
+                    counts.add(Count::DescriptorsUnscored, descriptors.len() as u64);
+                    counts.add(Count::KernelUnavailable, 1);
+                    Count::KernelUnavailable
+                }
+            }
+        }));
+        let end = scored.unwrap_or_else(|_| {
+            counts.add(Count::WorkerPanicked, 1);
+            Count::WorkerPanicked
+        });
         let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         counts.set(Count::PassMsLast, elapsed);
         counts.max(Count::PassMsMax, elapsed);
@@ -312,13 +317,14 @@ fn score_descriptors(
         counts.add(Count::DescriptorsAnalyzed, 1);
         let mut rows = top.into_vec();
         let room = bounds.rows_per_pass.saturating_sub(written);
+        // A pass at its cap leaves the rows the descriptor already holds; an empty write would replace them.
+        if room == 0 && !rows.is_empty() {
+            counts.add(Count::DroppedAtCap, rows.len() as u64);
+            continue;
+        }
         if rows.len() > room {
             counts.add(Count::DroppedAtCap, (rows.len() - room) as u64);
             rows.truncate(room);
-        }
-        // A write with no rows would replace the rows the descriptor already holds.
-        if rows.is_empty() && room == 0 {
-            continue;
         }
         let scores: Vec<CandidateScore<'_>> = rows
             .iter()
@@ -362,7 +368,7 @@ fn candidate_summaries(
     bounds: &PassBounds,
     budget: &EvalBudget,
 ) -> Result<Vec<(String, String, String)>, Count> {
-    let failed = |_: KernelError| stop(budget).unwrap_or(Count::KernelUnavailable);
+    let failed = |_| stop(budget).unwrap_or(Count::KernelUnavailable);
     let tip = target.target.through_commit;
     let visible = kernel
         .visible_domain_decisions_as_of_in_scope(
@@ -404,7 +410,7 @@ fn candidate_summaries(
         }
         let read = kernel
             .claim_facts_at_within_budget(chunk, target.target, claims, budget)
-            .map_err(|_: ClaimFactsError| stop(budget).unwrap_or(Count::KernelUnavailable))?;
+            .map_err(|_| stop(budget).unwrap_or(Count::KernelUnavailable))?;
         // The scope filter above already kept only rows whose scope names the project.
         let standing: HashMap<&str, bool> = read
             .claims

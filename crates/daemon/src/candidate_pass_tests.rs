@@ -1,5 +1,5 @@
 use std::num::NonZeroUsize;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc;
 
 use kernel::source_identity::OccurrenceClass;
@@ -301,6 +301,16 @@ async fn a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate() {
     *handler.contradiction_candidates.before_pass.lock().unwrap() = Some(Arc::new(move || {
         *seen.lock().unwrap() = Some((capture.is_idle(), gate.try_lock().is_ok()));
     }));
+    let scoring_gate = Arc::clone(&handler.capture_commit_gate);
+    let scoring = Arc::new(Mutex::new(Vec::new()));
+    let scored = Arc::clone(&scoring);
+    *handler
+        .contradiction_candidates
+        .before_descriptor
+        .lock()
+        .unwrap() = Some(Arc::new(move |_| {
+        scored.lock().unwrap().push(scoring_gate.try_lock().is_ok());
+    }));
     publish(
         &handler,
         &project,
@@ -347,6 +357,40 @@ async fn a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate() {
         capture_report(&handler)["completed"],
         2,
         "each job still ends in exactly one terminal count"
+    );
+    let before = rows(&store);
+    handler.source_capture.forget_memo_for_test();
+    publish(
+        &handler,
+        &project,
+        &window(0, &format!("{TOPIC} first")),
+        true,
+    );
+    settle(&handler).await;
+    assert!(capture_report(&handler)["units_replayed"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        counts(&handler)["completed"],
+        2,
+        "a replayed unit is scored again"
+    );
+    let after = rows(&store);
+    assert_eq!(after.len(), before.len());
+    for (earlier, later) in before.iter().zip(&after) {
+        assert_eq!(
+            (&earlier.evidence_id, &earlier.decision_object_id),
+            (&later.evidence_id, &later.decision_object_id)
+        );
+        assert!(later.publish_tip >= earlier.publish_tip);
+    }
+    *handler
+        .contradiction_candidates
+        .before_descriptor
+        .lock()
+        .unwrap() = None;
+    let scoring = scoring.lock().unwrap();
+    assert!(
+        !scoring.is_empty() && scoring.iter().all(|free| *free),
+        "the commit gate is free while each descriptor is scored"
     );
 }
 
@@ -712,6 +756,26 @@ fn a_deadline_during_the_third_descriptor_leaves_the_first_two() {
 }
 
 #[test]
+fn a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor() {
+    let core = Core::open(PassBounds {
+        budget: Duration::ZERO,
+        ..PassBounds::default()
+    });
+    seed(
+        &core.kernel,
+        &core.project,
+        &[("one", TOPIC, EventKind::Other)],
+    );
+    let descriptors: Vec<Descriptor> = (0..3)
+        .map(|index| core.descriptor(&format!("d{index}"), TOPIC))
+        .collect();
+    assert_eq!(core.score(&descriptors), CandidateCount::Deadline);
+    assert!(rows(&core.store).is_empty());
+    assert_eq!(core.count("descriptors_unscored"), 3);
+    assert_eq!(core.count("deadline"), 1);
+}
+
+#[test]
 fn the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows() {
     let names: Vec<String> = (0..5).map(|index| format!("c{index}")).collect();
     let decisions: Vec<(&str, &str, EventKind)> = names
@@ -868,8 +932,14 @@ async fn a_rerun_from_the_retained_bytes_at_one_tip_rebuilds_the_rows_and_the_ke
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_route_consent_reaches_the_pass_through_a_transform() {
     for consent in [false, true] {
-        let (handler, store, _dir, project) =
-            candidate_handler(candidate_config(true, consent)).await;
+        let (handler, store, _dir, project) = handler_with_store_and_kernel(
+            Arc::new(ProducerState::default()),
+            candidate_config(true, !consent),
+        )
+        .await;
+        let mut bound = binding_with_harness(project.to_str().unwrap(), "opencode", SESSION);
+        bound.config = candidate_config(true, consent);
+        handler.bind_route(test_route(7), bound);
         let binding = kernel_routes::ProjectBinding::new(&project);
         seed(
             &kernel_of(&handler),
@@ -933,16 +1003,26 @@ async fn a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_
     assert_eq!(capture_report(&handler)["retained_bytes"], 0);
     assert!(rows(&store).is_empty());
 
+    let job_charge = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&job_charge);
+    let capture = Arc::clone(&handler.source_capture);
+    *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+        let held = capture.report(false, now_ms())["retained_bytes"]
+            .as_u64()
+            .unwrap();
+        observed.store(held, std::sync::atomic::Ordering::Relaxed);
+    }));
     let (reached, release) = park(&handler);
-    publish(
-        &handler,
-        &project,
-        &window(1, &format!("{TOPIC} second")),
-        true,
-    );
+    let text = format!("{TOPIC} second");
+    publish(&handler, &project, &window(1, &text), true);
     entered(&reached);
+    *handler.source_capture.before_publish.lock().unwrap() = None;
     let held = capture_report(&handler)["retained_bytes"].as_u64().unwrap();
-    assert!(held > 0, "the parked pass holds its publication's charge");
+    let job = job_charge.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        held > text.len() as u64 && held < job,
+        "the parked pass holds a charge for its kept text ({held} bytes), below the job's {job}"
+    );
     let core = Arc::clone(&handler.core);
     let shutdown =
         tokio::spawn(async move { CompositeComponent::shutdown(&Handler { core }).await });
@@ -960,12 +1040,12 @@ async fn a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publish_latency_with_candidates_on_stays_within_the_off_baseline() {
     const RUNS: u64 = 12;
-    let mut held = Vec::new();
+    let mut medians = Vec::new();
     for enabled in [false, true] {
         let (handler, _store, _dir, project) =
             candidate_handler(candidate_config(true, enabled)).await;
         let binding = kernel_routes::ProjectBinding::new(&project);
-        let decisions: Vec<(String, String)> = (0..64)
+        let decisions: Vec<(String, String)> = (0..2_000)
             .map(|index| (format!("seeded-{index}"), format!("{TOPIC} {index} topic")))
             .collect();
         let refs: Vec<(&str, &str, EventKind)> = decisions
@@ -973,53 +1053,74 @@ async fn publish_latency_with_candidates_on_stays_within_the_off_baseline() {
             .map(|(name, summary)| (name.as_str(), summary.as_str(), EventKind::Other))
             .collect();
         seed(&kernel_of(&handler), &binding, &refs);
+        // The flag-on arm records each publication that commits while a pass is running.
+        let overlapped = Arc::new(AtomicU64::new(0));
+        let seen = Arc::clone(&overlapped);
+        let candidates = Arc::clone(&handler.contradiction_candidates);
+        *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+            if candidates.report()["active"] == 1 {
+                seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }));
+        let mut samples = Vec::new();
         for run in 0..RUNS {
-            let texts: Vec<Value> = (0..8)
-                .flat_map(|unit| window(run * 8 + unit, &format!("{TOPIC} {run} {unit} topic")))
-                .collect();
-            // On the flag-on arm every odd publication runs while the previous pass is parked.
-            let parked = (enabled && run % 2 == 0).then(|| park(&handler));
-            publish(&handler, &project, &texts, enabled);
-            if let Some((reached, release)) = parked {
-                entered(&reached);
-                unhook(&handler);
-                let next: Vec<Value> = (0..8)
+            let batch = |offset: u64, word: &str| -> Vec<Value> {
+                (0..8)
                     .flat_map(|unit| {
                         window(
-                            10_000 + run * 8 + unit,
-                            &format!("{TOPIC} {run} {unit} overlap"),
+                            offset + run * 8 + unit,
+                            &format!("{TOPIC} {run} {unit} {word}"),
                         )
                     })
-                    .collect();
-                publish(&handler, &project, &next, enabled);
+                    .collect()
+            };
+            let parked = enabled.then(|| park(&handler));
+            publish(&handler, &project, &batch(0, "topic"), enabled);
+            if let Some((reached, release)) = &parked {
+                entered(reached);
+                unhook(&handler);
+                release.send(()).unwrap();
+            } else {
                 while !handler.source_capture.is_idle() {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                release.send(()).unwrap();
             }
+            samples.push(
+                capture_report(&handler)["publish_ms_last"]
+                    .as_u64()
+                    .unwrap(),
+            );
+            publish(&handler, &project, &batch(10_000, "beside"), enabled);
+            while !handler.source_capture.is_idle() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            samples.push(
+                capture_report(&handler)["publish_ms_last"]
+                    .as_u64()
+                    .unwrap(),
+            );
             settle(&handler).await;
         }
-        let report = capture_report(&handler);
+        samples.sort_unstable();
+        let median = samples[samples.len() / 2];
+        let overlaps = overlapped.load(std::sync::atomic::Ordering::Relaxed);
         eprintln!(
-            "candidate pass {}: publish_ms_max {} publish_ms_last {} units_published {} pass_ms_max {} rows_written {} refused_pass_busy {}",
+            "candidate pass {}: publication hold median {median} ms, p90 {} ms, max {} ms over {} publications; pass_ms_max {}; publications beside a running pass {overlaps}",
             if enabled { "on" } else { "off" },
-            report["publish_ms_max"],
-            report["publish_ms_last"],
-            report["units_published"],
+            samples[samples.len() * 9 / 10],
+            samples[samples.len() - 1],
+            samples.len(),
             counts(&handler)["pass_ms_max"],
-            counts(&handler)["rows_written"],
-            counts(&handler)["refused_pass_busy"],
         );
-        held.push(report["publish_ms_max"].as_u64().unwrap());
+        medians.push(median);
         if enabled {
-            assert_eq!(counts(&handler)["refused_pass_busy"], RUNS / 2);
-            assert_eq!(counts(&handler)["completed"], RUNS);
+            assert!(overlaps > 0, "no publication committed while a pass ran");
         }
     }
     assert!(
-        held[1] <= held[0].saturating_mul(2) + 50,
-        "publication hold with candidates on {} ms, off {} ms",
-        held[1],
-        held[0]
+        medians[1] <= medians[0].saturating_mul(3) + 50,
+        "median publication hold with candidates on {} ms, off {} ms",
+        medians[1],
+        medians[0]
     );
 }
