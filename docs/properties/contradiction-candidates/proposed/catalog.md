@@ -547,16 +547,21 @@ of the bound project and the other project's own row, a repeat drops zero,
 and the Kernel tip and the reviewer-job facts are unchanged;
 `a_closed_kernel_drops_nothing_and_counts_the_skip` (`:502`) runs with no
 Kernel; `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land`
-(`:766`) refuses one claim chunk and observes its live rows kept, the
+(`:765`) refuses one claim chunk and observes its live rows kept, the
 over-age and retired-evidence rows dropped, and one skip counted;
 `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over`
 (`:517`) bounds each run to one page;
 `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it`
-(`:817`), `a_cancelled_sweep_deletes_nothing` (`:843`),
-`every_claim_chunk_of_a_page_is_read` (`:856`), and
+(`:816`), `a_cancelled_sweep_deletes_nothing` (`:842`),
+`every_claim_chunk_of_a_page_is_read` (`:855`), and
 `a_row_at_the_age_bound_stays_and_one_past_it_drops` (`:486`) cover the
-remaining branches. The sweep is `CandidateSweep::run`
-(`crates/daemon/src/contradiction_candidates/sweep.rs:68`); it reads the page
+remaining branches. `a_busy_reader_does_not_hold_the_sweep_past_its_budget`
+(`:1000`) holds one Kernel reader while the other is free and observes the
+sweep return inside its budget with both rows judged: each scope-terms read
+goes through `KernelStore::scope_terms_within_budget`
+(`crates/kernel/src/scope.rs:1573`), which polls the whole reader pool and
+stops at the sweep's deadline. The sweep is `CandidateSweep::run`
+(`crates/daemon/src/contradiction_candidates/sweep.rs:66`); it reads the page
 before it captures the tip, reads each chunk of decisions in ascending id
 order through `KernelStore::claim_standing_at_within_budget`
 (`crates/kernel/src/claim_facts.rs:270`), which returns the registry row,
@@ -716,7 +721,7 @@ hides the table, runs the sweep under a false flag with and without a
 Kernel, and observes every counter at zero, then shows the same table fails
 the first statement an enabled sweep runs;
 `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass`
-(`:901`) drives `pass_then_sweep`
+(`:900`) drives `pass_then_sweep`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) with the flag off and
 then on. The key is `/contradiction_candidates/enabled`
 (`crates/daemon/src/config.rs:1024`), user-only and default false

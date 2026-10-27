@@ -995,3 +995,29 @@ fn the_evidence_read_refuses_another_incarnation_and_a_future_snapshot() {
         ))
     );
 }
+
+#[test]
+fn a_busy_reader_does_not_hold_the_sweep_past_its_budget() {
+    const HOLD: std::time::Duration = std::time::Duration::from_secs(6);
+    let fixture = Fixture::open();
+    let live = fixture.live_evidence.clone();
+    fixture.write(PROJECT, &live, &["active", "other-project"], |_| {});
+    let counts = Candidates::default();
+    let held = std::sync::Barrier::new(2);
+    let elapsed = std::thread::scope(|scope| {
+        scope.spawn(|| fixture.kernel.hold_first_reader_for_test(&held, HOLD));
+        held.wait();
+        let started = std::time::Instant::now();
+        fixture.sweep(&mut CandidateSweep::default(), &counts, NOW_MS, &|| false);
+        started.elapsed()
+    });
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "the sweep waited {elapsed:?} on the held reader"
+    );
+    assert_eq!(
+        kept(&fixture),
+        [(PROJECT.to_string(), live, "object-active".to_string())]
+    );
+    assert_eq!(report(&counts)["sweep_skipped_kernel_unavailable"], 0);
+}

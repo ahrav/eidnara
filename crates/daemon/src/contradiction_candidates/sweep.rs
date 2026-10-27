@@ -11,16 +11,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
-use kernel::{
-    ClaimStanding, EvidenceLiveness, IdentifiedCommitReadTarget, KernelError, KernelStore,
-};
+use kernel::{ClaimStanding, EvidenceLiveness, IdentifiedCommitReadTarget, KernelStore};
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::StoredCandidate;
 
 use super::eligibility::eligible;
 use super::scorer::matcher_digest;
 use super::{Candidates, Count};
-use crate::kernel_routes::project::{ScopeFilter, stored_terms};
+use crate::kernel_routes::project::ScopeFilter;
 
 /// Rows one sweep run examines.
 pub const CANDIDATE_SWEEP_PAGE: usize = 256;
@@ -215,14 +213,7 @@ fn judge(
         }
     }
     let mut filters: HashMap<&str, Option<ScopeFilter>> = HashMap::new();
-    let mut stored = stored_terms(kernel);
-    let mut terms = |scope: &str| {
-        if budget.is_exhausted() {
-            Err(KernelError::Deadline)
-        } else {
-            stored(scope)
-        }
-    };
+    let mut terms = |scope: &str| kernel.scope_terms_within_budget(scope, budget);
     for (row, standing) in rows.iter().zip(standing.iter_mut()) {
         if *standing == Standing::Dead || row.publish_tip > target.target.through_commit {
             continue;

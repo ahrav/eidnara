@@ -410,10 +410,10 @@ applies the same id checks (`check_claim_ids`, `:343`) inside `limit.run`
 before its reader acquisition (`:284`), in chunks of 64 under
 `max_claims` = 64, so `TooManyClaims` cannot arise from it;
 `every_claim_chunk_of_a_page_is_read`
-(`crates/daemon/tests/contradiction_candidates_sweep.rs:856`) reads 66
+(`crates/daemon/tests/contradiction_candidates_sweep.rs:855`) reads 66
 decisions in two chunks, and
 `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land`
-(`:766`) shows a chunk refused as `NotADecision` keeps that chunk's rows.
+(`:765`) shows a chunk refused as `NotADecision` keeps that chunk's rows.
 Impact: for P5 R2 this bound caps the ids per call but, per D1, the call
 returns no summary text; the plan's data path through this API does not
 exist at HEAD.

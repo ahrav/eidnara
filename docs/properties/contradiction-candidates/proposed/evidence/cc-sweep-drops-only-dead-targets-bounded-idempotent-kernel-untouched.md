@@ -12,7 +12,7 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/sweep.rs:68` `CandidateSweep::run`
+- `crates/daemon/src/contradiction_candidates/sweep.rs:66` `CandidateSweep::run`
   returns before any statement when the flag is false, counts one skip with
   no Kernel, reads `CANDIDATE_SWEEP_PAGE + 1` rows after the watermark, and
   only then captures the identified Kernel target, so every row on the page
@@ -20,13 +20,19 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
   `judge`.
 - `run` marks a row dead without a Kernel read when its matcher digest
   differs from `matcher_digest()` or its age exceeds `MAX_CANDIDATE_AGE`;
-  these drops land even when the tip capture fails. `sweep.rs:176` `judge`
+  these drops land even when the tip capture fails. `sweep.rs:174` `judge`
   then marks a row with a foreign `database_incarnation_id` dead, reads
   claim standing for the distinct decisions in ascending id order in chunks
   of 64 (a refused chunk is read again one decision at a time), and applies
   `crates/daemon/src/contradiction_candidates/eligibility.rs:7` `eligible`
   with a per-project `ScopeFilter`; then reads evidence liveness for the
   rows still kept. A failed read keeps the rows it would have judged.
+- The `ScopeFilter` reads scope terms through
+  `crates/kernel/src/scope.rs:1573` `scope_terms_within_budget`, which takes
+  its reader through `reader_with_limit` under the sweep's budget, so a busy
+  reader neither holds the run past its deadline nor blocks shutdown, which
+  joins the worker. A failed scope read leaves the row out of the
+  eligibility drop and counts one skip.
 - `crates/kernel/src/claim_facts.rs:270` `claim_standing_at_within_budget`
   checks the claim bound inside the budget, then the target against the tip
   and the incarnation under the reader guard, and reads the served view plus
@@ -66,7 +72,7 @@ Rows on live evidence with an eligible decision that differ in one drop
 reason each; decisions in every disposition with their dispositions read
 back through claim standing; a retired evidence row; a row above the tip; a
 refused claim chunk beside Kernel-free drops; more than one page; a closed
-Kernel; a cancelled run. All are in
+Kernel; a cancelled run; one held Kernel reader beside a free one. All are in
 `crates/daemon/tests/contradiction_candidates_sweep.rs`.
 
 ## Investigation log
@@ -94,7 +100,7 @@ Kernel; a cancelled run. All are in
 
 ### Q: Page size and scheduling
 
-- Sources examined: `sweep.rs:26`, `lifecycle.rs:448`.
+- Sources examined: `sweep.rs:24`, `lifecycle.rs:448`.
 - Findings: 256 rows per run, one run per MemoryReviewer cleanup pass (30 s
   idle, 5 s after an advancing pass).
 - Missing evidence: none.
