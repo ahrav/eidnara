@@ -400,17 +400,20 @@ Fault/timing angle: none.
 Required faults and enabling state: `max_claims + 1` ids; a budget already
 exhausted at call time; an id of 513 bytes.
 Confidence: high - [evidence](evidence/p5dep-claim-fact-bounds-are-refused-before-any-row-is-read.md).
-Read `claim_facts.rs:230-304`: `limit.run` checks first (`:238`),
-`check_claim_bounds` (`:258`) precedes `reader_with_limit` (`:261`).
+Read `claim_facts.rs:240-360`: `limit.run` checks first (`:248`),
+`check_claim_bounds` (`:309`) precedes `reader_with_limit` (`:313`).
 Existing check: `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`,
 `an_exhausted_budget_is_refused_before_the_projection_is_read`. Status
-unaudited. Re-exercised by #1166: the candidate sweep reads claim facts in
-chunks of 64 under `max_claims` = 64, so `TooManyClaims` cannot arise from
-it; `every_claim_chunk_of_a_page_is_read`
-(`crates/daemon/tests/contradiction_candidates_sweep.rs:855`) reads 66
+unaudited. Re-exercised by #1166: the candidate sweep reads claim standing
+through `claim_standing_at_within_budget` (`claim_facts.rs:270`), which
+applies the same id checks (`check_claim_ids`, `:343`) inside `limit.run`
+before its reader acquisition (`:284`), in chunks of 64 under
+`max_claims` = 64, so `TooManyClaims` cannot arise from it;
+`every_claim_chunk_of_a_page_is_read`
+(`crates/daemon/tests/contradiction_candidates_sweep.rs:856`) reads 66
 decisions in two chunks, and
 `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land`
-(`:765`) shows a chunk refused as `NotADecision` keeps that chunk's rows.
+(`:766`) shows a chunk refused as `NotADecision` keeps that chunk's rows.
 Impact: for P5 R2 this bound caps the ids per call but, per D1, the call
 returns no summary text; the plan's data path through this API does not
 exist at HEAD.
@@ -460,7 +463,7 @@ Required faults and enabling state: a held reader pool
 inside the statement; a parent interrupt raised mid-read.
 Confidence: medium - [evidence](evidence/p5dep-budget-exhaustion-stops-a-budgeted-kernel-read.md).
 Read `slice/read.rs:134`, `:241`, `open.rs:565-593`, `:1654-1664`,
-`:1693-1722`, `claim_facts.rs:238`, `:261`, `:274`, `:350`, `:357`. The
+`:1693-1722`, `claim_facts.rs:248`, `:313`, `:326`, `:545`, `:552`. The
 statement-interrupt path for claim facts is read in code but not observed by
 a test this pass found.
 Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget`,

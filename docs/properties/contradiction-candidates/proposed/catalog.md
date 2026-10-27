@@ -538,26 +538,30 @@ which returns before any table statement unless the user tier sets
 Status: active
 Exercised: partial - #1166, `crates/daemon/tests/contradiction_candidates_sweep.rs`:
 `one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_none`
-(`:432`) seeds rows for decisions in every disposition, a decision of another
+(`:433`) seeds rows for decisions in every disposition, a decision of another
 project, another domain, a `Secret` decision, a retired descriptor, and one
 row each for a foreign incarnation, a stale matcher digest, and an over-age
 row, each on live evidence and an eligible decision so it has one reason to
 drop; one sweep keeps exactly the active, sensitive, stale, and disputed rows
 of the bound project and the other project's own row, a repeat drops zero,
 and the Kernel tip and the reviewer-job facts are unchanged;
-`a_closed_kernel_drops_nothing_and_counts_the_skip` (`:501`) runs with no
+`a_closed_kernel_drops_nothing_and_counts_the_skip` (`:502`) runs with no
 Kernel; `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land`
-(`:765`) refuses one claim chunk and observes its live rows kept, the
+(`:766`) refuses one claim chunk and observes its live rows kept, the
 over-age and retired-evidence rows dropped, and one skip counted;
 `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over`
-(`:516`) bounds each run to one page;
+(`:517`) bounds each run to one page;
 `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it`
-(`:816`), `a_cancelled_sweep_deletes_nothing` (`:842`),
-`every_claim_chunk_of_a_page_is_read` (`:855`), and
-`a_row_at_the_age_bound_stays_and_one_past_it_drops` (`:485`) cover the
+(`:817`), `a_cancelled_sweep_deletes_nothing` (`:843`),
+`every_claim_chunk_of_a_page_is_read` (`:856`), and
+`a_row_at_the_age_bound_stays_and_one_past_it_drops` (`:486`) cover the
 remaining branches. The sweep is `CandidateSweep::run`
-(`crates/daemon/src/contradiction_candidates/sweep.rs:71`); it reads the page
-before it captures the tip and deletes through
+(`crates/daemon/src/contradiction_candidates/sweep.rs:68`); it reads the page
+before it captures the tip, reads each chunk of decisions in ascending id
+order through `KernelStore::claim_standing_at_within_budget`
+(`crates/kernel/src/claim_facts.rs:270`), which returns the registry row,
+decision row, own admission row, and served standing that claim facts
+carry, and deletes through
 `MemoryStore::delete_candidates_as_read`, so a row written above the tip or
 rewritten after the read stays. Retirement observability (G4): the sweep
 judges a descriptor by its evidence row through the new budgeted
@@ -570,13 +574,13 @@ and the budget expiry.
 Guarantee: One sweep call examines at most one page of rows. Among the rows
 written at or below the sweep's Kernel tip it drops exactly those with a
 stale matcher digest, an age past `MAX_CANDIDATE_AGE`, a foreign Kernel
-incarnation, a decision missing from claim facts or failing `eligible` at the
-tip, or descriptor evidence that is `Retired` or `Unknown` at the tip; every
-other row is kept, and so is every row written above the tip; a repeat at the
-same tip drops zero; the sweep writes no Kernel row. With no Kernel the sweep
-reads nothing, drops nothing, and counts one skip. A Kernel read that fails
-keeps the rows it would have judged and counts one skip; the drops that need
-no Kernel read still land.
+incarnation, a decision with no registry row in its claim standing or failing
+`eligible` at the tip, or descriptor evidence that is `Retired` or `Unknown`
+at the tip; every other row is kept, and so is every row written above the
+tip; a repeat at the same tip drops zero; the sweep writes no Kernel row.
+With no Kernel the sweep reads nothing, drops nothing, and counts one skip. A
+Kernel read that fails keeps the rows it would have judged and counts one
+skip; the drops that need no Kernel read still land.
 Check: `always` - seed one row per drop reason, each otherwise eligible on
 live evidence, plus rows for active, sensitive, stale, and disputed
 decisions; one sweep keeps exactly the eligible rows; a second sweep drops
@@ -707,12 +711,12 @@ Reachability: default-production (the flag's default is off; this record
 describes the default build's behavior)
 Status: active - PROPOSED
 Exercised: partial - sweep and status arm (#1166):
-`a_false_flag_runs_no_table_statement_and_moves_no_counter` (`crates/daemon/tests/contradiction_candidates_sweep.rs:552`)
+`a_false_flag_runs_no_table_statement_and_moves_no_counter` (`crates/daemon/tests/contradiction_candidates_sweep.rs:553`)
 hides the table, runs the sweep under a false flag with and without a
 Kernel, and observes every counter at zero, then shows the same table fails
 the first statement an enabled sweep runs;
 `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass`
-(`:900`) drives `pass_then_sweep`
+(`:901`) drives `pass_then_sweep`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) with the flag off and
 then on. The key is `/contradiction_candidates/enabled`
 (`crates/daemon/src/config.rs:1024`), user-only and default false
@@ -809,13 +813,13 @@ Reachability: explicit-config-only
 Status: active - PROPOSED
 Exercised: partial - sweep arm (#1166): every enabled sweep in
 `crates/daemon/tests/contradiction_candidates_sweep.rs` runs through
-`Fixture::sweep` (`:290`), which compares the Kernel tip and the
+`Fixture::sweep` (`:291`), which compares the Kernel tip and the
 MemoryReviewer job facts before and after the run;
-`the_candidate_modules_name_no_kernel_write_path` (`:694`) is a lexical proxy
+`the_candidate_modules_name_no_kernel_write_path` (`:695`) is a lexical proxy
 that finds no Kernel write entry point, `CommitIntent`, or `CausalInputs` in
 the files of `crates/daemon/src/contradiction_candidates/` and does not
 follow calls out of the module; and
-`every_reviewer_job_the_daemon_builds_carries_no_signal` (`:718`) scans every
+`every_reviewer_job_the_daemon_builds_carries_no_signal` (`:719`) scans every
 `.rs` file under `crates/daemon/src` for `CausalInputs {` literals and
 requires `signals: Vec::new()` in each, so a construction through a helper
 or struct update would escape it. The pass arm lands with #1167.

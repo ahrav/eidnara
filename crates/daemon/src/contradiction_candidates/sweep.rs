@@ -6,14 +6,13 @@
 //! store.
 
 use std::collections::HashMap;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
 use kernel::{
-    ClaimFactBounds, ClaimFacts, EvidenceLiveness, IdentifiedCommitReadTarget, KernelError,
-    KernelStore,
+    ClaimStanding, EvidenceLiveness, IdentifiedCommitReadTarget, KernelError, KernelStore,
 };
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::StoredCandidate;
@@ -30,9 +29,8 @@ pub const CANDIDATE_SWEEP_PAGE: usize = 256;
 pub const MAX_CANDIDATE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// The Kernel reads of one run stop at this deadline.
 const SWEEP_BUDGET: Duration = Duration::from_secs(2);
-/// Decisions per claim-facts read.
+/// Decisions per claim-standing read.
 const CLAIM_CHUNK: NonZeroUsize = NonZeroUsize::new(64).expect("nonzero");
-const CLAIM_CAUSAL_PAYLOAD_BYTES: NonZeroU64 = NonZeroU64::new(1024 * 1024).expect("nonzero");
 
 // A page's distinct evidence ids fit one liveness read.
 const _: () = assert!(CANDIDATE_SWEEP_PAGE <= kernel::MAX_EVIDENCE_LIVENESS_IDS);
@@ -189,12 +187,8 @@ fn judge(
         }
     }
     let mut read_failed = false;
-    let bounds = ClaimFactBounds {
-        max_claims: CLAIM_CHUNK,
-        max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
-    };
     let decisions = kept_unique(rows, &standing, |row| row.decision_object_id.clone());
-    let mut facts: HashMap<String, Option<ClaimFacts>> = HashMap::new();
+    let mut facts: HashMap<String, Option<ClaimStanding>> = HashMap::new();
     for chunk in decisions.chunks(CLAIM_CHUNK.get()) {
         if cancelled() {
             return Judged {
@@ -202,19 +196,14 @@ fn judge(
                 read_failed,
             };
         }
-        let mut read = |ids: &[String]| match kernel.claim_facts_at_within_budget(
+        let mut read = |ids: &[String]| match kernel.claim_standing_at_within_budget(
             ids,
             target.target,
-            bounds,
+            CLAIM_CHUNK,
             budget,
         ) {
-            Ok(read) => {
-                facts.extend(ids.iter().map(|id| (id.clone(), None)));
-                facts.extend(
-                    read.claims
-                        .into_iter()
-                        .map(|claim| (claim.object.object_id.clone(), Some(claim))),
-                );
+            Ok(standings) => {
+                facts.extend(ids.iter().cloned().zip(standings));
                 true
             }
             Err(_) => false,

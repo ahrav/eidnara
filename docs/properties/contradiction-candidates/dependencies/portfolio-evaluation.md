@@ -37,7 +37,7 @@ named function; no wrong file, no wrong claim).
 | `read.rs:204-230`, `:240` payload sizes then payloads | confirmed (`:205`, `:216`, `:226`, `:241`, `:249`) |
 | `project.rs:106-111` `scope_term`; `:204-206` `None => false` | confirmed |
 | `slice/read.rs:126-133`, `:134`, `:139-146`, `:236-241`, `:330` | confirmed |
-| `claim_facts.rs:230-247`, `:238`, `:258`, `:261`, `:146-156`, `:90-97` | confirmed; `ClaimDecisionFacts` carries ids only (D1 holds) |
+| `claim_facts.rs:240-257`, `:248`, `:309`, `:313`, `:146-156`, `:90-97` | confirmed; `ClaimDecisionFacts` carries ids only (D1 holds) |
 | `source_capture.rs:3`, `:53`, `:266`, `:602-605`, `:609-612`, `:790-803` | confirmed |
 | `source_capture.rs:652-676` `CaptureJob::run` | corrected: `:653-676` |
 | `lib.rs:9219-9236` `capture_after_response` | confirmed |

@@ -1,4 +1,4 @@
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use daemon::contradiction_candidates::Candidates;
@@ -9,10 +9,10 @@ use daemon::contradiction_candidates::sweep::{
 };
 use kernel::applicability::EvalBudget;
 use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, ClaimFactBounds, ClaimFacts,
-    CommitIntent, DecisionPayload, DecisionSpec, Disposition, DomainSpec, EventKind,
-    EvidenceLiveness, EvidenceLivenessError, KernelStore, MAX_EVIDENCE_LIVENESS_IDS, ProjectScope,
-    ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
+    AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, ClaimStanding, CommitIntent,
+    DecisionPayload, DecisionSpec, Disposition, DomainSpec, EventKind, EvidenceLiveness,
+    EvidenceLivenessError, KernelStore, MAX_EVIDENCE_LIVENESS_IDS, ProjectScope, ProviderEgress,
+    ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
 };
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::{
@@ -224,20 +224,21 @@ impl Fixture {
             .database_incarnation_id
     }
 
-    fn facts(&self, name: &str) -> ClaimFacts {
+    fn facts(&self, name: &str) -> ClaimStanding {
         let target = self
             .kernel
             .capture_commit_read_target_within_budget(&EvalBudget::unbounded())
             .unwrap();
-        let bounds = ClaimFactBounds {
-            max_claims: NonZeroUsize::new(1).unwrap(),
-            max_causal_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
-        };
         self.kernel
-            .claim_facts_at(&[format!("object-{name}")], target, bounds)
+            .claim_standing_at_within_budget(
+                &[format!("object-{name}")],
+                target,
+                NonZeroUsize::new(1).unwrap(),
+                &EvalBudget::unbounded(),
+            )
             .unwrap()
-            .claims
             .remove(0)
+            .unwrap()
     }
 
     fn write(&self, project: &str, evidence: &str, decisions: &[&str], tweak: impl Fn(&mut Row)) {

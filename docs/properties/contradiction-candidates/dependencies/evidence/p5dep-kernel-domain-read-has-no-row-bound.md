@@ -61,7 +61,7 @@ None; the cost is in the read itself.
 
 - Sources examined: `slice/read.rs:126-220` (`decision_page_within_budget`),
   `:236-243` (`decisions_for_objects_as_of_within_budget`),
-  `claim_facts.rs:230-247`, `admission.rs:3146-3163`
+  `claim_facts.rs:240-257`, `admission.rs:3146-3163`
   (`visible_as_of_in_scope` with `ids`).
 - Findings: the page API is store-wide (no domain or scope predicate) and its
   budget bounds only the reader wait (D2). The `ids` variant of

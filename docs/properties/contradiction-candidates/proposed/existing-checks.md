@@ -61,22 +61,23 @@ untouched (`:495`).
 
 | Check | Location | Asserts | Records | Status |
 | --- | --- | --- | --- | --- |
-| `the_eligibility_rule_admits_exactly_active_stale_and_disputed_decisions_of_the_project` | `:377` | dispositions read back through claim facts; the predicate admits active, sensitive, stale, disputed of the bound project only | sweep | unaudited |
-| `one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_none` | `:432` | each drop reason on its own row; repeat drops zero; tip and job facts unchanged; gauge | sweep, R5 | unaudited |
-| `a_row_at_the_age_bound_stays_and_one_past_it_drops` | `:485` | age boundary | sweep | unaudited |
-| `a_closed_kernel_drops_nothing_and_counts_the_skip` | `:501` | no Kernel: no read, one skip | sweep | unaudited |
-| `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over` | `:516` | page bound and wrap | sweep | unaudited |
-| `a_false_flag_runs_no_table_statement_and_moves_no_counter` | `:552` | hidden table, false flag: no statement, zero counters | flag off (sweep arm) | unaudited |
-| `the_counter_block_holds_exactly_the_closed_vocabulary_as_integers` | `:600` | the 27 names, integers only | flag off (status arm) | unaudited |
-| `the_evidence_read_answers_liveness_at_its_snapshot_in_request_order` | `:640` | Live, Retired, Unknown; bound; deadline | sweep | unaudited |
-| `the_candidate_modules_name_no_kernel_write_path` | `:694` | no Kernel write entry point named in the module's files (lexical) | R5 | unaudited |
-| `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:718` | every `CausalInputs {` literal under `crates/daemon/src` has empty `signals` (lexical) | R5 | unaudited |
-| `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land` | `:765` | a refused chunk keeps its rows; Kernel-free drops land | sweep | unaudited |
-| `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:816` | rows above the tip are not judged | sweep | unaudited |
-| `a_cancelled_sweep_deletes_nothing` | `:842` | cancellation | sweep | unaudited |
-| `every_claim_chunk_of_a_page_is_read` | `:855` | two claim chunks | sweep | unaudited |
-| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:900` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
-| `the_evidence_read_refuses_another_incarnation_and_a_future_snapshot` | `:969` | incarnation and snapshot refusals | sweep | unaudited |
+| `the_eligibility_rule_admits_exactly_active_stale_and_disputed_decisions_of_the_project` | `:378` | dispositions read back through claim standing; the predicate admits active, sensitive, stale, disputed of the bound project only | sweep | unaudited |
+| `one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_none` | `:433` | each drop reason on its own row; repeat drops zero; tip and job facts unchanged; gauge | sweep, R5 | unaudited |
+| `a_row_at_the_age_bound_stays_and_one_past_it_drops` | `:486` | age boundary | sweep | unaudited |
+| `a_closed_kernel_drops_nothing_and_counts_the_skip` | `:502` | no Kernel: no read, one skip | sweep | unaudited |
+| `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over` | `:517` | page bound and wrap | sweep | unaudited |
+| `a_false_flag_runs_no_table_statement_and_moves_no_counter` | `:553` | hidden table, false flag: no statement, zero counters | flag off (sweep arm) | unaudited |
+| `the_counter_block_holds_exactly_the_closed_vocabulary_as_integers` | `:601` | the 27 names, integers only | flag off (status arm) | unaudited |
+| `the_evidence_read_answers_liveness_at_its_snapshot_in_request_order` | `:641` | Live, Retired, Unknown; bound; deadline | sweep | unaudited |
+| `the_candidate_modules_name_no_kernel_write_path` | `:695` | no Kernel write entry point named in the module's files (lexical) | R5 | unaudited |
+| `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:719` | every `CausalInputs {` literal under `crates/daemon/src` has empty `signals` (lexical) | R5 | unaudited |
+| `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land` | `:766` | a refused chunk keeps its rows; Kernel-free drops land | sweep | unaudited |
+| `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:817` | rows above the tip are not judged | sweep | unaudited |
+| `a_cancelled_sweep_deletes_nothing` | `:843` | cancellation | sweep | unaudited |
+| `every_claim_chunk_of_a_page_is_read` | `:856` | two claim chunks | sweep | unaudited |
+| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:901` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
+| `the_evidence_read_refuses_another_incarnation_and_a_future_snapshot` | `:970` | incarnation and snapshot refusals | sweep | unaudited |
+| `every_standing_equals_the_claim_facts_of_its_claim_at_every_snapshot`, `standing_refusals_match_the_claim_facts_refusals` | `crates/kernel/tests/kernel_claim_standing.rs:111`, `:168` | the sweep's claim standing read equals the registry row, decision row, own admission row, and served standing of claim facts at every snapshot, and refuses as claim facts does | sweep | unaudited |
 
 Also: `crates/daemon/src/config.rs:2299` and `:2320` (default, tier, and
 resolved-config freezing), `crates/daemon/src/lib.rs:21340` (bound route and

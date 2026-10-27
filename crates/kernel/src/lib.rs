@@ -84,8 +84,9 @@ pub use claim_causality::{
 };
 pub use claim_facts::{
     AdmissionFacts, ClaimDecisionFacts, ClaimFactBounds, ClaimFacts, ClaimFactsError,
-    ClaimFactsSnapshot, ClaimOccurrence, ExcludedRepresentation, MAX_CLAIM_OBJECT_ID_BYTES,
-    RepresentationExclusion, ServedFacts, ServedStanding, SupportingApproval,
+    ClaimFactsSnapshot, ClaimOccurrence, ClaimStanding, ExcludedRepresentation,
+    MAX_CLAIM_OBJECT_ID_BYTES, RepresentationExclusion, ServedFacts, ServedStanding,
+    SupportingApproval,
 };
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,

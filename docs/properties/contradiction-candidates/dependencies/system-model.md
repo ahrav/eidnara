@@ -69,8 +69,8 @@ row (`:161-170`), `lock_reader_within(&budget.acquire_limit())` (`:134`).
 `decisions_for_objects_as_of_within_budget` (`:236-243`) is the same acquire
 plus `decisions_for_objects_on`. `decision_payload_sizes_as_of` (`:330-345`)
 reads `length(decision_payload)` only, no budget. `claim_facts_at_within_budget`
-(`crates/kernel/src/claim_facts.rs:230-247`): `limit.run(..)` then
-`claim_facts_inner` (`:249-285`), which calls `check_claim_bounds` (`:287-304`)
+(`crates/kernel/src/claim_facts.rs:240-257`): `limit.run(..)` then
+`claim_facts_inner` (`:301-334`), which calls `check_claim_bounds` (`:336-358`)
 before `reader_with_limit`. `ClaimFactBounds` (`:41-44`), `TooManyClaims`
 (`:49`). `ClaimFacts` (`:146-156`) carries `object`, `decision:
 ClaimDecisionFacts` (`:90-97`, ids only), admission facts, `served:
@@ -207,7 +207,7 @@ C6 `read.rs:26`, `:189`: the row bound applies after the filter; `:197`:
 payload sizes read before any payload.
 C7 `slice/read.rs:121`: a single decision larger than the bound is returned
 alone; the wait for a pooled reader stops at the budget.
-C8 `claim_facts.rs:230-233`: reader acquisition and every statement stop at
+C8 `claim_facts.rs:232-234`: reader acquisition and every statement stop at
 the deadline or on cancellation.
 C9 `source_capture.rs:3`: "The response bytes never wait on the kernel or the
 job"; single publication slot; at most one screened batch under a 5 s budget.
@@ -266,7 +266,7 @@ no domain or scope predicate (`slice/read.rs:139-146`), so for P5 it would
 examine every project's and every domain's decisions. Its budget bounds only
 the reader acquisition wait (`:134`, `lock_reader_within`), not the statement:
 `LimitedConnection` and its progress handler are used by `claim_facts`
-(`reader_with_limit`, `claim_facts.rs:261`) but not here. The row scan is
+(`reader_with_limit`, `claim_facts.rs:313`) but not here. The row scan is
 bounded by `max_rows` instead. The doc comment at `:121` is accurate about
 the wait; the plan's reading of "budgeted" is broader than the code.
 
