@@ -17,7 +17,8 @@ revision.
   runs on a scoped thread beside the response build, and the settle joins it
   before the response returns (`crates/daemon/src/lib.rs:10136`). A pass that
   handed its serve to a tracked job sets `touch_delegated`
-  (`crates/daemon/src/lib.rs:9812`) and the job touches after its serve commits
+  (`crates/daemon/src/lib.rs:9812`) and the job touches after its serve
+  attempt, whatever the serve answered,
   (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:341`)).
 - Update: `crates/kernel/src/use_outcome.rs:43-47` selects the live records with
   a null or earlier value (the `LIVE_SESSION_WHERE` and `last_transform_at`
@@ -88,7 +89,8 @@ Kernel unavailable at the write.
   touch's staleness read and its write (`PassWriteBudget`); the daemon carries no
   other pass deadline. The touch bounds its connection waits, its begin, and its
   statements by that budget. A pass that handed its serve to a tracked job
-  makes no touch of its own: the job touches after its serve under a budget of
+  makes no touch of its own: the job touches after its serve attempt, whatever
+  the serve answered, under a budget of
   the same size, so the serving pass's record carries that pass's time. A serve
   refused for want of a write slot leaves the pass its own touch and its full
   budget (`a_serve_deadline_leaves_the_touch_its_own_kernel_wait`).

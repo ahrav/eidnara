@@ -1293,7 +1293,8 @@ response returns (`crates/daemon/src/lib.rs:10130`, `touch_use_outcomes`
 (`crates/daemon/src/lib.rs:9851`)), within what remains of the pass's Kernel
 wait (`PassWriteBudget::spend`, `crates/daemon/src/use_outcome_writer.rs:376-383`); a pass that handed its
 serve to a tracked job leaves the touch to that job, which checks and updates
-after its serve commits with a Kernel wait of its own (`touch_after_serve`
+after its serve attempt, whatever that serve answered, with a Kernel wait of its
+own (`touch_after_serve`
 (`crates/daemon/src/use_outcome_writer.rs:341`)); the Kernel update moves
 only live records whose value is null or earlier, in one fenced transaction
 with no commit that holds only the writer (`advance_use_outcome_last_transform`
@@ -1327,7 +1328,8 @@ Open questions:
   staleness read and its write (`PassWriteBudget`); the daemon carries no other
   pass deadline. The touch bounds its connection waits, its begin, and its
   statements by that budget. A pass that handed its serve to a tracked job
-  makes no touch of its own: the job touches after its serve, under a budget of
+  makes no touch of its own: the job touches after its serve attempt, whatever
+  the serve answered, under a budget of
   the same size, so the serving pass's record carries that pass's time and the
   response waits on neither write.
 - Cost: every committing pass of a session with a stale live record (a value
