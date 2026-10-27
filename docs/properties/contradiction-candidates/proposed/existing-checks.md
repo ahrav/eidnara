@@ -81,11 +81,11 @@ refuses a store at the prior baseline untouched (`:496`).
 | `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:719` | every `CausalInputs {` literal under `crates/daemon/src` has empty `signals` (lexical) | R5 | unaudited |
 | `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land` | `:765` | a refused chunk keeps its rows; Kernel-free drops land | sweep | unaudited |
 | `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:816` | rows above the tip are not judged | sweep | unaudited |
-| `a_cancelled_sweep_deletes_nothing` | `:842` | cancellation | sweep | unaudited |
-| `every_claim_chunk_of_a_page_is_read` | `:855` | two claim chunks | sweep | unaudited |
-| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:900` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
-| `the_evidence_read_refuses_another_incarnation_and_a_future_snapshot` | `:969` | incarnation and snapshot refusals | sweep | unaudited |
-| `a_busy_reader_does_not_hold_the_sweep_past_its_budget` | `:1000` | one held reader: the sweep's scope reads take the free reader and the run stays inside its budget | sweep | unaudited |
+| `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` | `:842` | cancellation before the first Kernel read: no reader taken, nothing deleted | sweep | unaudited |
+| `every_claim_chunk_of_a_page_is_read` | `:871` | two claim chunks | sweep | unaudited |
+| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:916` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
+| `the_evidence_read_refuses_another_incarnation_a_future_snapshot_and_a_negative_one` | `:985` | incarnation, future-snapshot, and negative-snapshot refusals | sweep | unaudited |
+| `a_busy_reader_does_not_hold_the_sweep_past_its_budget` | `:1027` | one held reader: the sweep's scope reads take the free reader and the run stays inside its budget | sweep | unaudited |
 | `the_budgeted_scope_read_answers_as_the_unbudgeted_one_and_stops_at_its_deadline` | `crates/kernel/tests/kernel_scope.rs:460` | `scope_terms_within_budget` equals `scope_terms`, answers `None` for a missing scope, and returns `Deadline` on an expired budget and on a fully held reader pool | sweep | unaudited |
 | `every_standing_equals_the_claim_facts_of_its_claim_at_every_snapshot`, `standing_refusals_match_the_claim_facts_refusals` | `crates/kernel/tests/kernel_claim_standing.rs:111`, `:168` | the sweep's claim standing read equals the registry row, decision row, own admission row, and served standing of claim facts at every snapshot, and refuses as claim facts does | sweep | unaudited |
 

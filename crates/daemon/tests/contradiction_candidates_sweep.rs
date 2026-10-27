@@ -839,16 +839,32 @@ fn a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it() {
 /// Cancellation before the delete is observable here; the checks before each Kernel read have no
 /// effect a test can observe without a Kernel read counter.
 #[test]
-fn a_cancelled_sweep_deletes_nothing() {
+fn a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row() {
     let fixture = Fixture::open();
     let retired = fixture.retired_evidence.clone();
     fixture.write(PROJECT, &retired, &["active"], |row| {
         row.incarnation = "0".repeat(32);
     });
     let counts = Candidates::default();
-    fixture.sweep(&mut CandidateSweep::default(), &counts, NOW_MS, &|| true);
+    let before = untouched(&fixture);
+    let acquisitions = fixture.kernel.controlled_acquisitions_for_test();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| true,
+    );
+    assert_eq!(
+        fixture.kernel.controlled_acquisitions_for_test(),
+        acquisitions,
+        "a sweep cancelled before its first Kernel read takes no reader"
+    );
+    assert_eq!(untouched(&fixture), before);
     assert_eq!(fixture.rows().len(), 1);
     assert_eq!(report(&counts)["sweep_dropped"], 0);
+    assert_eq!(report(&counts)["sweep_skipped_kernel_unavailable"], 0);
 }
 
 #[test]
@@ -966,7 +982,7 @@ fn the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass() {
 }
 
 #[test]
-fn the_evidence_read_refuses_another_incarnation_and_a_future_snapshot() {
+fn the_evidence_read_refuses_another_incarnation_a_future_snapshot_and_a_negative_one() {
     let fixture = Fixture::open();
     let other = Fixture::open();
     let budget = EvalBudget::unbounded();
@@ -993,6 +1009,17 @@ fn the_evidence_read_refuses_another_incarnation_and_a_future_snapshot() {
         Err(EvidenceLivenessError::Kernel(
             kernel::KernelError::FutureSnapshot
         ))
+    );
+    let mut negative = future;
+    negative.through_commit = -1;
+    assert_eq!(
+        fixture
+            .kernel
+            .evidence_liveness_at_within_budget(&ids, negative, &budget),
+        Err(EvidenceLivenessError::Kernel(
+            kernel::KernelError::InvalidInput
+        )),
+        "a negative snapshot is refused as claim standing refuses it"
     );
 }
 

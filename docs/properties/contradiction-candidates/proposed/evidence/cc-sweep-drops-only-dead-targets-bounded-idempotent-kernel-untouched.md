@@ -20,7 +20,7 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
   `judge`.
 - `run` marks a row dead without a Kernel read when its matcher digest
   differs from `matcher_digest()` or its age exceeds `MAX_CANDIDATE_AGE`;
-  these drops land even when the tip capture fails. `sweep.rs:174` `judge`
+  these drops land even when the tip capture fails. `sweep.rs:177` `judge`
   then marks a row with a foreign `database_incarnation_id` dead, reads
   claim standing for the distinct decisions in ascending id order in chunks
   of 64 (a refused chunk is read again one decision at a time), and applies

@@ -110,6 +110,9 @@ impl CandidateSweep {
             })
             .collect();
         let budget = EvalBudget::new(Some(Instant::now() + SWEEP_BUDGET), Arc::default());
+        if cancelled() {
+            return;
+        }
         let judged = match kernel.capture_identified_commit_read_target_within_budget(&budget) {
             Ok(target) => judge(kernel, &target, &rows, standing, &budget, cancelled),
             Err(_) => Judged {

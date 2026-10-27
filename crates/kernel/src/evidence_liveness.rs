@@ -56,6 +56,9 @@ impl KernelStore {
         if evidence_ids.len() > MAX_EVIDENCE_LIVENESS_IDS {
             return Err(EvidenceLivenessError::TooManyIds);
         }
+        if target.through_commit < 0 {
+            return Err(KernelError::InvalidInput.into());
+        }
         let limit = budget.acquire_limit();
         limit.run(|| {
             let mut reader = self.reader_with_limit(&limit)?;

@@ -561,11 +561,11 @@ over-age and retired-evidence rows dropped, and one skip counted;
 `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over`
 (`:517`) bounds each run to one page;
 `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it`
-(`:816`), `a_cancelled_sweep_deletes_nothing` (`:842`),
-`every_claim_chunk_of_a_page_is_read` (`:855`), and
+(`:816`), `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` (`:842`),
+`every_claim_chunk_of_a_page_is_read` (`:871`), and
 `a_row_at_the_age_bound_stays_and_one_past_it_drops` (`:486`) cover the
 remaining branches. `a_busy_reader_does_not_hold_the_sweep_past_its_budget`
-(`:1000`) holds one Kernel reader while the other is free and observes the
+(`:1027`) holds one Kernel reader while the other is free and observes the
 sweep return inside its budget with both rows judged: each scope-terms read
 goes through `KernelStore::scope_terms_within_budget`
 (`crates/kernel/src/scope.rs:1573`), which polls the whole reader pool and
