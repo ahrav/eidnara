@@ -254,6 +254,24 @@ pub(super) const MAX_STAGING_LEASE_MS: i64 = 3_600_000;
 /// reaper boundary.
 pub(super) const MAX_STAGING_CLOCK_SKEW_MS: i64 = 60_000;
 
+/// `INDEXED BY` requires each seek to use its table's partial index of live,
+/// scoped citing rows. SQLite fails statement preparation when that index is
+/// unusable.
+const LIVE_CITING_SCOPE_SEEKS: [&str; 3] = [
+    "SELECT scope_id FROM decisions INDEXED BY idx_decisions_live_evidence_scope
+      WHERE evidence_id=?1 AND scope_id>=?2 AND scope_id IS NOT NULL
+        AND invalidated_commit_seq IS NULL
+      ORDER BY scope_id LIMIT 1",
+    "SELECT scope_id FROM observations INDEXED BY idx_observations_live_evidence_scope
+      WHERE evidence_id=?1 AND scope_id>=?2 AND scope_id IS NOT NULL
+        AND invalidated_commit_seq IS NULL
+      ORDER BY scope_id LIMIT 1",
+    "SELECT scope_id FROM asserted_edges INDEXED BY idx_edges_live_evidence_scope
+      WHERE evidence_id=?1 AND scope_id>=?2 AND scope_id IS NOT NULL
+        AND invalidated_commit_seq IS NULL
+      ORDER BY scope_id LIMIT 1",
+];
+
 pub const OPERATOR_REDACTION_PLACEHOLDER: &str = super::schema::operator_redaction_placeholder!();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,13 +539,13 @@ impl Envelope<'_> {
     /// whose scope `accepts` takes. The citers are the live decisions,
     /// observations, and asserted edges whose `evidence_id` is this row, and the
     /// live decisions whose events cite it; an unscoped citer offers no scope.
-    /// `accepts` sees each distinct scope id at most once and the walk stops at
-    /// the first scope it takes, so an accepted citer costs one row read
-    /// however many rows cite the evidence. After the first refusal the walk
-    /// restarts with SQLite skipping that scope's rows, so a run of citers
-    /// under one refused scope stays inside the query. Reads inside the
-    /// envelope's transaction, so a check against the answer and a write citing
-    /// the row observe one state.
+    /// `accepts` sees each distinct scope id at most once.
+    ///
+    /// The seeks in [`LIVE_CITING_SCOPE_SEEKS`] visit each distinct citing
+    /// scope in each table, with one additional seek when the table is
+    /// exhausted. An accepted direct citer ends the check before the
+    /// decision-event scan, which reads one row per citing event with a live,
+    /// scoped decision. All reads use the envelope's transaction.
     pub fn evidence_cited_in(
         &self,
         evidence_id: &str,
@@ -545,56 +563,84 @@ impl Envelope<'_> {
         if live != Some(true) {
             return Ok(false);
         }
+        let mut refused: HashSet<String> = HashSet::new();
+        let mut judge = |scope_id: &str| -> Result<bool, KernelError> {
+            if refused.contains(scope_id) {
+                return Ok(false);
+            }
+            if accepts(scope_id)? {
+                return Ok(true);
+            }
+            refused.insert(scope_id.to_string());
+            Ok(false)
+        };
+        for sql in LIVE_CITING_SCOPE_SEEKS {
+            let mut statement = self.tx.prepare_cached(sql).map_err(map_sqlite)?;
+            // Under BINARY collation the smallest string after `scope_id` is
+            // `scope_id` followed by NUL, so seeking from it skips every row
+            // of the scope just judged.
+            let mut from = String::new();
+            while let Some(scope_id) = statement
+                .query_row(params![evidence_id, from], |row| row.get::<_, String>(0))
+                .optional()
+                .map_err(map_sqlite)?
+            {
+                if judge(&scope_id)? {
+                    return Ok(true);
+                }
+                from = scope_id;
+                from.push('\0');
+            }
+        }
         let mut statement = self
             .tx
             .prepare_cached(
-                "SELECT scope_id FROM decisions
-                  WHERE evidence_id=?1 AND scope_id IS NOT ?2
-                    AND scope_id IS NOT NULL AND invalidated_commit_seq IS NULL
-                 UNION ALL SELECT scope_id FROM observations
-                  WHERE evidence_id=?1 AND scope_id IS NOT ?2
-                    AND scope_id IS NOT NULL AND invalidated_commit_seq IS NULL
-                 UNION ALL SELECT d.scope_id FROM decision_events e
+                "SELECT d.scope_id FROM decision_events e
                    JOIN decisions d ON d.decision_id=e.decision_id
-                  WHERE e.evidence_id=?1 AND d.scope_id IS NOT ?2
-                    AND d.scope_id IS NOT NULL AND d.invalidated_commit_seq IS NULL
-                 UNION ALL SELECT scope_id FROM asserted_edges
-                  WHERE evidence_id=?1 AND scope_id IS NOT ?2
-                    AND scope_id IS NOT NULL AND invalidated_commit_seq IS NULL",
+                  WHERE e.evidence_id=?1 AND d.scope_id IS NOT NULL
+                    AND d.invalidated_commit_seq IS NULL",
             )
             .map_err(map_sqlite)?;
-        // The first row the walk reads is the first one refused, so the
-        // restart that skips its scope re-reads one row. SQLite tests the
-        // skipped scope first, so a skipped row costs one column read.
-        let mut skipped: Option<String> = None;
-        let mut refused: HashSet<String> = HashSet::new();
-        let mut last_refused = String::new();
-        'walk: loop {
-            let mut rows = statement
-                .query(params![evidence_id, skipped])
-                .map_err(map_sqlite)?;
-            while let Some(row) = rows.next().map_err(map_sqlite)? {
-                let scope_id = row
-                    .get_ref(0)
-                    .map_err(map_sqlite)?
-                    .as_str()
-                    .map_err(|_| KernelError::Io)?;
-                if scope_id == last_refused || refused.contains(scope_id) {
-                    continue;
-                }
-                if accepts(scope_id)? {
-                    return Ok(true);
-                }
-                last_refused.clear();
-                last_refused.push_str(scope_id);
-                refused.insert(last_refused.clone());
-                if skipped.is_none() {
-                    skipped = Some(last_refused.clone());
-                    continue 'walk;
-                }
+        let mut rows = statement.query([evidence_id]).map_err(map_sqlite)?;
+        while let Some(row) = rows.next().map_err(map_sqlite)? {
+            let scope_id = row
+                .get_ref(0)
+                .map_err(map_sqlite)?
+                .as_str()
+                .map_err(|_| KernelError::Io)?;
+            if judge(scope_id)? {
+                return Ok(true);
             }
-            return Ok(false);
         }
+        Ok(false)
+    }
+
+    /// Counts the SQLite virtual-machine instructions `read` executes on this
+    /// envelope's connection. The one-instruction progress handler replaces
+    /// any existing handler and is removed after `read` returns.
+    #[cfg(feature = "test-support")]
+    pub fn sqlite_steps_for_test<T>(
+        &self,
+        read: impl FnOnce(&Self) -> Result<T, KernelError>,
+    ) -> Result<(u64, T), KernelError> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let steps = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&steps);
+        self.tx
+            .progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .map_err(map_sqlite)?;
+        let result = read(self);
+        self.tx
+            .progress_handler(0, None::<fn() -> bool>)
+            .map_err(map_sqlite)?;
+        Ok((steps.load(Ordering::Relaxed), result?))
     }
 
     pub fn commit_seq(&self) -> i64 {

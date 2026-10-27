@@ -181,7 +181,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "ed12f254bd6b6471905b6079de58c45c1072d05179892e2433a70506b2c1299e";
+    "6489ca489edd85ab755f9c3911136053a7be1a5ce97790d02e14490eb4deafc7";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -1935,6 +1935,7 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("index", "idx_decisions_anchor_fk"),
         ("index", "idx_decisions_evidence_fk"),
         ("index", "idx_decisions_known_as_of"),
+        ("index", "idx_decisions_live_evidence_scope"),
         ("index", "idx_decisions_proposition_fk"),
         ("index", "idx_decisions_scope_fk"),
         ("index", "idx_decisions_superseded_fk"),
@@ -1949,6 +1950,7 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("index", "idx_edges_anchor_fk"),
         ("index", "idx_edges_evidence_fk"),
         ("index", "idx_edges_known_as_of"),
+        ("index", "idx_edges_live_evidence_scope"),
         ("index", "idx_edges_relation_fk"),
         ("index", "idx_edges_scope_fk"),
         ("index", "idx_edges_source_fk"),
@@ -1971,6 +1973,7 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("index", "idx_observations_anchor_fk"),
         ("index", "idx_observations_evidence_fk"),
         ("index", "idx_observations_known_as_of"),
+        ("index", "idx_observations_live_evidence_scope"),
         ("index", "idx_observations_proposition_fk"),
         ("index", "idx_observations_scope_fk"),
         ("index", "idx_observations_superseded_fk"),

@@ -2419,3 +2419,63 @@ fn evidence_cited_in_matches_the_citation_model_under_seeded_citers() {
     }
     assert!(accepted_answers > 0);
 }
+
+fn accepted_citation_steps(history: i64) -> u64 {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let evidence = ingest_evidence(&store, "history", 'e');
+    let citing = |index: i64, scope_id: &str| {
+        let mut spec = decision(index);
+        spec.scope_id = Some(scope_id.to_string());
+        spec.evidence_id = Some(evidence.clone());
+        spec
+    };
+    store
+        .commit(intent("history-citers", 'c'), |envelope| {
+            for scope_id in ["scope-foreign", "scope-own"] {
+                envelope.insert_scope(branch_scope(scope_id))?;
+            }
+            envelope.insert_decision(decision(0))?;
+            for index in 1..=history {
+                envelope.insert_decision(citing(index, "scope-own"))?;
+                let mut observed = observation(index, "decision-object-0");
+                observed.scope_id = Some("scope-own".to_string());
+                observed.evidence_id = Some(evidence.clone());
+                envelope.insert_observation(observed)?;
+                envelope.insert_decision(citing(history + index, "scope-foreign"))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    store
+        .commit(intent("history-retire", 'f'), |envelope| {
+            for index in 1..=history {
+                envelope.retire_decision(&format!("decision-object-{index}"))?;
+                envelope.retire_observation(&format!("observation-object-{index}"))?;
+            }
+            envelope.insert_decision(citing(3 * history + 1, "scope-own"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (_, (steps, cited)) = store
+        .preview(deadline, |preview| {
+            preview.sqlite_steps_for_test(|envelope| {
+                envelope.evidence_cited_in(&evidence, |scope_id| Ok(scope_id == "scope-own"))
+            })
+        })
+        .unwrap();
+    assert!(cited, "history {history}");
+    steps
+}
+
+#[test]
+fn an_accepted_evidence_check_costs_the_same_however_long_the_citation_history() {
+    let short = accepted_citation_steps(1);
+    let long = accepted_citation_steps(200);
+    assert!(
+        long <= short + short / 4,
+        "a check over 200 retired and foreign citers took {long} SQLite steps; over 1, {short}"
+    );
+}
