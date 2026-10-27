@@ -74,6 +74,9 @@ pub struct CandidateWrite {
     pub replaced_away: usize,
     /// Rows evicted to hold the project at its cap, held rows and new rows alike.
     pub dropped_at_cap: usize,
+    /// The write was below the descriptor's held tip, so it updated held keys
+    /// and discarded its other rows.
+    pub late: bool,
 }
 
 /// A stored row.
@@ -502,6 +505,7 @@ impl MemoryStore {
             let (mut rows, mut bytes) = totals;
             let mut written = 0;
             let mut fresh = Vec::new();
+            let mut update = tx.prepare_cached(if late { UPDATE_LATE } else { UPDATE_HELD })?;
             for row in write.rows {
                 let Some(prior) = held
                     .iter()
@@ -512,12 +516,10 @@ impl MemoryStore {
                     }
                     continue;
                 };
-                let statement = if late { UPDATE_LATE } else { UPDATE_HELD };
-                written += tx
-                    .prepare_cached(statement)?
-                    .execute(row_values(write, row))?;
+                written += update.execute(row_values(write, row))?;
                 bytes += row_bytes(write, row) - prior.bytes;
             }
+            drop(update);
             let mut replaced_away = 0;
             if !late {
                 let mut delete = tx.prepare_cached(DELETE_KEY)?;
@@ -583,6 +585,7 @@ impl MemoryStore {
                 written,
                 replaced_away,
                 dropped_at_cap,
+                late,
             }))
         })
     }
