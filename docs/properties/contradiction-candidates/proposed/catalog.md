@@ -45,7 +45,7 @@ for the active records, [certificate.md](certificate.md),
 | cc-partial-result-is-descriptor-granular-prefix | S-C | safety | always | intended explicit-config-only | proposed (#1167) |
 | cc-row-key-unique-and-caps-enforced | S-D | safety | always | intended explicit-config-only | proposed (#1165) |
 | cc-table-rebuildable-from-evidence-bytes-and-live-decisions | S-D | safety | always | intended explicit-config-only | proposed (#1165, #1167) |
-| cc-sweep-drops-only-dead-targets-bounded-idempotent-kernel-untouched | S-E | safety | always | explicit-config-only | active, exercised yes (#1166) |
+| cc-sweep-drops-only-dead-targets-bounded-idempotent-kernel-untouched | S-E | safety | always | explicit-config-only | active, exercised partial (#1166) |
 | cc-read-serves-only-live-decision-rows-ids-and-scores-only | S-F | safety | always | intended explicit-config-only | proposed (#1168) |
 | cc-read-distinguishes-disabled-unavailable-and-empty | S-F | safety | always | intended default-production | proposed (#1168) |
 | cc-flag-off-no-pass-no-write-no-table-read | S-G | safety | always(!X) | intended default-production | proposed, exercised partial (sweep arm #1166; #1167, #1168) |
@@ -536,7 +536,7 @@ cleanup loop whenever the memory store opens
 which returns before any table statement unless the user tier sets
 `contradiction_candidates.enabled`.
 Status: active
-Exercised: yes - #1166, `crates/daemon/tests/contradiction_candidates_sweep.rs`:
+Exercised: partial - #1166, `crates/daemon/tests/contradiction_candidates_sweep.rs`:
 `one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_none`
 (`:432`) seeds rows for decisions in every disposition, a decision of another
 project, another domain, a `Secret` decision, a retired descriptor, and one
@@ -564,26 +564,35 @@ judges a descriptor by its evidence row through the new budgeted
 `KernelStore::evidence_liveness_at_within_budget`
 (`crates/kernel/src/evidence_liveness.rs:50`), which answers `Live`,
 `Retired`, or `Unknown` at the target; `Unknown` drops the row because a row
-at or below the tip names evidence the tip should know.
-Guarantee: One sweep call examines at most one page of rows and drops exactly
-those whose decision object is invalidated at the sweep's Kernel snapshot,
-whose disposition is `superseded` or `contradicted` (or otherwise not
-eligible under OQ-B), or whose descriptor object or evidence row is
-invalidated; every other row is kept; a repeat at the same tip drops zero; the
-sweep writes no Kernel row; a Kernel that is not readable yields zero drops
-and an unavailable result.
-Check: `always` - seed rows for decisions in states {active, disputed, stale,
-superseded, contradicted, invalidated} and for one retired descriptor; one
-sweep drops the superseded, contradicted, invalidated, and retired-descriptor
-rows and keeps active, disputed, stale; a second sweep drops zero; the Kernel
-commit log row count is equal before and after; with the Kernel closed the
-sweep returns unavailable and the table is unchanged; the semantics is
-`always` because every sweep step must satisfy the predicate.
-Fault/timing angle: a pass writing a row between the sweep's judgment and its
-delete (the row survives to the next sweep); the Kernel retention sweep
-retiring evidence concurrently; more rows than one page.
-Required faults and enabling state: flag on; rows in each state; a Kernel
-store closed during the sweep; a page overflow.
+at or below the tip names evidence the tip should know. Not constructed: a
+concurrent pass, a failed tip capture, evidence read, or scope-terms read,
+and the budget expiry.
+Guarantee: One sweep call examines at most one page of rows. Among the rows
+written at or below the sweep's Kernel tip it drops exactly those with a
+stale matcher digest, an age past `MAX_CANDIDATE_AGE`, a foreign Kernel
+incarnation, a decision missing from claim facts or failing `eligible` at the
+tip, or descriptor evidence that is `Retired` or `Unknown` at the tip; every
+other row is kept, and so is every row written above the tip; a repeat at the
+same tip drops zero; the sweep writes no Kernel row. With no Kernel the sweep
+reads nothing, drops nothing, and counts one skip. A Kernel read that fails
+keeps the rows it would have judged and counts one skip; the drops that need
+no Kernel read still land.
+Check: `always` - seed one row per drop reason, each otherwise eligible on
+live evidence, plus rows for active, sensitive, stale, and disputed
+decisions; one sweep keeps exactly the eligible rows; a second sweep drops
+zero; the Kernel tip and the reviewer-job facts are equal before and after;
+with no Kernel the table is unchanged and one skip is counted; with a
+refused claim chunk the chunk's rows stay and the Kernel-free drops land.
+`always` because every sweep run must satisfy the predicate.
+Fault/timing angle: a pass writing a row between the sweep's page read and
+its delete (a row above the tip or rewritten after the read stays); the
+Kernel retention sweep retiring evidence concurrently; more rows than one
+page; a failed tip capture, evidence read, or scope-terms read; the 2 s
+sweep budget expiring.
+Required faults and enabling state: flag on; rows for each drop reason and
+each kept disposition; a refused claim chunk; a page overflow; a row above
+the tip. The failed tip capture, evidence read, and scope-terms read and the
+budget expiry need a Kernel that fails on demand and are not constructed.
 Confidence: medium - [evidence](evidence/cc-sweep-drops-only-dead-targets-bounded-idempotent-kernel-untouched.md);
 the sweep's concurrency with the pass (#1167) is reasoned, not yet exercised
 Existing check: the tests above (#1166), unaudited. Bounded reads recorded
@@ -606,6 +615,12 @@ Open questions:
 - Resolved by #1166: `stale` and `disputed` rows are kept (OQ5-4 default);
   the page is `CANDIDATE_SWEEP_PAGE` = 256 and the sweep runs once per
   MemoryReviewer cleanup pass (OQ5-9).
+- Gap (liveness, queued): a table of `n` pages is covered in `n` enabled
+  runs, but candidate drops do not mark the pass as advanced, so an idle
+  loop covers one page per 30 s; no liveness record states this bound.
+- Gap (needs human input): when the flag turns off, held rows stay until a
+  later re-enable or the write-time caps reclaim them, and `retained_bytes`
+  keeps its last value.
 
 ## S-F read surfaces
 
@@ -713,19 +728,24 @@ Guarantee: With the route's frozen `contradiction_candidates.enabled` false
 written, and neither read surface opens the table; the flag is enabled only by
 explicit configuration at the `/contradiction_candidates/enabled` path and is
 frozen in the route's consent snapshot like `/source_capture/enabled`
-(`config.rs:102,154,993`).
+(`config.rs:102,157,1023`). The sweep is daemon-global: it reads the
+daemon-level value again on every cleanup pass
+(`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) and, while that value
+is false, runs no table statement and moves no counter.
 Check: `always(!X)` - X is "a pass counter increments, a row exists, or a
 table read statement executes for a route whose frozen flag is false"; this
 is a forbidden state with no dedicated detection point, so `always(!X)`
 rather than `unreachable`; assert by publishing with the flag off and
 checking counters, row count, and a statement-trace hook.
 Fault/timing angle: a config reload that turns the flag on after the route
-bound (the route keeps false); a daemon restart with the flag on (new routes
-see true).
+bound (the route keeps false, while the sweep follows the reload on its next
+pass); a daemon restart with the flag on (new routes see true).
 Required faults and enabling state: a default config; publications with
 source capture on; a `candidates` call and an owner read under the default.
-Confidence: low - proposed; no implementation evidence
-Existing check: none; proposed
+Confidence: low - only the sweep and status arm exist; the pass and read
+arms are unbuilt
+Existing check: the sweep-arm tests named under Exercised (#1166),
+unaudited.
 Impact: an unmeasured matcher reaches users (KTD4) and a surprise write load
 appears in deployments that did not opt in.
 Open questions:
@@ -787,21 +807,24 @@ confirm is `not_found`.
 Type: safety
 Reachability: explicit-config-only
 Status: active - PROPOSED
-Exercised: partial - sweep arm (#1166): the drop, age, and watermark tests
-in `crates/daemon/tests/contradiction_candidates_sweep.rs` (`:394`, `:467`, `:514`) compare the Kernel tip and the
-MemoryReviewer job facts before and after their sweeps;
-`the_candidate_modules_name_no_kernel_write_path` (`:694`) finds no Kernel
-write entry point, `CommitIntent`, or `CausalInputs` in
-`crates/daemon/src/contradiction_candidates/`; and
-`every_reviewer_job_the_daemon_builds_carries_no_signal` (`:718`) checks
-every production `CausalInputs` literal in `crates/daemon/src` for
-`signals: Vec::new()`. The pass arm lands with #1167.
+Exercised: partial - sweep arm (#1166): every enabled sweep in
+`crates/daemon/tests/contradiction_candidates_sweep.rs` runs through
+`Fixture::sweep` (`:290`), which compares the Kernel tip and the
+MemoryReviewer job facts before and after the run;
+`the_candidate_modules_name_no_kernel_write_path` (`:694`) is a lexical proxy
+that finds no Kernel write entry point, `CommitIntent`, or `CausalInputs` in
+the files of `crates/daemon/src/contradiction_candidates/` and does not
+follow calls out of the module; and
+`every_reviewer_job_the_daemon_builds_carries_no_signal` (`:718`) scans every
+`.rs` file under `crates/daemon/src` for `CausalInputs {` literals and
+requires `signals: Vec::new()` in each, so a construction through a helper
+or struct update would escape it. The pass arm lands with #1167.
 Guarantee: Across any pass and any sweep the Kernel commit log, admission
 rows, and object registry are unchanged, no decision's disposition or
 maturity changes, no MemoryReviewer job is reserved, and every
 `CausalInputs.signals` constructed in the daemon remains empty
-(`memory_reviewer_jobs.rs:79-82`; producers at `selection.rs:314`,
-`handoff.rs:374`, `lifecycle.rs:526`).
+(`crates/memory-store/src/memory_reviewer_jobs.rs:79-82`; production
+producers at `selection.rs:306` and `handoff.rs:367`).
 Check: `always(!X)` - X is "a Kernel write, a reviewer reservation, or a
 non-empty `signals` attributable to the candidate feature"; a forbidden state
 with no dedicated detection point; assert by comparing commit-log and
@@ -811,8 +834,9 @@ Kernel write family or a `CausalInputs` constructor with a non-empty vector.
 Fault/timing angle: none; the obligation is structural.
 Required faults and enabling state: flag on; a pass that writes rows; a sweep
 that drops rows; a candidate whose score would tempt an automatic dispute.
-Confidence: low - proposed; no implementation evidence
-Existing check: none; proposed
+Confidence: low - only the sweep arm exists; the pass arm is unbuilt
+Existing check: the sweep-arm tests named under Exercised (#1166),
+unaudited.
 Impact: the plan's three stop conditions; a signal would reserve a
 receipt-charged reviewer job against the Q38 ceiling (2,048 per project per
 incarnation, `docs/memory-reviewer-operations.md:257`).

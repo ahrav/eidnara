@@ -69,8 +69,8 @@ untouched (`:495`).
 | `a_false_flag_runs_no_table_statement_and_moves_no_counter` | `:552` | hidden table, false flag: no statement, zero counters | flag off (sweep arm) | unaudited |
 | `the_counter_block_holds_exactly_the_closed_vocabulary_as_integers` | `:600` | the 27 names, integers only | flag off (status arm) | unaudited |
 | `the_evidence_read_answers_liveness_at_its_snapshot_in_request_order` | `:640` | Live, Retired, Unknown; bound; deadline | sweep | unaudited |
-| `the_candidate_modules_name_no_kernel_write_path` | `:694` | no Kernel write entry point in the module | R5 | unaudited |
-| `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:718` | every production `CausalInputs` literal has empty `signals` | R5 | unaudited |
+| `the_candidate_modules_name_no_kernel_write_path` | `:694` | no Kernel write entry point named in the module's files (lexical) | R5 | unaudited |
+| `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:718` | every `CausalInputs {` literal under `crates/daemon/src` has empty `signals` (lexical) | R5 | unaudited |
 | `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land` | `:765` | a refused chunk keeps its rows; Kernel-free drops land | sweep | unaudited |
 | `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:816` | rows above the tip are not judged | sweep | unaudited |
 | `a_cancelled_sweep_deletes_nothing` | `:842` | cancellation | sweep | unaudited |

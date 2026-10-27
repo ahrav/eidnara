@@ -726,14 +726,13 @@ fn every_reviewer_job_the_daemon_builds_carries_no_signal() {
                 continue;
             }
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            if !name.ends_with(".rs") {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
-            let production = text.split("#[cfg(test)]").next().unwrap();
-            for (at, _) in production.match_indices("CausalInputs {") {
+            for (at, _) in text.match_indices("CausalInputs {") {
                 let mut depth = 0;
-                let end = production[at..]
+                let end = text[at..]
                     .char_indices()
                     .find(|(_, ch)| {
                         depth += match ch {
@@ -745,7 +744,7 @@ fn every_reviewer_job_the_daemon_builds_carries_no_signal() {
                     })
                     .unwrap()
                     .0;
-                let body = &production[at..=at + end];
+                let body = &text[at..=at + end];
                 assert!(
                     body.contains("signals: Vec::new()"),
                     "{} builds CausalInputs with a signal: {body}",
@@ -756,8 +755,8 @@ fn every_reviewer_job_the_daemon_builds_carries_no_signal() {
         }
     }
     assert!(
-        built > 0,
-        "the scan found the daemon's CausalInputs constructions"
+        built >= 9,
+        "the scan finds every CausalInputs literal in the daemon source: {built}"
     );
 }
 

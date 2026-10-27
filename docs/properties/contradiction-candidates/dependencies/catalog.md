@@ -778,7 +778,9 @@ which row its sweep keys on.
 Open questions:
 - Resolved by #1166: the candidate sweep keys on the evidence row, so a
   confirmed candidate whose evidence a dispute citation keeps live is kept
-  while its descriptor is retired, matching P4's confirm check.
+  while its descriptor is retired, matching P4's confirm check, for as long
+  as the row is younger than `MAX_CANDIDATE_AGE` (30 days); past that age
+  the sweep drops it whatever its evidence says.
   `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
   (`crates/daemon/tests/harness_sources.rs:3482`) re-exercises the kept
   evidence with an observation citation at the #1166 tip; a decision-event
