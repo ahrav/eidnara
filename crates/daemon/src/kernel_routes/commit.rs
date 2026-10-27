@@ -744,18 +744,16 @@ fn require_visible_evidence(
     filter: &mut ScopeFilter,
     evidence_id: &str,
 ) -> Result<(), KernelError> {
-    let citations = envelope
-        .evidence_citations(evidence_id)?
-        .filter(|citations| citations.live)
-        .ok_or(KernelError::NotFound)?;
-    for scope_id in &citations.citing_scopes {
-        if filter.matches(Some(scope_id), &mut |scope_id| {
+    let visible = envelope.evidence_cited_in(evidence_id, |scope_id| {
+        filter.matches(Some(scope_id), &mut |scope_id| {
             envelope.scope_terms(scope_id)
-        })? {
-            return Ok(());
-        }
+        })
+    })?;
+    if visible {
+        Ok(())
+    } else {
+        Err(KernelError::NotFound)
     }
-    Err(KernelError::NotFound)
 }
 
 impl DispositionResult {

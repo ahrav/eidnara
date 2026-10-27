@@ -101,8 +101,8 @@ pub use eligibility::{
 };
 pub use envelope::{
     AlignmentProjectionSpec, CommitIntent, CommitReceipt, DependentObservationQuery, DomainSpec,
-    Envelope, EvidenceCitations, KnownAsOf, OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState,
-    Preview, RemediationTarget, RepositoryProvenance, Sensitivity, StagingCandidateRow,
+    Envelope, KnownAsOf, OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState, Preview,
+    RemediationTarget, RepositoryProvenance, Sensitivity, StagingCandidateRow,
     StagingCandidateSpec, TokenCheck, TokenConflict,
 };
 pub use facts::{ArtifactBudgetFacts, KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};

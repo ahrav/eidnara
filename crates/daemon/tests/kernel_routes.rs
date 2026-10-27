@@ -6278,8 +6278,9 @@ async fn a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field() 
 
 /// One evidence id cited by several rows is visible exactly when one of its
 /// live citers belongs to the bound project, whatever order the scopes sort
-/// in; both evidence fields may ride one dispute, and a malformed reference
-/// is refused by its form even beside an id that would be `not_found`.
+/// in and whichever citer was written first; both evidence fields may ride
+/// one dispute, and a malformed reference is refused by its form even beside
+/// an id that would be `not_found`.
 #[tokio::test]
 async fn a_dispute_judges_every_citer_and_both_evidence_fields_together() {
     let daemon = Daemon::start().await;
@@ -6287,7 +6288,7 @@ async fn a_dispute_judges_every_citer_and_both_evidence_fields_together() {
     seed_domain(&store);
     assert_state(
         &daemon
-            .commit("create", (1..=2).map(insert_decision).collect(), vec![])
+            .commit("create", (1..=3).map(insert_decision).collect(), vec![])
             .await,
         "available",
         None,
@@ -6320,6 +6321,46 @@ async fn a_dispute_judges_every_citer_and_both_evidence_fields_together() {
         .unwrap()
         .evidence_id;
     cite_foreign("only", &foreign_only, 51);
+    // Foreign citers written before the project's own citer.
+    let foreign_first = store
+        .ingest_artifact(ingest_request(
+            "foreign-first",
+            b"foreign-first",
+            Sensitivity::Normal,
+        ))
+        .unwrap()
+        .evidence_id;
+    cite_foreign("first-a", &foreign_first, 52);
+    cite_foreign("first-b", &foreign_first, 53);
+    assert_state(
+        &daemon
+            .commit(
+                "cite-foreign-first",
+                vec![citing_decision(10, &foreign_first)],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    let applied = daemon
+        .commit(
+            "foreign-first",
+            vec![dispute(
+                "decision-object-3",
+                "mark_disputed",
+                cites_id(&foreign_first),
+            )],
+            vec![],
+        )
+        .await;
+    assert_state(&applied, "available", None);
+    assert_eq!(
+        latest_admission(&daemon, "decision-object-3")
+            .evidence_id
+            .as_deref(),
+        Some(foreign_first.as_str())
+    );
 
     let both = json!({
         "evidence_id": shared,
