@@ -49,9 +49,9 @@ revision.
   `an_outside_file_lock_bounds_the_advance_at_begin`
   (`crates/kernel/tests/kernel_use_outcome.rs:1239`),
   `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1295`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1285`),
   `the_advance_takes_no_pooled_reader`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1327`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:1317`). Status: unaudited.
 
 ## Failure scenario
 

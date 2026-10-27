@@ -1307,9 +1307,9 @@ Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 `an_outside_file_lock_bounds_the_advance_at_begin`
 (`crates/kernel/tests/kernel_use_outcome.rs:1239`),
 `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-(`crates/kernel/tests/kernel_use_outcome.rs:1295`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1285`),
 `the_advance_takes_no_pooled_reader`
-(`crates/kernel/tests/kernel_use_outcome.rs:1327`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1317`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.
@@ -1355,10 +1355,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - the routed read answers (2, 1) for two serves with a
+Exercised: partial - the routed read answers (2, 1) for two serves with a
 contradiction between them, skips a retired serve, answers (0, 0) for a decision
-never served, answers an unready Kernel with its state and no count, and the CLI
-accepts 2^53, refuses 2^53 + 1, and renders every other answer unavailable
+never served, and answers an unready Kernel with its state and no count; the
+Kernel read answers `Deadline` under a held reader pool; the CLI accepts 2^53,
+refuses 2^53 + 1, and renders every other answer unavailable. The route's answer
+for a read that fails while the Kernel is Ready has no daemon test.
 Guarantee: Served and disputed-after-serve counts per decision are exact
 unsigned integers at one Kernel snapshot; a Kernel that is not Ready answers
 its `unavailable` kernel state with no integer on the wire, which the CLI

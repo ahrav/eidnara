@@ -1265,22 +1265,12 @@ fn a_held_reader_pool_bounds_the_count_read() {
     let served_at = tick(&store, "tick");
     insert(&store, "a", spec("s1", &["d1"], served_at, 100)).unwrap();
     let wait = std::time::Duration::from_millis(100);
-    let hold = std::time::Duration::from_millis(1_500);
-    let held = std::sync::Barrier::new(2);
-    let (counted, waited) = std::thread::scope(|scope| {
-        let store = &store;
-        let held = &held;
-        let holder = scope.spawn(move || store.hold_readers_for_test(held, hold));
-        held.wait();
-        let started = std::time::Instant::now();
-        let counted = store.served_counts_for(&budget(wait), &project(), "d1");
-        let waited = started.elapsed();
-        holder.join().unwrap();
-        (counted, waited)
-    });
+    let started = std::time::Instant::now();
+    let counted = store
+        .with_readers_held_for_test(|| store.served_counts_for(&budget(wait), &project(), "d1"));
+    let waited = started.elapsed();
     assert_eq!(counted, Err(KernelError::Deadline));
     assert!(waited >= wait, "{waited:?}");
-    assert!(waited < hold, "the read waited for the pool: {waited:?}");
     assert_eq!(
         store.served_counts_for(&budget(wait), &project(), "d1"),
         Ok(ServedCounts {
