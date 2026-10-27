@@ -57,6 +57,9 @@ impl DisputeReason {
         }
         if let Some(evidence_id) = evidence_id
             && (evidence_id.is_empty()
+                // The length check bounds the input to `decodes_to_itself` and
+                // `redact_durable_text` to `MAX_REASON_BYTES`.
+                || evidence_id.len() > MAX_REASON_BYTES
                 || !decodes_to_itself(evidence_id)
                 || !redact_durable_text(evidence_id).detections.is_empty())
         {
@@ -415,7 +418,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(at_cap.len(), MAX_REASON_BYTES);
-        for over in ["e".repeat(room + 1), "/".repeat(room / 3 + 1)] {
+        for over in [
+            "e".repeat(room + 1),
+            "/".repeat(room / 3 + 1),
+            "e".repeat(1 << 20),
+        ] {
             assert_eq!(
                 DisputeReason::validated(
                     EventKind::MarkDisputed,
