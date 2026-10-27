@@ -55,8 +55,8 @@ widens to every pass.
   `{"kind":"unavailable","reason":"store_unavailable"}`
   ([`UnavailableReason`][reason], serialized `snake_case`; the read route's
   `state_only` arms at [`read.rs:296-322`][read-arms]).
-- The eight `blocking` call sites: [`commit.rs:1013`][blk-commit-preview],
-  [`:1038`][blk-commit-run], [`egress.rs:201`][blk-egress],
+- The eight `blocking` call sites: [`commit.rs:1034`][blk-commit-preview],
+  [`:1059`][blk-commit-run], [`egress.rs:201`][blk-egress],
   [`eligibility.rs:346`][blk-eligibility], [`ingest.rs:722`][blk-ingest-decode]
   (base64 page decode, holding the page bytes), [`:797`][blk-ingest-finish]
   (`finish_upload`, which calls [`store.ingest_artifact`][route-ingest] with

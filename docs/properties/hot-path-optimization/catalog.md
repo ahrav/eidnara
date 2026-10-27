@@ -779,7 +779,7 @@ them without creating implementation tickets.
 [prepare-field]: ../../../crates/memory-store/src/lib.rs#L2339-L2377
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L36
 [read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L163
-[admission-reference]: ../../../crates/kernel/src/admission.rs#L3409-L3623
+[admission-reference]: ../../../crates/kernel/src/admission.rs#L3482-L3696
 [outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L178-L215
 [tokenizer-reference]: ../../../crates/tokenizer/src/lib.rs#L123-L155
 [cache-reference]: ../../../crates/daemon/src/token_cache.rs#L165-L180

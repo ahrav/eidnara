@@ -293,7 +293,7 @@ and harness are unverified.
 | `catalog.md` `[tokenizer-dependency]`, `daemon/Cargo.toml:21-32` | VERIFIED | `tokenizer` is a normal dependency at line 32. |
 | `_lenses/guarded-store.md` `[cache]`, `storage/src/lib.rs:487-498` | VERIFIED | Documents expiry on scope installation and per-callback reuse. |
 | `_lenses/history-render.md` `[outer]`, `daemon/src/m0_compose.rs:178-215` | VERIFIED | Counts wrapped history and retries at most three times over 105 percent. |
-| `_lenses/canonical-read.md` `[sql]`, `kernel/src/admission.rs:3113-3279` | VERIFIED | Query has admission joins, scope prefilter, object-ID order, and Vec collection. |
+| `_lenses/canonical-read.md` `[sql]`, `kernel/src/admission.rs:3186-3352` | VERIFIED | Query has admission joins, scope prefilter, object-ID order, and Vec collection. |
 | `_lenses/redaction-ownership.md` `[json]`, `memory-store/src/lib.rs:2133-2143` | VERIFIED | Records empty retained text with detections and ownership metadata. |
 
 No sampled anchor is off.
