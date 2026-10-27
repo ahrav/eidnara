@@ -631,7 +631,7 @@ Open questions:
   read route. That route also owns the six-name key-set check above, and the
   store's `StoredCandidate` carries `project_digest`, `kernel_incarnation_id`,
   `matcher_digest`, and `decision_terms` beyond that set, so the read projects
-  the row rather than returning it.
+  the row rather than returning it (needs human input).
 Falsifier: the read answers rows for a `superseded` decision, or a row
 includes `summary`.
 Legal witness: active decision with 3 rows answers 3 rows and `next: null`;
