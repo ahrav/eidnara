@@ -147,15 +147,15 @@ before `parse_request_body` (`:463-474`, removes `ENVELOPE_KEYS` `:461`:
 S8 tool surface (re-verified at the #1164 branch tip; #1161 added
 `dispute`). `EIDNARA_MEMORY_ACTIONS =
 ["create","get","revise","archive","merge","dispute"]`
-(`packages/opencode-plugin/src/tools/eidnara-memory/types.ts:6-13`);
+(`packages/opencode-plugin/src/tools/eidnara-memory/types.ts:6-14`);
 `EIDNARA_MEMORY_DEFAULT_ACTIONS` excludes `dispute` (`:17-19`); read set
 `{get}` (`:24`); `isEidnaraMemoryMutation` (`:26-29`); `allowedActions?`
-(`:57`). `tools.ts:103-106` allowlist default; `:125-137` execute guards
+(`:57`). `tools.ts:122-125` allowlist default; `:145-157` execute guards
 (approve/enforce, context-researcher agent, closed list and allowlist);
 `:152-154` mutation needs a tool-call id.
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58` passes
 `EIDNARA_MEMORY_DEFAULT_ACTIONS`. Pi plugin
-`packages/pi-plugin/src/tools/eidnara-memory.ts:125-185` has the same
+`packages/pi-plugin/src/tools/eidnara-memory.ts:142-202` has the same
 allowlist default, the allowlist check, and the mutation identity check;
 exclusion of the context_researcher is by registration
 (`packages/pi-plugin/src/tools/index.ts:30-32`, `:69`;
@@ -219,7 +219,7 @@ C12 `local_file.rs:240`: owners first, evidence second; cited evidence kept;
 descriptors retired.
 C13 `host-wire-protocol.md:770`, `:790`: strict bodies, project checked before
 the body is read, `disabled`/`store_unavailable` terminals.
-C14 `types.ts:6-29`, `tools.ts:103-106`: closed action list; `get` is the
+C14 `types.ts:6-30`, `tools.ts:122-125`: closed action list; `get` is the
 only read; an omitted allowlist admits the default actions (all but
 `dispute`), an empty one admits none.
 
@@ -299,7 +299,7 @@ is silent on `kind`; recorded as a lead, not a defect.
 
 D7 At `3a3b916b7` the pi plugin's `eidnara_memory` tool had no
 `allowedActions`. #1161 resolved this: both plugins default to
-`EIDNARA_MEMORY_DEFAULT_ACTIONS` (pi `eidnara-memory.ts:129-134`, opencode
+`EIDNARA_MEMORY_DEFAULT_ACTIONS` (pi `eidnara-memory.ts:146-151`, opencode
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58`), so the P4/P5
 "allowlist as rollout lever" assumption holds in both.
 

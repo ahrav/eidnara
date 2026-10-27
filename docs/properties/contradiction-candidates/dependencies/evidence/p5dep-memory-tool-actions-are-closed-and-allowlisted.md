@@ -17,7 +17,7 @@ References re-verified at the #1164 branch tip (base `979fb814e`). #1161
 added the `dispute` action, `EIDNARA_MEMORY_DEFAULT_ACTIONS`, per-allowlist
 schemas, and the pi `allowedActions` since `3a3b916b7`.
 
-- `packages/opencode-plugin/src/tools/eidnara-memory/types.ts:6-13`
+- `packages/opencode-plugin/src/tools/eidnara-memory/types.ts:6-14`
   `EIDNARA_MEMORY_ACTIONS = ["create", "get", "revise", "archive", "merge",
   "dispute"] as const`; `:15` the action type; `:17-19`
   `EIDNARA_MEMORY_DEFAULT_ACTIONS` filters out `dispute`; `:22`
@@ -30,17 +30,17 @@ schemas, and the pi `allowedActions` since `3a3b916b7`.
   `.passthrough()` (unknown keys are tolerated at schema level; the action
   gate is explicit code); `:108-118` the exposed args include the dispute
   fields only when the allowlist names `dispute`.
-- `tools.ts:103-106` `allowedActions(deps) = deps.allowedActions ??
+- `tools.ts:122-125` `allowedActions(deps) = deps.allowedActions ??
   EIDNARA_MEMORY_DEFAULT_ACTIONS`; doc: omitted admits the default actions,
   which exclude `dispute`; explicit empty admits none.
-- `tools.ts:119-169` execute: parse; `unwrapImitatedReducedArgs`; `approve` or
+- `tools.ts:139-190` execute: parse; `unwrapImitatedReducedArgs`; `approve` or
   `enforce` -> "human-host-owned commands" error (`:125-127`);
   `toolContext.agent === CONTEXT_RESEARCHER_AGENT` -> "not available to the
   context_researcher agent" (`:128-130`); `typeof rawAction !== "string" ||
   !ACTIONS.includes(rawAction) || !primaryActions.includes(rawAction)` ->
   "Action '<a>' is not allowed in this context." (`:131-137`). All three
   return before `deps.kernelClient` is called (`:155`).
-- `tools.ts:152-154`: `!toolCallId && isEidnaraMemoryMutation(action)` ->
+- `tools.ts:172-174`: `!toolCallId && isEidnaraMemoryMutation(action)` ->
   "mutation requires a stable tool-call identity"; `:165` reads use
   `toolCallId ?? "read"`.
 - `packages/opencode-plugin/src/agents/context-researcher.ts:1`
@@ -48,7 +48,7 @@ schemas, and the pi `allowedActions` since `3a3b916b7`.
 - `packages/opencode-plugin/src/plugin/tool-registry.ts:58`: `allowedActions:
   [...EIDNARA_MEMORY_DEFAULT_ACTIONS]` at registration, so `dispute` is off by
   default.
-- `packages/pi-plugin/src/tools/eidnara-memory.ts:97-108` `paramsSchema`: the
+- `packages/pi-plugin/src/tools/eidnara-memory.ts:113-125` `paramsSchema`: the
   `action` enum lists the admitted actions and the dispute fields appear only
   when `dispute` is admitted; `:129-134` `allowedActions` defaults to
   `EIDNARA_MEMORY_DEFAULT_ACTIONS`; `:157-169` approve/enforce and allowlist
@@ -104,8 +104,8 @@ None; synchronous guards before any network call.
 
 ### Q: D7. Should the pi tool gain `allowedActions`?
 
-- Sources examined: `eidnara-memory.ts:125-169`, `index.ts:30-32`, `:69-75`,
-  `types.ts:17-19`.
+- Sources examined: `eidnara-memory.ts:142-186`, `index.ts:30-32`, `:69-75`,
+  `types.ts:18-20`.
 - Findings: at `3a3b916b7` pi gated by registration only. #1161 added
   `allowedActions` to the pi tool with the opencode default
   (`EIDNARA_MEMORY_DEFAULT_ACTIONS`, which excludes `dispute`), so the P4

@@ -847,6 +847,14 @@ Confidence: high - [evidence](evidence/p5dep-review-reads-parse-strict-bodies-af
 Read `wire.rs:32-51`, `:131-139`, `:203-220`; `kernel_routes/mod.rs:415-474`.
 Existing check: the wire tests above; the literal-set test at
 `wire.rs:448-463+`. Status unaudited.
+Re-exercised by #1168: `review.candidates` joins the family through
+`kernel_request` with a `deny_unknown_fields` body
+(`crates/daemon/src/contradiction_candidates/read.rs:29`);
+`review_candidates_pages_live_rows_and_answers_each_terminal`
+(`crates/daemon/src/candidate_pass_tests.rs:1242`) answers `invalid_params`
+for an unknown field and a malformed cursor, `project_mismatch` for a foreign
+root before the body is read (`:1514`), and `disabled` for a root without
+MODULE authority (`:1259`).
 Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
 fields, would break the family's stated order. `review.use_outcome` (#1157)
@@ -865,7 +873,7 @@ Reachability: default-production - any route opened with harness `cli`.
 Status: active
 Exercised: yes - `memory_reviewer_wire.rs:260`
 `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`;
-`lib.rs:35508` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
+`lib.rs:35511` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
 Guarantee: a binding whose harness is `OBSERVATIONAL_HARNESS` (`"cli"`)
 authorizes and resolves its project like any route and can call the routed
 read family with the same answers, and is excluded from
@@ -883,6 +891,8 @@ recorded receipt to read.
 Confidence: high - [evidence](evidence/p5dep-observational-routes-read-and-take-no-background-part.md).
 Read `lib.rs:274-281`, `:382-386`, `:413-417`.
 Existing check: the two tests above. Status unaudited.
+Re-exercised by #1168: a route bound with `OBSERVATIONAL_HARNESS` reads a
+`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:1526`).
 Impact: P5 U4's owner read is an observational read; it must be callable on a
 `cli` route and must not enroll the project in any background work.
 Open questions: None.
@@ -928,18 +938,26 @@ Required faults and enabling state: each action under an empty, partial, and
 omitted allowlist; a call with `agent: "context-researcher"`; a pi
 registration with `memoryToolEnabled: false`.
 Confidence: high - [evidence](evidence/p5dep-memory-tool-actions-are-closed-and-allowlisted.md).
-Read `types.ts:6-29`, `tools.ts:48-58`, `:99-138`, `:152-154`,
+Read `types.ts:6-30`, `tools.ts:48-58`, `:118-158`, `:172-174`,
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58`,
-`packages/pi-plugin/src/tools/eidnara-memory.ts:97-108`, `:125-185`,
+`packages/pi-plugin/src/tools/eidnara-memory.ts:113-125`, `:142-202`,
 `packages/pi-plugin/src/tools/index.ts:30-32`, `:69-75`,
 `packages/pi-plugin/src/subagent-entry.ts:63`.
 Existing check: the tests above. Status unaudited.
+Re-exercised by #1168: the closed list gains `candidates`
+(`packages/opencode-plugin/src/tools/eidnara-memory/types.ts:6-14`), a read
+in `EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:25`) that both default lists
+admit; `eidnara_memory candidates`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1545`) runs
+it without a tool-call id, and `Pi eidnara_memory candidates`
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:495`) shows it and its
+paging fields in Pi's default schema.
 Impact: P5 R6 adds `candidates` as a read; it must enter the closed list and
-`EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:24`), and its default-allowlist
+`EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:25`), and its default-allowlist
 membership is a rollout decision in both plugins.
 Open questions:
 - D7 is resolved since `3a3b916b7`: #1161 gave the pi tool `allowedActions`
-  with the same default as opencode (`eidnara-memory.ts:129-134`). Whether
+  with the same default as opencode (`eidnara-memory.ts:146-151`). Whether
   `candidates` joins `EIDNARA_MEMORY_DEFAULT_ACTIONS` is a decision for #1168
   (needs human input).
 

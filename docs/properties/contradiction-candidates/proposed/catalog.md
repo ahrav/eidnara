@@ -17,7 +17,9 @@ read (#1168) tickets make them checkable. #1166 builds the sweep and
 converts the sweep record to `Status: active`. #1167 builds the pass and
 converts the trigger, single-flight, candidate-set, partial-result, row-key,
 rebuild, and no-Kernel-write records; the flag-off record keeps its read arm
-for #1168. Source: the
+for #1168. #1168 builds the read route and the tool action and converts the
+two read records, the confirm-linkage record, and the flag-off record, so
+every record is active at its tip. Source: the
 `/software-design:invariant-driven-domain-modeling` pass whose certificate is
 `certificate.md`; its open items are listed in `open-questions.md`. The
 proposed records below are reproduced from that pass unchanged in
@@ -48,18 +50,18 @@ for the active records, [certificate.md](certificate.md),
 | cc-row-key-unique-and-caps-enforced | S-D | safety | always | explicit-config-only | active, exercised yes (#1165, #1167) |
 | cc-table-rebuildable-from-evidence-bytes-and-live-decisions | S-D | safety | always | explicit-config-only | active, exercised yes (#1165, #1167) |
 | cc-sweep-drops-only-dead-targets-bounded-idempotent-kernel-untouched | S-E | safety | always | explicit-config-only | active, exercised partial (#1166) |
-| cc-read-serves-only-live-decision-rows-ids-and-scores-only | S-F | safety | always | intended explicit-config-only | proposed (#1168) |
-| cc-read-distinguishes-disabled-unavailable-and-empty | S-F | safety | always | intended default-production | proposed (#1168) |
-| cc-flag-off-no-pass-no-write-no-table-read | S-G | safety | always(!X) | intended default-production | proposed, exercised partial (sweep #1166, pass #1167; reads #1168) |
-| cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm | S-H | safety | always | intended explicit-config-only | proposed (#1168) |
+| cc-read-serves-only-live-decision-rows-ids-and-scores-only | S-F | safety | always | explicit-config-only | active, exercised yes (#1168) |
+| cc-read-distinguishes-disabled-unavailable-and-empty | S-F | safety | always | default-production | active, exercised yes (#1168) |
+| cc-flag-off-no-pass-no-write-no-table-read | S-G | safety | always(!X) | default-production | active, exercised yes (#1166, #1167, #1168) |
+| cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm | S-H | safety | always | explicit-config-only | active, exercised yes (#1168) |
 | cc-pass-and-sweep-write-no-kernel-event-and-no-signal | R5 | safety | always(!X) | explicit-config-only | active, exercised partial (#1166, #1167) |
 
-15 records at the #1167 tip: 11 active, 4 proposed.
+15 records at the #1168 tip: 15 active, 0 proposed.
 Semantics distribution: 15 `always` (13 plain and 2 written `always(!X)` for
 forbidden states), 0
 `always-or-unreached`, 0 `sometimes`, 0 `reachable`, 0 `unreachable`; all 15
 are safety. Reachability: 13 `explicit-config-only`, 2 `default-production`
-(verified for the active records, intended for the proposed ones). The ticket mapping in the
+(verified at the #1168 tip). The ticket mapping in the
 Status column follows the #1163 decomposition; each ticket re-verifies the
 records it converts.
 
@@ -659,76 +661,113 @@ Open questions:
 ### cc-read-serves-only-live-decision-rows-ids-and-scores-only
 
 Type: safety
-Reachability: explicit-config-only
-Status: active - PROPOSED
-Exercised: not yet - U4 read route and tool action do not exist
-Guarantee: The owner read and the `candidates` action answer only for the
-route's bound project; they check the decision's standing in the Kernel at
-read time and answer a terminal (proposed `not_live`) with no rows when the
-decision is not eligible; otherwise they answer a bounded page of rows
-ordered (score desc, created desc, evidence id asc) whose fields are
-`evidence_id`, `decision_id`, `score`, `matched_atoms`, `publish_tip`,
-`created_at_ms`, and nothing else: no descriptor text, no summary, no atom
-list.
-Check: `always` - a read for a `superseded` decision answers the terminal
-even when rows exist; a read for an active decision with 70 rows and limit 64
-answers 64 rows and a `next`; the response JSON key set equals the six names;
-a read bound to project Q for a decision of project P answers the kernel
-routes' scope refusal; the semantics is `always` because every response must
-satisfy the predicate.
-Fault/timing angle: the decision superseded between the pass and the read; a
-row written between the standing read and the table read (legal omission).
-Required faults and enabling state: flag on; rows for an active and a
-superseded decision; more rows than the page bound; two project bindings.
-Confidence: low - proposed; no implementation evidence
-Existing check: none; proposed (`review.list` paging contract at
-`docs/host-wire-protocol.md:792` is the model)
-Impact: rows for a dead decision invite a dispute the Kernel will refuse;
-text in the answer is a new disclosure path for Sensitive harness capture
-(`source_capture.rs:710-716`) to the model.
+Reachability: explicit-config-only - the read answers rows only for a route
+whose frozen `contradiction_candidates.enabled` is true
+(`crates/daemon/src/contradiction_candidates/read.rs:132`).
+Status: active
+Exercised: yes - #1168,
+`review_candidates_pages_live_rows_and_answers_each_terminal`
+(`crates/daemon/src/candidate_pass_tests.rs:1242`) writes 70 live rows and
+four stale rows for one decision through the store and reads them back through
+`Handler` dispatch: the item key set is exactly the eight wire names
+(`:1355`), a limit of 65 clamps to 64 rows listed or filtered (`:1372`) and a
+limit of 0 to one (`:1438`), the two-page walk follows (score desc, created
+desc, evidence asc) and covers the 70 live rows once each (`:1417`, `:1426`),
+the retired-evidence, foreign-incarnation, stale-digest, and future-tip rows
+are left out and counted `read_filtered_stale` = 4 (`:1397`), a superseded
+decision with rows present answers `not_live` (`:1470`), an unknown decision
+answers `not_live` (`:1481`), and a foreign root answers `project_mismatch`
+(`:1505`), also with a bad body (`:1514`). The tip, the reviewer job facts,
+and the table's rows are unchanged across the reads (`:1344`, `:1399`).
+Guarantee: `review.candidates` and the `candidates` action answer only for the
+route's bound project; the handler judges the decision with the shared
+eligibility predicate at the reader's identified tip
+(`crates/daemon/src/contradiction_candidates/read.rs:65` `decision_is_live`)
+and answers `not_live` with no rows when it fails; otherwise it answers a page
+of at most 64 rows in (score desc, created desc, evidence id asc) order,
+`as_of` the tip, whose items carry exactly `evidence_id`,
+`decision_object_id`, `decision_id`, `matched_terms`, `decision_terms`,
+`score`, `publish_tip`, and `created_at_ms`
+(`crates/daemon/src/contradiction_candidates/read.rs:46`): no descriptor text,
+summary, or term. A row is listed only when its evidence is live at `as_of`,
+its Kernel incarnation and matcher digest equal the reader's, and its
+`publish_tip` is at or below `as_of`
+(`crates/daemon/src/contradiction_candidates/read.rs:99` `is_current`); every
+other row on the page is counted `read_filtered_stale`
+(`crates/daemon/src/contradiction_candidates/read.rs:191`). The TypeScript
+parser refuses an item with any other key set
+(`packages/opencode-plugin/src/shared/kernel-client/wire.ts:652`).
+Check: `always` - every answered page satisfies the key, order, bound, and
+filter predicates above, and every ineligible decision answers `not_live`; the
+semantics is `always` because every response must satisfy it.
+Fault/timing angle: the decision superseded between the pass and the read
+(answered `not_live`); evidence retired between the pass and the read
+(filtered); a row written for a tip past the reader's target (filtered).
+Required faults and enabling state: flag on; MODULE memories authority; rows
+for an active and a superseded decision; more rows than the page bound;
+retired evidence; a second incarnation id and matcher digest; a second project
+root.
+Confidence: high - [evidence](evidence/cc-read-serves-only-live-decision-rows-ids-and-scores-only.md)
+Existing check: the test above (#1168) and the store paging test
+`a_decision_pages_in_reader_order_with_a_stable_cursor`
+(`crates/memory-store/tests/contradiction_candidates.rs:235`), unaudited.
+Impact: rows for a dead decision invite a dispute the Kernel will refuse; text
+in the answer would be a disclosure path for Sensitive harness capture to the
+model.
 Open questions:
-- Terminal name and the section 7.8 method literal (API handoff); whether
-  `matched_atoms` as a count is acceptable where the atom list is not (yes
-  proposed: a count is not text).
+- Resolved by #1168: the terminal is `not_live` and the method literal is
+  `review.candidates` (`docs/host-wire-protocol.md:827`); the item carries
+  `matched_terms` and `decision_terms` as counts, and no term list.
 - G7, sensitivity of descriptor-derived rows: resolved by #1165. A row holds
   ids, integers, and times only (the table's columns are pinned by
   `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
-  `crates/memory-store/tests/contradiction_candidates.rs:415`), the memory
+  `crates/memory-store/tests/contradiction_candidates.rs:411`), the memory
   store is local, and the read answers carry the same closed key set, so a
   derived row inherits local-only egress by construction and carries no
   sensitivity column.
-Falsifier: the read answers rows for a `superseded` decision, or a row
-includes `summary`.
-Legal witness: active decision with 3 rows answers 3 rows and `next: null`;
-the same call after the decision is superseded answers `not_live`.
 
 ### cc-read-distinguishes-disabled-unavailable-and-empty
 
 Type: safety
-Reachability: default-production (the terminal branches are reachable with
-the flag at its default)
-Status: active - PROPOSED
-Exercised: not yet - U4 read route and tool action do not exist
-Guarantee: Flag off answers `disabled` without touching the table; a
-memory-store that cannot be read answers `store_unavailable`; a Kernel that is
-not Ready answers the kernel routes' state; an eligible decision with no rows
-answers an empty page; no terminal is ever rendered as an empty page.
+Reachability: default-production - the `disabled` branch answers at the flag's
+default, and the other branches need the flag on.
+Status: active
+Exercised: yes - #1168: a root without MODULE memories authority answers
+`disabled` (`crates/daemon/src/candidate_pass_tests.rs:1259`); a flag-off
+route answers `disabled` while the table is renamed away, and the same route
+with the flag on answers `store_unavailable`
+(`crates/daemon/src/candidate_pass_tests.rs:1544`, `:1551`); an eligible
+decision with no rows answers
+`{"kind":"page","as_of":tip,"items":[],"next":null}` (`:1478`).
+`review_candidates_answers_the_store_and_kernel_states_before_any_page`
+(`:1575`) answers the kernel route's `unavailable`/`store_starting` state for
+a Kernel not yet open (`:1590`), a non-starting `unavailable` state for a
+Kernel whose open failed (`:1607`), and `store_unavailable` for a daemon with
+no Memory Store (`:1638`), each without `items`. The OpenCode tool renders
+each terminal by name and `disabled` as a plain statement
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1584`).
+Guarantee: a route whose frozen flag is false, or a root whose memories
+authority is not MODULE, answers `disabled`
+(`crates/daemon/src/contradiction_candidates/read.rs:132`, `:144`); an
+uninstalled Memory Store, or one that fails the authority lookup or the page
+read, answers `store_unavailable`
+(`crates/daemon/src/contradiction_candidates/read.rs:135`); an unready Kernel
+or a failed Kernel read answers the kernel routes' state; an eligible decision
+with no rows answers an empty page; no terminal or state renders as a page.
 Check: `always` - the four conditions answer four distinct shapes; the
 semantics is `always` because every response must be one of them.
-Fault/timing angle: Kernel Starting at read; memory-store file unreadable;
-flag toggled between route bind and read (the frozen snapshot decides).
+Fault/timing angle: Kernel starting or failed at read; Memory Store absent or
+its table unreadable; the flag toggled between route bind and read (the frozen
+snapshot decides).
 Required faults and enabling state: a route with the flag off; a route with
-the flag on and the store removed; a Kernel in Starting; an eligible decision
-with zero rows.
-Confidence: low - proposed; no implementation evidence
-Existing check: none; proposed (`review.list` terminal vocabulary at
-`docs/host-wire-protocol.md:790`)
+the flag on and the table renamed away; a daemon with no Memory Store; a
+Kernel not yet open and one whose open failed; an eligible decision with zero
+rows.
+Confidence: high - [evidence](evidence/cc-read-distinguishes-disabled-unavailable-and-empty.md)
+Existing check: the tests above (#1168), unaudited.
 Impact: an agent reading an empty page as "no contradiction" when the store
 was unavailable.
 Open questions: None.
-Falsifier: Kernel Starting answers `{items: [], next: null}`.
-Legal witness: flag off: `disabled`; flag on, store missing:
-`store_unavailable`; flag on, no rows: `{items: [], next: null}`.
 
 ## S-G reachability
 
@@ -737,31 +776,46 @@ Legal witness: flag off: `disabled`; flag on, store missing:
 Type: safety
 Reachability: default-production (the flag's default is off; this record
 describes the default build's behavior)
-Status: active - PROPOSED
-Exercised: partial - sweep and status arm (#1166):
-`a_false_flag_runs_no_table_statement_and_moves_no_counter` (`crates/daemon/tests/contradiction_candidates_sweep.rs:552`)
-hides the table, runs the sweep under a false flag with and without a
-Kernel, and observes every counter at zero, then shows the same table fails
-the first statement an enabled sweep runs;
-`the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass`
-(`:900`) drives `pass_then_sweep`
+Status: active
+Exercised: yes - sweep and status arm (#1166):
+`a_false_flag_runs_no_table_statement_and_moves_no_counter`
+(`crates/daemon/tests/contradiction_candidates_sweep.rs:552`) hides the table,
+runs the sweep under a false flag with and without a Kernel, and observes
+every counter at zero, then shows the same table fails the first statement an
+enabled sweep runs;
+`the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` (`:900`)
+drives `pass_then_sweep`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) with the flag off and
 then on. The key is `/contradiction_candidates/enabled`
 (`crates/daemon/src/config.rs:1024`), user-only and default false
 (`contradiction_candidates_default_off_and_only_the_user_tier_enables_them`,
 `config.rs:2299`); a configuration resolved before a user-tier rewrite keeps
 its value (`config.rs:2320`), and a bound route keeps the value it was bound
-with (`a_route_keeps_the_candidate_flag_it_was_bound_with_and_health_reports_the_block`,
-`crates/daemon/src/lib.rs:21340`), which also shows the status block
-carrying the key with every counter zero. Pass arm (#1167):
-`a_route_without_consent_offers_no_pass_and_writes_no_row` (`crates/daemon/src/candidate_pass_tests.rs:251`)
-sets the offer's consent off directly, publishes three windows with source
-capture on, and observes
-every counter at zero and no row; `the_route_consent_reaches_the_pass_through_a_transform`
-(`:933`) binds the route against the opposite daemon value and shows the
-offer follows the route's frozen value. No statement trace exists, so the
-pass arm's "no table statement" clause rests on zero offers. The read arm
-lands with #1168.
+with
+(`a_route_keeps_the_candidate_flag_it_was_bound_with_and_health_reports_the_block`,
+`crates/daemon/src/lib.rs:21340`), which also shows the status block carrying
+the key with every counter zero. Pass arm (#1167):
+`a_route_without_consent_offers_no_pass_and_writes_no_row`
+(`crates/daemon/src/candidate_pass_tests.rs:251`) sets the offer's consent off
+directly, publishes three windows with source capture on, and observes every
+counter at zero and no row;
+`the_route_consent_reaches_the_pass_through_a_transform` (`:933`) binds the
+route against the opposite daemon value and shows the offer follows the
+route's frozen value; #1168 adds
+`a_publication_without_consent_runs_no_candidate_table_statement` (`:1767`),
+which renames the table away, publishes three consent-off windows with every
+counter at zero, and shows one consenting publication's pass fails on the
+hidden table (`store_unavailable` = 1). Read arm (#1168):
+`review_candidates_pages_live_rows_and_answers_each_terminal`
+(`crates/daemon/src/candidate_pass_tests.rs:1544`) renames the table away,
+answers `disabled` on a flag-off route with `read_filtered_stale` unchanged,
+and shows the same route with the flag on answers `store_unavailable`
+(`:1551`), so the flag-off read runs no table statement; the handler answers
+`disabled` before it reaches the store
+(`crates/daemon/src/contradiction_candidates/read.rs:132`). The `candidates`
+action renders the terminal as a plain statement in both harnesses
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1584`,
+`packages/pi-plugin/src/tools/eidnara-memory.test.ts:495`).
 Guarantee: With the route's frozen `contradiction_candidates.enabled` false
 (default), no candidate pass is offered after any publication, no row is
 written, and neither read surface opens the table; the flag is enabled only by
@@ -772,72 +826,81 @@ daemon-level value again on every cleanup pass
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) and, while that value
 is false, runs no table statement and moves no counter.
 Check: `always(!X)` - X is "a pass counter increments, a row exists, or a
-table read statement executes for a route whose frozen flag is false"; this
-is a forbidden state with no dedicated detection point, so `always(!X)`
-rather than `unreachable`; assert by publishing with the flag off and
-checking counters, row count, and a statement-trace hook.
+table read statement executes for a route whose frozen flag is false"; this is
+a forbidden state with no dedicated detection point, so `always(!X)` rather
+than `unreachable`; assert by publishing with the flag off and checking
+counters, row count, and a statement-trace hook.
 Fault/timing angle: a config reload that turns the flag on after the route
 bound (the route keeps false, while the sweep follows the reload on its next
 pass); a daemon restart with the flag on (new routes see true).
-Required faults and enabling state: a default config; publications with
-source capture on; a `candidates` call and an owner read under the default.
-Confidence: medium - the sweep and pass arms are tested; the read arm is
-unbuilt and no statement trace exists
-Existing check: the sweep-arm and pass-arm tests named under Exercised,
-unaudited.
+Required faults and enabling state: a default config; publications with source
+capture on; a `candidates` call and an owner read under the default.
+Confidence: high - [evidence](evidence/cc-flag-off-no-pass-no-write-no-table-read.md); every arm
+hides the table and pairs the flag-off run with a flag-on control
+Existing check: the sweep-arm, pass-arm, and read-arm tests named under
+Exercised, unaudited.
 Impact: an unmeasured matcher reaches users (KTD4) and a surprise write load
 appears in deployments that did not opt in.
 Open questions:
-- Whether the TS plugin hides the `candidates` action from the tool schema
-  when the daemon reports the flag off, since the schema itself is a visible
-  behavior change (OQ-E) (needs human input).
-Falsifier: flag off, a `candidates` call opens the table and answers an empty
-page instead of `disabled`.
-Legal witness: default config, five publications: zero pass admissions, zero
-rows, `candidates` answers `disabled`.
+- OQ-E resolved by #1168 (OQ5-6, option a): the `candidates` action is in both
+  plugins' schemas whatever the flag, and answers `disabled` when the route's
+  frozen flag is off; the A1 golden
+  (`packages/opencode-plugin/src/shared/prompt-surface-a1-golden.md`) carries
+  the schema change.
 
 ## S-H confirm linkage
 
 ### cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm
 
 Type: safety
-Reachability: explicit-config-only
-Status: active - PROPOSED
-Exercised: not yet - U3 table and U4 surfaces do not exist
-Guarantee: A row's `evidence_id` is byte-identical to the
-`Published.evidence_object_id` of the descriptor's publication
-(`harness_sources.rs:521-532`) and its decision object id is the `object_id`
-P4 `dispute` takes, so `dispute {object_id, event, evidence_id}` copied from a
-row is well formed; the list performs no evidence-liveness check; a confirm
-whose evidence has been retired is refused `not_found` by P4 C6 at commit;
-the confirm path never reads the candidate table.
-Check: `always` - for every row the evidence id equals the publication
-receipt's evidence object id and names an `evidence_meta` row at write time;
-a `dispute` built from a row with live evidence lands `Disputed`; after the
-evidence is retired the same row is still listed and the same `dispute` is
-refused `not_found`; the semantics is `always` because every row and every
-confirm must satisfy it.
+Reachability: explicit-config-only - as
+`cc-read-serves-only-live-decision-rows-ids-and-scores-only`.
+Status: active
+Exercised: yes - #1168,
+`a_listed_candidate_confirms_through_dispute_while_its_evidence_lives`
+(`crates/daemon/src/candidate_pass_tests.rs:1643`) publishes two windows
+through the capture job and the pass, lists each decision's row, checks the
+listed `evidence_id` equals a published descriptor's evidence id (`:1689`),
+truncates the candidate table, and files
+`dispute {object_id, event: mark_disputed, evidence_id}` built from the row
+through `kernel.commit`, which lands `disputed` (`:1726`). After
+`expire_harness_captures` retires the evidence, the other decision's read
+leaves the row out and counts it (`:1735`), and the same dispute built from
+the earlier listing is refused `not_found` (`:1745`).
+`the_confirm_path_never_reads_the_candidate_table` (`:1749`) is a lexical
+check that `kernel_routes/commit.rs` and `kernel_routes/dispute.rs` name no
+candidate store method. The OpenCode tool renders each row's confirm form
+`{"action":"dispute","event":"mark_disputed","objectId","evidenceId"}` from
+the row's ids
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1545`).
+Guarantee: a row's `evidence_id` is the `srcev:*` evidence row id the
+publication receipt carries (`Published.evidence_id`,
+`crates/daemon/src/harness_sources.rs:527`), and its `decision_object_id` is
+the `object_id` P4 `dispute` takes, so a dispute copied from a row is well
+formed; the read lists a row only while its evidence is live at the reader's
+tip; a confirm whose evidence retired after the listing is refused `not_found`
+by P4 at commit; the confirm path never reads the candidate table.
+Check: `always` - for every listed row the evidence id names a published
+descriptor's evidence row; a dispute built from a row with live evidence lands
+`Disputed`; after the evidence retires the row leaves the read and the same
+dispute is refused `not_found`; the semantics is `always` because every row
+and every confirm must satisfy it.
 Fault/timing angle: the `harness_capture` 30-day retention sweep retiring the
-evidence between list and confirm (`schema.rs:136`); a session delete retiring
-the descriptor.
-Required faults and enabling state: flag on; P4 D8 `dispute` landed; a row
-for a live descriptor; evidence retired by the Kernel sweep or
-`retire_evidence`; a confirm after retirement.
-Confidence: low - proposed; no implementation evidence
-Existing check: none; proposed (P4 proposed record
-`cited-evidence-live-at-dispute-commit` owns the confirm-side check)
+evidence between list and confirm; a session delete retiring the descriptor.
+Required faults and enabling state: flag on; MODULE authority; P4 `dispute`
+landed; rows written by a real pass; evidence retired by
+`expire_harness_captures` between the listing and the confirm.
+Confidence: high - [evidence](evidence/cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm.md);
+the confirm-path check is lexical
+Existing check: the tests above (#1168), unaudited; P4's
+`cited-evidence-live-at-dispute-commit` owns the confirm-side refusal.
 Impact: a row carrying the descriptor `object_id` instead of the evidence id
-makes every confirm fail; a list-side liveness check would hide the refusal
-the confirm must own and cost a Kernel read per row.
+makes every confirm fail; a confirm that read the table would make the derived
+table an authority.
 Open questions:
-- Under P4 OQ4-3's recommended visibility definition, a retired descriptor
-  leaves its evidence uncited and the confirm is `not_found` even if the
-  evidence row is live; the record's expected refusal name is the same.
-Falsifier: a row whose `evidence_id` is the `srcdesc:*` object id; or the
-list omits rows with retired evidence.
-Legal witness: row (E, O1); `dispute {object_id: O1, event: mark_disputed,
-evidence_id: E}` lands `Disputed`; after retiring E the row is listed and the
-confirm is `not_found`.
+- Resolved by #1168 (ticket scope, C14): the read checks evidence liveness at
+  the reader's tip and leaves retired rows out, counted `read_filtered_stale`;
+  a confirm built from an earlier listing still meets P4's refusal.
 
 ## Cross-cutting R5
 

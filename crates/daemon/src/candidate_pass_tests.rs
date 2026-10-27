@@ -1762,3 +1762,62 @@ fn the_confirm_path_never_reads_the_candidate_table() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_publication_without_consent_runs_no_candidate_table_statement() {
+    let (handler, store, dir, project) = candidate_handler(candidate_config(true, false)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    seed(
+        &kernel_of(&handler),
+        &binding,
+        &[("one", TOPIC, EventKind::Other)],
+    );
+    let path = find_file(dir.path(), "store.db");
+    let rename = |from: &str, to: &str| {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+            .unwrap();
+    };
+    rename(
+        "contradiction_candidates",
+        "contradiction_candidates_hidden",
+    );
+    for index in 0..3 {
+        publish(
+            &handler,
+            &project,
+            &window(index, &format!("{TOPIC} note {index}")),
+            false,
+        );
+        settle(&handler).await;
+    }
+    assert_eq!(capture_report(&handler)["units_published"], 3);
+    assert!(
+        counts(&handler)
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|value| value == 0),
+        "{}",
+        counts(&handler)
+    );
+    publish(
+        &handler,
+        &project,
+        &window(3, &format!("{TOPIC} note 3")),
+        true,
+    );
+    settle(&handler).await;
+    assert_eq!(
+        counts(&handler)["store_unavailable"],
+        1,
+        "the hidden table fails the pass a consenting publication runs: {}",
+        counts(&handler)
+    );
+    rename(
+        "contradiction_candidates_hidden",
+        "contradiction_candidates",
+    );
+    assert!(rows(&store).is_empty());
+}

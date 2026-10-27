@@ -104,10 +104,21 @@ read spares a rewritten row).
 | `a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_a_parked_pass` | `:983` | panic counted with permit and charge released; kept-text charge below the job's; shutdown waits | single flight | unaudited |
 | `publish_latency_with_candidates_on_stays_within_the_off_baseline` | `:1041` | median publication hold, with at least one publication beside a running pass, within 3x + 50 ms of the flag-off median | trigger (C1) | unaudited |
 
-## S-F, S-H
+## S-F read, S-G read and pass arms, S-H confirm (#1168)
 
-None found. The read and dispute-handoff behavior does not exist at the
-branch tip; the read ticket (#1168) adds the code and the checks.
+Rust checks are in `crates/daemon/src/candidate_pass_tests.rs`; TypeScript
+checks are named with their files.
+
+| Check | Location | Asserts | Records | Status |
+| --- | --- | --- | --- | --- |
+| `review_candidates_pages_live_rows_and_answers_each_terminal` | `:1242` | 8-key items; clamps at 65 and 0; order and disjoint two-page walk; four stale rows filtered and counted; `not_live` for superseded and unknown; empty page; `invalid_params` bodies; scope refusal before the body; observational read; flag off with the table hidden and a flag-on control; tip, jobs, and rows unchanged | read serves, read terminals, flag off (read arm) | unaudited |
+| `review_candidates_answers_the_store_and_kernel_states_before_any_page` | `:1575` | Kernel starting, Kernel open failed, and no Memory Store answer their states without `items` | read terminals | unaudited |
+| `a_listed_candidate_confirms_through_dispute_while_its_evidence_lives` | `:1643` | listed evidence id is a published descriptor's; confirm lands `disputed` with the table truncated; after retention the row is filtered and the earlier form is `not_found` | confirm linkage | unaudited |
+| `the_confirm_path_never_reads_the_candidate_table` | `:1749` | `commit.rs` and `dispute.rs` name no candidate store method (lexical) | confirm linkage | unaudited |
+| `a_publication_without_consent_runs_no_candidate_table_statement` | `:1767` | consent-off publications succeed with the table hidden and every counter zero; a consenting publication's pass fails on it | flag off (pass arm) | unaudited |
+| `eidnara_memory candidates` | `packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1506` | default read without a tool-call id; request body; confirm form; terminals by name; extra-key refusal; dispute-admission note; foreign-decision and paging refusals | read serves (client), confirm linkage | unaudited |
+| `Pi eidnara_memory candidates` | `packages/pi-plugin/src/tools/eidnara-memory.test.ts:494` | default schema with paging fields; `disabled` rendered; dispute-admission note from the Pi allowlist | read terminals, flag off (read arm) | unaudited |
+| `review.candidates is a listed method whose items and terminals are the ones the parser admits` | `packages/cli/src/commands/review-wire.contract.test.ts:120` | section 7.8 lists the method; its item keys and terminals equal the parser's | read serves (wire) | unaudited |
 
 ## Suspiciously quiet areas
 
