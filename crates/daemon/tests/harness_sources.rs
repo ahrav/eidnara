@@ -628,6 +628,24 @@ fn adapters_bind_native_identity_exactly_and_refuse_missing_identity() {
         opencode_units(&opencode_session(), &ignored).unwrap(),
         vec![]
     );
+    // A synthetic OpenCode text part is injected context. Checkpoint messages
+    // carry user and assistant conversation text, so the adapter publishes the
+    // typed part alone, at its part position.
+    let synthetic = json!({
+        "info": { "id": "msg_s", "sessionID": SESSION, "role": "user", "time": { "created": 1 } },
+        "parts": [
+            { "type": "text", "text": "injected context", "synthetic": true },
+            { "type": "text", "text": "the typed words" }
+        ]
+    });
+    let units = opencode_units(&opencode_session(), &synthetic).unwrap();
+    assert_eq!(
+        units
+            .iter()
+            .map(|unit| (unit.identity[4].1.as_str(), unit.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("1", "the typed words")]
+    );
     // Debug output of a unit names identities and sizes, never text.
     let debug = format!(
         "{:?}",

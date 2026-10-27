@@ -234,6 +234,7 @@ describe("runMemoryMarkCommand evidence", () => {
             { path: "src/.Git/config", git_object_id: OID },
             { path: "double%2Fencoded", git_object_id: OID },
             { path: `${"a".repeat(1025)}`, git_object_id: OID },
+            { path: Array(17).fill("d").join("/"), git_object_id: OID },
         ]) {
             const h = harness();
             const outcome = await run(h, {
@@ -243,6 +244,40 @@ describe("runMemoryMarkCommand evidence", () => {
                 confirmed: false,
             });
             expect(outcome).toMatchObject({ kind: "refused", step: "preview" });
+        }
+    });
+
+    test("the fake accepts a path of 16 components, the route's confined-path limit", async () => {
+        const h = harness();
+        const outcome = await run(h, {
+            event: "mark_disputed",
+            objectId: "mem_labeled",
+            evidenceRef: { path: Array(16).fill("d").join("/"), git_object_id: OID },
+            confirmed: false,
+        });
+        expect(outcome).toMatchObject({ kind: "applied" });
+    });
+
+    test("the fake refuses evidence whose rendered reason exceeds the route's 4096-byte cap", async () => {
+        // An unreserved byte renders as itself and `/` renders as `%2F`.
+        const prefix =
+            "v=1;op=kernel.commit;event=mark_disputed;reporter_taint=user_inferred;evidence_id=";
+        const room = 4096 - prefix.length;
+        for (const [evidenceId, applied] of [
+            ["e".repeat(room), true],
+            ["e".repeat(room + 1), false],
+            ["/".repeat(Math.floor(room / 3) + 1), false],
+        ] as const) {
+            const h = harness();
+            const outcome = await run(h, {
+                event: "mark_disputed",
+                objectId: "mem_labeled",
+                evidenceId,
+                confirmed: false,
+            });
+            expect(outcome).toMatchObject(
+                applied ? { kind: "applied" } : { kind: "refused", step: "preview" },
+            );
         }
     });
 

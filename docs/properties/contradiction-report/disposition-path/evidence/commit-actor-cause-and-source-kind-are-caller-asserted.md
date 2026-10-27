@@ -19,11 +19,11 @@ which makes the provenance of `source_kind` part of the dispute record.
   (`crates/daemon/src/kernel_routes/commit.rs:108-127`); `resolve_classes`
   derives the classes from `source_kind` and refuses an assertion above
   the derivation (`commit.rs:411-444`); the handler passes the resolved
-  taint to the dispute reason (`commit.rs:1111-1125`).
+  taint to the dispute reason (`commit.rs:1109-1123`).
 - `kernel_route_scope` binds the store, the project, the root, the
   harness, and the capabilities (`crates/daemon/src/kernel_routes/mod.rs:415-441`;
   `RouteScope` at `:405-412`). `handle_kernel_commit` reads only
-  `scope.project` and `scope.store` (`commit.rs:1126`, `:1141`, `:1144`);
+  `scope.project` and `scope.store` (`commit.rs:1124`, `:1139`, `:1142`);
   `scope.harness` is not read on this route.
 - `management_binding` requires a non-empty `session_id` and refuses one
   that differs from the channel's bound session with `session_mismatch`
@@ -32,7 +32,7 @@ which makes the provenance of `source_kind` part of the dispute record.
   body (`ENVELOPE_KEYS`, `mod.rs:461`; `parse_request_body`,
   `:463-474`), so the session reaches no Kernel row.
 - The Kernel redacts `actor` and `cause` before the `commit_log` insert
-  (`RedactedIntent`; insert at `crates/kernel/src/envelope.rs:1399-1415`).
+  (`RedactedIntent`; insert at `crates/kernel/src/envelope.rs:1420-1436`).
 - The commands send `actor = "user:opencode"`
   (`packages/opencode-plugin/src/hooks/context/command-handler.ts:391`) or
   `"user:pi"` (`packages/pi-plugin/src/commands/eidnara-memory-mark.ts:18`)
@@ -72,7 +72,7 @@ runs before body parsing for every `kernel.*` route.
 
 ### Q: Does the route verify `actor` against `RouteScope.harness`?
 
-- Sources examined: `mod.rs:405-441`, `commit.rs:1078-1207`,
+- Sources examined: `mod.rs:405-441`, `commit.rs:1076-1205`,
   `project.rs:138-165`.
 - Findings: no. `harness` is bound and unused on `kernel.commit`; `actor`
   is copied from the body.
@@ -82,7 +82,7 @@ runs before body parsing for every `kernel.*` route.
 
 ### Q: Is `source_kind` bound to the calling surface?
 
-- Sources examined: `commit.rs:368-380`, `:411-444`, `:1111-1125`.
+- Sources examined: `commit.rs:368-380`, `:411-444`, `:1109-1123`.
 - Findings: no. Any bound client may send any of `assistant`, `model`,
   `memory_classifier`, or `user`; the derivation bounds the resulting
   taint at `user_inferred` for the strongest claim.

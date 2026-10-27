@@ -23,7 +23,8 @@ today.
   the callers derive with `memoryMarkOperationId(sessionId, args)` (PR A
   moved the derivation to the callers, `command-handler.ts:415`,
   `pi-plugin/src/commands/eidnara-memory-mark.ts:61`); `cause =
-  commandLine(args)`, which appends the evidence flags (`:158-160`);
+  commandLine(args)`, which appends the evidence flags
+  (`memory-mark-command.ts:158-160`);
   `sourceKind` defaults to `"user"` (`:248`) and rides in the intent
   (`:253`).
 - `verdictFor` returns null unless `results.length == 1` and the single

@@ -19,19 +19,19 @@ carries so R3's join is specified against the real columns.
   (`crates/kernel/src/schema.rs:26`); update and delete triggers abort.
 - INSERT binds exactly `transaction_id, writer_epoch, producer,
   operation_key, request_digest, recorded_at, actor.text, cause.text`
-  (`crates/kernel/src/envelope.rs:1400-1415`).
+  (`crates/kernel/src/envelope.rs:1421-1436`).
 - `RedactedIntent::new` applies `identity()` to `producer` and
   `operation_key` and `redact()` to `actor` and `cause`
-  (`envelope.rs:1699-1714`); `RedactedIntent::record` writes a
+  (`envelope.rs:1720-1735`); `RedactedIntent::record` writes a
   `durable_text_redactions` row per detection for `actor` and `cause`
-  (`:1716-1726`, called at `:1417`).
+  (`:1737-1747`, called at `:1438`).
 - `IntentRequest` has `producer, operation_key, request_digest, actor,
   cause` and is `deny_unknown_fields` (`crates/daemon/src/kernel_routes/
   project.rs:138-146`); `into_intent` namespaces the key (`:148-163`).
 - `session_id` is an envelope key stripped before parsing
   (`kernel_routes/mod.rs:461`); the binding knows the session but nothing
   writes it to the Kernel on this path. `source_kind` is consumed by
-  `resolve_classes` (`commit.rs:1111-1118`) and copied into inserted specs
+  `resolve_classes` (`commit.rs:1109-1116`) and copied into inserted specs
   (`:288-294`), never into `commit_log`.
 - The admission row joins to the commit log by `commit_seq`
   (`admission_decisions.commit_seq REFERENCES commit_log`, `schema.rs:163`).
@@ -62,7 +62,7 @@ record would miss.
 
 None in time. Depends on `RedactedIntent::new`'s validation
 (`request_digest` lowercase hex 64, non-blank producer and key,
-`envelope.rs:1701-1706`).
+`envelope.rs:1722-1727`).
 
 ## What a test must construct
 
@@ -80,7 +80,7 @@ None in time. Depends on `RedactedIntent::new`'s validation
 
 - Sources examined: P4 R3, U1 Verification ("the receipt and commit log
   carry actor, cause, and session for the event"), U3 (typed reporter
-  columns in Batch K1), OQ4-1; `schema.rs:26`; `envelope.rs:1400-1415`;
+  columns in Batch K1), OQ4-1; `schema.rs:26`; `envelope.rs:1421-1436`;
   `mod.rs:461`.
 - Findings: the commit log carries `actor` and `cause`. The session id is
   dropped at the envelope boundary. OQ4-1 puts the reporter class into a

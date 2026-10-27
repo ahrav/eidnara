@@ -20,14 +20,14 @@ use daemon::search_projection::SearchProjection;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
 use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
-    ArtifactDeletionRequest, ArtifactDestination, CausalClass, CausalEvidence,
-    ClaimCausalityRequest, ClaimFactBounds, CommitIntent, CommitPageBounds, CommitReadError,
-    DecisionPayload, DecisionRow, DecisionSpec, Dimension, DomainSpec, EligibilityCandidate,
-    EligibilityVerdict, EventKind, ExportWindow, KernelError, KernelStore, ObservationPayload,
-    ObservationSpec, ProjectScope, ProviderEgress, RemediationTarget, ScopeSpec, ScopeTermSpec,
-    Sensitivity, SourceClass, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
-    SourcePageBounds, SourceRow, Surface, TaintClass,
+    AdmissionEvent, AdmissionRequest, AnchorSpec, AnchorValue, ArtifactDeletionIdentity,
+    ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactDestination, CausalClass,
+    CausalEvidence, ClaimCausalityRequest, ClaimFactBounds, CommitIntent, CommitPageBounds,
+    CommitReadError, DecisionPayload, DecisionRow, DecisionSpec, Dimension, DomainSpec,
+    EligibilityCandidate, EligibilityVerdict, EventKind, ExportWindow, KernelError, KernelStore,
+    ObservationPayload, ObservationSpec, ProjectScope, ProviderEgress, RemediationTarget,
+    ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass, SourceHold, SourceHoldAdmission,
+    SourceHoldBinding, SourceHoldBounds, SourcePageBounds, SourceRow, Surface, TaintClass,
 };
 use retrieval::batch::{
     BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, read_checkpoint,
@@ -1501,6 +1501,85 @@ fn registration_starts_after_its_own_commit() {
 
     ClaimMaterializer::register(&corpus.kernel, NOW + 1).unwrap();
     assert_eq!(corpus.checkpoint(), advanced);
+}
+
+/// The materializer consumes anchor-only commits with zero publications and publishes the `Seed::ledger` units for a decision committed with its anchor.
+#[test]
+fn anchor_commits_pass_through_the_claim_materializer() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let anchor = |name: &str| AnchorSpec {
+        anchor_id: format!("anchor-{name}"),
+        object_id: format!("anchor-object-{name}"),
+        domain_id: MEMORY.to_string(),
+        source_kind: "assistant".to_string(),
+        source_id: "memory_capture".to_string(),
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+        value: AnchorValue::ReachableFrom {
+            oid: "ab".repeat(20),
+            captures: Vec::new(),
+        },
+    };
+    corpus
+        .kernel
+        .commit(intent("anchor-only"), |envelope| {
+            Ok(envelope.insert_anchor(anchor("lone"))?.result_json())
+        })
+        .unwrap();
+    let seed = Seed::scoped(
+        "anchored",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        "Anchored at the checkout head.",
+        "",
+    );
+    let spec = DecisionSpec {
+        anchor_id: Some("anchor-paired".to_string()),
+        ..seed.spec()
+    };
+    let anchored = corpus
+        .kernel
+        .commit(intent("anchored"), |envelope| {
+            envelope.insert_anchor(anchor("paired"))?;
+            envelope.insert_decision(spec.clone())?;
+            envelope.record_admission(admission(seed.object))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let report = corpus.materialize();
+    assert_eq!(
+        (report.published, report.commits_consumed),
+        (2, 2),
+        "{report:?}"
+    );
+    assert_eq!(corpus.checkpoint(), Some(anchored.commit_seq));
+    assert_eq!(
+        corpus.inventory(),
+        seed.ledger().0.into_iter().collect::<BTreeSet<_>>()
+    );
+    for surface in [Surface::ExplicitSearch, Surface::AutoInject] {
+        let kinds: BTreeSet<String> = corpus
+            .kernel
+            .visible_as_of(surface, anchored.commit_seq)
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|row| row.object.object_kind)
+            .collect();
+        assert!(!kinds.contains("anchor"), "{surface:?}: {kinds:?}");
+    }
+    assert!(
+        corpus
+            .kernel
+            .visible_as_of(Surface::ExplicitSearch, anchored.commit_seq)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == seed.object)
+    );
 }
 
 /// A subject and decision naming different objects, or a non-decision registry row, are refused rather than mapped.

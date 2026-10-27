@@ -16,10 +16,10 @@ states what it answers for evidence.
 
 - `object_state_sql` selects `COALESCE(dec.scope_id, obs.scope_id)` with
   `LEFT JOIN decisions` and `LEFT JOIN observations`
-  (`crates/kernel/src/envelope.rs:1878-1892`); `object_state_from` reads it
-  into `ObjectState.scope_id` (`:1894-1901`). The doc comment: "Decisions
+  (`crates/kernel/src/envelope.rs:1899-1913`); `object_state_from` reads it
+  into `ObjectState.scope_id` (`:1915-1922`). The doc comment: "Decisions
   and observations are the object kinds that carry a scope and an evidence
-  citation; every other kind reads `None` for both" (`:1903-1904`).
+  citation; every other kind reads `None` for both" (`:1924-1925`).
 - `evidence_meta` has no `scope_id` column (`crates/kernel/src/schema.rs:
   139`). Tables with `scope_id`: `propositions` (`:118`), `scope_term`
   (`:130`), `asserted_edges` (`:143`), `decisions` (`:167`),
@@ -29,12 +29,12 @@ states what it answers for evidence.
 - `scoped_object_state` returns `Err(KernelError::NotFound)` when the
   filter does not match, "the same answer a missing object gets, prevents
   cross-project object-id enumeration" (`commit.rs:671-691`).
-- Every scoped position in the route goes through it: tokens (`:1053`),
+- Every scoped position in the route goes through it: tokens (`:1051`),
   disposition subject (`:706`), approval and chain members (`:714-716`),
-  supersede predecessor and replacement (`:947`, `:957`), retire target
-  (`:996`), projected dependencies (`:1029`).
+  supersede predecessor and replacement (`:945`, `:955`), retire target
+  (`:994`), projected dependencies (`:1027`).
 - The preview reads served rows with `served_rows_for(.., Some(scope_
-  term))` (`commit.rs:820`), another scope-bound read that selects
+  term))` (`commit.rs:818`), another scope-bound read that selects
   decision rows, not evidence.
 - The evidence object's registry row carries `object_kind`, `domain_id`,
   `source_kind`, `source_id` (`schema.rs:94`); `source_kind`/`source_id`
@@ -73,7 +73,7 @@ but store no scope on the row.
 
 ### Q: What does "visible to the caller's project scope" mean for a scope-less evidence object?
 
-- Sources examined: P4 R2 and U1 Approach step 2; `envelope.rs:1878-1904`;
+- Sources examined: P4 R2 and U1 Approach step 2; `envelope.rs:1899-1925`;
   `project.rs:199-206`; `schema.rs:94`, `:139`; `kernel_routes/mod.rs:
   415-441`; `docs/host-wire-protocol.md:26` (bearer key, no per-actor
   principal).
@@ -87,9 +87,9 @@ but store no scope on the row.
   should add a scope to evidence.
 - Conclusion: at `3a3b916b7`, needs human input. Resolved by PR A with
   definition (a), extended to decision events and asserted edges:
-  `Envelope::evidence_citations` (`crates/kernel/src/envelope.rs:532-577`)
-  returns the scopes of the live citers, and `require_visible_evidence`
-  (`crates/daemon/src/kernel_routes/commit.rs:742-759`) accepts an id
+  `Envelope::evidence_cited_in` (`crates/kernel/src/envelope.rs:520-598`)
+  offers the scopes of the live citers, and `require_visible_evidence`
+  (`crates/daemon/src/kernel_routes/commit.rs:742-757`) accepts an id
   only when the bound project's filter accepts one of them. Evidence
   objects still carry no scope, and this record's guarantee still holds
   for scoped lookups of an evidence object id; the record is re-labelled,

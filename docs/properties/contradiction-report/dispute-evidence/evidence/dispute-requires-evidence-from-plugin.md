@@ -27,7 +27,7 @@ None`. PR A adds the fields and the requirement.
   empty `evidence_id` (`crates/daemon/src/kernel_routes/dispute.rs:55-64`).
 - The handler runs `compose_reason` for every operation after
   `resolve_classes` and before the intent, preview, or commit
-  (`commit.rs:1111-1125`), and answers `state_only(invalid(reason))`, so
+  (`commit.rs:1109-1123`), and answers `state_only(invalid(reason))`, so
   no transaction starts.
 - The module header states the requirement and the refusal names
   (`commit.rs:12-15`, `:46-53`).
@@ -54,7 +54,7 @@ would fall to Candidate on assertion alone.
 ## Timing windows and dependencies
 
 None in time. The check depends on the handler loop running before
-`if parsed.preview` (`commit.rs:1145`); it does, so preview and commit
+`if parsed.preview` (`commit.rs:1143`); it does, so preview and commit
 share it.
 
 ## What a test must construct

@@ -15,6 +15,11 @@ Keep agent guidance in `docs/agents/` and property catalogs in `docs/properties/
 Specs and implementation plans belong in the issue tracker, not local copies.
 Do not commit research, benchmark reports, or planning artifacts.
 
+## Review
+
+Read `REVIEW.md` before preparing or reviewing a change; its Sub-agents section
+defines the review gate and what each reviewer receives.
+
 ## Agent skills
 
 ### Work tracking

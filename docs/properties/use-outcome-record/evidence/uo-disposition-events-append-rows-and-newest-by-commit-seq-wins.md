@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References are verified at the #1157 branch tip, the commit that carries this
+revision.
 
 - Append: `crates/kernel/src/admission.rs:1748`.
 - Newest wins: `crates/kernel/src/admission.rs:675`.
@@ -43,7 +43,7 @@ committed together.
 
 ## Investigation log
 
-### Q: A decision disputed then re-approved still counts as disputed after se
+### Q: Does a decision disputed then re-approved still count as disputed after serve?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A decision disputed then re-approved still counts as disputed after

@@ -17,7 +17,7 @@ use super::backend::{
 use super::config::MAX_OPENCODE_CONFIG_BYTES;
 use super::subprocess::group_registry::StateRoot;
 use super::subprocess::{
-    self, EnvSnapshot, PrivateDir, SubprocessLimits, SubprocessSpec, commit_terminal,
+    self, EnvSnapshot, PrivateDir, StdoutFilter, SubprocessLimits, SubprocessSpec, commit_terminal,
 };
 use crate::harness_closure::ValidatedHarnessClosure;
 
@@ -348,7 +348,7 @@ async fn run_opencode(
         );
     }
     // The OpenCode CLI closes its streams and exits when the run finishes, so EOF and the drain grace bound the tail without a terminal probe.
-    let result = match subprocess::run(spec, &limits, &cancel, None).await {
+    let result = match subprocess::run(spec, &limits, &cancel, StdoutFilter::default()).await {
         Ok(result) => result,
         Err(err) => {
             return subprocess::merge_cleanup(

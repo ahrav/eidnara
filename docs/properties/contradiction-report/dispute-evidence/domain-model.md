@@ -35,7 +35,7 @@ Corrections to [`../fact-sheet.md`](../fact-sheet.md) found while verifying:
   holds: the admission row's `source_kind`/`source_id` come from the
   subject object's registry row.
 - The "carry a scope and an evidence citation" doc comment is at
-  `crates/kernel/src/envelope.rs:1903-1904`, not "about 1870".
+  `crates/kernel/src/envelope.rs:1924-1925`, not "about 1870".
 - The transport envelope keys are at
   `crates/daemon/src/kernel_routes/mod.rs:461` and the stripping function
   `parse_request_body` at `:463-473`, not `:458-471`.
@@ -159,8 +159,8 @@ that exist)
 |---|---|---|
 | `admission_decisions` | `event_kind` (`mark_disputed` or `contradict`), `subject_object_id`, `source_kind`/`source_id`/`source_class`/`taint_class` (the subject's, `load_subject_facts` `admission.rs:2131-2172`), `disposition`, `maturity`, `effective_maturity`, `outcome`, `evidence_id`, `reason`, `commit_seq`, `decided_at` | FACT at `3a3b916b7` except `evidence_id` (always `None` then) and `reason` (constant `"kernel.commit"`, `commit.rs:99`). PR A: a dispute row carries the checked `evidence_id` and the `v=1` reason (`commit.rs:731-732`) |
 | `admission_decisions` (U3) | `reporter_source_class`, `reporter_taint_class`, `event_payload`, `use_outcome_id` | PROPOSED, Batch K1 |
-| `commit_log` | `producer`, `operation_key`, `request_digest`, `actor`, `cause` (`crates/kernel/src/schema.rs:26`; insert `envelope.rs:1399-1415`) | FACT; no session or source_kind column |
-| `operation_receipts` | `(producer, operation_key) -> request_digest, result_payload` (`schema.rs:42`; `stored_receipt` `envelope.rs:1342-1372`) | FACT |
+| `commit_log` | `producer`, `operation_key`, `request_digest`, `actor`, `cause` (`crates/kernel/src/schema.rs:26`; insert `envelope.rs:1420-1436`) | FACT; no session or source_kind column |
+| `operation_receipts` | `(producer, operation_key) -> request_digest, result_payload` (`schema.rs:42`; `stored_receipt` `envelope.rs:1363-1393`) | FACT |
 | `durable_text_redactions` | one row per detection in `reason` (`write_admission` `record(...)` call, `admission.rs:1787-1794`) | FACT |
 
 ### 3.2 State read by one dispute
@@ -173,7 +173,7 @@ that exist)
   `invalidated_commit_seq IS NULL`, plus the project-visibility predicate
   of section 5 rule A3.
 - Receipt: `(producer, operation_key)` lookup before the operation runs
-  (`run` `commit.rs:1043-1071`; `preview` `:877-883`).
+  (`run` `commit.rs:1041-1069`; `preview` `:875-881`).
 - Use-outcome (U3, PROPOSED): rows for (bound session, subject) with
   `served_commit_seq` below the committing `commit_seq`.
 
@@ -248,11 +248,11 @@ derived observation. All rows PROPOSED unless marked FACT.
 | A5 | The reporter's recorded taint class equals `derive_classes(source_kind)` lowered only by an asserted class at or below it; the subject row's `source_class`/`taint_class` are the subject's prior (R3, D3). | TS | INT + CUR | Daemon derives (FACT: `resolve_classes` `commit.rs:411-440`); Kernel refuses a subject class change (FACT: `admission.rs:268-274`) | Commit | Command dispute records `user_inferred`; tool dispute records `assistant_inference`; subject classes unchanged | A row recording reporter `explicit_user`, or a subject row whose classes differ from its prior |
 | A6 | A dispute never raises historical or effective maturity and never relaxes the disposition (R4, KTD4). FACT today for the event table; PROPOSED that adding `evidence_id` does not change it (`has_evidence` gates only `Enforce`, `admission.rs:275-277`). | TS | CUR | Kernel `evaluate_admission` | Commit | After dispute: `outcome=deny`, `effective_maturity=candidate`, historical unchanged | `outcome=promote` or `effective_maturity` above the prior's after a `mark_disputed` carrying evidence |
 | A7 | Filing against a prior whose disposition is more restrictive than the requested one (`Rejected`, `Contradicted`, `Quarantined` for `mark_disputed`; `Quarantined` for `contradict`) is recorded with `denied=true` and the prior disposition kept (FACT for the event table: `admission.rs:321-334`). PROPOSED: the evidence is still written on that row. | TS | CUR | Kernel | Commit | `mark_disputed` on a `Rejected` decision returns `denied: true`, disposition `rejected` | The disposition moves to `disputed` without a valid approval |
-| A8 | One dispute's logical identity is (reporting session, event, subject, canonical evidence key). Byte-identical repeats replay the receipt; a different evidence key in the same session is a distinct dispute and lands; the same identity with different bytes is refused `operation_key_reused` (FACT for the mechanism: `stored_receipt` `envelope.rs:1342-1372`; `run` `commit.rs:1064-1072`). | TS | CUR (receipts) | Daemon receipt namespace + Kernel receipt lookup | Receipt lookup at the start of the writer transaction | Two disputes with different `--evidence` in one session both land; the second `--evidence X` repeat replays | Second dispute with different evidence answers `operation_key_reused`; or two `commit_log` rows for one byte-identical repeat |
-| A9 | Preview with the new fields performs A1 to A5 identically and writes nothing (FACT for today's preview: no commit-log row, receipt, or token check, `commit.rs:122-126`, `:877-900`). | SP | CUR | Daemon route | Return of the preview | Preview of an invalid evidence id answers the same refusal name as commit would; row counts unchanged | A preview that leaves an `admission_decisions` or `commit_log` row, or that accepts an id the commit refuses |
+| A8 | One dispute's logical identity is (reporting session, event, subject, canonical evidence key). Byte-identical repeats replay the receipt; a different evidence key in the same session is a distinct dispute and lands; the same identity with different bytes is refused `operation_key_reused` (FACT for the mechanism: `stored_receipt` `envelope.rs:1363-1393`; `run` `commit.rs:1062-1070`). | TS | CUR (receipts) | Daemon receipt namespace + Kernel receipt lookup | Receipt lookup at the start of the writer transaction | Two disputes with different `--evidence` in one session both land; the second `--evidence X` repeat replays | Second dispute with different evidence answers `operation_key_reused`; or two `commit_log` rows for one byte-identical repeat |
+| A9 | Preview with the new fields performs A1 to A5 identically and writes nothing (FACT for today's preview: no commit-log row, receipt, or token check, `commit.rs:122-126`, `:875-898`). | SP | CUR | Daemon route | Return of the preview | Preview of an invalid evidence id answers the same refusal name as commit would; row counts unchanged | A preview that leaves an `admission_decisions` or `commit_log` row, or that accepts an id the commit refuses |
 | A10 | PR A: `reason` is a deterministic rendering of (reporter taint, optional `evidence_ref`) that parses back exactly and contains no redaction placeholder. U3: typed columns are authoritative; `reason` equals their rendering or is retired to a constant. | SP | DER | Daemon route composes; typed columns (U3) win disagreement | Commit (write); read for consumers | `parse(reason) == {taint, ref}` | `parse(reason)` fails, or disagrees with `reporter_taint_class` / `event_payload` |
 | A11 | U3: `use_outcome_id` names the `use_outcome` row for (bound session, subject) with the greatest `served_commit_seq` strictly below the dispute's `commit_seq`; null when none exists or P3 is absent. Chosen inside the committing transaction (R6). | SP at commit | CUR | Daemon route reading Kernel rows in the same transaction | Commit | Dispute from a session served the decision at seq n lands at seq n+k with the link set | Link names another session's row, or a row with `served_commit_seq >= commit_seq` |
-| A12 | The evidence check and the admission write observe one snapshot: both run inside the `commit_before` closure (FACT: `commit.rs:1043-1071`). | TS | CUR | Kernel exclusive writer | Commit | Concurrent `retire_evidence` serializes before or after the whole envelope | A row citing evidence invalidated by a commit with a lower `commit_seq` |
+| A12 | The evidence check and the admission write observe one snapshot: both run inside the `commit_before` closure (FACT: `commit.rs:1041-1069`). | TS | CUR | Kernel exclusive writer | Commit | Concurrent `retire_evidence` serializes before or after the whole envelope | A row citing evidence invalidated by a commit with a lower `commit_seq` |
 | A13 | The actor string is a claim and never decides class or admission (FACT: `docs/host-wire-protocol.md:26`; `commit.rs:5-10`). PROPOSED: the route may check `agent:<harness>` against `RouteScope.harness` and refuse a mismatch as `invalid_input`, but the reporter class still comes from `source_kind`. | IA | INT + CTX (binding) | Daemon route | Plan build | Pi tool sending `agent:pi` under a Pi binding lands | A row whose reporter class was derived from the actor prefix |
 | A14 | Progress: an envelope that passes admission commits or returns a definite refusal within the route deadline (`DEFAULT_DEADLINE` 5 s, `MAX_DEADLINE` 30 s, `commit.rs:88-89`); the deadline bounds writer acquisition only (`:90-92`). | LP | CTX | Kernel writer lease | Return | Commit returns with a receipt | Writer held past the deadline by a prior envelope; caller receives `unavailable` with nothing written |
 
@@ -291,7 +291,7 @@ can be invalidated later without violating any rule here.
     (`outcome`, `previous_disposition`, `disposition`, `denied`).
   - Definitely applied (earlier) / replay / stop. `replayed: true`; the
     verdict list is empty when the stored receipt is returned (FACT for
-    preview replay, `commit.rs:1165-1172`; the TS command treats a
+    preview replay, `commit.rs:1163-1170`; the TS command treats a
     missing verdict after a receipt as `outcome_unknown`,
     `memory-mark-command.ts:291-292`). Design note: a replayed commit
     response should carry the stored `result` so the client can answer
@@ -364,12 +364,12 @@ conflict.
 - Advisory checks: none on the client (the client sends ids as typed by
   the user or model).
 - Authoritative mechanism: the check runs inside the `commit_before`
-  closure that writes the row (`commit.rs:1043-1071`), so the Kernel's
+  closure that writes the row (`commit.rs:1041-1069`), so the Kernel's
   exclusive writer serializes it against `retire_evidence` and capture
   expiry.
 - Ordered set: receipt lookup; token checks; per operation: subject state
   and scope; subject admission; evidence check; `record_admission`.
-- Ordinary writers: the route (`record_disposition`, `commit.rs:784-798`).
+- Ordinary writers: the route (`record_disposition`, `commit.rs:782-796`).
 - Exceptional writers: `Envelope::record_admission` from Kernel tests and
   any future daemon code; these bypass A2 and A3 entirely because the
   Kernel does not check evidence liveness on this path (FACT:
@@ -402,9 +402,9 @@ evidence.
 
 - Authority: `operation_receipts` under the project-prefixed key
   (`ProjectBinding::operation_key`, `project.rs:78-83`).
-- Mechanism: `stored_receipt` before the operation (`envelope.rs:1342-
+- Mechanism: `stored_receipt` before the operation (`envelope.rs:1363-
   1372`); `run` maps a conflict raised before entering the closure to
-  `OperationKeyReused` (`commit.rs:1064-1072`).
+  `OperationKeyReused` (`commit.rs:1062-1070`).
 - Ordinary writers: both plugins through `deriveOperationKey(producer,
   actor, operationId)` (`client.ts:284-290`) with `operationId =
   [sessionId, event, objectId, ...evidence flags]` for the command
@@ -583,7 +583,7 @@ conflicts-and-questions.md)
 
 - C1 (R2 as written): "visible to the caller's project scope" has no
   direct meaning for evidence objects (`ScopeFilter::matches(None)` is
-  false, `project.rs:204-206`; `envelope.rs:1903-1904`). A3 defines it by
+  false, `project.rs:204-206`; `envelope.rs:1924-1925`). A3 defines it by
   citing scoped rows. Needs confirmation.
 - C2 (R3, U1 verification): the commit log carries `actor` and `cause`
   only (`schema.rs:26`); `session_id` and `source_kind` are not persisted,

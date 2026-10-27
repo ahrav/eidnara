@@ -33,7 +33,7 @@ list names a "foreign-scope `evidence_id`" refusal.
 Evidence: evidence objects carry no scope. `object_state_sql` reads scope
 only from `decisions` and `observations` (`crates/kernel/src/envelope.rs:
 1878-1891`); the doc comment says every other kind reads `None`
-(`:1903-1904`). `ScopeFilter::matches(None, ..)` returns `false`
+(`:1924-1925`). `ScopeFilter::matches(None, ..)` returns `false`
 (`crates/daemon/src/kernel_routes/project.rs:204-206`), so
 `scoped_object_state` on an evidence object's `object_id` is always
 `NotFound` (`commit.rs:676-690`). Tables with `scope_id`: `propositions`,
@@ -52,7 +52,7 @@ event".
 
 Evidence: `commit_log` columns are `commit_seq, transaction_id,
 writer_epoch, producer, operation_key, request_digest, recorded_at, actor,
-cause` (`schema.rs:26`; insert `envelope.rs:1399-1415`). `IntentRequest`
+cause` (`schema.rs:26`; insert `envelope.rs:1420-1436`). `IntentRequest`
 carries `producer, operation_key, request_digest, actor, cause`
 (`project.rs:139-146`). The transport strips `session_id` before the body
 is parsed (`mod.rs:461-473`). `operation_key` is
@@ -114,9 +114,9 @@ dispute with evidence rides today's envelope.
 Evidence: `memoryMarkOperationId` is `[sessionId, event, objectId]`
 (`memory-mark-command.ts:204-208`); `deriveRequestDigest` covers the
 operations (`client.ts:272-281`); a stored receipt with a different digest
-is `KernelError::Conflict` (`envelope.rs:1365-1367`), which `run` maps to
+is `KernelError::Conflict` (`envelope.rs:1386-1388`), which `run` maps to
 `OperationKeyReused` when raised before entering the closure
-(`commit.rs:1064-1072`).
+(`commit.rs:1062-1070`).
 
 Consequence: a user who disputes the same finding twice in one session with
 different evidence gets `operation_key_reused`. The tool's identity is per
@@ -144,7 +144,7 @@ typed columns" can mean. See Q6.
 The plan cites `derive_classes` at `commit.rs:226-240` (HEAD: `:368-378`),
 `disposition_request` evidence at `:590-596` (HEAD `3a3b916b7`: `:595-596`;
 PR A: `:731-732`), and the
-reporter join at `envelope.rs:1343-1352` (HEAD: insert at `:1399-1415`).
+reporter join at `envelope.rs:1343-1352` (HEAD: insert at `:1420-1436`).
 Shared-facts corrections are in `domain-model.md` section 0. No semantic
 claim changes.
 
@@ -307,7 +307,7 @@ admission. Alternative (b) is a retention-policy change and needs an owner.
 ### Q8. Replay response shape for a committed dispute
 
 Fact: a replayed preview returns `previews: []` with the receipt
-(`commit.rs:1165-1172`); the TS command treats a commit receipt with no
+(`commit.rs:1163-1170`); the TS command treats a commit receipt with no
 matching verdict as `outcome_unknown` (`memory-mark-command.ts:291-292`).
 Whether a replayed commit returns the stored verdict list was not traced
 end to end here.

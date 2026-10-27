@@ -8,33 +8,57 @@ Record kind: new obligation activated by #1156.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References are verified at the #1157 branch tip, the commit that carries this
+revision.
 
-- Hook: `crates/daemon/src/lib.rs:10030` in the settle step, after any rerun,
-  when the final response committed.
-- Update: `crates/kernel/src/use_outcome.rs:43` selects the live records with a
-  null or earlier value; a session with none takes no writer.
-- Outcomes: `crates/daemon/src/use_outcome_writer.rs:209` counts
-  `transform_touched`, `transform_skipped_deadline`, or
-  `transform_skipped_unavailable`.
+- Hook: `crates/daemon/src/lib.rs:10130` in the settle step, after any rerun,
+  when the final response committed and the check
+  (`crates/daemon/src/lib.rs:9817`) finds a live record to advance. The update
+  runs on a scoped thread beside the response build, and the settle joins it
+  before the response returns (`crates/daemon/src/lib.rs:10136`). A pass that
+  handed its serve to a tracked job sets `touch_delegated`
+  (`crates/daemon/src/lib.rs:9812`) and the job touches after its serve
+  attempt, whatever the serve answered,
+  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:356`)).
+- Update: `crates/kernel/src/use_outcome.rs:43-47` selects the live records with
+  a null or earlier value (the `LIVE_SESSION_WHERE` and `last_transform_at`
+  predicates at lines 45-46). A session with none takes no writer, because the
+  check above skips it; the update itself holds only the writer.
+- Outcomes: the match in `touch_session`
+  (`crates/daemon/src/use_outcome_writer.rs:328-338`) counts
+  `transform_touched` for an updated row and maps a Kernel error through
+  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:373`) to
+  `transform_skipped_deadline` or `transform_skipped_unavailable`.
 
 - Guarantee under test: `last_transform_at` never decreases on a session's
   serving record, and only a pass whose response committed updates it.
 - Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:220`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:234`);
   `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:305`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:321`);
+  `a_committing_pass_with_a_current_record_takes_no_writer`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:369`) (the daemon's
+  idle-session skip: a current record keeps the pass off a held writer);
   `a_spent_pass_budget_skips_the_touch`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:353`);
-  `the_serve_and_the_touch_of_one_pass_share_one_kernel_wait`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:382`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:424`) (the writer function
+  under a spent `PassWriteBudget`, not a pass);
+  `a_serve_deadline_leaves_the_touch_its_own_kernel_wait`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:453`);
+  `a_serve_that_spends_its_wait_leaves_the_touch_a_budget_of_its_own`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:490`) (a tracked serve
+  spends its wait on a held writer and its touch still lands);
+  `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:557`); Kernel half:
   `last_transform_at_advances_live_records_without_a_commit`
-  (`crates/kernel/tests/kernel_use_outcome.rs:940`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1118`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-  (`crates/kernel/tests/kernel_use_outcome.rs:999`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1203`),
   `an_outside_file_lock_bounds_the_advance_at_begin`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1036`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:1244`),
+  `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
+  (`crates/kernel/tests/kernel_use_outcome.rs:1290`),
+  `the_advance_takes_no_pooled_reader`
+  (`crates/kernel/tests/kernel_use_outcome.rs:1322`). Status: unaudited.
 
 ## Failure scenario
 
@@ -61,37 +85,72 @@ Kernel unavailable at the write.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: The pass budget is the 250 ms Kernel wait the pass shares across its s
+### Q: What bounds the touch's Kernel wait, and does the serve write share it?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
-- Findings: The pass budget is the 250 ms Kernel wait the pass shares across its
-  serve and touch writes (`PassWriteBudget`); the daemon carries no other pass
-  deadline. The touch bounds its connection waits, its begin, and its statements
-  by that budget; the serve write bounds its connection wait.
+- Findings: The pass budget is the 250 ms Kernel wait the pass spends across the
+  touch's staleness read and its write (`PassWriteBudget`); the daemon carries no
+  other pass deadline. The touch bounds its connection waits, its begin, and its
+  statements by that budget. A pass that handed its serve to a tracked job
+  makes no touch of its own: the job touches after its serve attempt, whatever
+  the serve answered, under a budget of
+  the same size, so the serving pass's record carries that pass's time. A serve
+  refused for want of a write slot leaves the pass its own touch and its full
+  budget (`a_serve_deadline_leaves_the_touch_its_own_kernel_wait`), and a
+  tracked serve that spends its wait on a held writer still touches under the
+  job's own budget
+  (`a_serve_that_spends_its_wait_leaves_the_touch_a_budget_of_its_own`).
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
 ### Q: Cost
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
-- Findings: Cost: every committing pass of a session with a live record makes
-  one fenced commit. Measured on this host (tmpfs, 200 advances of one record):
-  p50 6.4 ms, p99 22.3 ms, outside the 250 ms wait bound. A coarser stale
-  predicate would skip most of these and changes the per-committing-pass rule
-  (needs human input).
+- Findings: Cost: every committing pass of a session with a stale live record
+  (a value null or before the pass's time; the staleness read skips the writer
+  otherwise) makes one fenced commit, on a scoped thread beside the response
+  build, so its
+  device flush overlaps the memory-store flush of the pass trace. Measured on
+  this host (release build, one session with one record, paired runs of 240
+  committing passes): with a fixed 1 ms flush on tmpfs the committing pass p50
+  is 4.86 ms against 5.90 ms for the touch made before the response build; on
+  XFS over EBS NVMe it is 8.68 to 8.95 ms against 9.99 to 10.17 ms. A coarser
+  stale predicate would skip most of these commits and changes the
+  per-committing-pass rule (needs human input).
 - Missing evidence: an owner decision or the named read.
 - Conclusion: needs human input.
 
-### Q: A pass that commits and then fails its boundary read answers an error 
+### Q: Does a pass that commits and then fails its boundary read advance `last_transform_at`?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
-- Findings: A pass that commits and then fails its boundary read answers an
-  error before the settle step, so it records its serve and touches nothing; the
-  next committing pass catches up.
+- Findings: Yes. The pass answers an error before the settle step, so the pass
+  thread makes no touch, but it hands off its serve first and the job's touch
+  advances the record with that pass's time, because the pass committed
+  (`a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
+  asserts `last_transform_at` equals the serve's `recorded_at`). When every
+  write slot is taken, `UseOutcomeWrites::job` answers `None`, the serve counts
+  `deadline`, and the error path returns before the settle step, so no touch
+  runs and no lifecycle name counts the skip; the next committing pass catches
+  up, as after a touch skipped on a held writer. A committed boundary-failure
+  pass that froze no composition hands off no serve and returns before the
+  settle step, so it makes no touch either, with the same catch-up.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: A session rebound to a route with memory disabled keeps its records un
+### Q: Does a committing pass that lands while an earlier serve job still waits leave its time unrecorded?
+
+- Sources examined: `record_use_outcome` and `use_outcomes_to_touch` (`crates/daemon/src/lib.rs`), `touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs`).
+- Findings: Until the next committing pass, yes. The later pass's staleness
+  check finds no record while the serve job waits on the writer, so it touches
+  nothing; the job then inserts the record and advances it to its own pass's
+  `recorded_at`. The next committing pass advances it again. The window is the
+  serve job's wait, at most its `WRITE_BUDGET`.
+- Missing evidence: an owner decision on whether the attribution must name the
+  later pass without a further pass; a reconciliation would need the job to
+  learn the latest committed pass time, or the per-session writes serialized.
+- Conclusion: needs human input.
+
+### Q: A session rebound to a route with memory disabled keeps its records untouched by those passes, because such a route takes no Kernel read (C2)
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A session rebound to a route with memory disabled keeps its records
@@ -99,7 +158,7 @@ Kernel unavailable at the write.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
-### Q: A pass with an earlier clock selects no record, because the update fil
+### Q: A pass with an earlier clock selects no record, because the update filters on a stored value before `now`; the trigger never sees a decrease, and the pass ignores any write failure (C11)
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A pass with an earlier clock selects no record, because the update

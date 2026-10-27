@@ -31,7 +31,7 @@ lifecycle transitions.
   approval (`commit.rs:713-716`) so an out-of-scope approval is
   `not_found` before evaluation (`kernel_routes.rs:4508-4519`).
 - The route derives `denied` as `requested_disposition() != disposition`
-  (`commit.rs:769-772`); `requested_disposition` reads the same
+  (`commit.rs:767-770`); `requested_disposition` reads the same
   `event_effect` table (`admission.rs:4311-4313`).
 - A denial still writes one `admission_decisions` row with
   `outcome = deny` (`kernel_routes.rs:4500-4503`).
@@ -53,7 +53,7 @@ disposition by citing it.
 The approval's authority is read at evaluation time inside the writer
 transaction. In one envelope, an earlier operation that quarantines the
 approval changes the later operation's answer; the preview refuses that
-combination (`commit.rs:1174-1180`) while the commit judges it
+combination (`commit.rs:1172-1178`) while the commit judges it
 (`kernel_routes.rs:5493`).
 
 ## What a test must construct

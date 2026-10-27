@@ -9,7 +9,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
 use super::envelope::{PreparedIntent, commit_with_writer};
-use super::local_file::reserved_expiry_intent;
+use super::local_file::{reserved_expiry_intent, reserved_expiry_key};
 use super::redaction::identity;
 use super::{CachedSql, Envelope, EventKind, KernelError, KernelStore, map_sqlite};
 
@@ -105,7 +105,7 @@ fn length_prefixed(hash: &mut Sha256, field: &str) {
     hash.update(b"\n");
 }
 
-/// One serve to record. `decision_object_ids` are the served registry object ids in strictly ascending order. `served_set_digest` is the writer's own [`served_set_digest`] over them; the insert recomputes it and refuses a mismatch, so the stored digest always names the stored set. `served_commit_seq` is the composition's `known_as_of`, a committed sequence before the recording commit; a composition read at sequence 0 has no commit to name and is not recordable. `composition_revision` is the daemon's informational revision, stored bit for bit.
+/// One serve to record. `decision_object_ids` are the served registry object ids in strictly ascending order. `served_set_digest` is the writer's own [`served_set_digest`] over them; the insert recomputes it and refuses a mismatch, so the stored digest always names the stored set. `served_commit_seq` is the composition's `known_as_of`, a committed sequence before the recording commit; a composition read at sequence 0 has no commit to name and is not recordable. `recorded_at` is the serve's wall-clock time in milliseconds, at most 60 seconds ahead of the Kernel clock, and sets the record's 30-day retention deadline. `composition_revision` is the daemon's informational revision, stored bit for bit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseOutcomeSpec {
     pub project_digest: String,
@@ -186,21 +186,22 @@ static SERVED_SET_SQL: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-/// The unretired serves of `?1` with the disputed-after-serve flag: a committed `mark_disputed` or `contradict` on the same object and lineage at a sequence strictly after the serve.
+/// The unretired serves of `?1` with the disputed-after-serve flag: a committed `mark_disputed` or `contradict` on the same object and lineage at a sequence strictly after the serve. The newest such sequence is read once for the object, and each serve compares its own `served_commit_seq` against it: some qualifying event is later than the serve exactly when the newest one is.
 static SERVED_SESSIONS_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "SELECT {SERVE_COLUMNS},
-                EXISTS(SELECT 1 FROM admission_decisions a
-                       WHERE a.subject_object_id=o.object_id
-                         AND a.event_kind IN ('{disputed}','{contradict}')
-                         AND {lineage}
-                         AND a.commit_seq IS NOT NULL
-                         AND a.commit_seq>u.served_commit_seq) AS disputed_after_serve
-         FROM use_outcome_decisions d
+        "WITH disputes(disputed_through) AS MATERIALIZED (
+             SELECT (SELECT MAX(a.commit_seq) FROM admission_decisions a
+                     WHERE a.subject_object_id=o.object_id
+                       AND a.event_kind IN ('{disputed}','{contradict}')
+                       AND {lineage}
+                       AND a.commit_seq IS NOT NULL)
+             FROM object_registry o WHERE o.object_id=?1)
+         SELECT {SERVE_COLUMNS},
+                COALESCE(u.served_commit_seq<disputes.disputed_through,0) AS disputed_after_serve
+         FROM disputes
+         JOIN use_outcome_decisions d ON d.object_id=?1
          JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
-         JOIN object_registry o ON o.object_id=d.object_id
-         WHERE d.object_id=?1 AND u.invalidated_commit_seq IS NULL
-         ORDER BY u.created_commit_seq,u.use_outcome_id",
+         WHERE u.invalidated_commit_seq IS NULL",
         disputed = EventKind::MarkDisputed.as_str(),
         contradict = EventKind::Contradict.as_str(),
         lineage = super::admission::same_lineage_as_registry_object("a"),
@@ -236,6 +237,14 @@ static EXPIRED_SQL: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+/// Retires `?2` at commit `?1` when it is unretired and uncited under the writer; the recheck and the write are one statement.
+static RETIRE_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "UPDATE use_outcomes AS u SET invalidated_commit_seq=?1
+         WHERE u.use_outcome_id=?2 AND u.invalidated_commit_seq IS NULL AND NOT {USE_OUTCOME_CITED_SQL}"
+    )
+});
+
 static RECHECK_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT u.invalidated_commit_seq IS NULL AS live,{USE_OUTCOME_CITED_SQL} AS cited
@@ -250,7 +259,12 @@ impl UseOutcomeSpec {
         let well_formed = crate::cas::is_artifact_digest(&self.project_digest)
             && crate::cas::is_artifact_digest(&self.served_set_digest)
             && identity_fields.iter().all(|field| !field.trim().is_empty());
-        let in_range = self.recorded_at >= 0 && (1..commit_seq).contains(&self.served_commit_seq);
+        // `recorded_at` shares the staging heartbeat's allowance for a timestamp ahead of the Kernel clock.
+        let skew_ceiling = crate::current_time_ms()
+            .checked_add(super::envelope::MAX_STAGING_CLOCK_SKEW_MS)
+            .ok_or(KernelError::InvalidInput)?;
+        let in_range = (0..=skew_ceiling).contains(&self.recorded_at)
+            && (1..commit_seq).contains(&self.served_commit_seq);
         let ids = &self.decision_object_ids;
         let set_agrees = ids.windows(2).all(|pair| pair[0] < pair[1])
             && ids.iter().all(|id| !id.trim().is_empty())
@@ -275,27 +289,13 @@ impl Envelope<'_> {
     ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` for a malformed spec (see [`UseOutcomeSpec`]), `NotFound` when a decision id names no registry object, `Conflict` when the identity is already recorded, and mapped storage errors otherwise.
+    /// Returns `InvalidInput` for a malformed spec (see [`UseOutcomeSpec`]) or a decision-row trigger abort, `NotFound` for a missing decision registry object, `Conflict` for an existing identity, and mapped storage errors otherwise.
     pub fn insert_use_outcome(&mut self, spec: UseOutcomeSpec) -> Result<String, KernelError> {
         self.guarded(|envelope| envelope.insert_use_outcome_inner(&spec))
     }
 
     fn insert_use_outcome_inner(&mut self, spec: &UseOutcomeSpec) -> Result<String, KernelError> {
         let retain_until = spec.validated_retain_until(self.commit_seq)?;
-        // Every id is checked before the record is written, so a missing object is `NotFound` rather than a foreign-key `Conflict`.
-        for object_id in &spec.decision_object_ids {
-            let registered: bool = self
-                .tx
-                .query_row_cached(
-                    "SELECT EXISTS(SELECT 1 FROM object_registry WHERE object_id=?1)",
-                    [object_id],
-                    |row| row.get(0),
-                )
-                .map_err(map_sqlite)?;
-            if !registered {
-                return Err(KernelError::NotFound);
-            }
-        }
         let id = use_outcome_id(
             &spec.project_digest,
             &spec.harness,
@@ -306,16 +306,18 @@ impl Envelope<'_> {
             .execute_cached(
                 "INSERT INTO use_outcomes(
                      use_outcome_id,project_digest,harness,session_id,served_set_digest,
-                     composition_revision,served_commit_seq,session_role,recorded_at,
+                     decision_count,composition_revision,served_commit_seq,session_role,recorded_at,
                      created_commit_seq,retention_class,retain_until,sensitivity_class,
                      provider_egress_class
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'sensitive','local_only')",
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'sensitive','local_only')",
                 params![
                     id,
                     spec.project_digest,
                     spec.harness,
                     spec.session_id,
                     spec.served_set_digest,
+                    i64::try_from(spec.decision_object_ids.len())
+                        .map_err(|_| KernelError::InvalidInput)?,
                     spec.composition_revision.cast_signed(),
                     spec.served_commit_seq,
                     spec.session_role.as_str(),
@@ -332,7 +334,16 @@ impl Envelope<'_> {
                     "INSERT INTO use_outcome_decisions(use_outcome_id,object_id) VALUES (?1,?2)",
                     params![id, object_id],
                 )
-                .map_err(map_sqlite)?;
+                .map_err(|error| {
+                    // The record was written earlier in this transaction, so the reference a decision row can miss is its registry object. A duplicate identity fails the record's insert first; its recorded decision rows hold the same registry objects, which they keep from deletion.
+                    if is_foreign_key_failure(&error) {
+                        KernelError::NotFound
+                    } else if is_trigger_abort(&error) {
+                        KernelError::InvalidInput
+                    } else {
+                        map_sqlite(error)
+                    }
+                })?;
         }
         Ok(id)
     }
@@ -366,31 +377,73 @@ impl Envelope<'_> {
     }
 }
 
-fn serve_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<UseOutcomeServe> {
-    let role_index = row.as_ref().column_index("session_role")?;
-    let role: String = row.get(role_index)?;
-    Ok(UseOutcomeServe {
-        use_outcome_id: row.get("use_outcome_id")?,
-        project_digest: row.get("project_digest")?,
-        harness: row.get("harness")?,
-        session_id: row.get("session_id")?,
-        served_set_digest: row.get("served_set_digest")?,
-        composition_revision: row.get::<_, i64>("composition_revision")?.cast_unsigned(),
-        served_commit_seq: row.get("served_commit_seq")?,
-        session_role: SessionRole::from_stored(&role).ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                role_index,
-                rusqlite::types::Type::Text,
-                "unknown session role".into(),
-            )
-        })?,
-        recorded_at: row.get("recorded_at")?,
-        created_commit_seq: row.get("created_commit_seq")?,
-        invalidated_commit_seq: row.get("invalidated_commit_seq")?,
-        deleted_at: row.get("deleted_at")?,
-        last_transform_at: row.get("last_transform_at")?,
-        retain_until: row.get("retain_until")?,
-    })
+/// The positions of [`SERVE_COLUMNS`] in one prepared statement, resolved by name once per statement, so each row reads its columns by position.
+#[derive(Clone, Copy)]
+struct ServeColumns {
+    use_outcome_id: usize,
+    project_digest: usize,
+    harness: usize,
+    session_id: usize,
+    served_set_digest: usize,
+    composition_revision: usize,
+    served_commit_seq: usize,
+    session_role: usize,
+    recorded_at: usize,
+    created_commit_seq: usize,
+    invalidated_commit_seq: usize,
+    deleted_at: usize,
+    last_transform_at: usize,
+    retain_until: usize,
+}
+
+impl ServeColumns {
+    fn of(statement: &rusqlite::Statement<'_>) -> rusqlite::Result<Self> {
+        let at = |name: &str| statement.column_index(name);
+        Ok(Self {
+            use_outcome_id: at("use_outcome_id")?,
+            project_digest: at("project_digest")?,
+            harness: at("harness")?,
+            session_id: at("session_id")?,
+            served_set_digest: at("served_set_digest")?,
+            composition_revision: at("composition_revision")?,
+            served_commit_seq: at("served_commit_seq")?,
+            session_role: at("session_role")?,
+            recorded_at: at("recorded_at")?,
+            created_commit_seq: at("created_commit_seq")?,
+            invalidated_commit_seq: at("invalidated_commit_seq")?,
+            deleted_at: at("deleted_at")?,
+            last_transform_at: at("last_transform_at")?,
+            retain_until: at("retain_until")?,
+        })
+    }
+
+    fn serve(self, row: &rusqlite::Row<'_>) -> rusqlite::Result<UseOutcomeServe> {
+        let role: String = row.get(self.session_role)?;
+        Ok(UseOutcomeServe {
+            use_outcome_id: row.get(self.use_outcome_id)?,
+            project_digest: row.get(self.project_digest)?,
+            harness: row.get(self.harness)?,
+            session_id: row.get(self.session_id)?,
+            served_set_digest: row.get(self.served_set_digest)?,
+            composition_revision: row
+                .get::<_, i64>(self.composition_revision)?
+                .cast_unsigned(),
+            served_commit_seq: row.get(self.served_commit_seq)?,
+            session_role: SessionRole::from_stored(&role).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    self.session_role,
+                    rusqlite::types::Type::Text,
+                    "unknown session role".into(),
+                )
+            })?,
+            recorded_at: row.get(self.recorded_at)?,
+            created_commit_seq: row.get(self.created_commit_seq)?,
+            invalidated_commit_seq: row.get(self.invalidated_commit_seq)?,
+            deleted_at: row.get(self.deleted_at)?,
+            last_transform_at: row.get(self.last_transform_at)?,
+            retain_until: row.get(self.retain_until)?,
+        })
+    }
 }
 
 fn decision_object_ids(tx: &Transaction<'_>, id: &str) -> Result<Vec<String>, KernelError> {
@@ -407,7 +460,7 @@ fn decision_object_ids(tx: &Transaction<'_>, id: &str) -> Result<Vec<String>, Ke
 }
 
 impl KernelStore {
-    /// Every serving record of one session, retired or not, oldest first, each with its decision ids; `None` when the session has no record. A record with no decision rows is a serve of an empty composition. The read issues one decision-row query per record, so its cost follows the distinct compositions the session was served within the retention window.
+    /// `served_set` returns all serving records of one session, including retired records, oldest first with their decision ids, or `None` when the session has no record. A record with zero decision rows represents a serve of an empty composition. Records persist after retirement, so the result size and the number of decision-row queries grow with the session's lifetime count of distinct served compositions.
     ///
     /// # Errors
     ///
@@ -420,8 +473,11 @@ impl KernelStore {
     ) -> Result<Option<Vec<UseOutcomeRecord>>, KernelError> {
         let (_, records) = self.read_snapshot(0, |tx, _| {
             let mut statement = tx.prepare_cached(&SERVED_SET_SQL).map_err(map_sqlite)?;
+            let columns = ServeColumns::of(&statement).map_err(map_sqlite)?;
             let serves = statement
-                .query_map(params![project_digest, harness, session_id], serve_from)
+                .query_map(params![project_digest, harness, session_id], |row| {
+                    columns.serve(row)
+                })
                 .map_err(map_sqlite)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(map_read)?;
@@ -444,25 +500,64 @@ impl KernelStore {
     ///
     /// Returns storage and lock errors, and `CorruptCanonicalRow` for a stored role outside the vocabulary.
     pub fn served_sessions_for(&self, object_id: &str) -> Result<Vec<ServedSession>, KernelError> {
-        let (_, sessions) = self.read_snapshot(0, |tx, _| {
+        let (_, mut sessions) = self.read_snapshot(0, |tx, _| {
             let mut statement = tx
                 .prepare_cached(&SERVED_SESSIONS_SQL)
+                .map_err(map_sqlite)?;
+            let columns = ServeColumns::of(&statement).map_err(map_sqlite)?;
+            let disputed = statement
+                .column_index("disputed_after_serve")
                 .map_err(map_sqlite)?;
             statement
                 .query_map([object_id], |row| {
                     Ok(ServedSession {
-                        serve: serve_from(row)?,
-                        disputed_after_serve: row.get("disputed_after_serve")?,
+                        serve: columns.serve(row)?,
+                        disputed_after_serve: row.get(disputed)?,
                     })
                 })
                 .map_err(map_sqlite)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(map_read)
         })?;
+        // The query yields serves in decision-index order; the answer orders them by creating commit, then id.
+        sessions.sort_unstable_by(|left, right| {
+            (left.serve.created_commit_seq, &left.serve.use_outcome_id)
+                .cmp(&(right.serve.created_commit_seq, &right.serve.use_outcome_id))
+        });
         Ok(sessions)
     }
 
-    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. A session with nothing to advance takes no writer. The connection waits, the transaction's begin, and its statements stop at the budget; the commit runs to completion once reached.
+    /// Whether a live record of one session holds a `last_transform_at` that is null or before `at`, read on a pooled reader within `budget`. A caller makes this check before [`Self::advance_use_outcome_last_transform`], so a session with nothing to advance takes no writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for a negative `at`, `Deadline` when the budget ends first, and mapped storage errors otherwise.
+    pub fn use_outcome_last_transform_is_stale(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        project_digest: &str,
+        harness: &str,
+        session_id: &str,
+        at: i64,
+    ) -> Result<bool, KernelError> {
+        if at < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        let limit = budget.acquire_limit();
+        let stale = self
+            .reader_with_limit(&limit)?
+            .query_row_cached(
+                &STALE_TRANSFORM_SQL,
+                params![project_digest, harness, session_id, at],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite)?;
+        // A scan that ends between progress callbacks can outlast the budget; the check after it answers `Deadline` for that window, as the other bounded reads do.
+        limit.check()?;
+        Ok(stale)
+    }
+
+    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. The write holds only the writer: the caller's [`Self::use_outcome_last_transform_is_stale`] check keeps a session with nothing to advance off the writer, and the update's own filter skips a record another pass advanced since that check. The connection waits, the transaction's begin, and its statements stop at the budget; the commit runs to completion once reached.
     ///
     /// # Errors
     ///
@@ -480,13 +575,6 @@ impl KernelStore {
         }
         let limit = budget.acquire_limit();
         let args = params![project_digest, harness, session_id, at];
-        let stale: bool = self
-            .reader_with_limit(&limit)?
-            .query_row_cached(&STALE_TRANSFORM_SQL, args, |row| row.get(0))
-            .map_err(map_sqlite)?;
-        if !stale {
-            return Ok(0);
-        }
         let mut writer = self.writer_with_limit(&limit)?;
         let tx = writer.transaction(rusqlite::TransactionBehavior::Immediate)?;
         super::envelope::check_fence(&tx, self.lease_epoch())?;
@@ -504,15 +592,18 @@ impl KernelStore {
     /// Returns storage and lock errors.
     pub fn served_counts_for(
         &self,
+        budget: &crate::applicability::EvalBudget,
         project_digest: &str,
         object_id: &str,
     ) -> Result<ServedCounts, KernelError> {
+        let limit = budget.acquire_limit();
         let (served, disputed): (i64, i64) = self
-            .lock_reader()?
+            .reader_with_limit(&limit)?
             .query_row_cached(&SERVED_COUNTS_SQL, [object_id, project_digest], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .map_err(map_read)?;
+        limit.check()?;
         Ok(ServedCounts {
             served_sessions: u64::try_from(served).map_err(|_| KernelError::CorruptCanonicalRow)?,
             disputed_after_serve: u64::try_from(disputed)
@@ -550,8 +641,15 @@ impl KernelStore {
             self.lease_epoch(),
             reserved_expiry_intent(EXPIRY_PRODUCER, EXPIRY_CAUSE, now, &page_key(&page)),
             |envelope| {
+                // Every record's receipt shares the producer, actor, and cause; only the key differs.
+                let receipts = PreparedIntent::new(reserved_expiry_intent(
+                    EXPIRY_PRODUCER,
+                    EXPIRY_CAUSE,
+                    now,
+                    &page[0],
+                ))?;
                 for id in &page {
-                    tally.count(retire_due_use_outcome(envelope, now, id)?);
+                    tally.count(retire_due_use_outcome(envelope, &receipts, now, id)?);
                 }
                 // A page that retires nothing rolls back, so it leaves no receipt a later call at this cutoff would replay.
                 empty_page = tally.retired == 0;
@@ -607,6 +705,22 @@ impl UseOutcomeExpiry {
     }
 }
 
+fn is_foreign_key_failure(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+    )
+}
+
+fn is_trigger_abort(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+    )
+}
+
 fn map_read(error: rusqlite::Error) -> KernelError {
     match error {
         rusqlite::Error::FromSqlConversionFailure(..) => KernelError::CorruptCanonicalRow,
@@ -638,37 +752,32 @@ fn expired_page(
     Ok((page, sweep))
 }
 
-/// Retires record `id` when, under the writer, it is unretired and uncited, and records its reserved receipt keyed by `now` and the id. Its deadline is immutable and was before `now` at selection. The writer holds the transaction from this recheck through the update, so a live record's update affects exactly that row.
+/// Retires record `id` when, under the writer, it is unretired and uncited, and records its reserved receipt keyed by `now` and the id. Its deadline is immutable and was before `now` at selection. One conditional update rechecks and retires the record, so a live, uncited record's update affects exactly that row; a record the update leaves in place is read again to report whether a citation kept it or another sweep retired it. `receipts` carries the page's reserved producer, actor, and cause.
 fn retire_due_use_outcome(
     envelope: &mut Envelope<'_>,
+    receipts: &PreparedIntent,
     now: i64,
     id: &str,
 ) -> Result<Recheck, KernelError> {
-    let state: Option<(bool, bool)> = envelope
+    let retired = envelope
         .tx
-        .query_row_cached(&RECHECK_SQL, [id], |row| {
-            Ok((row.get("live")?, row.get("cited")?))
-        })
-        .optional()
+        .execute_cached(&RETIRE_SQL, params![envelope.commit_seq, id])
         .map_err(map_sqlite)?;
-    match state {
-        Some((true, false)) => {}
-        Some((true, true)) => return Ok(Recheck::Cited),
-        Some((false, _)) | None => return Ok(Recheck::Gone),
+    if retired == 0 {
+        let cited: Option<(bool, bool)> = envelope
+            .tx
+            .query_row_cached(&RECHECK_SQL, [id], |row| {
+                Ok((row.get("live")?, row.get("cited")?))
+            })
+            .optional()
+            .map_err(map_sqlite)?;
+        return Ok(match cited {
+            Some((true, true)) => Recheck::Cited,
+            _ => Recheck::Gone,
+        });
     }
-    envelope
-        .tx
-        .execute_cached(
-            "UPDATE use_outcomes SET invalidated_commit_seq=?1 WHERE use_outcome_id=?2",
-            params![envelope.commit_seq, id],
-        )
-        .map_err(map_sqlite)?;
-    let intent = PreparedIntent::new(reserved_expiry_intent(
-        EXPIRY_PRODUCER,
-        EXPIRY_CAUSE,
-        now,
-        id,
-    ))?;
+    let (operation_key, request_digest) = reserved_expiry_key(now, id);
+    let intent = receipts.rekeyed(&operation_key, request_digest)?;
     envelope.record_reserved_receipt(&intent, "retired")?;
     Ok(Recheck::Retired)
 }
@@ -678,7 +787,8 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        EXPIRED_SQL, SERVED_COUNTS_SQL, SERVED_SESSIONS_SQL, SERVED_SET_SQL, SessionRole,
+        ADVANCE_TRANSFORM_SQL, EXPIRED_SQL, MARK_DELETED_SQL, SERVED_COUNTS_SQL,
+        SERVED_SESSIONS_SQL, SERVED_SET_SQL, STALE_TRANSFORM_SQL, SessionRole,
         USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
     };
     use crate::{CommitIntent, DomainSpec, KernelStore, Sensitivity, served_set_digest};
@@ -695,7 +805,7 @@ mod tests {
         }
     }
 
-    /// A store holding one expired serve of the domain object `decision` per session in `sessions`, and their ids in order.
+    /// A store holding one expired serve of the decision object `decision` per session in `sessions`, and their ids in order.
     fn store_with_expired_serves(
         root: &std::path::Path,
         sessions: &[&str],
@@ -705,15 +815,25 @@ mod tests {
             .commit(intent("domain"), |envelope| {
                 envelope.insert_domain(DomainSpec {
                     domain_id: "domain".to_string(),
-                    object_id: "decision".to_string(),
+                    object_id: "domain-object".to_string(),
                     name: "domain".to_string(),
                     source_kind: "fixture".to_string(),
-                    source_id: "decision".to_string(),
+                    source_id: "domain".to_string(),
                     source_revision: 1,
                     sensitivity: Sensitivity::Normal,
                 })?;
                 Ok(String::new())
             })
+            .unwrap();
+        Connection::open(root.join("kernel.sqlite"))
+            .unwrap()
+            .execute(
+                "INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 ) VALUES ('decision','decision','domain','fixture','decision',1,1,'normal')",
+                [],
+            )
             .unwrap();
         let ids = sessions
             .iter()
@@ -907,7 +1027,7 @@ mod tests {
         assert!(retired(&store, "session"));
     }
 
-    /// The sweep scan reads the live-retention index in index order and probes citations through the citing index. The by-session read seeks the identity index. The by-decision read starts from the decision-row index and probes disputes through the subject index. The count read seeks the decision-row index and reads disputes through the subject index in an uncorrelated subquery.
+    /// The sweep scan reads the live-retention index in its order with no temporary sort and probes citations through the citing index; the by-session read, the delete mark, the staleness check, and the advance seek the identity index; the by-decision read starts from the decision-row index and probes disputes through the subject index; the count read seeks the decision-row index and reads disputes through the subject index in an uncorrelated subquery.
     #[test]
     fn the_sweep_and_the_reads_use_their_indexes() {
         let root = tempfile::tempdir().unwrap();
@@ -940,6 +1060,21 @@ mod tests {
             by_session.contains("sqlite_autoindex_use_outcomes"),
             "{by_session}"
         );
+        for (name, sql) in [
+            ("mark deleted", &*MARK_DELETED_SQL),
+            ("staleness check", &*STALE_TRANSFORM_SQL),
+            ("advance", &*ADVANCE_TRANSFORM_SQL),
+        ] {
+            let lifecycle = plan(sql, &[&digest, &"opencode", &"session", &1_i64]);
+            assert!(
+                lifecycle.contains("sqlite_autoindex_use_outcomes"),
+                "{name}: {lifecycle}"
+            );
+            assert!(
+                !lifecycle.contains("SCAN use_outcomes"),
+                "{name}: {lifecycle}"
+            );
+        }
         let by_decision = plan(&SERVED_SESSIONS_SQL, &[&"decision"]);
         assert!(
             by_decision.contains("idx_use_outcome_decisions_object_fk"),
