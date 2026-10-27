@@ -14,7 +14,7 @@ revision.
 
 - `CanonicalMemorySnapshot::new` seeds the hasher with
   `eidnara-project-memory-revision-v1` and hashes category plus rendered line
-  per positive row (`crates/daemon/src/canonical_memory.rs:55`).
+  per positive row (`crates/daemon/src/canonical_memory.rs:55-58`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
   (`crates/daemon/src/canonical_memory.rs:248`)).
