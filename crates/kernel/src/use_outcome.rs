@@ -787,7 +787,8 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        EXPIRED_SQL, SERVED_COUNTS_SQL, SERVED_SESSIONS_SQL, SERVED_SET_SQL, SessionRole,
+        ADVANCE_TRANSFORM_SQL, EXPIRED_SQL, MARK_DELETED_SQL, SERVED_COUNTS_SQL,
+        SERVED_SESSIONS_SQL, SERVED_SET_SQL, STALE_TRANSFORM_SQL, SessionRole,
         USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
     };
     use crate::{CommitIntent, DomainSpec, KernelStore, Sensitivity, served_set_digest};
@@ -1026,7 +1027,7 @@ mod tests {
         assert!(retired(&store, "session"));
     }
 
-    /// The sweep scan reads the live-retention index in index order and probes citations through the citing index. The by-session read seeks the identity index. The by-decision read starts from the decision-row index and probes disputes through the subject index. The count read seeks the decision-row index and reads disputes through the subject index in an uncorrelated subquery.
+    /// The sweep scan reads the live-retention index in its order with no temporary sort and probes citations through the citing index; the by-session read, the delete mark, the staleness check, and the advance seek the identity index; the by-decision read starts from the decision-row index and probes disputes through the subject index; the count read seeks the decision-row index and reads disputes through the subject index in an uncorrelated subquery.
     #[test]
     fn the_sweep_and_the_reads_use_their_indexes() {
         let root = tempfile::tempdir().unwrap();
@@ -1059,6 +1060,21 @@ mod tests {
             by_session.contains("sqlite_autoindex_use_outcomes"),
             "{by_session}"
         );
+        for (name, sql) in [
+            ("mark deleted", &*MARK_DELETED_SQL),
+            ("staleness check", &*STALE_TRANSFORM_SQL),
+            ("advance", &*ADVANCE_TRANSFORM_SQL),
+        ] {
+            let lifecycle = plan(sql, &[&digest, &"opencode", &"session", &1_i64]);
+            assert!(
+                lifecycle.contains("sqlite_autoindex_use_outcomes"),
+                "{name}: {lifecycle}"
+            );
+            assert!(
+                !lifecycle.contains("SCAN use_outcomes"),
+                "{name}: {lifecycle}"
+            );
+        }
         let by_decision = plan(&SERVED_SESSIONS_SQL, &[&"decision"]);
         assert!(
             by_decision.contains("idx_use_outcome_decisions_object_fk"),

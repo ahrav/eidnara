@@ -15,7 +15,7 @@ revision.
   captured sources, then `mark_use_outcomes_deleted`
   (`crates/daemon/src/lib.rs:6908-6920`) commits one envelope keyed by
   `use-outcome-delete`, a digest of the session id, and a fresh attempt nonce
-  (`crates/daemon/src/use_outcome_writer.rs:278-310`); the digest keeps the key
+  (`crates/daemon/src/use_outcome_writer.rs:284-316`); the digest keeps the key
   clear of the Kernel's identity check for any session id the wire admits
   (`a_session_id_that_reads_as_a_secret_still_deletes`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:612`)); an envelope that
@@ -68,9 +68,11 @@ it starting; a route close without delete.
 - Findings: A record written after the delete commits, by a pass on a route
   still bound to the session (OQ3-10), stays live until a later delete marks it;
   each delete selects the live records afresh under its own attempt key. This
-  includes a pass whose Memory Store commit preceded the delete and whose serve
-  write landed after it: the harness received that composition, and the serve
-  writer takes no capture gate, so the record counts as a continued session.
+  includes a pass answered before the delete whose serve job committed after
+  it: the serve write is deferred to a tracked job that takes no capture gate,
+  so a `session.delete` answered `ok` can be followed by a live record of that
+  pass. The accepted loss (gap G2) covers both the continued session and this
+  deferred write.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
