@@ -31,7 +31,7 @@ daemon check is specified against it.
   (`crates/kernel/src/lib.rs:212-224`). The route's `run` turns a
   `Conflict` raised after entering the operation, with no recorded refusal,
   into `CommitFailure::StorageConstraint`, reported as
-  `invalid/already_exists` (`commit.rs:1065-1073`, `:484`).
+  `invalid/already_exists` (`commit.rs:1063-1071`, `:484`).
 - Production writers that set `Some(evidence_id)`:
   `crates/daemon/src/harness_sources.rs:976` (`EventKind::Other`) only.
   `crates/daemon/src/memory_reviewer/lifecycle.rs:649` was first listed
@@ -41,7 +41,7 @@ daemon check is specified against it.
   route set `None`. At the PR A tip it sets the cited id for a dispute
   (`commit.rs:731`) only after `require_visible_evidence` found the row
   live and cited by the bound project in the same transaction
-  (`commit.rs:719-721`, `:742-759`), so the route never reaches this
+  (`commit.rs:719-721`, `:742-757`), so the route never reaches this
   record's accept-retired or dangling-id branch.
 - Contrast: `validate_trigger` requires the trigger's backing evidence to
   be live (`admission.rs:2768-2774`) and

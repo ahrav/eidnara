@@ -20,7 +20,7 @@ and what each failure answers.
      `NotFound`.
   2. `object_kind != "decision" || invalidated_commit_seq.is_some()` is
      `NotFound` (`:707-709`). `load_object_state` has no liveness filter
-     of its own (`envelope.rs:1905-1919`), so this line is the liveness
+     of its own (`envelope.rs:1926-1940`), so this line is the liveness
      check.
   3. `subject_admission(object_id)?.ok_or(AdmissionPolicy)` (`:710-712`):
      a decision with no admission row is `AdmissionPolicy`.
@@ -31,8 +31,8 @@ and what each failure answers.
      (`admission.rs:1017-1038`).
 - Mapping: `NotFound -> invalid/not_found`, `AdmissionPolicy ->
   invalid/admission_policy` (`kernel_routes/state.rs:275-276`).
-- Both preview and commit call the same function (`commit.rs:790` in
-  `record_disposition`, `:835` in `PreviewRun::disposition`), so a refusal is identical in both modes
+- Both preview and commit call the same function (`commit.rs:788` in
+  `record_disposition`, `:833` in `PreviewRun::disposition`), so a refusal is identical in both modes
   (`kernel_routes.rs:5355`).
 - Tests: retired subject and unadmitted subject (`kernel_routes.rs:4888-
   4941`); missing id (`:5078-5086`); foreign approval chains of three

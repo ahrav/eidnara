@@ -19,7 +19,7 @@ behavior.
 ## 1. Harness fit
 
 Routing for `/testing:test-strategy`. No record needs a simulator: the
-single `Immediate` writer transaction (`envelope.rs:1383-1386`) turns every
+single `Immediate` writer transaction (`envelope.rs:1404-1407`) turns every
 "retired between read and commit" window into two sequential requests, and
 all 14 `always` checks hold over per-request state.
 
@@ -73,7 +73,7 @@ are an open question. Situation coverage lives in 21 `sometimes` markers in
 Observability: every column check is readable through the test store
 connection at route level. Two checks name kernel-internal functions a
 daemon test cannot call: evidence-scope cites `load_object_state`
-(`pub(super)`, `envelope.rs:1905`) and cascade cites `validate_approval`;
+(`pub(super)`, `envelope.rs:1926`) and cascade cites `validate_approval`;
 the route-visible proxies are `not_found` and a later relaxation denied.
 
 Constructibility: F1 to F11 and F13 to F16 are available as the fault map
@@ -105,10 +105,10 @@ differ, prior above Candidate, retired id cited); none negates a check.
   change; a test written from them fails on the intended change (B1).
 - Replay after move: `memory-mark-command.test.ts:351` pins that a repeat
   reports `applied` with the original verdict while the stored disposition
-  differs (`commit.rs:1190-1206`). Safe for the store, possibly misleading
+  differs (`commit.rs:1188-1204`). Safe for the store, possibly misleading
   for the user; no record asks (R5).
 - Preview shows the subject's visibility only; a dispute on an approval
-  demotes dependents the confirmation never names (`commit.rs:812-823`,
+  demotes dependents the confirmation never names (`commit.rs:810-821`,
   `changes_to` at `:537-542`). Gap G2.
 - Superseded to Disputed is lateral at rank 1 and lands without approval;
   the restrictiveness open question names Stale only (R8).
@@ -142,7 +142,7 @@ differ, prior above Candidate, retired id cited); none negates a check.
 - G1: read `kernel_route_scope` (`mod.rs:415-441`), `IntentRequest`
   (`project.rs:138-146`), `resolve_classes`; one record on what the daemon
   verifies about the intent and `source_kind`.
-- G2: read `PreviewRun` (`commit.rs:806-865`); owner decides whether
+- G2: read `PreviewRun` (`commit.rs:804-863`); owner decides whether
   cascade visibility is part of the preview contract; at most one record.
 - G3: read the `crates/secret-scanner` detectors; name one detected token
   and the result for a path and a hex oid. G4: grep callers of

@@ -15,7 +15,10 @@ cites is unchanged between the two). Date: 2026-10-25. PR A of
 `6159fd224`, code commit `6c4d445e3`). References were remapped through the
 git diff between the two revisions; references to lines PR A changed were
 rewritten by hand, and the records PR A makes checkable were re-read
-against the code and tests. The design-time companions (`fact-sheet.md`,
+against the code and tests. Commit `f94f3163b` rewrote the evidence
+visibility read; references into the files it changed were remapped the
+same way at `f94f3163b`, and the references into the rewritten read were
+rewritten by hand. The design-time companions (`fact-sheet.md`,
 `disposition-path/system-model.md`, `disposition-path/portfolio-evaluation.md`,
 `dispute-evidence/domain-model.md`, `dispute-evidence/open-questions.md`,
 `dispute-evidence/certificate.md`) describe `3a3b916b7` and carry a

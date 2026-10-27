@@ -1,9 +1,10 @@
 # Existing checks: kernel.commit disposition path
 
 System: authored at `3a3b916b7` (2026-10-25); line numbers re-verified at
-the PR A tip of #1160 (code commit `6c4d445e3`). The tables list the checks
-found at authoring; PR A's dispute tests are listed in the last section
-below and in full in
+the PR A tip of #1160 (code commit `6c4d445e3`; references into the files
+the evidence-walk commit `f94f3163b` changed re-verified at `f94f3163b`).
+The tables list the checks found at authoring; PR A's dispute tests are
+listed in the last section below and in full in
 [`../dispute-evidence/existing-checks.md`](../dispute-evidence/existing-checks.md).
 Every check below is `unaudited`: adequacy verdicts belong to
 `/testing:invariant-test-review` (tests) and
@@ -48,10 +49,10 @@ Fixtures: `commit-available-disposition-quarantine.json`,
 | 4736 | `an_authority_event_requires_approval_even_at_an_unchanged_rung` | authority events need approval | (context) | unaudited |
 
 Compile-time guard: `admission.rs:4317-4324` asserts the maturity rank
-order. `commit.rs:1295` (`every_disposition_event_names_a_disposition_
+order. `commit.rs:1293` (`every_disposition_event_names_a_disposition_
 transition`) asserts each `DispositionEvent` maps to a kind with
 `requested_disposition().is_some()` and that `"approve"` does not parse.
-`commit.rs:1315` asserts the receipt payload round trip and tolerates a
+`commit.rs:1313` asserts the receipt payload round trip and tolerates a
 receipt without `dispositions`.
 
 ## Kernel integration tests (`crates/kernel/tests/kernel_admission.rs`)
@@ -94,7 +95,7 @@ receipt without `dispositions`.
 | `schema.rs:163` | FK `evidence_id REFERENCES evidence_meta ON DELETE RESTRICT`; `foreign_keys=ON` at `schema.rs:244`, `open.rs:1035` | evidence existence | unaudited |
 | `schema.rs:26` | `commit_log` append-only triggers | commit-log row | unaudited |
 | `commit.rs:136-137`, `:108-109` | `deny_unknown_fields` on `Operation` and `CommitRequest` | no-evidence field | unaudited |
-| `commit.rs:1145-1160` | preview refuses tokens and non-disposition operations | preview | unaudited |
+| `commit.rs:1143-1158` | preview refuses tokens and non-disposition operations | preview | unaudited |
 | `state.rs:191-250` | compile-time guard that every `InvalidReason` has a slice position | refusal mapping | unaudited |
 
 ## PR A checks that touch these records
@@ -137,7 +138,7 @@ At authoring (`3a3b916b7`), with the PR A state noted:
   A matches both bodies against one expected operation
   (`memory-mark-command.test.ts:174`).
 - No liveness check existed on this surface. PR A adds the dispute
-  evidence check (`require_visible_evidence`, `commit.rs:742-759`).
+  evidence check (`require_visible_evidence`, `commit.rs:742-757`).
 
 ## Suspiciously quiet areas
 
@@ -149,7 +150,7 @@ At authoring (`3a3b916b7`), with the PR A state noted:
   test exercises a retired or dangling id on that path.
 - The lateral disposition moves at equal restrictiveness rank other than
   Stale to Disputed.
-- `derive_classes` is unit-tested (`commit.rs:1215-1293`) but its output
+- `derive_classes` is unit-tested (`commit.rs:1213-1291`) but its output
   is irrelevant to the disposition path, which no test demonstrates.
 - The TypeScript `invalid_params` transport error path for a body the
   daemon refuses as malformed.

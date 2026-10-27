@@ -2,8 +2,10 @@
 
 System: authored at `3a3b916b7` (2026-10-25); references re-verified at
 the PR A branch tip of [#1160](https://github.com/ahrav/eidnara/issues/1160)
-(base `6159fd224`, code commit `6c4d445e3`). Method:
-`docs/properties/METHOD.md` and `/testing:property-discovery-and-catalog`.
+(base `6159fd224`, code commit `6c4d445e3`; references into the files
+the evidence-walk commit `f94f3163b` changed re-verified at `f94f3163b`).
+Method: `docs/properties/METHOD.md` and
+`/testing:property-discovery-and-catalog`.
 Companion files: [system-model.md](system-model.md),
 [existing-checks.md](existing-checks.md), [fault-map.md](fault-map.md),
 [portfolio-evaluation.md](portfolio-evaluation.md), `evidence/<slug>.md`.
@@ -269,7 +271,7 @@ cited or stored approval is invalid then `r.disposition == p.disposition
 && r.outcome == "deny" && r.denied == true` and one new
 `admission_decisions` row exists; else `r.disposition ==
 requested(event)`. Table at `admission.rs:4168-4175`, rule at `:321-330`,
-`denied` derivation at `commit.rs:762-782`. Every evaluation, so `always`.
+`denied` derivation at `commit.rs:760-780`. Every evaluation, so `always`.
 Fault/timing angle: the approval's authority changing between preview and
 commit; an approval quarantined earlier in the same envelope
 (`kernel_routes.rs:5493`); lateral moves at equal rank.
@@ -331,12 +333,12 @@ Fault/timing angle: version skew: a client built for PR A sending
 user sees.
 Required faults and enabling state: a body with an unknown key; a body
 with the new fields against an older daemon; a replay of a stored receipt
-whose `result` predates `dispositions` (`commit.rs:1315-1351` tolerates
+whose `result` predates `dispositions` (`commit.rs:1313-1349` tolerates
 the missing key).
 Confidence: high - [evidence](evidence/disposition-operation-carries-no-evidence-and-refuses-unknown-fields.md).
 Read the `deny_unknown_fields` attributes, the new fields, and the
 request builder at the PR A tip.
-Existing check: `commit.rs:1315`
+Existing check: `commit.rs:1313`
 (`the_result_payload_round_trips_and_tolerates_an_unreadable_receipt`)
 covers receipt shape only. No test sends an unknown key on a disposition
 operation. Status unaudited.
@@ -359,7 +361,7 @@ this path (portfolio refinement R1). Re-labelled at the PR A tip: the
 disposition route now sets `Some(evidence_id)` for a dispute
 (`commit.rs:731`), but only after `require_visible_evidence` found the row
 live and cited by the bound project in the same transaction
-(`commit.rs:719-721`, `:742-759`). The route therefore never reaches the
+(`commit.rs:719-721`, `:742-757`). The route therefore never reaches the
 accept-retired branch or the dangling-id FK branch; both remain reachable
 from `harness_sources.rs:976` and from any store-API caller of
 `record_admission` (`commit.rs:55-58`).
@@ -374,7 +376,7 @@ Check: `always` - for an `AdmissionRequest` with `evidence_id = Some(e)`:
 if `e` has a secret-like substring then `InvalidInput`; else if no
 `evidence_meta` row has `evidence_id = e` then the INSERT fails with
 `SQLITE_CONSTRAINT` mapped to `Conflict` (`lib.rs:212-224`), which the
-route would report as `invalid/already_exists` (`commit.rs:1065-1073`); else
+route would report as `invalid/already_exists` (`commit.rs:1063-1071`); else
 the row is written with `evidence_id = e` whether or not
 `invalidated_commit_seq IS NULL`. No liveness predicate exists between
 `admission.rs:1690-1695` and the INSERT at `:1748-1786`. Holds on every
@@ -403,7 +405,7 @@ Open questions:
 - Should the Kernel refuse a retired `evidence_id` on `write_admission`,
   or is the daemon the only intended gate (KTD2)? (needs human input)
 - Resolved by PR A: the daemon check answers `not_found` for a dangling
-  or retired id (`commit.rs:48-49`, `:747-750`), before the Kernel's FK
+  or retired id (`commit.rs:48-49`, `:747-756`), before the Kernel's FK
   path could answer `already_exists`.
 
 ### slice-write-refuses-non-live-evidence-citations
@@ -443,8 +445,8 @@ Impact: its semantics (retired is `NotFound`, mapped to
 `invalid/not_found`) are the model the PR A dispute check follows.
 Open questions:
 - Resolved by PR A: the daemon's dispute check calls neither helper. It
-  calls the new Kernel read `Envelope::evidence_citations`
-  (`crates/kernel/src/envelope.rs:532-577`) inside the writer transaction
+  calls the new Kernel read `Envelope::evidence_cited_in`
+  (`crates/kernel/src/envelope.rs:520-598`) inside the writer transaction
   and answers `not_found` for a retired row, the same name this record's
   helpers give (`cited-evidence-live-at-dispute-commit` in
   [`../dispute-evidence/catalog.md`](../dispute-evidence/catalog.md)).
@@ -468,19 +470,19 @@ Guarantee: An evidence object's `ObjectState.scope_id` is `None`, so
 under every project binding.
 Check: `always` - for every `evidence_meta` row `e` and its
 `object_registry` row `o`: `load_object_state(o.object_id).scope_id ==
-None` (`object_state_sql`, `envelope.rs:1881`), `ScopeFilter::matches(None,
+None` (`object_state_sql`, `envelope.rs:1902`), `ScopeFilter::matches(None,
 ..) == Ok(false)` (`project.rs:199-206`), and `scoped_object_state(..,
 o.object_id)` returns `Err(NotFound)`. Every evidence row, so `always`.
 Observation split (portfolio refinement R3): the route-level test observes
 `invalid(not_found)` for a request naming an evidence object id in a scoped
 position; the `scope_id == None` clause is a kernel-crate assertion, since
-`load_object_state` is `pub(super)` (`envelope.rs:1905`).
+`load_object_state` is `pub(super)` (`envelope.rs:1926`).
 Fault/timing angle: none in time; the gap is structural.
 Required faults and enabling state: a live evidence row ingested through
 `kernel.artifact.ingest.*` or the store API; a route request naming its
 `object_id` in any scoped position.
 Confidence: high - [evidence](evidence/evidence-objects-carry-no-scope-and-fail-scoped-lookup.md).
-Read `object_state_sql`, the doc comment at `envelope.rs:1903-1904`, and
+Read `object_state_sql`, the doc comment at `envelope.rs:1924-1925`, and
 `ScopeFilter::matches`. Tables with `scope_id`: `asserted_edges`,
 `decisions`, `observations`, `propositions`, `scope_term`, `scopes`
 (`schema.rs`).
@@ -489,8 +491,8 @@ Impact: an evidence object id cannot be a disposition subject, approval,
 token, or projected dependency under any binding. Re-labelled at the PR A
 tip: the guarantee still holds, and dispute evidence no longer depends on
 it. The route judges a cited `evidence_id` through its live citers
-(`require_visible_evidence`, `commit.rs:742-759`, over
-`Envelope::evidence_citations`, `envelope.rs:532-577`), which is
+(`require_visible_evidence`, `commit.rs:742-757`, over
+`Envelope::evidence_cited_in`, `envelope.rs:520-598`), which is
 `cited-evidence-visible-to-bound-project` in
 [`../dispute-evidence/catalog.md`](../dispute-evidence/catalog.md).
 Open questions:
@@ -566,11 +568,11 @@ their values before it; and for a preview `P` and a commit `C` of the same
 operations against the same tip with no intervening commit, each
 `P.previews[i]` restricted to `DispositionResult` fields equals
 `C.dispositions[i]`. Preview and commit share `disposition_request` and
-`prepare_admission` (`commit.rs:827-865`; `admission.rs:1859-1870`).
+`prepare_admission` (`commit.rs:825-863`; `admission.rs:1859-1870`).
 Every request, so `always`.
 Fault/timing angle: a commit landing between preview and commit changes
 the prior; an earlier operation in the same preview changing an approval
-chain is refused as malformed (`commit.rs:1174-1180`).
+chain is refused as malformed (`commit.rs:1172-1178`).
 Required faults and enabling state: subjects in each disposition; a
 preview with a recorded identity (replays, judges nothing).
 Confidence: high - [evidence](evidence/disposition-preview-writes-nothing-and-reports-the-commit-verdict.md).
@@ -608,8 +610,8 @@ Check: `always` - per identity `k`: `COUNT(commit_log WHERE producer,
 operation_key = k) <= 1`; a second request with equal digest returns
 `receipt.replayed == true`, `receipt.commit_seq` equal to the first, and
 `dispositions` byte-equal to the first (`stored_receipt`,
-`envelope.rs:1342-1372`; `commit.rs:1190-1206`); a request with a
-different digest returns `invalid/operation_key_reused` (`commit.rs:1065-
+`envelope.rs:1363-1393`; `commit.rs:1188-1204`); a request with a
+different digest returns `invalid/operation_key_reused` (`commit.rs:1063-
 1070`). Every request, so `always`.
 Fault/timing angle: a lost response (`outcome_unknown`) followed by the
 client's single reissue under the same identity
@@ -629,7 +631,7 @@ relies on.
 Open questions:
 - A repeated command after the object moved reports `applied` with the
   original verdict while the stored disposition differs
-  (`memory-mark-command.test.ts:351`; `commit.rs:1190-1206`). Safe for the
+  (`memory-mark-command.test.ts:351`; `commit.rs:1188-1204`). Safe for the
   store; is the replayed verdict the right thing to show the user? (needs
   human input; portfolio refinement R5)
 
@@ -744,7 +746,7 @@ Open questions:
   (`commit.rs:60-62`); no owner decision beyond that is recorded. (needs
   human input)
 - Portfolio gap G2: the preview's `visibility_changes` reports the
-  subject only (`PreviewRun::disposition`, `commit.rs:827-866`; `changes_to`
+  subject only (`PreviewRun::disposition`, `commit.rs:825-864`; `changes_to`
   at `:537-542`) and excludes the dependents the commit demotes in the same
   `commit_seq`, so a user confirming a dispute on an approval is not shown
   the cascade. Resolved per OQ4-10 by documenting the limit: the route
@@ -761,7 +763,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - every non-replayed `kernel.commit`
-inserts one `commit_log` row (`envelope.rs:1400-1415`).
+inserts one `commit_log` row (`envelope.rs:1421-1436`).
 Status: active
 Exercised: partial - PR A's `kernel_routes.rs:5723` reads the `commit_log`
 row of two dispute commits and asserts `actor` and `cause` equal the
@@ -884,7 +886,7 @@ intent `I` on binding `B`: the `commit_log` row at `c` has `actor =
 redact(I.actor)`, `cause = redact(I.cause)`, `producer = I.producer`
 whatever `B.harness` is; the dispute reason's `reporter_taint` is a
 function of `(source_kind, asserted_taint_class)` alone
-(`commit.rs:1111-1125`); the request's `session_id` equals the channel's
+(`commit.rs:1109-1123`); the request's `session_id` equals the channel's
 bound session or the request is refused `session_mismatch` before parsing
 (`management_binding`, `crates/daemon/src/lib.rs:6596-6631`). Holds on
 every request, so `always`.
@@ -897,7 +899,7 @@ Confidence: high - [evidence](evidence/commit-actor-cause-and-source-kind-are-ca
 Read `IntentRequest::into_intent` (`project.rs:148-165`),
 `kernel_route_scope` (`mod.rs:415-441`), the envelope keys stripped before
 body parsing (`ENVELOPE_KEYS`, `mod.rs:461`), and every use of the bound
-scope in `handle_kernel_commit` (`commit.rs:1126`, `:1141`, `:1144`).
+scope in `handle_kernel_commit` (`commit.rs:1124`, `:1139`, `:1142`).
 Existing check: `kernel_routes.rs:5723` for `actor` and `cause` stored as
 sent on a `test` binding. Status unaudited.
 Impact: a model-driven client can file a dispute with `actor:

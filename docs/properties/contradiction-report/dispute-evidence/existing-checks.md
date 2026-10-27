@@ -1,8 +1,8 @@
 # Existing checks: dispute evidence on kernel.commit
 
 System: the PR A branch tip of #1160 (base `6159fd224`, code commit
-`6c4d445e3`, review-round code commits `511cd6d73` and `f68e895ca`; line
-numbers verified at `f68e895ca`). Every check below is `unaudited`:
+`6c4d445e3`, review-round code commits `511cd6d73` and `f68e895ca`,
+evidence-walk commit `f94f3163b`; line numbers verified at `f94f3163b`). Every check below is `unaudited`:
 adequacy verdicts belong to `/testing:invariant-test-review` for tests and
 `/low-level-systems:defensive-assertions-and-invariant-guards` for
 production guards. An existing check never removes a property from the
@@ -21,10 +21,10 @@ catalog.
 | 6146 | `a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale` | against rejected, contradicted, quarantined: `denied: true`, prior kept, evidence on the row; from stale: lands disputed | standing | unaudited |
 | 6199 | `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents` | a dispute on an approval keeps its historical maturity and classes, sets effective `candidate`, and writes `approval_revoked` on the dependent in the same commit with the same parseable reason | standing, reason, cascade | unaudited |
 | 6252 | `a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field` | a `mark_disputed` body carrying a forged `reason` answers an error (the variant, not the refusal name, is asserted); four counts unchanged | requirement, reason | unaudited |
-| 6284 | `a_dispute_judges_every_citer_and_both_evidence_fields_together` | evidence cited by the project and by a foreign scope that sorts first lands; both fields on one dispute land and parse back; foreign-only evidence answers `not_found`; a malformed reference beside a `not_found` id answers `invalid_input`; nothing written on refusal | visibility, form, reason | unaudited |
-| 6375 | `a_dispute_previewed_while_its_evidence_was_visible_is_judged_again_at_commit` | a preview answers `available`; the only project citer retires; the commit answers `not_found` with counts unchanged | liveness, visibility, preview | unaudited |
-| 6418 | `a_dispute_relaxes_a_contradicted_prior_only_with_a_valid_approval` | against a `contradicted` prior: without an approval `denied: true` and the disposition kept; with a valid approval `denied: false`, `disputed`, `outcome = deny`, evidence on the row | standing | unaudited |
-| 6475 | `an_insert_citing_evidence_makes_it_citable_later_in_the_same_commit` | uncited live evidence answers `not_found`; an envelope with an `insert_decision` citing it and then the dispute lands with the id on the row (portfolio gap G1) | visibility | unaudited |
+| 6285 | `a_dispute_judges_every_citer_and_both_evidence_fields_together` | evidence cited by the project and by a foreign scope that sorts first lands; evidence cited by two foreign decisions written before the project's citer lands; both fields on one dispute land and parse back; foreign-only evidence answers `not_found`; a malformed reference beside a `not_found` id answers `invalid_input`; nothing written on refusal | visibility, form, reason | unaudited |
+| 6416 | `a_dispute_previewed_while_its_evidence_was_visible_is_judged_again_at_commit` | a preview answers `available`; the only project citer retires; the commit answers `not_found` with counts unchanged | liveness, visibility, preview | unaudited |
+| 6459 | `a_dispute_relaxes_a_contradicted_prior_only_with_a_valid_approval` | against a `contradicted` prior: without an approval `denied: true` and the disposition kept; with a valid approval `denied: false`, `disputed`, `outcome = deny`, evidence on the row | standing | unaudited |
+| 6516 | `an_insert_citing_evidence_makes_it_citable_later_in_the_same_commit` | uncited live evidence answers `not_found`; an envelope with an `insert_decision` citing it and then the dispute lands with the id on the row (portfolio gap G1) | visibility | unaudited |
 
 Helpers the tests rely on: `assert_refused_without_writing` (`:5703`),
 `write_counts` (`:5597`), `latest_admission` (`:5625`), `project_evidence`
@@ -52,7 +52,8 @@ landing.
 | Location | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
 | `crates/kernel/src/admission.rs:4532` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | over every consistent maturity pair, disposition, dispute event, and evidence flag: `Deny`, historical kept, effective not raised, restrictiveness not lowered, prior kept on a relaxing request | standing | unaudited |
-| `crates/kernel/tests/kernel_slice.rs:2159` | `evidence_citations_name_the_scopes_of_live_citers_and_the_rows_liveness` | live decisions, observations, and decision events contribute scopes once and in order; unscoped and retired citers contribute none; retired rows read not live; unknown ids read absent | liveness, visibility | unaudited |
+| `crates/kernel/tests/kernel_slice.rs:2160` | `evidence_cited_in_offers_each_live_citing_scope_once_and_stops_at_the_first_accepted` | live decisions, observations, and decision events offer their scopes once each; unscoped and retired citers offer none; the walk ends at the accepted scope; retired and unknown ids are cited nowhere | liveness, visibility | unaudited |
+| `crates/kernel/tests/kernel_slice.rs:2252` | `evidence_cited_in_matches_the_citation_model_under_seeded_citers` | over 24 seeded rounds of interleaved scoped, unscoped, live, and retired decisions, observations, and decision events, the answer equals the model for every accepted scope set; each scope is offered at most once and only when a live citer carries it; no scope before the last is accepted; a refusal offered every citing scope | visibility | unaudited |
 
 ## TypeScript tests (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts`)
 
@@ -82,7 +83,7 @@ its contract test is
 | `commit.rs:206-234` | `compose_reason`: dispute needs valid evidence; other events take none | requirement, form | unaudited |
 | `dispute.rs:49-81` | `DisputeReason::validated`: presence, empty id, a detection in the raw `evidence_id` (`:58-64`), form, cap, a detection in the composed reason (`:77-79`) | requirement, form, reason | unaudited |
 | `dispute.rs:151-159` | `EvidenceRef::is_well_formed` | form | unaudited |
-| `commit.rs:742-759` | `require_visible_evidence`: live and cited by a scope of the bound project | liveness, visibility | unaudited |
+| `commit.rs:742-757` | `require_visible_evidence`: live and cited by a scope of the bound project | liveness, visibility | unaudited |
 | `commit.rs:137`, `:168-171` | `deny_unknown_fields` with `reason` skipped, so a body cannot supply `reason` | reason | unaudited |
 | `commit.rs:411-444` | `resolve_classes`: refuse an assertion above the derivation | reporter | unaudited |
 
@@ -92,7 +93,7 @@ its contract test is
   holds it. For the cited evidence row this state is not constructible:
   `retire_evidence` refuses evidence a live row cites
   (`crates/kernel/src/slice/write.rs:585-608`). The reachable form is a
-  citer retirement queued behind the dispute; `kernel_routes.rs:6375`
+  citer retirement queued behind the dispute; `kernel_routes.rs:6416`
   constructs its sequential form only.
 - No test cites evidence through an asserted-edge citer, and no Rust code
   under `crates/` writes `asserted_edges`.
@@ -108,10 +109,11 @@ its contract test is
   decode-idempotence, a detection in the raw value, and a detection in
   the composed reason; their shape is otherwise unchecked before the
   Kernel read, which answers `not_found` for anything not stored.
-- `Envelope::evidence_citations` (`crates/kernel/src/envelope.rs:536-577`)
-  reads every row citing one evidence id, unbounded, inside the writer
-  transaction. The owner defers a bounded read as a follow-up; each
-  citing row was paid for by a write.
+- `Envelope::evidence_cited_in` (`crates/kernel/src/envelope.rs:520-598`)
+  stops at the first accepted citer, but a refused dispute still visits
+  every live citer of the id inside the writer transaction, one table
+  seek per citer. Bounding it by distinct citing scopes needs an index
+  over `(evidence_id, scope_id)`, a Kernel schema decision.
 - `evidence_ref.path` accepts C0 and bidi control characters; they are
   stored percent-encoded. Recorded as a review nit, not fixed.
 - The route documents `class_over_declared` and `invalid_input` for the

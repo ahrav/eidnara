@@ -67,7 +67,7 @@ The cascade runs inside the invalidating transaction and holds the single
 writer for its duration. A preview of the same operation shows only the
 approval's own verdict; the dependents' projected visibility is not part
 of the preview (`PreviewRun` reads served rows for the targets only,
-`commit.rs:812-823`).
+`commit.rs:810-821`).
 
 ## What a test must construct
 
@@ -117,7 +117,7 @@ demotion, and does not read `kernel.read`.
 ### Q: Does the preview show the cascade a dispute on an approval causes (G2)?
 
 - Sources examined: `PreviewRun::disposition`
-  (`crates/daemon/src/kernel_routes/commit.rs:827-866`), `changes_to`
+  (`crates/daemon/src/kernel_routes/commit.rs:825-864`), `changes_to`
   (`:537-542`), the route module header (`commit.rs:60-63`), the command
   usage (`packages/opencode-plugin/src/shared/memory-mark-command.ts:53`)
   and its test (`memory-mark-command.test.ts:156`), and PR A's

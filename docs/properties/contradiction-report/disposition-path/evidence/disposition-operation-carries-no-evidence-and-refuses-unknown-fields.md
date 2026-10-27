@@ -37,7 +37,7 @@ the change is measured against.
 - Receipt shape: `CommitResult.dispositions` is `#[serde(default,
   skip_serializing_if = "Vec::is_empty")]` (`commit.rs:500-502`), so
   receipts recorded before the field existed still decode; the unit test
-  at `:1309` asserts that.
+  at `:1307` asserts that.
 - TypeScript: `DispositionOperation` has `op, object_id, event,
   approval_object_id?`, and at the PR A tip `evidence_id?` and
   `evidence_ref?` (`shared/kernel-client/client.ts:101-111`); the command

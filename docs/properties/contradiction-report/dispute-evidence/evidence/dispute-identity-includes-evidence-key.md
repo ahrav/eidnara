@@ -30,7 +30,7 @@ specification recommended adding the evidence key
 - Route side: `commit_log` has a unique index on `(producer,
   operation_key)` (`crates/kernel/src/schema.rs:26`); the receipt lookup
   precedes the operation, so a reused key with another digest is
-  `operation_key_reused` (`crates/daemon/src/kernel_routes/commit.rs:1068-1070`).
+  `operation_key_reused` (`crates/daemon/src/kernel_routes/commit.rs:1066-1068`).
 
 ## Failure scenario
 

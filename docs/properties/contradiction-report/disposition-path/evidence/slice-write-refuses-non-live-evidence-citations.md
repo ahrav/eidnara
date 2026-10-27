@@ -29,13 +29,13 @@ on them.
 - Route reachability: `DecisionRequest.evidence_id` and
   `ObservationRequest.evidence_id` (`crates/daemon/src/kernel_routes/
   commit.rs:274`, `:314`) flow into the specs (`:292`, `:344`) and into
-  `envelope.insert_decision` / `insert_observation` (`:927`, `:1033`).
+  `envelope.insert_decision` / `insert_observation` (`:925`, `:1031`).
 - `NotFound` maps to `invalid/not_found` (`kernel_routes/state.rs:276`),
   whose doc reads "does not exist, is not live, or is not scoped to the
   bound project" (`:79-81`).
 - The whole envelope rolls back on the error: `commit_prepared_with_writer`
-  returns at `operation(&mut envelope)?` (`envelope.rs:1432`) before
-  `tx.commit()` (`:1559`).
+  returns at `operation(&mut envelope)?` (`envelope.rs:1453`) before
+  `tx.commit()` (`:1580`).
 - Kernel test `a_trigger_whose_evidence_is_gone_cannot_admit`
   (`crates/kernel/tests/kernel_admission.rs:4211`) covers the trigger
   branch in `validate_trigger`, a different predicate with the same
@@ -45,7 +45,7 @@ on them.
 
 A predicate edit that drops `AND invalidated_commit_seq IS NULL` lets an
 insert cite a retired evidence row; `object_state_sql` would then show
-`artifact_digest = NULL` for the decision (`envelope.rs:1887-1889` joins
+`artifact_digest = NULL` for the decision (`envelope.rs:1908-1910` joins
 live evidence only) while the row's `evidence_id` points at a dead row.
 The duplicate `COUNT(*)` form in `require_live_evidence` also admits a
 list with a repeated live id and one dangling id if the count happens to
@@ -71,16 +71,16 @@ predicate runs inside the writer transaction and sees the retirement.
 ### Q: Which read-side helper will the P4 daemon check call?
 
 - Sources examined: `slice/write.rs:1095-1178` (all private `fn`);
-  PR A's `Envelope::evidence_citations` (`envelope.rs:532-577`) and
+  PR A's `Envelope::evidence_cited_in` (`envelope.rs:520-598`) and
   `require_visible_evidence`
-  (`crates/daemon/src/kernel_routes/commit.rs:742-759`).
+  (`crates/daemon/src/kernel_routes/commit.rs:742-757`).
 - Findings: at `3a3b916b7` no public read returned an evidence row's
-  liveness by id. PR A adds `evidence_citations`, which returns the row's
-  liveness and the scopes of its live citers inside the envelope's
+  liveness by id. PR A adds `evidence_cited_in`, which reads the row's
+  liveness and walks the scopes of its live citers inside the envelope's
   transaction; the daemon calls it and answers `not_found` for a retired
   or unknown row. The private helpers here are unchanged.
 - Missing evidence: none.
-- Conclusion: resolved with answer: `Envelope::evidence_citations`.
+- Conclusion: resolved with answer: `Envelope::evidence_cited_in`.
 
 ### Q: Does `require_live_evidence` deduplicate its input?
 

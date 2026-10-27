@@ -28,9 +28,10 @@ or a bias (a framing decision for a human).
 
 About 45 `file:line` citations were checked. Most are exact, or are off
 by a doc-comment line. Examples: `commit.rs:12-63`, `:206-234`,
-`:719-721`, `:725-726`, `:742-759`, `:1047-1062`, `:1111-1125`,
-`:1151-1159`; `dispute.rs:49-81`, `:108-148`, `:151-159`, `:201-207`;
-`envelope.rs:187-194`, `:532-577`; `scope.rs:710-716`;
+`:719-721`, `:725-726`, `:742-757`, `:1045-1060`, `:1109-1123`,
+`:1149-1157`; `dispute.rs:49-81`, `:108-148`, `:151-159`, `:201-207`;
+`envelope.rs:520-598` (the read, renamed `evidence_cited_in` since);
+`scope.rs:710-716`;
 `lib.rs:14529`; `admission.rs:4168-4175`, `:4532`; all eight route test
 lines from `kernel_routes.rs:5723` to `:6199`; and all seven TypeScript
 test lines.
@@ -46,7 +47,7 @@ The following were wrong at `16660c3dd`:
   246.
 - `catalog.md`, reason record, `Existing check:`. It cited `:390`. At
   `f68e895ca` the test is at 404.
-- `commit.rs:1068-1070` is the comment that interprets a conflict. The
+- `commit.rs:1066-1068` is the comment that interprets a conflict. The
   receipt lookup itself runs inside `KernelStore::commit_before`. This is
   minor.
 
@@ -57,7 +58,7 @@ under one writer transaction.
 
 | Record | Route | Why |
 |---|---|---|
-| requirement | route test with raw bodies, plus TS parser | refusal happens before any transaction (`commit.rs:1119-1125`) |
+| requirement | route test with raw bodies, plus TS parser | refusal happens before any transaction (`commit.rs:1117-1123`) |
 | liveness | route test; kernel lock harness for the queued case | `retire_evidence` store API |
 | visibility | route test with two projects; kernel test for the edge citer | asserted-edge branch has no test |
 | form | `dispute.rs` unit tests plus route | pure predicates |
@@ -119,7 +120,7 @@ consistently.
   The tests' `project_evidence` helper uses exactly this path to make
   evidence citable (`kernel_routes.rs:5684-5698`).
   - `apply` runs operations in order inside one transaction
-    (`commit.rs:901-1041`). I infer, without having tested it, that a
+    (`commit.rs:899-1039`). I infer, without having tested it, that a
     single envelope holding `insert_decision` citing E, then a dispute
     citing E, passes `require_visible_evidence`.
   - The insert also distinguishes a live id (`available`) from an unknown
@@ -146,8 +147,8 @@ consistently.
 
 | Id | Class | Finding and action | Disposition |
 |---|---|---|---|
-| G1 | gap | Visibility check is satisfiable by self-citation through route inserts; insert answers leak evidence existence. Add one record or an open question on visibility (needs human input) | Queued as an open question (needs human input) on `cited-evidence-visible-to-bound-project`. The test `an_insert_citing_evidence_makes_it_citable_later_in_the_same_commit` (`kernel_routes.rs:6475`) shows a dispute citing uncited live evidence alone answers `not_found`, and the same dispute after an `insert_decision` citing that evidence in one envelope lands with the id on the row. Under the resolved OQ4-3 definition, evidence is citable once this project cites it, in the same envelope included. The insert path's live-versus-unknown answer is pre-existing behavior outside #1160 |
-| G2 | gap | No test sends `approval_object_id` on a dispute; add the route case alongside R1 | Closed by `a_dispute_relaxes_a_contradicted_prior_only_with_a_valid_approval` (`kernel_routes.rs:6418`): without the approval the dispute is `denied: true` and the decision stays `contradicted`; with a valid approval it answers `denied: false`, lands `disputed`, and the row reads `outcome = deny` with the evidence id |
+| G1 | gap | Visibility check is satisfiable by self-citation through route inserts; insert answers leak evidence existence. Add one record or an open question on visibility (needs human input) | Queued as an open question (needs human input) on `cited-evidence-visible-to-bound-project`. The test `an_insert_citing_evidence_makes_it_citable_later_in_the_same_commit` (`kernel_routes.rs:6516`) shows a dispute citing uncited live evidence alone answers `not_found`, and the same dispute after an `insert_decision` citing that evidence in one envelope lands with the id on the row. Under the resolved OQ4-3 definition, evidence is citable once this project cites it, in the same envelope included. The insert path's live-versus-unknown answer is pre-existing behavior outside #1160 |
+| G2 | gap | No test sends `approval_object_id` on a dispute; add the route case alongside R1 | Closed by `a_dispute_relaxes_a_contradicted_prior_only_with_a_valid_approval` (`kernel_routes.rs:6459`): without the approval the dispute is `denied: true` and the decision stays `contradicted`; with a valid approval it answers `denied: false`, lands `disputed`, and the row reads `outcome = deny` with the evidence id |
 | R1 | refinement | Standing: condition the restrictiveness clause on `approval_object_id IS NULL`, or state the approved-relaxation clause; fix the Guarantee | Applied: the standing Guarantee and Check hold the restrictiveness clause unless the row names a valid approval, matching AC8 "no relaxation without a valid approval" |
 | R2 | refinement | Form: add an open question on whitespace paths in the command, next to the `%XX` one | Applied: open question on the form record; at `511cd6d73` the usage names the limit (`memory-mark-command.ts:51`) |
 | R3 | refinement | Fix the `dispute.rs` line numbers in `existing-checks.md` and in the form and reason records | Applied to every `dispute.rs` line number in both parts, at `f68e895ca` |
@@ -159,7 +160,7 @@ consistently.
 
 ## Gaps queued
 
-- **G1.** Read `commit.rs:901-1041` and `slice/write.rs:1095-1107`.
+- **G1.** Read `commit.rs:899-1039` and `slice/write.rs:1095-1107`.
   Write one route test: in one envelope, `insert_decision` citing
   evidence that only project B cites, then a dispute citing it. Record
   the result. An owner then decides whether visibility means "already
@@ -167,7 +168,7 @@ consistently.
   inserts should get the same check.
   - Disposition: the route test landed as
     `an_insert_citing_evidence_makes_it_citable_later_in_the_same_commit`
-    (`kernel_routes.rs:6475`). It uses uncited live evidence rather than
+    (`kernel_routes.rs:6516`). It uses uncited live evidence rather than
     evidence only project B cites; the insert path accepts any live
     evidence id (`require_parents` checks liveness only), so the result
     covers both. The owner question stays open on
@@ -175,7 +176,7 @@ consistently.
 - **G2.** One route case: a dispute with a valid approval against a
   `contradicted` prior. Assert the landed disposition and `denied: false`.
   No new record is needed. It closes R1.
-  - Disposition: closed by `kernel_routes.rs:6418`.
+  - Disposition: closed by `kernel_routes.rs:6459`.
 
 ## Biases for a human
 

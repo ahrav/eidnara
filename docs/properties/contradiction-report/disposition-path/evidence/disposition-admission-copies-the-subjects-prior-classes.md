@@ -23,7 +23,7 @@ reading; code resolves which describes the disposition path.
 - `CommitPlan.classes` (the caller's derived pair from `resolve_classes`,
   `commit.rs:411-444`) is read only by `admit` (`:579-598`) for inserts
   and supersedes. The `Operation::Disposition` arm in `apply`
-  (`:1000-1006`) never touches it.
+  (`:998-1004`) never touches it.
 - `evaluate_admission` refuses when the request's classes differ from the
   prior's (`admission.rs:268-273`), so the copy is also what makes the
   route's dispositions pass that gate for every subject class.
