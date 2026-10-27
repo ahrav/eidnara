@@ -539,6 +539,7 @@ async fn capture_job(
             window: window.iter().cloned().map(Arc::new).collect(),
             epoch: handler.source_capture.epoch(),
             documents: None,
+            candidates: false,
         })
         .unwrap()
         .into_job(
@@ -809,6 +810,7 @@ async fn the_capture_report_carries_no_unit_text() {
             window: window.to_vec(),
             epoch: handler.source_capture.epoch(),
             documents: None,
+            candidates: false,
         })
     };
     let foreign = vec![Arc::new(json!({
@@ -1251,6 +1253,7 @@ async fn a_window_past_the_remaining_budget_is_refused_resident_short() {
             window: window.clone(),
             epoch: handler.source_capture.epoch(),
             documents: None,
+            candidates: false,
         })
     };
     let held = offer().expect("the first window fits");
@@ -1346,6 +1349,7 @@ async fn identity_keys_past_the_remaining_budget_end_resident_short() {
             window: filler,
             epoch: handler.source_capture.epoch(),
             documents: None,
+            candidates: false,
         })
         .expect("the filler fits");
     let parts: Vec<Value> = (0..9_000)

@@ -531,6 +531,18 @@ pub struct Published {
     pub admission: (SourceClass, TaintClass),
 }
 
+impl Published {
+    /// The id of the evidence row retaining the unit's bytes. The publisher keys a unit's
+    /// evidence object `srcev-object:{key}` and its evidence row `srcev:{key}`.
+    pub fn evidence_id(&self) -> String {
+        let key = self
+            .evidence_object_id
+            .strip_prefix("srcev-object:")
+            .unwrap_or(&self.evidence_object_id);
+        format!("srcev:{key}")
+    }
+}
+
 /// Evidence retained before publication failed. Only permanent descriptor refusals attempt compensation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetainedEvidence {
