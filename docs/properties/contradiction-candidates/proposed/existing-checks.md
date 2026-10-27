@@ -57,6 +57,9 @@ Analyzer checks the scorer relies on:
 | `the_totals_follow_replaced_ids_late_writes_deletes_and_truncation` | `:1243` | the gauge equals a sum over the rows through replaced ids, late writes, deletes, and truncation | sweep (store arm) | unaudited |
 | `a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` | `:1298` | a new row below the cap's floor is counted written and dropped; held rows and rowids stay; a landing row takes a fresh rowid | row key and caps | unaudited |
 | `only_the_candidate_module_writes_the_candidate_tables` | `:1429` | no other memory-store source, trigger, or session purge writes either candidate table, so the totals the cap and gauge read stay exact | row key and caps; sweep (store arm) | unaudited |
+| `every_candidate_statement_reuses_its_cached_plan` | `:1353` | 12 rounds of writes, late writes, pages, sweep pages, keyed deletes, and gauge reads run 16 distinct candidate statements; the statement cache re-creates and re-plans none | row key and caps; read (paging); sweep (store arm) (the cost of the checks, not a record directly) | unaudited |
+| `the_page_sweep_and_eviction_scans_stop_at_their_bound` | `:1488` | over a 300-row project, a two-row page, a three-row sweep page, and a one-row eviction each run under 500 VM steps | read (paging); sweep (store arm); row key and caps (bounded scans) | unaudited |
+| `a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores` | `:1532` | 256 rows into a run of equal scores, with and without equal `created_at_ms`, the continuation page returns the next two rows under 500 VM steps | read (paging) | unaudited |
 
 Baseline: `crates/memory-store/tests/baseline.rs` pins the table, its two
 indexes, and `contradiction_candidate_totals` in `EXPECTED_OBJECTS` and
@@ -64,11 +67,12 @@ refuses a store at the prior baseline untouched (`:496`).
 
 ## S-B, S-C, S-E to S-H and R5
 
-None found. The trigger, candidate set, store, sweep, read, flag, and
-dispute-handoff behavior does not exist at the branch tip; the store
-(#1165), sweep (#1166), pass (#1167), and read (#1168) tickets add the code
-and the checks. The 12 proposed records carry `Existing check: none;
-proposed`.
+None found. The trigger, candidate set, sweep, read, flag, and
+dispute-handoff behavior does not exist at the branch tip. The store arm
+landed with #1165 and is inventoried under S-D above; the sweep (#1166),
+pass (#1167), and read (#1168) tickets add the remaining code and checks.
+The 12 proposed records carry `Existing check: none; proposed`; the two S-D
+records also carry `Exercised: partial` with the store checks above.
 
 ## Suspiciously quiet areas
 
