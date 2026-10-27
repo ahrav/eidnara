@@ -926,7 +926,7 @@ async fn a_recorded_served_set_replays_while_another_writer_holds_the_writer() {
     assert_eq!(
         written,
         Some(UseOutcomeWrite::Written),
-        "a new served set waits for a writer released within the budget"
+        "a new served set waits for the writer's release"
     );
     let third = served_in("third");
     assert_eq!(third.len(), 1);
