@@ -8,7 +8,7 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip, the commit that carries this
+References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
 - Record triggers: `use_outcomes_identity_immutable` (its column list includes

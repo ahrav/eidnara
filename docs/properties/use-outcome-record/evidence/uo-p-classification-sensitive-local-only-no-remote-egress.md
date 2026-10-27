@@ -8,13 +8,13 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip, the commit that carries this
+References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
 - DDL CHECKs: `crates/kernel/src/schema.rs:188`.
-- Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:266`), whose
+- Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:293`), whose
   `INSERT` carries the class literals
-  (`crates/kernel/src/use_outcome.rs:280-285`); it pushes no pending change, so the commit writes no change event or outbox row.
+  (`crates/kernel/src/use_outcome.rs:307-312`); it pushes no pending change, so the commit writes no change event or outbox row.
 - Class rule: `denies_destination` (`crates/kernel/src/envelope.rs:71`).
 
 - Guarantee under test: Every serving record carries `sensitive`, `local_only`,

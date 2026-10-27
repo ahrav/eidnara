@@ -153,6 +153,13 @@ pub struct ServedSession {
     pub disputed_after_serve: bool,
 }
 
+/// How many unretired serving records of one project name one decision object, and how many of them a `mark_disputed` or `contradict` on its lineage followed; both are read at one snapshot, so `disputed_after_serve <= served_sessions`. A session served the object at two served sets holds two records and counts twice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServedCounts {
+    pub served_sessions: u64,
+    pub disputed_after_serve: u64,
+}
+
 /// What one use-outcome expiry sweep did: `retired` records were retired by this call; `cited` expired records were kept because a committed admission row with a live subject cites them, counted among the rows the call read while filling its page. A cited record is kept, so a later call counts it again while its citation holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UseOutcomeExpiry {
@@ -195,6 +202,26 @@ static SERVED_SESSIONS_SQL: LazyLock<String> = LazyLock::new(|| {
          JOIN use_outcome_decisions d ON d.object_id=?1
          JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
          WHERE u.invalidated_commit_seq IS NULL",
+        disputed = EventKind::MarkDisputed.as_str(),
+        contradict = EventKind::Contradict.as_str(),
+        lineage = super::admission::same_lineage_as_registry_object("a"),
+    )
+});
+
+/// A committed `mark_disputed` or `contradict` on the object's lineage disputes a serve when its `commit_seq` exceeds `served_commit_seq`, as in [`SERVED_SESSIONS_SQL`]; the maximum matching `commit_seq` therefore suffices for the disputed count.
+static SERVED_COUNTS_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT COUNT(*),
+                COALESCE(SUM(u.served_commit_seq<(
+                    SELECT MAX(a.commit_seq) FROM object_registry o
+                    JOIN admission_decisions a ON a.subject_object_id=o.object_id
+                    WHERE o.object_id=?1
+                      AND a.event_kind IN ('{disputed}','{contradict}')
+                      AND {lineage}
+                      AND a.commit_seq IS NOT NULL)),0)
+         FROM use_outcome_decisions d
+         JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
+         WHERE d.object_id=?1 AND u.project_digest=?2 AND u.invalidated_commit_seq IS NULL",
         disputed = EventKind::MarkDisputed.as_str(),
         contradict = EventKind::Contradict.as_str(),
         lineage = super::admission::same_lineage_as_registry_object("a"),
@@ -558,6 +585,32 @@ impl KernelStore {
         Ok(advanced)
     }
 
+    /// [`Self::served_sessions_for`] restricted to the serves recorded under `project_digest`, as counts, derived in one statement at one snapshot; an object the project never served counts `(0, 0)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage and lock errors.
+    pub fn served_counts_for(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        project_digest: &str,
+        object_id: &str,
+    ) -> Result<ServedCounts, KernelError> {
+        let limit = budget.acquire_limit();
+        let (served, disputed): (i64, i64) = self
+            .reader_with_limit(&limit)?
+            .query_row_cached(&SERVED_COUNTS_SQL, [object_id, project_digest], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(map_read)?;
+        limit.check()?;
+        Ok(ServedCounts {
+            served_sessions: u64::try_from(served).map_err(|_| KernelError::CorruptCanonicalRow)?,
+            disputed_after_serve: u64::try_from(disputed)
+                .map_err(|_| KernelError::CorruptCanonicalRow)?,
+        })
+    }
+
     /// Retires serving records whose `retain_until` is before `now` and that no committed admission row with a live subject cites: at most [`MAX_EXPIRED_USE_OUTCOMES_PER_CALL`] per call, oldest deadline first, in one commit. Each record is rechecked under the writer and gets its own reserved receipt keyed by `now` and its id, so a citation committed after selection keeps it and a record another sweep retired since selection is skipped. The commit's own receipt is keyed by `now` and a digest of the page's ids, so only a repeat of the same page at this cutoff replays; a replay retires nothing and reports the cited rows its scan read. A page that retires nothing commits nothing.
     ///
     /// # Errors
@@ -734,9 +787,9 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        ADVANCE_TRANSFORM_SQL, EXPIRED_SQL, MARK_DELETED_SQL, SERVED_SESSIONS_SQL, SERVED_SET_SQL,
-        STALE_TRANSFORM_SQL, SessionRole, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry,
-        UseOutcomeSpec,
+        ADVANCE_TRANSFORM_SQL, EXPIRED_SQL, MARK_DELETED_SQL, SERVED_COUNTS_SQL,
+        SERVED_SESSIONS_SQL, SERVED_SET_SQL, STALE_TRANSFORM_SQL, SessionRole,
+        USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
     };
     use crate::{CommitIntent, DomainSpec, KernelStore, Sensitivity, served_set_digest};
 
@@ -974,7 +1027,7 @@ mod tests {
         assert!(retired(&store, "session"));
     }
 
-    /// The sweep scan reads the live-retention index in its order with no temporary sort and probes citations through the citing index; the by-session read, the delete mark, the staleness check, and the advance seek the identity index; the by-decision read starts from the decision-row index and probes disputes through the subject index.
+    /// The sweep scan reads the live-retention index in its order with no temporary sort and probes citations through the citing index; the by-session read, the delete mark, the staleness check, and the advance seek the identity index; the by-decision read starts from the decision-row index and probes disputes through the subject index; the count read seeks the decision-row index and reads disputes through the subject index in an uncorrelated subquery.
     #[test]
     fn the_sweep_and_the_reads_use_their_indexes() {
         let root = tempfile::tempdir().unwrap();
@@ -1031,5 +1084,13 @@ mod tests {
             by_decision.contains("idx_admission_subject_latest"),
             "{by_decision}"
         );
+        let counts = plan(&SERVED_COUNTS_SQL, &[&"decision", &digest]);
+        assert!(
+            counts.contains("idx_use_outcome_decisions_object_fk"),
+            "{counts}"
+        );
+        assert!(counts.contains("idx_admission_subject_latest"), "{counts}");
+        assert!(!counts.contains("CORRELATED"), "{counts}");
+        assert!(!counts.contains("TEMP B-TREE"), "{counts}");
     }
 }

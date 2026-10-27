@@ -10,7 +10,7 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip, the commit that carries this
+References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
 - Additive engine: `crates/daemon/src/transform.rs:3122` inside

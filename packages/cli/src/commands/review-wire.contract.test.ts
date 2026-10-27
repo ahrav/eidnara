@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { parseExactJson } from "@eidnara/opencode/shared/host-client";
 import {
     ABSTAIN_REASONS,
     ACTIVATION_STATES,
+    decodeUseOutcome,
     LIST_TERMINALS,
     MEMORY_REVIEWER_STATES,
     OUTCOMES,
@@ -100,5 +102,54 @@ describe("review vocabularies are pinned to docs/host-wire-protocol.md", () => {
         expect(quotedAlternatives(types.get("activation_state") ?? "")).toEqual([
             ...ACTIVATION_STATES,
         ]);
+    });
+
+    test("review.use_outcome is a listed method whose answer carries exactly the fields the decoder reads", () => {
+        expect(paragraphStarting("Methods: ")).toContain("`review.use_outcome`");
+        const paragraph = paragraphStarting("`review.use_outcome` carries");
+        expect(paragraph).toContain(
+            '`{"kind":"counts","object_id": string,"served_sessions": u64,"disputed_after_serve": u64}`',
+        );
+        expect(paragraph).toContain("no greater than 2^53");
+    });
+});
+
+describe("review.use_outcome counts are exact through 2^53", () => {
+    const answer = (served: unknown) => ({
+        kind: "counts",
+        object_id: "mem-1",
+        served_sessions: served,
+        disputed_after_serve: 0,
+    });
+
+    test("9007199254740992 decodes exactly and 9007199254740993 is unavailable", () => {
+        expect(decodeUseOutcome(answer(9007199254740992n), "mem-1")).toEqual({
+            kind: "body",
+            body: {
+                object_id: "mem-1",
+                served_sessions: 9007199254740992,
+                disputed_after_serve: 0,
+            },
+        });
+        expect(decodeUseOutcome(answer(9007199254740993n), "mem-1").kind).toBe("malformed");
+    });
+
+    test("the exact-JSON lexemes reach the decoder unrounded", () => {
+        const decoded = (served: string) =>
+            decodeUseOutcome(
+                parseExactJson(
+                    `{"kind":"counts","object_id":"mem-1","served_sessions":${served},"disputed_after_serve":0}`,
+                ),
+                "mem-1",
+            );
+        expect(decoded("9007199254740992")).toEqual({
+            kind: "body",
+            body: {
+                object_id: "mem-1",
+                served_sessions: 9007199254740992,
+                disputed_after_serve: 0,
+            },
+        });
+        expect(decoded("9007199254740993").kind).toBe("malformed");
     });
 });

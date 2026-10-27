@@ -51,7 +51,7 @@ revision.
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-  (`crates/kernel/tests/kernel_use_outcome.rs:755`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:790`). Status: unaudited.
 
 ## Failure scenario
 

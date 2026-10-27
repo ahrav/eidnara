@@ -635,3 +635,41 @@ async fn a_session_id_that_reads_as_a_secret_still_deletes() {
         "a plain id still selects and marks its live record"
     );
 }
+
+/// With the Kernel Starting, and again once it is marked unavailable, `review.use_outcome` answers the kernel routes' `unavailable` state and carries no count.
+#[tokio::test(flavor = "current_thread")]
+async fn review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count() {
+    let producer = Arc::new(ProducerState::default());
+    let (starting, _store, _dir, project) =
+        handler_with_store(Arc::clone(&producer), default_test_config());
+    starting.kernel.set_expected(true);
+    let (ready, _store, _dir, ready_project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    ready
+        .kernel
+        .mark_unavailable(kernel_routes::UnavailableKind::Store);
+    for (handler, project, reason) in [
+        (&starting, &project, "store_starting"),
+        (&ready, &ready_project, "store_unavailable"),
+    ] {
+        let outcome = handler
+            .dispatch_value(
+                test_route(7),
+                json!({
+                    "method": "review.use_outcome",
+                    "session_id": "ses",
+                    "project_root": project,
+                    "object_id": "mem-a",
+                }),
+            )
+            .await;
+        let PreparedOutcome::Response(bytes) = outcome else {
+            panic!("{outcome:?}");
+        };
+        let answer: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["state"]["kind"], "unavailable", "{answer}");
+        assert_eq!(answer["state"]["reason"], reason, "{answer}");
+        assert!(answer.get("served_sessions").is_none(), "{answer}");
+        assert!(answer.get("disputed_after_serve").is_none(), "{answer}");
+    }
+}

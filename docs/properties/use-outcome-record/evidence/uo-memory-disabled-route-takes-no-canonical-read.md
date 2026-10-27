@@ -9,7 +9,7 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip, the commit that carries this
+References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
 - Gate: `project_memory_read` (`crates/daemon/src/lib.rs:5542`); the pass calls

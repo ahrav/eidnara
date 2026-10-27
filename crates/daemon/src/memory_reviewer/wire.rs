@@ -1,4 +1,4 @@
-//! The context application protocol's review operations: a bounded list of a project's completed review outcomes, the read of one selected proposal, and the explicit acceptance of one. List and read are local reads over the bound route's project; acceptance applies the selected proposal through the Kernel only while the owner's acceptance record admits it. An unbound root or an unready Kernel answers as every kernel route does; an uninstalled Memory Store or a root whose memories authority is not MODULE answers `disabled`, the terminal the lane's other methods use while they are not installed. A receipt lists from its row alone; a read goes through the same receipt-selected path every reader uses, so a proposal is visible only while its receipt is complete, its selection matches, and its review hold is live.
+//! The context application protocol's review operations: a bounded list of a project's completed review outcomes, the read of one selected proposal, the explicit acceptance of one, and the use-outcome counts of one decision. List and read are local reads over the bound route's project; acceptance applies the selected proposal through the Kernel only while the owner's acceptance record admits it. An unbound root or an unready Kernel answers as every kernel route does; an uninstalled Memory Store or a root whose memories authority is not MODULE answers `disabled`, the terminal the lane's other methods use while they are not installed. A receipt lists from its row alone; a read goes through the same receipt-selected path every reader uses, so a proposal is visible only while its receipt is complete, its selection matches, and its review hold is live.
 
 use std::sync::Arc;
 
@@ -9,6 +9,7 @@ use context_core::canonical_json::is_lower_hex;
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::blocking;
+use crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES;
 use crate::{HandlerCore, MemoriesAuthority, memories_authority_for_route};
 use host_runtime::RouteHandle;
 use memory_store::memory_reviewer_ledger::{MAX_RECEIPT_PAGE, MemoryReviewerReceipt};
@@ -22,10 +23,12 @@ use super::settlement::{
 pub(crate) const LIST: &str = "review.list";
 pub(crate) const READ: &str = "review.read";
 pub(crate) const ACCEPT: &str = "review.accept";
+pub(crate) const USE_OUTCOME: &str = "review.use_outcome";
 /// Longest caller operation key `review.accept` admits.
 const MAX_OPERATION_KEY_BYTES: usize = 128;
 /// How long the acceptance gate may wait for a Kernel reader to learn the live incarnation.
 const GATE_READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+const USE_OUTCOME_READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The list page a caller asks for; `limit` is capped at [`MAX_RECEIPT_PAGE`].
 #[derive(Debug, Deserialize)]
@@ -49,6 +52,12 @@ struct AcceptRequest {
     causal_identity: String,
     operation_key: String,
     target: kernel::ProposalTarget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UseOutcomeRequest {
+    object_id: String,
 }
 
 /// The stores and the ledger project one review operation reads under.
@@ -295,6 +304,45 @@ impl HandlerCore {
 }
 
 impl HandlerCore {
+    /// `review.use_outcome`: the exact served and disputed-after-serve counts of one decision object within the bound project, at one Kernel snapshot. It binds through the kernel-route scope alone, so it needs no Memory Store, and an unready Kernel or a failed read answers its kernel state with no count.
+    pub(crate) async fn handle_review_use_outcome(
+        &self,
+        channel: RouteHandle,
+        request: Value,
+    ) -> PreparedOutcome {
+        let (scope, parsed) =
+            match self.kernel_request::<UseOutcomeRequest>(channel, request, USE_OUTCOME) {
+                Ok(bound) => bound,
+                Err(outcome) => return outcome,
+            };
+        if parsed.object_id.is_empty() || parsed.object_id.len() > MAX_OBJECT_ID_BYTES {
+            return crate::invalid_params_error(format!(
+                "{USE_OUTCOME} requires an object_id of 1 to {MAX_OBJECT_ID_BYTES} bytes"
+            ));
+        }
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + USE_OUTCOME_READ_BUDGET),
+            Arc::default(),
+        );
+        let counts = blocking(move || {
+            scope
+                .store
+                .served_counts_for(&budget, scope.project.digest(), &parsed.object_id)
+                .map(|counts| (parsed.object_id, counts))
+        })
+        .await;
+        match counts {
+            Ok(Ok((object_id, counts))) => response(json!({
+                "kind": "counts",
+                "object_id": object_id,
+                "served_sessions": counts.served_sessions,
+                "disputed_after_serve": counts.disputed_after_serve,
+            })),
+            Ok(Err(error)) => crate::kernel_routes::state_only(error.into()),
+            Err(outcome) => crate::kernel_routes::state_only(outcome),
+        }
+    }
+
     pub(crate) async fn handle_review_accept(
         &self,
         channel: RouteHandle,

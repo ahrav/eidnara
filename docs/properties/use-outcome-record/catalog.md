@@ -9,18 +9,17 @@ Kernel tables, reads, and sweep), [#1155](https://github.com/ahrav/eidnara/issue
 (U4, the observational read). It carries the 34 records of the
 specification's Property Catalog: 20 existing-behavior records (`uo-*`) and
 14 new obligations (`uo-p-*`). #1154 lands the part and activates six
-obligations; #1155 activates five; #1156 activates two; the other one stays proposed and names
-the ticket that activates it.
+obligations; #1155 activates five; #1156 activates two; #1157 activates the last; every obligation is active.
 
 ## Evidence boundary
 
 The specification authored its records at `a0e3f2993` and condensed the
 evidence inline because no part directory existed; this part reconstructs
 the records and their evidence from that catalog. Every `file:line` here was
-re-verified against the #1156 branch tip, the commit that carries this
+re-verified against the #1157 branch tip, the commit that carries this
 revision of the directory. A specification reference that moved or
 pointed at a test rather than production code is corrected in the record's
-evidence file. `Exercised` cites tests that run in the #1156 PR's recorded
+evidence file. `Exercised` cites tests that run in the #1157 PR's recorded
 gate run.
 
 Every existing check is `unaudited` (see `existing-checks.md`). Adequacy
@@ -98,7 +97,7 @@ Check semantics: 31 `always`, 1 `always-or-unreached`, 2 `always(!X)`. No record
 | [`uo-p-producer-matches-request-subagent-flag`](#uo-p-producer-matches-request-subagent-flag) | new (#1155) | safety | `always` | default-production | yes | active |
 | [`uo-p-deleted-at-iff-session-delete-kernel-step`](#uo-p-deleted-at-iff-session-delete-kernel-step) | new (#1156) | safety | `always` | default-production | yes | active |
 | [`uo-p-last-transform-at-monotone-per-committing-pass`](#uo-p-last-transform-at-monotone-per-committing-pass) | new (#1156) | safety | `always` | default-production | yes | active |
-| [`uo-p-counts-exact-and-unavailable-not-zero`](#uo-p-counts-exact-and-unavailable-not-zero) | proposed (#1157) | safety | `always` | default-production | not yet | active - PROPOSED (owner: #1157) |
+| [`uo-p-counts-exact-and-unavailable-not-zero`](#uo-p-counts-exact-and-unavailable-not-zero) | new (#1157) | safety | `always` | default-production | partial | active |
 
 ## Records
 
@@ -336,7 +335,7 @@ wrapup reads the live config (`prepare_wrapup_fire`
 `SessionBinding.config` versus `effective_config` at the two call sites.
 Existing check:
 `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-(`crates/daemon/src/lib.rs:39955`); `only_an_available_composition_is_recorded`
+(`crates/daemon/src/lib.rs:39958`); `only_an_available_composition_is_recorded`
 (`crates/daemon/src/use_outcome_writer_tests.rs:181`);
 `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
 (`crates/daemon/src/use_outcome_writer_tests.rs:600`). Status: unaudited.
@@ -400,7 +399,7 @@ predicates filter `commit_seq IS NOT NULL`
 (`crates/kernel/src/admission.rs:675`); the production writer binds the envelope
 sequence at `crates/kernel/src/admission.rs:1781`. The use-outcome dispute join
 and citation predicate filter the same way
-(`crates/kernel/src/use_outcome.rs:171`).
+(`crates/kernel/src/use_outcome.rs:178`).
 Existing check:
 `malformed_stored_policy_and_sensitivity_fail_closed_without_read_error`
 (`crates/kernel/tests/kernel_admission.rs:2935`);
@@ -533,7 +532,7 @@ Existing check:
 `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
 (`crates/daemon/src/source_capture_tests.rs:1699`);
 `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-(`crates/daemon/src/lib.rs:26450`);
+(`crates/daemon/src/lib.rs:26453`);
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`). Status: unaudited.
 Impact: #1156 places the `deleted_at` write in this Kernel step; a reordering
@@ -561,7 +560,7 @@ Confidence: high -
 `unbind_route` (`crates/daemon/src/lib.rs:4716`) calls `purge_session_state`
 (`crates/daemon/src/lib.rs:4756`), which clears in-memory maps only.
 Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-(`crates/daemon/src/lib.rs:25400`);
+(`crates/daemon/src/lib.rs:25403`);
 `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
 (`crates/daemon/tests/kernel_routes.rs:3849`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
@@ -704,15 +703,15 @@ Required faults and enabling state: A `memory_reviewer` block in a non-ready
 state with zero counters.
 Confidence: medium -
 [evidence](evidence/uo-status-counters-are-closed-vocabulary-exact-integers-with-unavailable-not-zero.md).
-`packages/cli/src/commands/review-wire.ts:346`;
-`packages/cli/src/commands/review-wire.ts:401`;
+`packages/cli/src/commands/review-wire.ts:379`;
+`packages/cli/src/commands/review-wire.ts:434`;
 `packages/opencode-plugin/src/shared/host-client/exact-json.ts:11`. Lead L4: the
 `source_capture` block has no state flag
 (`crates/daemon/src/source_capture.rs:675`).
 Existing check: `the_capture_report_reaches_host_status_field_for_field`
 (`crates/daemon/src/source_capture_tests.rs:845`);
-`packages/cli/src/commands/review.test.ts:771`;
-`packages/cli/src/commands/review.test.ts:822`. Status: unaudited.
+`packages/cli/src/commands/review.test.ts:901`;
+`packages/cli/src/commands/review.test.ts:952`. Status: unaudited.
 Impact: A zero read as "no harm observed" when the store was not ready.
 Open questions:
 - Gap G6: does the status surface name no identifiers? The `source_capture` and
@@ -725,7 +724,8 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - the wire tests list and read under MODULE authority and compare
-an observational route
+an observational route; `review.use_outcome` answers an observational route the
+same counts
 Guarantee: `review.*` reads authorize by the connection bearer key and the
 route's project binding; the wire has no owner principal, and an observational
 `cli` route reads the same answers.
@@ -737,13 +737,15 @@ bound to one project.
 Confidence: high -
 [evidence](evidence/uo-review-reads-authorize-by-bearer-and-project-binding-not-owner.md).
 `kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:414`);
-`bind_review` (`crates/daemon/src/memory_reviewer/wire.rs:194`);
+`bind_review` (`crates/daemon/src/memory_reviewer/wire.rs:203`);
 `crates/daemon/src/lib.rs:275`.
 Existing check:
 `review_operations_are_disabled_without_module_authority_and_list_and_read_receipts_under_it`
 (`crates/daemon/tests/memory_reviewer_wire.rs:15`);
 `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`
-(`crates/daemon/tests/memory_reviewer_wire.rs:260`). Status: unaudited.
+(`crates/daemon/tests/memory_reviewer_wire.rs:260`);
+`review_use_outcome_counts_serves_and_later_disputes_of_one_decision`
+(`crates/daemon/tests/memory_reviewer_wire.rs:686`). Status: unaudited.
 Impact: A per-owner read would contradict K5; the #1157 read follows the bearer
 rule.
 Open questions:
@@ -846,7 +848,7 @@ Confidence: high -
 [evidence](evidence/uo-p-classification-sensitive-local-only-no-remote-egress.md).
 CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:188`); the insert
 names the classes as literals in its `INSERT` statement
-(`crates/kernel/src/use_outcome.rs:280-285`).
+(`crates/kernel/src/use_outcome.rs:307-312`).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
 (`crates/kernel/tests/kernel_schema.rs:2348`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
@@ -875,13 +877,13 @@ Required faults and enabling state: A serve at n; dispositions at n + k, at n,
 and before n; a null row and another lineage by SQL.
 Confidence: high -
 [evidence](evidence/uo-p-disputed-after-serve-from-committed-events-only.md).
-the join is `crates/kernel/src/use_outcome.rs:183-201`, using the admission
+the join is `crates/kernel/src/use_outcome.rs:190-228`, using the admission
 lineage text through `crates/kernel/src/admission.rs:910`.
 Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
 (`crates/kernel/tests/kernel_use_outcome.rs:400`);
 `disputed_after_serve_is_judged_against_each_serve`
-(`crates/kernel/tests/kernel_use_outcome.rs:791`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:826`). Status: unaudited.
 Impact: A prior dispute or a stale mark counted as harm after the serve.
 Open questions:
 - A decision disputed then re-approved still counts: event existence counts
@@ -913,28 +915,28 @@ Required faults and enabling state: An expired record; an expired cited record;
 70 expired records; a citation inserted after selection.
 Confidence: high -
 [evidence](evidence/uo-p-sweep-retires-only-expired-uncited-rows.md).
-`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:566`); predicate
-`crates/kernel/src/use_outcome.rs:169`; recheck `retire_due_use_outcome`
-(`crates/kernel/src/use_outcome.rs:703`); receipt
+`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:619`); predicate
+`crates/kernel/src/use_outcome.rs:176`; recheck `retire_due_use_outcome`
+(`crates/kernel/src/use_outcome.rs:756`); receipt
 `crates/kernel/src/local_file.rs:438`.
 Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
-(`crates/kernel/tests/kernel_use_outcome.rs:533`);
+(`crates/kernel/tests/kernel_use_outcome.rs:568`);
 `an_expiry_backlog_drains_one_page_per_call`
-(`crates/kernel/tests/kernel_use_outcome.rs:595`);
+(`crates/kernel/tests/kernel_use_outcome.rs:630`);
 `an_expired_record_cited_by_a_live_report_is_retained`
-(`crates/kernel/tests/kernel_use_outcome.rs:665`);
+(`crates/kernel/tests/kernel_use_outcome.rs:700`);
 `a_record_cited_after_selection_is_kept`
-(`crates/kernel/src/use_outcome.rs:850`);
+(`crates/kernel/src/use_outcome.rs:903`);
 `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-(`crates/kernel/src/use_outcome.rs:878-879`);
+(`crates/kernel/src/use_outcome.rs:931-932`);
 `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-(`crates/kernel/src/use_outcome.rs:941`);
+(`crates/kernel/src/use_outcome.rs:994`);
 `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-(`crates/kernel/src/use_outcome.rs:962`);
+(`crates/kernel/src/use_outcome.rs:1015`);
 `the_cited_count_covers_the_rows_read_before_the_page_fills`
-(`crates/kernel/tests/kernel_use_outcome.rs:862`);
+(`crates/kernel/tests/kernel_use_outcome.rs:956`);
 `the_sweep_and_the_reads_use_their_indexes`
-(`crates/kernel/src/use_outcome.rs:979`);
+(`crates/kernel/src/use_outcome.rs:1032`);
 `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
 `a_cancelled_slice_stops_before_the_use_outcome_sweep`
@@ -968,9 +970,9 @@ Required faults and enabling state: A session with records, then a delete
 (Kernel arm: direct SQL deletes).
 Confidence: high - [evidence](evidence/uo-p-record-survives-session-delete.md).
 the delete triggers and the retained read hold the Kernel arm (`served_set`
-(`crates/kernel/src/use_outcome.rs:441`)); the `session.delete` step only sets
+(`crates/kernel/src/use_outcome.rs:468`)); the `session.delete` step only sets
 `deleted_at` (`mark_use_outcomes_deleted`
-(`crates/kernel/src/use_outcome.rs:331`)).
+(`crates/kernel/src/use_outcome.rs:358`)).
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
 (`crates/kernel/tests/kernel_schema.rs:2177`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
@@ -1034,7 +1036,7 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:215`),
 `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-(`crates/kernel/tests/kernel_use_outcome.rs:755`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:790`). Status: unaudited.
 Impact: Duplicates inflate served counts and P7 removal sets.
 Open questions:
 - Receipts last for the database incarnation and serving records for the
@@ -1094,7 +1096,7 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:215`),
 `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-(`crates/kernel/tests/kernel_use_outcome.rs:776`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:811`). Status: unaudited.
 Impact: The record names findings the session never saw.
 Open questions: None.
 
@@ -1165,7 +1167,7 @@ Open questions:
 - OQ3-11 resolved at #1155 ticketing: an empty Canonical composition writes a
   record with zero decision rows.
 - Tip 0, raised in #1176 review: `UseOutcomeSpec::validated_retain_until`
-  (`crates/kernel/src/use_outcome.rs:239-240`)
+  (`crates/kernel/src/use_outcome.rs:266-267`)
   requires `1 <= served_commit_seq < created_commit_seq` and the column
   references `commit_log`, so a serve at tip 0 is not recordable. The first
   commit of any kind ends that state. Resolved for this catalog by the carve-out
@@ -1193,7 +1195,7 @@ comes from the pass's `is_subagent`
 Existing check: `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
 (`crates/daemon/src/use_outcome_writer_tests.rs:420`); Kernel half:
 `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-(`crates/kernel/tests/kernel_use_outcome.rs:776`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:811`). Status: unaudited.
 Impact: Harm attributed to the wrong session kind.
 Open questions:
 - OQ3-9 resolved at #1154 ticketing: the column is `session_role`.
@@ -1229,7 +1231,7 @@ Confidence: high -
 runs inside the capture gate after the descriptor retirement and before the
 memory delete (`delete_kernel_step` (`crates/daemon/src/lib.rs:6883`)); the
 envelope selects the session's live records under the writer
-(`mark_use_outcomes_deleted` (`crates/kernel/src/use_outcome.rs:331`)), and the
+(`mark_use_outcomes_deleted` (`crates/kernel/src/use_outcome.rs:358`)), and the
 set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:188`).
 Existing check:
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
@@ -1245,7 +1247,7 @@ Existing check:
 `a_session_id_that_reads_as_a_secret_still_deletes`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:612`); Kernel half:
 `a_session_delete_marks_each_live_record_once`
-(`crates/kernel/tests/kernel_use_outcome.rs:969`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1063`). Status: unaudited.
 Impact: A deleted session reads as live, or a live one as deleted.
 Open questions:
 - A record written after the delete commits, by a pass on a route still bound to
@@ -1302,7 +1304,7 @@ own (`touch_after_serve`
 (`crates/daemon/src/use_outcome_writer.rs:356`)); the Kernel update moves
 only live records whose value is null or earlier, in one fenced transaction
 with no commit that holds only the writer (`advance_use_outcome_last_transform`
-(`crates/kernel/src/use_outcome.rs:538`)).
+(`crates/kernel/src/use_outcome.rs:565`)).
 Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:234`);
 `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
@@ -1318,15 +1320,15 @@ Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:557`); Kernel half:
 `last_transform_at_advances_live_records_without_a_commit`
-(`crates/kernel/tests/kernel_use_outcome.rs:1024`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1118`),
 `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-(`crates/kernel/tests/kernel_use_outcome.rs:1109`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1203`),
 `an_outside_file_lock_bounds_the_advance_at_begin`
-(`crates/kernel/tests/kernel_use_outcome.rs:1150`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1244`),
 `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-(`crates/kernel/tests/kernel_use_outcome.rs:1174`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1290`),
 `the_advance_takes_no_pooled_reader`
-(`crates/kernel/tests/kernel_use_outcome.rs:1206`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1322`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.
@@ -1382,29 +1384,64 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active - PROPOSED (owner: #1157)
-Exercised: not yet - the read lands with #1157
+Status: active
+Exercised: partial - the routed read answers (2, 1) for two serves with a
+contradiction between them, skips a retired serve, answers (0, 0) for a decision
+never served, and answers an unready Kernel with its state and no count; the
+Kernel read answers `Deadline` under a held reader pool; the CLI accepts 2^53,
+refuses 2^53 + 1, and renders every other answer unavailable. The route's answer
+for a read that fails while the Kernel is Ready has no daemon test.
 Guarantee: Served and disputed-after-serve counts per decision are exact
 unsigned integers at one Kernel snapshot; a Kernel that is not Ready answers
-unavailable with no integer.
+its `unavailable` kernel state with no integer on the wire, which the CLI
+renders as `unavailable`.
 Check: `always` - k unretired records of which j have a later dispute answer (k,
 j); an unready Kernel answers no integer; the client accepts 2^53 and refuses
 2^53 + 1.
 Fault/timing angle: none
 Required faults and enabling state: A Kernel starting; one decision served to
 two sessions with one later dispute.
-Confidence: medium -
-[evidence](evidence/uo-p-counts-exact-and-unavailable-not-zero.md). the
-by-decision read exists (`served_sessions_for`
-(`crates/kernel/src/use_outcome.rs:475`)).
-Existing check: Kernel half only:
+Confidence: high -
+[evidence](evidence/uo-p-counts-exact-and-unavailable-not-zero.md). one
+statement counts the by-decision rows at one snapshot (`served_counts_for`
+(`crates/kernel/src/use_outcome.rs:593`)); the handler answers counts or the
+kernel state (`crates/daemon/src/memory_reviewer/wire.rs:308`); the client
+decodes each count with `exactCount` and renders any other answer unavailable
+(`packages/cli/src/commands/review-wire.ts:344`).
+Existing check:
+`review_use_outcome_counts_serves_and_later_disputes_of_one_decision`
+(`crates/daemon/tests/memory_reviewer_wire.rs:686`);
+`review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count`
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:641`);
+`packages/cli/src/commands/review-wire.contract.test.ts:107`;
+`packages/cli/src/commands/review-wire.contract.test.ts:125`;
+`packages/cli/src/commands/review-wire.contract.test.ts:137`;
+`packages/cli/src/commands/review.test.ts:781`;
+`packages/cli/src/commands/review.test.ts:822-861`;
+`packages/cli/src/commands/review.test.ts:863`; Kernel half:
+`disputed_after_serve_is_judged_against_each_serve`
+(`crates/kernel/tests/kernel_use_outcome.rs:826`) and
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:400`). The routed read is proposed.
-Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:400`); the read bound:
+`a_held_reader_pool_bounds_the_count_read`
+(`crates/kernel/tests/kernel_use_outcome.rs:1267`) and
+`review_use_outcome_reads_the_kernel_under_a_bounded_budget`
+(`crates/daemon/tests/memory_reviewer_wire.rs:787`). Status: unaudited.
 Impact: A zero misread as "no harm observed".
 Open questions:
 - OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome` method
   answering the Kernel state outcome when unready.
+- `served_sessions` counts unretired serving records, one per (harness,
+  session, served set), so a session served the decision at two served sets
+  counts twice; the name follows the ticket.
+- The counts cover the bound project only; another project's serves of the same
+  decision are not counted.
+- A failed read after the Kernel is Ready answers the kernel state its failure
+  maps to. The read runs under a 5 s budget; a held reader pool stops the
+  Kernel read with `Deadline` (`a_held_reader_pool_bounds_the_count_read`),
+  which maps to `unavailable`/`store_busy`; no daemon test drives that
+  state answer. AC19 (no identifier in logs or `host.status`) holds by
+  inspection: the handler logs nothing and adds no status field.
 
 ## Relationship map
 

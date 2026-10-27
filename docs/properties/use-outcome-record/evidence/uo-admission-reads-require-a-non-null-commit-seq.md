@@ -9,13 +9,13 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip, the commit that carries this
+References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
 - Writer binding: the INSERT at `crates/kernel/src/admission.rs:1748` binds
   `self.commit_seq` at `crates/kernel/src/admission.rs:1781`.
 - Reader filters: `crates/kernel/src/admission.rs:675`; the new reader's
-  `a.commit_seq IS NOT NULL` predicate at `crates/kernel/src/use_outcome.rs:190`.
+  `a.commit_seq IS NOT NULL` predicate at `crates/kernel/src/use_outcome.rs:197`.
 - Reachability: a null-commit row exists only after direct SQL, so the label is
   test-only.
 

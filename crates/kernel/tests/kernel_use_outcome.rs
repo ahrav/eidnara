@@ -1,6 +1,6 @@
 use kernel::{
     ArtifactDestination, CommitIntent, DomainSpec, EligibilityDeniedReason, KernelError,
-    KernelStore, MAX_EXPIRED_USE_OUTCOMES_PER_CALL, Sensitivity, SessionRole,
+    KernelStore, MAX_EXPIRED_USE_OUTCOMES_PER_CALL, Sensitivity, ServedCounts, SessionRole,
     USE_OUTCOME_RETENTION_CLASS, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
     served_set_digest, use_outcome_id,
 };
@@ -395,7 +395,7 @@ fn a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote() {
     );
 }
 
-/// For a serve at `known_as_of = n`, `mark_disputed` or `contradict` committed after n sets the flag and a later approval does not clear it; an event at or before n, a `mark_stale`, a null-commit-sequence row, and another source kind, source id, or revision do not; two qualifying events in one commit count once; a retired record is not answered.
+/// For a serve at `known_as_of = n`, `mark_disputed` or `contradict` committed after n sets the flag and a later approval does not clear it; an event at or before n, a `mark_stale`, a null-commit-sequence row, and another source kind, source id, or revision do not; two qualifying events in one commit count once; a retired record is not answered. `served_counts_for` counts each case by the same rule.
 #[test]
 fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage() {
     let objects = [
@@ -483,6 +483,20 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
         let sessions = store.served_sessions_for(object).unwrap();
         assert_eq!(sessions.len(), 1, "{object} has one serve");
         assert_eq!(sessions[0].serve.use_outcome_id, id);
+        assert_eq!(
+            store
+                .served_counts_for(
+                    &kernel::applicability::EvalBudget::unbounded(),
+                    &project(),
+                    object
+                )
+                .unwrap(),
+            ServedCounts {
+                served_sessions: 1,
+                disputed_after_serve: u64::from(sessions[0].disputed_after_serve),
+            },
+            "{object}: the counts apply the by-decision read's rule"
+        );
         sessions[0].disputed_after_serve
     };
     for object in [
@@ -506,6 +520,16 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
         assert!(!disputed(object), "{object}");
     }
     assert!(store.served_sessions_for("unserved").unwrap().is_empty());
+    assert_eq!(
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "unserved"
+            )
+            .unwrap(),
+        ServedCounts::default()
+    );
 
     writer(root.path())
         .execute("UPDATE use_outcomes SET invalidated_commit_seq=?1", [after])
@@ -515,6 +539,17 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
             .served_sessions_for("later-dispute")
             .unwrap()
             .is_empty()
+    );
+    assert_eq!(
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "later-dispute"
+            )
+            .unwrap(),
+        ServedCounts::default(),
+        "a retired record is not counted"
     );
     assert_eq!(
         store
@@ -786,11 +821,11 @@ fn session_roles_round_trip_and_the_served_set_digest_is_order_free() {
     assert_ne!(served_set_digest([]), served_set_digest([""]));
 }
 
-/// The dispute comparison is per serve: a dispute between two serves of one object counts for the earlier serve only, and retiring one serve leaves the other answered.
+/// The dispute comparison is per serve: a dispute between two serves of one object counts for the earlier serve only, and retiring one serve leaves the other answered. The counts read the same rows: two serves with one disputed, then one with none, and an object never served counts zero of each.
 #[test]
 fn disputed_after_serve_is_judged_against_each_serve() {
     let root = tempfile::tempdir().unwrap();
-    let store = store_with_objects(root.path(), &["x"]);
+    let store = store_with_objects(root.path(), &["x", "y"]);
     let first_at = tick(&store, "first");
     let first = insert(&store, "serve-1", spec("s1", &["x"], first_at, 100)).unwrap();
     let disputed_at = tick(&store, "disputed");
@@ -817,6 +852,41 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         answer(&store),
         [(first.clone(), true), (second.clone(), false)]
     );
+    let counts = |served_sessions, disputed_after_serve| ServedCounts {
+        served_sessions,
+        disputed_after_serve,
+    };
+    assert_eq!(
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "x"
+            )
+            .unwrap(),
+        counts(2, 1)
+    );
+    assert_eq!(
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "never-served"
+            )
+            .unwrap(),
+        counts(0, 0)
+    );
+    assert_eq!(
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &"b".repeat(64),
+                "x"
+            )
+            .unwrap(),
+        counts(0, 0),
+        "another project's serves are not counted"
+    );
     writer(root.path())
         .execute(
             "UPDATE use_outcomes SET invalidated_commit_seq=?1 WHERE use_outcome_id=?2",
@@ -824,6 +894,30 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         )
         .unwrap();
     assert_eq!(answer(&store), [(second, false)]);
+    assert_eq!(
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "x"
+            )
+            .unwrap(),
+        counts(1, 0),
+        "a retired record is not counted"
+    );
+    let third_at = tick(&store, "third");
+    insert(&store, "serve-3", spec("s2", &["x", "y"], third_at, 100)).unwrap();
+    assert_eq!(
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "x"
+            )
+            .unwrap(),
+        counts(2, 0),
+        "one session served at two served sets holds two records"
+    );
 }
 
 /// The by-decision read answers serves oldest first by creating commit even when their ids, which the decision index orders, sort otherwise.
@@ -1167,6 +1261,28 @@ fn an_outside_file_lock_bounds_the_advance_at_begin() {
         "the wait is bounded by the budget, not the busy timeout: {waited:?}"
     );
     assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
+}
+
+#[test]
+fn a_held_reader_pool_bounds_the_count_read() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 100)).unwrap();
+    let wait = std::time::Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    let counted = store
+        .with_readers_held_for_test(|| store.served_counts_for(&budget(wait), &project(), "d1"));
+    let waited = started.elapsed();
+    assert_eq!(counted, Err(KernelError::Deadline));
+    assert!(waited >= wait, "{waited:?}");
+    assert_eq!(
+        store.served_counts_for(&budget(wait), &project(), "d1"),
+        Ok(ServedCounts {
+            served_sessions: 1,
+            disputed_after_serve: 0,
+        })
+    );
 }
 
 /// The staleness check answers `true` while a live record of the session holds a `last_transform_at` that is null or before the time, and writes nothing when it does; a spent budget answers `Deadline`. The live-record filter it shares with the advance is covered by `last_transform_at_advances_live_records_without_a_commit`.

@@ -9,10 +9,10 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip, the commit that carries this
+References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Ready gate: `packages/cli/src/commands/review-wire.ts:401`.
+- Ready gate: `packages/cli/src/commands/review-wire.ts:434`.
 - Exact bound:
   `packages/opencode-plugin/src/shared/host-client/exact-json.ts:11`.
 - Correction: the ready gate applies to the `memory_reviewer` block; no client
@@ -23,8 +23,8 @@ revision.
   ready, through an exact-integer decoder bounded at 2^53.
 - Existing check: `the_capture_report_reaches_host_status_field_for_field`
   (`crates/daemon/src/source_capture_tests.rs:845`);
-  `packages/cli/src/commands/review.test.ts:771`;
-  `packages/cli/src/commands/review.test.ts:822`. Status: unaudited.
+  `packages/cli/src/commands/review.test.ts:901`;
+  `packages/cli/src/commands/review.test.ts:952`. Status: unaudited.
 
 ## Failure scenario
 

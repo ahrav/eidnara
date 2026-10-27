@@ -8,7 +8,7 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip, the commit that carries this
+References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
 - Ids: the rendered rows of `CanonicalMemorySnapshot::new`, ascending
@@ -35,7 +35,7 @@ revision.
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-  (`crates/kernel/tests/kernel_use_outcome.rs:776`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:811`). Status: unaudited.
 
 ## Failure scenario
 
