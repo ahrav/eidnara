@@ -352,14 +352,18 @@ pub(crate) fn touch_needed(
         .map_err(skipped_touch)
 }
 
-/// The touch a serve job makes for its pass after its serve write, with a Kernel wait budget of its own: the staleness check and the update each spend what remains of it. Answers `None` when no live record needed the update.
+/// The touch a serve job makes for its pass after its serve attempt, with a Kernel wait budget of its own: the staleness check and the update each spend what remains of it. Answers `None` when no live record needed the update; a Kernel that is not Ready answers the skip the pass thread would count.
 pub(crate) fn touch_after_serve(
-    store: &KernelStore,
+    kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
     harness: &str,
     session_id: &str,
     at: i64,
 ) -> Option<LifecycleWrite> {
+    let Ok(store) = kernel.kernel_store() else {
+        return Some(LifecycleWrite::TransformSkippedUnavailable);
+    };
+    let store = &store;
     let budget = PassWriteBudget::default();
     match budget.spend(|budget| touch_needed(store, budget, project, harness, session_id, at)) {
         Ok(true) => {

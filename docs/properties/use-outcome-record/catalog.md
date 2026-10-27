@@ -1251,9 +1251,11 @@ Open questions:
 - A record written after the delete commits, by a pass on a route still bound to
   the session (OQ3-10), stays live until a later delete marks it; each delete
   selects the live records afresh under its own attempt key. This includes a
-  pass whose Memory Store commit preceded the delete and whose serve write
-  landed after it: the harness received that composition, and the serve writer
-  takes no capture gate, so the record counts as a continued session.
+  pass answered before the delete whose serve job committed after it: the serve
+  write is deferred to a tracked job that takes no capture gate, so a
+  `session.delete` answered `ok` can be followed by a live record of that pass.
+  The accepted loss (gap G2) covers both the continued session and this
+  deferred write.
 - A fold after a delete over a composition the deleted record already holds
   replays that record, so the continued session gains no live record for it
   until its composition changes (needs human input).

@@ -9771,8 +9771,8 @@ impl HandlerCore {
         let is_subagent = env.parsed.is_subagent;
         let served = snapshot.served_set();
         let recorded_at = env.pass_now;
-        // The job touches after its serve, so the serving pass's record carries this pass's time, as a serve made on the pass thread would.
         let write_budget = self.use_outcome_writes.write_budget();
+        // The job touches after its serve attempt, so the serving pass's record carries this pass's time, as a serve made on the pass thread would.
         let job = self.use_outcome_writes.job(slot, move || {
             let write = match injected {
                 Some(error) => Some(use_outcome_writer::UseOutcomeWrite::from_error(error)),
@@ -9789,17 +9789,13 @@ impl HandlerCore {
                     write_budget,
                 ),
             };
-            let touch = match kernel.kernel_store() {
-                Ok(store) => use_outcome_writer::touch_after_serve(
-                    &store,
-                    &project,
-                    &harness,
-                    &session_id,
-                    recorded_at,
-                ),
-                Err(_) => Some(use_outcome_writer::LifecycleWrite::TransformSkippedUnavailable),
-            };
-            if let Some(touch) = touch {
+            if let Some(touch) = use_outcome_writer::touch_after_serve(
+                &kernel,
+                &project,
+                &harness,
+                &session_id,
+                recorded_at,
+            ) {
                 lifecycle.record(touch);
             }
             write
@@ -16739,7 +16735,7 @@ fn invalid_params_error(message: impl Into<String>) -> PreparedOutcome {
     }
 }
 
-/// A failure of `session.delete`'s Kernel step: `Unavailable` is the retryable `kernel_unavailable`, and `Failed` is `source_retirement_failed`, which a retry meets again.
+/// A failure of `session.delete`'s Kernel step: `Unavailable` is the retryable `kernel_unavailable`; `Failed` is `source_retirement_failed`, which a retry meets again for a conflict or a corrupt row in the source retirement, while the use-outcome mark commits under a fresh attempt key and a retry runs it anew.
 enum DeleteStepError {
     Unavailable(String),
     Failed(String),
