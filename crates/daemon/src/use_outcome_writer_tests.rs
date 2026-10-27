@@ -474,6 +474,11 @@ async fn an_equal_served_set_at_a_later_known_as_of_replays() {
     assert_eq!(later["action"], "HARD", "{later}");
     let first_seq = first["project_memory"]["known_as_of"].as_i64().unwrap();
     assert!(later["project_memory"]["known_as_of"].as_i64().unwrap() > first_seq);
+    // An equal revision digests equal rendered rows, so the later fold served the same set.
+    assert_eq!(
+        later["project_memory"]["revision"], first["project_memory"]["revision"],
+        "{later}"
+    );
     let records = served(&handler, &project);
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].serve.served_commit_seq, first_seq);
@@ -493,7 +498,8 @@ async fn a_dispute_between_folds_records_the_next_served_set_without_it() {
         &project,
         &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
     );
-    let _ = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
+    let first = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(first["action"], "HARD", "{first}");
     kernel
         .commit(intent("dispute"), |envelope| {
             envelope.record_admission(kernel_route_fixtures::admission(
