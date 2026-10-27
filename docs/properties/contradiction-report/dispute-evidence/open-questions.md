@@ -111,16 +111,20 @@ list). See Q4.
 Plan: none of R1 to R7 mentions the operation identity; the plan assumes a
 dispute with evidence rides today's envelope.
 
-Evidence: `memoryMarkOperationId` is `[sessionId, event, objectId]`
-(`memory-mark-command.ts:204-208`); `deriveRequestDigest` covers the
-operations (`client.ts:272-281`); a stored receipt with a different digest
-is `KernelError::Conflict` (`envelope.rs:1386-1388`), which `run` maps to
+Evidence at `3a3b916b7`: `memoryMarkOperationId` was `[sessionId, event,
+objectId]`; `deriveRequestDigest` covers the operations
+(`client.ts:272-281`); a stored receipt with a different digest is
+`KernelError::Conflict` (`envelope.rs:1386-1388`), which `run` maps to
 `OperationKeyReused` when raised before entering the closure
 (`commit.rs:1062-1070`).
 
-Consequence: a user who disputes the same finding twice in one session with
-different evidence gets `operation_key_reused`. The tool's identity is per
-tool call (`execute.ts:430-432`) and does not collide. See Q2.
+Consequence at `3a3b916b7`: a user who disputed the same finding twice in
+one session with different evidence got `operation_key_reused`. PR A
+closed it: `memoryMarkOperationId` appends the evidence flags
+(`memory-mark-command.ts:203-208`), so two pieces of evidence are two
+identities; see `domain-model.md` section 7.3 and
+`memory-mark-command.test.ts:208`. The tool's identity is per tool call
+(`execute.ts:430-432`) and never collided. See Q2.
 
 ### C6. U3 typed columns cannot be backfilled from PR A rows
 

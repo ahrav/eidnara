@@ -511,13 +511,13 @@ memory a human approved. `runMemoryMarkCommand` answers `denied` for an
 `assistant` mark whose preview moves to a less restrictive disposition,
 and sends no commit (`memory-mark-command.ts:267-279`). The runner test
 `an assistant-sourced dispute is denied a relaxation the stored approval
-would admit` (`memory-mark-command.test.ts:557`) and the tool test `never
+would admit` (`memory-mark-command.test.ts:592`) and the tool test `never
 relaxes a disposition through the memory's stored approval`
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1484`)
 seed a quarantined memory whose stored decision names a live approval and
 assert `denied`, the disposition kept, and one preview call with no
 commit; `a user command relaxes through the stored approval`
-(`memory-mark-command.test.ts:584`) keeps the command's relaxation. The
+(`memory-mark-command.test.ts:619`) keeps the command's relaxation. The
 check judges the preview, so an object that moves between the preview
 and the commit lands the commit's verdict.
 Guarantee: A dispute carrying evidence yields `outcome = deny`, keeps
@@ -626,7 +626,7 @@ reference with counts unchanged and then commits it.
 retires the evidence's only project citer, and commits: the commit
 answers `not_found` and writes nothing, so the commit's verdict is the
 one that holds when the tip moves.
-`memory-mark-command.test.ts:249` reports a refused preview by name with
+`memory-mark-command.test.ts:284` reports a refused preview by name with
 no receipt and one call.
 Guarantee: A `preview: true` envelope carrying the evidence fields runs
 the same form, liveness, and visibility checks as the commit, writes no

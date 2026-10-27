@@ -594,7 +594,7 @@ command callers pass it in (`command-handler.ts:415`,
 Status: active
 Exercised: partial - `kernel_routes.rs:4982` covers replay, reused key,
 and token abort; TypeScript tests cover replay through the command
-(`memory-mark-command.test.ts:348`, `:359`). PR A adds a route test of
+(`memory-mark-command.test.ts:383`, `:359`). PR A adds a route test of
 two dispute identities, replay, and reuse
 (`dispute_identities_land_replay_and_refuse_reuse_like_every_envelope`,
 `kernel_routes.rs:6080`) and a command test of two evidence keys in one
@@ -623,7 +623,7 @@ response.
 Confidence: high - [evidence](evidence/disposition-envelope-identity-replays-without-a-second-write.md).
 Existing check: `kernel_routes.rs:4982`
 (`disposition_operations_share_the_envelope_replay_and_token_rules`),
-`kernel_routes.rs:931`, `:6080`, `memory-mark-command.test.ts:348`,
+`kernel_routes.rs:931`, `:6080`, `memory-mark-command.test.ts:383`,
 `:359`, `:208`. Status unaudited.
 Impact: a second write under one identity would double-record a dispute
 and break the one-row-per-report assumption P3's join by `commit_seq`
@@ -641,7 +641,7 @@ Type: safety
 Reachability: default-production - command registered in both plugins
 (`pi-plugin/src/index.ts:550`; `command-handler.ts:413`).
 Status: active
-Exercised: partial - `memory-mark-command.test.ts:267-522` covers
+Exercised: partial - `memory-mark-command.test.ts:302-557` covers
 confirmation, decline, denial, replay, cancellation, separator refusal,
 refused preview, and mismatched verdicts. PR A's
 `memory-mark-command.test.ts:181` asserts that both calls (preview and
@@ -678,7 +678,7 @@ Required faults and enabling state: a `FakeKernel` or stub returning
 mismatched, empty, or multiple verdicts; a recorded identity; a
 `visibility_changes: true` preview.
 Confidence: high - [evidence](evidence/memory-mark-command-commits-only-the-previewed-operation.md).
-Existing check: `memory-mark-command.test.ts:268`, `:291`, `:312`, `:331`,
+Existing check: `memory-mark-command.test.ts:303`, `:291`, `:312`, `:331`,
 `:348`, `:359`, `:372`, `:390`, `:421`, `:437`, `:451`, and PR A's `:181`,
 `:208`, `:249`. Status unaudited.
 Impact: committing an operation the user did not preview, or treating a

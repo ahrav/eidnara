@@ -72,17 +72,17 @@ receipt without `dispositions`.
 | Line | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
 | 81, 92 | `parseMemoryMarkArgs` | event spelling, flag position, refusals of a target disposition, missing id, flag-shaped id | command | unaudited |
-| 268 | tightening on a labeled object applies without confirmation | no `confirm` call; `applied` | command | unaudited |
-| 291 | the same command on a verified object asks first; no dialog writes nothing | `needs_confirmation` | command | unaudited |
-| 312 | declining writes nothing; accepting applies | `declined`, `applied` | command | unaudited |
-| 331 | a relaxation without an approval is denied before anything is written | `denied` from preview, no commit | command, restrictiveness | unaudited |
-| 348 | repeating a command with the same identity replays the receipt | `replayed: true` | replay | unaudited |
-| 359 | a repeat after the object moved on still replays | replay with stale verdict | replay | unaudited |
-| 372 | a denial recorded by the commit itself is reported as denied | `denied` from commit | command | unaudited |
-| 390 | a session that ends after the preview commits nothing | `isCancelled` honored | command | unaudited |
-| 421 | an actor carrying the key separator is refused before any call | `RangeError` path | command | unaudited |
-| 437 | a refused preview names the state and writes nothing | `refused/preview` | command | unaudited |
-| 451 | a verdict for another object or event never decides the one the user named | `verdictFor` null paths | command | unaudited |
+| 303 | tightening on a labeled object applies without confirmation | no `confirm` call; `applied` | command | unaudited |
+| 326 | the same command on a verified object asks first; no dialog writes nothing | `needs_confirmation` | command | unaudited |
+| 347 | declining writes nothing; accepting applies | `declined`, `applied` | command | unaudited |
+| 366 | a relaxation without an approval is denied before anything is written | `denied` from preview, no commit | command, restrictiveness | unaudited |
+| 383 | repeating a command with the same identity replays the receipt | `replayed: true` | replay | unaudited |
+| 394 | a repeat after the object moved on still replays | replay with stale verdict | replay | unaudited |
+| 407 | a denial recorded by the commit itself is reported as denied | `denied` from commit | command | unaudited |
+| 425 | a session that ends after the preview commits nothing | `isCancelled` honored | command | unaudited |
+| 456 | an actor carrying the key separator is refused before any call | `RangeError` path | command | unaudited |
+| 472 | a refused preview names the state and writes nothing | `refused/preview` | command | unaudited |
+| 486 | a verdict for another object or event never decides the one the user named | `verdictFor` null paths | command | unaudited |
 
 ## Production guards
 
