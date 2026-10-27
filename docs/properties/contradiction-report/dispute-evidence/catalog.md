@@ -110,9 +110,10 @@ with empty `path` and `gitObjectId`, with `path` and no `gitObjectId`, and
 with no `objectId`, and asserts the usage error with no daemon call; the
 Pi test `refuses a dispute without evidence before sending anything`
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:509`)
-sends the same five shapes and asserts the same for Pi. A route request from the tool with neither field
-is the raw-body case the route test above already refuses
-`invalid_input`, since the tool sends the same `disposition` body.
+sends the same five shapes and asserts the same for Pi. A route request
+from the tool with neither field is the raw-body case the route test
+above already refuses `invalid_input`, since the tool sends the same
+`disposition` body.
 Guarantee: A `mark_disputed` or `contradict` operation that reaches the
 Kernel writer through `kernel.commit` carries a non-empty `evidence_id`,
 an `evidence_ref`, or both; one with neither, or with an empty id, is
@@ -143,13 +144,14 @@ either field; a body carrying its own `reason`; a client that bypasses
 the TypeScript parser and sends the raw body (the route tests do this).
 Confidence: high - [evidence](evidence/dispute-requires-evidence-from-plugin.md).
 Read `compose_reason` (`commit.rs:208-236`), `DisputeReason::validated`
-(`dispute.rs:49-76`), the handler loop (`commit.rs:1145-1151`), and the
+(`dispute.rs:49-79`), the handler loop (`commit.rs:1145-1151`), and the
 route and parser tests above.
 Existing check: `kernel_routes.rs:5971`, `:6258`; `dispute.rs:401`
 (`a_dispute_needs_evidence_and_other_events_take_none`, unit);
 `memory-mark-command.test.ts:137`; the fake kernel mirrors the rule
 (`disputeEvidenceWellFormed`,
-`packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:285-307`).
+`packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:335-351`,
+applied at `:691`).
 Status unaudited.
 Impact: a dispute with nothing to check lowers a finding's standing on
 assertion alone, and a later reader has no evidence to follow.
@@ -258,7 +260,7 @@ scope: live decisions, live observations, and decision events through a
 live decision; unscoped and retired citers offer none, each scope is
 offered once, and the walk stops at the first accepted scope.
 `evidence_cited_in_matches_the_citation_model_under_seeded_citers`
-(`kernel_slice.rs:2315`) checks the answer and the offered scopes against
+(`kernel_slice.rs:2316`) checks the answer and the offered scopes against
 a citation model over seeded interleavings of all three citer kinds, live
 and retired, for every accepted scope set.
 `a_dispute_judges_every_citer_and_both_evidence_fields_together`
@@ -307,7 +309,7 @@ writer and no test:
 no Rust code under `crates/` inserts into `asserted_edges`, so the arm is
 read, not exercised.
 Existing check: `kernel_routes.rs:5801`, `:5723`, `:6291`, `:6422`,
-`:6522`; `kernel_slice.rs:2161`, `:2315`. Status unaudited.
+`:6522`; `kernel_slice.rs:2161`, `:2316`. Status unaudited.
 Impact: accepting a foreign id would attach another project's evidence to
 this project's finding and reveal its existence through the answer.
 Open questions:
@@ -403,7 +405,7 @@ Open questions:
   decision to verify blobs exists.
 - A path with a literal `%XX` sequence (for example a file named
   `100%41.md`) is refused by the decode-idempotence rule
-  (`dispute.rs:214-220`). The command help does not mention the rule.
+  (`dispute.rs:216-220`). The command help does not mention the rule.
 - A path holding a space cannot be cited from the command: the parser
   splits its arguments on `/\s+/` (`memory-mark-command.ts:94-97`), while
   the route accepts such paths (`kernel_routes.rs:5880`). At `511cd6d73`
@@ -506,7 +508,7 @@ evidence: without an approval it answers `denied: true` and the decision
 stays `contradicted`; with a valid `approval_object_id` it answers
 `denied: false`, lands `disputed`, and the row reads `outcome = deny`
 with the evidence id. Tool arm (#1161): an operation that names no
-approval runs under the subject's stored one (`admission.rs:1625-1634`),
+approval runs under the subject's stored one (`admission.rs:1625-1636`),
 so a model dispute could otherwise relax a quarantined or contradicted
 memory a human approved. `runMemoryMarkCommand` answers `denied` for an
 `assistant` mark whose preview moves to a less restrictive disposition,
@@ -516,16 +518,18 @@ would admit` (`memory-mark-command.test.ts:633`) and the tool test `never
 relaxes a disposition through the memory's stored approval`
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1491`)
 seed a quarantined memory whose stored decision names a live approval and
-assert `denied`, the disposition kept, and one preview call with no
-commit; `a user command relaxes through the stored approval`
-(`memory-mark-command.test.ts:660`) keeps the command's relaxation. The
-check judges the preview, so an object that moves between the preview
-and the commit lands the commit's verdict.
+assert `denied`, the disposition kept, and no commit call; the runner
+test also asserts exactly one preview call. `a user command relaxes
+through the stored approval` (`memory-mark-command.test.ts:660`) keeps
+the command's relaxation. The check judges the preview and runs in the
+plugin, so an object that moves between the preview and the commit
+lands the commit's verdict (see the open question below).
 Guarantee: A dispute carrying evidence yields `outcome = deny`, keeps
 historical maturity, never raises effective maturity, and moves the
-disposition to an equal or more restrictive one unless the operation
-names a valid approval; against a more restrictive prior without a valid
-approval it records `denied` with the prior kept.
+disposition to an equal or more restrictive one unless a valid approval
+is named by the operation or stored on the subject; against a more
+restrictive prior without a valid approval it records `denied` with the
+prior kept.
 Check: `always` - for every dispute row `r` and its prior `p`:
 `r.outcome = 'deny'`, `r.maturity = p.maturity`,
 `rank(r.effective_maturity) <= rank(p.effective_maturity)`, and
@@ -556,7 +560,25 @@ Open questions:
 - A dispute against a `rejected`, `contradicted`, or `quarantined` prior
   is recorded `denied: true` with the evidence on the row, not refused
   outright. The test pins the recorded form; see
-  [open-questions.md](open-questions.md) Q9. (needs human input)
+  [open-questions.md](open-questions.md) Q9. Through the shared runner
+  a denied preview returns before the commit
+  (`memory-mark-command.ts:274`), so when the object is unchanged between
+  the preview and the commit the command and tool arms write no denied
+  row; a denied commit verdict (`:302`) still lands one. (needs human
+  input)
+- The assistant no-relaxation rule runs in the plugin against the
+  preview (`memory-mark-command.ts:275-287`); the route back-fills the
+  subject's stored approval for every source kind
+  (`admission.rs:1625-1636`). A subject quarantined under a valid
+  approval between the preview and the commit lands `quarantined ->
+  disputed` with `denied: false`. Remedy under consideration: deny the
+  relaxation in the writer transaction when the derived taint is
+  `AssistantInference`; the deny shape is the owner's to pick. (needs
+  human input)
+- `visibilityChanged` in an applied tool result is the preview's
+  `visibility_changes` (`memory-mark-command.ts:288`, `:308`); after a
+  concurrent move it describes the previewed object, not the committed
+  verdict. Rename or re-read after the commit. (needs human input)
 
 ### dispute-identity-includes-evidence-key
 
@@ -702,7 +724,7 @@ Check: `always` - for every row whose reason starts with `v=1;`:
 `parse(reason)` is `Some`, `render(parse(reason)) == reason`, `reason` is
 ASCII, `len(reason) <= MAX_REASON_BYTES` (`dispute.rs:14`), and
 `redact_durable_text(reason).detections` is empty
-(`dispute.rs:72-74`). The Kernel stores `redact_lossy(reason)`
+(`dispute.rs:72-76`). The Kernel stores `redact_lossy(reason)`
 (`crates/kernel/src/redaction.rs:41-42` calls the same
 `redact_durable_text`), so no `durable_text_redactions` row exists for a
 route-written reason. Holds on every write, so `always`.

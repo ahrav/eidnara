@@ -29,7 +29,7 @@ or a bias (a framing decision for a human).
 About 45 `file:line` citations were checked. Most are exact, or are off
 by a doc-comment line. Examples: `commit.rs:12-63`, `:208-236`,
 `:726-728`, `:732-733`, `:749-764`, `:1066-1081`, `:1137-1151`,
-`:1149-1157`; `dispute.rs:49-76`, `:103-143`, `:149-157`, `:209-215`;
+`:1149-1157`; `dispute.rs:49-79`, `:103-143`, `:149-157`, `:216-220`;
 `envelope.rs:548-615` (the read, renamed `evidence_cited_in` since);
 `scope.rs:710-716`;
 `lib.rs:14529`; `admission.rs:4241-4248`, `:4605`; all eight route test

@@ -19,7 +19,7 @@ behavior.
 ## 1. Harness fit
 
 Routing for `/testing:test-strategy`. No record needs a simulator: the
-single `Immediate` writer transaction (`envelope.rs:1403-1406`) turns every
+single `Immediate` writer transaction (`envelope.rs:1459-1469`) turns every
 "retired between read and commit" window into two sequential requests, and
 all 14 `always` checks hold over per-request state.
 
@@ -73,7 +73,7 @@ are an open question. Situation coverage lives in 21 `sometimes` markers in
 Observability: every column check is readable through the test store
 connection at route level. Two checks name kernel-internal functions a
 daemon test cannot call: evidence-scope cites `load_object_state`
-(`pub(super)`, `envelope.rs:1925`) and cascade cites `validate_approval`;
+(`pub(super)`, `envelope.rs:1989`) and cascade cites `validate_approval`;
 the route-visible proxies are `not_found` and a later relaxation denied.
 
 Constructibility: F1 to F11 and F13 to F16 are available as the fault map

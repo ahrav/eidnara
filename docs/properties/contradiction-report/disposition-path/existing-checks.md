@@ -109,8 +109,13 @@ receipt without `dispositions`.
 | `kernel_routes.rs:6146` | `a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale` | restrictiveness (Stale to Disputed) | unaudited |
 | `kernel_routes.rs:6199` | `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents` | authority-bearer cascade, classes, maturity | unaudited |
 | `admission.rs:4605` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | maturity, restrictiveness (dispute events) | unaudited |
-| `memory-mark-command.test.ts:178` | the evidence rides the preview and the commit byte for byte under the user source kind | command (both bodies, `source_kind`) | unaudited |
-| `memory-mark-command.test.ts:205` | two disputes with different evidence in one session are two commits; the same evidence replays | replay | unaudited |
+| `memory-mark-command.test.ts:185` | the evidence rides the preview and the commit byte for byte under the user source kind | command (both bodies, `source_kind`) | unaudited |
+| `memory-mark-command.test.ts:212` | two disputes with different evidence in one session are two commits; the same evidence replays | replay | unaudited |
+| `memory-mark-command.test.ts:601` | the caller's signal reaches the preview and the commit | command (signal propagation to both requests) | unaudited |
+| `memory-mark-command.test.ts:633` | an assistant-sourced dispute is denied a relaxation the stored approval would admit | authority-bearer cascade, command (assistant source kind, preview guard) | unaudited |
+| `memory-mark-command.test.ts:660` | a user command relaxes through the stored approval | command (user source kind, stored approval) | unaudited |
+| `memory-mark-command.test.ts:672` | the preview and the commit carry one digest of the operation and the source kind | replay (request digest), caller-asserted fields | unaudited |
+| `memory-mark-command.test.ts:706` | both flag orders parse to one args value and one identity | replay (operation identity), command | unaudited |
 
 ## None found
 

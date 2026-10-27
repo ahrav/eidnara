@@ -311,16 +311,17 @@ admission. Alternative (b) is a retention-policy change and needs an owner.
 ### Q8. Replay response shape for a committed dispute
 
 Fact: a replayed preview returns `previews: []` with the receipt
-(`commit.rs:1199-1206`); the TS command treats a commit receipt with no
-matching verdict as `outcome_unknown` (`memory-mark-command.ts:273-274`).
-Whether a replayed commit returns the stored verdict list was not traced
-end to end here.
+(`commit.rs:1199-1206`); a replayed commit deserializes the stored
+receipt and returns its `dispositions` (`commit.rs:1224-1240`), and
+`dispute_identities_land_replay_and_refuse_reuse_like_every_envelope`
+asserts the replayed list equals the first response
+(`kernel_routes.rs:6114-6121`). The TS command therefore reports the
+stored verdict with `replayed: true`; its `outcome_unknown` branch
+(`memory-mark-command.ts:299-300`) covers a commit response that omits
+the verdict.
 
-Recommendation: the commit replay returns the stored `result` so the
-client reports "already recorded (replayed)" rather than
-`outcome_unknown`. Alternative: keep today's shape and have the client
-treat `replayed: true` as applied. Verify the actual replay body before
-choosing.
+Resolution: the recommended shape is already the route's behavior; no
+change needed.
 
 ### Q9. A dispute against a more restrictive prior (needs human input)
 

@@ -35,13 +35,20 @@ None`. PR A adds the fields and the requirement.
   nothing or another event cites something
   (`packages/opencode-plugin/src/shared/memory-mark-command.ts:137-138`).
   The fake kernel mirrors the rule (`disputeEvidenceWellFormed`,
-  `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:285-307`,
-  applied at `:691-693`).
+  `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:335-351`,
+  applied at `:691`).
 - No other production writer files the two dispute events: a search of
   `crates/daemon/src`, `crates/kernel/src`, and `packages/*/src` (non-test)
   for `MarkDisputed`, `EventKind::Contradict`, `mark_disputed`, and
-  `"contradict"` finds only this route, its client type, its wire list,
-  and the command.
+  `"contradict"` finds two senders, the command and the tool executor
+  `executeDispute`
+  (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:49`),
+  both of which send through the shared runner; the other hits are this
+  route, its client type and wire list, the kernel's event-name table and
+  use-outcome reader, and the tool schema and description files, none of
+  which sends a dispute. Both harnesses reach
+  `executeDispute` only through an allowlist that names `dispute`
+  (#1161).
 
 ## Failure scenario
 

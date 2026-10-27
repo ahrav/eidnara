@@ -23,7 +23,7 @@ ordinary path.
   (`crates/daemon/src/confined_path.rs:29-45`). An absolute path has an
   empty first component and is refused.
 - `decodes_to_itself` refuses any `%` followed by two hex digits
-  (`dispute.rs:209-215`), so a stored value has one reading.
+  (`dispute.rs:216-220`), so a stored value has one reading.
 - `validated` scans the raw `evidence_id` (`dispute.rs:58-59` through
   `value_is_clean`, `:166-170`; added in `511cd6d73`) and the composed
   reason (`dispute.rs:75`). The raw scan covers an `evidence_id` whose

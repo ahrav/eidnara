@@ -74,10 +74,10 @@ the difference noted.
   `session_id`, no `source_kind` column.
 - `operation_receipts` keyed `UNIQUE(producer, operation_key)` with
   `request_digest` and `result_payload` (`schema.rs:42`);
-  `stored_receipt` (`envelope.rs:1362-1392`) replays on equal digest and
+  `stored_receipt` (`envelope.rs:1426-1456`) replays on equal digest and
   returns `Conflict` on a different digest. The lookup runs before the
   operation inside the writer transaction
-  (`envelope.rs:1472-1480`).
+  (`envelope.rs:1472-1481`).
 - `admission_decisions` (`schema.rs:164`): `source_kind`/`source_id` are
   the subject's (`load_subject_facts`, `admission.rs:2204-2243`),
   `source_class`/`taint_class` are what the request carried,
@@ -86,11 +86,11 @@ the difference noted.
   `reason`. `foreign_keys=ON` is set at `schema.rs:250` and `open.rs:1035`.
 - `evidence_meta` (`schema.rs:139`): live means `invalidated_commit_seq IS
   NULL`. The table has no `scope_id` column.
-- `object_state_sql` (`envelope.rs:1898-1912`) reads `scope_id` as
+- `object_state_sql` (`envelope.rs:1962-1976`) reads `scope_id` as
   `COALESCE(dec.scope_id, obs.scope_id)`, so any object that is not a
   decision or observation has `scope_id = None`. `load_object_state`
-  (`envelope.rs:1925-1939`) carries the doc comment at
-  `envelope.rs:1923-1924` (shared-facts cites "~1870").
+  (`envelope.rs:1989-2004`) carries the doc comment at
+  `envelope.rs:1987-1988` (shared-facts cites "~1870").
 - `ScopeFilter::matches` returns `Ok(false)` for `scope_id = None`
   (`kernel_routes/project.rs:199-206`), so `scoped_object_state`
   (`commit.rs:682-697`) answers `NotFound` for every evidence object id.
@@ -108,7 +108,7 @@ the difference noted.
 ## Lens: concurrency model
 
 - One exclusive writer transaction per commit (`TransactionBehavior::
-  Immediate`, `envelope.rs:1403-1406`); `deadline_ms` bounds writer
+  Immediate`, `envelope.rs:1459-1469`); `deadline_ms` bounds writer
   acquisition only, operation count bounds the hold (`commit.rs:91-93`).
 - Within an envelope, `admission_latest` caches each subject's newest
   decision so a later operation on the same object sees the earlier one as

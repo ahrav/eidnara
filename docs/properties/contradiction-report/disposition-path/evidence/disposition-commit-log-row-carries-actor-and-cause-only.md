@@ -62,7 +62,7 @@ record would miss.
 
 None in time. Depends on `RedactedIntent::new`'s validation
 (`request_digest` lowercase hex 64, non-blank producer and key,
-`envelope.rs:1721-1726`).
+`envelope.rs:1784-1790`).
 
 ## What a test must construct
 
