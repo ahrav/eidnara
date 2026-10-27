@@ -17,16 +17,17 @@ revision.
   runs on a scoped thread beside the response build, and the settle joins it
   before the response returns (`crates/daemon/src/lib.rs:10136`). A pass that
   handed its serve to a tracked job sets `touch_delegated`
-  (`crates/daemon/src/lib.rs:9812`) and the job touches after its serve commits
-  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:334`)).
+  (`crates/daemon/src/lib.rs:9812`) and the job touches after its serve
+  attempt, whatever the serve answered,
+  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:341`)).
 - Update: `crates/kernel/src/use_outcome.rs:43-47` selects the live records with
   a null or earlier value (the `LIVE_SESSION_WHERE` and `last_transform_at`
   predicates at lines 45-46). A session with none takes no writer, because the
   check above skips it; the update itself holds only the writer.
 - Outcomes: the match in `touch_session`
-  (`crates/daemon/src/use_outcome_writer.rs:298-308`) counts
+  (`crates/daemon/src/use_outcome_writer.rs:305-315`) counts
   `transform_touched` for an updated row and maps a Kernel error through
-  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:351`) to
+  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:358`) to
   `transform_skipped_deadline` or `transform_skipped_unavailable`.
 
 - Guarantee under test: `last_transform_at` never decreases on a session's
@@ -35,23 +36,26 @@ revision.
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:227`);
   `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:314`);
+  `a_committing_pass_with_a_current_record_takes_no_writer`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:362`) (the daemon's
+  idle-session skip: a current record keeps the pass off a held writer);
   `a_spent_pass_budget_skips_the_touch`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:362`) (the writer function
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:417`) (the writer function
   under a spent `PassWriteBudget`, not a pass);
   `a_serve_deadline_leaves_the_touch_its_own_kernel_wait`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:391`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:446`);
   `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:428`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:483`); Kernel half:
   `last_transform_at_advances_live_records_without_a_commit`
   (`crates/kernel/tests/kernel_use_outcome.rs:1118`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1202`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1203`),
   `an_outside_file_lock_bounds_the_advance_at_begin`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1239`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1244`),
   `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1285`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1290`),
   `the_advance_takes_no_pooled_reader`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1317`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:1322`). Status: unaudited.
 
 ## Failure scenario
 
@@ -85,7 +89,8 @@ Kernel unavailable at the write.
   touch's staleness read and its write (`PassWriteBudget`); the daemon carries no
   other pass deadline. The touch bounds its connection waits, its begin, and its
   statements by that budget. A pass that handed its serve to a tracked job
-  makes no touch of its own: the job touches after its serve under a budget of
+  makes no touch of its own: the job touches after its serve attempt, whatever
+  the serve answered, under a budget of
   the same size, so the serving pass's record carries that pass's time. A serve
   refused for want of a write slot leaves the pass its own touch and its full
   budget (`a_serve_deadline_leaves_the_touch_its_own_kernel_wait`).
@@ -120,7 +125,9 @@ Kernel unavailable at the write.
   write slot is taken, `UseOutcomeWrites::job` answers `None`, the serve counts
   `deadline`, and the error path returns before the settle step, so no touch
   runs and no lifecycle name counts the skip; the next committing pass catches
-  up, as after a touch skipped on a held writer.
+  up, as after a touch skipped on a held writer. A committed boundary-failure
+  pass that froze no composition hands off no serve and returns before the
+  settle step, so it makes no touch either, with the same catch-up.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 

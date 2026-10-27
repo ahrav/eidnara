@@ -26,7 +26,7 @@ revision.
   `review_use_outcome_counts_serves_and_later_disputes_of_one_decision`
   (`crates/daemon/tests/memory_reviewer_wire.rs:686`);
   `review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:512`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:567`);
   `packages/cli/src/commands/review-wire.contract.test.ts:107`;
   `packages/cli/src/commands/review-wire.contract.test.ts:125`;
   `packages/cli/src/commands/review-wire.contract.test.ts:137`;
@@ -38,7 +38,7 @@ revision.
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
   (`crates/kernel/tests/kernel_use_outcome.rs:400`); the read bound:
   `a_held_reader_pool_bounds_the_count_read`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1262`) and
+  (`crates/kernel/tests/kernel_use_outcome.rs:1267`) and
   `review_use_outcome_reads_the_kernel_under_a_bounded_budget`
   (`crates/daemon/tests/memory_reviewer_wire.rs:787`). Status: unaudited.
 

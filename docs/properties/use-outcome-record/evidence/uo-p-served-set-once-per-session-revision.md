@@ -11,9 +11,9 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:402-405`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:409-412`; the request
   digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:453-458`)).
+  (`crates/daemon/src/use_outcome_writer.rs:460-465`)).
 - Call sites: `record_use_outcome` (`crates/daemon/src/lib.rs:9721`) runs after
   each committed attempt: the boundary-failure path in `run_transform`
   (`crates/daemon/src/lib.rs:9630`), the committed attempt in `first_transform`

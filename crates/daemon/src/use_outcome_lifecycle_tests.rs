@@ -357,6 +357,61 @@ async fn a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up(
     );
 }
 
+/// A committing pass whose record already carries a later time takes no writer: with the writer held by another commit, the staleness read answers `false`, the pass answers `ok` with no touch and no skip counted, and the record keeps its value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_committing_pass_with_a_current_record_takes_no_writer() {
+    let (handler, _store, _dir, project) = served_handler().await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let binding = bound(&project);
+    let ahead = served(&handler, &project)[0]
+        .serve
+        .last_transform_at
+        .unwrap()
+        + 3_600_000;
+    kernel
+        .advance_use_outcome_last_transform(
+            &kernel::applicability::EvalBudget::new(
+                Some(Instant::now() + Duration::from_secs(5)),
+                Arc::default(),
+            ),
+            binding.kernel_project.digest(),
+            &binding.harness,
+            "ses",
+            ahead,
+        )
+        .unwrap();
+    let (entered, held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(kernel_route_fixtures::intent("hold-writer"), |_| {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    held.recv().unwrap();
+    let started = Instant::now();
+    let current = call_transform(&handler, vec![ck("m1", 1, "hello"), ck("m2", 2, "more")]).await;
+    let elapsed = started.elapsed();
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(current["committed"], true, "{current}");
+    assert_eq!(
+        served(&handler, &project)[0].serve.last_transform_at,
+        Some(ahead)
+    );
+    assert_eq!(
+        lifecycle_counts(&handler),
+        [("transform_touched", 1)],
+        "the pass skipped the writer without a deadline: {elapsed:?}"
+    );
+}
+
 /// A pass's Kernel writes share one wait: once an earlier write spent it, a later touch answers `Deadline` with a free writer and leaves the record as it was.
 #[tokio::test(flavor = "current_thread")]
 async fn a_spent_pass_budget_skips_the_touch() {

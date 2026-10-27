@@ -11,7 +11,7 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Role: `crates/daemon/src/use_outcome_writer.rs:409-413` (both branches of the
+- Role: `crates/daemon/src/use_outcome_writer.rs:416-420` (both branches of the
   `is_subagent` mapping).
 
 - Guarantee under test: The stored `session_role` is `subagent` exactly when the
