@@ -844,8 +844,8 @@ a serve through the envelope.
 Confidence: high -
 [evidence](evidence/uo-p-classification-sensitive-local-only-no-remote-egress.md).
 CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:188`); the insert
-names the classes as literals (`insert_use_outcome`
-(`crates/kernel/src/use_outcome.rs:266`)).
+names the classes as literals in its `INSERT` statement
+(`crates/kernel/src/use_outcome.rs:280-285`).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
 (`crates/kernel/tests/kernel_schema.rs:2348`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
@@ -1343,7 +1343,10 @@ Open questions:
   (`a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`).
   When every write slot is taken, the serve counts `deadline`, no job runs, and
   the error path makes no touch of its own, so the record keeps its earlier
-  value until the next committing pass; no lifecycle name counts that skip.
+  value until the next committing pass; no lifecycle name counts that skip. A
+  committed boundary-failure pass that froze no composition hands off no serve
+  and makes no touch either, with the same catch-up on the next committing
+  pass.
 - A committing pass that lands while an earlier pass's serve job still waits
   for the writer finds no record at its staleness check and touches nothing;
   the job then advances the record to its own pass's time, and the later

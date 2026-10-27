@@ -1046,6 +1046,7 @@ fn last_transform_at_advances_live_records_without_a_commit() {
             count(root, "SELECT COUNT(*) FROM commit_log"),
             count(root, "SELECT COUNT(*) FROM operation_receipts"),
             count(root, "SELECT COUNT(*) FROM change_event"),
+            count(root, "SELECT COUNT(*) FROM outbox"),
         )
     };
     let before = durable(root.path());

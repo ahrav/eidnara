@@ -120,7 +120,9 @@ Kernel unavailable at the write.
   write slot is taken, `UseOutcomeWrites::job` answers `None`, the serve counts
   `deadline`, and the error path returns before the settle step, so no touch
   runs and no lifecycle name counts the skip; the next committing pass catches
-  up, as after a touch skipped on a held writer.
+  up, as after a touch skipped on a held writer. A committed boundary-failure
+  pass that froze no composition hands off no serve and returns before the
+  settle step, so it makes no touch either, with the same catch-up.
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 
