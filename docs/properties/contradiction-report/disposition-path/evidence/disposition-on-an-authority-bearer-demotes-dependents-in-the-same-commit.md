@@ -123,7 +123,7 @@ demotion, and does not read `kernel.read`.
   (`crates/daemon/src/kernel_routes/commit.rs:825-864`), `changes_to`
   (`:537-542`), the route module header (`commit.rs:60-63`), the command
   usage (`packages/opencode-plugin/src/shared/memory-mark-command.ts:54`)
-  and its test (`memory-mark-command.test.ts:163`), and PR A's
+  and its test (`memory-mark-command.test.ts:167`), and PR A's
   `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents`
   (`crates/daemon/tests/kernel_routes.rs:6199`).
 - Findings: the preview computes `current` and `projected` for the

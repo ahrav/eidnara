@@ -180,7 +180,7 @@ refusal (`admission.rs:268-273`), and `write_admission` column binding
 Existing check: `crates/daemon/tests/kernel_routes.rs:4398`
 (`disposition_events_apply_the_fixed_table_and_report_outcome_and_disposition`)
 asserts disposition and outcome only; `kernel_routes.rs:5723` and `:6199`
-assert the row's classes for disputes; `admission.rs:4912`
+assert the row's classes for disputes; `admission.rs:4936`
 (`restrictive_disposition_and_origin_classification_are_sticky`) asserts
 the class-mismatch refusal at the evaluator. Status unaudited.
 Impact: if the caller's class were written, a model-filed dispute would
@@ -203,7 +203,7 @@ reaches `evaluate_admission` through `record_admission`
 (`admission.rs:982-987`).
 Status: active
 Exercised: partial - evaluator unit tests cover the withdrawal
-(`admission.rs:5732`, `:5313`); kernel integration tests cover
+(`admission.rs:5756`, `:5337`); kernel integration tests cover
 `MarkStale` on a `CodeObserved` subject (`kernel_admission.rs:2735`).
 PR A route tests read `maturity` and `effective_maturity` after a dispute:
 `kernel_routes.rs:5723` (historical kept, effective `candidate`) and
@@ -232,8 +232,8 @@ from the route.
 Confidence: high - [evidence](evidence/disposition-never-raises-maturity-and-withdraws-effective-support.md).
 Read `evaluate_admission` lines `:264-388` and `event_can_raise_support`
 (`:4189-4199`), which lists no disposition event.
-Existing check: `admission.rs:5732`
-(`non_active_dispositions_withdraw_effective_support`), `:5313`
+Existing check: `admission.rs:5756`
+(`non_active_dispositions_withdraw_effective_support`), `:5337`
 (`an_event_that_names_a_disposition_keeps_its_own_outcome`),
 `kernel_admission.rs:2735` (`dispositions_and_sensitivity_only_reduce_
 visibility`). Status unaudited.
@@ -255,7 +255,7 @@ Exercised: partial - route tests cover Active to each of the five
 (`kernel_routes.rs:4398`), Quarantined to Stale denied and then permitted
 with a scoped approval (`:4458`), Stale to Stale admitted (`:4551-4565`);
 evaluator tests cover Rejected/Contradicted/Quarantined to Stale/Disputed
-(`admission.rs:5208`, `:5407`). PR A drives Stale to Disputed through the
+(`admission.rs:5232`, `:5431`). PR A drives Stale to Disputed through the
 route (`kernel_routes.rs:6146`) and Rejected, Contradicted, and
 Quarantined to Disputed denied without approval (same test). Disputed to
 Stale and Disputed to Contradicted are not driven by any test.
@@ -283,8 +283,8 @@ Read the restrictiveness table, `relaxes_disposition`, and both route and
 evaluator tests.
 Existing check: `kernel_routes.rs:4458`
 (`a_relaxation_is_denied_without_a_valid_approval_and_permitted_with_one`),
-`admission.rs:5208` (`leaving_a_restricted_disposition_requires_authority`),
-`admission.rs:5407` (`relaxing_a_restrictive_disposition_requires_approval`).
+`admission.rs:5232` (`leaving_a_restricted_disposition_requires_authority`),
+`admission.rs:5431` (`relaxing_a_restrictive_disposition_requires_approval`).
 Status unaudited.
 Impact: a relaxation that landed without approval would let a plugin undo
 a quarantine; a tightening that required approval would block the P4
@@ -446,7 +446,7 @@ Impact: its semantics (retired is `NotFound`, mapped to
 Open questions:
 - Resolved by PR A: the daemon's dispute check calls neither helper. It
   calls the new Kernel read `Envelope::evidence_cited_in`
-  (`crates/kernel/src/envelope.rs:520-598`) inside the writer transaction
+  (`crates/kernel/src/envelope.rs:520-597`) inside the writer transaction
   and answers `not_found` for a retired row, the same name this record's
   helpers give (`cited-evidence-live-at-dispute-commit` in
   [`../dispute-evidence/catalog.md`](../dispute-evidence/catalog.md)).
@@ -470,19 +470,19 @@ Guarantee: An evidence object's `ObjectState.scope_id` is `None`, so
 under every project binding.
 Check: `always` - for every `evidence_meta` row `e` and its
 `object_registry` row `o`: `load_object_state(o.object_id).scope_id ==
-None` (`object_state_sql`, `envelope.rs:1902`), `ScopeFilter::matches(None,
+None` (`object_state_sql`, `envelope.rs:1901`), `ScopeFilter::matches(None,
 ..) == Ok(false)` (`project.rs:199-206`), and `scoped_object_state(..,
 o.object_id)` returns `Err(NotFound)`. Every evidence row, so `always`.
 Observation split (portfolio refinement R3): the route-level test observes
 `invalid(not_found)` for a request naming an evidence object id in a scoped
 position; the `scope_id == None` clause is a kernel-crate assertion, since
-`load_object_state` is `pub(super)` (`envelope.rs:1926`).
+`load_object_state` is `pub(super)` (`envelope.rs:1925`).
 Fault/timing angle: none in time; the gap is structural.
 Required faults and enabling state: a live evidence row ingested through
 `kernel.artifact.ingest.*` or the store API; a route request naming its
 `object_id` in any scoped position.
 Confidence: high - [evidence](evidence/evidence-objects-carry-no-scope-and-fail-scoped-lookup.md).
-Read `object_state_sql`, the doc comment at `envelope.rs:1924-1925`, and
+Read `object_state_sql`, the doc comment at `envelope.rs:1923-1924`, and
 `ScopeFilter::matches`. Tables with `scope_id`: `asserted_edges`,
 `decisions`, `observations`, `propositions`, `scope_term`, `scopes`
 (`schema.rs`).
@@ -492,7 +492,7 @@ token, or projected dependency under any binding. Re-labelled at the PR A
 tip: the guarantee still holds, and dispute evidence no longer depends on
 it. The route judges a cited `evidence_id` through its live citers
 (`require_visible_evidence`, `commit.rs:742-757`, over
-`Envelope::evidence_cited_in`, `envelope.rs:520-598`), which is
+`Envelope::evidence_cited_in`, `envelope.rs:520-597`), which is
 `cited-evidence-visible-to-bound-project` in
 [`../dispute-evidence/catalog.md`](../dispute-evidence/catalog.md).
 Open questions:
@@ -552,7 +552,7 @@ Open questions:
 Type: safety
 Reachability: default-production - `preview: true` is a request field
 (`commit.rs:126`); the TypeScript command always previews first
-(`memory-mark-command.ts:257`).
+(`memory-mark-command.ts:265`).
 Status: active
 Exercised: partial - route tests cover write-nothing, per-surface
 visibility, in-request ordering, denials and refusals, and the changed-
@@ -588,17 +588,17 @@ Type: safety
 Reachability: default-production - every `kernel.commit` carries an intent
 (`project.rs:138-146`); the command derives `operationId = sessionId SEP
 event SEP objectId`, followed at the PR A tip by the evidence flags
-(`memoryMarkOperationId`, `memory-mark-command.ts:203-208`), and both
+(`memoryMarkOperationId`, `memory-mark-command.ts:210-215`), and both
 command callers pass it in (`command-handler.ts:415`,
 `pi-plugin/src/commands/eidnara-memory-mark.ts:61`).
 Status: active
 Exercised: partial - `kernel_routes.rs:4982` covers replay, reused key,
 and token abort; TypeScript tests cover replay through the command
-(`memory-mark-command.test.ts:383`, `:394`). PR A adds a route test of
+(`memory-mark-command.test.ts:424`, `:435`). PR A adds a route test of
 two dispute identities, replay, and reuse
 (`dispute_identities_land_replay_and_refuse_reuse_like_every_envelope`,
 `kernel_routes.rs:6080`) and a command test of two evidence keys in one
-session (`memory-mark-command.test.ts:208`). No test replays after the
+session (`memory-mark-command.test.ts:212`). No test replays after the
 subject moved and asserts the replayed `dispositions` still equal the
 original while the stored disposition differs.
 Guarantee: For one `(producer, operation_key)`: an equal `request_digest`
@@ -610,7 +610,7 @@ Check: `always` - per identity `k`: `COUNT(commit_log WHERE producer,
 operation_key = k) <= 1`; a second request with equal digest returns
 `receipt.replayed == true`, `receipt.commit_seq` equal to the first, and
 `dispositions` byte-equal to the first (`stored_receipt`,
-`envelope.rs:1363-1393`; `commit.rs:1188-1204`); a request with a
+`envelope.rs:1362-1392`; `commit.rs:1188-1204`); a request with a
 different digest returns `invalid/operation_key_reused` (`commit.rs:1063-
 1070`). Every request, so `always`.
 Fault/timing angle: a lost response (`outcome_unknown`) followed by the
@@ -623,15 +623,15 @@ response.
 Confidence: high - [evidence](evidence/disposition-envelope-identity-replays-without-a-second-write.md).
 Existing check: `kernel_routes.rs:4982`
 (`disposition_operations_share_the_envelope_replay_and_token_rules`),
-`kernel_routes.rs:931`, `:6080`, `memory-mark-command.test.ts:383`,
-`:394`, `:208`. Status unaudited.
+`kernel_routes.rs:931`, `:6080`, `memory-mark-command.test.ts:424`,
+`:435`, `:212`. Status unaudited.
 Impact: a second write under one identity would double-record a dispute
 and break the one-row-per-report assumption P3's join by `commit_seq`
 relies on.
 Open questions:
 - A repeated command after the object moved reports `applied` with the
   original verdict while the stored disposition differs
-  (`memory-mark-command.test.ts:394`; `commit.rs:1188-1204`). Safe for the
+  (`memory-mark-command.test.ts:435`; `commit.rs:1188-1204`). Safe for the
   store; is the replayed verdict the right thing to show the user? (needs
   human input; portfolio refinement R5)
 
@@ -641,10 +641,10 @@ Type: safety
 Reachability: default-production - command registered in both plugins
 (`pi-plugin/src/index.ts:550`; `command-handler.ts:413`).
 Status: active
-Exercised: partial - `memory-mark-command.test.ts:302-557` covers
+Exercised: partial - `memory-mark-command.test.ts:343-598` covers
 confirmation, decline, denial, replay, cancellation, separator refusal,
 refused preview, and mismatched verdicts. PR A's
-`memory-mark-command.test.ts:181` asserts that both calls (preview and
+`memory-mark-command.test.ts:185` asserts that both calls (preview and
 commit) carry the same disposition operation with its evidence fields,
 `source_kind: "user"`, and the same `cause`; it matches each body against
 one expected object rather than comparing the two bodies, and it does not
@@ -657,13 +657,13 @@ cancellation; and reports `outcome_unknown` when the commit's verdict list
 does not answer the sent operation.
 Check: `always` - for one invocation: `previewBody.operations ==
 commitBody.operations == [{op:"disposition", object_id, event,
-evidence_id?, evidence_ref?}]` (`memory-mark-command.ts:240-246`),
+evidence_id?, evidence_ref?}]` (`memory-mark-command.ts:247-254`),
 `previewBody.intent == commitBody.intent`, `source_kind == "user"`;
 `confirm` called at most once; `commit` not called when the preview
 verdict is `denied`, when `confirm` returns false, or when `isCancelled()`
 is true; `verdictFor` returns null whenever `results.length != 1 ||
 object_id != operation.object_id || event != operation.event`
-(`memory-mark-command.ts:211-219`), and a null verdict maps to
+(`memory-mark-command.ts:218-226`), and a null verdict maps to
 `refused(preview, invalid("internal"))` on the preview branch
 (`:263-265`) and to `refused(commit, unavailable("outcome_unknown"))` on
 the commit branch (`:290-292`) (portfolio refinement R6). Every
@@ -678,8 +678,8 @@ Required faults and enabling state: a `FakeKernel` or stub returning
 mismatched, empty, or multiple verdicts; a recorded identity; a
 `visibility_changes: true` preview.
 Confidence: high - [evidence](evidence/memory-mark-command-commits-only-the-previewed-operation.md).
-Existing check: `memory-mark-command.test.ts:303`, `:326`, `:347`, `:366`,
-`:383`, `:394`, `:407`, `:425`, `:456`, `:472`, `:486`, and PR A's `:181`,
+Existing check: `memory-mark-command.test.ts:344`, `:367`, `:388`, `:407`,
+`:424`, `:435`, `:448`, `:466`, `:497`, `:513`, `:527`, and PR A's `:185`,
 `:208`, `:284`. Status unaudited.
 Impact: committing an operation the user did not preview, or treating a
 foreign verdict as the answer, would apply a disposition the confirmation
@@ -751,7 +751,7 @@ Open questions:
   `commit_seq`, so a user confirming a dispute on an approval is not shown
   the cascade. Resolved per OQ4-10 by documenting the limit: the route
   header (`commit.rs:60-63`) and the command usage
-  (`memory-mark-command.ts:54`, asserted by `memory-mark-command.test.ts:163`)
+  (`memory-mark-command.ts:54`, asserted by `memory-mark-command.test.ts:167`)
   state that the preview reports the named memory's visibility only. The
   preview still does not report the cascade.
 - How does a deferred dependent (past `MAX_AUTHORITY_DEMOTIONS`) get its
@@ -763,7 +763,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - every non-replayed `kernel.commit`
-inserts one `commit_log` row (`envelope.rs:1421-1436`).
+inserts one `commit_log` row (`envelope.rs:1420-1435`).
 Status: active
 Exercised: partial - PR A's `kernel_routes.rs:5723` reads the `commit_log`
 row of two dispute commits and asserts `actor` and `cause` equal the
@@ -787,7 +787,7 @@ Required faults and enabling state: a disposition commit from the command
 (`actor = user:opencode | user:pi`; `cause` is the command line
 `commandLine(args)`, `/eidnara-memory-mark <event> <object_id>` followed
 at the PR A tip by `--evidence <id>` and `--path <path>@<oid>` when
-present, `memory-mark-command.ts:158-160`, `:252`); a `cause` carrying
+present, `memory-mark-command.ts:165-167`, `:260`); a `cause` carrying
 a secret-like token.
 Confidence: high - [evidence](evidence/disposition-commit-log-row-carries-actor-and-cause-only.md).
 Read the schema and the INSERT.
@@ -815,7 +815,7 @@ Reachability: default-production - every admission row passes
 constant `"kernel.commit"` (`commit.rs:100`) for every event except the two
 disputes, which carry the `v=1` structured reason the route composes and
 caps at 4096 bytes (`commit.rs:221-227`;
-`crates/daemon/src/kernel_routes/dispute.rs:14`, `:77-79`).
+`crates/daemon/src/kernel_routes/dispute.rs:14`, `:72-74`).
 Status: active
 Exercised: partial - `kernel_admission.rs:1676` covers a revocation reason
 surviving; no test drives a reason at or above 512 KiB, a blank reason
@@ -836,7 +836,7 @@ Fault/timing angle: none in time; the bound is per request.
 Required faults and enabling state: a store-API caller with a long or
 secret-bearing reason. The route cannot produce either: it refuses a
 dispute reason over 4096 bytes or holding a detection with
-`invalid_input` before the Kernel sees it (`dispute.rs:77-79`).
+`invalid_input` before the Kernel sees it (`dispute.rs:72-74`).
 Confidence: medium - [evidence](evidence/admission-reason-is-redacted-bounded-and-non-blank.md).
 The bound and the blank check are read in code; the redaction-row write
 was read but its message and column mapping were not traced into
@@ -854,8 +854,8 @@ Open questions:
   `redact_durable_text` the route scans with
   (`crates/kernel/src/redaction.rs:41-42`). The scanner detects the test
   token `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678`
-  (`dispute.rs:342-349`), and 64 seeded 40- and 64-hex object ids beside
-  an ordinary repository path carry no detection (`dispute.rs:354-367`).
+  (`dispute.rs:343-350`), and 64 seeded 40- and 64-hex object ids beside
+  an ordinary repository path carry no detection (`dispute.rs:355-368`).
   The evidence file records which rule the token matches and that the
   attribution is inferred from the rule regexes.
 

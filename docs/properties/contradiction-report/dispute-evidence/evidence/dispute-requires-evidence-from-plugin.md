@@ -24,7 +24,7 @@ None`. PR A adds the fields and the requirement.
   with `InvalidReason::InvalidInput` (`:228-229`); non-dispute events get
   `ADMISSION_REASON` (`:231`, constant at `:100`).
 - `DisputeReason::validated` refuses a dispute with neither field and an
-  empty `evidence_id` (`crates/daemon/src/kernel_routes/dispute.rs:55-64`).
+  empty `evidence_id` (`crates/daemon/src/kernel_routes/dispute.rs:55-59`).
 - The handler runs `compose_reason` for every operation after
   `resolve_classes` and before the intent, preview, or commit
   (`commit.rs:1109-1123`), and answers `state_only(invalid(reason))`, so
@@ -33,7 +33,7 @@ None`. PR A adds the fields and the requirement.
   (`commit.rs:12-15`, `:46-53`).
 - TypeScript: `parseMemoryMarkArgs` prints usage when a dispute cites
   nothing or another event cites something
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:130-131`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:137-138`).
   The fake kernel mirrors the rule (`disputeEvidenceWellFormed`,
   `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:285-307`,
   applied at `:647-649`).
@@ -68,8 +68,8 @@ share it.
 
 All four are constructed: `a_dispute_needs_evidence_and_other_events_take_none`
 (`crates/daemon/tests/kernel_routes.rs:5971`), the unit test of the same
-name (`dispute.rs:370`), and the parser test at
-`memory-mark-command.test.ts:133`. The tool arm (#1161) refuses before
+name (`dispute.rs:371`), and the parser test at
+`memory-mark-command.test.ts:137`. The tool arm (#1161) refuses before
 sending: `refuses missing evidence and unsupported events before sending;
 renders denials and refusals`
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1534`)

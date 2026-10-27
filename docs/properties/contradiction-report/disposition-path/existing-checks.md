@@ -109,8 +109,8 @@ receipt without `dispositions`.
 | `kernel_routes.rs:6146` | `a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale` | restrictiveness (Stale to Disputed) | unaudited |
 | `kernel_routes.rs:6199` | `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents` | authority-bearer cascade, classes, maturity | unaudited |
 | `admission.rs:4532` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | maturity, restrictiveness (dispute events) | unaudited |
-| `memory-mark-command.test.ts:181` | the evidence rides the preview and the commit byte for byte under the user source kind | command (both bodies, `source_kind`) | unaudited |
-| `memory-mark-command.test.ts:208` | two disputes with different evidence in one session are two commits; the same evidence replays | replay | unaudited |
+| `memory-mark-command.test.ts:185` | the evidence rides the preview and the commit byte for byte under the user source kind | command (both bodies, `source_kind`) | unaudited |
+| `memory-mark-command.test.ts:212` | two disputes with different evidence in one session are two commits; the same evidence replays | replay | unaudited |
 
 ## None found
 
@@ -136,7 +136,7 @@ At authoring (`3a3b916b7`), with the PR A state noted:
   to Disputed (`kernel_routes.rs:6146`); Disputed to Stale is not driven.
 - No TypeScript test asserted the commit body equals the preview body. PR
   A matches both bodies against one expected operation
-  (`memory-mark-command.test.ts:181`).
+  (`memory-mark-command.test.ts:185`).
 - No liveness check existed on this surface. PR A adds the dispute
   evidence check (`require_visible_evidence`, `commit.rs:742-757`).
 

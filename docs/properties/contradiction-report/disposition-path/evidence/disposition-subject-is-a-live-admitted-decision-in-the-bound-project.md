@@ -20,7 +20,7 @@ and what each failure answers.
      `NotFound`.
   2. `object_kind != "decision" || invalidated_commit_seq.is_some()` is
      `NotFound` (`:707-709`). `load_object_state` has no liveness filter
-     of its own (`envelope.rs:1926-1940`), so this line is the liveness
+     of its own (`envelope.rs:1925-1939`), so this line is the liveness
      check.
   3. `subject_admission(object_id)?.ok_or(AdmissionPolicy)` (`:710-712`):
      a decision with no admission row is `AdmissionPolicy`.
@@ -56,7 +56,7 @@ valid authority.
 The writer lock serializes commits, so a retirement that commits first is
 seen by step 2. Preview runs on a read snapshot and can judge a subject
 that the next commit retires; the commit then answers `not_found`
-(`memory-mark-command.ts:288-289` reports `refused/commit`).
+(`memory-mark-command.ts:296-297` reports `refused/commit`).
 
 ## What a test must construct
 

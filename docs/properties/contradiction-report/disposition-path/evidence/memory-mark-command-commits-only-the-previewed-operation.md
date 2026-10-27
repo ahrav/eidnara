@@ -17,15 +17,15 @@ today.
 - One operation: `const operation: DispositionOperation = {op:
   "disposition", object_id, event}`, plus `evidence_id` and `evidence_ref`
   when the user gave them (PR A) (`packages/opencode-plugin/src/shared/
-  memory-mark-command.ts:240-246`); both calls send `operations:
-  [operation]` with the same `intent` object (`:247-256`, `:257`, `:288`).
+  memory-mark-command.ts:247-254`); both calls send `operations:
+  [operation]` with the same `intent` object (`:255-264`, `:265`, `:296`).
 - Intent: `actor: input.actor`; `operationId: input.operationId`, which
   the callers derive with `memoryMarkOperationId(sessionId, args)` (PR A
   moved the derivation to the callers, `command-handler.ts:415`,
   `pi-plugin/src/commands/eidnara-memory-mark.ts:61`); `cause =
   commandLine(args)`, which appends the evidence flags
-  (`memory-mark-command.ts:158-160`);
-  `sourceKind` defaults to `"user"` (`:248` and `:253`).
+  (`memory-mark-command.ts:165-167`);
+  `sourceKind` defaults to `"user"` (`:256` and `:261`).
 - `verdictFor` returns null unless `results.length == 1` and the single
   verdict's `object_id` and `event` equal the operation's (`:211-219`).
 - Preview branch: `refused/preview` on a non-available state (`:258-259`);
@@ -45,8 +45,8 @@ today.
   `retire_decision` only (`client.ts:644-651`), so a disposition commit
   sends no tokens; `previewDispositions` sends `commitBody(.., true)`,
   which adds `preview: true` (`:597-641`, `:773`, `:789`).
-- Tests: `memory-mark-command.test.ts:302-557`, including the mismatched-
-  verdict matrix at `:486`; PR A adds `:181` (both bodies carry the same
+- Tests: `memory-mark-command.test.ts:343-598`, including the mismatched-
+  verdict matrix at `:527`; PR A adds `:185` (both bodies carry the same
   operation with its evidence and `source_kind: "user"`), `:208`, and
   `:284`.
 
