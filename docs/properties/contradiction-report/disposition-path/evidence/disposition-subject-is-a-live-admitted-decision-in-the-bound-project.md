@@ -70,9 +70,15 @@ that the next commit retires; the commit then answers `not_found`
 
 ## Investigation log
 
-No open questions. The retired-stored-approval case is listed as an
-enabling state to construct, not as a question: `scoped_object_state` on
-a retired approval returns the row (no liveness filter in
-`load_object_state`), and `validate_approval` then judges it invalid;
-whether the outcome is `not_found` or a denied relaxation depends on the
-event and was not traced here.
+### Q: Which refusal does a retired stored approval produce?
+
+- Sources examined: `scoped_object_state` and `load_object_state` (no
+  liveness filter, so a retired approval's row is returned);
+  `validate_approval`, which judges the retired approval invalid.
+- Findings: the evaluator sees `approval_valid = false`. Whether the
+  operation then answers `not_found` or lands as a denied relaxation
+  depends on the event, and the event-specific outcome was not traced.
+- Missing evidence: a trace of `validate_approval`'s answer through
+  `evaluate_admission` for each disposition event, or the test listed
+  above under "What a test must construct".
+- Conclusion: unresolved, needs that trace.

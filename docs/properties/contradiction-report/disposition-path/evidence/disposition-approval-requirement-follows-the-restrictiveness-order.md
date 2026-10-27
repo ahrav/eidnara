@@ -41,10 +41,12 @@ lifecycle transitions.
 
 ## Failure scenario
 
-A rank table edit that places Disputed above Stale would make Stale to
-Disputed require approval and block the P4 report on stale findings; one
-that places Contradicted at 1 would let `mark_disputed` relax a
-contradiction without approval. A `validate_approval` regression that
+A rank table edit that places Disputed below Stale would make Stale to
+Disputed a relaxation, so it would require approval and block the P4
+report on stale findings; one that places Contradicted at 1 would make
+Contradicted to Disputed an equal-rank move, so `mark_disputed` would land
+on a contradicted decision without approval. A `validate_approval`
+regression that
 returns true for a quarantined approval would let a plugin relax any
 disposition by citing it.
 

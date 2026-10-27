@@ -47,9 +47,12 @@ A predicate edit that drops `AND invalidated_commit_seq IS NULL` lets an
 insert cite a retired evidence row; `object_state_sql` would then show
 `artifact_digest = NULL` for the decision (`envelope.rs:1908-1910` joins
 live evidence only) while the row's `evidence_id` points at a dead row.
-The duplicate `COUNT(*)` form in `require_live_evidence` also admits a
-list with a repeated live id and one dangling id if the count happens to
-match; the input is deduplicated by the caller or not (not read).
+The `COUNT(*)` form in `require_live_evidence` accepts a list that
+repeats a live id, since `json_each` yields one row per element and each
+live element joins its own `evidence_meta` row, so the count equals the
+input length; a dangling element joins no row and always leaves the count
+below the length, so it is refused. Whether the caller deduplicates the
+input was not read.
 
 ## Timing windows and dependencies
 

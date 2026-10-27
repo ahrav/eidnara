@@ -76,6 +76,7 @@ asserts a violation.
 | `disposition_identity_reused` | `stored_receipt` returns `Conflict` for a disposition intent | replay |
 | `disposition_replayed_after_subject_moved` | a replay whose stored `dispositions[0].disposition` differs from the subject's current stored disposition | replay |
 | `command_received_mismatched_verdict` | `verdictFor` returns null in either step | command |
+| `command_preview_visibility_changes` | a preview answer with `visibility_changes == true` and no `receipt`, so the command reaches its confirmation branch | command |
 | `disposition_on_authority_bearer` | `subject_grants_authority(subject) == true` before a disposition write | cascade |
 | `disposition_cascade_demoted_dependents` | `demote_dependents_if_authority_lost` returns a non-zero demoted count after a disposition | cascade |
 | `commit_log_cause_redacted` | `redact(intent.cause)` records at least one detection | commit-log row |

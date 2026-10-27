@@ -61,8 +61,9 @@ can also approach 512 KiB and abort the whole envelope with
 ## Timing windows and dependencies
 
 None in time. Depends on the detector set in `crates/secret-scanner` and
-on `redact_durable_text` in `crates/context-core/src/redaction.rs`, not
-read in this pass.
+on `redact_durable_text` in `crates/context-core/src/redaction.rs`, which
+the initial pass at `3a3b916b7` did not read; the second investigation
+question below records the read at the PR A tip and its conclusion.
 
 ## What a test must construct
 

@@ -25,8 +25,7 @@ today.
   `pi-plugin/src/commands/eidnara-memory-mark.ts:61`); `cause =
   commandLine(args)`, which appends the evidence flags
   (`memory-mark-command.ts:158-160`);
-  `sourceKind` defaults to `"user"` (`:248`) and rides in the intent
-  (`:253`).
+  `sourceKind` defaults to `"user"` (`:248` and `:253`).
 - `verdictFor` returns null unless `results.length == 1` and the single
   verdict's `object_id` and `event` equal the operation's (`:211-219`).
 - Preview branch: `refused/preview` on a non-available state (`:258-259`);

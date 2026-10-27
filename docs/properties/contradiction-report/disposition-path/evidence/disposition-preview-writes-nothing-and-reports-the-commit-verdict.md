@@ -38,8 +38,9 @@ contracts and idempotency.
 - `refuse_changed_authority` makes the preview refuse what the commit
   would judge differently after a cascade (`admission.rs:1872-1885`,
   mapped at `commit.rs:1172-1178`).
-- Tests: `:5120` (counts unchanged, surfaces), `:5277` (in-request prior),
-  `:5355` (denials and refusals match), `:5493` (changed authority).
+- Tests: `kernel_routes.rs:5120` (counts unchanged, surfaces), `:5277`
+  (in-request prior), `:5355` (denials and refusals match), `:5493`
+  (changed authority).
 
 ## Failure scenario
 
@@ -54,8 +55,8 @@ question about a change that does not happen, or skip one that does.
 Preview and commit are separate requests; the object or its approval can
 move between them. The command treats the commit's verdict as recorded
 (`memory-mark-command.ts:293-294`). Inside one preview, an earlier
-operation's judged state feeds the next (`PreviewRun.judged`, `commit.rs:800-804`,
-`:831-835`, `:842-845`).
+operation's judged state feeds the next (`PreviewRun.judged`,
+`commit.rs:800-804`, `:831-835`, `:842-845`).
 
 ## What a test must construct
 
