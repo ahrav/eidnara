@@ -72,12 +72,12 @@ name (`dispute.rs:370`), and the parser test at
 `memory-mark-command.test.ts:133`. The tool arm (#1161) refuses before
 sending: `refuses missing evidence and unsupported events before sending;
 renders denials and refusals`
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1527`)
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1534`)
 calls `dispute` with neither evidence input, with an empty `evidenceId`,
 with empty `path` and `gitObjectId`, with `path` and no `gitObjectId`,
 and with no `objectId`, and asserts the usage error with no daemon call;
 `refuses a dispute without evidence before sending anything`
-(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:507`)
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:509`)
 asserts the same for Pi.
 
 The check is a per-request route oracle (portfolio refinement R4): it

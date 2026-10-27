@@ -105,12 +105,12 @@ usage` (`memory-mark-command.test.ts:133`) covers the TypeScript side.
 counts unchanged; it asserts the error variant, not the refusal name. Tool
 arm (#1161): `refuses missing evidence and unsupported events before
 sending; renders denials and refusals`
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1527`)
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1534`)
 calls `dispute` with neither evidence input, with an empty `evidenceId`,
 with empty `path` and `gitObjectId`, with `path` and no `gitObjectId`, and
 with no `objectId`, and asserts the usage error with no daemon call; the
 Pi test `refuses a dispute without evidence before sending anything`
-(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:507`)
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:509`)
 asserts the same for Pi. A route request from the tool with neither field
 is the raw-body case the route test above already refuses
 `invalid_input`, since the tool sends the same `disposition` body.
@@ -514,7 +514,7 @@ and sends no commit (`memory-mark-command.ts:267-279`). The runner test
 `an assistant-sourced dispute is denied a relaxation the stored approval
 would admit` (`memory-mark-command.test.ts:592`) and the tool test `never
 relaxes a disposition through the memory's stored approval`
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1484`)
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1491`)
 seed a quarantined memory whose stored decision names a live approval and
 assert `denied`, the disposition kept, and one preview call with no
 commit; `a user command relaxes through the stored approval`

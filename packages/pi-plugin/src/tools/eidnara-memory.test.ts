@@ -461,6 +461,7 @@ describe("Pi eidnara_memory dispute", () => {
                     preview?: boolean;
                     intent: { actor: string; cause: string };
                     source_kind: string;
+                    asserted_source_class?: string;
                     asserted_taint_class?: string;
                     operations: unknown[];
                 },
@@ -470,6 +471,7 @@ describe("Pi eidnara_memory dispute", () => {
             expect(body.intent.actor).toBe("agent:pi");
             expect(body.intent.cause).toBe("eidnara_memory dispute call-dispute");
             expect(body.source_kind).toBe("assistant");
+            expect(body.asserted_source_class).toBeUndefined();
             expect(body.asserted_taint_class).toBeUndefined();
             expect(body.operations).toEqual([
                 {

@@ -1398,6 +1398,7 @@ describe("eidnara_memory dispute", () => {
                 },
             ]);
             expect(body.source_kind).toBe("assistant");
+            expect(body.asserted_source_class).toBeUndefined();
             expect(body.asserted_taint_class).toBeUndefined();
             expect(body.intent).toMatchObject({
                 actor: "agent:opencode",
