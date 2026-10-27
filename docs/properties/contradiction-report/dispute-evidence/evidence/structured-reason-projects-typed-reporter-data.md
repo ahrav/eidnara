@@ -3,10 +3,11 @@
 ## Discovery trigger
 
 Plan P4 decisions D5 and D9 and the specification's OQ4-1 and OQ4-2: in PR
-A the reporter class and the repository reference ride in `reason`,
-because the typed columns arrive in PR B
-([#1162](https://github.com/ahrav/eidnara/issues/1162)). The reason must
-therefore be a faithful, parseable carrier.
+A the reporter class and the repository reference ride in `reason`, and
+PR B ([#1162](https://github.com/ahrav/eidnara/issues/1162)) adds the
+typed columns beside it. The reason must therefore be a faithful,
+parseable carrier, and since PR B it must equal the rendering of the
+typed columns.
 
 ## Evidence trail
 
@@ -75,7 +76,18 @@ None in time. The reason depends on the scanner's rule set, as in
 - Not constructed: a read of `durable_text_redactions` after a landed
   dispute. The absence of a redaction row is argued from the shared
   detector.
-- Not constructed: the PR B typed form.
+- Typed form (PR B): `a_dispute_row_records_its_reporter_and_links_the_sessions_latest_serve`
+  (`crates/daemon/tests/kernel_routes.rs:6651`) asserts the reporter
+  columns read `(model_inference, user_inferred)` for a command-shaped
+  dispute and `(model_inference, assistant_inference)` for a tool-shaped
+  one, that `event_payload` holds the sent `evidence_ref` serialized byte
+  for byte and is null when none was sent, and that `DisputeReason`
+  rendered from the typed columns and the row's `evidence_id` equals the
+  stored `reason`; `reporter_columns_are_dispute_only_and_checked_by_the_schema`
+  (`crates/kernel/tests/kernel_use_outcome.rs:1456`) asserts every other
+  writer stores NULL and the CHECKs refuse an unknown class, a half-set
+  pair, and a payload that is not a JSON object
+  (`crates/kernel/src/schema.rs:164`).
 
 ## Investigation log
 
@@ -90,8 +102,12 @@ None in time. The reason depends on the scanner's rule set, as in
 
 ### Q: Do PR A reasons carry into PR B's typed columns?
 
-- Sources examined: [`../open-questions.md`](../open-questions.md) Q6.
-- Findings: the grammar is versioned (`v=1`) and parseable, so a
-  migration can read it; no migration is written at this revision.
-- Missing evidence: the PR B design.
-- Conclusion: needs human input.
+- Sources examined: [`../open-questions.md`](../open-questions.md) Q6;
+  `crates/kernel/src/schema.rs:164`; the #1162 diff of `crates/kernel/src`.
+- Findings: the grammar is versioned (`v=1`) and parseable. #1162 takes
+  Q6's option (a): the columns are nullable, a row written before #1162
+  keeps its `reason` with the three columns NULL, and no code reads a
+  `reason` into the columns.
+- Missing evidence: none.
+- Conclusion: resolved with answer: they do not; a PR A row is told apart
+  by its NULL `reporter_source_class`, and its `reason` stays the carrier.
