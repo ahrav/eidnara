@@ -2,7 +2,10 @@
 
 System: the PR A branch tip of #1160 (base `6159fd224`, code commit
 `6c4d445e3`, review-round code commits `511cd6d73` and `f68e895ca`,
-evidence-walk commit `f94f3163b`; line numbers verified at `f94f3163b`). Every check below is `unaudited`:
+evidence-walk commit `f94f3163b`). Line numbers were re-verified at the
+#1161 branch tip after `main` at `7d27fc0a4` merged in; the tool tests
+under "Tool tests (#1161)" exist only on that branch. Every check below
+is `unaudited`:
 adequacy verdicts belong to `/testing:invariant-test-review` for tests and
 `/low-level-systems:defensive-assertions-and-invariant-guards` for
 production guards. An existing check never removes a property from the
