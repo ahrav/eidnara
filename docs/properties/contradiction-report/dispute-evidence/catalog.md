@@ -113,7 +113,8 @@ Pi test `refuses a dispute without evidence before sending anything`
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:509`)
 sends the same five shapes and asserts the same for Pi. A route request
 from the tool with neither field is the raw-body case the route test
-above already refuses `invalid_input`, since the tool sends the same `disposition` body.
+above already refuses `invalid_input`, since the tool sends the same
+`disposition` body.
 Guarantee: A `mark_disputed` or `contradict` operation that reaches the
 Kernel writer through `kernel.commit` carries a non-empty `evidence_id`,
 an `evidence_ref`, or both; one with neither, or with an empty id, is
