@@ -166,6 +166,7 @@ fn format_cursor(score_bp: u32, created_at_ms: i64, evidence_id: &str) -> String
 }
 
 /// The position `cursor` names; only a cursor [`format_cursor`] produces is accepted.
+/// The hex scan examines at most `2 * MAX_CANDIDATE_ID_BYTES` bytes.
 fn decode_cursor(cursor: &str) -> Result<(u32, i64, String), MemoryStoreError> {
     let refused = || invalid("the page cursor is not one this store issued");
     let mut parts = cursor.splitn(3, '.');
@@ -175,7 +176,11 @@ fn decode_cursor(cursor: &str) -> Result<(u32, i64, String), MemoryStoreError> {
     };
     let score: u32 = score.parse().map_err(|_| refused())?;
     let created: i64 = created.parse().map_err(|_| refused())?;
-    if evidence.is_empty() || evidence.len() % 2 != 0 || !is_lower_hex(evidence, evidence.len()) {
+    if evidence.is_empty()
+        || evidence.len() % 2 != 0
+        || evidence.len() > 2 * MAX_CANDIDATE_ID_BYTES
+        || !is_lower_hex(evidence, evidence.len())
+    {
         return Err(refused());
     }
     let bytes = (0..evidence.len())
@@ -345,11 +350,12 @@ impl MemoryStore {
     /// One page of the rows naming `decision_object_id`, ordered `score_bp`
     /// descending, `created_at_ms` descending, `evidence_id` ascending, after the
     /// cursor `after`; `limit` is clamped to `1..=`[`MAX_CANDIDATE_PAGE`].
+    /// `decision_object_id` is a Kernel object id of 1 to `MAX_CANDIDATE_ID_BYTES` bytes.
     ///
     /// # Errors
     ///
-    /// [`MemoryStoreError::Serde`] for a malformed digest or id, or a cursor
-    /// this store did not issue. Storage errors otherwise.
+    /// [`MemoryStoreError::Serde`] for a malformed digest or id, or for a cursor
+    /// outside the canonical form a page's `next` carries.
     pub fn candidates_for_decision(
         &self,
         project_digest: &str,
@@ -358,13 +364,18 @@ impl MemoryStore {
         limit: usize,
     ) -> Result<CandidatePage, MemoryStoreError> {
         check_hex("project_digest", project_digest, 64)?;
-        check_id("decision_object_id", decision_object_id)?;
-        let after = after.map(decode_cursor).transpose()?;
+        if decision_object_id.is_empty() || decision_object_id.len() > MAX_CANDIDATE_ID_BYTES {
+            return Err(invalid("decision_object_id is not a Kernel object id"));
+        }
+        // `candidates_for_decision` queries the first page for a malformed cursor so storage errors take precedence over cursor validation errors.
+        let after = after.map(decode_cursor).transpose();
         let limit = limit.clamp(1, MAX_CANDIDATE_PAGE);
-        let (score, created, evidence) = after.map_or(
-            (i64::MAX, i64::MAX, String::new()),
-            |(score, created, evidence)| (i64::from(score), created, evidence),
-        );
+        let (score, created, evidence) = match &after {
+            Ok(Some((score, created, evidence))) => {
+                (i64::from(*score), *created, evidence.as_str())
+            }
+            _ => (i64::MAX, i64::MAX, ""),
+        };
         let mut items = self
             .inner
             .with_conn(|conn| {
@@ -378,6 +389,7 @@ impl MemoryStore {
                     .collect::<rusqlite::Result<Vec<_>>>()
             })
             .map_err(MemoryStoreError::from)?;
+        after?;
         let next = if items.len() > limit {
             items.truncate(limit);
             items

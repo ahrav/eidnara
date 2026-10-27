@@ -33,7 +33,7 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
   answers per id from `evidence_meta.created_commit_seq` and
   `invalidated_commit_seq`, read for the whole batch by one statement that
   joins the requested ids to the primary key. It opens no write transaction.
-- `crates/memory-store/src/contradiction_candidates.rs:428`
+- `crates/memory-store/src/contradiction_candidates.rs:440`
   `delete_candidates_as_read` deletes a row only while it holds the values
   the sweep read, so a rewrite after the read survives.
 - `crates/daemon/src/memory_reviewer/lifecycle.rs:448` `pass_then_sweep`

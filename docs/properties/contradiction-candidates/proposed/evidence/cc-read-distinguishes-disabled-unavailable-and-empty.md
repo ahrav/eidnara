@@ -36,13 +36,13 @@ does not change the route's answer.
 A flag-off route with the table renamed away and a flag-on control; a root
 without MODULE authority; a daemon with no Memory Store; a Kernel not yet
 open and one whose open failed; an eligible decision with zero rows. All in
-`crates/daemon/src/candidate_pass_tests.rs:1242` and `:1575`.
+`crates/daemon/src/candidate_pass_tests.rs:1242` and `:1586`.
 
 ## Investigation log
 
 ### Q: Does a failed Kernel open answer differently from a starting one?
 
-- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:1590`, `:1607`.
+- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:1601`, `:1618`.
 - Findings: a Kernel not yet open answers `unavailable`/`store_starting`;
   opening at a file path answers `unavailable`/`store_unavailable`.
 - Missing evidence: none.

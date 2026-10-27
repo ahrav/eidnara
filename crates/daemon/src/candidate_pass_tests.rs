@@ -1250,6 +1250,7 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
             ("one", TOPIC, EventKind::Other),
             ("replaced", TOPIC, EventKind::Other),
             ("empty", TOPIC, EventKind::Other),
+            ("ctl\u{1}", TOPIC, EventKind::Other),
         ],
     );
     let ask = |body: Value| route_call(&handler, candidates_request(&project, body));
@@ -1478,6 +1479,11 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
         "an eligible decision with no rows"
     );
     assert_eq!(
+        ask(json!({ "decision_object_id": "object-ctl\u{1}" })).await,
+        Ok(json!({ "kind": "page", "as_of": kernel.tip().unwrap(), "items": [], "next": null })),
+        "a live decision whose id the candidate writer cannot store has no rows"
+    );
+    assert_eq!(
         ask(json!({ "decision_object_id": "object-missing" })).await,
         Ok(json!({ "kind": "terminal", "terminal": "not_live" }))
     );
@@ -1549,6 +1555,11 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
         ask(json!({ "decision_object_id": "object-one" })).await,
         Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
         "the hidden table fails the read a true flag runs"
+    );
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one", "after": "not-a-cursor" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
+        "the store terminal is judged before the cursor form"
     );
     rename(
         "contradiction_candidates_hidden",

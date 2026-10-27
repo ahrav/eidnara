@@ -49,7 +49,7 @@ Analyzer checks the scorer relies on:
 | `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:411` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
 | `a_late_write_replaces_held_keys_and_adds_none` | `:454` | a write below the held tip adds no key | row key and caps | unaudited |
 | `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:488` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
-| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:513` | rows added before or removed from page one move nothing after the cursor; non-canonical cursors refused | read (paging) | unaudited |
+| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:513` | rows added before or removed from page one move nothing after the cursor; non-canonical and oversized cursors refused | read (paging) | unaudited |
 | `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:560` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
 | `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:624` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
 
@@ -82,7 +82,7 @@ Also: `crates/daemon/src/config.rs:2299` and `:2320` (default, tier, and
 resolved-config freezing), `crates/daemon/src/lib.rs:21367` (bound route and
 status block), `crates/host-runtime/src/control.rs:2004` (host forwarding
 allowlist against `docs/host-wire-protocol.md`), and
-`crates/memory-store/tests/contradiction_candidates.rs:663` (a delete as
+`crates/memory-store/tests/contradiction_candidates.rs:670` (a delete as
 read spares a rewritten row).
 
 ## S-B trigger and S-C candidate set (`crates/daemon/src/candidate_pass_tests.rs`, #1167)
@@ -111,7 +111,7 @@ checks are named with their files.
 
 | Check | Location | Asserts | Records | Status |
 | --- | --- | --- | --- | --- |
-| `review_candidates_pages_live_rows_and_answers_each_terminal` | `:1242` | 8-key items; clamps at 65 and 0; order and disjoint two-page walk; four stale rows filtered and counted; `not_live` for superseded and unknown; empty page; `invalid_params` bodies; scope refusal before the body; observational read; flag off with the table hidden and a flag-on control; tip, jobs, and rows unchanged | read serves, read terminals, flag off (read arm) | unaudited |
+| `review_candidates_pages_live_rows_and_answers_each_terminal` | `:1242` | 8-key items; clamps at 65 and 0; order and disjoint two-page walk; four stale rows filtered and counted; `not_live` for superseded and unknown; empty page, including for a live decision whose id holds a control character; `invalid_params` bodies; scope refusal before the body; observational read; flag off with the table hidden and a flag-on control; `store_unavailable` before a malformed cursor on the hidden table; tip, jobs, and rows unchanged | read serves, read terminals, flag off (read arm) | unaudited |
 | `review_candidates_answers_the_store_and_kernel_states_before_any_page` | `:1575` | Kernel starting, Kernel open failed, and no Memory Store answer their states without `items` | read terminals | unaudited |
 | `a_listed_candidate_confirms_through_dispute_while_its_evidence_lives` | `:1643` | listed evidence id is a published descriptor's; confirm lands `disputed` with the table truncated; after retention the row is filtered and the earlier form is `not_found` | confirm linkage | unaudited |
 | `the_confirm_path_never_reads_the_candidate_table` | `:1749` | `commit.rs` and `dispute.rs` name no candidate store method (lexical) | confirm linkage | unaudited |

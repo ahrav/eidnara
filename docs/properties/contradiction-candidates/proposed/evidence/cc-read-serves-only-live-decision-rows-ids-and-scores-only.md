@@ -23,7 +23,7 @@ carry no descriptor or summary text.
   `not_live` (`:178`) before the store is read.
 - `crates/daemon/src/contradiction_candidates/read.rs:181`
   `candidates_for_decision` pages at most 64 rows in reader order with a
-  keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:353`).
+  keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:359`).
 - `crates/daemon/src/contradiction_candidates/read.rs:197` reads evidence
   liveness for the page's ids at the same target; `is_current` (`:115`) keeps
   a row only when its evidence is live, its incarnation and matcher digest
@@ -35,8 +35,8 @@ carry no descriptor or summary text.
 - Equivalence tests: `crates/kernel/tests/kernel_claim_facts.rs:954`
   compares the standing read with claim facts field by field and refusal by
   refusal; `crates/kernel/tests/kernel_source_descriptors.rs:3094` answers
-  liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:688`
-  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:1829`
+  liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:695`
+  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:1840`
   shows a page body is the canonical `serde_json` encoding of its value.
 
 ## Failure scenario
@@ -72,7 +72,7 @@ future tip; a superseded decision with rows; a second root. All in
 ### Q: Can a foreign root reach the body parser?
 
 - Sources examined: `crates/daemon/src/contradiction_candidates/read.rs:132-144`,
-  `crates/daemon/src/candidate_pass_tests.rs:1514`.
+  `crates/daemon/src/candidate_pass_tests.rs:1520`.
 - Findings: `kernel_request` answers `project_mismatch` before parsing; a
   foreign root with an unknown field answers the scope refusal.
 - Missing evidence: none.

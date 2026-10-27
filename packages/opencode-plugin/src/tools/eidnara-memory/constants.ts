@@ -121,6 +121,6 @@ export const EIDNARA_MEMORY_UNWRAP_RULES: ImitatedArgsSchema = {
     evidenceId: "string",
     path: "string",
     gitObjectId: "string",
-    after: "string",
+    after: { type: "nullable", rule: "string" },
     limit: "number",
 };

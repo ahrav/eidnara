@@ -20,10 +20,10 @@ enabling state" and name the tests that construct them.
 | A9 diacritic-only and NFC versus NFD spellings | yes | literal strings (`:131-159`) |
 | A10 second thread or process | yes, unused | spawn a thread in the test; no test does |
 | A11 toolchain Unicode change | no in-tree | build under another toolchain; the digest pin fails by design |
-| R1 evidence retired between list and confirm | yes | `expire_harness_captures` past the retention (`candidate_pass_tests.rs:1643`) |
-| R2 Kernel starting or failed at read | yes | no open, or an open at a file path (`candidate_pass_tests.rs:1575`) |
-| R3 Memory Store absent | yes | a handler built without a store (`candidate_pass_tests.rs:1575`) |
-| R4 candidate table hidden | yes | `ALTER TABLE ... RENAME` on `store.db` (`candidate_pass_tests.rs:1242`, `:1767`) |
+| R1 evidence retired between list and confirm | yes | `expire_harness_captures` past the retention (`candidate_pass_tests.rs:1654`) |
+| R2 Kernel starting or failed at read | yes | no open, or an open at a file path (`candidate_pass_tests.rs:1586`) |
+| R3 Memory Store absent | yes | a handler built without a store (`candidate_pass_tests.rs:1586`) |
+| R4 candidate table hidden | yes | `ALTER TABLE ... RENAME` on `store.db` (`candidate_pass_tests.rs:1242`, `:1778`) |
 | R5 authority lookup fails | no | no seam (dependency fault F18) |
 
 ## Per-property required faults

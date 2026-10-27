@@ -554,6 +554,13 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
             "{cursor}"
         );
     }
+    let oversized = format!("7500.5.{}", "61".repeat(513));
+    assert!(
+        store
+            .candidates_for_decision(PROJECT, "decision", Some(&oversized), 4)
+            .is_err(),
+        "a cursor naming an evidence id longer than any stored id was never issued"
+    );
 }
 
 #[test]
