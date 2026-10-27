@@ -15,7 +15,7 @@ catalog does not resolve any of them (see bias B3 in
 | OQ-B | One eligibility predicate shared by the pass, the sweep, and the reads: which dispositions are candidates and which are swept; `Stale` and `Quarantined` need a human decision (certificate conflict 6). | specification owner |
 | OQ-C | Descriptor text source (H3): carried out of the publication job past the capture commit gate, or read back from the Kernel evidence bytes (certificate conflict 4). | specification owner |
 | OQ-D | The candidate-set bound N, and whether a budgeted Kernel id read is needed given the unbounded `visible_domain_decisions_as_of_in_scope` (plan OQ5-1; certificate conflict 2). | specification owner |
-| OQ-E | Whether the TS plugin hides the `candidates` action from the tool schema when the daemon flag is off (certificate conflict 3). | specification owner |
+| OQ-E | Whether the TS plugin hides the `candidates` action from the tool schema when the daemon flag is off (certificate conflict 3). Resolved by #1168 (OQ5-6, option a): the action is in both schemas whatever the flag and answers `disabled`. | specification owner |
 
 Plan open questions OQ5-2 and OQ5-3 are carried by the certificate
 unchanged. #1164 resolves OQ5-3 (the scorer-side constant values) and OQ5-5

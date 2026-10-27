@@ -913,12 +913,12 @@ missing tool-call identity, the context-researcher agent, and a narrowed
 allowlist with zero transport calls; the pi tests cover a disallowed action
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:303-326`), the default
 allowlist refusing `dispute` (`:422-431`), and the registration omission
-(`packages/pi-plugin/src/tools/index.test.ts:40-70`). This pass found no
-test that calls `get` without a tool-call id to show a read runs under the
-`"read"` identity.
+(`packages/pi-plugin/src/tools/index.test.ts:40-70`). The #1168
+`candidates` test (`tools.test.ts:1550`) runs a read without a tool-call
+id.
 Guarantee: the action vocabulary is the closed list
-`["create","get","revise","archive","merge","dispute"]`; `get` is the only
-read and every other action is a mutation that requires a stable tool-call
+`["create","get","revise","archive","merge","dispute","candidates"]`; `get`
+and `candidates` are the reads and every other action is a mutation that requires a stable tool-call
 identity; in both plugins an omitted `allowedActions` admits the default
 actions, which exclude `dispute`, an explicit empty list admits none, and a
 disallowed or unknown action answers
@@ -928,7 +928,7 @@ opencode a call from the `context-researcher` agent is refused inside the
 tool; in pi the tool is omitted from the context_researcher's registered
 surface (`memoryToolEnabled: false`).
 Check: `always` - `action ∉ allowed ⇒ error text && transport.calls
-unchanged`; `isEidnaraMemoryMutation(a) == (a != "get")`; `agent ==
+unchanged`; `isEidnaraMemoryMutation(a) == (a ∉ {"get","candidates"})`; `agent ==
 "context-researcher" ⇒ refused` (opencode); `"dispute" ∉
 EIDNARA_MEMORY_DEFAULT_ACTIONS`; the pi registration for
 `memoryToolEnabled: false` excludes `eidnara_memory`. `always` because every
@@ -957,9 +957,9 @@ Impact: P5 R6 adds `candidates` as a read; it must enter the closed list and
 membership is a rollout decision in both plugins.
 Open questions:
 - D7 is resolved since `3a3b916b7`: #1161 gave the pi tool `allowedActions`
-  with the same default as opencode (`eidnara-memory.ts:146-151`). Whether
-  `candidates` joins `EIDNARA_MEMORY_DEFAULT_ACTIONS` is a decision for #1168
-  (needs human input).
+  with the same default as opencode (`eidnara-memory.ts:146-151`).
+- Resolved by #1168: `candidates` is in the default list in both plugins
+  (`types.ts:19-20`).
 
 ## Relationship map
 

@@ -1,9 +1,9 @@
 # Fault map: P5 proposed obligations
 
-Verified at the #1164 branch tip (base `979fb814e`). This map covers the
-three active S-A records. The 12 proposed records need the faults their
-catalog entries list under "Required faults and enabling state"; their
-availability is assessed when #1165 to #1168 land the code.
+Verified at the #1164 branch tip (base `979fb814e`) for the S-A rows; the
+read and confirm rows (R1 to R5) are verified at the #1168 tip (base
+`cda655423`). The other records list their faults under "Required faults and
+enabling state" and name the tests that construct them.
 
 ## Fault classes and availability
 
@@ -20,6 +20,11 @@ availability is assessed when #1165 to #1168 land the code.
 | A9 diacritic-only and NFC versus NFD spellings | yes | literal strings (`:131-159`) |
 | A10 second thread or process | yes, unused | spawn a thread in the test; no test does |
 | A11 toolchain Unicode change | no in-tree | build under another toolchain; the digest pin fails by design |
+| R1 evidence retired between list and confirm | yes | `expire_harness_captures` past the retention (`candidate_pass_tests.rs:1643`) |
+| R2 Kernel starting or failed at read | yes | no open, or an open at a file path (`candidate_pass_tests.rs:1575`) |
+| R3 Memory Store absent | yes | a handler built without a store (`candidate_pass_tests.rs:1575`) |
+| R4 candidate table hidden | yes | `ALTER TABLE ... RENAME` on `store.db` (`candidate_pass_tests.rs:1242`, `:1767`) |
+| R5 authority lookup fails | no | no seam (dependency fault F18) |
 
 ## Per-property required faults
 

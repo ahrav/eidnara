@@ -13,35 +13,37 @@ C14; D7.
 
 ## Evidence trail
 
-References re-verified at the #1164 branch tip (base `979fb814e`). #1161
-added the `dispute` action, `EIDNARA_MEMORY_DEFAULT_ACTIONS`, per-allowlist
+References re-verified at the #1168 branch tip (base `cda655423`); #1168
+added the `candidates` read. #1161 added the `dispute` action, `EIDNARA_MEMORY_DEFAULT_ACTIONS`, per-allowlist
 schemas, and the pi `allowedActions` since `3a3b916b7`.
 
 - `packages/opencode-plugin/src/tools/eidnara-memory/types.ts:6-14`
   `EIDNARA_MEMORY_ACTIONS = ["create", "get", "revise", "archive", "merge",
-  "dispute"] as const`; `:15` the action type; `:17-19`
-  `EIDNARA_MEMORY_DEFAULT_ACTIONS` filters out `dispute`; `:22`
-  `EIDNARA_MEMORY_DISPUTE_EVENTS`; `:24` `EIDNARA_MEMORY_READ_ACTIONS = new
-  Set(["get"])`; `:26-29` `isEidnaraMemoryMutation(action) =
-  !READ_ACTIONS.has(action)`; `:52-58` `EidnaraMemoryToolDeps` with
-  `allowedActions?: EidnaraMemoryAction[]` (`:57`).
+  "dispute", "candidates"] as const`; `:16` the action type; `:19-20`
+  `EIDNARA_MEMORY_DEFAULT_ACTIONS` filters out `dispute`; `:23`
+  `EIDNARA_MEMORY_DISPUTE_EVENTS`; `:25-28` `EIDNARA_MEMORY_READ_ACTIONS = new
+  Set(["get", "candidates"])`; `:31-33` `isEidnaraMemoryMutation(action) =
+  !READ_ACTIONS.has(action)`; `EidnaraMemoryToolDeps` with
+  `allowedActions?: EidnaraMemoryAction[]` (`:60-66`).
 - `tools.ts:48-58` `actionField`: the `action` enum lists exactly the admitted
-  actions; `:81-97` the dispute-only fields; `:99-101` the parse schema with
+  actions; `:82-100` the dispute-only fields and `:103-116` the
+  `candidates` paging fields; `:118-120` the parse schema with
   `.passthrough()` (unknown keys are tolerated at schema level; the action
-  gate is explicit code); `:108-118` the exposed args include the dispute
-  fields only when the allowlist names `dispute`.
+  gate is explicit code); `:131-138` the exposed args include the paging
+  and dispute fields only when the allowlist names `candidates` or
+  `dispute`.
 - `tools.ts:122-125` `allowedActions(deps) = deps.allowedActions ??
   EIDNARA_MEMORY_DEFAULT_ACTIONS`; doc: omitted admits the default actions,
   which exclude `dispute`; explicit empty admits none.
 - `tools.ts:139-190` execute: parse; `unwrapImitatedReducedArgs`; `approve` or
-  `enforce` -> "human-host-owned commands" error (`:125-127`);
+  `enforce` -> "human-host-owned commands" error (`:145-147`);
   `toolContext.agent === CONTEXT_RESEARCHER_AGENT` -> "not available to the
-  context_researcher agent" (`:128-130`); `typeof rawAction !== "string" ||
+  context_researcher agent" (`:148-150`); `typeof rawAction !== "string" ||
   !ACTIONS.includes(rawAction) || !primaryActions.includes(rawAction)` ->
-  "Action '<a>' is not allowed in this context." (`:131-137`). All three
-  return before `deps.kernelClient` is called (`:155`).
+  "Action '<a>' is not allowed in this context." (`:151-157`). All three
+  return before `deps.kernelClient` is called (`:175`).
 - `tools.ts:172-174`: `!toolCallId && isEidnaraMemoryMutation(action)` ->
-  "mutation requires a stable tool-call identity"; `:165` reads use
+  "mutation requires a stable tool-call identity"; `:185` reads use
   `toolCallId ?? "read"`.
 - `packages/opencode-plugin/src/agents/context-researcher.ts:1`
   `CONTEXT_RESEARCHER_AGENT = "context-researcher"`.

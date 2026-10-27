@@ -9,11 +9,9 @@ for unbuilt behavior. #1164 builds the scorer
 `crates/daemon/src/contradiction_candidates/scorer.rs`) and converts the
 three S-A records to `Status: active` with `Exercised: yes`; their tests are
 in `crates/daemon/tests/contradiction_candidates_scorer.rs`, and their
-references are verified at the #1164 branch tip. The records not yet converted keep
-`Status: active - PROPOSED`: each is a specification input and a test target
-for the unit that builds its behavior, and no claim is made that the
-implementation exists. The store (#1165), sweep (#1166), pass (#1167), and
-read (#1168) tickets make them checkable. #1166 builds the sweep and
+references are verified at the #1164 branch tip. The store (#1165), sweep
+(#1166), pass (#1167), and read (#1168) tickets make the other records
+checkable. #1166 builds the sweep and
 converts the sweep record to `Status: active`. #1167 builds the pass and
 converts the trigger, single-flight, candidate-set, partial-result, row-key,
 rebuild, and no-Kernel-write records; the flag-off record keeps its read arm
@@ -22,13 +20,8 @@ two read records, the confirm-linkage record, and the flag-off record, so
 every record is active at its tip. Source: the
 `/software-design:invariant-driven-domain-modeling` pass whose certificate is
 `certificate.md`; its open items are listed in `open-questions.md`. The
-proposed records below are reproduced from that pass unchanged in
-substance.
-
-Reachability labels on proposed records name the intended class once the
-unit lands, per the preamble reproduced below, and are re-verified at
-implementation time. The active records carry the class verified at the
-branch tip.
+records were first proposed by that pass, and each carries the reachability
+class verified at the branch tip.
 
 Companion files: [existing-checks.md](existing-checks.md),
 [fault-map.md](fault-map.md),
@@ -669,7 +662,7 @@ Exercised: yes - #1168,
 `review_candidates_pages_live_rows_and_answers_each_terminal`
 (`crates/daemon/src/candidate_pass_tests.rs:1242`) writes 70 live rows and
 four stale rows for one decision through the store and reads them back through
-`Handler` dispatch: the item key set is exactly the eight wire names
+`Handler` dispatch: the first item's key set is exactly the eight wire names
 (`:1355`), a limit of 65 clamps to 64 rows listed or filtered (`:1372`) and a
 limit of 0 to one (`:1438`), the two-page walk follows (score desc, created
 desc, evidence asc) and covers the 70 live rows once each (`:1417`, `:1426`),
@@ -678,7 +671,12 @@ are left out and counted `read_filtered_stale` = 4 (`:1397`), a superseded
 decision with rows present answers `not_live` (`:1470`), an unknown decision
 answers `not_live` (`:1481`), and a foreign root answers `project_mismatch`
 (`:1505`), also with a bad body (`:1514`). The tip, the reviewer job facts,
-and the table's rows are unchanged across the reads (`:1344`, `:1399`).
+and the tip and job facts are unchanged after the first read (`:1344`,
+`:1345`) and the table's rows after the walk (`:1399`). Not constructed: the
+other `eligible` refusals (another domain, a foreign scope, hidden, or a
+contradicted, rejected, or quarantined disposition) through the read; the
+eligibility predicate's own test covers them
+(`crates/daemon/tests/contradiction_candidates_sweep.rs:377`).
 Guarantee: `review.candidates` and the `candidates` action answer only for the
 route's bound project; the handler judges the decision with the shared
 eligibility predicate at the reader's identified tip
@@ -745,12 +743,13 @@ a Kernel not yet open (`:1590`), a non-starting `unavailable` state for a
 Kernel whose open failed (`:1607`), and `store_unavailable` for a daemon with
 no Memory Store (`:1638`), each without `items`. The OpenCode tool renders
 each terminal by name and `disabled` as a plain statement
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1589`).
-Guarantee: a route whose frozen flag is false, or a root whose memories
-authority is not MODULE, answers `disabled`
-(`crates/daemon/src/contradiction_candidates/read.rs:132`, `:144`); an
-uninstalled Memory Store, or one that fails the authority lookup or the page
-read, answers `store_unavailable`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1589`). Not
+constructed: a failing authority lookup (dependency fault F18 has no seam).
+Guarantee: after the scope, Kernel-readiness, and body checks, a route whose
+frozen flag is false, or a root whose memories authority is not MODULE,
+answers `disabled` (`crates/daemon/src/contradiction_candidates/read.rs:132`,
+`:144`); an uninstalled Memory Store, or one that fails the authority lookup
+or the page read, answers `store_unavailable`
 (`crates/daemon/src/contradiction_candidates/read.rs:135`); an unready Kernel
 or a failed Kernel read answers the kernel routes' state; an eligible decision
 with no rows answers an empty page; no terminal or state renders as a page.
@@ -807,11 +806,11 @@ which renames the table away, publishes three consent-off windows with every
 counter at zero, and shows one consenting publication's pass fails on the
 hidden table (`store_unavailable` = 1). Read arm (#1168):
 `review_candidates_pages_live_rows_and_answers_each_terminal`
-(`crates/daemon/src/candidate_pass_tests.rs:1544`) renames the table away,
-answers `disabled` on a flag-off route with `read_filtered_stale` unchanged,
-and shows the same route with the flag on answers `store_unavailable`
-(`:1551`), so the flag-off read runs no table statement; the handler answers
-`disabled` before it reaches the store
+(`crates/daemon/src/candidate_pass_tests.rs:1242`, assertions `:1541-1551`)
+renames the table away, answers `disabled` on a flag-off route with
+`read_filtered_stale` unchanged, and shows the same route with the flag on
+answers `store_unavailable` (`:1551`), so the flag-off read runs no table
+statement; the handler answers `disabled` before it reaches the store
 (`crates/daemon/src/contradiction_candidates/read.rs:132`). The `candidates`
 action renders the terminal as a plain statement in both harnesses
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1589`,
@@ -829,7 +828,8 @@ Check: `always(!X)` - X is "a pass counter increments, a row exists, or a
 table read statement executes for a route whose frozen flag is false"; this is
 a forbidden state with no dedicated detection point, so `always(!X)` rather
 than `unreachable`; assert by publishing with the flag off and checking
-counters, row count, and a statement-trace hook.
+counters and row count with the table renamed away, beside a flag-on control
+that fails on it.
 Fault/timing angle: a config reload that turns the flag on after the route
 bound (the route keeps false, while the sweep follows the reload on its next
 pass); a daemon restart with the flag on (new routes see true).
@@ -872,7 +872,10 @@ check that `kernel_routes/commit.rs` and `kernel_routes/dispute.rs` name no
 candidate store method. The OpenCode tool renders each row's confirm form
 `{"action":"dispute","event":"mark_disputed","objectId","evidenceId"}` from
 the row's ids
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1550`).
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1550`). The
+form's fields match `dispute`'s arguments by reading
+`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts`; no test feeds
+a rendered form back into the tool.
 Guarantee: a row's `evidence_id` is the `srcev:*` evidence row id the
 publication receipt carries (`Published.evidence_id`,
 `crates/daemon/src/harness_sources.rs:527`), and its `decision_object_id` is
