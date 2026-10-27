@@ -56,12 +56,7 @@ impl DisputeReason {
             return Err(InvalidReason::InvalidInput);
         }
         if let Some(evidence_id) = evidence_id
-            && (evidence_id.is_empty()
-                // The length check bounds the input to `decodes_to_itself` and
-                // `redact_durable_text` to `MAX_REASON_BYTES`.
-                || evidence_id.len() > MAX_REASON_BYTES
-                || !decodes_to_itself(evidence_id)
-                || !redact_durable_text(evidence_id).detections.is_empty())
+            && (evidence_id.is_empty() || !value_is_clean(evidence_id, MAX_REASON_BYTES))
         {
             return Err(InvalidReason::InvalidInput);
         }
@@ -154,11 +149,17 @@ impl DisputeReason {
 impl EvidenceRef {
     fn is_well_formed(&self) -> bool {
         is_lower_hex_oid(&self.git_object_id)
-            && self.path.len() <= MAX_EVIDENCE_PATH_BYTES
+            && value_is_clean(&self.path, MAX_EVIDENCE_PATH_BYTES)
             && confined_path::check(&self.path).is_ok()
-            && decodes_to_itself(&self.path)
-            && redact_durable_text(&self.path).detections.is_empty()
     }
+}
+
+/// The length check runs first, so the decode and the secret scan read a
+/// bounded input.
+fn value_is_clean(value: &str, max_bytes: usize) -> bool {
+    value.len() <= max_bytes
+        && decodes_to_itself(value)
+        && redact_durable_text(value).detections.is_empty()
 }
 
 const fn is_unreserved(byte: u8) -> bool {

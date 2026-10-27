@@ -3,7 +3,8 @@
 use std::{cell::Cell, fs};
 
 use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent, DecisionEventPayload,
+    AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
+    ArtifactDeletionRequest, ArtifactIngestRequest, CommitIntent, DecisionEventPayload,
     DecisionEventSpec, DecisionPayload, DecisionSpec, DependentObservationQuery, DomainSpec,
     EventKind, KernelError, KernelStore, ObservationDependencySpec, ObservationPayload,
     ObservationSpec, ProviderEgress, RepositoryProvenance, Sensitivity, SourceClass, TaintClass,
@@ -2239,6 +2240,68 @@ fn evidence_cited_in_offers_each_live_citing_scope_once_and_stops_at_the_first_a
         })
         .unwrap();
     assert_eq!(cited_in(&retired, None), (false, Vec::new()));
+}
+
+/// Artifact deletion invalidates an evidence row that live scoped decisions
+/// still cite; the liveness read refuses it before any citer offers a scope.
+#[test]
+fn evidence_cited_in_refuses_a_deleted_evidence_row_that_live_decisions_still_cite() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let evidence = ingest_evidence(&store, "deleted", 'd');
+    store
+        .commit(intent("deleted-citer", 'c'), |envelope| {
+            envelope.insert_scope(branch_scope("scope-own"))?;
+            let mut spec = decision(1);
+            spec.scope_id = Some("scope-own".to_string());
+            spec.evidence_id = Some(evidence.clone());
+            envelope.insert_decision(spec)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let cited_in = |evidence_id: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (_, seen) = store
+            .preview(deadline, |preview| {
+                let mut offered = Vec::new();
+                let cited = preview.evidence_cited_in(evidence_id, |scope_id| {
+                    offered.push(scope_id.to_string());
+                    Ok(scope_id == "scope-own")
+                })?;
+                Ok((cited, offered))
+            })
+            .unwrap();
+        seen
+    };
+    assert_eq!(cited_in(&evidence), (true, vec!["scope-own".to_string()]));
+
+    store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("delete-cited-evidence", 'f'),
+            identity: ArtifactDeletionIdentity::EvidenceId(evidence.clone()),
+            kind: ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: 42,
+        })
+        .unwrap();
+    let connection = Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let (evidence_retired, citer_live): (bool, bool) = connection
+        .query_row(
+            "SELECT (SELECT invalidated_commit_seq IS NOT NULL FROM evidence_meta WHERE evidence_id=?1),
+                    (SELECT invalidated_commit_seq IS NULL FROM decisions WHERE evidence_id=?1)",
+            [&evidence],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(evidence_retired && citer_live);
+    assert_eq!(cited_in(&evidence), (false, Vec::new()));
 }
 
 /// `evidence_cited_in` agrees with a model of seeded citations for every

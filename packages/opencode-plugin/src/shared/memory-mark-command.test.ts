@@ -210,6 +210,21 @@ describe("runMemoryMarkCommand evidence", () => {
         expect(memoryMarkOperationId(SESSION, byId)).not.toBe(
             memoryMarkOperationId(SESSION, byFile),
         );
+        expect(memoryMarkOperationId(SESSION, { ...byId, evidenceId: "ev-b" })).not.toBe(
+            memoryMarkOperationId(SESSION, byId),
+        );
+        expect(
+            memoryMarkOperationId(SESSION, {
+                ...byFile,
+                evidenceRef: { path: "src/lib.rs", git_object_id: "f".repeat(40) },
+            }),
+        ).not.toBe(memoryMarkOperationId(SESSION, byFile));
+        expect(
+            memoryMarkOperationId(SESSION, {
+                ...byFile,
+                evidenceRef: { path: "src/main.rs", git_object_id: OID },
+            }),
+        ).not.toBe(memoryMarkOperationId(SESSION, byFile));
         const first = await run(h, byId);
         const second = await run(h, byFile);
         expect(first).toMatchObject({ kind: "applied", replayed: false });
@@ -218,6 +233,25 @@ describe("runMemoryMarkCommand evidence", () => {
         const again = await run(h, byId);
         expect(again).toEqual({ ...first, replayed: true });
         expect(h.kernel.receipts.size).toBe(2);
+    });
+
+    test("the commit sends the reference the preview judged when the caller edits its args during confirmation", async () => {
+        const h = harness();
+        const input: MemoryMarkArgs = {
+            event: "mark_disputed",
+            objectId: "mem_verified",
+            evidenceRef: { path: "docs/a.md", git_object_id: OID },
+            confirmed: false,
+        };
+        const outcome = await run(h, input, async () => {
+            (input.evidenceRef as { git_object_id: string }).git_object_id = "f".repeat(40);
+            return true;
+        });
+        expect(outcome.kind).toBe("applied");
+        expect(h.transport.calls.map((call) => call.body.operations[0].evidence_ref)).toEqual([
+            { path: "docs/a.md", git_object_id: OID },
+            { path: "docs/a.md", git_object_id: OID },
+        ]);
     });
 
     test("the fake refuses the reference shapes the route refuses", async () => {
