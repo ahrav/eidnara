@@ -78,7 +78,7 @@ with empty `path` and `gitObjectId`, with `path` and no `gitObjectId`,
 and with no `objectId`, and asserts the usage error with no daemon call;
 `refuses a dispute without evidence before sending anything`
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:509`)
-asserts the same for Pi.
+sends the same five shapes and asserts the same for Pi.
 
 The check is a per-request route oracle (portfolio refinement R4): it
 reads each disposition operation's `event`, `evidence_id`, and

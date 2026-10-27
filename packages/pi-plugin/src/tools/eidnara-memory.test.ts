@@ -510,6 +510,14 @@ describe("Pi eidnara_memory dispute", () => {
         const h = seeded(EIDNARA_MEMORY_ACTIONS);
         for (const args of [
             { action: "dispute", objectId: "mem_rule", event: "contradict" },
+            { action: "dispute", objectId: "mem_rule", event: "contradict", evidenceId: "" },
+            {
+                action: "dispute",
+                objectId: "mem_rule",
+                event: "contradict",
+                path: "",
+                gitObjectId: "",
+            },
             { action: "dispute", objectId: "mem_rule", event: "contradict", path: "src/a.rs" },
             { action: "dispute", event: "contradict", evidenceId: "ev-1" },
         ]) {

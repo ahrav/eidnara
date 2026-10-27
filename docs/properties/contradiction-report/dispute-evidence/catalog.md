@@ -111,7 +111,7 @@ with empty `path` and `gitObjectId`, with `path` and no `gitObjectId`, and
 with no `objectId`, and asserts the usage error with no daemon call; the
 Pi test `refuses a dispute without evidence before sending anything`
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:509`)
-asserts the same for Pi. A route request from the tool with neither field
+sends the same five shapes and asserts the same for Pi. A route request from the tool with neither field
 is the raw-body case the route test above already refuses
 `invalid_input`, since the tool sends the same `disposition` body.
 Guarantee: A `mark_disputed` or `contradict` operation that reaches the
