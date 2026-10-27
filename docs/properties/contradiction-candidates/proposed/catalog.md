@@ -462,7 +462,7 @@ evictions at caps of 2 to 4096, and as-read deletes against a reference model
 of the rules, checking every row, the returned counts, rowid stability, and
 the gauge after each step, and pages, cursors across writes, and the sweep
 every seventh step. The store
-(`crates/memory-store/src/contradiction_candidates.rs:470`) enforces K and the
+(`crates/memory-store/src/contradiction_candidates.rs:471`) enforces K and the
 project cap in the write transaction; the daemon owns the values. The pass
 arm (M per pass, `rows_written`, replayed units) lands with #1167.
 Guarantee: The table key is (project digest, descriptor evidence object id,
@@ -482,8 +482,11 @@ project interleaving (bounded by P).
 Required faults and enabling state: flag on; a descriptor overlapping K + 1
 decisions; a batch whose total matches exceed M; the same unit published
 twice (replay).
-Confidence: low - proposed; no implementation evidence
-Existing check: none; proposed
+Confidence: low - proposed; the direct-write store checks above exercise the
+key, the caps, the eviction order, and the counts at the #1165 tip; the pass
+arm (M per pass, `rows_written`, replay) lands with #1167
+Existing check: the store checks named under Exercised, `unaudited`
+(`existing-checks.md` S-D); none for the pass arm
 Impact: duplicate rows inflate candidate counts; uncapped rows make the
 table grow with project size per pass.
 Open questions:
@@ -519,8 +522,12 @@ was retired (excluded from the rebuild input and swept from the table).
 Required faults and enabling state: flag on; a pass that wrote rows; a
 rebuild entry point (operator or test) that enumerates live descriptors of
 the project and reads evidence bytes under a budget.
-Confidence: low - proposed; no implementation evidence
-Existing check: none; proposed
+Confidence: low - proposed; `truncating_and_replaying_the_writes_rebuilds_the_same_rows`
+exercises truncate and replay of a recorded write sequence at the #1165 tip;
+the rebuild from evidence bytes lands with #1167
+Existing check: `truncating_and_replaying_the_writes_rebuilds_the_same_rows`
+(`crates/memory-store/tests/contradiction_candidates.rs:372`), `unaudited`;
+none for the pass arm
 Impact: without this the table is a log, not a derivation, and the derived
 classification (index D6) is false.
 Open questions:
@@ -676,13 +683,19 @@ Open questions:
 - Terminal name and the section 7.8 method literal (API handoff); whether
   `matched_atoms` as a count is acceptable where the atom list is not (yes
   proposed: a count is not text).
-- G7, sensitivity of descriptor-derived rows: resolved by #1165. A row holds
-  ids, integers, and times only (the table's columns are pinned by
+- G7, sensitivity and egress class of descriptor-derived rows: the
+  sensitivity half is resolved by #1165. A row holds ids, integers, and times
+  only (the table's columns are pinned by
   `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
-  `crates/memory-store/tests/contradiction_candidates.rs:411`), the memory
-  store is local, and the read answers carry the same closed key set, so a
-  derived row inherits local-only egress by construction and carries no
-  sensitivity column.
+  `crates/memory-store/tests/contradiction_candidates.rs:411`), so a derived
+  row carries none of the captured text and needs no sensitivity column. The
+  egress half is unresolved until #1168: the store's `candidates_for_decision`
+  returns rows to its caller and enforces no egress policy, so what leaves
+  the daemon is decided by the U4 read route. That route also owns the
+  six-name key-set check above, and the store's `StoredCandidate` carries
+  `project_digest`, `kernel_incarnation_id`, `matcher_digest`, and
+  `decision_terms` beyond that set, so the read projects the row rather than
+  returning it.
 Falsifier: the read answers rows for a `superseded` decision, or a row
 includes `summary`.
 Legal witness: active decision with 3 rows answers 3 rows and `next: null`;
@@ -730,7 +743,7 @@ hides the table, runs the sweep under a false flag with and without a
 Kernel, and observes every counter at zero, then shows the same table fails
 the first statement an enabled sweep runs;
 `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass`
-(`:900`) drives `pass_then_sweep`
+(`:916`) drives `pass_then_sweep`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) with the flag off and
 then on. The key is `/contradiction_candidates/enabled`
 (`crates/daemon/src/config.rs:1024`), user-only and default false

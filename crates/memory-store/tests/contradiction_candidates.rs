@@ -1481,15 +1481,20 @@ fn every_candidate_statement_reuses_its_cached_plan() {
 fn only_the_candidate_module_writes_the_candidate_tables() {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let writes = [
-        "insert into contradiction_candidate",
+        "into contradiction_candidate",
         "update contradiction_candidate",
         "delete from contradiction_candidate",
     ];
-    let mut files = vec![src.join("lib.rs")];
-    for entry in std::fs::read_dir(&src).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_some_and(|extension| extension == "rs") {
-            files.push(path);
+    let mut files = Vec::new();
+    let mut dirs = vec![src.clone()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
         }
     }
     let mut checked = 0;
@@ -1500,7 +1505,12 @@ fn only_the_candidate_module_writes_the_candidate_tables() {
         {
             continue;
         }
-        let text = std::fs::read_to_string(&path).unwrap().to_lowercase();
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for write in writes {
             assert!(
                 !text.contains(write),
