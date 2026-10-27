@@ -757,7 +757,7 @@ Confidence: low - proposed; no implementation evidence
 Existing check: none; proposed
 Impact: the plan's three stop conditions; a signal would reserve a
 receipt-charged reviewer job against the Q38 ceiling (2,048 per project per
-incarnation, `docs/memory-reviewer-operations.md:257`).
+incarnation, `docs/memory-reviewer-operations.md:263`).
 Open questions: None.
 Falsifier: a non-empty `signals` vector built from candidate rows, or a
 commit-log row attributed to the pass.
