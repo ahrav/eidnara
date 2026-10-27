@@ -106,18 +106,23 @@ None in time. The reason depends on the scanner's rule set, as in
 ### Q: Do PR A reasons carry into PR B's typed columns?
 
 - Sources examined: [`../open-questions.md`](../open-questions.md) Q6;
-  `crates/kernel/src/schema.rs:164`; the #1162 diff of `crates/kernel/src`.
+  `crates/kernel/src/schema.rs:164`; `crates/kernel/src/admission.rs:998-1003`;
+  [`../../../use-outcome-record/evidence/uo-kernel-opens-only-at-the-compiled-baseline-identity.md`](../../../use-outcome-record/evidence/uo-kernel-opens-only-at-the-compiled-baseline-identity.md).
 - Findings: the grammar is versioned (`v=1`) and parseable. #1162 takes
-  Q6's option (a): the four U3 columns are nullable, a dispute row
-  written before #1162 keeps its `reason` with `reporter_source_class`,
-  `reporter_taint_class`, `event_payload`, and `use_outcome_id` NULL (no
-  Kernel code wrote any of them before #1162), and no code reads a
-  `reason` into the columns. Rows of every other event kind also hold
-  NULL in all four, by the CHECK that ties the reporter columns to
-  `mark_disputed` and `contradict` (`crates/kernel/src/schema.rs:164`).
+  Q6's option (a): the four U3 columns are nullable and no code reads a
+  `reason` into them. A store written before #1162 carries the previous
+  schema digest, and the Kernel opens a store only at the compiled
+  baseline identity, so no PR A row is readable at this baseline. At this
+  baseline a `mark_disputed` or `contradict` row with NULL reporter
+  columns is one an in-process caller wrote through the public
+  `Envelope::record_admission`, which passes no reporter
+  (`crates/kernel/src/admission.rs:998-1003`); the route stores the
+  reporter on every dispute it writes. Rows of every other event kind
+  hold NULL in all four columns by the CHECK that ties the reporter
+  columns to `mark_disputed` and `contradict`
+  (`crates/kernel/src/schema.rs:164`).
 - Missing evidence: none.
-- Conclusion: resolved with answer: they do not. A `mark_disputed` or
-  `contradict` row with NULL reporter columns is a pre-#1162 dispute,
-  since the route has stored them on every dispute since #1162; its
-  `reason` stays the carrier. NULL on another event kind says nothing
-  about the row's age.
+- Conclusion: resolved with answer: they do not, because a PR A store
+  does not open at this baseline. A NULL reporter on a dispute row says
+  the row was written through `record_admission` rather than the route,
+  and its `reason` is whatever that caller supplied.
