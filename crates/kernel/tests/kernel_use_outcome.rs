@@ -1755,7 +1755,8 @@ fn check_link_definition(
                     .filter(|bit| mask & (1 << bit) != 0)
                     .map(|bit| OBJECTS[bit])
                     .collect();
-                let mut serve = spec(SESSIONS[session], &objects, ticks[at % ticks.len()], 0);
+                // Serves draw from the first three sessions, so `SESSIONS[3]` only ever disputes.
+                let mut serve = spec(SESSIONS[session % 3], &objects, ticks[at % ticks.len()], 0);
                 serve.harness = HARNESSES[harness].to_string();
                 serve.project_digest = projects[project].clone();
                 // A repeated identity is `Conflict` and records nothing; the history keeps its first record.
