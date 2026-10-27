@@ -68,12 +68,14 @@ All constructed except the reply drop:
 ### Q: Is the identity independent of flag order?
 
 - Sources examined: `evidenceFlags`; the parser test at
-  `memory-mark-command.test.ts:106`.
-- Findings: by construction yes; the parser test asserts both orders
-  parse to the same `args` shape (`toMatchObject`), and no test compares
-  the two identities.
-- Missing evidence: an assertion of equal identities.
-- Conclusion: resolved with answer from code; not exercised.
+  `memory-mark-command.test.ts:106`; `both flag orders parse to one args
+  value and one identity` (`memory-mark-command.test.ts:665`).
+- Findings: by construction yes, and the second test parses
+  `--path p@o --evidence ev` and `--evidence ev --path p@o`, asserts the
+  two `args` values are equal, and asserts `memoryMarkOperationId` yields
+  one identity for both.
+- Missing evidence: none.
+- Conclusion: resolved with answer; exercised.
 
 ### Q: Does the route itself include evidence in the identity?
 

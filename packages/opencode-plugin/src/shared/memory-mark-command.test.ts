@@ -660,3 +660,19 @@ describe("runMemoryMarkCommand request digest", () => {
         }
     });
 });
+
+describe("memoryMarkOperationId flag order", () => {
+    test("both flag orders parse to one args value and one identity", () => {
+        const pathFirst = parseMemoryMarkArgs(
+            `mark_disputed mem_1 --path src/a.rs@${OID} --evidence ev`,
+        );
+        const evidenceFirst = parseMemoryMarkArgs(
+            `mark_disputed mem_1 --evidence ev --path src/a.rs@${OID}`,
+        );
+        if (!pathFirst.ok || !evidenceFirst.ok) throw new Error("both orders parse");
+        expect(evidenceFirst.args).toEqual(pathFirst.args);
+        expect(memoryMarkOperationId(SESSION, evidenceFirst.args)).toBe(
+            memoryMarkOperationId(SESSION, pathFirst.args),
+        );
+    });
+});

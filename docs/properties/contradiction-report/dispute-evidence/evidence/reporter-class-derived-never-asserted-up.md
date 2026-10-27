@@ -62,7 +62,7 @@ All constructed, the tool arm with #1161:
   (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1376`)
   for OpenCode and `files a dispute under agent:pi and the assistant
   source kind when allowed`
-  (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:433`) for Pi.
+  (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:449`) for Pi.
   `executeDispute` fixes the source kind
   (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:53`), so
   the tool cannot send `"user"`.

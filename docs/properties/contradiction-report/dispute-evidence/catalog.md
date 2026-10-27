@@ -109,7 +109,7 @@ sending; renders denials and refusals`
 calls `dispute` with neither evidence input, with `path` and no
 `gitObjectId`, and with no `objectId`, and asserts the usage error with no
 daemon call; the Pi test `refuses a dispute without evidence before
-sending anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:491`)
+sending anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:507`)
 asserts the same for Pi. A route request from the tool with neither field
 is the raw-body case the route test above already refuses
 `invalid_input`, since the tool sends the same `disposition` body.
@@ -439,7 +439,7 @@ evidence under the tool identity, actor, cause, and assistant source kind`
 asserts the tool's preview and commit both send `source_kind:
 "assistant"` and no asserted class, and the Pi test `files a dispute under
 agent:pi and the assistant source kind when allowed`
-(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:433`) asserts the
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:449`) asserts the
 same for Pi's preview and commit bodies, with `agent:pi`; the route side
 stores `assistant_inference` for that source kind
 (`kernel_routes.rs:5723`). The harness fixes `source_kind` in
@@ -603,9 +603,10 @@ a reused key and the record would keep only the first.
 Open questions:
 - `--evidence A --path p@o` and `--path p@o --evidence A` produce one
   identity because `evidenceFlags` orders the flags
-  (`memory-mark-command.ts:145-155`); the parser test asserts both orders
-  parse (`memory-mark-command.test.ts:106`) but no test asserts the two
-  identities are equal. Read, not exercised.
+  (`memory-mark-command.ts:145-155`); `both flag orders parse to one args
+  value and one identity` (`memory-mark-command.test.ts:665`) parses both
+  orders and asserts equal `args` and equal `memoryMarkOperationId`
+  results. Exercised.
 
 ### dispute-preview-writes-nothing
 

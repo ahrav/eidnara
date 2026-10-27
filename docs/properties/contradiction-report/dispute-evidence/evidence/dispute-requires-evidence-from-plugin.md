@@ -76,7 +76,7 @@ renders denials and refusals`
 calls `dispute` with neither evidence input, with `path` and no
 `gitObjectId`, and with no `objectId`, and asserts the usage error with
 no daemon call; `refuses a dispute without evidence before sending
-anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:491`)
+anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:507`)
 asserts the same for Pi.
 
 The check is a per-request route oracle (portfolio refinement R4): it
