@@ -32,7 +32,7 @@ revision.
   `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
   (`crates/daemon/tests/transform_canonical_memory.rs:46`);
   `a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:253`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:280`);
   `a_pressure_refold_reports_its_frozen_composition`
   (`crates/daemon/src/transform.rs:20895`). Status: unaudited.
 
@@ -65,7 +65,7 @@ refold on the folding engine, and a CAS conflict inside one pass.
   Owner #1155 (AC7); the writer runs only after the attempt's memory-store
   commit succeeded, and
   `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:314`) asserts that a rival
+  (`crates/daemon/src/use_outcome_writer_tests.rs:341`) asserts that a rival
   commit lands while no composition is stored and that one record results.
   The test inspects the Memory Store row version, the frozen composition, the
   Kernel served-set count, and the `written` counter; other durable state is
