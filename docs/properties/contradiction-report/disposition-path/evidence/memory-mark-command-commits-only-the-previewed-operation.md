@@ -47,9 +47,9 @@ today.
   sends no tokens; `previewDispositions` sends `commitBody(.., true)`,
   which adds `preview: true` (`:597-641`, `:773`, `:789`).
 - Tests: `memory-mark-command.test.ts:302-557`, including the mismatched-
-  verdict matrix at `:451`; PR A adds `:181` (both bodies carry the same
+  verdict matrix at `:486`; PR A adds `:181` (both bodies carry the same
   operation with its evidence and `source_kind: "user"`), `:208`, and
-  `:249`.
+  `:284`.
 
 ## Failure scenario
 

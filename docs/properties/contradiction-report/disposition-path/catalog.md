@@ -594,7 +594,7 @@ command callers pass it in (`command-handler.ts:415`,
 Status: active
 Exercised: partial - `kernel_routes.rs:4982` covers replay, reused key,
 and token abort; TypeScript tests cover replay through the command
-(`memory-mark-command.test.ts:383`, `:359`). PR A adds a route test of
+(`memory-mark-command.test.ts:383`, `:394`). PR A adds a route test of
 two dispute identities, replay, and reuse
 (`dispute_identities_land_replay_and_refuse_reuse_like_every_envelope`,
 `kernel_routes.rs:6080`) and a command test of two evidence keys in one
@@ -624,7 +624,7 @@ Confidence: high - [evidence](evidence/disposition-envelope-identity-replays-wit
 Existing check: `kernel_routes.rs:4982`
 (`disposition_operations_share_the_envelope_replay_and_token_rules`),
 `kernel_routes.rs:931`, `:6080`, `memory-mark-command.test.ts:383`,
-`:359`, `:208`. Status unaudited.
+`:394`, `:208`. Status unaudited.
 Impact: a second write under one identity would double-record a dispute
 and break the one-row-per-report assumption P3's join by `commit_seq`
 relies on.
@@ -678,9 +678,9 @@ Required faults and enabling state: a `FakeKernel` or stub returning
 mismatched, empty, or multiple verdicts; a recorded identity; a
 `visibility_changes: true` preview.
 Confidence: high - [evidence](evidence/memory-mark-command-commits-only-the-previewed-operation.md).
-Existing check: `memory-mark-command.test.ts:303`, `:291`, `:312`, `:331`,
-`:348`, `:359`, `:372`, `:390`, `:421`, `:437`, `:451`, and PR A's `:181`,
-`:208`, `:249`. Status unaudited.
+Existing check: `memory-mark-command.test.ts:303`, `:326`, `:347`, `:366`,
+`:383`, `:394`, `:407`, `:425`, `:456`, `:472`, `:486`, and PR A's `:181`,
+`:208`, `:284`. Status unaudited.
 Impact: committing an operation the user did not preview, or treating a
 foreign verdict as the answer, would apply a disposition the confirmation
 dialog never described.
