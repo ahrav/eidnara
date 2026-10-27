@@ -17,7 +17,7 @@ constant.
 | F4 approval validity | valid, revoked, out-of-scope, non-`adr_accepted`, chain over depth | yes, route and store API | `seed_approval` with `scope_id` None or another project; quarantine the approval; `approval_chain_reader_sees_envelope_writes_and_refuses_truncation` (`:4579`) builds depth |
 | F5 retired evidence | `evidence_meta` row with `invalidated_commit_seq` set | yes, store API or sweep | `ingest_evidence` (`kernel_admission.rs:92`) then retire; retention sweep for `harness_capture` |
 | F6 dangling evidence id | id with no `evidence_meta` row | yes | any unused string that passes `identity()` |
-| F7 secret-like identity | an id or reason the redactor detects | yes | `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678`, which `redact_durable_text` detects (`crates/daemon/src/kernel_routes/dispute.rs:343-350`); 40- and 64-hex object ids and an ordinary path carry no detection (`dispute.rs:355-368`) |
+| F7 secret-like identity | an id or reason the redactor detects | yes | `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678`, which `redact_durable_text` detects (`crates/daemon/src/kernel_routes/dispute.rs:352-359`); 40- and 64-hex object ids and an ordinary path carry no detection (`dispute.rs:364-377`) |
 | F8 oversize reason | reason above 512 KiB | yes, store API only | `"a".repeat(MAX_REDACTABLE_BYTES + 1)` |
 | F9 unknown body key | extra key on the disposition operation | yes, route | raw JSON with a key outside the six fields; at the PR A tip `evidence_id` and `evidence_ref` are fields |
 | F10 identity replay | same `(producer, operation_key)` with equal digest | yes, route | repeat the request |

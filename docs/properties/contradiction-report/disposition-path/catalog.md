@@ -470,13 +470,13 @@ Guarantee: An evidence object's `ObjectState.scope_id` is `None`, so
 under every project binding.
 Check: `always` - for every `evidence_meta` row `e` and its
 `object_registry` row `o`: `load_object_state(o.object_id).scope_id ==
-None` (`object_state_sql`, `envelope.rs:1901`), `ScopeFilter::matches(None,
+None` (`object_state_sql`, `envelope.rs:1962-1976`), `ScopeFilter::matches(None,
 ..) == Ok(false)` (`project.rs:199-206`), and `scoped_object_state(..,
 o.object_id)` returns `Err(NotFound)`. Every evidence row, so `always`.
 Observation split (portfolio refinement R3): the route-level test observes
 `invalid(not_found)` for a request naming an evidence object id in a scoped
 position; the `scope_id == None` clause is a kernel-crate assertion, since
-`load_object_state` is `pub(super)` (`envelope.rs:1925`).
+`load_object_state` is `pub(super)` (`envelope.rs:1989`).
 Fault/timing angle: none in time; the gap is structural.
 Required faults and enabling state: a live evidence row ingested through
 `kernel.artifact.ingest.*` or the store API; a route request naming its
@@ -610,7 +610,7 @@ Check: `always` - per identity `k`: `COUNT(commit_log WHERE producer,
 operation_key = k) <= 1`; a second request with equal digest returns
 `receipt.replayed == true`, `receipt.commit_seq` equal to the first, and
 `dispositions` byte-equal to the first (`stored_receipt`,
-`envelope.rs:1362-1392`; `commit.rs:1188-1204`); a request with a
+`envelope.rs:1426-1456`; `commit.rs:1188-1204`); a request with a
 different digest returns `invalid/operation_key_reused` (`commit.rs:1063-
 1070`). Every request, so `always`.
 Fault/timing angle: a lost response (`outcome_unknown`) followed by the
@@ -815,7 +815,7 @@ Reachability: default-production - every admission row passes
 constant `"kernel.commit"` (`commit.rs:100`) for every event except the two
 disputes, which carry the `v=1` structured reason the route composes and
 caps at 4096 bytes (`commit.rs:221-227`;
-`crates/daemon/src/kernel_routes/dispute.rs:14`, `:72-74`).
+`crates/daemon/src/kernel_routes/dispute.rs:14`, `:72-76`).
 Status: active
 Exercised: partial - `kernel_admission.rs:1676` covers a revocation reason
 surviving; no test drives a reason at or above 512 KiB, a blank reason
@@ -836,7 +836,7 @@ Fault/timing angle: none in time; the bound is per request.
 Required faults and enabling state: a store-API caller with a long or
 secret-bearing reason. The route cannot produce either: it refuses a
 dispute reason over 4096 bytes or holding a detection with
-`invalid_input` before the Kernel sees it (`dispute.rs:72-74`).
+`invalid_input` before the Kernel sees it (`dispute.rs:72-76`).
 Confidence: medium - [evidence](evidence/admission-reason-is-redacted-bounded-and-non-blank.md).
 The bound and the blank check are read in code; the redaction-row write
 was read but its message and column mapping were not traced into

@@ -507,7 +507,7 @@ evidence: without an approval it answers `denied: true` and the decision
 stays `contradicted`; with a valid `approval_object_id` it answers
 `denied: false`, lands `disputed`, and the row reads `outcome = deny`
 with the evidence id. Tool arm (#1161): an operation that names no
-approval runs under the subject's stored one (`admission.rs:1574-1583`),
+approval runs under the subject's stored one (`admission.rs:1574-1585`),
 so a model dispute could otherwise relax a quarantined or contradicted
 memory a human approved. `runMemoryMarkCommand` answers `denied` for an
 `assistant` mark whose preview moves to a less restrictive disposition,
@@ -691,7 +691,7 @@ Check: `always` - for every row whose reason starts with `v=1;`:
 `parse(reason)` is `Some`, `render(parse(reason)) == reason`, `reason` is
 ASCII, `len(reason) <= MAX_REASON_BYTES` (`dispute.rs:14`), and
 `redact_durable_text(reason).detections` is empty
-(`dispute.rs:72-74`). The Kernel stores `redact_lossy(reason)`
+(`dispute.rs:72-76`). The Kernel stores `redact_lossy(reason)`
 (`crates/kernel/src/redaction.rs:41-42` calls the same
 `redact_durable_text`), so no `durable_text_redactions` row exists for a
 route-written reason. Holds on every write, so `always`.
@@ -702,7 +702,7 @@ dispute on an approval so the cascade copies the reason; a body carrying
 its own `reason`.
 Confidence: high - [evidence](evidence/structured-reason-projects-typed-reporter-data.md).
 Read `render`, `parse`, `encode`, `decode`, `decodes_to_itself`
-(`dispute.rs:83-208`), and the Kernel `reason` path
+(`dispute.rs:83-213`), and the Kernel `reason` path
 (`admission.rs:1689`). The redaction-row absence for a landed dispute is
 argued from the shared detector, not asserted by a test.
 Existing check: `kernel_routes.rs:5880`, `:5723`, `:6199`, `:6252`,
