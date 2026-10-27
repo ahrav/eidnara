@@ -196,6 +196,14 @@ impl ScopeFilter {
         }
     }
 
+    /// The filter for the project whose route digest is `project_digest`, or `None` when the digest is not lowercase SHA-256 hex.
+    pub(crate) fn for_digest(project_digest: &str) -> Option<Self> {
+        Some(Self {
+            project: ProjectScope::new(project_digest).ok()?,
+            verdicts: HashMap::new(),
+        })
+    }
+
     pub(crate) fn matches(
         &mut self,
         scope_id: Option<&str>,

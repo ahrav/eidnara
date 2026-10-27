@@ -100,6 +100,9 @@ pub struct DaemonConfig {
     /// kernel source descriptors. Capture also requires `memory_enabled` and a session
     /// that is not a subagent's.
     pub source_capture_enabled: bool,
+    /// User-only consent to score each settled source publication against the project's live
+    /// memory decisions and keep the overlaps as derived candidate rows, and to sweep those rows.
+    pub contradiction_candidates_enabled: bool,
     /// Auto-search hint controls operate independently at transform time.
     pub auto_search: AutoSearchConfig,
     /// TerseTextCompression compression uses deterministic age-tier controls.
@@ -152,6 +155,7 @@ impl Default for DaemonConfig {
             memory_enabled: true,
             memory_auto_capture: true,
             source_capture_enabled: false,
+            contradiction_candidates_enabled: false,
             auto_search: AutoSearchConfig::default(),
             terse_text_compression: TerseTextCompressionConfig::default(),
             auto_promote: true,
@@ -429,6 +433,7 @@ impl MergedConfig {
             memory_enabled: _,
             memory_auto_capture: _,
             source_capture_enabled: _,
+            contradiction_candidates_enabled: _,
             auto_search: _,
             terse_text_compression: _,
             auto_promote: _,
@@ -496,6 +501,20 @@ impl ConfigCache {
         );
         emit_warnings(warnings);
         effective
+    }
+
+    /// The daemon-level `contradiction_candidates.enabled`: the user tier's value over the
+    /// default. A project tier cannot set the key, so the merge below names the filesystem root
+    /// as its project and its result holds for every project. Tier warnings are left to the
+    /// routes' loads, which report them on every bind.
+    pub fn contradiction_candidates_enabled(&mut self) -> bool {
+        self.effective_for_env(
+            std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+            std::env::var("HOME").ok().as_deref(),
+            Path::new("/"),
+        )
+        .0
+        .contradiction_candidates_enabled
     }
 
     /// Loads and merges config from explicit user and project paths.
@@ -920,6 +939,7 @@ pub enum ConfigKey {
     MemoryEnabled,
     MemoryAutoCapture,
     SourceCaptureEnabled,
+    ContradictionCandidatesEnabled,
     AutoSearchEnabled,
     AutoSearchScoreThreshold,
     AutoSearchMinPromptChars,
@@ -957,6 +977,7 @@ impl ConfigKey {
         Self::MemoryEnabled,
         Self::MemoryAutoCapture,
         Self::SourceCaptureEnabled,
+        Self::ContradictionCandidatesEnabled,
         Self::AutoSearchEnabled,
         Self::AutoSearchScoreThreshold,
         Self::AutoSearchMinPromptChars,
@@ -991,6 +1012,7 @@ impl ConfigKey {
             Self::MemoryEnabled => "/memory/enabled",
             Self::MemoryAutoCapture => "/memory/auto_capture",
             Self::SourceCaptureEnabled => "/source_capture/enabled",
+            Self::ContradictionCandidatesEnabled => "/contradiction_candidates/enabled",
             Self::AutoSearchEnabled => "/memory/auto_search/enabled",
             Self::AutoSearchScoreThreshold => "/memory/auto_search/score_threshold",
             Self::AutoSearchMinPromptChars => "/memory/auto_search/min_prompt_chars",
@@ -1039,6 +1061,7 @@ impl ConfigKey {
             | Self::ProjectDocsFiles
             | Self::MemoryAutoCapture
             | Self::SourceCaptureEnabled
+            | Self::ContradictionCandidatesEnabled
             | Self::CacheTtl => true,
             Self::ExecuteThresholdPercentage
             | Self::CompactionEnabled
@@ -1072,6 +1095,7 @@ impl ConfigKey {
             | Self::ProjectDocsFiles
             | Self::MemoryAutoCapture
             | Self::SourceCaptureEnabled
+            | Self::ContradictionCandidatesEnabled
             | Self::PromptSurfaceGuidanceOverrideText
             | Self::PromptSurfaceGuidanceOverridePath
             | Self::CacheTtl => TierClass::UserOnly,
@@ -1203,6 +1227,11 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
         ConfigKey::SourceCaptureEnabled => {
             if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
                 cfg.source_capture_enabled = enabled;
+            }
+        }
+        ConfigKey::ContradictionCandidatesEnabled => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.contradiction_candidates_enabled = enabled;
             }
         }
         ConfigKey::AutoSearchEnabled => {
@@ -2237,6 +2266,7 @@ mod tests {
                 ConfigKey::HistorySummarizerFallbackModels,
                 ConfigKey::MemoryAutoCapture,
                 ConfigKey::SourceCaptureEnabled,
+                ConfigKey::ContradictionCandidatesEnabled,
                 ConfigKey::MemoryInjectionBudgetTokens,
                 ConfigKey::MemoryBudgetTokens,
                 ConfigKey::UserProfileBudgetTokens,
@@ -2254,6 +2284,25 @@ mod tests {
                 "{key:?} is privileged and project-allowed"
             );
         }
+    }
+
+    #[test]
+    fn contradiction_candidates_default_off_and_only_the_user_tier_enables_them() {
+        assert!(!DaemonConfig::default().contradiction_candidates_enabled);
+        let on = serde_json::json!({ "contradiction_candidates": { "enabled": true } });
+        assert!(
+            merge_tiers_with_warnings(Some(&on), None)
+                .0
+                .contradiction_candidates_enabled
+        );
+        let (cfg, warnings) = merge_tiers_with_warnings(None, Some(&on));
+        assert!(!cfg.contradiction_candidates_enabled);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("/contradiction_candidates/enabled")),
+            "{warnings:?}"
+        );
     }
 
     /// A project tier that sets every key the merge reads changes no privileged
@@ -2289,6 +2338,7 @@ mod tests {
             },
             "terse_text_compression": { "enabled": true, "min_chars": 999 },
             "source_capture": { "enabled": true },
+            "contradiction_candidates": { "enabled": true },
             "user_memories": { "enabled": true },
             "memory_classifier": {
                 "inject_docs": true,
@@ -2329,6 +2379,10 @@ mod tests {
         assert!(
             !cfg.source_capture_enabled,
             "project tier cannot enable source capture"
+        );
+        assert!(
+            !cfg.contradiction_candidates_enabled,
+            "project tier cannot enable contradiction candidates"
         );
         assert_eq!(cfg.inject_docs, user_only.inject_docs);
         assert_eq!(cfg.project_doc_files, user_only.project_doc_files);
@@ -2503,7 +2557,7 @@ mod tests {
             0,
             "tier values are read through ConfigKey::pointer(), never a raw literal"
         );
-        assert_eq!(ConfigKey::ALL.len(), 28);
+        assert_eq!(ConfigKey::ALL.len(), 29);
     }
 
     /// The user-memory gate's two keys and the budget's two keys resolve the

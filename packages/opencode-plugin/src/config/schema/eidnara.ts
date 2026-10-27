@@ -289,6 +289,12 @@ export interface EidnaraConfig {
      */
     source_capture?: { enabled: boolean };
     /**
+     * User-only consent for the daemon to score settled source publications against the
+     * project's live memory decisions and keep the overlaps as candidate rows. The daemon reads
+     * this key itself. Defaults to off.
+     */
+    contradiction_candidates?: { enabled: boolean };
+    /**
      * User-only list of repository documents the daemon reads for the prompt block and, when
      * `source_capture.enabled` is set, retains. The daemon reads and validates this key itself;
      * a project value is ignored.
@@ -578,6 +584,17 @@ export const EidnaraConfigSchema = z
             })
             .default({ enabled: false })
             .describe("User-only exact source capture of message text and tool results."),
+        contradiction_candidates: z
+            .strictObject({
+                enabled: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "User-only: score each settled source publication against the project's live memory decisions and keep the lexical overlaps as derived candidate rows a reviewer can confirm with a dispute, and sweep rows that can no longer be served (default: false). Project values are ignored with a warning.",
+                    ),
+            })
+            .default({ enabled: false })
+            .describe("User-only write-time contradiction candidates."),
         project_docs: z
             .strictObject({
                 files: z

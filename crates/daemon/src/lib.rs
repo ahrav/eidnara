@@ -2796,6 +2796,7 @@ pub struct HandlerCore {
     capture_commit_gate: Arc<Mutex<()>>,
     capture_memo: Arc<Mutex<memory_capture::CaptureCheckpointMemo>>,
     source_capture: Arc<source_capture::SourceCapture>,
+    contradiction_candidates: Arc<contradiction_candidates::Candidates>,
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
     #[cfg(test)]
@@ -3814,6 +3815,7 @@ impl Handler {
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
             source_capture: Arc::default(),
+            contradiction_candidates: Arc::default(),
             use_outcome_counts: Default::default(),
             use_outcome_lifecycle: Default::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
@@ -3964,6 +3966,8 @@ impl HandlerCore {
         let store_slot = Arc::clone(&self.store);
         let memory_reviewer_status = Arc::clone(&self.memory_reviewer_status);
         let source_capture = Arc::clone(&self.source_capture);
+        let contradiction_candidates = Arc::clone(&self.contradiction_candidates);
+        let candidates_enabled = self.candidates_enabled();
         let memory_reviewer_home = Arc::clone(&self.memory_reviewer_home);
         let memory_reviewer_host = self
             .memory_reviewer_host
@@ -4004,6 +4008,8 @@ impl HandlerCore {
                         store,
                         Arc::clone(&kernel),
                         Arc::clone(&source_capture),
+                        Arc::clone(&contradiction_candidates),
+                        Arc::clone(&candidates_enabled),
                         cancel.clone(),
                     ));
                 }
@@ -4349,6 +4355,7 @@ impl Handler {
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
             source_capture: Arc::default(),
+            contradiction_candidates: Arc::default(),
             use_outcome_counts: Default::default(),
             use_outcome_lifecycle: Default::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
@@ -4958,6 +4965,22 @@ impl HandlerCore {
             project,
             binding.project_root.to_string_lossy().as_ref(),
         )
+    }
+
+    /// The daemon-level `contradiction_candidates.enabled`, read again on each call so the sweep follows the user tier; bound routes keep the value frozen at bind.
+    fn candidates_enabled(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        #[cfg(test)]
+        if let Some(config) = &self.fixed_config {
+            let enabled = config.contradiction_candidates_enabled;
+            return Arc::new(move || enabled);
+        }
+        let config = Mutex::new(ConfigCache::default());
+        Arc::new(move || {
+            config
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contradiction_candidates_enabled()
+        })
     }
 
     fn effective_config(&self, project_root: &Path) -> Arc<DaemonConfig> {
@@ -13550,6 +13573,10 @@ impl CompositeComponent for Handler {
                 .report(self.cancel.is_cancelled(), now_ms()),
         );
         metrics.insert(
+            "contradiction_candidates".to_owned(),
+            self.contradiction_candidates.report(),
+        );
+        metrics.insert(
             "memory_reviewer".to_owned(),
             self.memory_reviewer_status.reported().to_json(),
         );
@@ -21307,6 +21334,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bound_route_keeps_its_candidate_flag_across_a_reload_and_health_reports_the_block() {
+        let mut enabled = default_test_config();
+        enabled.contradiction_candidates_enabled = true;
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), enabled);
+        let (first, second) = (test_route(7), test_route(8));
+        let identity = crate::kernel_route_fixtures::route_identity(&project, "opencode", "ses-a");
+        assert!(matches!(
+            CompositeComponent::bind(&handler, first, identity).await,
+            BindOutcome::Accept
+        ));
+        assert!(handler.candidates_enabled()());
+        // A reload changes what the next bind reads; the second route is bound with that value.
+        let mut reloaded = binding(project.to_str().unwrap(), "ses-b");
+        reloaded.config = default_test_config();
+        handler.bind_route(second, reloaded);
+        let frozen = |route, session| {
+            handler
+                .resolve_binding(route, session)
+                .unwrap()
+                .config
+                .contradiction_candidates_enabled
+        };
+        assert!(frozen(first, "ses-a"), "the bound route keeps its value");
+        assert!(!frozen(second, "ses-b"));
+
+        let metrics = CompositeComponent::health(&handler).await.metrics.unwrap();
+        let block = metrics["contradiction_candidates"].as_object().unwrap();
+        assert_eq!(block.len(), 27);
+        assert!(block.values().all(|value| value == 0), "{block:?}");
+        let composite = host_runtime::HealthReport {
+            status: host_runtime::HealthStatus::Ok,
+            detail: None,
+            metrics: Some(json!({
+                "components": { "context": { "status": "ok", "metrics": metrics.clone() } }
+            })),
+        };
+        let status: serde_json::Value = serde_json::from_slice(
+            &host_runtime::host_status_response_json(&composite, json!({ "state": "healthy" })),
+        )
+        .unwrap();
+        assert_eq!(
+            status["metrics"]["components"]["context"]["metrics"]["contradiction_candidates"],
+            metrics["contradiction_candidates"],
+            "the host forwards the block field for field"
+        );
+    }
+
+    #[tokio::test]
     async fn old_epoch_route_gone_preserves_new_epoch_binding_and_dispatch_state() {
         let state = Arc::new(ProducerState::default());
         let (handler, _store, _dir, project) = handler_with_store(state, DaemonConfig::default());
@@ -26417,6 +26493,7 @@ mod tests {
             memory_enabled: true,
             memory_auto_capture: false,
             source_capture_enabled: false,
+            contradiction_candidates_enabled: false,
             auto_search: crate::config::AutoSearchConfig::default(),
             terse_text_compression: crate::config::TerseTextCompressionConfig::default(),
             auto_promote: true,

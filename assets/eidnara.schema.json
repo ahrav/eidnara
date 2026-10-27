@@ -643,6 +643,21 @@
       },
       "additionalProperties": false
     },
+    "contradiction_candidates": {
+      "default": {
+        "enabled": false
+      },
+      "description": "User-only write-time contradiction candidates.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "User-only: score each settled source publication against the project's live memory decisions and keep the lexical overlaps as derived candidate rows a reviewer can confirm with a dispute, and sweep rows that can no longer be served (default: false). Project values are ignored with a warning.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "project_docs": {
       "description": "User-only repository documents Eidnara reads and, with source capture, retains.",
       "type": "object",

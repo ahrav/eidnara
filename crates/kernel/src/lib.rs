@@ -19,6 +19,7 @@ mod current_input;
 mod durable_fs;
 mod eligibility;
 mod envelope;
+mod evidence_liveness;
 mod facts;
 mod local_file;
 mod memory_reviewer_hold;
@@ -106,6 +107,7 @@ pub use envelope::{
     Preview, RemediationTarget, RepositoryProvenance, Sensitivity, StagingCandidateRow,
     StagingCandidateSpec, TokenCheck, TokenConflict,
 };
+pub use evidence_liveness::{EvidenceLiveness, EvidenceLivenessError, MAX_EVIDENCE_LIVENESS_IDS};
 pub use facts::{ArtifactBudgetFacts, KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};
 pub use local_file::{
     CaptureExpiry, LOCAL_FILE_DETAIL_VERSION, LOCAL_FILE_KIND, LOCAL_FILE_SOURCE_KIND,

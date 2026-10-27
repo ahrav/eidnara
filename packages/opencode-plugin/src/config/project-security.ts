@@ -515,6 +515,17 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         }
     }
 
+    // The block holds only the user-level consent switch, as `source_capture` does.
+    if ("contradiction_candidates" in projectRaw) {
+        const candidates = projectRaw.contradiction_candidates;
+        delete projectRaw.contradiction_candidates;
+        if (isPlainObject(candidates) && "enabled" in candidates) {
+            warnings.push(
+                "Ignoring contradiction_candidates from project config (security: scoring conversation sources against memory decisions requires user-level consent).",
+            );
+        }
+    }
+
     // The daemon reads the document list from the user tier only, so the strip removes the
     // block and warns when it sets the list, as the daemon's tier merge does.
     if ("project_docs" in projectRaw) {

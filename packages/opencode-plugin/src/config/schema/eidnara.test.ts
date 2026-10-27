@@ -74,6 +74,20 @@ describe("EidnaraConfigSchema", () => {
                     .success,
             ).toBe(false);
         });
+
+        it("keeps contradiction candidates off unless the key enables it", () => {
+            const parse = (value: unknown) =>
+                EidnaraConfigSchema.safeParse({ contradiction_candidates: value });
+            expect(EidnaraConfigSchema.parse({}).contradiction_candidates).toEqual({
+                enabled: false,
+            });
+            expect(parse({}).data?.contradiction_candidates).toEqual({ enabled: false });
+            expect(parse({ enabled: true }).data?.contradiction_candidates).toEqual({
+                enabled: true,
+            });
+            expect(parse({ enabled: "yes" }).success).toBe(false);
+            expect(parse({ enabled: true, extra: 1 }).success).toBe(false);
+        });
     });
 
     describe("budget configuration", () => {
@@ -137,6 +151,9 @@ describe("EidnaraConfigSchema", () => {
                     enabled: false,
                 },
                 source_capture: {
+                    enabled: false,
+                },
+                contradiction_candidates: {
                     enabled: false,
                 },
                 terse_text_compression: {

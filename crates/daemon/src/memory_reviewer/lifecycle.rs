@@ -437,14 +437,17 @@ pub fn sweep_and_sample(
     })
 }
 
-/// Blocking work runs off the runtime thread and is joined before the task ends, so shutdown observes physical completion. The blocking pass checks the token between steps, so the join waits for at most one in-flight step.
+/// Blocking work runs off the runtime thread and is joined before the task ends, so shutdown observes physical completion. The blocking pass checks the token between steps, so the join waits for at most one in-flight step. After a pass that was not cancelled, the same blocking task runs one contradiction-candidate sweep under the daemon-level `candidates_enabled` value; the loop owns the sweep's watermark.
 pub(crate) async fn run(
     status: Arc<MemoryReviewerStatus>,
     store: Arc<MemoryStore>,
     kernel: Arc<KernelOpenCoordinator>,
     capture: Arc<crate::source_capture::SourceCapture>,
+    candidates: Arc<crate::contradiction_candidates::Candidates>,
+    candidates_enabled: Arc<dyn Fn() -> bool + Send + Sync>,
     cancel: CancellationToken,
 ) {
+    let mut sweep = Some(crate::contradiction_candidates::sweep::CandidateSweep::default());
     loop {
         let kernel_store = (kernel.state() == KernelState::Ready)
             .then(|| kernel.kernel_store().ok())
@@ -454,14 +457,27 @@ pub(crate) async fn run(
         let last_sampled_at_ms = status.last_sampled_at_ms();
         let store = Arc::clone(&store);
         let probe = cancel.clone();
+        let candidates = Arc::clone(&candidates);
+        let candidates_enabled = Arc::clone(&candidates_enabled);
+        let mut candidate_sweep = sweep.take().unwrap_or_default();
         let mut worker = tokio::task::spawn_blocking(move || {
-            sweep_and_sample(
+            let pass = sweep_and_sample(
                 &store,
                 kernel_store.as_deref(),
                 now_ms,
                 last_sampled_at_ms,
                 &|| probe.is_cancelled(),
-            )
+            );
+            if pass.is_some() && !probe.is_cancelled() {
+                candidate_sweep.run(
+                    &store,
+                    kernel_store.as_deref(),
+                    candidates_enabled(),
+                    &candidates,
+                    now_ms,
+                );
+            }
+            (pass, candidate_sweep)
         });
         let pass = tokio::select! {
             _ = cancel.cancelled() => {
@@ -470,8 +486,11 @@ pub(crate) async fn run(
                 return;
             }
             joined = &mut worker => match joined {
-                Ok(Some(pass)) => pass,
-                Ok(None) => return,
+                Ok((Some(pass), candidate_sweep)) => {
+                    sweep = Some(candidate_sweep);
+                    pass
+                }
+                Ok((None, _)) => return,
                 Err(error) => {
                     eprintln!("daemon: memory_reviewer sampler worker failed: {error}");
                     Pass {
