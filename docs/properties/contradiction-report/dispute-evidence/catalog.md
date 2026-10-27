@@ -109,7 +109,7 @@ sending; renders denials and refusals`
 calls `dispute` with neither evidence input, with `path` and no
 `gitObjectId`, and with no `objectId`, and asserts the usage error with no
 daemon call; the Pi test `refuses a dispute without evidence before
-sending anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:482`)
+sending anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:491`)
 asserts the same for Pi. A route request from the tool with neither field
 is the raw-body case the route test above already refuses
 `invalid_input`, since the tool sends the same `disposition` body.
