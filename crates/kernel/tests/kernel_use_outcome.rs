@@ -1464,8 +1464,8 @@ const DEFINITION_SQL: &str = "SELECT u.use_outcome_id FROM use_outcome_decisions
       AND u.served_commit_seq<?5
     ORDER BY u.served_commit_seq DESC, u.use_outcome_id DESC LIMIT 1";
 
-/// One generated serve: session and harness indexes, a served-set mask over `d1..d3`, and which earlier tick it was served at.
-type GeneratedServe = (usize, usize, u8, usize);
+/// One generated event: kind (0 or 1 a serve, 2 a tick, 3 a dispute), session, harness, and project indexes, a served-set mask over `d1..d3` (a dispute's subject is `mask % 3`), and which tick a serve was served at.
+type GeneratedEvent = (u8, usize, usize, usize, u8, usize);
 
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig {
@@ -1475,70 +1475,109 @@ proptest::proptest! {
         ..proptest::prelude::ProptestConfig::default()
     })]
 
-    /// Over generated serve histories (shared and out-of-order served sequences, overlapping served sets, two harnesses, and sessions never served), every dispute stores the link the record-join definition answers.
+    /// Over generated histories that interleave serves, ticks, and disputes (shared and out-of-order served sequences, overlapping served sets, two harnesses, two projects, and sessions never served), every dispute stores the link the record-join definition answers when it commits.
     #[test]
     fn the_stored_link_equals_the_record_join_definition(
-        serves in proptest::collection::vec(
-            (0usize..3, 0usize..2, 0u8..8, 0usize..4),
-            0..12,
+        events in proptest::collection::vec(
+            (0u8..4, 0usize..4, 0usize..2, 0usize..2, 0u8..8, 0usize..8),
+            0..24,
         ),
     ) {
-        check_link_definition(&serves)?;
+        check_link_definition(&events)?;
     }
 }
 
 fn check_link_definition(
-    serves: &[GeneratedServe],
+    events: &[GeneratedEvent],
 ) -> Result<(), proptest::test_runner::TestCaseError> {
     const OBJECTS: [&str; 3] = ["d1", "d2", "d3"];
     const SESSIONS: [&str; 4] = ["s1", "s2", "s3", "never"];
     const HARNESSES: [&str; 2] = [HARNESS, "pi"];
+    let projects = [project(), "b".repeat(64)];
     let root = tempfile::tempdir().unwrap();
     let store = decision_store(root.path(), &OBJECTS);
-    let ticks: Vec<i64> = (0..4).map(|n| tick(&store, &format!("tick-{n}"))).collect();
-    for (n, &(session, harness, mask, at)) in serves.iter().enumerate() {
-        let objects: Vec<&str> = (0..OBJECTS.len())
-            .filter(|bit| mask & (1 << bit) != 0)
-            .map(|bit| OBJECTS[bit])
-            .collect();
-        let mut serve = spec(SESSIONS[session], &objects, ticks[at], 0);
-        serve.harness = HARNESSES[harness].to_string();
-        // A repeated identity is `Conflict` and records nothing; the history keeps its first record.
-        let _ = insert(&store, &format!("serve-{n}"), serve);
-    }
+    let mut ticks: Vec<i64> = (0..2).map(|n| tick(&store, &format!("tick-{n}"))).collect();
     let reads = writer(root.path());
-    for session in SESSIONS {
+    let check_dispute = |key: &str,
+                         session: usize,
+                         harness: usize,
+                         project: usize,
+                         subject: &str|
+     -> Result<(), proptest::test_runner::TestCaseError> {
+        let reporter = DisputeReporter {
+            project_digest: projects[project].clone(),
+            harness: HARNESSES[harness].to_string(),
+            ..reporter(SESSIONS[session], TaintClass::AssistantInference, None)
+        };
+        let receipt = store
+            .commit(intent(key), |envelope| {
+                envelope.record_dispute_admission(
+                    request(subject, EventKind::MarkDisputed),
+                    &reporter,
+                )?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let stored: Option<String> = reads
+            .query_row(
+                "SELECT use_outcome_id FROM admission_decisions
+                  WHERE commit_seq=?1 AND subject_object_id=?2",
+                params![receipt.commit_seq, subject],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let defined: Option<String> = reads
+            .query_row(
+                DEFINITION_SQL,
+                params![
+                    subject,
+                    reporter.project_digest,
+                    reporter.harness,
+                    reporter.session_id,
+                    receipt.commit_seq
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        proptest::prop_assert_eq!(stored, defined, "{}", key);
+        Ok(())
+    };
+    for (n, &(kind, session, harness, project, mask, at)) in events.iter().enumerate() {
+        match kind {
+            0 | 1 => {
+                let objects: Vec<&str> = (0..OBJECTS.len())
+                    .filter(|bit| mask & (1 << bit) != 0)
+                    .map(|bit| OBJECTS[bit])
+                    .collect();
+                let mut serve = spec(SESSIONS[session], &objects, ticks[at % ticks.len()], 0);
+                serve.harness = HARNESSES[harness].to_string();
+                serve.project_digest = projects[project].clone();
+                // A repeated identity is `Conflict` and records nothing; the history keeps its first record.
+                match insert(&store, &format!("serve-{n}"), serve) {
+                    Ok(_) | Err(KernelError::Conflict) => {}
+                    Err(error) => proptest::prop_assert!(false, "serve {} refused: {:?}", n, error),
+                }
+            }
+            2 => ticks.push(tick(&store, &format!("tick-event-{n}"))),
+            _ => check_dispute(
+                &format!("dispute-{n}"),
+                session,
+                harness,
+                project,
+                OBJECTS[usize::from(mask) % OBJECTS.len()],
+            )?,
+        }
+    }
+    for (session, _) in SESSIONS.iter().enumerate() {
         for subject in OBJECTS {
-            let reporter = reporter(session, TaintClass::AssistantInference, None);
-            let receipt = store
-                .commit(
-                    intent(&format!("dispute-{session}-{subject}")),
-                    |envelope| {
-                        envelope.record_dispute_admission(
-                            request(subject, EventKind::MarkDisputed),
-                            &reporter,
-                        )?;
-                        Ok(String::new())
-                    },
-                )
-                .unwrap();
-            let stored: Option<String> = reads
-                .query_row(
-                    "SELECT use_outcome_id FROM admission_decisions
-                      WHERE commit_seq=?1 AND subject_object_id=?2",
-                    params![receipt.commit_seq, subject],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let defined: Option<String> = reads
-                .query_row(
-                    DEFINITION_SQL,
-                    params![subject, project(), HARNESS, session, receipt.commit_seq],
-                    |row| row.get(0),
-                )
-                .optional()
-                .unwrap();
-            proptest::prop_assert_eq!(stored, defined, "{} {}", session, subject);
+            check_dispute(
+                &format!("final-{session}-{subject}"),
+                session,
+                0,
+                0,
+                subject,
+            )?;
         }
     }
     Ok(())
