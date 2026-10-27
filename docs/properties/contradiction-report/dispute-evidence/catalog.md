@@ -438,7 +438,8 @@ sends `source_kind: "user"` on both calls. Tool arm (#1161): `sends the
 evidence under the tool identity, actor, cause, and assistant source kind`
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1376`)
 asserts the tool's preview and commit both send `source_kind:
-"assistant"` and no asserted class, and the Pi test `files a dispute under
+"assistant"` with `asserted_source_class` and `asserted_taint_class` both
+absent, and the Pi test `files a dispute under
 agent:pi and the assistant source kind when allowed`
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:449`) asserts the
 same for Pi's preview and commit bodies, with `agent:pi`; the route side

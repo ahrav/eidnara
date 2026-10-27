@@ -56,9 +56,10 @@ All constructed, the tool arm with #1161:
   subject's.
 - The command sends `source_kind: "user"` on preview and commit
   (`memory-mark-command.test.ts:181`).
-- The tool sends `source_kind: "assistant"` and no asserted class on
-  preview and commit: `sends the evidence under the tool identity, actor,
-  cause, and assistant source kind`
+- The tool sends `source_kind: "assistant"` with `asserted_source_class`
+  and `asserted_taint_class` both absent on preview and commit: `sends
+  the evidence under the tool identity, actor, cause, and assistant source
+  kind`
   (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1376`)
   for OpenCode and `files a dispute under agent:pi and the assistant
   source kind when allowed`
