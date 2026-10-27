@@ -61,6 +61,7 @@ Analyzer checks the scorer relies on:
 | `every_candidate_statement_reuses_its_cached_plan` | `:1353` | 12 rounds of writes, late writes, pages, sweep pages, keyed deletes, and gauge reads run 16 distinct candidate statements; the statement cache re-creates and re-plans none | row key and caps; read (paging); sweep (store arm) (the cost of the checks, not a record directly) | unaudited |
 | `the_page_sweep_and_eviction_scans_stop_at_their_bound` | `:1498` | over a 300-row project, a two-row page, a three-row sweep page, and a one-row eviction each run under 500 VM steps | read (paging); sweep (store arm); row key and caps (bounded scans) | unaudited |
 | `a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores` | `:1542` | 256 rows into a run of equal scores, with and without equal `created_at_ms`, the continuation page returns the next two rows under 500 VM steps | read (paging) | unaudited |
+| `a_read_with_a_secret_shaped_id_answers_an_empty_page` | `:1593` | a page read for a secret-shaped decision id answers an empty page; an empty id is still refused by the shape check | read keys (no text); read (paging) | unaudited |
 
 Baseline: `crates/memory-store/tests/baseline.rs` pins the table, its two
 indexes, and `contradiction_candidate_totals` in `EXPECTED_OBJECTS` and

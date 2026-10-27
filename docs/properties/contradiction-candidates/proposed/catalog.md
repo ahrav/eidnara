@@ -460,7 +460,7 @@ evictions at caps of 2 to 4096, and keyed deletes against a reference model
 of the rules, checking every row, the returned counts, rowid stability, and
 the gauge after each step, and pages, cursors across writes, and the sweep
 every seventh step. The store
-(`crates/memory-store/src/contradiction_candidates.rs:478`) enforces K and the
+(`crates/memory-store/src/contradiction_candidates.rs:485`) enforces K and the
 project cap in the write transaction; the daemon owns the values. The pass
 arm (M per pass, `rows_written`, replayed units) lands with #1167.
 Guarantee: The table key is (project digest, descriptor evidence object id,
