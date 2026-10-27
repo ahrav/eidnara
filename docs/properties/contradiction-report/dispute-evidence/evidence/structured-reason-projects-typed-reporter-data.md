@@ -7,7 +7,10 @@ A the reporter class and the repository reference ride in `reason`, and
 PR B ([#1162](https://github.com/ahrav/eidnara/issues/1162)) adds the
 typed columns beside it. The reason must therefore be a faithful,
 parseable carrier, and since PR B it must equal the rendering of the
-typed columns.
+typed values the grammar carries: the event kind, `reporter_taint_class`,
+`evidence_id`, and the reference in `event_payload`
+(`reporter_source_class` and `use_outcome_id` have no field in the
+grammar).
 
 ## Evidence trail
 
@@ -105,9 +108,16 @@ None in time. The reason depends on the scanner's rule set, as in
 - Sources examined: [`../open-questions.md`](../open-questions.md) Q6;
   `crates/kernel/src/schema.rs:164`; the #1162 diff of `crates/kernel/src`.
 - Findings: the grammar is versioned (`v=1`) and parseable. #1162 takes
-  Q6's option (a): the columns are nullable, a row written before #1162
-  keeps its `reason` with the three columns NULL, and no code reads a
-  `reason` into the columns.
+  Q6's option (a): the four U3 columns are nullable, a dispute row
+  written before #1162 keeps its `reason` with `reporter_source_class`,
+  `reporter_taint_class`, `event_payload`, and `use_outcome_id` NULL (no
+  Kernel code wrote any of them before #1162), and no code reads a
+  `reason` into the columns. Rows of every other event kind also hold
+  NULL in all four, by the CHECK that ties the reporter columns to
+  `mark_disputed` and `contradict` (`crates/kernel/src/schema.rs:164`).
 - Missing evidence: none.
-- Conclusion: resolved with answer: they do not; a PR A row is told apart
-  by its NULL `reporter_source_class`, and its `reason` stays the carrier.
+- Conclusion: resolved with answer: they do not. A `mark_disputed` or
+  `contradict` row with NULL reporter columns is a pre-#1162 dispute,
+  since the route has stored them on every dispute since #1162; its
+  `reason` stays the carrier. NULL on another event kind says nothing
+  about the row's age.
