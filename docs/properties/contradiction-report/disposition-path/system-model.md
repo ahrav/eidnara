@@ -86,7 +86,7 @@ the difference noted.
   `reason`. `foreign_keys=ON` is set at `schema.rs:244` and `open.rs:1035`.
 - `evidence_meta` (`schema.rs:139`): live means `invalidated_commit_seq IS
   NULL`. The table has no `scope_id` column.
-- `object_state_sql` (`envelope.rs:1898-1912`) reads `scope_id` as
+- `object_state_sql` (`envelope.rs:1962-1976`) reads `scope_id` as
   `COALESCE(dec.scope_id, obs.scope_id)`, so any object that is not a
   decision or observation has `scope_id = None`. `load_object_state`
   (`envelope.rs:1989-2004`) carries the doc comment at

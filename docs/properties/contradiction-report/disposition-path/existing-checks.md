@@ -111,7 +111,7 @@ receipt without `dispositions`.
 | `admission.rs:4532` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | maturity, restrictiveness (dispute events) | unaudited |
 | `memory-mark-command.test.ts:185` | the evidence rides the preview and the commit byte for byte under the user source kind | command (both bodies, `source_kind`) | unaudited |
 | `memory-mark-command.test.ts:212` | two disputes with different evidence in one session are two commits; the same evidence replays | replay | unaudited |
-| `memory-mark-command.test.ts:601` | the caller's signal reaches the preview and the commit | command (cancellation before preview and before commit) | unaudited |
+| `memory-mark-command.test.ts:601` | the caller's signal reaches the preview and the commit | command (signal propagation to both requests) | unaudited |
 | `memory-mark-command.test.ts:633` | an assistant-sourced dispute is denied a relaxation the stored approval would admit | authority-bearer cascade, command (assistant source kind, preview guard) | unaudited |
 | `memory-mark-command.test.ts:660` | a user command relaxes through the stored approval | command (user source kind, stored approval) | unaudited |
 | `memory-mark-command.test.ts:672` | the preview and the commit carry one digest of the operation and the source kind | replay (request digest), caller-asserted fields | unaudited |

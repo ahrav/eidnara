@@ -159,7 +159,7 @@ that exist)
 |---|---|---|
 | `admission_decisions` | `event_kind` (`mark_disputed` or `contradict`), `subject_object_id`, `source_kind`/`source_id`/`source_class`/`taint_class` (the subject's, `load_subject_facts` `admission.rs:2131-2172`), `disposition`, `maturity`, `effective_maturity`, `outcome`, `evidence_id`, `reason`, `commit_seq`, `decided_at` | FACT at `3a3b916b7` except `evidence_id` (always `None` then) and `reason` (constant `"kernel.commit"`, `commit.rs:99`). PR A: a dispute row carries the checked `evidence_id` and the `v=1` reason (`commit.rs:731-732`) |
 | `admission_decisions` (U3) | `reporter_source_class`, `reporter_taint_class`, `event_payload`, `use_outcome_id` | PROPOSED, Batch K1 |
-| `commit_log` | `producer`, `operation_key`, `request_digest`, `actor`, `cause` (`crates/kernel/src/schema.rs:26`; insert `envelope.rs:1419-1435`) | FACT; no session or source_kind column |
+| `commit_log` | `producer`, `operation_key`, `request_digest`, `actor`, `cause` (`crates/kernel/src/schema.rs:26`; insert `envelope.rs:1484-1499`) | FACT; no session or source_kind column |
 | `operation_receipts` | `(producer, operation_key) -> request_digest, result_payload` (`schema.rs:42`; `stored_receipt` `envelope.rs:1426-1456`) | FACT |
 | `durable_text_redactions` | one row per detection in `reason` (`write_admission` `record(...)` call, `admission.rs:1787-1794`) | FACT |
 

@@ -22,7 +22,7 @@ per report.
   daemon prefixes the key with the project and `RECEIPT_FAMILY = "commit"`
   (`project.rs:78-83`, `:152-163`; `commit.rs:87`).
 - `commit_prepared_with_writer` opens the writer transaction, checks the
-  fence, then `stored_receipt` (`crates/kernel/src/envelope.rs:1403-1416`):
+  fence, then `stored_receipt` (`crates/kernel/src/envelope.rs:1472-1481`):
   a `Some` returns the stored receipt without running the operation;
   `Conflict` when the digest differs (`:1426-1456`).
 - `operation_receipts` is `UNIQUE(producer, operation_key)` with no-delete

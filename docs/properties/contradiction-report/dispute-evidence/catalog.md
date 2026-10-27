@@ -529,7 +529,8 @@ Guarantee: A dispute carrying evidence yields `outcome = deny`, keeps
 historical maturity, never raises effective maturity, and moves the
 disposition to an equal or more restrictive one unless a valid approval
 is named by the operation or stored on the subject; against a more
-restrictive prior without a valid approval it records `denied` with the prior kept.
+restrictive prior without a valid approval it records `denied` with the
+prior kept.
 Check: `always` - for every dispute row `r` and its prior `p`:
 `r.outcome = 'deny'`, `r.maturity = p.maturity`,
 `rank(r.effective_maturity) <= rank(p.effective_maturity)`, and
@@ -562,8 +563,10 @@ Open questions:
   outright. The test pins the recorded form; see
   [open-questions.md](open-questions.md) Q9. Through the shared runner
   a denied preview returns before the commit
-  (`memory-mark-command.ts:274`), so the command and tool arms write no
-  denied row; only a raw route caller lands one. (needs human input)
+  (`memory-mark-command.ts:274`), so when the object is unchanged between
+  the preview and the commit the command and tool arms write no denied
+  row; a denied commit verdict (`:302`) still lands one. (needs human
+  input)
 - The assistant no-relaxation rule runs in the plugin against the
   preview (`memory-mark-command.ts:275-287`); the route back-fills the
   subject's stored approval for every source kind
