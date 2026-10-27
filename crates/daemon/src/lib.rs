@@ -2804,6 +2804,7 @@ pub struct HandlerCore {
     kernel: Arc<kernel_routes::KernelOpenCoordinator>,
     /// Serve writes transform passes hand off after freezing a composition, and their outcome counts.
     use_outcome_writes: Arc<use_outcome_writer::UseOutcomeWrites>,
+    use_outcome_lifecycle: Arc<use_outcome_writer::LifecycleCounts>,
     /// The MemoryReviewer sampler's published block; `health()` and status read it and never touch the ledger.
     memory_reviewer_status: Arc<memory_reviewer::lifecycle::MemoryReviewerStatus>,
     /// `initialize` decodes the storage descriptor, and `activate` consumes it: malformed descriptors fail before publication, while storage opens after transport publication.
@@ -2864,6 +2865,9 @@ pub struct HandlerCore {
     /// `Some(None)` is a Kernel that is not Ready, and `Some(Some(error))` is a commit that returned `error`.
     #[cfg(test)]
     use_outcome_fault: Mutex<Option<Option<kernel::KernelError>>>,
+    /// The answer the next `session.delete` use-outcome step gives after its commit ran, standing in for an unknown commit outcome.
+    #[cfg(test)]
+    use_outcome_delete_fault: Mutex<Option<kernel::KernelError>>,
     #[cfg(test)]
     between_transform_and_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -3505,6 +3509,10 @@ struct PassEnv {
     /// `use_outcome_settled` records this pass's serve-write handoff to a Ready Kernel, regardless of outcome. If the Kernel is
     /// not Ready, `use_outcome_settled` remains clear so a rerun can retry.
     use_outcome_settled: std::sync::atomic::AtomicBool,
+    /// What remains of the pass's Kernel wait for the touch it makes on its own thread.
+    kernel_writes: use_outcome_writer::PassWriteBudget,
+    /// Set when this pass handed its serve to a tracked job: that job advances `last_transform_at` after its serve commits, so the pass thread makes no touch of its own.
+    touch_delegated: std::sync::atomic::AtomicBool,
     snapshot_generation: u64,
     pass_now: i64,
     timings: PassTimings,
@@ -3839,6 +3847,7 @@ impl Handler {
             capture_commit_gate: Arc::new(Mutex::new(())),
             source_capture: Arc::default(),
             use_outcome_writes: Arc::default(),
+            use_outcome_lifecycle: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
@@ -3878,6 +3887,8 @@ impl Handler {
             after_transform_commit: Mutex::new(None),
             #[cfg(test)]
             use_outcome_fault: Mutex::new(None),
+            #[cfg(test)]
+            use_outcome_delete_fault: Mutex::new(None),
             #[cfg(test)]
             between_transform_and_prepare: Mutex::new(None),
             #[cfg(test)]
@@ -4371,6 +4382,7 @@ impl Handler {
             capture_commit_gate: Arc::new(Mutex::new(())),
             source_capture: Arc::default(),
             use_outcome_writes: Arc::default(),
+            use_outcome_lifecycle: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
@@ -4404,6 +4416,7 @@ impl Handler {
             reduction_injection: Mutex::new(HashMap::new()),
             after_transform_commit: Mutex::new(None),
             use_outcome_fault: Mutex::new(None),
+            use_outcome_delete_fault: Mutex::new(None),
             between_transform_and_prepare: Mutex::new(None),
             wrapup_operation_budget: Mutex::new(None),
             unknown_module_retry_delay: Mutex::new(None),
@@ -6866,8 +6879,8 @@ impl HandlerCore {
         }
     }
 
-    /// Step 1 of `session.delete`: retires the bound session's captured sources in the Kernel. The caller holds the capture commit gate. A deployment without a kernel holds no captured sources. A Kernel that is starting or unavailable, or a transient inventory or commit failure, is the retryable `kernel_unavailable`; a corrupt row or a page that replays is `source_retirement_failed`, which a retry meets again.
-    fn retire_captured_sources(
+    /// Step 1 of `session.delete`, under the capture commit gate the caller holds: retires the bound session's captured sources, then marks its live use-outcome records deleted. A deployment without a kernel holds neither. A Kernel that is starting or unavailable, or a transient inventory or commit failure, is the retryable `kernel_unavailable`, counted `delete_kernel_unavailable`; a conflict, a corrupt row, invalid input, or a page that replays is `source_retirement_failed`, which a retry meets again.
+    fn delete_kernel_step(
         &self,
         binding: &SessionBinding,
         session_id: &str,
@@ -6875,13 +6888,58 @@ impl HandlerCore {
         if !self.kernel.expected() {
             return Ok(());
         }
-        let kernel = self
+        let outcome = self
             .kernel
             .kernel_store()
-            .map_err(|state| PreparedOutcome::Error {
-                code: "kernel_unavailable".to_string(),
-                message: state.state_key(),
-            })?;
+            .map_err(|state| DeleteStepError::Unavailable(state.state_key()))
+            .and_then(|kernel| {
+                Self::retire_captured_sources(&kernel, binding, session_id)?;
+                self.mark_use_outcomes_deleted(&kernel, binding, session_id)
+            });
+        outcome.map_err(|error| {
+            if matches!(error, DeleteStepError::Unavailable(_)) {
+                self.use_outcome_lifecycle
+                    .record(use_outcome_writer::LifecycleWrite::DeleteKernelUnavailable);
+            }
+            error.into_outcome()
+        })
+    }
+
+    fn mark_use_outcomes_deleted(
+        &self,
+        kernel: &kernel::KernelStore,
+        binding: &SessionBinding,
+        session_id: &str,
+    ) -> Result<(), DeleteStepError> {
+        let marked = use_outcome_writer::mark_session_deleted(
+            kernel,
+            &binding.kernel_project,
+            &binding.harness,
+            session_id,
+            now_ms(),
+        );
+        #[cfg(test)]
+        let marked = self.use_outcome_delete_fault().map_or(marked, Err);
+        let write =
+            marked.map_err(|error| delete_step_error("use outcomes not marked deleted", error))?;
+        self.use_outcome_lifecycle.record(write);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn use_outcome_delete_fault(&self) -> Option<kernel::KernelError> {
+        self.use_outcome_delete_fault
+            .lock()
+            .expect("use-outcome delete fault mutex")
+            .take()
+    }
+
+    /// Retires the bound session's captured sources in receipt-keyed pages.
+    fn retire_captured_sources(
+        kernel: &kernel::KernelStore,
+        binding: &SessionBinding,
+        session_id: &str,
+    ) -> Result<(), DeleteStepError> {
         let session = source_capture::CapturedSession {
             project_id: binding.kernel_project.digest(),
             harness: &binding.harness,
@@ -6889,37 +6947,27 @@ impl HandlerCore {
         };
         let page_rows = std::num::NonZeroUsize::new(source_capture::SESSION_RETIREMENT_PAGE)
             .expect("a nonzero page");
-        let retired = source_capture::retire_session_pages(&kernel, session, page_rows, usize::MAX)
-            .map_err(|error| PreparedOutcome::Error {
-                code: match error {
-                    kernel::KernelError::Conflict
-                    | kernel::KernelError::CorruptCanonicalRow
-                    | kernel::KernelError::InvalidInput => "source_retirement_failed",
-                    _ => "kernel_unavailable",
-                }
-                .to_string(),
-                message: format!("captured sources not retired: {error}"),
-            })?;
+        let retired = source_capture::retire_session_pages(kernel, session, page_rows, usize::MAX)
+            .map_err(|error| delete_step_error("captured sources not retired", error))?;
         // Every page ran, so the session holds no live captured source; the memory delete may follow.
         if retired {
             Ok(())
         } else {
-            Err(PreparedOutcome::Error {
-                code: "kernel_unavailable".to_string(),
-                message: "captured sources not retired: the page bound ran out".to_string(),
-            })
+            Err(DeleteStepError::Unavailable(
+                "captured sources not retired: the page bound ran out".to_string(),
+            ))
         }
     }
 
     /// `session.delete` removes the bound session in two stores, in order, under the capture commit gate:
     ///
-    /// 1. The Kernel retires every live `messages` and `raw_tool_spans` descriptor the bound project, harness, and session own, in receipt-keyed pages. The retired rows stay readable as history.
+    /// 1. The Kernel retires every live `messages` and `raw_tool_spans` descriptor the bound project, harness, and session own, in receipt-keyed pages. The retired rows stay readable as history. Then it sets `deleted_at` on the session's live use-outcome records; the served set stays readable.
     /// 2. The memory store deletes the session's rows, and the capture memo and generation ticket drop the session's pending work.
     ///
     /// Outcomes, each safe to retry with the same session:
     /// - `{ok: true, deleted_rows}` once both steps completed. A repeat answers `ok` again.
     /// - `kernel_unavailable` when the Kernel is starting or unavailable, or its inventory or a page commit fails transiently. The memory store is untouched, and a retry continues from what is still live.
-    /// - `source_retirement_failed` when the inventory reads a corrupt row or a page replays. The memory store is untouched, and a retry meets the same fault until the Kernel is repaired.
+    /// - `source_retirement_failed` when the inventory reads a corrupt row or a page replays, or the use-outcome step meets a conflict or invalid input. The memory store is untouched, and a retry meets the same fault until the Kernel is repaired.
     /// - `store_write_failed` when the memory-store delete fails after step 1 committed. The captured sources are already retired, and a retry completes step 2.
     /// - `store_unavailable` when no store is open, before either step, or when the blocking work did not report back, after which either step may have committed. A retry converges.
     ///
@@ -6955,8 +7003,8 @@ impl HandlerCore {
                     .capture_commit_gate
                     .lock()
                     .expect("capture publication mutex");
-                // Captured sources retire before the memory rows go, so no deleted session keeps a live descriptor.
-                core.retire_captured_sources(&binding, &session_id)?;
+                // Captured sources retire and the session's use-outcome records are marked deleted before the memory rows go, so no deleted session keeps a live descriptor or reads as live.
+                core.delete_kernel_step(&binding, &session_id)?;
                 #[cfg(test)]
                 if core
                     .source_capture
@@ -9556,6 +9604,8 @@ impl HandlerCore {
             note_project_path,
             project_memory,
             use_outcome_settled: std::sync::atomic::AtomicBool::new(false),
+            kernel_writes: Default::default(),
+            touch_delegated: std::sync::atomic::AtomicBool::new(false),
             snapshot_generation,
             pass_now,
             timings: PassTimings {
@@ -9714,6 +9764,7 @@ impl HandlerCore {
         };
         let injected = fault.flatten();
         let kernel = Arc::clone(&self.kernel);
+        let lifecycle = Arc::clone(&self.use_outcome_lifecycle);
         let project = env.binding.kernel_project.clone();
         let harness = env.binding.harness.clone();
         let session_id = env.parsed.session_id.clone();
@@ -9721,24 +9772,91 @@ impl HandlerCore {
         let served = snapshot.served_set();
         let recorded_at = env.pass_now;
         let write_budget = self.use_outcome_writes.write_budget();
-        let job = self.use_outcome_writes.job(slot, move || match injected {
-            Some(error) => Some(use_outcome_writer::UseOutcomeWrite::from_error(error)),
-            None => use_outcome_writer::record_serve(
+        // The job touches after its serve attempt, so the serving pass's record carries this pass's time, as a serve made on the pass thread would.
+        let job = self.use_outcome_writes.job(slot, move || {
+            let write = match injected {
+                Some(error) => Some(use_outcome_writer::UseOutcomeWrite::from_error(error)),
+                None => use_outcome_writer::record_serve(
+                    &kernel,
+                    &use_outcome_writer::Serve {
+                        project: &project,
+                        harness: &harness,
+                        session_id: &session_id,
+                        is_subagent,
+                        served: &served,
+                        recorded_at,
+                    },
+                    write_budget,
+                ),
+            };
+            if let Some(touch) = use_outcome_writer::touch_after_serve(
                 &kernel,
-                &use_outcome_writer::Serve {
-                    project: &project,
-                    harness: &harness,
-                    session_id: &session_id,
-                    is_subagent,
-                    served: &served,
-                    recorded_at,
-                },
-                write_budget,
-            ),
+                &project,
+                &harness,
+                &session_id,
+                recorded_at,
+            ) {
+                lifecycle.record(touch);
+            }
+            write
         });
         if self.admission().spawn_blocking(job).is_none() {
             self.use_outcome_writes
                 .record(use_outcome_writer::UseOutcomeWrite::KernelUnavailable);
+            return;
+        }
+        env.touch_delegated
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The Kernel to advance `last_transform_at` in after a settled committed pass, when a live record of the session needs it: the check reads within what remains of the pass's Kernel wait, and a skip is counted. A route with memory disabled takes no Kernel read, so it writes no record and touches none.
+    fn use_outcomes_to_touch(&self, env: &PassEnv) -> Option<Arc<kernel::KernelStore>> {
+        if !self.kernel.expected()
+            || env.project_memory.is_none()
+            || env
+                .touch_delegated
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        let Ok(kernel) = self.kernel.kernel_store() else {
+            self.use_outcome_lifecycle
+                .record(use_outcome_writer::LifecycleWrite::TransformSkippedUnavailable);
+            return None;
+        };
+        let needed = env.kernel_writes.spend(|budget| {
+            use_outcome_writer::touch_needed(
+                &kernel,
+                budget,
+                &env.binding.kernel_project,
+                &env.binding.harness,
+                &env.parsed.session_id,
+                env.pass_now,
+            )
+        });
+        match needed {
+            Ok(needed) => needed.then_some(kernel),
+            Err(skipped) => {
+                self.use_outcome_lifecycle.record(skipped);
+                None
+            }
+        }
+    }
+
+    /// The touch advances `last_transform_at` on the session's live records using the remainder of the pass's 250 ms Kernel wait budget and counts failed writes as skips. The update runs only after [`Self::use_outcomes_to_touch`] found a stale record, and its filter leaves a record another pass already advanced.
+    fn touch_use_outcomes(&self, env: &PassEnv, kernel: &kernel::KernelStore) {
+        let write = env.kernel_writes.spend(|budget| {
+            use_outcome_writer::touch_session(
+                kernel,
+                budget,
+                &env.binding.kernel_project,
+                &env.binding.harness,
+                &env.parsed.session_id,
+                env.pass_now,
+            )
+        });
+        if let Some(write) = write {
+            self.use_outcome_lifecycle.record(write);
         }
     }
 
@@ -10005,6 +10123,37 @@ impl HandlerCore {
                 return outcome;
             }
         }
+        if pass.result.response.committed
+            && let Some(kernel) = self.use_outcomes_to_touch(env)
+        {
+            // A scoped thread makes the touch's Kernel write while this thread builds the response
+            // and makes its memory-store writes, so the two stores' waits overlap; neither reads
+            // the other's state, and both finish before the response returns.
+            return std::thread::scope(|scope| {
+                let touch =
+                    || host_runtime::redact_panics(|| self.touch_use_outcomes(env, &kernel));
+                let Ok(touching) = std::thread::Builder::new().spawn_scoped(scope, touch) else {
+                    self.touch_use_outcomes(env, &kernel);
+                    return self.respond_to_settled_pass(env, pass, diagnostics);
+                };
+                let outcome = self.respond_to_settled_pass(env, pass, diagnostics);
+                touching
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                outcome
+            });
+        }
+        self.respond_to_settled_pass(env, pass, diagnostics)
+    }
+
+    /// Builds the settled pass's response from the window it served and records its timings.
+    fn respond_to_settled_pass(
+        &self,
+        env: &PassEnv,
+        pass: TransformedPass,
+        diagnostics: HistorySummarizerDiagnostics,
+    ) -> PreparedOutcome {
+        let store = &env.store;
         let TransformedPass {
             mut result,
             trigger_timings,
@@ -10013,7 +10162,7 @@ impl HandlerCore {
         } = pass;
         // Everything after the pass reads the window it served.
         let served_request = result.served_request.take();
-        let parsed = served_request.as_deref().unwrap_or(parsed);
+        let parsed = served_request.as_deref().unwrap_or(&env.parsed);
         let timings = &env.timings;
         let post_attach_started_at = Instant::now();
         let revert_epoch = result.revert_epoch;
@@ -16586,6 +16735,36 @@ fn invalid_params_error(message: impl Into<String>) -> PreparedOutcome {
     }
 }
 
+/// A failure of `session.delete`'s Kernel step: `Unavailable` is the retryable `kernel_unavailable`; `Failed` is `source_retirement_failed`, which a retry meets again for a conflict or a corrupt row in the source retirement, while the use-outcome mark commits under a fresh attempt key and a retry runs it anew.
+enum DeleteStepError {
+    Unavailable(String),
+    Failed(String),
+}
+
+impl DeleteStepError {
+    fn into_outcome(self) -> PreparedOutcome {
+        let (code, message) = match self {
+            Self::Unavailable(message) => ("kernel_unavailable", message),
+            Self::Failed(message) => ("source_retirement_failed", message),
+        };
+        PreparedOutcome::Error {
+            code: code.to_string(),
+            message,
+        }
+    }
+}
+
+/// Classifies a Kernel failure in `session.delete`'s Kernel step: a conflict, a corrupt row, or invalid input recurs on retry; every other failure is transient.
+fn delete_step_error(context: &str, error: kernel::KernelError) -> DeleteStepError {
+    let message = format!("{context}: {error}");
+    match error {
+        kernel::KernelError::Conflict
+        | kernel::KernelError::CorruptCanonicalRow
+        | kernel::KernelError::InvalidInput => DeleteStepError::Failed(message),
+        _ => DeleteStepError::Unavailable(message),
+    }
+}
+
 fn store_unavailable_error() -> PreparedOutcome {
     PreparedOutcome::Error {
         code: "store_unavailable".to_string(),
@@ -19021,6 +19200,8 @@ mod tests {
     mod source_recovery_tests;
     #[path = "tool_vocabulary_tests.rs"]
     mod tool_vocabulary_tests;
+    #[path = "use_outcome_lifecycle_tests.rs"]
+    mod use_outcome_lifecycle_tests;
     #[path = "use_outcome_writer_tests.rs"]
     mod use_outcome_writer_tests;
     #[path = "transform/window_admission.rs"]

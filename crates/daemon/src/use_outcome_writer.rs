@@ -1,11 +1,13 @@
-//! Records a frozen Canonical composition as a Kernel use-outcome serve: which decision objects one session was served.
+//! Records a frozen Canonical composition as a Kernel use-outcome serve: which decision objects one session was served. Also writes the record lifecycle: `session.delete` marks a session's live records deleted, and a committing pass advances their `last_transform_at`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
-use kernel::{CommitIntent, CommitReceipt, Envelope, KernelError, SessionRole, UseOutcomeSpec};
+use kernel::{
+    CommitIntent, CommitReceipt, Envelope, KernelError, KernelStore, SessionRole, UseOutcomeSpec,
+};
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -16,6 +18,9 @@ use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
 const PRODUCER: &str = "eidnara-daemon/use-outcome";
 const FAMILY: &str = "use-outcome";
 const REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-serve-v1\n";
+const DELETE_PRODUCER: &str = "eidnara-daemon/use-outcome-delete";
+const DELETE_FAMILY: &str = "use-outcome-delete";
+const DELETE_REQUEST_DOMAIN: &[u8] = b"eidnara-use-outcome-delete-v1\n";
 /// `WRITE_BUDGET` bounds writer waits and the pooled-reader replay check; the insert runs to completion once the writer is held.
 pub(crate) const WRITE_BUDGET: Duration = Duration::from_millis(250);
 const WRITER_FIRST_WAIT: Duration = Duration::from_millis(1);
@@ -169,6 +174,12 @@ impl UseOutcomeWrites {
         self.counts[outcome as usize].load(Ordering::Relaxed)
     }
 
+    /// Whether a serve job holds a write slot: a test holding the Kernel writer reads this to learn that a pass handed its serve off.
+    #[cfg(test)]
+    pub(crate) fn job_in_flight(&self) -> bool {
+        self.slots.available_permits() < WRITES_IN_FLIGHT
+    }
+
     /// Lengthens or shortens the writer wait of every later job, so a test can hold the Kernel writer across a pass without racing the budget.
     #[cfg(test)]
     pub(crate) fn set_write_budget(&self, budget: Duration) {
@@ -197,6 +208,197 @@ impl UseOutcomeWrites {
         self.slots
             .try_acquire_many(WRITES_IN_FLIGHT as u32)
             .expect("no write is in flight")
+    }
+}
+
+/// Closed names for the lifecycle writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifecycleWrite {
+    DeletedMarked,
+    DeleteNothingLive,
+    DeleteKernelUnavailable,
+    TransformTouched,
+    TransformSkippedDeadline,
+    TransformSkippedUnavailable,
+}
+
+impl LifecycleWrite {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::DeletedMarked,
+        Self::DeleteNothingLive,
+        Self::DeleteKernelUnavailable,
+        Self::TransformTouched,
+        Self::TransformSkippedDeadline,
+        Self::TransformSkippedUnavailable,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::DeletedMarked => "deleted_marked",
+            Self::DeleteNothingLive => "delete_nothing_live",
+            Self::DeleteKernelUnavailable => "delete_kernel_unavailable",
+            Self::TransformTouched => "transform_touched",
+            Self::TransformSkippedDeadline => "transform_skipped_deadline",
+            Self::TransformSkippedUnavailable => "transform_skipped_unavailable",
+        }
+    }
+
+    const fn logged(self) -> bool {
+        match self {
+            Self::DeletedMarked | Self::DeleteNothingLive | Self::TransformTouched => false,
+            Self::DeleteKernelUnavailable
+            | Self::TransformSkippedDeadline
+            | Self::TransformSkippedUnavailable => true,
+        }
+    }
+}
+
+const _: () =
+    assert!(LifecycleWrite::TransformSkippedUnavailable as usize + 1 == LifecycleWrite::ALL.len());
+
+#[derive(Debug, Default)]
+pub(crate) struct LifecycleCounts([AtomicU64; LifecycleWrite::ALL.len()]);
+
+impl LifecycleCounts {
+    pub(crate) fn record(&self, write: LifecycleWrite) {
+        self.0[write as usize].fetch_add(1, Ordering::Relaxed);
+        if write.logged() {
+            eprintln!("daemon: use-outcome lifecycle write: {}", write.name());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self, write: LifecycleWrite) -> u64 {
+        self.0[write as usize].load(Ordering::Relaxed)
+    }
+}
+
+/// `session.delete`'s use-outcome step: one envelope that sets `deleted_at = now` on every live record of the session, selected under the writer. An envelope that marks nothing rolls back, so a session with no live record commits nothing. The key carries a digest of the session id, so the Kernel's identity check on the key passes for any id the wire admits, and a fresh attempt nonce, so a receipt never answers a later delete as a replay; idempotence rests on the live selection, and a record already marked keeps its first timestamp.
+pub(crate) fn mark_session_deleted(
+    store: &KernelStore,
+    project: &ProjectBinding,
+    harness: &str,
+    session_id: &str,
+    now: i64,
+) -> Result<LifecycleWrite, KernelError> {
+    let mut nonce = [0u8; 16];
+    getrandom::getrandom(&mut nonce).map_err(|_| KernelError::Io)?;
+    let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let session_digest = length_prefixed_digest(DELETE_REQUEST_DOMAIN, [session_id].into_iter());
+    let operation_key = project
+        .operation_key(DELETE_FAMILY, &format!("{session_digest}:{nonce}"))
+        .ok_or(KernelError::InvalidInput)?;
+    let now_text = now.to_string();
+    let intent = CommitIntent {
+        producer: DELETE_PRODUCER.to_string(),
+        operation_key,
+        request_digest: length_prefixed_digest(
+            DELETE_REQUEST_DOMAIN,
+            [session_id, now_text.as_str()].into_iter(),
+        ),
+        actor: "daemon".to_string(),
+        cause: "session deleted".to_string(),
+    };
+    let mut nothing_live = false;
+    let outcome = store.commit(intent, |envelope| {
+        let marked =
+            envelope.mark_use_outcomes_deleted(project.digest(), harness, session_id, now)?;
+        nothing_live = marked == 0;
+        if nothing_live {
+            return Err(KernelError::NotFound);
+        }
+        Ok(marked.to_string())
+    });
+    match outcome {
+        Ok(_) => Ok(LifecycleWrite::DeletedMarked),
+        Err(KernelError::NotFound) if nothing_live => Ok(LifecycleWrite::DeleteNothingLive),
+        Err(error) => Err(error),
+    }
+}
+
+/// Advances `last_transform_at` to `at` on the session's live records after a committed pass, within `budget`. Answers `None` when no record needed it. A deadline counts `transform_skipped_deadline` and every other Kernel failure `transform_skipped_unavailable`; either skips the write, and the next committing pass catches up.
+pub(crate) fn touch_session(
+    store: &KernelStore,
+    budget: &EvalBudget,
+    project: &ProjectBinding,
+    harness: &str,
+    session_id: &str,
+    at: i64,
+) -> Option<LifecycleWrite> {
+    match store.advance_use_outcome_last_transform(
+        budget,
+        project.digest(),
+        harness,
+        session_id,
+        at,
+    ) {
+        Ok(0) => None,
+        Ok(_) => Some(LifecycleWrite::TransformTouched),
+        Err(error) => Some(skipped_touch(error)),
+    }
+}
+
+/// Whether a live record of the session needs `last_transform_at` advanced to `at`, read within `budget`. A Kernel failure answers the skip [`touch_session`] would count for it.
+pub(crate) fn touch_needed(
+    store: &KernelStore,
+    budget: &EvalBudget,
+    project: &ProjectBinding,
+    harness: &str,
+    session_id: &str,
+    at: i64,
+) -> Result<bool, LifecycleWrite> {
+    store
+        .use_outcome_last_transform_is_stale(budget, project.digest(), harness, session_id, at)
+        .map_err(skipped_touch)
+}
+
+/// The touch a serve job makes for its pass after its serve attempt, with a Kernel wait budget of its own: the staleness check and the update each spend what remains of it. Answers `None` when no live record needed the update; a Kernel that is not Ready answers the skip the pass thread would count.
+pub(crate) fn touch_after_serve(
+    kernel: &KernelOpenCoordinator,
+    project: &ProjectBinding,
+    harness: &str,
+    session_id: &str,
+    at: i64,
+) -> Option<LifecycleWrite> {
+    let Ok(store) = kernel.kernel_store() else {
+        return Some(LifecycleWrite::TransformSkippedUnavailable);
+    };
+    let store = &store;
+    let budget = PassWriteBudget::default();
+    match budget.spend(|budget| touch_needed(store, budget, project, harness, session_id, at)) {
+        Ok(true) => {
+            budget.spend(|budget| touch_session(store, budget, project, harness, session_id, at))
+        }
+        Ok(false) => None,
+        Err(skipped) => Some(skipped),
+    }
+}
+
+fn skipped_touch(error: KernelError) -> LifecycleWrite {
+    match UseOutcomeWrite::from_error(error) {
+        UseOutcomeWrite::Deadline => LifecycleWrite::TransformSkippedDeadline,
+        _ => LifecycleWrite::TransformSkippedUnavailable,
+    }
+}
+
+/// `PassWriteBudget` gives each operation the remaining `WRITE_BUDGET` and deducts its elapsed time. Transform passes hand serve writes to tracked jobs with separate waits.
+#[derive(Debug)]
+pub(crate) struct PassWriteBudget(Mutex<Duration>);
+
+impl Default for PassWriteBudget {
+    fn default() -> Self {
+        Self(Mutex::new(WRITE_BUDGET))
+    }
+}
+
+impl PassWriteBudget {
+    pub(crate) fn spend<T>(&self, write: impl FnOnce(&EvalBudget) -> T) -> T {
+        let remaining = *self.0.lock().expect("pass write budget mutex");
+        let started = Instant::now();
+        let outcome = write(&EvalBudget::new(Some(started + remaining), Arc::default()));
+        let mut left = self.0.lock().expect("pass write budget mutex");
+        *left = left.saturating_sub(started.elapsed());
+        outcome
     }
 }
 
@@ -275,9 +477,16 @@ pub(crate) fn record_serve(
 }
 
 fn request_digest(served_ids: &[&str], harness: &str, role: SessionRole) -> String {
+    length_prefixed_digest(
+        REQUEST_DOMAIN,
+        served_ids.iter().copied().chain([harness, role.as_str()]),
+    )
+}
+
+fn length_prefixed_digest<'a>(domain: &[u8], fields: impl Iterator<Item = &'a str>) -> String {
     let mut hash = Sha256::new();
-    hash.update(REQUEST_DOMAIN);
-    for field in served_ids.iter().copied().chain([harness, role.as_str()]) {
+    hash.update(domain);
+    for field in fields {
         hash.update(field.len().to_string().as_bytes());
         hash.update(b":");
         hash.update(field.as_bytes());

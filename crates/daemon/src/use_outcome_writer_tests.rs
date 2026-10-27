@@ -4,7 +4,7 @@ use crate::use_outcome_writer::{Serve, UseOutcomeWrite, WRITE_BUDGET};
 use kernel::KernelError;
 use kernel_route_fixtures::{MEMORY_DOMAIN, commit_verified_memory, ensure_domain, intent};
 
-fn bound(project: &Path) -> SessionBinding {
+pub(super) fn bound(project: &Path) -> SessionBinding {
     binding(project.to_str().unwrap(), "ses")
 }
 
@@ -14,7 +14,11 @@ fn record_serve(kernel: &KernelOpenCoordinator, serve: &Serve<'_>) -> Option<Use
 }
 
 /// Commits the project's scope and one verified memory decision per `(object_id, summary)`.
-fn seed_memories(kernel: &kernel::KernelStore, project: &Path, memories: &[(&str, &str)]) {
+pub(super) fn seed_memories(
+    kernel: &kernel::KernelStore,
+    project: &Path,
+    memories: &[(&str, &str)],
+) {
     let binding = bound(project);
     let scope_id = binding.kernel_project.scope_id();
     kernel
@@ -38,7 +42,7 @@ fn seed_memories(kernel: &kernel::KernelStore, project: &Path, memories: &[(&str
     }
 }
 
-fn served(handler: &Handler, project: &Path) -> Vec<kernel::UseOutcomeRecord> {
+pub(super) fn served(handler: &Handler, project: &Path) -> Vec<kernel::UseOutcomeRecord> {
     let binding = bound(project);
     handler
         .kernel
@@ -202,17 +206,51 @@ async fn only_an_available_composition_is_recorded() {
                 ..bound(&disabled_project)
             },
         );
-        seed_memories(
-            &disabled.kernel.kernel_store().unwrap(),
-            &disabled_project,
-            &[("mem-a", "Rule a.")],
+        let kernel = disabled.kernel.kernel_store().unwrap();
+        seed_memories(&kernel, &disabled_project, &[("mem-a", "Rule a.")]);
+        // A live record with a null `last_transform_at` is stale for any pass, so a touch on the disabled route would count.
+        let stale = canonical_memory::CanonicalMemorySnapshot::new(
+            kernel.tip().unwrap(),
+            false,
+            vec![canonical_memory::CanonicalMemory {
+                object_id: "mem-a".to_string(),
+                category: "PROJECT_RULES".to_string(),
+                content: "Rule a.".to_string(),
+            }],
+        );
+        let binding = bound(&disabled_project);
+        let stale = stale.served_set();
+        assert_eq!(
+            record_serve(
+                &disabled.kernel,
+                &Serve {
+                    project: &binding.kernel_project,
+                    harness: &binding.harness,
+                    session_id: "ses",
+                    is_subagent: false,
+                    served: &stale,
+                    recorded_at: 1,
+                },
+            ),
+            Some(UseOutcomeWrite::Written)
         );
         let response = call_transform(&disabled, vec![ck("m1", 1, "hello")]).await;
         assert_eq!(response["action"], "HARD", "{response}");
-        assert!(served(&disabled, &disabled_project).is_empty());
+        let records = served(&disabled, &disabled_project);
+        assert_eq!(records.len(), 1, "the disabled pass recorded no serve");
+        assert_eq!(
+            records[0].serve.last_transform_at, None,
+            "the disabled pass touched no record"
+        );
         assert!(
             counts(&disabled).is_empty(),
             "a disabled route attempts no write"
+        );
+        assert!(
+            crate::use_outcome_writer::LifecycleWrite::ALL
+                .iter()
+                .all(|write| disabled.use_outcome_lifecycle.get(*write) == 0),
+            "a disabled route takes no Kernel read to touch records"
         );
     }
 
@@ -1048,11 +1086,29 @@ fn hold_kernel_writer(
 }
 
 /// The response can return while a serve write the pass handed off remains pending.
-async fn transform_leaving_serves_pending(
+pub(super) async fn transform_leaving_serves_pending(
     handler: &Handler,
     messages: Vec<IngressMessage>,
 ) -> Value {
-    let request = handler.test_client_prepare_request(request(messages));
+    transform_request_leaving_serves_pending(handler, request(messages)).await
+}
+
+/// [`transform_leaving_serves_pending`] for a request carrying usage, so a pass under context pressure refolds.
+pub(super) async fn transform_with_usage_leaving_serves_pending(
+    handler: &Handler,
+    messages: Vec<IngressMessage>,
+    current_total_input_tokens: u64,
+    context_limit_tokens: u64,
+) -> Value {
+    transform_request_leaving_serves_pending(
+        handler,
+        request_with_usage(messages, current_total_input_tokens, context_limit_tokens),
+    )
+    .await
+}
+
+async fn transform_request_leaving_serves_pending(handler: &Handler, request: Value) -> Value {
+    let request = handler.test_client_prepare_request(request);
     let outcome = handler
         .handle_transform_with_runner(
             test_route(7),
@@ -1180,4 +1236,9 @@ async fn a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].decision_object_ids, ["mem-a"]);
     assert_eq!(counts(&handler), [("written", 1)]);
+    assert_eq!(
+        records[0].serve.last_transform_at,
+        Some(records[0].serve.recorded_at),
+        "the serve job's touch carries the committing pass's time"
+    );
 }

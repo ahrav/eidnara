@@ -9,20 +9,22 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the commit that carries this
+References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Teardown: `unbind_route` (`crates/daemon/src/lib.rs:4703`); purge:
-  `purge_session_state` (`crates/daemon/src/lib.rs:4743`).
+- Teardown: `unbind_route` (`crates/daemon/src/lib.rs:4716`); purge:
+  `purge_session_state` (`crates/daemon/src/lib.rs:4756`).
 - Correction: the spec's `lib.rs:32181` maps to a `session.delete` test at this
   tip.
 
 - Guarantee under test: Route teardown purges process-local session state and
   deletes no durable row in either store.
 - Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-  (`crates/daemon/src/lib.rs:25219`);
+  (`crates/daemon/src/lib.rs:25400`);
   `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
-  (`crates/daemon/tests/kernel_routes.rs:3849`). Status: unaudited.
+  (`crates/daemon/tests/kernel_routes.rs:3849`);
+  `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`). Status: unaudited.
 
 ## Failure scenario
 
@@ -35,7 +37,10 @@ None.
 ## What a test must construct
 
 A HARD fold, a route close, then a read of both stores (marker
-`uo_route_torn_down_after_hard`, owner #1156).
+`uo_route_torn_down_after_hard`, owner #1156):
+`a_route_torn_down_after_a_hard_fold_leaves_its_records_live` reads the Kernel
+record and the session's memory rows after the teardown. An exhaustive check
+over every table of both stores is still to construct.
 
 Required faults and enabling state: A route closed without `session.delete`
 after a HARD fold.
@@ -45,9 +50,13 @@ after a HARD fold.
 ### Q: Does any open question remain for this record?
 
 - Sources examined: the specification catalog entry, the code and tests cited above.
-- Findings: the cited code and tests agree with the guarantee at this tip for
-  process-local state; no test reads both stores after a route teardown.
-- Missing evidence: a HARD fold, a route close, then a read of both stores
-  (marker `uo_route_torn_down_after_hard`, owner #1156).
+- Findings: the cited code and tests agree with the guarantee at this tip.
+  `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`) reads both stores
+  after the teardown: the Kernel record stays live with `deleted_at` null and
+  the Kernel tip unchanged, and the session's memory rows load. It reads the
+  rows the fold wrote, not every table of either store.
+- Missing evidence: an exhaustive check that no durable row of the session in
+  any table of either store changed across the teardown.
 - Conclusion: resolved with answer - no design question is open; coverage stays
-  partial until #1156 constructs the two-store read.
+  partial until a test asserts every table of both stores unchanged.

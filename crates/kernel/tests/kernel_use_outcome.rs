@@ -898,3 +898,325 @@ fn the_cited_count_covers_the_rows_read_before_the_page_fills() {
         }
     );
 }
+
+fn lifecycle(store: &KernelStore, session: &str) -> Vec<(Option<i64>, Option<i64>)> {
+    store
+        .served_set(&project(), HARNESS, session)
+        .unwrap()
+        .unwrap_or_default()
+        .iter()
+        .map(|record| (record.serve.deleted_at, record.serve.last_transform_at))
+        .collect()
+}
+
+/// The other bindings a lifecycle predicate must leave alone: the same session id under another harness, and under another project.
+const OTHER_HARNESS: &str = "claude-code";
+
+fn other_project() -> String {
+    "b".repeat(64)
+}
+
+/// Inserts `s1` records under the other harness and the other project, and answers a reader of both records' lifecycle columns.
+fn insert_other_bindings(
+    store: &KernelStore,
+    served_at: i64,
+    now: i64,
+) -> impl Fn() -> Vec<(Option<i64>, Option<i64>)> + '_ {
+    let mut harness_record = spec("s1", &["d1"], served_at, now);
+    harness_record.harness = OTHER_HARNESS.to_string();
+    insert(store, "other-harness", harness_record).unwrap();
+    let mut project_record = spec("s1", &["d1"], served_at, now);
+    project_record.project_digest = other_project();
+    insert(store, "other-project", project_record).unwrap();
+    move || {
+        [(project(), OTHER_HARNESS), (other_project(), HARNESS)]
+            .iter()
+            .flat_map(|(project, harness)| {
+                store
+                    .served_set(project, harness, "s1")
+                    .unwrap()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|record| (record.serve.deleted_at, record.serve.last_transform_at))
+            })
+            .collect()
+    }
+}
+
+fn mark_deleted(
+    store: &KernelStore,
+    key: &str,
+    session: &str,
+    at: i64,
+) -> Result<usize, KernelError> {
+    let marked = std::cell::Cell::new(0);
+    store.commit(intent(key), |envelope| {
+        marked.set(envelope.mark_use_outcomes_deleted(&project(), HARNESS, session, at)?);
+        Ok(String::new())
+    })?;
+    Ok(marked.get())
+}
+
+fn budget(wait: std::time::Duration) -> kernel::applicability::EvalBudget {
+    kernel::applicability::EvalBudget::new(
+        Some(std::time::Instant::now() + wait),
+        std::sync::Arc::default(),
+    )
+}
+
+/// Marking a session deleted sets `deleted_at` once on each of its live records: a repeat keeps the first value, a record served after the first mark is marked by the next, a retired record and another session keep their state, and a negative time is refused with no row changed.
+#[test]
+fn a_session_delete_marks_each_live_record_once() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1", "d2", "d3"]);
+    let served_at = tick(&store, "tick");
+    let now = USE_OUTCOME_RETENTION_MS + 1;
+    insert(&store, "a", spec("s1", &["d1"], served_at, now)).unwrap();
+    insert(&store, "b", spec("s1", &["d2"], served_at, now)).unwrap();
+    insert(&store, "c", spec("s1", &["d3"], served_at, 0)).unwrap();
+    insert(&store, "other", spec("s2", &["d1"], served_at, now)).unwrap();
+    let other_bindings = insert_other_bindings(&store, served_at, now);
+    assert_eq!(store.expire_use_outcomes(now).unwrap().retired, 1);
+
+    assert_eq!(
+        mark_deleted(&store, "neg", "s1", -1),
+        Err(KernelError::InvalidInput)
+    );
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(None, None), (None, None), (None, None)]
+    );
+    assert_eq!(mark_deleted(&store, "del-1", "s1", 10), Ok(2));
+    assert_eq!(mark_deleted(&store, "del-2", "s1", 20), Ok(0));
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(Some(10), None), (Some(10), None), (None, None)],
+        "the retired record keeps its state"
+    );
+    assert_eq!(lifecycle(&store, "s2"), [(None, None)]);
+    assert_eq!(
+        other_bindings(),
+        [(None, None), (None, None)],
+        "the same session id under another harness or project keeps its state"
+    );
+    let served_again = tick(&store, "tick-2");
+    insert(&store, "e", spec("s1", &["d1", "d2"], served_again, now)).unwrap();
+    assert_eq!(mark_deleted(&store, "del-3", "s1", 30), Ok(1));
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [
+            (Some(10), None),
+            (Some(10), None),
+            (None, None),
+            (Some(30), None)
+        ]
+    );
+    let records = store
+        .served_set(&project(), HARNESS, "s1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(records[0].decision_object_ids, ["d1"]);
+    assert_eq!(records[3].decision_object_ids, ["d1", "d2"]);
+}
+
+/// `last_transform_at` moves forward only on the session's live records, through a write that appends no commit-log row, receipt, or outbox entry; an earlier time, a deleted record, a retired record, and another session are left alone.
+#[test]
+fn last_transform_at_advances_live_records_without_a_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1", "d2"]);
+    let served_at = tick(&store, "tick");
+    let now = USE_OUTCOME_RETENTION_MS + 1;
+    insert(&store, "a", spec("s1", &["d1"], served_at, now)).unwrap();
+    insert(&store, "c", spec("s2", &["d1"], served_at, now)).unwrap();
+    insert(&store, "d", spec("s3", &["d1"], served_at, 0)).unwrap();
+    let other_bindings = insert_other_bindings(&store, served_at, now);
+    assert_eq!(store.expire_use_outcomes(now).unwrap().retired, 1);
+    let advance = |session: &str, at: i64| {
+        store.advance_use_outcome_last_transform(
+            &budget(std::time::Duration::from_secs(5)),
+            &project(),
+            HARNESS,
+            session,
+            at,
+        )
+    };
+    let tip = store.tip().unwrap();
+    let durable = |root: &std::path::Path| {
+        (
+            count(root, "SELECT COUNT(*) FROM commit_log"),
+            count(root, "SELECT COUNT(*) FROM operation_receipts"),
+            count(root, "SELECT COUNT(*) FROM change_event"),
+            count(root, "SELECT COUNT(*) FROM outbox"),
+        )
+    };
+    let before = durable(root.path());
+
+    assert_eq!(advance("s1", -1), Err(KernelError::InvalidInput));
+    assert_eq!(advance("s1", 100), Ok(1));
+    assert_eq!(advance("s1", 50), Ok(0));
+    assert_eq!(advance("s1", 100), Ok(0));
+    assert_eq!(lifecycle(&store, "s1"), [(None, Some(100))]);
+    assert_eq!(lifecycle(&store, "s2"), [(None, None)]);
+    assert_eq!(
+        advance("s3", 100),
+        Ok(0),
+        "a retired record is not advanced"
+    );
+    assert_eq!(lifecycle(&store, "s3"), [(None, None)]);
+    assert_eq!(
+        other_bindings(),
+        [(None, None), (None, None)],
+        "the same session id under another harness or project is not advanced"
+    );
+    // At 100 the advanced record is current while both other bindings' `s1` records are null, so a
+    // predicate that dropped the project or the harness would answer `true` for the first binding.
+    let stale = |project: &str, harness: &str| {
+        store.use_outcome_last_transform_is_stale(
+            &budget(std::time::Duration::from_secs(5)),
+            project,
+            harness,
+            "s1",
+            100,
+        )
+    };
+    assert_eq!(stale(&project(), HARNESS), Ok(false));
+    assert_eq!(
+        (
+            stale(&other_project(), HARNESS),
+            stale(&project(), OTHER_HARNESS)
+        ),
+        (Ok(true), Ok(true)),
+        "the staleness check reads the binding it was asked about"
+    );
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(durable(root.path()), before);
+
+    insert(&store, "b", spec("s1", &["d2"], served_at, now)).unwrap();
+    assert_eq!(mark_deleted(&store, "del", "s1", 150), Ok(2));
+    let later = tick(&store, "tick-2");
+    insert(&store, "e", spec("s1", &["d1", "d2"], later, now)).unwrap();
+    let tip = store.tip().unwrap();
+    assert_eq!(advance("s1", 200), Ok(1));
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(Some(150), Some(100)), (Some(150), None), (None, Some(200))],
+        "a deleted record receives no update"
+    );
+    assert_eq!(store.tip().unwrap(), tip);
+}
+
+#[test]
+fn a_held_writer_bounds_the_advance_and_an_idle_session_skips_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let wait = std::time::Duration::from_millis(100);
+    std::thread::scope(|scope| {
+        let (entered, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let store = &store;
+        let holder = scope.spawn(move || {
+            store
+                .commit(intent("hold"), |_| {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                    Ok(String::new())
+                })
+                .unwrap();
+        });
+        held.recv().unwrap();
+        let started = std::time::Instant::now();
+        let advanced =
+            store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s1", 10);
+        assert_eq!(advanced, Err(KernelError::Deadline));
+        let waited = started.elapsed();
+        assert!(
+            waited >= wait && waited < wait * 10,
+            "the writer wait is bounded by the budget: {waited:?}"
+        );
+        assert_eq!(
+            store.use_outcome_last_transform_is_stale(&budget(wait), &project(), HARNESS, "s9", 10),
+            Ok(false)
+        );
+        release.send(()).unwrap();
+        holder.join().unwrap();
+    });
+    assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
+}
+
+/// A writer outside this process holding the database file lock stops the advance at its budget, at BEGIN, before SQLite's busy timeout; the record is unchanged.
+#[test]
+fn an_outside_file_lock_bounds_the_advance_at_begin() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let outside = writer(root.path());
+    outside.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let wait = std::time::Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    let advanced =
+        store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s1", 10);
+    let waited = started.elapsed();
+    outside.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(advanced, Err(KernelError::Deadline));
+    // Ten budgets of slack for a loaded host, an order of magnitude under the 5 s busy timeout the budget preempts.
+    assert!(
+        waited >= wait && waited < wait * 10,
+        "the wait is bounded by the budget, not the busy timeout: {waited:?}"
+    );
+    assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
+}
+
+/// The staleness check answers `true` while a live record of the session holds a `last_transform_at` that is null or before the time, and writes nothing when it does; a spent budget answers `Deadline`. The live-record filter it shares with the advance is covered by `last_transform_at_advances_live_records_without_a_commit`.
+#[test]
+fn the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let stale = |wait: std::time::Duration, at: i64| {
+        store.use_outcome_last_transform_is_stale(&budget(wait), &project(), HARNESS, "s1", at)
+    };
+    let wait = std::time::Duration::from_secs(5);
+    let tip = store.tip().unwrap();
+
+    assert_eq!(stale(wait, 100), Ok(true), "a null value is stale");
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(None, None)],
+        "the check writes nothing"
+    );
+    assert_eq!(
+        stale(std::time::Duration::ZERO, 100),
+        Err(KernelError::Deadline)
+    );
+    assert_eq!(
+        store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s1", 100),
+        Ok(1)
+    );
+    assert_eq!(stale(wait, 100), Ok(false));
+    assert_eq!(stale(wait, 99), Ok(false));
+    assert_eq!(stale(wait, 101), Ok(true));
+    assert_eq!(store.tip().unwrap(), tip);
+}
+
+#[test]
+fn the_advance_takes_no_pooled_reader() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let advanced = store.with_readers_held_for_test(|| {
+        store.advance_use_outcome_last_transform(
+            &budget(std::time::Duration::from_millis(100)),
+            &project(),
+            HARNESS,
+            "s1",
+            10,
+        )
+    });
+    assert_eq!(advanced, Ok(1));
+    assert_eq!(lifecycle(&store, "s1"), [(None, Some(10))]);
+}

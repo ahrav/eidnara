@@ -26,6 +26,26 @@ const PAGE_KEY_DOMAIN: &[u8] = b"eidnara-use-outcome-expiry-page-v1\n";
 /// The reserved producer suffix of expiry commits, also their actor.
 const EXPIRY_PRODUCER: &str = "use-outcome-expiry";
 const EXPIRY_CAUSE: &str = "use outcome retention expired";
+/// The live (unretired, `deleted_at` null) records of one session: `?1` project digest, `?2` harness, `?3` session id. The UNIQUE identity index serves the prefix.
+const LIVE_SESSION_WHERE: &str = "project_digest=?1 AND harness=?2 AND session_id=?3
+     AND invalidated_commit_seq IS NULL AND deleted_at IS NULL";
+/// Marks the session's live records deleted at `?4`.
+static MARK_DELETED_SQL: LazyLock<String> =
+    LazyLock::new(|| format!("UPDATE use_outcomes SET deleted_at=?4 WHERE {LIVE_SESSION_WHERE}"));
+/// Whether a live record of the session holds a `last_transform_at` that is null or before `?4`.
+static STALE_TRANSFORM_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM use_outcomes WHERE {LIVE_SESSION_WHERE}
+           AND (last_transform_at IS NULL OR last_transform_at<?4))"
+    )
+});
+/// Advances those records to `?4`.
+static ADVANCE_TRANSFORM_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "UPDATE use_outcomes SET last_transform_at=?4 WHERE {LIVE_SESSION_WHERE}
+           AND (last_transform_at IS NULL OR last_transform_at<?4)"
+    )
+});
 
 /// Whether the served session was a primary session or a subagent session at the serve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -302,6 +322,34 @@ impl Envelope<'_> {
     }
 }
 
+impl Envelope<'_> {
+    /// Sets `deleted_at` on every live (unretired, `deleted_at` null) record of one session and answers how many it marked. The records are selected under the writer, so a serve committed before this commit is marked with the rest. A record already marked keeps its first value, and a retired record keeps its state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for a negative `deleted_at`, and mapped storage errors otherwise.
+    pub fn mark_use_outcomes_deleted(
+        &mut self,
+        project_digest: &str,
+        harness: &str,
+        session_id: &str,
+        deleted_at: i64,
+    ) -> Result<usize, KernelError> {
+        self.guarded(|envelope| {
+            if deleted_at < 0 {
+                return Err(KernelError::InvalidInput);
+            }
+            envelope
+                .tx
+                .execute_cached(
+                    &MARK_DELETED_SQL,
+                    params![project_digest, harness, session_id, deleted_at],
+                )
+                .map_err(map_sqlite)
+        })
+    }
+}
+
 /// The positions of [`SERVE_COLUMNS`] in one prepared statement, resolved by name once per statement, so each row reads its columns by position.
 #[derive(Clone, Copy)]
 struct ServeColumns {
@@ -450,6 +498,64 @@ impl KernelStore {
                 .cmp(&(right.serve.created_commit_seq, &right.serve.use_outcome_id))
         });
         Ok(sessions)
+    }
+
+    /// Whether a live record of one session holds a `last_transform_at` that is null or before `at`, read on a pooled reader within `budget`. A caller makes this check before [`Self::advance_use_outcome_last_transform`], so a session with nothing to advance takes no writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for a negative `at`, `Deadline` when the budget ends first, and mapped storage errors otherwise.
+    pub fn use_outcome_last_transform_is_stale(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        project_digest: &str,
+        harness: &str,
+        session_id: &str,
+        at: i64,
+    ) -> Result<bool, KernelError> {
+        if at < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        let limit = budget.acquire_limit();
+        let stale = self
+            .reader_with_limit(&limit)?
+            .query_row_cached(
+                &STALE_TRANSFORM_SQL,
+                params![project_digest, harness, session_id, at],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite)?;
+        // A scan that ends between progress callbacks can outlast the budget; the check after it answers `Deadline` for that window, as the other bounded reads do.
+        limit.check()?;
+        Ok(stale)
+    }
+
+    /// Advances `last_transform_at` to `at` on every live record of one session whose value is null or earlier, and answers how many it advanced. The write is one fenced transaction with no commit-log row, receipt, or outbox entry, because the column is advisory and gates no read. The write holds only the writer: the caller's [`Self::use_outcome_last_transform_is_stale`] check keeps a session with nothing to advance off the writer, and the update's own filter skips a record another pass advanced since that check. The connection waits, the transaction's begin, and its statements stop at the budget; the commit runs to completion once reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for a negative `at`, `Deadline` when the budget ends first, `Busy` when a writer outside this process holds the file lock past the busy timeout, `FenceLost` when the process lease moved, and mapped storage errors otherwise.
+    pub fn advance_use_outcome_last_transform(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        project_digest: &str,
+        harness: &str,
+        session_id: &str,
+        at: i64,
+    ) -> Result<usize, KernelError> {
+        if at < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        let limit = budget.acquire_limit();
+        let args = params![project_digest, harness, session_id, at];
+        let mut writer = self.writer_with_limit(&limit)?;
+        let tx = writer.transaction(rusqlite::TransactionBehavior::Immediate)?;
+        super::envelope::check_fence(&tx, self.lease_epoch())?;
+        let advanced = tx
+            .execute_cached(&ADVANCE_TRANSFORM_SQL, args)
+            .map_err(map_sqlite)?;
+        tx.commit()?;
+        Ok(advanced)
     }
 
     /// Retires serving records whose `retain_until` is before `now` and that no committed admission row with a live subject cites: at most [`MAX_EXPIRED_USE_OUTCOMES_PER_CALL`] per call, oldest deadline first, in one commit. Each record is rechecked under the writer and gets its own reserved receipt keyed by `now` and its id, so a citation committed after selection keeps it and a record another sweep retired since selection is skipped. The commit's own receipt is keyed by `now` and a digest of the page's ids, so only a repeat of the same page at this cutoff replays; a replay retires nothing and reports the cited rows its scan read. A page that retires nothing commits nothing.
@@ -628,8 +734,9 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        EXPIRED_SQL, SERVED_SESSIONS_SQL, SERVED_SET_SQL, SessionRole, USE_OUTCOME_RETENTION_MS,
-        UseOutcomeExpiry, UseOutcomeSpec,
+        ADVANCE_TRANSFORM_SQL, EXPIRED_SQL, MARK_DELETED_SQL, SERVED_SESSIONS_SQL, SERVED_SET_SQL,
+        STALE_TRANSFORM_SQL, SessionRole, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry,
+        UseOutcomeSpec,
     };
     use crate::{CommitIntent, DomainSpec, KernelStore, Sensitivity, served_set_digest};
 
@@ -867,7 +974,7 @@ mod tests {
         assert!(retired(&store, "session"));
     }
 
-    /// The sweep scan reads the live-retention index in its order with no temporary sort and probes citations through the citing index; the by-session read seeks the identity index; the by-decision read starts from the decision-row index and probes disputes through the subject index.
+    /// The sweep scan reads the live-retention index in its order with no temporary sort and probes citations through the citing index; the by-session read, the delete mark, the staleness check, and the advance seek the identity index; the by-decision read starts from the decision-row index and probes disputes through the subject index.
     #[test]
     fn the_sweep_and_the_reads_use_their_indexes() {
         let root = tempfile::tempdir().unwrap();
@@ -900,6 +1007,21 @@ mod tests {
             by_session.contains("sqlite_autoindex_use_outcomes"),
             "{by_session}"
         );
+        for (name, sql) in [
+            ("mark deleted", &*MARK_DELETED_SQL),
+            ("staleness check", &*STALE_TRANSFORM_SQL),
+            ("advance", &*ADVANCE_TRANSFORM_SQL),
+        ] {
+            let lifecycle = plan(sql, &[&digest, &"opencode", &"session", &1_i64]);
+            assert!(
+                lifecycle.contains("sqlite_autoindex_use_outcomes"),
+                "{name}: {lifecycle}"
+            );
+            assert!(
+                !lifecycle.contains("SCAN use_outcomes"),
+                "{name}: {lifecycle}"
+            );
+        }
         let by_decision = plan(&SERVED_SESSIONS_SQL, &[&"decision"]);
         assert!(
             by_decision.contains("idx_use_outcome_decisions_object_fk"),

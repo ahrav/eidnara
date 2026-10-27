@@ -8,10 +8,10 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the commit that carries this
+References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9675-9678`); one
+- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9721`); one
   write per pass covers its reruns.
 - A composition read at sequence 0 precedes every commit; the handler skips its
   write, and the next fold after a commit records the serve.
@@ -21,13 +21,13 @@ revision.
   commit attempts a record with zero decision rows, which exists once the write
   lands as `written` or as `replayed` against a live record; a receipt that
   outlives its expired record replays with no live row. At tip 0 the composition names no commit and
-  the writer records nothing (`crates/daemon/src/lib.rs:9688`).
+  the writer records nothing (`crates/daemon/src/lib.rs:9737-9739`).
 - Existing check: `only_an_available_composition_is_recorded`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:177`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:181`);
   `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:527`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:565`);
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:726`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:764`); Kernel half:
   `served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve`
   (`crates/kernel/tests/kernel_use_outcome.rs:164`). Status: unaudited.
 

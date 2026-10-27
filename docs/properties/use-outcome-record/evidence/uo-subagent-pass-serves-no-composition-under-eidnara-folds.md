@@ -9,7 +9,7 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the commit that carries this
+References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
 - Folding plan rule: `crates/daemon/src/transform.rs:4239` sets `Defer` when the
@@ -28,7 +28,7 @@ revision.
   `subagent_first_active_render_commits_tagged_bytes_before_replay`
   (`crates/daemon/src/transform.rs:23784`);
   `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:382`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_writer_tests.rs:420`). Status: unaudited.
 
 ## Failure scenario
 

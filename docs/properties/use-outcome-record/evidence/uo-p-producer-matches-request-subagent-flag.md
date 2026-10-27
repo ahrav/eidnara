@@ -8,16 +8,17 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the commit that carries this
+References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Role: `crates/daemon/src/use_outcome_writer.rs:234`.
+- Role: `crates/daemon/src/use_outcome_writer.rs:435-439` (both branches of the
+  `is_subagent` mapping).
 
 - Guarantee under test: The stored `session_role` is `subagent` exactly when the
   writing pass's effective subagent flag was true.
 - Existing check:
   `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:382`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:420`); Kernel half:
   `session_roles_round_trip_and_the_served_set_digest_is_order_free`
   (`crates/kernel/tests/kernel_use_outcome.rs:776`). Status: unaudited.
 

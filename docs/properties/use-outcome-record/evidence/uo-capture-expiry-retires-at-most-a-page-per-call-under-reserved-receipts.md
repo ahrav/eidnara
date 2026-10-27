@@ -9,14 +9,14 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the commit that carries this
+References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
 - Page bound and order: `expired_captures_sql`
   (`crates/kernel/src/local_file.rs:558`).
 - Reserved receipt: `expiry_intent` (`crates/kernel/src/local_file.rs:433`).
 - The use-outcome sweep follows the same shape at `expire_use_outcomes`
-  (`crates/kernel/src/use_outcome.rs:460`).
+  (`crates/kernel/src/use_outcome.rs:566`).
 - Correction: the spec cited `harness_sources.rs:3331, 3187`; the tests moved to
   the lines under Existing check.
 

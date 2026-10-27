@@ -9,7 +9,7 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the commit that carries this
+References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
 - Scope: `kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:414`).

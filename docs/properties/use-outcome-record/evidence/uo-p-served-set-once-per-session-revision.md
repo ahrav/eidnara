@@ -8,16 +8,17 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the commit that carries this
+References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:226-229`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:428-431`; the request
   digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:277`)).
-- Call sites: `record_use_outcome` runs after the commit bookkeeping of
-  `first_transform` (`crates/daemon/src/lib.rs:9917`) and `rerun_transform`
-  (`crates/daemon/src/lib.rs:9846`), and in `run_transform` when a committed
-  pass fails its boundary read (`crates/daemon/src/lib.rs:9666`).
+  (`crates/daemon/src/use_outcome_writer.rs:479`)).
+- Call sites: `record_use_outcome` runs after the commit bookkeeping, at the
+  call in `first_transform` (`crates/daemon/src/lib.rs:10035`) and the call in
+  `rerun_transform` (`crates/daemon/src/lib.rs:9964`), and at the call in
+  `run_transform` when a committed pass fails its boundary read
+  (`crates/daemon/src/lib.rs:9716`).
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
 - Guarantee under test: For one (project digest, harness, session, served-set
@@ -26,27 +27,27 @@ revision.
   writes nothing, while another harness or role at that key conflicts.
 - Existing check:
   `a_hard_fold_records_its_frozen_composition_once_per_served_set`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:66`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:70`);
   `an_equal_digest_replays_and_another_harness_or_role_conflicts`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:127`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:131`);
   `an_equal_served_set_at_a_later_known_as_of_replays`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:449`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:487`);
   `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:305`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:343`);
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:726`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:764`);
   `a_recorded_served_set_replays_while_another_writer_holds_the_writer`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:826`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:864`);
   `every_kernel_error_maps_to_a_closed_outcome`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:954`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:992`);
   `an_emergency_pass_that_reruns_records_one_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:973`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1011`);
   `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1001`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1039`);
   `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1070`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1126`);
   `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1106`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1162`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
@@ -78,7 +79,7 @@ between; a CAS retry.
 - Missing evidence: an owner decision or the named read.
 - Conclusion: needs human input.
 
-### Q: The receipt key omits the harness while the record identity carries it
+### Q: The receipt key omits the harness while the record identity carries it, so one session id served under two harnesses at one served set is a lasting conflict; the design takes session ids as unique within a project (needs human input)
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: The receipt key omits the harness while the record identity carries

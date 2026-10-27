@@ -9,7 +9,7 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1155 branch tip, the commit that carries this
+References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
 - Writes happen only when state changed: `crates/daemon/src/transform.rs:3262`,
@@ -20,7 +20,9 @@ revision.
   with the session.
 - Existing check:
   `delete_session_sweeps_every_session_table_once_and_scopes_notes`
-  (`crates/memory-store/src/lib.rs:22344`). Status: unaudited.
+  (`crates/memory-store/src/lib.rs:22344`);
+  `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`). Status: unaudited.
 
 ## Failure scenario
 
