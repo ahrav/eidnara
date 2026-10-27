@@ -550,7 +550,7 @@ Open questions:
 Type: safety
 Reachability: default-production - `preview: true` is a request field
 (`commit.rs:126`); the TypeScript command always previews first
-(`memory-mark-command.ts:222`).
+(`memory-mark-command.ts:237`).
 Status: active
 Exercised: partial - route tests cover write-nothing, per-surface
 visibility, in-request ordering, denials and refusals, and the changed-
@@ -586,17 +586,17 @@ Type: safety
 Reachability: default-production - every `kernel.commit` carries an intent
 (`project.rs:138-146`); the command derives `operationId = sessionId SEP
 event SEP objectId`, followed at the PR A tip by the evidence flags
-(`memoryMarkOperationId`, `memory-mark-command.ts:189-194`), and both
+(`memoryMarkOperationId`, `memory-mark-command.ts:201-206`), and both
 command callers pass it in (`command-handler.ts:415`,
 `pi-plugin/src/commands/eidnara-memory-mark.ts:61`).
 Status: active
 Exercised: partial - `kernel_routes.rs:4982` covers replay, reused key,
 and token abort; TypeScript tests cover replay through the command
-(`memory-mark-command.test.ts:340`, `:351`). PR A adds a route test of
+(`memory-mark-command.test.ts:348`, `:359`). PR A adds a route test of
 two dispute identities, replay, and reuse
 (`dispute_identities_land_replay_and_refuse_reuse_like_every_envelope`,
 `kernel_routes.rs:6080`) and a command test of two evidence keys in one
-session (`memory-mark-command.test.ts:201`). No test replays after the
+session (`memory-mark-command.test.ts:208`). No test replays after the
 subject moved and asserts the replayed `dispositions` still equal the
 original while the stored disposition differs.
 Guarantee: For one `(producer, operation_key)`: an equal `request_digest`
@@ -621,15 +621,15 @@ response.
 Confidence: high - [evidence](evidence/disposition-envelope-identity-replays-without-a-second-write.md).
 Existing check: `kernel_routes.rs:4982`
 (`disposition_operations_share_the_envelope_replay_and_token_rules`),
-`kernel_routes.rs:931`, `:6080`, `memory-mark-command.test.ts:340`,
-`:351`, `:201`. Status unaudited.
+`kernel_routes.rs:931`, `:6080`, `memory-mark-command.test.ts:348`,
+`:359`, `:208`. Status unaudited.
 Impact: a second write under one identity would double-record a dispute
 and break the one-row-per-report assumption P3's join by `commit_seq`
 relies on.
 Open questions:
 - A repeated command after the object moved reports `applied` with the
   original verdict while the stored disposition differs
-  (`memory-mark-command.test.ts:351`; `commit.rs:1190-1206`). Safe for the
+  (`memory-mark-command.test.ts:359`; `commit.rs:1190-1206`). Safe for the
   store; is the replayed verdict the right thing to show the user? (needs
   human input; portfolio refinement R5)
 
@@ -639,10 +639,10 @@ Type: safety
 Reachability: default-production - command registered in both plugins
 (`pi-plugin/src/index.ts:550`; `command-handler.ts:413`).
 Status: active
-Exercised: partial - `memory-mark-command.test.ts:260-514` covers
+Exercised: partial - `memory-mark-command.test.ts:267-522` covers
 confirmation, decline, denial, replay, cancellation, separator refusal,
 refused preview, and mismatched verdicts. PR A's
-`memory-mark-command.test.ts:174` asserts that both calls (preview and
+`memory-mark-command.test.ts:181` asserts that both calls (preview and
 commit) carry the same disposition operation with its evidence fields,
 `source_kind: "user"`, and the same `cause`; it matches each body against
 one expected object rather than comparing the two bodies, and it does not
@@ -655,16 +655,16 @@ cancellation; and reports `outcome_unknown` when the commit's verdict list
 does not answer the sent operation.
 Check: `always` - for one invocation: `previewBody.operations ==
 commitBody.operations == [{op:"disposition", object_id, event,
-evidence_id?, evidence_ref?}]` (`memory-mark-command.ts:209-215`),
+evidence_id?, evidence_ref?}]` (`memory-mark-command.ts:221-227`),
 `previewBody.intent == commitBody.intent`, `source_kind == "user"`;
 `confirm` called at most once; `commit` not called when the preview
 verdict is `denied`, when `confirm` returns false, or when `isCancelled()`
 is true; `verdictFor` returns null whenever `results.length != 1 ||
 object_id != operation.object_id || event != operation.event`
-(`memory-mark-command.ts:197-205`), and a null verdict maps to
+(`memory-mark-command.ts:209-217`), and a null verdict maps to
 `refused(preview, invalid("internal"))` on the preview branch
-(`:227-229`) and to `refused(commit, unavailable("outcome_unknown"))` on
-the commit branch (`:240-242`) (portfolio refinement R6). Every
+(`:243-245`) and to `refused(commit, unavailable("outcome_unknown"))` on
+the commit branch (`:257-259`) (portfolio refinement R6). Every
 invocation, so `always`. Coverage marker to add:
 `command_preview_visibility_changes` (the confirmation branch is reached
 only when `visibility_changes` is true, so the at-most-once clause is
@@ -676,9 +676,9 @@ Required faults and enabling state: a `FakeKernel` or stub returning
 mismatched, empty, or multiple verdicts; a recorded identity; a
 `visibility_changes: true` preview.
 Confidence: high - [evidence](evidence/memory-mark-command-commits-only-the-previewed-operation.md).
-Existing check: `memory-mark-command.test.ts:261`, `:283`, `:304`, `:323`,
-`:340`, `:351`, `:364`, `:382`, `:413`, `:429`, `:443`, and PR A's `:174`,
-`:201`, `:242`. Status unaudited.
+Existing check: `memory-mark-command.test.ts:268`, `:291`, `:312`, `:331`,
+`:348`, `:359`, `:372`, `:390`, `:421`, `:437`, `:451`, and PR A's `:181`,
+`:208`, `:249`. Status unaudited.
 Impact: committing an operation the user did not preview, or treating a
 foreign verdict as the answer, would apply a disposition the confirmation
 dialog never described.
@@ -749,7 +749,7 @@ Open questions:
   `commit_seq`, so a user confirming a dispute on an approval is not shown
   the cascade. Resolved per OQ4-10 by documenting the limit: the route
   header (`commit.rs:60-63`) and the command usage
-  (`memory-mark-command.ts:53`, asserted by `memory-mark-command.test.ts:156`)
+  (`memory-mark-command.ts:54`, asserted by `memory-mark-command.test.ts:163`)
   state that the preview reports the named memory's visibility only. The
   preview still does not report the cascade.
 - How does a deferred dependent (past `MAX_AUTHORITY_DEMOTIONS`) get its
@@ -785,7 +785,7 @@ Required faults and enabling state: a disposition commit from the command
 (`actor = user:opencode | user:pi`; `cause` is the command line
 `commandLine(args)`, `/eidnara-memory-mark <event> <object_id>` followed
 at the PR A tip by `--evidence <id>` and `--path <path>@<oid>` when
-present, `memory-mark-command.ts:157-159`, `:216-221`); a `cause` carrying
+present, `memory-mark-command.ts:158-160`, `:230-236`); a `cause` carrying
 a secret-like token.
 Confidence: high - [evidence](evidence/disposition-commit-log-row-carries-actor-and-cause-only.md).
 Read the schema and the INSERT.

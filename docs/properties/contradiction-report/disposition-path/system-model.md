@@ -119,7 +119,7 @@ the difference noted.
   `invalid_params`, `commit.rs:1174-1180`).
 - Preview and commit are separate requests; the object can move between
   them. The TypeScript command treats the commit's verdict as the recorded
-  one (`memory-mark-command.ts:243-244`).
+  one (`memory-mark-command.ts:260-261`).
 
 ## Lens: claimed safety guarantees (claims under test)
 
@@ -186,7 +186,7 @@ disposition row.
   `kernel_routes.rs:4479-4503`).
 - TypeScript: a commit whose verdict list does not match the sent
   operation is `unavailable(outcome_unknown)` because a receipt exists
-  (`memory-mark-command.ts:240-242`).
+  (`memory-mark-command.ts:257-259`).
 
 ## Lens: unproven assumptions
 
@@ -220,7 +220,7 @@ disposition row.
   against an approval.
 - `Preview` with an already recorded identity replays the receipt and
   judges nothing (`commit.rs:880-882`); the command then commits, which
-  also replays (`memory-mark-command.ts:226-238`).
+  also replays (`memory-mark-command.ts:242-255`).
 
 ## Contract-versus-code disagreements preserved as leads
 

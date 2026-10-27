@@ -24,7 +24,7 @@ route's derivation, never from a stronger claim by the client.
   subject's; the Kernel refuses a request whose classes differ from the
   prior (`crates/kernel/src/admission.rs:268-274`).
 - The command sends `sourceKind: "user"`
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:220`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:229`).
 - The route stores `actor` and `cause` as sent; neither enters the class
   derivation (`IntentRequest`, `crates/daemon/src/kernel_routes/project.rs:140-146`).
 
@@ -55,7 +55,7 @@ All constructed except the tool arm:
   the `user` dispute constructs a reporter class that differs from the
   subject's.
 - The command sends `source_kind: "user"` on preview and commit
-  (`memory-mark-command.test.ts:174`).
+  (`memory-mark-command.test.ts:181`).
 - Not constructed: the model tool arm's own surface (#1161).
 
 The check is a per-request route oracle (portfolio refinement R4). It

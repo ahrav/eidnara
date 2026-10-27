@@ -17,8 +17,8 @@ today.
 - One operation: `const operation: DispositionOperation = {op:
   "disposition", object_id, event}`, plus `evidence_id` and `evidence_ref`
   when the user gave them (PR A) (`packages/opencode-plugin/src/shared/
-  memory-mark-command.ts:209-215`); both calls send `operations:
-  [operation]` with the same `intent` object (`:222`, `:238`).
+  memory-mark-command.ts:221-227`); both calls send `operations:
+  [operation]` with the same `intent` object (`:237`, `:255`).
 - Intent: `actor: input.actor`; `operationId: input.operationId`, which
   the callers derive with `memoryMarkOperationId(sessionId, args)` (PR A
   moved the derivation to the callers, `command-handler.ts:415`,
@@ -44,10 +44,10 @@ today.
   `retire_decision` only (`client.ts:644-651`), so a disposition commit
   sends no tokens; `previewDispositions` sends `commitBody(.., true)`,
   which adds `preview: true` (`:597-641`, `:773`, `:789`).
-- Tests: `memory-mark-command.test.ts:260-514`, including the mismatched-
-  verdict matrix at `:443`; PR A adds `:174` (both bodies carry the same
-  operation with its evidence and `source_kind: "user"`), `:201`, and
-  `:242`.
+- Tests: `memory-mark-command.test.ts:267-522`, including the mismatched-
+  verdict matrix at `:451`; PR A adds `:181` (both bodies carry the same
+  operation with its evidence and `source_kind: "user"`), `:208`, and
+  `:249`.
 
 ## Failure scenario
 

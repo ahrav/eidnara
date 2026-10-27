@@ -12,12 +12,12 @@ specification recommended adding the evidence key
 
 - `memoryMarkOperationId(sessionId, args)` joins the session, event,
   object id, and `evidenceFlags(args)` with the key separator
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:189-194`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:201-206`).
 - `evidenceFlags` emits `--evidence <id>` then `--path <path>@<oid>`, each
-  only when present (`memory-mark-command.ts:144-154`), so flag order on
+  only when present (`memory-mark-command.ts:145-155`), so flag order on
   the command line does not change the identity.
 - The runner takes `operationId` from its caller (`MemoryMarkInput`,
-  `memory-mark-command.ts:175`; used at `:218`). Both callers pass
+  `memory-mark-command.ts:183`; used at `:232`). Both callers pass
   `memoryMarkOperationId(sessionId, parsed.args)`
   (`packages/opencode-plugin/src/hooks/context/command-handler.ts:415`,
   `packages/pi-plugin/src/commands/eidnara-memory-mark.ts:61`).
@@ -26,7 +26,7 @@ specification recommended adding the evidence key
   with `joinKeyFields` (`client.ts:247`); `request_digest` covers the
   operations, so other bytes under one key are `operation_key_reused`.
 - The parser refuses U+001F in the object id and the evidence id
-  (`memory-mark-command.ts:116-121`) and in the path (`:79`).
+  (`memory-mark-command.ts:117-122`) and in the path (`:80`).
 - Route side: `commit_log` has a unique index on `(producer,
   operation_key)` (`crates/kernel/src/schema.rs:26`); the receipt lookup
   precedes the operation, so a reused key with another digest is
@@ -53,7 +53,7 @@ All constructed except the reply drop:
 - One session, dispute by id then by file: two identities, two
   `applied` outcomes with `replayed: false`, two receipts; the first again
   replays with no new receipt
-  (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts:201`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts:208`).
 - Route: two keys, two commit-log and two admission rows; an identical
   repeat returns `replayed: true`, the first `commit_seq` and
   `dispositions`, counts unchanged; the first key with another digest is
@@ -61,14 +61,14 @@ All constructed except the reply drop:
   (`dispute_identities_land_replay_and_refuse_reuse_like_every_envelope`,
   `crates/daemon/tests/kernel_routes.rs:6080`).
 - Parser refusal of U+001F in the path and the evidence id
-  (`memory-mark-command.test.ts:137`).
+  (`memory-mark-command.test.ts:144`).
 
 ## Investigation log
 
 ### Q: Is the identity independent of flag order?
 
 - Sources examined: `evidenceFlags`; the parser test at
-  `memory-mark-command.test.ts:99`.
+  `memory-mark-command.test.ts:106`.
 - Findings: by construction yes; the parser test asserts both orders
   parse to the same `args` shape (`toMatchObject`), and no test compares
   the two identities.

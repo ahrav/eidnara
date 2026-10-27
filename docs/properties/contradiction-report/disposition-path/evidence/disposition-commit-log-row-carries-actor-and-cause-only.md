@@ -39,8 +39,8 @@ carries so R3's join is specified against the real columns.
   handler.ts:391`) or `"user:pi"` (`pi-plugin/src/commands/eidnara-memory-
   mark.ts:18`); `cause` is `commandLine(args)`: `/eidnara-memory-mark
   <event> <object_id>`, followed at the PR A tip by `--evidence <id>` and
-  `--path <path>@<oid>` when present (`memory-mark-command.ts:157-159`,
-  set at `:219`); `producer` defaults to the client's (`client.ts:603`).
+  `--path <path>@<oid>` when present (`memory-mark-command.ts:158-160`,
+  set at `:233`); `producer` defaults to the client's (`client.ts:603`).
 - PR A's `a_dispute_citing_live_project_evidence_lands_with_the_id_and_the_reporter`
   (`kernel_routes.rs:5723`) reads `actor` and `cause` from the
   `commit_log` row of two dispute commits (`commit_actor_and_cause`,

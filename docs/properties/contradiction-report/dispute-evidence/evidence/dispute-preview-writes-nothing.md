@@ -21,8 +21,8 @@ dispute the user declined.
 - A preview refuses tokens and non-disposition operations
   (`commit.rs:1146-1159`).
 - The command treats the commit's verdict as the one recorded
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:243-244`)
-  and reports a refused preview with no commit (`:223-224`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:260-261`)
+  and reports a refused preview with no commit (`:238-239`).
 
 ## Failure scenario
 
@@ -52,7 +52,7 @@ All constructed:
 - A valid reference previews with counts unchanged, then commits
   (`kernel_routes.rs:5880`).
 - The command reports `refused` at the preview step, writes no receipt,
-  and makes one call (`memory-mark-command.test.ts:242`).
+  and makes one call (`memory-mark-command.test.ts:249`).
 - A tip that moves between preview and commit: the preview answers
   `available`, the evidence's only project citer retires, and the commit
   answers `not_found` with nothing written
@@ -65,7 +65,7 @@ All constructed:
 
 - Sources examined: `PreviewRun::disposition` (`commit.rs:827-866`), the
   module header (`commit.rs:60-63`), the command usage
-  (`memory-mark-command.ts:53`), `memory-mark-command.test.ts:156`.
+  (`memory-mark-command.ts:54`), `memory-mark-command.test.ts:163`.
 - Findings: no. `visibility_changes` compares the subject's current and
   projected surfaces only; dependents demoted in the same commit are not
   reported. The limit is documented in the header and in the usage text,

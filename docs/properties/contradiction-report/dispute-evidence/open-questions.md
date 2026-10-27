@@ -89,9 +89,11 @@ Not resolvable from code. See Q11 (needs human input).
 
 Plan R5: the tool sends `actor: agent:<harness>`.
 
-Evidence: both harnesses send the constant `agent:opencode`
-(`packages/opencode-plugin/src/tools/eidnara-memory/execute.ts:49`;
-`packages/pi-plugin/src/tools/eidnara-memory.ts:166`). The daemon knows
+Evidence: before #1161 both harnesses sent the constant `agent:opencode`;
+#1161 keeps it for OpenCode
+(`packages/opencode-plugin/src/tools/eidnara-memory/execute.ts:50`) and
+gives the Pi tool `agent:pi`
+(`packages/pi-plugin/src/tools/eidnara-memory.ts:57`). The daemon knows
 the bound harness (`RouteScope.harness`, `mod.rs:410`) and does not check
 the actor against it; the actor is a claim (`docs/host-wire-protocol.md:
 26`).
@@ -110,7 +112,7 @@ Plan: none of R1 to R7 mentions the operation identity; the plan assumes a
 dispute with evidence rides today's envelope.
 
 Evidence: `memoryMarkOperationId` is `[sessionId, event, objectId]`
-(`memory-mark-command.ts:190-194`); `deriveRequestDigest` covers the
+(`memory-mark-command.ts:202-206`); `deriveRequestDigest` covers the
 operations (`client.ts:272-281`); a stored receipt with a different digest
 is `KernelError::Conflict` (`envelope.rs:1365-1367`), which `run` maps to
 `OperationKeyReused` when raised before entering the closure
@@ -204,12 +206,12 @@ Options:
 Recommendation: (a). It matches the plan's objective (evidence recorded so
 a later reader can check it: two references, two rows) and keeps the
 replay guarantee the command's doc comment promises (PR A implements (a):
-`memoryMarkOperationId`, `memory-mark-command.ts:189-194`). Alternative: (b), if the product wants one
+`memoryMarkOperationId`, `memory-mark-command.ts:201-206`). Alternative: (b), if the product wants one
 dispute per session and a clear "already disputed" message. (c) loses the
 replay property and is not recommended. Under (a), the evidence key must be
 U+001F-free (`client.ts:247-255`); A4 excludes NUL only, so the parser must
 also refuse U+001F in `path` as it does for `object_id`
-(`memory-mark-command.ts:116-118`).
+(`memory-mark-command.ts:117-119`).
 
 ### Q3. How the reporting session is joinable (needs human input)
 
@@ -306,7 +308,7 @@ admission. Alternative (b) is a retention-policy change and needs an owner.
 
 Fact: a replayed preview returns `previews: []` with the receipt
 (`commit.rs:1165-1172`); the TS command treats a commit receipt with no
-matching verdict as `outcome_unknown` (`memory-mark-command.ts:241-242`).
+matching verdict as `outcome_unknown` (`memory-mark-command.ts:258-259`).
 Whether a replayed commit returns the stored verdict list was not traced
 end to end here.
 
@@ -328,7 +330,7 @@ Options:
 
 - (a) Keep the table: the row lands `denied`, the evidence is on it, the
   client reports "denied" (today's `denied` outcome,
-  `memory-mark-command.ts:244`).
+  `memory-mark-command.ts:261`).
 - (b) Refuse at the route before writing when the requested disposition
   is less restrictive than the prior, so no evidence is recorded against a
   finding that is already more than disputed.

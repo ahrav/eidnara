@@ -69,11 +69,11 @@ All constructed:
   `encode` on reserved and multi-byte input has a fixed witness
   (`dispute.rs:280`).
 - The fake kernel refuses five path shapes the route refuses
-  (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts:223`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts:230`).
 - Command parser: `--path` split at the last `@`; a path without `@`, an
   empty path or oid, and a path holding U+001F print usage
-  (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts:99`,
-  `:137`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts:106`,
+  `:144`).
 
 ## Investigation log
 
@@ -109,8 +109,8 @@ All constructed:
 ### Q: Can the command cite a path that holds a space (portfolio R2)?
 
 - Sources examined: `parseMemoryMarkArgs`
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:85-88`),
-  the usage text (`memory-mark-command.ts:51`), `kernel_routes.rs:5880`.
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:86-89`),
+  the usage text (`memory-mark-command.ts:52`), `kernel_routes.rs:5880`.
 - Findings: no. The parser splits its arguments on `/\s+/`, so a path
   with a space becomes two words. The route accepts such paths. At
   `511cd6d73` the usage names the limit ("a relative repository path

@@ -56,7 +56,7 @@ valid authority.
 The writer lock serializes commits, so a retirement that commits first is
 seen by step 2. Preview runs on a read snapshot and can judge a subject
 that the next commit retires; the commit then answers `not_found`
-(`memory-mark-command.ts:238-239` reports `refused/commit`).
+(`memory-mark-command.ts:255-256` reports `refused/commit`).
 
 ## What a test must construct
 

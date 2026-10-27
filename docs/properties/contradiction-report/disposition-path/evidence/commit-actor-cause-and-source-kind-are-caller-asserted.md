@@ -37,7 +37,7 @@ which makes the provenance of `source_kind` part of the dispute record.
   (`packages/opencode-plugin/src/hooks/context/command-handler.ts:391`) or
   `"user:pi"` (`packages/pi-plugin/src/commands/eidnara-memory-mark.ts:18`)
   and `sourceKind: "user"`
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:220`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:229`).
 
 ## Failure scenario
 

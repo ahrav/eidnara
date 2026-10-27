@@ -33,7 +33,7 @@ None`. PR A adds the fields and the requirement.
   (`commit.rs:12-15`, `:46-53`).
 - TypeScript: `parseMemoryMarkArgs` prints usage when a dispute cites
   nothing or another event cites something
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:129-130`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:130-131`).
   The fake kernel mirrors the rule (`disputeEvidenceWellFormed`,
   `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:285-307`,
   applied at `:647-649`).
@@ -69,7 +69,7 @@ share it.
 All four are constructed: `a_dispute_needs_evidence_and_other_events_take_none`
 (`crates/daemon/tests/kernel_routes.rs:5971`), the unit test of the same
 name (`dispute.rs:370`), and the parser test at
-`memory-mark-command.test.ts:126`.
+`memory-mark-command.test.ts:133`.
 
 The check is a per-request route oracle (portfolio refinement R4): it
 reads each disposition operation's `event`, `evidence_id`, and

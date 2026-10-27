@@ -97,7 +97,7 @@ preview and the commit with the four row counts unchanged; it lands
 `mark_stale`, `explicit_reject`, and `quarantine` without evidence with
 `reason = "kernel.commit"` and `evidence_id IS NULL`. The command parser
 test `a dispute without evidence, and evidence on another event, print
-usage` (`memory-mark-command.test.ts:126`) covers the TypeScript side.
+usage` (`memory-mark-command.test.ts:133`) covers the TypeScript side.
 `a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field`
 (`kernel_routes.rs:6252`) sends a `mark_disputed` body carrying a forged
 `reason` field and asserts the route answers an error with the four row
@@ -146,7 +146,7 @@ Read `compose_reason` (`commit.rs:206-234`), `DisputeReason::validated`
 route and parser tests above.
 Existing check: `kernel_routes.rs:5971`, `:6252`; `dispute.rs:370`
 (`a_dispute_needs_evidence_and_other_events_take_none`, unit);
-`memory-mark-command.test.ts:126`; the fake kernel mirrors the rule
+`memory-mark-command.test.ts:133`; the fake kernel mirrors the rule
 (`disputeEvidenceWellFormed`,
 `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:285-307`).
 Status unaudited.
@@ -332,7 +332,7 @@ Open questions:
 Type: safety
 Reachability: default-production - `DisputeReason::validated` runs for
 every dispute in `compose_reason` (`commit.rs:221-227`); the command's
-`--path <path>@<oid>` reaches it (`memory-mark-command.ts:75-81`).
+`--path <path>@<oid>` reaches it (`memory-mark-command.ts:76-82`).
 Status: active
 Exercised: yes - `a_dispute_citing_a_repository_file_records_it_in_the_reason`
 (`kernel_routes.rs:5880`) lands five paths holding `;`, `=`, `%`, `@`,
@@ -389,10 +389,10 @@ Open questions:
   `100%41.md`) is refused by the decode-idempotence rule
   (`dispute.rs:201-207`). The command help does not mention the rule.
 - A path holding a space cannot be cited from the command: the parser
-  splits its arguments on `/\s+/` (`memory-mark-command.ts:85-88`), while
+  splits its arguments on `/\s+/` (`memory-mark-command.ts:86-89`), while
   the route accepts such paths (`kernel_routes.rs:5880`). At `511cd6d73`
   the usage text names the limit ("a relative repository path without
-  spaces", `memory-mark-command.ts:51`). Whether the command should accept
+  spaces", `memory-mark-command.ts:52`). Whether the command should accept
   quoted or escaped paths is open. (needs human input)
 - `evidence_ref.path` accepts C0 and bidi control characters:
   `confined_path::check` refuses NUL only among control bytes
@@ -416,7 +416,7 @@ unknown `source_kind` with `invalid_input`, nothing written, and records
 `kernel_routes.rs:5723` records `user_inferred` for `source_kind: "user"`
 and `assistant_inference` for `assistant`, and asserts the row's
 `(source_class, taint_class)` equal the subject's prior row. The
-TypeScript test at `memory-mark-command.test.ts:174` asserts the command
+TypeScript test at `memory-mark-command.test.ts:181` asserts the command
 sends `source_kind: "user"` on both calls. Tool arm (#1161): `sends the
 evidence under the tool identity, actor, cause, and assistant source kind`
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1373`)
@@ -533,7 +533,7 @@ identity with `memoryMarkOperationId(sessionId, args)`
 (`command-handler.ts:415`,
 `packages/pi-plugin/src/commands/eidnara-memory-mark.ts:61`).
 Status: active
-Exercised: yes - `memory-mark-command.test.ts:201` files a dispute by id
+Exercised: yes - `memory-mark-command.test.ts:208` files a dispute by id
 and one by file in one session: two identities, two commits, two
 receipts; a repeat of the first replays with `replayed: true` and no new
 receipt. `dispute_identities_land_replay_and_refuse_reuse_like_every_envelope`
@@ -551,9 +551,9 @@ operation_key)` (the unique index on `commit_log`,
 `crates/kernel/src/schema.rs:26`); (b)
 `memoryMarkOperationId(s, a) == memoryMarkOperationId(s, b)` exactly when
 `a` and `b` name the same event, object, and evidence
-(`memory-mark-command.ts:189-194`, `:144-154`); (c) every identity field
+(`memory-mark-command.ts:201-206`, `:145-155`); (c) every identity field
 is free of U+001F (the parser refuses it in the object id, evidence id,
-and path, `memory-mark-command.ts:79`, `:116-121`). Holds on every
+and path, `memory-mark-command.ts:80`, `:117-122`). Holds on every
 request, so `always`.
 Fault/timing angle: a lost response followed by the client's reissue
 under the same identity must replay. The receipt lookup precedes the
@@ -564,22 +564,22 @@ in one session; an identical repeat; the same key with other bytes.
 Confidence: high - [evidence](evidence/dispute-identity-includes-evidence-key.md).
 Read `memoryMarkOperationId`, `evidenceFlags`, `parseMemoryMarkArgs`, and
 the two tests.
-Existing check: `memory-mark-command.test.ts:201`; `kernel_routes.rs:6080`.
+Existing check: `memory-mark-command.test.ts:208`; `kernel_routes.rs:6080`.
 Status unaudited.
 Impact: a second piece of evidence would be refused with a message about
 a reused key and the record would keep only the first.
 Open questions:
 - `--evidence A --path p@o` and `--path p@o --evidence A` produce one
   identity because `evidenceFlags` orders the flags
-  (`memory-mark-command.ts:144-154`); the parser test asserts both orders
-  parse (`memory-mark-command.test.ts:99`) but no test asserts the two
+  (`memory-mark-command.ts:145-155`); the parser test asserts both orders
+  parse (`memory-mark-command.test.ts:106`) but no test asserts the two
   identities are equal. Read, not exercised.
 
 ### dispute-preview-writes-nothing
 
 Type: safety
 Reachability: default-production - `runMemoryMarkCommand` previews before
-every commit (`memory-mark-command.ts:222`); the route refuses a preview
+every commit (`memory-mark-command.ts:237`); the route refuses a preview
 of anything other than dispositions (`commit.rs:1151-1159`).
 Status: active
 Exercised: yes - `assert_refused_without_writing`
@@ -594,7 +594,7 @@ reference with counts unchanged and then commits it.
 retires the evidence's only project citer, and commits: the commit
 answers `not_found` and writes nothing, so the commit's verdict is the
 one that holds when the tip moves.
-`memory-mark-command.test.ts:242` reports a refused preview by name with
+`memory-mark-command.test.ts:249` reports a refused preview by name with
 no receipt and one call.
 Guarantee: A `preview: true` envelope carrying the evidence fields runs
 the same form, liveness, and visibility checks as the commit, writes no
@@ -608,7 +608,7 @@ evidence check runs inside `disposition_request`, which both paths call
 (`commit.rs:790`, `:835`).
 Fault/timing angle: a commit between preview and commit can change the
 answer; the commit's verdict is the one recorded
-(`memory-mark-command.ts:243-244`). Constructed at the route by
+(`memory-mark-command.ts:260-261`). Constructed at the route by
 `kernel_routes.rs:6375`.
 Required faults and enabling state: a preview of each refused input and
 of a valid one at the same tip as the following commit; a commit between
@@ -616,13 +616,13 @@ a preview and its commit that changes the verdict.
 Confidence: high - [evidence](evidence/dispute-preview-writes-nothing.md).
 Read the handler, `preview` (`commit.rs:877-897`), and the helper.
 Existing check: `kernel_routes.rs:5703`, `:5801`, `:5880`, `:5971`,
-`:6375`; `memory-mark-command.test.ts:242`. Status unaudited.
+`:6375`; `memory-mark-command.test.ts:249`. Status unaudited.
 Impact: a writing preview would record disputes the user declined; a
 disagreeing one would ask the wrong question.
 Open questions:
 - The preview reports the subject's visibility only; a dispute on an
   approval also demotes its dependents in the commit. The limit is
-  documented (`commit.rs:60-63`, `memory-mark-command.ts:53`) and tracked
+  documented (`commit.rs:60-63`, `memory-mark-command.ts:54`) and tracked
   as G2 on `disposition-on-an-authority-bearer-demotes-dependents-in-the-same-commit`.
 
 ### structured-reason-projects-typed-reporter-data

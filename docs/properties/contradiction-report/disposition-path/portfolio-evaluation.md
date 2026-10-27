@@ -103,7 +103,7 @@ differ, prior above Candidate, retired id cited); none negates a check.
 - Baseline pins: no-evidence, commit-log, evidence-scope, and the
   accept-retired branch of evidence-existence assert behavior P4 intends to
   change; a test written from them fails on the intended change (B1).
-- Replay after move: `memory-mark-command.test.ts:351` pins that a repeat
+- Replay after move: `memory-mark-command.test.ts:359` pins that a repeat
   reports `applied` with the original verdict while the stored disposition
   differs (`commit.rs:1190-1206`). Safe for the store, possibly misleading
   for the user; no record asks (R5).
@@ -128,7 +128,7 @@ differ, prior above Candidate, retired id cited); none negates a check.
 | R3 | refinement | evidence-scope: split observation into route `not_found` and a kernel-crate `scope_id == None` assertion |
 | R4 | refinement | subject: evidence says the retired-stored-approval outcome "was not traced"; record says `Open questions: None`. Add it |
 | R5 | refinement | replay: add open question on reporting the original verdict after a move (needs human input) |
-| R6 | refinement | command: preview null verdict is `refused/preview invalid(internal)` (`memory-mark-command.ts:227-229`), commit null is `outcome_unknown` (`:240-242`); fix the check; add marker `command_preview_visibility_changes` |
+| R6 | refinement | command: preview null verdict is `refused/preview invalid(internal)` (`memory-mark-command.ts:243-245`), commit null is `outcome_unknown` (`:257-259`); fix the check; add marker `command_preview_visibility_changes` |
 | R7 | refinement | cascade: mark the `deferred` branch `Exercised: not yet - 4,096 dependents` |
 | R8 | refinement | restrictiveness: extend the lateral-move question to Superseded to Disputed |
 | R9 | refinement | no-evidence: add a row-existence floor to the second clause |
