@@ -140,8 +140,10 @@ consistently.
 - **Whitespace in paths.** The command splits arguments on `/\s+/`
   (`memory-mark-command.ts:86-89`). A path containing a space cannot be
   cited from the command. The route accepts such paths
-  (`kernel_routes.rs:5880`), and the usage text does not mention the limit
-  (R2).
+  (`kernel_routes.rs:5880`); the usage text names the limit since
+  `511cd6d73` (`memory-mark-command.ts:52`), which closed R2. Whether the
+  command should accept quoted or escaped paths stays open on the form
+  record.
 
 ## Finding disposition
 

@@ -407,32 +407,35 @@ evidence.
   `OperationKeyReused` (`commit.rs:1064-1072`).
 - Ordinary writers: both plugins through `deriveOperationKey(producer,
   actor, operationId)` (`client.ts:284-290`) with `operationId =
-  [sessionId, event, objectId]` for the command
-  (`memory-mark-command.ts:204-208`) and `sessionId SEP toolCallId` for the
-  tool (`execute.ts:430-432`).
-- Gap (FACT): the command's `operationId` omits the evidence, so a second
-  dispute in one session with different evidence changes the
-  `request_digest` (`deriveRequestDigest` covers operations,
-  `client.ts:272-281`) but not the key, and the daemon refuses
-  `operation_key_reused`. The tool's key is per tool call, so it has no
-  such collision; its replay unit is the tool call.
-- Proposed identity: the command's `operationId` becomes
-  `[sessionId, event, objectId, evidenceKey]` where `evidenceKey` is
-  `evidence_id` or `path@oid` after A4 admission. `evidenceKey` must be
-  free of U+001F (`joinKeyFields`, `client.ts:247-255`); A4's path bounds
-  exclude NUL but not U+001F, so the parser refuses it as the object id
-  parser already does (`memory-mark-command.ts:117-119`).
-- Consequence: the "one dispute per (session, event, object)" replay
-  unit the doc comment described at `3a3b916b7` (PR A:
-  `memoryMarkOperationId` at `memory-mark-command.ts:203-208` includes the
-  evidence flags)
-  becomes "one dispute per (session, event, object, evidence)". The logical
-  intent of "one dispute" is "this session asserts this evidence against
-  this finding"; two pieces of evidence are two assertions and two rows,
-  each a tightening that the Kernel accepts (A7: a repeat on an already
-  `Disputed` decision records `outcome=deny`, disposition unchanged,
-  `admission.rs:321-367`). The alternative (keep the key, refuse the second
-  evidence) is recorded in conflicts Q2.
+  [sessionId, event, objectId, ...evidence flags]` for the command
+  (`memoryMarkOperationId`, `memory-mark-command.ts:203-208`) and
+  `sessionId SEP toolCallId` for the tool (`execute.ts:430-432`).
+- Gap at `3a3b916b7`, closed by PR A: the command's `operationId` omitted
+  the evidence, so a second dispute in one session with different evidence
+  changed the `request_digest` (`deriveRequestDigest` covers operations,
+  `client.ts:272-281`) but not the key, and the daemon refused
+  `operation_key_reused`. PR A appends the evidence flags to the identity;
+  `memory-mark-command.test.ts:208` lands two disputes with different
+  evidence in one session as two commits and replays a repeat of the first.
+  The tool's key is per tool call, so it never had the collision; its
+  replay unit is the tool call.
+- Identity (applied in PR A): the command's `operationId` is
+  `[sessionId, event, objectId, evidence flags]`, the flags being
+  `--evidence <id>` and `--path <path>@<oid>` in a fixed order after A4
+  admission (`evidenceFlags`, `memory-mark-command.ts:145-155`). Each field
+  must be free of U+001F (`joinKeyFields`, `client.ts:247-255`); A4's path
+  bounds exclude NUL but not U+001F, so the parser refuses it in the object
+  id, the evidence id, and the path (`memory-mark-command.ts:117-122`,
+  `:80`).
+- Consequence: the replay unit is "one dispute per (session, event,
+  object, evidence)", where the doc comment at `3a3b916b7` described "one
+  dispute per (session, event, object)". The logical intent of "one
+  dispute" is "this session asserts this evidence against this finding";
+  two pieces of evidence are two assertions and two rows, each a tightening
+  that the Kernel accepts (A7: a repeat on an already `Disputed` decision
+  records `outcome=deny`, disposition unchanged, `admission.rs:321-367`).
+  The alternative (keep the key, refuse the second evidence) is recorded in
+  conflicts Q2.
 
 ### 7.4 Enforcement set for A10 and A11 (derived reason, use-outcome link)
 
@@ -594,8 +597,9 @@ conflicts-and-questions.md)
   `agent:opencode`; #1161 keeps it for OpenCode (`execute.ts:50`) and
   gives Pi `agent:pi` (`pi-plugin/src/tools/eidnara-memory.ts:57`). The
   daemon can verify against the binding. Decide whether to verify.
-- C5 (A8): the command's operation identity collides on a second evidence.
-  Section 7.3 proposes the identity change.
+- C5 (A8): at `3a3b916b7` the command's operation identity collided on a
+  second evidence. PR A applied the section 7.3 identity
+  (`memoryMarkOperationId`, `memory-mark-command.ts:203-208`); closed.
 - C6 (U3 rebuild): PR A rows do not survive the Batch K1 rotation under
   single-baseline storage; no migration exists or is allowed.
 
