@@ -26,7 +26,7 @@ guards). An existing check never removes a record from the catalog.
 
 Production guards: the compile-time assertion that the descriptor bound is
 at least `MAX_SOURCE_UNIT_BYTES`
-(`crates/daemon/src/contradiction_candidates/scorer.rs:65-67`); the
+(`crates/daemon/src/contradiction_candidates/scorer.rs:68-70`); the
 analyzer's refusals (`crates/retrieval/src/lexical/analysis.rs:78-105`),
 which the scorer propagates.
 
@@ -124,7 +124,7 @@ branch tip; the read ticket (#1168) adds the code and the checks.
 - The scorer's `TooManyAtoms` path is unreachable by construction and has no
   test; the analyzer's own test covers the refusal.
 - The pass records `matcher_digest()` with each row
-  (`crates/daemon/src/contradiction_candidates/pass.rs:343`); no test reads
+  (`crates/daemon/src/contradiction_candidates/pass.rs:372`); no test reads
   the digest back from a pass-written row.
 - No test fails a store write inside a pass; that path counts the failed
   descriptor as analyzed and the later ones as unscored.

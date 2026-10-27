@@ -140,7 +140,7 @@ Status unaudited. Re-exercised by #1164 through the scorer:
 `an_unscorable_summary_is_reported_and_the_others_still_score`
 (`:243-274`) covers the 8192-byte summary bound. The scorer's atom bounds
 sit one past the most atoms the byte bounds admit
-(`crates/daemon/src/contradiction_candidates/scorer.rs:84-95`), so `TooManyAtoms` is
+(`crates/daemon/src/contradiction_candidates/scorer.rs:87-98`), so `TooManyAtoms` is
 unreachable through it.
 Impact: a P5 pass that analyzes a 64 KiB descriptor and a project's decision
 summaries does unbounded work or allocation per pass if the bound truncates
@@ -173,7 +173,7 @@ Read `analysis.rs:107-199`: only `char` classification, slicing, and
 `String::push`; no I/O, statics, or folding.
 Existing check: the goldens (`tests/lexical_analysis.rs:24-36` harness,
 `:51-218` cases). Status unaudited. Re-exercised by #1164: the scorer folds
-after analysis (`crates/daemon/src/contradiction_candidates/scorer.rs:102-110`),
+after analysis (`crates/daemon/src/contradiction_candidates/scorer.rs:111-149`),
 and its hand-written term sets
 (`crates/daemon/tests/contradiction_candidates_scorer.rs:31-80`, `:131-159`) show
 case-boundary parts (`HTTPServer` to `http`, `server`), kept diacritics,
@@ -213,7 +213,7 @@ Read `identity.rs:36-65` and the test.
 Existing check: `identity_pins_the_manifest`. Status unaudited.
 Re-exercised by #1164: the matcher preimage names `ANALYSIS_CONTRACT_EPOCH`
 and the Unicode version
-(`crates/daemon/src/contradiction_candidates/scorer.rs:301-303`), and
+(`crates/daemon/src/contradiction_candidates/scorer.rs:397-399`), and
 `the_matcher_digest_pins_every_rule`
 (`crates/daemon/tests/contradiction_candidates_scorer.rs:348-400`) asserts the whole
 preimage, including both fields, and the digest literal. `identity_pins_the_manifest` and the retrieval crate are unchanged
@@ -293,7 +293,7 @@ Status unaudited.
 Re-exercised by #1167: the pass applies the SQL prefilter and then
 `ScopeFilter`, as `read_visible` does;
 `the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_counts_the_cut`
-(`crates/daemon/src/candidate_pass_tests.rs:560`) keeps another project's
+(`crates/daemon/src/candidate_pass_tests.rs:561`) keeps another project's
 decision out.
 Impact: a P5 pass that trusts the Kernel prefilter alone (without the daemon
 `ScopeFilter`) would see rows of other projects whose scopes are uncertain,
@@ -342,7 +342,7 @@ Existing check: `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_trunca
 unaudited.
 Re-exercised by #1167: the pass bounds its candidate set with `NewestRows`
 after the scope filter; the test at
-`crates/daemon/src/candidate_pass_tests.rs:560` cuts the oldest at a reduced
+`crates/daemon/src/candidate_pass_tests.rs:561` cuts the oldest at a reduced
 cap.
 Impact: a P5 pass that copies this pattern (plan U1 "patterns to follow"
 `read.rs:185`) inherits a bound that is applied after full materialization of
@@ -481,7 +481,7 @@ Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_bud
 (`search_catchup.rs:1876`). Status unaudited.
 Re-exercised by #1167:
 `a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor`
-(`crates/daemon/src/candidate_pass_tests.rs:759`) passes a spent budget and
+(`crates/daemon/src/candidate_pass_tests.rs:760`) passes a spent budget and
 observes `deadline` before any Kernel read.
 Impact: plan R1/KTD2 give the P5 pass its own deadline; if it uses the
 decision-page API it gets a bounded wait plus a row-bounded scan, not a
@@ -558,7 +558,7 @@ Existing check: the two tests above. Status unaudited.
 Re-exercised by #1167: the pass is offered from the capture job's tracked task
 after `run_settled` returns, so `AfterResponse` still only spawns;
 `the_route_consent_reaches_the_pass_through_a_transform`
-(`crates/daemon/src/candidate_pass_tests.rs:933`) runs the transform and its
+(`crates/daemon/src/candidate_pass_tests.rs:1038`) runs the transform and its
 after-response work with consent on and off.
 Impact: a P5 trigger that ran inside `AfterResponse` before `job.run()` or
 awaited the job would re-couple response latency to the kernel; a trigger
@@ -592,7 +592,7 @@ Confidence: high - [evidence](evidence/p5dep-capture-slot-is-single-and-released
 Existing check: the two tests above. Status unaudited.
 Re-exercised by #1167:
 `a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate`
-(`crates/daemon/src/candidate_pass_tests.rs:282`) observes the slot idle and
+(`crates/daemon/src/candidate_pass_tests.rs:283`) observes the slot idle and
 the commit gate free when the pass starts and while it scores.
 Impact: a P5 pass that ran inside the job's closure would extend slot
 occupancy and raise `RefusedQueueFull` for the next pass; a pass outside the
@@ -669,7 +669,7 @@ Existing check: `the_capture_report_carries_no_unit_text`,
 `the_capture_report_reaches_host_status_field_for_field`. Status unaudited.
 Re-exercised by #1167: the job's `Count` vocabulary is unchanged, and
 `a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate`
-(`crates/daemon/src/candidate_pass_tests.rs:282`) checks two jobs end in two
+(`crates/daemon/src/candidate_pass_tests.rs:283`) checks two jobs end in two
 `completed` counts with consent on.
 Impact: the P5 trigger waits for the job's terminal: the capture task runs
 `job.run_settled()` and offers the pass after it returns

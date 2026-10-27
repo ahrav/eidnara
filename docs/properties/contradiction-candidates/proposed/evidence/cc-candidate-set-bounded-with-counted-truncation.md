@@ -9,7 +9,7 @@ once per descriptor.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/pass.rs:363` `candidate_summaries`
+- `crates/daemon/src/contradiction_candidates/pass.rs:392` `candidate_summaries`
   reads explicit-search ids with the project scope term, judges each scope with
   `ScopeFilter`, keeps the newest `bounds.decisions` with `NewestRows`, filters
   by `eligible` through claim facts in chunks of 64, cuts payloads by

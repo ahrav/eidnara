@@ -14,26 +14,28 @@ counted `descriptors_refused_oversize`) lands with #1167.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/scorer.rs:63-69`
+- `crates/daemon/src/contradiction_candidates/scorer.rs:66-72`
   `DESCRIPTOR_BOUNDS = bounds(65_536)`, `SUMMARY_BOUNDS = bounds(8_192)`;
-  `:65-67` a compile-time assertion holds the descriptor bound at or above
+  `:68-70` a compile-time assertion holds the descriptor bound at or above
   `MAX_SOURCE_UNIT_BYTES` (`crates/daemon/src/harness_sources.rs:612`).
-- `scorer.rs:82-95` `bounds`: `max_atoms = max_input_bytes / 2 + 1`, so the
+- `scorer.rs:85-98` `bounds`: `max_atoms = max_input_bytes / 2 + 1`, so the
   bounds are `{65536, 32769}` and `{8192, 4097}`. n atoms need at least
   2n - 1 bytes, so `max_atoms` atoms need more than `max_input_bytes`
   bytes: the byte check always refuses first.
-- `scorer.rs:102-110` `term_set` calls `analyze_segments(&[text], bounds)?`;
+- `scorer.rs:111-149` `term_set` returns `InputTooLong` for a text over the
+  byte bound before reading it and `TooManyAtoms` past the atom bound, the
+  refusals `analyze_segments(&[text], bounds)` gives;
   a refusal returns before any term is built.
 - `crates/retrieval/src/lexical/analysis.rs:78-105`: the byte check runs
   before the atom loop and the atom check before retention; neither returns
   a partial `Analysis`.
-- `scorer.rs:175-181` `DescriptorTerms::new` returns the refusal;
-  `:182-207` `score` maps a summary refusal or an empty term set to
+- `scorer.rs:275-281` `DescriptorTerms::new` returns the refusal;
+  `:282-303` `score` maps a summary refusal or an empty term set to
   `SummaryScore::Unscorable` and an analyzed overlap below a gate, zero
   included, to `Below`.
-- `scorer.rs:271-288` `score_descriptor` returns `Err` for the descriptor
+- `scorer.rs:367-384` `score_descriptor` returns `Err` for the descriptor
   (`?` before any summary is read) and lists unscorable summaries by
-  decision object id (`:280`). With a repeated object id, one id can appear
+  decision object id (`:376`). With a repeated object id, one id can appear
   twice in `unscorable`, or in `unscorable` and in `candidates` when
   another entry with that id scores.
 - Tests: `crates/daemon/tests/contradiction_candidates_scorer.rs:224-241`
@@ -81,7 +83,7 @@ nothing" half.
 
 - Sources examined: #1164 Scope ("`max_atoms` derived as
   `(max_input_bytes + 1) / 2`"), #1164 OQ5-3 (literal values 32769 and
-  4097), `scorer.rs:84-95`, the digest pin test at
+  4097), `scorer.rs:87-98`, the digest pin test at
   `contradiction_candidates_scorer.rs:348-400` (`65536/32769`,
   `8192/4097`).
 - Findings: the two ticket statements differ by one; the code and the pin
@@ -91,7 +93,7 @@ nothing" half.
 
 ### Q: What are the descriptor and summary bounds? (originally needs human input)
 
-- Sources examined: #1164 OQ5-3, `scorer.rs:63-69`.
+- Sources examined: #1164 OQ5-3, `scorer.rs:66-72`.
 - Findings: the ticket fixes 64 KiB and 8 KiB as scaffolding under #1007.
 - Missing evidence: the measurement #1007 will supply.
 - Conclusion: resolved with answer for this epoch.

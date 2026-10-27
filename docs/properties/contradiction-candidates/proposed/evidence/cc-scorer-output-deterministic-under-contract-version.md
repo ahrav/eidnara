@@ -12,25 +12,25 @@ iteration. #1163 D1 and C4 fix the total order; #1164 implements it.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/scorer.rs:102-110`
+- `crates/daemon/src/contradiction_candidates/scorer.rs:111-149`
   `term_set` collects folded, floored terms into a `BTreeSet<String>`, so a
   text's terms have one order and duplicates collapse.
-- `scorer.rs:139-148` `ScoredCandidate::rank`: score descending by
+- `scorer.rs:231-240` `ScoredCandidate::rank`: score descending by
   cross-multiplying `matched_terms` and `decision_terms` (no floating point),
   then `matched_terms` descending, `decision_terms` ascending, decision
   object id ascending, decision id ascending. `String` comparison is byte
   order, so `rank` is a total order over distinct (object id, decision id)
   pairs.
-- `scorer.rs:217-233` `TopCandidates::record` scores one summary and offers
-  a passing one; `:235-250` `offer` replaces a kept entry with the same
+- `scorer.rs:313-329` `TopCandidates::record` scores one summary and offers
+  a passing one; `:331-346` `offer` replaces a kept entry with the same
   decision object id only when the new one ranks better, inserts at
-  `partition_point`, and truncates to `CANDIDATES_PER_DESCRIPTOR` (`:62`,
+  `partition_point`, and truncates to `CANDIDATES_PER_DESCRIPTOR` (`:65`,
   K = 4).
-- `scorer.rs:271-288` `score_descriptor` feeds every candidate through
+- `scorer.rs:367-384` `score_descriptor` feeds every candidate through
   `record`, collects unscorable ids, and sorts them (`sort_unstable` on
   `String`, a total order, so equal ids are indistinguishable).
-- `scorer.rs:292-327` `matcher_preimage` names `ORDER_RULE_ID` (`:79-80`);
-  `:338-345` the digest is the SHA-256 of the preimage, held in a
+- `scorer.rs:388-423` `matcher_preimage` names `ORDER_RULE_ID` (`:82-83`);
+  `:434-441` the digest is the SHA-256 of the preimage, held in a
   `LazyLock`.
 - Tests: `crates/daemon/tests/contradiction_candidates_scorer.rs:276-318`
   `the_top_k_is_the_same_under_every_input_order`;
@@ -72,8 +72,8 @@ None. The function is pure: it reads only its arguments and the constant
 
 ### Q: Does the order depend on anything outside the inputs?
 
-- Sources examined: `scorer.rs:102-110`, `:139-148`, `:217-250`,
-  `:271-288`.
+- Sources examined: `scorer.rs:111-149`, `:231-240`, `:313-346`,
+  `:367-384`.
 - Findings: no hash container, clock, global, or I/O reaches the result.
   `rank` ignores the summary and ends at the decision id, so two entries
   tie only when their ids and counts are equal, and such entries give
@@ -85,7 +85,7 @@ None. The function is pure: it reads only its arguments and the constant
 
 ### Q: Which tie-break order applies? (originally needs human input)
 
-- Sources examined: #1163 D1 and C4, #1164 Scope, `scorer.rs:139-148`.
+- Sources examined: #1163 D1 and C4, #1164 Scope, `scorer.rs:231-240`.
 - Findings: the specification fixes score desc, `matched_terms` desc,
   `decision_terms` asc, object id asc; the code adds decision id asc and
   one entry per object id, both named in the order rule id.
