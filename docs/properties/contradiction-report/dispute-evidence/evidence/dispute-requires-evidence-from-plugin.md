@@ -69,7 +69,15 @@ share it.
 All four are constructed: `a_dispute_needs_evidence_and_other_events_take_none`
 (`crates/daemon/tests/kernel_routes.rs:5971`), the unit test of the same
 name (`dispute.rs:370`), and the parser test at
-`memory-mark-command.test.ts:133`.
+`memory-mark-command.test.ts:133`. The tool arm (#1161) refuses before
+sending: `refuses missing evidence and unsupported events before sending;
+renders denials and refusals`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1527`)
+calls `dispute` with neither evidence input, with `path` and no
+`gitObjectId`, and with no `objectId`, and asserts the usage error with
+no daemon call; `refuses a dispute without evidence before sending
+anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:482`)
+asserts the same for Pi.
 
 The check is a per-request route oracle (portfolio refinement R4): it
 reads each disposition operation's `event`, `evidence_id`, and
@@ -83,11 +91,14 @@ row, so a store scan on it is circular.
 ### Q: Does the check cover the model tool arm?
 
 - Sources examined: `packages/*/src` for `"disposition"` operations.
-- Findings: only the shared command runner sends a disposition at this
-  revision; no tool sends one.
-- Missing evidence: the #1161 tool arm.
-- Conclusion: resolved with answer: the record is `partial - command
-  arm`; #1161 extends it.
+- Findings: the shared command runner and, with #1161, `executeDispute`
+  (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:48`)
+  send a disposition; the tool runs the same runner, so the route sees the
+  same body, and the tool's own usage check refuses a dispute citing
+  nothing before any daemon call (`dispute.ts:47`).
+- Missing evidence: none.
+- Conclusion: resolved with answer: the record is `yes` for the command
+  arm, the tool arm, and raw route bodies.
 
 ### Q: Should the Kernel enforce the requirement for every writer?
 

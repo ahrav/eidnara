@@ -62,11 +62,11 @@ once PR B writes it; it is not verifiable at HEAD and the record says so.
 
 | Slug | Type | Reachability | Status | Exercised | Semantics |
 |---|---|---|---|---|---|
-| `dispute-requires-evidence-from-plugin` | safety | default-production | active | partial | always |
+| `dispute-requires-evidence-from-plugin` | safety | default-production | active | yes | always |
 | `cited-evidence-live-at-dispute-commit` | safety | default-production | active | yes | always |
 | `cited-evidence-visible-to-bound-project` | safety | default-production | active | yes | always |
 | `evidence-ref-well-formed-and-redaction-stable` | safety | default-production | active | yes | always |
-| `reporter-class-derived-never-asserted-up` | safety | default-production | active | partial | always |
+| `reporter-class-derived-never-asserted-up` | safety | default-production | active | yes | always |
 | `dispute-with-evidence-never-raises-standing` | safety | default-production | active | yes | always |
 | `dispute-identity-includes-evidence-key` | safety | default-production | active | yes | always |
 | `dispute-preview-writes-nothing` | safety | default-production | active | yes | always-or-unreached |

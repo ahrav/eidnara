@@ -41,7 +41,7 @@ None. The derivation is a pure function of the request.
 
 ## What a test must construct
 
-All constructed except the tool arm:
+All constructed, the tool arm with #1161:
 
 - `asserted_taint_class: user_explicit` under `assistant` and `user`:
   `class_over_declared`, nothing written; an unknown `source_kind`:
@@ -56,7 +56,16 @@ All constructed except the tool arm:
   subject's.
 - The command sends `source_kind: "user"` on preview and commit
   (`memory-mark-command.test.ts:181`).
-- Not constructed: the model tool arm's own surface (#1161).
+- The tool sends `source_kind: "assistant"` and no asserted class on
+  preview and commit: `sends the evidence under the tool identity, actor,
+  cause, and assistant source kind`
+  (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1376`)
+  for OpenCode and `files a dispute under agent:pi and the assistant
+  source kind when allowed`
+  (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:433`) for Pi.
+  `executeDispute` fixes the source kind
+  (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:53`), so
+  the tool cannot send `"user"`.
 
 The check is a per-request route oracle (portfolio refinement R4). It
 reads the request's `source_kind`, `asserted_source_class`, and

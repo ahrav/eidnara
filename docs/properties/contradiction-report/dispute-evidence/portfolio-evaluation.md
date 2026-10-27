@@ -88,9 +88,9 @@ request-scoped validator. Situation coverage lives in the seven
 fault-map markers. None of the seven exists in code: `git grep` finds no
 marker name outside `docs/` (R5).
 
-Two records are partial because the model tool arm lands with #1161.
-Both say so. (Author note: #1161 adds the tool arm, and both records now
-read `Exercised: yes`.) The bypass through Kernel API writers is an open question
+Two records were partial while the model tool arm waited on #1161; both
+now read `Exercised: yes` with the tool arm's tests named. The bypass
+through Kernel API writers is an open question
 in requirement and liveness, marked "needs human input". It is recorded
 consistently.
 
