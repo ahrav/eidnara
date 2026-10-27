@@ -4,6 +4,8 @@
 //! times only. The store keeps the rows, bounds them per descriptor and per
 //! project, and pages them; the daemon judges their liveness.
 
+use std::sync::LazyLock;
+
 use rusqlite::params;
 
 use context_core::canonical_json::is_lower_hex;
@@ -20,6 +22,22 @@ const SCORE_SCALE: i64 = 10_000;
 
 const COLUMNS: &str = "project_digest,evidence_id,decision_object_id,decision_id,matched_terms,\
      decision_terms,score_bp,publish_tip,kernel_incarnation_id,matcher_digest,created_at_ms";
+
+/// The page statement. Its LIMIT is the constant `MAX_CANDIDATE_PAGE + 1`, and
+/// the reader stops after the page's own `limit + 1` rows: SQLite recompiles a
+/// cached statement each time a LIMIT parameter is bound again.
+static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT {COLUMNS} FROM contradiction_candidates
+          WHERE project_digest=?1 AND decision_object_id=?2
+            AND score_bp<=?3
+            AND (score_bp<?3 OR (score_bp=?3 AND created_at_ms<?4)
+                 OR (score_bp=?3 AND created_at_ms=?4 AND evidence_id>?5))
+          ORDER BY score_bp DESC, created_at_ms DESC, evidence_id ASC
+          LIMIT {}",
+        MAX_CANDIDATE_PAGE + 1
+    )
+});
 
 /// One scored decision a descriptor's write carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,7 +361,6 @@ impl MemoryStore {
         check_id("decision_object_id", decision_object_id)?;
         let after = after.map(decode_cursor).transpose()?;
         let limit = limit.clamp(1, MAX_CANDIDATE_PAGE);
-        let fetch = i64::try_from(limit + 1).map_err(|_| invalid("limit"))?;
         let (score, created, evidence) = after.map_or(
             (i64::MAX, i64::MAX, String::new()),
             |(score, created, evidence)| (i64::from(score), created, evidence),
@@ -351,27 +368,13 @@ impl MemoryStore {
         let mut items = self
             .inner
             .with_conn(|conn| {
-                let mut statement = conn.prepare_cached(&format!(
-                    "SELECT {COLUMNS} FROM contradiction_candidates
-                      WHERE project_digest=?1 AND decision_object_id=?2
-                        AND score_bp<=?3
-                        AND (score_bp<?3 OR (score_bp=?3 AND created_at_ms<?4)
-                             OR (score_bp=?3 AND created_at_ms=?4 AND evidence_id>?5))
-                      ORDER BY score_bp DESC, created_at_ms DESC, evidence_id ASC
-                      LIMIT ?6"
-                ))?;
+                let mut statement = conn.prepare_cached(&PAGE_SQL)?;
                 statement
                     .query_map(
-                        params![
-                            project_digest,
-                            decision_object_id,
-                            score,
-                            created,
-                            evidence,
-                            fetch
-                        ],
+                        params![project_digest, decision_object_id, score, created, evidence],
                         candidate_from_row,
                     )?
+                    .take(limit + 1)
                     .collect::<rusqlite::Result<Vec<_>>>()
             })
             .map_err(MemoryStoreError::from)?;

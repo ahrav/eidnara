@@ -155,6 +155,18 @@ pub struct ClaimFacts {
     pub causal_record: Option<CausalRecord>,
 }
 
+/// The facts of one claim decision that judge its standing: the registry row,
+/// the typed decision row, the own admission row, and the served
+/// interpretation, each equal to the same field of [`ClaimFacts`] at the same
+/// snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimStanding {
+    pub object: ObjectRow,
+    pub decision: ClaimDecisionFacts,
+    pub own_admission: Option<AdmissionFacts>,
+    pub served: ServedStanding,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimFactsSnapshot {
     pub known_as_of: i64,
@@ -246,6 +258,63 @@ impl KernelStore {
         })
     }
 
+    /// The [`ClaimStanding`] of `object_id` at `target.through_commit` under
+    /// `budget`, from one snapshot; `None` when no registry row was created by
+    /// the snapshot. Each field is read as [`Self::claim_facts_at_within_budget`]
+    /// reads it.
+    ///
+    /// # Errors
+    ///
+    /// `Kernel(Deadline)` from an exhausted budget; `Kernel(InvalidInput)` for
+    /// an empty or oversized id or a negative target; `FutureSnapshot`,
+    /// `IncarnationMismatch`, `NotADecision`, `MalformedRequiredField`, and the
+    /// reader's errors as [`Self::claim_facts_at_within_budget`] answers them.
+    pub fn claim_standing_at_within_budget(
+        &self,
+        object_id: &str,
+        target: CommitReadTarget,
+        budget: &EvalBudget,
+    ) -> Result<Option<ClaimStanding>, ClaimFactsError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            if object_id.is_empty()
+                || object_id.len() > MAX_CLAIM_OBJECT_ID_BYTES
+                || target.through_commit < 0
+            {
+                return Err(KernelError::InvalidInput.into());
+            }
+            let mut reader = self.reader_with_limit(&limit)?;
+            let tx = reader.transaction(TransactionBehavior::Deferred)?;
+            if target.through_commit > tip(&tx).map_err(map_sqlite)? {
+                return Err(KernelError::FutureSnapshot.into());
+            }
+            if target.incarnation != self.incarnation() {
+                return Err(ClaimFactsError::IncarnationMismatch);
+            }
+            let requested = target.through_commit;
+            let standing = match registry_row_at(&tx, requested, object_id)? {
+                None => None,
+                Some(object) => {
+                    let ids = [object.object_id.clone()];
+                    let served = load_served(&tx, requested, &ids)?.remove(object_id);
+                    let mut own = tx.prepare_cached(&OWN_SQL).map_err(map_sqlite)?;
+                    let (decision, own_admission, served) =
+                        load_standing(&tx, requested, &object, served, &mut own)?;
+                    drop(own);
+                    Some(ClaimStanding {
+                        object,
+                        decision,
+                        own_admission,
+                        served,
+                    })
+                }
+            };
+            tx.commit()?;
+            limit.check()?;
+            Ok(standing)
+        })
+    }
+
     fn claim_facts_inner(
         &self,
         object_ids: &[String],
@@ -322,6 +391,9 @@ pub(crate) fn load_claims_in_tx(
     )
 }
 
+static OWN_SQL: LazyLock<String> = LazyLock::new(|| admission_sql(AdmissionScope::Own));
+static LINEAGE_SQL: LazyLock<String> = LazyLock::new(|| admission_sql(AdmissionScope::Lineage));
+
 /// Serving facts by object id; `None` records an object with no serving admission.
 pub(crate) type KnownServed<'a> = HashMap<&'a str, Option<ServedFacts>>;
 
@@ -348,9 +420,6 @@ pub(crate) fn load_claims_served_in_tx(
     let mut served = load_served(tx, requested, &unknown)?;
     if !object_ids.is_empty() {
         limit.check()?;
-        static OWN_SQL: LazyLock<String> = LazyLock::new(|| admission_sql(AdmissionScope::Own));
-        static LINEAGE_SQL: LazyLock<String> =
-            LazyLock::new(|| admission_sql(AdmissionScope::Lineage));
         let mut own = tx.prepare_cached(&OWN_SQL).map_err(map_sqlite)?;
         let mut lineage = tx.prepare_cached(&LINEAGE_SQL).map_err(map_sqlite)?;
         for object_id in object_ids {
@@ -411,17 +480,8 @@ fn load_claim(
     bounds: ClaimFactBounds,
     (own, lineage): (&mut Statement<'_>, &mut Statement<'_>),
 ) -> Result<ClaimFacts, ClaimFactsError> {
-    if object.object_kind != "decision" {
-        return Err(ClaimFactsError::NotADecision);
-    }
-    let decision = load_decision(tx, &object)?;
-    let own_admission = load_admission(own, requested, &object)?;
+    let (decision, own_admission, served) = load_standing(tx, requested, &object, served, own)?;
     let lineage_admission = load_admission(lineage, requested, &object)?;
-    let served = match served {
-        Some(facts) => ServedStanding::Served(facts),
-        None if object.invalidated_commit_seq.is_some() => ServedStanding::NotLiveAtSnapshot,
-        None => ServedStanding::NeverAdmitted,
-    };
     let (occurrences, excluded_representations) = load_occurrences(tx, requested, &object, wanted)?;
     let (causality, causal_record) =
         causal_class_at(tx, requested, &object, bounds.max_causal_payload_bytes)?;
@@ -436,6 +496,28 @@ fn load_claim(
         causality,
         causal_record,
     })
+}
+
+/// The decision row, own admission row, and served standing of a registry
+/// row `object` whose serving facts are `served`.
+fn load_standing(
+    tx: &Transaction<'_>,
+    requested: i64,
+    object: &ObjectRow,
+    served: Option<ServedFacts>,
+    own: &mut Statement<'_>,
+) -> Result<(ClaimDecisionFacts, Option<AdmissionFacts>, ServedStanding), ClaimFactsError> {
+    if object.object_kind != "decision" {
+        return Err(ClaimFactsError::NotADecision);
+    }
+    let decision = load_decision(tx, object)?;
+    let own_admission = load_admission(own, requested, object)?;
+    let served = match served {
+        Some(facts) => ServedStanding::Served(facts),
+        None if object.invalidated_commit_seq.is_some() => ServedStanding::NotLiveAtSnapshot,
+        None => ServedStanding::NeverAdmitted,
+    };
+    Ok((decision, own_admission, served))
 }
 
 fn sensitivity_field(value: &str) -> Result<Sensitivity, ClaimFactsError> {

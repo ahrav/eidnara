@@ -1821,3 +1821,57 @@ async fn a_publication_without_consent_runs_no_candidate_table_statement() {
     );
     assert!(rows(&store).is_empty());
 }
+
+/// A page body is the canonical `serde_json` encoding of its own value, keys in
+/// lexicographic order and no whitespace, which is the encoding of a `json!`
+/// page with the same fields.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_encodes_a_page_as_its_canonical_json_value() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    activate_memories_authority(&store, &project);
+    let incarnation = kernel
+        .capture_identified_commit_read_target_within_budget(
+            &kernel::applicability::EvalBudget::unbounded(),
+        )
+        .unwrap()
+        .database_incarnation_id;
+    let digest = crate::contradiction_candidates::scorer::matcher_digest();
+    let evidence: Vec<String> = ["first", "second", "third"]
+        .into_iter()
+        .map(|key| ingest(&kernel, key))
+        .collect();
+    let tip = kernel.tip().unwrap();
+    for (matched, evidence) in (3..).zip(&evidence) {
+        write_row(
+            &store,
+            &binding,
+            evidence,
+            "one",
+            matched,
+            (&incarnation, digest, tip),
+        );
+    }
+    let mut next = Value::Null;
+    for expected in [2, 1] {
+        let request = candidates_request(
+            &project,
+            json!({ "decision_object_id": "object-one", "limit": 2, "after": next }),
+        );
+        let PreparedOutcome::Response(output) = handler
+            .dispatch_value_for_test(test_route(7), request)
+            .await
+        else {
+            panic!("the read answers a page");
+        };
+        let mut bytes = Vec::new();
+        output.measure().unwrap().write_to(&mut bytes).unwrap();
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), expected, "{page}");
+        assert_eq!(bytes, serde_json::to_vec(&page).unwrap());
+        next = page["next"].clone();
+    }
+    assert_eq!(next, Value::Null);
+}

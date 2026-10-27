@@ -681,3 +681,46 @@ fn a_delete_as_read_spares_a_row_rewritten_since_the_read() {
         "a row whose incarnation or digest differs from the one read stays"
     );
 }
+
+/// Each limit from 1 past the page bound walks the decision's rows once in
+/// reader order, while first pages of other limits read between its pages.
+#[test]
+fn every_page_limit_walks_each_row_once_in_reader_order() {
+    let (_dir, store) = open();
+    for index in 0..70_i64 {
+        let matched = 1 + u32::try_from(index % 4).unwrap();
+        let rows = [score("decision", matched, 4), score("other", 2, 4)];
+        store
+            .replace_candidates_for_descriptor(
+                &write(PROJECT, &format!("ev-{index:03}"), 1, index % 5, &rows),
+                CAPS,
+            )
+            .unwrap();
+    }
+    let mut expected: Vec<StoredCandidate> = all_rows(&store)
+        .into_iter()
+        .filter(|row| row.decision_object_id == "decision")
+        .collect();
+    reader_order(&mut expected);
+    for limit in 1..=MAX_CANDIDATE_PAGE + 1 {
+        let mut walked = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = store
+                .candidates_for_decision(PROJECT, "decision", after.as_deref(), limit)
+                .unwrap();
+            assert!(page.items.len() <= limit.min(MAX_CANDIDATE_PAGE), "{limit}");
+            walked.extend(page.items);
+            let other = MAX_CANDIDATE_PAGE + 1 - limit;
+            let first = store
+                .candidates_for_decision(PROJECT, "decision", None, other)
+                .unwrap();
+            assert_eq!(first.items, expected[..other.clamp(1, MAX_CANDIDATE_PAGE)]);
+            after = page.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        assert_eq!(walked, expected, "limit {limit}");
+    }
+}

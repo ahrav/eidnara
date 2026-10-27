@@ -947,3 +947,112 @@ fn a_registry_class_this_build_cannot_read_is_an_error_not_a_secret_default() {
         Err(ClaimFactsError::MalformedRequiredField)
     );
 }
+
+/// The standing read answers each field it shares with the full read, and the
+/// same refusal, for the same claim at the same target.
+#[test]
+fn claim_standing_matches_the_claim_facts_it_shares_at_each_target() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use kernel::CommitReadTarget;
+    use kernel::applicability::EvalBudget;
+
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 1);
+    fixture.publish_summary(1, 1);
+    let before = fixture.store.capture_commit_read_target().unwrap();
+    fixture
+        .store
+        .commit(intent("correct"), |envelope| {
+            envelope.correct_decision("decision-object-1", decision(2, 2))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let after = fixture.store.capture_commit_read_target().unwrap();
+    let budget = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(60)),
+        Arc::default(),
+    );
+    let full = |id: &str, target: CommitReadTarget| {
+        fixture
+            .store
+            .claim_facts_at_within_budget(&[id.to_string()], target, bounds(), &budget)
+    };
+    let mut compared = 0;
+    for target in [before, after] {
+        for id in ["decision-object-1", "decision-object-2", "missing"] {
+            let facts = full(id, target).unwrap();
+            let standing = fixture
+                .store
+                .claim_standing_at_within_budget(id, target, &budget)
+                .unwrap();
+            match (facts.claims.first(), standing) {
+                (Some(facts), Some(standing)) => {
+                    assert_eq!(standing.object, facts.object, "{id}");
+                    assert_eq!(standing.decision, facts.decision, "{id}");
+                    assert_eq!(standing.own_admission, facts.own_admission, "{id}");
+                    assert_eq!(standing.served, facts.served, "{id}");
+                    compared += 1;
+                }
+                (None, None) => assert_eq!(facts.missing, [id.to_string()]),
+                other => panic!("{id} at {}: {other:?}", target.through_commit),
+            }
+        }
+    }
+    assert_eq!(
+        compared, 3,
+        "decision 1 at both targets and decision 2 after"
+    );
+
+    let other = Fixture::open();
+    other.admit_decision(1, 1);
+    let foreign = other.store.capture_commit_read_target().unwrap();
+    let future = CommitReadTarget {
+        through_commit: after.through_commit + 1,
+        ..after
+    };
+    let negative = CommitReadTarget {
+        through_commit: -1,
+        ..after
+    };
+    let long = "x".repeat(MAX_CLAIM_OBJECT_ID_BYTES + 1);
+    for (id, target, refusal) in [
+        (
+            "decision-object-1",
+            negative,
+            ClaimFactsError::Kernel(KernelError::InvalidInput),
+        ),
+        (
+            "decision-object-1",
+            foreign,
+            ClaimFactsError::IncarnationMismatch,
+        ),
+        (
+            "decision-object-1",
+            future,
+            ClaimFactsError::Kernel(KernelError::FutureSnapshot),
+        ),
+        ("domain-object", after, ClaimFactsError::NotADecision),
+        (
+            "",
+            after,
+            ClaimFactsError::Kernel(KernelError::InvalidInput),
+        ),
+        (
+            long.as_str(),
+            after,
+            ClaimFactsError::Kernel(KernelError::InvalidInput),
+        ),
+    ] {
+        assert_eq!(full(id, target).unwrap_err(), refusal, "{id}");
+        assert_eq!(
+            fixture
+                .store
+                .claim_standing_at_within_budget(id, target, &budget)
+                .unwrap_err(),
+            refusal,
+            "{id}"
+        );
+    }
+}

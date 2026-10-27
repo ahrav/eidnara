@@ -3085,3 +3085,66 @@ fn a_writer_reads_the_live_revision_of_one_lineage() {
         "a superseding revision is the live one"
     );
 }
+
+/// The evidence liveness read answers every requested position: a repeated id
+/// answers at each of its positions, an id that only resembles a stored id
+/// (a prefix, or one holding JSON escapes) answers `Unknown`, an empty request
+/// answers an empty list, and a full batch keeps request order.
+#[test]
+fn evidence_liveness_answers_each_requested_position() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use kernel::EvidenceLiveness::{Live, Retired, Unknown};
+    use kernel::MAX_EVIDENCE_LIVENESS_IDS;
+    use kernel::applicability::EvalBudget;
+
+    let fixture = Fixture::open();
+    let (retired, _) = fixture.retain("retired", "retired text");
+    let (live, _) = fixture.retain("live", "live text");
+    rusqlite::Connection::open_with_flags(
+        fixture.root.path().join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap()
+    .execute(
+        "UPDATE evidence_meta SET invalidated_commit_seq=(SELECT MAX(commit_seq) FROM commit_log)
+         WHERE evidence_id=?1",
+        [&retired],
+    )
+    .unwrap();
+    let target = fixture.store.capture_commit_read_target().unwrap();
+    let budget = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(60)),
+        Arc::default(),
+    );
+    let read = |ids: &[&str]| {
+        fixture
+            .store
+            .evidence_liveness_at_within_budget(ids, target, &budget)
+            .unwrap()
+    };
+    assert_eq!(read(&[]), []);
+    let prefix = &live[..live.len() - 1];
+    let escaped = format!("{live}\"\\\u{1}\u{e9}");
+    assert_eq!(
+        read(&[
+            &live, &retired, prefix, &live, &escaped, &retired, "", &live
+        ]),
+        [
+            Live, Retired, Unknown, Live, Unknown, Retired, Unknown, Live
+        ]
+    );
+    let mut full = vec!["evidence-never"; MAX_EVIDENCE_LIVENESS_IDS];
+    full[0] = &retired;
+    full[MAX_EVIDENCE_LIVENESS_IDS - 1] = &live;
+    let answered = read(&full);
+    assert_eq!(answered.len(), MAX_EVIDENCE_LIVENESS_IDS);
+    assert_eq!(answered[0], Retired);
+    assert_eq!(answered[MAX_EVIDENCE_LIVENESS_IDS - 1], Live);
+    assert!(
+        answered[1..MAX_EVIDENCE_LIVENESS_IDS - 1]
+            .iter()
+            .all(|liveness| *liveness == Unknown)
+    );
+}

@@ -1,21 +1,19 @@
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use host_runtime::RouteHandle;
 use kernel::applicability::EvalBudget;
 use kernel::{
-    ClaimFactBounds, ClaimFactsError, EvidenceLiveness, IdentifiedCommitReadTarget, KernelError,
-    KernelStore,
+    ClaimFactsError, EvidenceLiveness, IdentifiedCommitReadTarget, KernelError, KernelStore,
 };
 use memory_store::MemoryStoreError;
 use memory_store::contradiction_candidates::{MAX_CANDIDATE_PAGE, StoredCandidate};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::eligibility::eligible;
+use super::Count;
+use super::eligibility::standing_is_eligible;
 use super::scorer::matcher_digest;
-use super::{CLAIM_CAUSAL_PAYLOAD_BYTES, Count};
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES;
 use crate::kernel_routes::project::{ProjectBinding, ScopeFilter, stored_terms};
@@ -43,17 +41,40 @@ fn terminal(code: &str) -> PreparedOutcome {
     response(json!({ "kind": "terminal", "terminal": code }))
 }
 
-fn item(row: &StoredCandidate) -> Value {
-    json!({
-        "evidence_id": row.evidence_id,
-        "decision_object_id": row.decision_object_id,
-        "decision_id": row.decision_id,
-        "matched_terms": row.matched_terms,
-        "decision_terms": row.decision_terms,
-        "score": row.score_bp,
-        "publish_tip": row.publish_tip,
-        "created_at_ms": row.created_at_ms,
-    })
+/// The page body, encoded once from the store rows. Fields are declared in
+/// lexicographic key order, the order a `serde_json` object encodes its keys,
+/// so the body is the canonical encoding of the page's JSON value.
+#[derive(Serialize)]
+struct PageOut<'a> {
+    as_of: i64,
+    items: Vec<ItemOut<'a>>,
+    kind: &'static str,
+    next: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ItemOut<'a> {
+    created_at_ms: i64,
+    decision_id: &'a str,
+    decision_object_id: &'a str,
+    decision_terms: u32,
+    evidence_id: &'a str,
+    matched_terms: u32,
+    publish_tip: i64,
+    score: u32,
+}
+
+fn item(row: &StoredCandidate) -> ItemOut<'_> {
+    ItemOut {
+        created_at_ms: row.created_at_ms,
+        decision_id: &row.decision_id,
+        decision_object_id: &row.decision_object_id,
+        decision_terms: row.decision_terms,
+        evidence_id: &row.evidence_id,
+        matched_terms: row.matched_terms,
+        publish_tip: row.publish_tip,
+        score: row.score_bp,
+    }
 }
 
 enum Refused {
@@ -69,21 +90,16 @@ fn decision_is_live(
     decision_object_id: &str,
     budget: &EvalBudget,
 ) -> Result<bool, Refused> {
-    let bounds = ClaimFactBounds {
-        max_claims: NonZeroUsize::MIN,
-        max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
-    };
-    let decision = [decision_object_id.to_owned()];
-    let facts = match kernel.claim_facts_at_within_budget(&decision, target.target, bounds, budget)
-    {
-        Ok(read) => read.claims.into_iter().next(),
-        Err(ClaimFactsError::NotADecision) => None,
-        Err(ClaimFactsError::Kernel(error)) => return Err(Refused::Kernel(error)),
-        Err(ClaimFactsError::IncarnationMismatch) => {
-            return Err(Refused::Kernel(KernelError::Conflict));
-        }
-        Err(_) => return Err(Refused::Kernel(KernelError::CorruptCanonicalRow)),
-    };
+    let facts =
+        match kernel.claim_standing_at_within_budget(decision_object_id, target.target, budget) {
+            Ok(standing) => standing,
+            Err(ClaimFactsError::NotADecision) => None,
+            Err(ClaimFactsError::Kernel(error)) => return Err(Refused::Kernel(error)),
+            Err(ClaimFactsError::IncarnationMismatch) => {
+                return Err(Refused::Kernel(KernelError::Conflict));
+            }
+            Err(_) => return Err(Refused::Kernel(KernelError::CorruptCanonicalRow)),
+        };
     let Some(facts) = facts else {
         return Ok(false);
     };
@@ -93,7 +109,7 @@ fn decision_is_live(
             &mut stored_terms(kernel),
         )
         .map_err(Refused::Kernel)?;
-    Ok(eligible(&facts, names_project))
+    Ok(standing_is_eligible(&facts, names_project))
 }
 
 fn is_current(
@@ -138,7 +154,7 @@ impl HandlerCore {
         let counts = Arc::clone(&self.contradiction_candidates);
         let limit = parsed.limit.unwrap_or(MAX_CANDIDATE_PAGE);
         let root = scope.project_root.to_string_lossy().to_string();
-        let read = blocking(move || -> Result<Value, Refused> {
+        let read = blocking(move || -> Result<Vec<u8>, Refused> {
             match memories_authority_for_route(&ledger, &root) {
                 Ok(MemoriesAuthority::Module(_)) => {}
                 Ok(MemoriesAuthority::NotModule { .. }) => {
@@ -183,22 +199,29 @@ impl HandlerCore {
                     kernel::EvidenceLivenessError::Kernel(error) => Refused::Kernel(error),
                     _ => Refused::Kernel(KernelError::Conflict),
                 })?;
-            let (kept, stale): (Vec<_>, Vec<_>) = page
+            let items: Vec<ItemOut<'_>> = page
                 .items
                 .iter()
                 .zip(standing)
-                .partition(|(row, liveness)| is_current(row, *liveness, &target));
-            counts.add(Count::ReadFilteredStale, stale.len() as u64);
-            Ok(json!({
-                "kind": "page",
-                "as_of": target.target.through_commit,
-                "items": kept.iter().map(|(row, _)| item(row)).collect::<Vec<_>>(),
-                "next": page.next,
-            }))
+                .filter(|(row, liveness)| is_current(row, *liveness, &target))
+                .map(|(row, _)| item(row))
+                .collect();
+            counts.add(
+                Count::ReadFilteredStale,
+                (page.items.len() - items.len()) as u64,
+            );
+            // Encoding strings and integers into a `Vec` succeeds; a failure answers store_unavailable.
+            serde_json::to_vec(&PageOut {
+                as_of: target.target.through_commit,
+                items,
+                kind: "page",
+                next: page.next.as_deref(),
+            })
+            .map_err(|_| Refused::Terminal("store_unavailable"))
         })
         .await;
         match read {
-            Ok(Ok(page)) => response(page),
+            Ok(Ok(body)) => PreparedOutcome::Response(PreparedOutput::cached_bytes(body)),
             Ok(Err(Refused::Terminal(code))) => terminal(code),
             Ok(Err(Refused::Kernel(error))) => state_only(error.into()),
             Ok(Err(Refused::InvalidCursor)) => crate::invalid_params_error(format!(
