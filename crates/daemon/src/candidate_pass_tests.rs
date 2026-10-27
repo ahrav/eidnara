@@ -1249,6 +1249,7 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
         &[
             ("one", TOPIC, EventKind::Other),
             ("replaced", TOPIC, EventKind::Other),
+            ("empty", TOPIC, EventKind::Other),
         ],
     );
     let ask = |body: Value| route_call(&handler, candidates_request(&project, body));
@@ -1467,6 +1468,14 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
         ask(json!({ "decision_object_id": "object-replaced" })).await,
         Ok(json!({ "kind": "terminal", "terminal": "not_live" })),
         "rows exist for the replaced decision"
+    );
+    let empty = ask(json!({ "decision_object_id": "object-empty" }))
+        .await
+        .unwrap();
+    assert_eq!(
+        empty,
+        json!({ "kind": "page", "as_of": kernel.tip().unwrap(), "items": [], "next": null }),
+        "an eligible decision with no rows"
     );
     assert_eq!(
         ask(json!({ "decision_object_id": "object-missing" })).await,
