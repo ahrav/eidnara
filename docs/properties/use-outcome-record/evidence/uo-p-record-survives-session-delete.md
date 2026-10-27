@@ -29,7 +29,7 @@ revision.
   `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`);
   `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:86`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:90`). Status: unaudited.
 
 ## Failure scenario
 

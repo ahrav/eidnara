@@ -356,20 +356,26 @@ async fn a_discarded_attempt_leaves_no_serve_and_the_retry_records_one() {
     let rival = Arc::clone(&store);
     let raced = Arc::new(Mutex::new(None));
     let fired = Arc::clone(&raced);
+    let writes = Arc::clone(&handler.use_outcome_writes);
+    // The hook runs just before the attempt's CAS, so a write handed off ahead of that commit would hold a slot here.
     crate::transform::install_transform_attempt_hook(session, move || {
         let loaded = rival.load(session).unwrap();
         rival
             .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
-        *fired.lock().unwrap() = Some(loaded.meta.project_memory);
+        *fired.lock().unwrap() = Some((
+            loaded.meta.project_memory,
+            writes.writes_in_flight(),
+            writes.get(UseOutcomeWrite::Written),
+        ));
     });
     let mut raced_request = request(vec![ck("m1", 1, "hello")]);
     raced_request["session_id"] = json!(session);
     let response = call_transform_request_on_channel(&handler, 9, raced_request).await;
     assert_eq!(
         *raced.lock().unwrap(),
-        Some(None),
-        "the rival committed before the attempt's commit, while no composition was stored"
+        Some((None, 0, 0)),
+        "the rival committed before the attempt's commit, while no composition was stored and no write was handed off"
     );
     assert_eq!(response["action"], "HARD", "{response}");
     let after = store.load(session).unwrap();
@@ -450,7 +456,11 @@ async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
         let response = call_transform_request(&handler, subagent).await;
         assert_eq!(response["status"], "ok", "{response}");
         if expected.is_none() {
-            assert_ne!(response["action"], "HARD", "{response}");
+            // The folding engine plans Soft or Defer for a subagent pass; `SOFT+` is the wire name of Defer.
+            assert!(
+                response["action"] == "SOFT" || response["action"] == "SOFT+",
+                "{response}"
+            );
             assert!(response["project_memory"].is_null(), "{response}");
         }
         assert_eq!(
@@ -502,6 +512,11 @@ async fn an_equal_served_set_at_a_later_known_as_of_replays() {
     assert_eq!(later["action"], "HARD", "{later}");
     let first_seq = first["project_memory"]["known_as_of"].as_i64().unwrap();
     assert!(later["project_memory"]["known_as_of"].as_i64().unwrap() > first_seq);
+    // An equal revision digests equal rendered rows, so the later fold served the same set.
+    assert_eq!(
+        later["project_memory"]["revision"], first["project_memory"]["revision"],
+        "{later}"
+    );
     let records = served(&handler, &project);
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].serve.served_commit_seq, first_seq);
@@ -521,7 +536,8 @@ async fn a_dispute_between_folds_records_the_next_served_set_without_it() {
         &project,
         &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
     );
-    let _ = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
+    let first = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(first["action"], "HARD", "{first}");
     kernel
         .commit(intent("dispute"), |envelope| {
             envelope.record_admission(kernel_route_fixtures::admission(

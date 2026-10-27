@@ -84,35 +84,36 @@ Every location was read at the #1157 branch tip.
 | `only_an_available_composition_is_recorded` | `crates/daemon/src/use_outcome_writer_tests.rs:181` | `uo-consent-gate-source-is-the-route-frozen-config`, `uo-p-no-row-when-memory-disabled`, `uo-p-no-row-for-withheld-composition` | unaudited |
 | `a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it` | `crates/daemon/src/use_outcome_writer_tests.rs:282` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
 | `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one` | `crates/daemon/src/use_outcome_writer_tests.rs:343` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `the_session_role_follows_the_pass_subagent_flag_on_each_engine` | `crates/daemon/src/use_outcome_writer_tests.rs:414` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds`, `uo-p-producer-matches-request-subagent-flag` | unaudited |
-| `an_equal_served_set_at_a_later_known_as_of_replays` | `crates/daemon/src/use_outcome_writer_tests.rs:477` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `a_dispute_between_folds_records_the_next_served_set_without_it` | `crates/daemon/src/use_outcome_writer_tests.rs:513` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
-| `a_withheld_read_then_an_available_read_of_the_same_rows_records_once` | `crates/daemon/src/use_outcome_writer_tests.rs:549` | `uo-p-no-row-for-withheld-composition` | unaudited |
-| `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:584` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
-| `the_real_failure_paths_count_their_outcomes_and_bound_the_wait` | `crates/daemon/src/use_outcome_writer_tests.rs:748` | `uo-p-served-set-once-per-session-revision`, `uo-p-no-row-for-withheld-composition` | unaudited |
+| `the_session_role_follows_the_pass_subagent_flag_on_each_engine` | `crates/daemon/src/use_outcome_writer_tests.rs:420` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds`, `uo-p-producer-matches-request-subagent-flag` | unaudited |
+| `an_equal_served_set_at_a_later_known_as_of_replays` | `crates/daemon/src/use_outcome_writer_tests.rs:487` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_dispute_between_folds_records_the_next_served_set_without_it` | `crates/daemon/src/use_outcome_writer_tests.rs:528` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `a_withheld_read_then_an_available_read_of_the_same_rows_records_once` | `crates/daemon/src/use_outcome_writer_tests.rs:565` | `uo-p-no-row-for-withheld-composition` | unaudited |
+| `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:600` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
+| `the_real_failure_paths_count_their_outcomes_and_bound_the_wait` | `crates/daemon/src/use_outcome_writer_tests.rs:764` | `uo-p-served-set-once-per-session-revision`, `uo-p-no-row-for-withheld-composition` | unaudited |
 | `a_hard_fold_records_its_frozen_composition_once_per_served_set` | `crates/daemon/src/use_outcome_writer_tests.rs:70` | `uo-p-served-set-once-per-session-revision`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
-| `a_recorded_served_set_replays_while_another_writer_holds_the_writer` | `crates/daemon/src/use_outcome_writer_tests.rs:848` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `every_kernel_error_maps_to_a_closed_outcome` | `crates/daemon/src/use_outcome_writer_tests.rs:976` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `an_emergency_pass_that_reruns_records_one_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:995` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:1023` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer` | `crates/daemon/src/use_outcome_writer_tests.rs:1110` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it` | `crates/daemon/src/use_outcome_writer_tests.rs:1146` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:1175` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `a_recorded_served_set_replays_while_another_writer_holds_the_writer` | `crates/daemon/src/use_outcome_writer_tests.rs:864` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `every_kernel_error_maps_to_a_closed_outcome` | `crates/daemon/src/use_outcome_writer_tests.rs:992` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `an_emergency_pass_that_reruns_records_one_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:1011` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:1039` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer` | `crates/daemon/src/use_outcome_writer_tests.rs:1126` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it` | `crates/daemon/src/use_outcome_writer_tests.rs:1162` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:1191` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
 | `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it` | `crates/daemon/tests/harness_sources.rs:3356` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
 | `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` | `crates/daemon/tests/harness_sources.rs:3500` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts`, `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
-| `a_delete_step_with_an_unknown_outcome_converges_on_retry` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:136` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
-| `a_second_delete_marks_records_written_after_the_first` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:177` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
-| `a_route_torn_down_after_a_hard_fold_leaves_its_records_live` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:208` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row`, `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
-| `a_session_id_that_reads_as_a_secret_still_deletes` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:538` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
-| `last_transform_at_moves_forward_only_on_committing_passes` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:227` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:314` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `a_committing_pass_with_a_current_record_takes_no_writer` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:362` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `a_spent_pass_budget_skips_the_touch` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:417` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `a_serve_deadline_leaves_the_touch_its_own_kernel_wait` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:446` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:483` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:567` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
+| `a_delete_step_with_an_unknown_outcome_converges_on_retry` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:144` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
+| `a_second_delete_marks_records_written_after_the_first` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:184` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
+| `a_route_torn_down_after_a_hard_fold_leaves_its_records_live` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:215` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row`, `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
+| `a_session_id_that_reads_as_a_secret_still_deletes` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:612` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
+| `last_transform_at_moves_forward_only_on_committing_passes` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:234` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:321` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `a_committing_pass_with_a_current_record_takes_no_writer` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:369` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `a_spent_pass_budget_skips_the_touch` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:424` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `a_serve_deadline_leaves_the_touch_its_own_kernel_wait` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:453` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `a_serve_that_spends_its_wait_leaves_the_touch_a_budget_of_its_own` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:490` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:557` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:641` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
 | `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:41` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate`, `uo-per-session-pass-timestamps-die-with-the-session`, `uo-p-record-survives-session-delete`, `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
-| `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:86` | `uo-p-record-survives-session-delete`, `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
+| `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:90` | `uo-p-record-survives-session-delete`, `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `route_teardown_releases_the_staged_upload_while_the_session_stays_bound` | `crates/daemon/tests/kernel_routes.rs:3849` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
 | `review_operations_are_disabled_without_module_authority_and_list_and_read_receipts_under_it` | `crates/daemon/tests/memory_reviewer_wire.rs:15` | `uo-review-reads-authorize-by-bearer-and-project-binding-not-owner` | unaudited |
 | `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route` | `crates/daemon/tests/memory_reviewer_wire.rs:260` | `uo-review-reads-authorize-by-bearer-and-project-binding-not-owner` | unaudited |

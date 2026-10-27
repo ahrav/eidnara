@@ -99,10 +99,13 @@ const SERVED_IDS_BYTES_BOUND: u64 =
 /// 4096 bytes, its harness at 128, and its session at 256 (`host_runtime::control`), and a transform runs only on the
 /// route whose binding names its session, so the sum stays near 5 KiB.
 const JOB_IDENTITY_BYTES: u64 = 16 * 1024;
+/// Heap the Kernel's insert validation holds per id while it recomputes the digest: a `BTreeSet<&str>` node slot.
+const KERNEL_VALIDATION_BYTES_PER_ID: u64 = 64;
 /// One in-flight write at its peak: the owned [`ServedSet`], the `&str` slice `request_digest` reads, the owned id
-/// copy the insert spec carries into the commit, and the identities.
-const RETAINED_SERVED_SET_BYTES_PER_WRITE: u64 =
-    2 * SERVED_IDS_BYTES_BOUND + MAX_READ_ROWS as u64 * 16 + JOB_IDENTITY_BYTES;
+/// copy the insert spec carries into the commit, the Kernel's validation set over those ids, and the identities.
+const RETAINED_SERVED_SET_BYTES_PER_WRITE: u64 = 2 * SERVED_IDS_BYTES_BOUND
+    + MAX_READ_ROWS as u64 * (16 + KERNEL_VALIDATION_BYTES_PER_ID)
+    + JOB_IDENTITY_BYTES;
 /// What in-flight jobs retain after their passes' responses released their charges: a slot is reserved before the set
 /// is built, so at most [`WRITES_IN_FLIGHT`] jobs exist.
 pub(crate) const RETAINED_SERVED_SET_BYTES_BOUND: u64 =
@@ -171,6 +174,12 @@ impl UseOutcomeWrites {
         self.counts[outcome as usize].load(Ordering::Relaxed)
     }
 
+    /// Whether a serve job holds a write slot: a test holding the Kernel writer reads this to learn that a pass handed its serve off.
+    #[cfg(test)]
+    pub(crate) fn job_in_flight(&self) -> bool {
+        self.slots.available_permits() < WRITES_IN_FLIGHT
+    }
+
     /// Lengthens or shortens the writer wait of every later job, so a test can hold the Kernel writer across a pass without racing the budget.
     #[cfg(test)]
     pub(crate) fn set_write_budget(&self, budget: Duration) {
@@ -186,6 +195,12 @@ impl UseOutcomeWrites {
             .acquire_many(WRITES_IN_FLIGHT as u32)
             .await
             .expect("the slots semaphore stays open");
+    }
+
+    /// Write slots a job holds at this instant.
+    #[cfg(test)]
+    pub(crate) fn writes_in_flight(&self) -> usize {
+        WRITES_IN_FLIGHT - self.slots.available_permits()
     }
 
     #[cfg(test)]

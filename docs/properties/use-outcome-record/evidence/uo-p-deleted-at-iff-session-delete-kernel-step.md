@@ -15,10 +15,10 @@ revision.
   captured sources, then `mark_use_outcomes_deleted`
   (`crates/daemon/src/lib.rs:6908-6920`) commits one envelope keyed by
   `use-outcome-delete`, a digest of the session id, and a fresh attempt nonce
-  (`crates/daemon/src/use_outcome_writer.rs:269-301`); the digest keeps the key
+  (`crates/daemon/src/use_outcome_writer.rs:278-310`); the digest keeps the key
   clear of the Kernel's identity check for any session id the wire admits
   (`a_session_id_that_reads_as_a_secret_still_deletes`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:538`)); an envelope that
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:612`)); an envelope that
   marks nothing rolls back.
 - Order: the step runs at `crates/daemon/src/lib.rs:7007`, before the
   `stop_after_retirement` hook and the memory delete; a `kernel_unavailable`
@@ -26,20 +26,22 @@ revision.
 - A retry after a stop between the stores, or after an unknown commit outcome,
   selects no live record and commits nothing, so the first timestamp stays.
 
-- Guarantee under test: `deleted_at` is set exactly when a `session.delete` for
-  the session committed its Kernel step, before the memory-store delete; route
-  teardown leaves it null.
+- Guarantee under test: `deleted_at` is set on a record exactly when a
+  `session.delete` for the session committed a Kernel step that selected it as
+  live, before the memory-store delete; a record expiry retired before that step
+  keeps its state, a serve published after it stays live until a later delete
+  (OQ3-10), and route teardown leaves it null.
 - Existing check:
   `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`);
   `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:86`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:90`);
   `a_delete_step_with_an_unknown_outcome_converges_on_retry`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:136`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:144`);
   `a_second_delete_marks_records_written_after_the_first`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:177`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:184`);
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:208`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`); Kernel half:
   `a_session_delete_marks_each_live_record_once`
   (`crates/kernel/tests/kernel_use_outcome.rs:1063`). Status: unaudited.
 

@@ -24,7 +24,7 @@ revision.
   `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
   (`crates/daemon/tests/kernel_routes.rs:3849`);
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:208`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`). Status: unaudited.
 
 ## Failure scenario
 
@@ -52,7 +52,7 @@ after a HARD fold.
 - Sources examined: the specification catalog entry, the code and tests cited above.
 - Findings: the cited code and tests agree with the guarantee at this tip.
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:208`) reads both stores
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`) reads both stores
   after the teardown: the Kernel record stays live with `deleted_at` null and
   the Kernel tip unchanged, and the session's memory rows load. It reads the
   rows the fold wrote, not every table of either store.
