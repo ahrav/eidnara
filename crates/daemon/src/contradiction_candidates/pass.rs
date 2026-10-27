@@ -5,7 +5,7 @@
 //! per pass. One pass runs per store; an offer while one runs is refused. The
 //! pass reads the Kernel and writes only the memory store.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,8 +20,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::eligibility::eligible;
 use super::scorer::{
-    CANDIDATES_PER_DESCRIPTOR, CandidateInput, DescriptorTerms, SummaryScore, TopCandidates,
-    matcher_digest,
+    CANDIDATES_PER_DESCRIPTOR, DESCRIPTOR_BOUNDS, SUMMARY_BOUNDS, ScoredCandidate, TopCandidates,
+    matcher_digest, passes_gates, term_set,
 };
 use super::{Candidates, Count};
 use crate::canonical_memory::MEMORY_DOMAIN_ID;
@@ -132,7 +132,7 @@ impl Candidates {
 }
 
 impl CandidatePass {
-    /// Runs the pass on the blocking pool and returns once it physically completes. The blocking closure records the pass's end, a panic included, and its timing before it releases the permit, so an idle permit means those counters are final. Cancellation raises the budget's interrupt; the pass stops at its next check. Between checks it runs one budgeted Kernel read, up to 256 scope-term reads, the unbudgeted visible-decision and payload-size reads, 256 summaries of one descriptor, or one row write.
+    /// Runs the pass on the blocking pool and returns once it physically completes. The blocking closure records the pass's end, a panic included, and its timing before it releases the permit, so an idle permit means those counters are final. Cancellation raises the budget's interrupt; the pass stops at its next check. Between checks it runs one budgeted Kernel read, up to 256 scope-term reads, the unbudgeted visible-decision and payload-size reads, 256 summaries against every descriptor, or one row write.
     pub(crate) async fn run(self) -> Count {
         let counts = Arc::clone(&self.active.counts);
         counts.add(Count::Admitted, 1);
@@ -225,7 +225,7 @@ fn stop(budget: &EvalBudget) -> Option<Count> {
     })
 }
 
-/// Scores `descriptors` in publish order against the eligible decisions of `project` at one Kernel tip and writes each descriptor's rows. A stopped budget leaves the rows of a publish-order prefix: a descriptor not fully scored writes nothing and counts `descriptors_unscored` with every later one.
+/// Scores `descriptors` against the eligible decisions of `project` at one Kernel tip in one scan of the summaries, then writes each descriptor's rows in publish order. A stopped budget leaves the rows of a publish-order prefix: a descriptor not fully scored writes nothing and counts `descriptors_unscored` with every later one.
 pub(crate) fn score_publication(
     kernel: &KernelStore,
     store: &MemoryStore,
@@ -272,9 +272,60 @@ fn score_descriptors(
         per_descriptor: CANDIDATES_PER_DESCRIPTOR,
         per_project: bounds.rows_per_project,
     };
+    if let Some(end) = stop(budget) {
+        return unscored(0, end);
+    }
+    let analyzed: Vec<Option<BTreeSet<String>>> = descriptors
+        .iter()
+        .map(|descriptor| term_set(&descriptor.text, DESCRIPTOR_BOUNDS).ok())
+        .collect();
+    // Each term maps to the publish-order positions of the descriptors that hold it, so one pass over a summary's terms counts its overlap with every descriptor.
+    let mut postings: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (position, terms) in analyzed.iter().enumerate() {
+        for term in terms.iter().flatten() {
+            postings.entry(term).or_default().push(position);
+        }
+    }
+    let mut tops = vec![TopCandidates::default(); descriptors.len()];
+    let mut matched = vec![0; descriptors.len()];
+    if analyzed.iter().any(Option::is_some) {
+        let mut unscorable = 0;
+        for (scanned, (object_id, decision_id, summary)) in summaries.iter().enumerate() {
+            if scanned % SUMMARIES_PER_CHECK == 0
+                && let Some(end) = stop(budget)
+            {
+                return unscored(0, end);
+            }
+            let terms = match term_set(summary, SUMMARY_BOUNDS) {
+                Ok(terms) if !terms.is_empty() => terms,
+                _ => {
+                    unscorable += 1;
+                    continue;
+                }
+            };
+            for term in &terms {
+                for &position in postings.get(term.as_str()).into_iter().flatten() {
+                    matched[position] += 1;
+                }
+            }
+            for (top, matched) in tops.iter_mut().zip(&mut matched) {
+                let matched_terms = std::mem::take(matched);
+                if passes_gates(matched_terms, terms.len()) {
+                    top.offer(ScoredCandidate {
+                        decision_object_id: object_id.clone(),
+                        decision_id: decision_id.clone(),
+                        matched_terms,
+                        decision_terms: terms.len(),
+                    });
+                }
+            }
+        }
+        counts.add(Count::SummariesUnscorable, unscorable);
+    }
     let mut written = 0;
-    let mut unscorable_counted = false;
-    for (index, descriptor) in descriptors.iter().enumerate() {
+    for (index, ((descriptor, terms), top)) in
+        descriptors.iter().zip(&analyzed).zip(tops).enumerate()
+    {
         if let Some(end) = stop(budget) {
             return unscored(index, end);
         }
@@ -285,31 +336,9 @@ fn score_descriptors(
                 hook(index);
             }
         }
-        let Ok(terms) = DescriptorTerms::new(&descriptor.text) else {
+        if terms.is_none() {
             counts.add(Count::DescriptorsRefusedOversize, 1);
             continue;
-        };
-        let mut top = TopCandidates::default();
-        let mut unscorable = 0;
-        for (scanned, (object_id, decision_id, summary)) in summaries.iter().enumerate() {
-            if scanned % SUMMARIES_PER_CHECK == 0
-                && let Some(end) = stop(budget)
-            {
-                return unscored(index, end);
-            }
-            let input = CandidateInput {
-                decision_object_id: object_id,
-                decision_id,
-                summary,
-            };
-            if top.record(&terms, input) == SummaryScore::Unscorable {
-                unscorable += 1;
-            }
-        }
-        // Whether a summary is unscorable depends on the summary alone, so the first scored descriptor counts each one once.
-        if !unscorable_counted {
-            counts.add(Count::SummariesUnscorable, unscorable);
-            unscorable_counted = true;
         }
         if let Some(end) = stop(budget) {
             return unscored(index, end);

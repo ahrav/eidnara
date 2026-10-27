@@ -11,6 +11,7 @@ use memory_store::contradiction_candidates::StoredCandidate;
 
 use super::*;
 use crate::contradiction_candidates::pass::{Descriptor, PassBounds, score_publication};
+use crate::contradiction_candidates::scorer::{CandidateInput, score_descriptor};
 use crate::contradiction_candidates::{Candidates, Count as CandidateCount};
 
 const SESSION: &str = "ses";
@@ -844,6 +845,110 @@ fn the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_
     capped.score(std::slice::from_ref(&descriptor));
     assert_eq!(rows(&capped.store).len(), 3);
     assert_eq!(capped.count("dropped_at_cap"), 1);
+}
+
+#[test]
+fn each_descriptor_keeps_the_top_k_that_score_descriptor_ranks_over_the_loaded_summaries() {
+    let core = Core::open(PassBounds::default());
+    let words = [
+        "kernel",
+        "snapshot",
+        "ledger",
+        "quorum",
+        "lease",
+        "writer",
+        "HTTPServer",
+        "config_loader",
+        "École",
+        "cache",
+        "eviction",
+        "replica",
+        "fsync",
+        "journal",
+        "the",
+        "and",
+    ];
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    let mut next = |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % bound as u64) as usize
+    };
+    let summaries: Vec<(String, String)> = (0..60)
+        .map(|index| {
+            let length = 3 + next(6);
+            let text: Vec<&str> = (0..length).map(|_| words[next(words.len())]).collect();
+            (format!("s{index:02}"), text.join(" "))
+        })
+        .collect();
+    let seeded: Vec<(&str, &str, EventKind)> = summaries
+        .iter()
+        .map(|(name, summary)| (name.as_str(), summary.as_str(), EventKind::Other))
+        .collect();
+    seed(&core.kernel, &core.project, &seeded);
+    let texts: Vec<String> = (0..6)
+        .map(|index| {
+            let length = 4 + next(10);
+            let text: Vec<&str> = (0..length).map(|_| words[next(words.len())]).collect();
+            format!("{} {index}", text.join(" "))
+        })
+        .chain(["x".repeat(65_537), String::new()])
+        .collect();
+    let descriptors: Vec<Descriptor> = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| core.descriptor(&format!("d{index}"), text))
+        .collect();
+    assert_eq!(core.score(&descriptors), CandidateCount::Completed);
+    let ids: Vec<(String, String)> = summaries
+        .iter()
+        .map(|(name, _)| (format!("object-{name}"), format!("decision-{name}")))
+        .collect();
+    let inputs: Vec<CandidateInput<'_>> = ids
+        .iter()
+        .zip(&summaries)
+        .map(|((object, decision), (_, summary))| CandidateInput {
+            decision_object_id: object,
+            decision_id: decision,
+            summary,
+        })
+        .collect();
+    let mut written = 0;
+    for descriptor in &descriptors {
+        let expected: Vec<(String, u32, u32)> = score_descriptor(&descriptor.text, &inputs)
+            .map(|scored| scored.candidates)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|kept| {
+                (
+                    kept.decision_object_id,
+                    u32::try_from(kept.matched_terms).unwrap(),
+                    u32::try_from(kept.decision_terms).unwrap(),
+                )
+            })
+            .collect();
+        let mut held: Vec<(String, u32, u32)> = rows(&core.store)
+            .into_iter()
+            .filter(|row| row.evidence_id == descriptor.evidence_id)
+            .map(|row| {
+                (
+                    row.decision_object_id,
+                    row.matched_terms,
+                    row.decision_terms,
+                )
+            })
+            .collect();
+        let mut sorted = expected.clone();
+        sorted.sort();
+        held.sort();
+        assert_eq!(held, sorted, "{}", descriptor.text);
+        written += expected.len();
+    }
+    assert!(written > 8, "the fixture produces candidates: {written}");
+    assert_eq!(core.count("rows_written"), written as u64);
+    assert_eq!(core.count("descriptors_analyzed"), 7);
+    assert_eq!(core.count("descriptors_refused_oversize"), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

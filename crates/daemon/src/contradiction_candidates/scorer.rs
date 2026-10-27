@@ -2,7 +2,7 @@
 //! decision summaries by the share of each summary's terms the descriptor
 //! contains.
 //!
-//! Both texts pass through the retrieval analyzer, `analyze_segments`, under
+//! Both texts follow the retrieval analyzer's rules, `analyze_segments`, under
 //! explicit bounds. A text's terms are the set of its atoms and parts, each
 //! folded with `str::to_lowercase`, keeping terms of at least
 //! [`MIN_TERM_SCALARS`] scalar values that hold an alphanumeric scalar, are not
@@ -23,6 +23,9 @@
 //! terms, and their scalar counts can differ at the floor. A decision object
 //! id appears at most once in a result: the better-ranked entry wins, with
 //! `decision_id` as the last key.
+//!
+//! [`term_set`] applies those rules to all-ASCII words itself and hands every
+//! other word to the analyzer.
 //!
 //! A descriptor over its bound is refused whole. A summary over its bound, or
 //! with no term left after the floor, is reported unscorable and excluded; the
@@ -96,17 +99,106 @@ const fn bounds(max_input_bytes: usize) -> LexicalBounds {
 
 /// The folded, floored term set of `text` under `bounds`.
 ///
+/// An ASCII scalar outside `[0-9A-Za-z_]` ends every analyzer atom, so each
+/// all-ASCII word is one atom whose parts `ascii_parts` finds; every other
+/// word goes to `analyze_segments`. `tests/contradiction_candidates_term_sets.rs`
+/// compares the result with the analyzer's atoms and parts under the same fold
+/// and floor.
+///
 /// # Errors
 ///
 /// The analyzer's refusal when `text` exceeds `bounds`.
 pub fn term_set(text: &str, bounds: LexicalBounds) -> Result<BTreeSet<String>, LexicalRefusal> {
-    let analysis = analyze_segments(&[text], bounds)?;
-    Ok(analysis
-        .atoms()
-        .chain(analysis.parts())
-        .map(str::to_lowercase)
-        .filter(|term| kept(term))
-        .collect())
+    if text.len() > bounds.max_input_bytes.get() {
+        return Err(LexicalRefusal::InputTooLong {
+            bytes: text.len(),
+            bound: bounds.max_input_bytes.get(),
+        });
+    }
+    let mut terms = BTreeSet::new();
+    let mut keep = |term: String| {
+        if kept(&term) {
+            terms.insert(term);
+        }
+    };
+    let mut atoms = 0;
+    for word in text
+        .split(|c: char| c.is_ascii() && !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|word| !word.is_empty())
+    {
+        if word.is_ascii() {
+            atoms += 1;
+            keep(word.to_ascii_lowercase());
+            ascii_parts(word, |part| keep(part.to_ascii_lowercase()));
+        } else {
+            let analysis = analyze_segments(&[word], bounds)?;
+            atoms += analysis.atoms().len();
+            analysis
+                .atoms()
+                .chain(analysis.parts())
+                .map(str::to_lowercase)
+                .for_each(&mut keep);
+        }
+    }
+    if atoms > bounds.max_atoms.get() {
+        return Err(LexicalRefusal::TooManyAtoms {
+            bound: bounds.max_atoms.get(),
+        });
+    }
+    Ok(terms)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AsciiClass {
+    Separator,
+    Digit,
+    Upper,
+    Lower,
+}
+
+/// Calls `part` with each part `analyze_segments` gives an ASCII atom: a part
+/// ends at `_`, between a letter and a digit, between a lowercase and an
+/// uppercase letter, and before the last capital of a capital run that two
+/// lowercase letters follow.
+fn ascii_parts(atom: &str, mut part: impl FnMut(&str)) {
+    let class = |byte: u8| match byte {
+        b'_' => AsciiClass::Separator,
+        b'0'..=b'9' => AsciiClass::Digit,
+        b'A'..=b'Z' => AsciiClass::Upper,
+        _ => AsciiClass::Lower,
+    };
+    let bytes = atom.as_bytes();
+    let lower_at = |at: usize| {
+        bytes
+            .get(at)
+            .is_some_and(|&byte| class(byte) == AsciiClass::Lower)
+    };
+    let mut start = 0;
+    for at in 0..bytes.len() {
+        let current = class(bytes[at]);
+        let splits = current == AsciiClass::Separator
+            || (at > start
+                && match (class(bytes[at - 1]), current) {
+                    (AsciiClass::Digit, AsciiClass::Upper | AsciiClass::Lower)
+                    | (AsciiClass::Upper | AsciiClass::Lower, AsciiClass::Digit)
+                    | (AsciiClass::Lower, AsciiClass::Upper) => true,
+                    (AsciiClass::Upper, AsciiClass::Upper) => lower_at(at + 1) && lower_at(at + 2),
+                    _ => false,
+                });
+        if splits {
+            if at > start {
+                part(&atom[start..at]);
+            }
+            start = if current == AsciiClass::Separator {
+                at + 1
+            } else {
+                at
+            };
+        }
+    }
+    if start < bytes.len() {
+        part(&atom[start..]);
+    }
 }
 
 fn kept(term: &str) -> bool {
@@ -165,6 +257,14 @@ pub enum SummaryScore {
     Unscorable,
 }
 
+/// Whether a summary of `decision_terms` terms, `matched_terms` of them in the descriptor, is a candidate.
+pub(crate) fn passes_gates(matched_terms: usize, decision_terms: usize) -> bool {
+    let (numerator, denominator) = CANDIDATE_SCORE_THRESHOLD;
+    matched_terms >= MIN_MATCHED_TERMS
+        && decision_terms >= MIN_DECISION_TERMS
+        && matched_terms * denominator >= numerator * decision_terms
+}
+
 /// One descriptor's analyzed terms, scored against one summary at a time so
 /// only one summary's term set is resident.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,11 +288,7 @@ impl DescriptorTerms {
         }
         let matched_terms = terms.intersection(&self.0).count();
         let decision_terms = terms.len();
-        let (numerator, denominator) = CANDIDATE_SCORE_THRESHOLD;
-        if matched_terms >= MIN_MATCHED_TERMS
-            && decision_terms >= MIN_DECISION_TERMS
-            && matched_terms * denominator >= numerator * decision_terms
-        {
+        if passes_gates(matched_terms, decision_terms) {
             SummaryScore::Candidate {
                 matched_terms,
                 decision_terms,
@@ -232,7 +328,7 @@ impl TopCandidates {
     }
 
     /// A later duplicate of a kept decision object id keeps the better-ranked entry.
-    fn offer(&mut self, candidate: ScoredCandidate) {
+    pub(crate) fn offer(&mut self, candidate: ScoredCandidate) {
         if let Some(index) = self
             .0
             .iter()
