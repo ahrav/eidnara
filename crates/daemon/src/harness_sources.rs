@@ -523,24 +523,14 @@ pub struct Published {
     pub occurrence_id: String,
     /// The evidence object retaining the unit's exact bytes.
     pub evidence_object_id: String,
+    /// The id of that object's evidence row, which a dispute cites.
+    pub evidence_id: String,
     /// The predecessor revision this publication invalidated in the same commit.
     pub replaced_object_id: Option<String>,
     /// The kernel answered from a stored receipt: the same unit was published before.
     pub replayed: bool,
     /// The admission classes the unit was recorded under.
     pub admission: (SourceClass, TaintClass),
-}
-
-impl Published {
-    /// The id of the evidence row retaining the unit's bytes. The publisher keys a unit's
-    /// evidence object `srcev-object:{key}` and its evidence row `srcev:{key}`.
-    pub fn evidence_id(&self) -> String {
-        let key = self
-            .evidence_object_id
-            .strip_prefix("srcev-object:")
-            .unwrap_or(&self.evidence_object_id);
-        format!("srcev:{key}")
-    }
 }
 
 /// Evidence retained before publication failed. Only permanent descriptor refusals attempt compensation.
@@ -672,6 +662,7 @@ impl SourcePublisher<'_> {
     ) -> Result<Published, PublishError> {
         let unit = self.prepare(unit, observed_at)?;
         let evidence_object_id = unit.evidence_object_id();
+        let evidence_id = unit.evidence_id();
         // A unit published before answers from its descriptor receipt without offering its bytes to the store again; a receipt under another request is the conflict the digest exists to catch.
         let descriptor_intent = self.descriptor_intent(&unit);
         let (_, (stored, admission, evidence_digest)) = self
@@ -704,6 +695,7 @@ impl SourcePublisher<'_> {
                 object_id: receipt.result,
                 occurrence_id: unit.occurrence_id,
                 evidence_object_id,
+                evidence_id: evidence_id.clone(),
                 replaced_object_id: None,
                 replayed: true,
                 admission,
@@ -753,6 +745,7 @@ impl SourcePublisher<'_> {
                 object_id: published.object_id,
                 occurrence_id: published.occurrence_id,
                 evidence_object_id,
+                evidence_id: evidence_id.clone(),
                 replaced_object_id: published.replaced_object_id,
                 replayed: receipt.replayed,
                 admission: committed_admission,
@@ -762,6 +755,7 @@ impl SourcePublisher<'_> {
                 object_id: receipt.result,
                 occurrence_id: unit.occurrence_id,
                 evidence_object_id,
+                evidence_id: evidence_id.clone(),
                 replaced_object_id: None,
                 replayed: true,
                 admission,
@@ -1018,7 +1012,7 @@ impl SourcePublisher<'_> {
                 ..self.evidence_intent(unit)
             },
             payload: unit.unit.text.as_bytes().to_vec(),
-            evidence_id: format!("srcev:{}", unit.key),
+            evidence_id: unit.evidence_id(),
             object_id: unit.evidence_object_id(),
             object_kind: "evidence".to_owned(),
             domain_id: self.domain_id.to_owned(),
@@ -1341,6 +1335,7 @@ fn publish_prepared(
                 object_id: receipt.result,
                 occurrence_id: unit.occurrence_id.clone(),
                 evidence_object_id: unit.evidence_object_id(),
+                evidence_id: unit.evidence_id(),
                 replaced_object_id: None,
                 replayed: true,
                 admission,
@@ -1457,6 +1452,7 @@ fn publish_prepared(
                     object_id: descriptor.object_id,
                     occurrence_id: descriptor.occurrence_id,
                     evidence_object_id,
+                    evidence_id: handle.evidence_id.clone(),
                     replaced_object_id: descriptor.replaced_object_id,
                     replayed: false,
                     admission,
@@ -2077,6 +2073,10 @@ impl Prepared<'_> {
 
     fn evidence_object_id(&self) -> String {
         format!("srcev-object:{}", self.key)
+    }
+
+    fn evidence_id(&self) -> String {
+        format!("srcev:{}", self.key)
     }
 
     /// The head a `repository_documents` publication expects. Its producer reads the lineage's historical head ([`kernel::KernelStore::source_lineage_head`]) and proposes exactly the head plus one, 1 for an empty lineage, so the expected head is the revision before the proposal and any gap refuses as a moved head. Every other class names no head.

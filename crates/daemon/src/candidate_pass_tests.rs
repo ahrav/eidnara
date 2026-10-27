@@ -343,6 +343,11 @@ async fn a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate() {
         1,
         "a repeated window is a memo hit, publishes nothing, and offers no pass"
     );
+    assert_eq!(
+        capture_report(&handler)["completed"],
+        2,
+        "each job still ends in exactly one terminal count"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -378,22 +383,37 @@ async fn a_second_offer_while_a_pass_runs_is_refused_and_a_cancel_still_ends_the
         "the refused publication wrote nothing"
     );
     assert_eq!(counts(&handler)["active"], 0);
+    unhook(&handler);
 
-    let (reached, release) = park(&handler);
-    publish(
-        &handler,
-        &project,
-        &window(2, &format!("{TOPIC} third")),
-        true,
-    );
-    entered(&reached);
-    handler.cancel.cancel();
-    release.send(()).unwrap();
+    let cancel = handler.cancel.clone();
+    *handler
+        .contradiction_candidates
+        .before_descriptor
+        .lock()
+        .unwrap() = Some(Arc::new(move |index| {
+        if index == 1 {
+            cancel.cancel();
+            // The async side raises the budget's interrupt once it observes the cancel.
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }));
+    let mut native = window(2, &format!("{TOPIC} third"));
+    native.extend(window(3, &format!("{TOPIC} fourth")));
+    native.extend(window(4, &format!("{TOPIC} fifth")));
+    publish(&handler, &project, &native, true);
     until(&handler, "budget_exhausted", 1).await;
     until(&handler, "active", 0).await;
-    unhook(&handler);
-    assert_eq!(counts(&handler)["descriptors_unscored"], 1);
-    assert_eq!(rows(&store).len(), 1, "the cancelled pass wrote nothing");
+    *handler
+        .contradiction_candidates
+        .before_descriptor
+        .lock()
+        .unwrap() = None;
+    assert_eq!(counts(&handler)["descriptors_unscored"], 2);
+    assert_eq!(
+        rows(&store).len(),
+        2,
+        "the cancelled pass wrote the rows of its first descriptor only"
+    );
 }
 
 struct Core {
@@ -463,7 +483,9 @@ impl Core {
             Some(Instant::now() + self.counts.bounds().budget),
             Arc::new(AtomicBool::new(false)),
         );
-        score_publication(
+        let tip = self.kernel.tip().unwrap();
+        let jobs = self.store.memory_reviewer_status_facts().unwrap();
+        let end = score_publication(
             &self.kernel,
             &self.store,
             &self.project,
@@ -471,7 +493,10 @@ impl Core {
             &self.counts,
             &budget,
             now_ms(),
-        )
+        );
+        assert_eq!(self.kernel.tip().unwrap(), tip, "a pass commits nothing");
+        assert_eq!(self.store.memory_reviewer_status_facts().unwrap(), jobs);
+        end
     }
 
     fn count(&self, name: &str) -> u64 {
@@ -531,6 +556,70 @@ fn the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_coun
 }
 
 #[test]
+fn a_superseded_decision_is_never_scored_and_the_default_bounds_are_the_named_constants() {
+    use crate::contradiction_candidates::pass::{
+        CANDIDATE_PASS_BUDGET, CANDIDATES_PER_PASS, MAX_CANDIDATE_DECISIONS,
+        MAX_CANDIDATE_ROWS_PER_PROJECT, MAX_CANDIDATE_SUMMARY_BYTES,
+    };
+    assert_eq!(
+        PassBounds::default(),
+        PassBounds {
+            rows_per_pass: CANDIDATES_PER_PASS,
+            decisions: MAX_CANDIDATE_DECISIONS,
+            summary_bytes: MAX_CANDIDATE_SUMMARY_BYTES,
+            rows_per_project: MAX_CANDIDATE_ROWS_PER_PROJECT,
+            budget: CANDIDATE_PASS_BUDGET,
+        }
+    );
+    assert_eq!(
+        (
+            CANDIDATES_PER_PASS,
+            MAX_CANDIDATE_DECISIONS,
+            MAX_CANDIDATE_ROWS_PER_PROJECT
+        ),
+        (64, 4096, 4096)
+    );
+    let core = Core::open(PassBounds::default());
+    seed(
+        &core.kernel,
+        &core.project,
+        &[("replaced", TOPIC, EventKind::Other)],
+    );
+    let successor = DecisionSpec {
+        decision_id: "decision-replacement".to_owned(),
+        object_id: "object-replacement".to_owned(),
+        domain_id: crate::canonical_memory::MEMORY_DOMAIN_ID.to_owned(),
+        proposition_id: None,
+        scope_id: Some(core.project.scope_id()),
+        anchor_id: None,
+        evidence_id: None,
+        decision_kind: "architecture".to_owned(),
+        payload: DecisionPayload {
+            summary: "unrelated wording about another subject entirely".to_owned(),
+            rationale: "fixture".to_owned(),
+        },
+        source_kind: "fixture".to_owned(),
+        source_id: "lineage-replaced".to_owned(),
+        source_revision: 2,
+        sensitivity: kernel::Sensitivity::Normal,
+    };
+    core.kernel
+        .commit(intent("supersede"), |envelope| {
+            envelope.correct_decision("object-replaced", successor)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let descriptor = core.descriptor("d0", TOPIC);
+    core.score(std::slice::from_ref(&descriptor));
+    assert!(core.rows_for(&descriptor.evidence_id).is_empty());
+    assert_eq!(
+        core.count("summaries_loaded"),
+        0,
+        "the replaced decision is no longer served, and its replacement has no admission of its own"
+    );
+}
+
+#[test]
 fn the_summary_byte_cut_skips_payloads_before_any_load() {
     let core = Core::open(PassBounds::default());
     seed(
@@ -568,11 +657,12 @@ fn an_oversize_descriptor_writes_nothing_and_an_unscorable_summary_leaves_the_ot
         &[
             ("plain", TOPIC, EventKind::Other),
             ("huge", &huge, EventKind::Other),
+            ("stopwords", "the and with from this", EventKind::Other),
         ],
     );
     let oversize = Descriptor {
         evidence_id: "srcev:oversize".to_owned(),
-        text: format!("{TOPIC} {}", "x".repeat(65_536)),
+        text: "x".repeat(65_537),
     };
     let scored = core.descriptor("d1", TOPIC);
     assert_eq!(
@@ -581,7 +671,11 @@ fn an_oversize_descriptor_writes_nothing_and_an_unscorable_summary_leaves_the_ot
     );
     assert_eq!(core.count("descriptors_refused_oversize"), 1);
     assert!(core.rows_for(&oversize.evidence_id).is_empty());
-    assert_eq!(core.count("summaries_unscorable"), 1);
+    assert_eq!(
+        core.count("summaries_unscorable"),
+        2,
+        "the over-bound summary and the one the floor empties"
+    );
     assert_eq!(core.rows_for(&scored.evidence_id), ["object-plain"]);
 }
 
@@ -591,11 +685,12 @@ fn a_deadline_during_the_third_descriptor_leaves_the_first_two() {
         budget: Duration::from_millis(500),
         ..PassBounds::default()
     });
-    seed(
-        &core.kernel,
-        &core.project,
-        &[("one", TOPIC, EventKind::Other)],
-    );
+    let names: Vec<String> = (0..5).map(|index| format!("c{index}")).collect();
+    let decisions: Vec<(&str, &str, EventKind)> = names
+        .iter()
+        .map(|name| (name.as_str(), TOPIC, EventKind::Other))
+        .collect();
+    seed(&core.kernel, &core.project, &decisions);
     let descriptors: Vec<Descriptor> = (0..5)
         .map(|index| core.descriptor(&format!("d{index}"), &format!("{TOPIC} {index}")))
         .collect();
@@ -608,11 +703,12 @@ fn a_deadline_during_the_third_descriptor_leaves_the_first_two() {
     for (index, descriptor) in descriptors.iter().enumerate() {
         assert_eq!(
             core.rows_for(&descriptor.evidence_id).len(),
-            usize::from(index < 2),
+            if index < 2 { 4 } else { 0 },
             "descriptor {index}"
         );
     }
     assert_eq!(core.count("descriptors_unscored"), 3);
+    assert_eq!(core.count("deadline"), 1);
 }
 
 #[test]
@@ -643,6 +739,15 @@ fn the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_
     assert_eq!(core.count("rows_written"), 6);
     assert_eq!(core.count("dropped_at_cap"), 2);
     let before = rows(&core.store);
+    seed(
+        &core.kernel,
+        &core.project,
+        &[(
+            "later",
+            "unrelated wording elsewhere entirely",
+            EventKind::Other,
+        )],
+    );
     core.score(&[first.clone(), second.clone()]);
     let after = rows(&core.store);
     assert_eq!(after.len(), before.len());
@@ -651,8 +756,20 @@ fn the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_
             (&earlier.evidence_id, &earlier.decision_object_id),
             (&later.evidence_id, &later.decision_object_id)
         );
-        assert!(later.publish_tip >= earlier.publish_tip);
+        assert!(later.publish_tip > earlier.publish_tip);
     }
+    let full = core.descriptor("d2", &format!("{TOPIC} third"));
+    *core.counts.test_bounds.lock().unwrap() = Some(PassBounds {
+        rows_per_pass: 4,
+        ..PassBounds::default()
+    });
+    core.score(&[full.clone(), first.clone()]);
+    assert_eq!(core.rows_for(&full.evidence_id).len(), 4);
+    assert_eq!(
+        core.rows_for(&first.evidence_id).len(),
+        4,
+        "a descriptor past the pass cap keeps the rows it already holds"
+    );
 
     let capped = Core::open(PassBounds {
         rows_per_project: 3,
@@ -707,6 +824,18 @@ async fn a_rerun_from_the_retained_bytes_at_one_tip_rebuilds_the_rows_and_the_ke
             text: retained_text(&kernel, row),
         })
         .collect();
+    let mut retained: Vec<&str> = descriptors.iter().map(|row| row.text.as_str()).collect();
+    retained.sort_unstable();
+    let first_text = format!("{TOPIC} first");
+    let mut published = vec![
+        first_text.as_str(),
+        "snapshot ledger quorum lease renewal second",
+    ];
+    published.sort_unstable();
+    assert_eq!(
+        retained, published,
+        "the Kernel retained exactly the texts the pass scored"
+    );
     let counts = Candidates::default();
     let budget = kernel::applicability::EvalBudget::unbounded();
     assert_eq!(
@@ -738,6 +867,50 @@ async fn a_rerun_from_the_retained_bytes_at_one_tip_rebuilds_the_rows_and_the_ke
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_route_consent_reaches_the_pass_through_a_transform() {
+    for consent in [false, true] {
+        let (handler, store, _dir, project) =
+            candidate_handler(candidate_config(true, consent)).await;
+        let binding = kernel_routes::ProjectBinding::new(&project);
+        seed(
+            &kernel_of(&handler),
+            &binding,
+            &[("one", TOPIC, EventKind::Other)],
+        );
+        let native = window(0, &format!("{TOPIC} from a transform"));
+        let messages: Vec<IngressMessage> = codec::decode_opencode(&native)
+            .messages
+            .into_iter()
+            .map(|mut message| {
+                message.ck.meta.created_at_ms = Some(1_000 + message.ordinal as i64);
+                message
+            })
+            .collect();
+        let mut request = request_with_usage(messages, 1_000, 200_000);
+        request["serializer_profile"] = json!("opencode-aisdk");
+        request["native_messages"] = json!(native);
+        request["base_revision"] = json!("base-0");
+        let request = handler.test_client_prepare_request(request);
+        let mut outcome = handler
+            .handle_transform_for_test(test_route(7), request)
+            .await;
+        outcome
+            .take_after_response()
+            .expect("capture runs after the response")
+            .run();
+        settle(&handler).await;
+        assert_eq!(capture_report(&handler)["units_published"], 1);
+        assert_eq!(
+            counts(&handler)["offered"],
+            u64::from(consent),
+            "consent {consent}"
+        );
+        assert_eq!(counts(&handler)["completed"], u64::from(consent));
+        assert_eq!(rows(&store).len(), usize::from(consent));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_a_parked_pass() {
     let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
     let binding = kernel_routes::ProjectBinding::new(&project);
     seed(
@@ -745,30 +918,43 @@ async fn the_route_consent_reaches_the_pass_through_a_transform() {
         &binding,
         &[("one", TOPIC, EventKind::Other)],
     );
-    let native = window(0, &format!("{TOPIC} from a transform"));
-    let messages: Vec<IngressMessage> = codec::decode_opencode(&native)
-        .messages
-        .into_iter()
-        .map(|mut message| {
-            message.ck.meta.created_at_ms = Some(1_000 + message.ordinal as i64);
-            message
-        })
-        .collect();
-    let mut request = request_with_usage(messages, 1_000, 200_000);
-    request["serializer_profile"] = json!("opencode-aisdk");
-    request["native_messages"] = json!(native);
-    request["base_revision"] = json!("base-0");
-    let request = handler.test_client_prepare_request(request);
-    let mut outcome = handler
-        .handle_transform_for_test(test_route(7), request)
-        .await;
-    outcome
-        .take_after_response()
-        .expect("capture runs after the response")
-        .run();
+    *handler.contradiction_candidates.before_pass.lock().unwrap() =
+        Some(Arc::new(|| panic!("injected pass panic")));
+    publish(
+        &handler,
+        &project,
+        &window(0, &format!("{TOPIC} first")),
+        true,
+    );
+    until(&handler, "worker_panicked", 1).await;
     settle(&handler).await;
-    assert_eq!(counts(&handler)["completed"], 1);
-    assert_eq!(rows(&store).len(), 1);
+    unhook(&handler);
+    assert_eq!(counts(&handler)["active"], 0);
+    assert_eq!(capture_report(&handler)["retained_bytes"], 0);
+    assert!(rows(&store).is_empty());
+
+    let (reached, release) = park(&handler);
+    publish(
+        &handler,
+        &project,
+        &window(1, &format!("{TOPIC} second")),
+        true,
+    );
+    entered(&reached);
+    let held = capture_report(&handler)["retained_bytes"].as_u64().unwrap();
+    assert!(held > 0, "the parked pass holds its publication's charge");
+    let core = Arc::clone(&handler.core);
+    let shutdown =
+        tokio::spawn(async move { CompositeComponent::shutdown(&Handler { core }).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown waits for the parked pass"
+    );
+    release.send(()).unwrap();
+    shutdown.await.unwrap().unwrap();
+    assert_eq!(counts(&handler)["active"], 0);
+    assert_eq!(capture_report(&handler)["retained_bytes"], 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -791,26 +977,47 @@ async fn publish_latency_with_candidates_on_stays_within_the_off_baseline() {
             let texts: Vec<Value> = (0..8)
                 .flat_map(|unit| window(run * 8 + unit, &format!("{TOPIC} {run} {unit} topic")))
                 .collect();
+            // On the flag-on arm every odd publication runs while the previous pass is parked.
+            let parked = (enabled && run % 2 == 0).then(|| park(&handler));
             publish(&handler, &project, &texts, enabled);
+            if let Some((reached, release)) = parked {
+                entered(&reached);
+                unhook(&handler);
+                let next: Vec<Value> = (0..8)
+                    .flat_map(|unit| {
+                        window(
+                            10_000 + run * 8 + unit,
+                            &format!("{TOPIC} {run} {unit} overlap"),
+                        )
+                    })
+                    .collect();
+                publish(&handler, &project, &next, enabled);
+                while !handler.source_capture.is_idle() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                release.send(()).unwrap();
+            }
             settle(&handler).await;
         }
         let report = capture_report(&handler);
         eprintln!(
-            "candidate pass {}: publish_ms_max {} publish_ms_last {} units_published {} pass_ms_max {} rows_written {}",
+            "candidate pass {}: publish_ms_max {} publish_ms_last {} units_published {} pass_ms_max {} rows_written {} refused_pass_busy {}",
             if enabled { "on" } else { "off" },
             report["publish_ms_max"],
             report["publish_ms_last"],
             report["units_published"],
             counts(&handler)["pass_ms_max"],
             counts(&handler)["rows_written"],
+            counts(&handler)["refused_pass_busy"],
         );
         held.push(report["publish_ms_max"].as_u64().unwrap());
         if enabled {
+            assert_eq!(counts(&handler)["refused_pass_busy"], RUNS / 2);
             assert_eq!(counts(&handler)["completed"], RUNS);
         }
     }
     assert!(
-        held[1] <= held[0].saturating_mul(3) + 250,
+        held[1] <= held[0].saturating_mul(2) + 50,
         "publication hold with candidates on {} ms, off {} ms",
         held[1],
         held[0]

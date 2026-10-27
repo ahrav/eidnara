@@ -9248,6 +9248,7 @@ impl HandlerCore {
         offer: source_capture::Offer,
     ) -> Option<dispatch::AfterResponse> {
         // The route's frozen consent decides whether the job's settled publication is offered to a candidate pass.
+        let mut offer = offer;
         let candidates = offer
             .candidates
             .then(|| {
@@ -9255,6 +9256,7 @@ impl HandlerCore {
                     .map(|store| (Arc::clone(&self.contradiction_candidates), store))
             })
             .flatten();
+        offer.candidates = candidates.is_some();
         let handoff = self.source_capture.offer(offer)?;
         let admission = self.admission();
         let kernel = Arc::clone(&self.kernel);

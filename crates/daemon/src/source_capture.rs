@@ -640,7 +640,7 @@ impl CaptureHandoff {
             epoch: self.epoch,
             window_bytes: self.window_bytes,
             documents: self.documents,
-            candidates: self.candidates.then(Mutex::default),
+            kept_for_pass: self.candidates.then(std::cell::RefCell::default),
         })
     }
 }
@@ -662,7 +662,7 @@ pub(crate) struct CaptureJob {
     window_bytes: usize,
     documents: PendingDocuments,
     /// The text and receipt of each unit this job published, kept only when the route consents to candidates.
-    candidates: Option<Mutex<Vec<(String, Published)>>>,
+    kept_for_pass: Option<std::cell::RefCell<Vec<(String, Published)>>>,
 }
 
 impl CaptureJob {
@@ -696,37 +696,50 @@ impl CaptureJob {
         (end, None)
     }
 
-    /// Publishes, then releases the slot permit by dropping the job before it returns.
+    /// Publishes, then releases the slot permit by dropping the job before it returns. The pass holds a charge for the kept texts and receipts in place of the job's charge; when the budget cannot take it while the job's charge is still held, the pass keeps the job's larger charge.
     fn publish_settled(mut self) -> (Count, Option<SettledPublication>) {
         let end = self.publish();
         let CaptureJob {
+            capture,
             project,
             _retained,
-            candidates,
+            kept_for_pass,
             ..
         } = self;
-        let units = candidates
-            .map(|units| {
-                units
-                    .into_inner()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-            })
+        let units = kept_for_pass
+            .map(std::cell::RefCell::into_inner)
             .unwrap_or_default();
-        let settled = (end == Count::Completed && !units.is_empty()).then(|| SettledPublication {
-            project,
-            units,
-            _retained,
-        });
-        (end, settled)
+        if end != Count::Completed || units.is_empty() {
+            return (end, None);
+        }
+        let kept: usize = units
+            .iter()
+            .map(|(text, published)| {
+                text.len()
+                    + published.object_id.len()
+                    + published.occurrence_id.len()
+                    + published.evidence_object_id.len()
+                    + published.evidence_id.len()
+                    + std::mem::size_of::<(String, Published)>()
+            })
+            .sum();
+        let retained = RetainedCharge::take(&capture, kept).unwrap_or(_retained);
+        (
+            end,
+            Some(SettledPublication {
+                project,
+                units,
+                _retained: retained,
+            }),
+        )
     }
 
     /// Keeps a published unit's text and receipt for the candidate pass when the route consents to one.
     fn keep_published(&self, disposition: &UnitDisposition, text: String) {
-        if let (Some(kept), UnitDisposition::Published(published)) = (&self.candidates, disposition)
+        if let (Some(kept), UnitDisposition::Published(published)) =
+            (&self.kept_for_pass, disposition)
         {
-            kept.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((text, published.clone()));
+            kept.borrow_mut().push((text, published.clone()));
         }
     }
 

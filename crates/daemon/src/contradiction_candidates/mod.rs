@@ -103,7 +103,7 @@ impl Candidates {
     }
 
     /// The bounds a pass runs under.
-    pub fn bounds(&self) -> pass::PassBounds {
+    pub(crate) fn bounds(&self) -> pass::PassBounds {
         #[cfg(test)]
         if let Some(bounds) = *self.test_bounds.lock().unwrap() {
             return bounds;
@@ -112,7 +112,8 @@ impl Candidates {
     }
 
     /// Whether no pass holds the permit.
-    pub fn is_idle(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_idle(&self) -> bool {
         self.slot.available_permits() == 1
     }
 

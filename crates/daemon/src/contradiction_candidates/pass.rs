@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
-use kernel::{ClaimFactBounds, KernelStore, Surface};
+use kernel::{ClaimFactBounds, ClaimFactsError, KernelError, KernelStore, Surface};
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::{CandidateCaps, CandidateScore, DescriptorCandidates};
 use tokio::sync::OwnedSemaphorePermit;
@@ -40,17 +40,21 @@ pub const MAX_CANDIDATE_SUMMARY_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_CANDIDATE_ROWS_PER_PROJECT: usize = 4096;
 /// The pass's deadline from its start.
 pub const CANDIDATE_PASS_BUDGET: Duration = Duration::from_secs(10);
+/// Summaries one descriptor scores between budget checks.
+const SUMMARIES_PER_CHECK: usize = 256;
+/// Visible rows the scope filter judges between budget checks.
+const ROWS_PER_CHECK: usize = 256;
 const CLAIM_CHUNK: NonZeroUsize = NonZeroUsize::new(64).expect("nonzero");
 const CLAIM_CAUSAL_PAYLOAD_BYTES: NonZeroU64 = NonZeroU64::new(1024 * 1024).expect("nonzero");
 
 /// The pass's bounds; production uses [`PassBounds::default`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PassBounds {
-    pub rows_per_pass: usize,
-    pub decisions: usize,
-    pub summary_bytes: u64,
-    pub rows_per_project: usize,
-    pub budget: Duration,
+pub(crate) struct PassBounds {
+    pub(crate) rows_per_pass: usize,
+    pub(crate) decisions: usize,
+    pub(crate) summary_bytes: u64,
+    pub(crate) rows_per_project: usize,
+    pub(crate) budget: Duration,
 }
 
 impl Default for PassBounds {
@@ -67,25 +71,34 @@ impl Default for PassBounds {
 
 /// One descriptor a pass scores: the exact text the Kernel retained, and its evidence row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Descriptor {
-    pub evidence_id: String,
-    pub text: String,
+pub(crate) struct Descriptor {
+    pub(crate) evidence_id: String,
+    pub(crate) text: String,
 }
 
 /// An admitted pass: it holds the store's pass permit and the publication's charge.
 pub(crate) struct CandidatePass {
-    counts: Arc<Candidates>,
     kernel: Arc<KernelOpenCoordinator>,
     store: Arc<MemoryStore>,
     cancel: CancellationToken,
     settled: SettledPublication,
-    _active: ActivePass,
+    active: ActivePass,
 }
 
 /// Counts the pass as active while the permit lives, so a panicking pass releases both.
 struct ActivePass {
     counts: Arc<Candidates>,
     _permit: OwnedSemaphorePermit,
+}
+
+impl ActivePass {
+    fn new(counts: &Arc<Candidates>, permit: OwnedSemaphorePermit) -> Self {
+        counts.add(Count::Active, 1);
+        Self {
+            counts: Arc::clone(counts),
+            _permit: permit,
+        }
+    }
 }
 
 impl Drop for ActivePass {
@@ -108,31 +121,25 @@ impl Candidates {
             self.add(Count::RefusedPassBusy, 1);
             return None;
         };
-        self.add(Count::Active, 1);
         Some(CandidatePass {
-            counts: Arc::clone(self),
             kernel,
             store,
             cancel,
             settled,
-            _active: ActivePass {
-                counts: Arc::clone(self),
-                _permit: permit,
-            },
+            active: ActivePass::new(self, permit),
         })
     }
 }
 
 impl CandidatePass {
-    /// Runs the pass on the blocking pool and returns once it physically completes; cancellation raises the budget's interrupt, so the pass stops at its next check.
+    /// Runs the pass on the blocking pool and returns once it physically completes. The blocking closure records the pass's end and timing before it releases the permit, so an idle permit means the counters are final. Cancellation raises the budget's interrupt; the pass stops at its next check, after at most one Kernel read, one scope-term read, 256 summaries of one descriptor, or one row write.
     pub(crate) async fn run(self) -> Count {
-        let counts = Arc::clone(&self.counts);
+        let counts = Arc::clone(&self.active.counts);
         counts.add(Count::Admitted, 1);
         let interrupt = Arc::new(AtomicBool::new(false));
         let raised = Arc::clone(&interrupt);
         let cancel = self.cancel.clone();
-        let started = Instant::now();
-        let mut join = tokio::task::spawn_blocking(move || self.score(&interrupt));
+        let mut join = tokio::task::spawn_blocking(move || self.finish(&interrupt));
         let joined = tokio::select! {
             joined = &mut join => joined,
             () = cancel.cancelled() => {
@@ -140,42 +147,62 @@ impl CandidatePass {
                 join.await
             }
         };
-        let end = joined.unwrap_or(Count::WorkerPanicked);
-        let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        counts.set(Count::PassMsLast, elapsed);
-        counts.max(Count::PassMsMax, elapsed);
-        counts.add(end, 1);
-        end
+        match joined {
+            Ok(end) => end,
+            Err(error) => {
+                // A closure the runtime dropped before it ran was stopped by shutdown, not a panic.
+                let end = if error.is_panic() {
+                    Count::WorkerPanicked
+                } else {
+                    Count::BudgetExhausted
+                };
+                counts.add(end, 1);
+                end
+            }
+        }
     }
 
-    fn score(self, interrupt: &Arc<AtomicBool>) -> Count {
+    fn finish(self, interrupt: &Arc<AtomicBool>) -> Count {
+        let started = Instant::now();
+        let counts = &self.active.counts;
         #[cfg(test)]
-        if let Some(hook) = self.counts.before_pass.lock().unwrap().clone() {
-            hook();
+        {
+            let hook = counts.before_pass.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
         }
-        let deadline = Instant::now() + self.counts.bounds().budget;
+        let deadline = Instant::now() + counts.bounds().budget;
         let budget = EvalBudget::new(Some(deadline), Arc::clone(interrupt));
-        let Ok(kernel) = self.kernel.kernel_store() else {
-            return Count::KernelUnavailable;
-        };
         let descriptors: Vec<Descriptor> = self
             .settled
             .units
             .iter()
             .map(|(text, published)| Descriptor {
-                evidence_id: published.evidence_id(),
+                evidence_id: published.evidence_id.clone(),
                 text: text.clone(),
             })
             .collect();
-        score_publication(
-            &kernel,
-            &self.store,
-            &self.settled.project,
-            &descriptors,
-            &self.counts,
-            &budget,
-            crate::now_ms(),
-        )
+        let end = match self.kernel.kernel_store() {
+            Ok(kernel) => score_publication(
+                &kernel,
+                &self.store,
+                &self.settled.project,
+                &descriptors,
+                counts,
+                &budget,
+                crate::now_ms(),
+            ),
+            Err(_) => {
+                counts.add(Count::DescriptorsUnscored, descriptors.len() as u64);
+                counts.add(Count::KernelUnavailable, 1);
+                Count::KernelUnavailable
+            }
+        };
+        let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        counts.set(Count::PassMsLast, elapsed);
+        counts.max(Count::PassMsMax, elapsed);
+        end
     }
 }
 
@@ -195,6 +222,20 @@ fn stop(budget: &EvalBudget) -> Option<Count> {
 
 /// Scores `descriptors` in publish order against the eligible decisions of `project` at one Kernel tip and writes each descriptor's rows. A stopped budget leaves the rows of a publish-order prefix: a descriptor not fully scored writes nothing and counts `descriptors_unscored` with every later one.
 pub(crate) fn score_publication(
+    kernel: &KernelStore,
+    store: &MemoryStore,
+    project: &ProjectBinding,
+    descriptors: &[Descriptor],
+    counts: &Candidates,
+    budget: &EvalBudget,
+    now_ms: i64,
+) -> Count {
+    let end = score_descriptors(kernel, store, project, descriptors, counts, budget, now_ms);
+    counts.add(end, 1);
+    end
+}
+
+fn score_descriptors(
     kernel: &KernelStore,
     store: &MemoryStore,
     project: &ProjectBinding,
@@ -233,8 +274,11 @@ pub(crate) fn score_publication(
             return unscored(index, end);
         }
         #[cfg(test)]
-        if let Some(hook) = counts.before_descriptor.lock().unwrap().clone() {
-            hook(index);
+        {
+            let hook = counts.before_descriptor.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(index);
+            }
         }
         let Ok(terms) = DescriptorTerms::new(&descriptor.text) else {
             counts.add(Count::DescriptorsRefusedOversize, 1);
@@ -242,7 +286,12 @@ pub(crate) fn score_publication(
         };
         let mut top = TopCandidates::default();
         let mut unscorable = 0;
-        for (object_id, decision_id, summary) in &summaries {
+        for (scanned, (object_id, decision_id, summary)) in summaries.iter().enumerate() {
+            if scanned % SUMMARIES_PER_CHECK == 0
+                && let Some(end) = stop(budget)
+            {
+                return unscored(index, end);
+            }
             let input = CandidateInput {
                 decision_object_id: object_id,
                 decision_id,
@@ -252,8 +301,10 @@ pub(crate) fn score_publication(
                 unscorable += 1;
             }
         }
-        if !std::mem::replace(&mut unscorable_counted, true) {
+        // Whether a summary is unscorable depends on the summary alone, so the first scored descriptor counts each one once.
+        if !unscorable_counted {
             counts.add(Count::SummariesUnscorable, unscorable);
+            unscorable_counted = true;
         }
         if let Some(end) = stop(budget) {
             return unscored(index, end);
@@ -264,6 +315,10 @@ pub(crate) fn score_publication(
         if rows.len() > room {
             counts.add(Count::DroppedAtCap, (rows.len() - room) as u64);
             rows.truncate(room);
+        }
+        // A write with no rows would replace the rows the descriptor already holds.
+        if rows.is_empty() && room == 0 {
+            continue;
         }
         let scores: Vec<CandidateScore<'_>> = rows
             .iter()
@@ -307,7 +362,7 @@ fn candidate_summaries(
     bounds: &PassBounds,
     budget: &EvalBudget,
 ) -> Result<Vec<(String, String, String)>, Count> {
-    let failed = |_| stop(budget).unwrap_or(Count::KernelUnavailable);
+    let failed = |_: KernelError| stop(budget).unwrap_or(Count::KernelUnavailable);
     let tip = target.target.through_commit;
     let visible = kernel
         .visible_domain_decisions_as_of_in_scope(
@@ -320,7 +375,12 @@ fn candidate_summaries(
     let mut filter = ScopeFilter::new(project);
     let mut terms = stored_terms(kernel);
     let mut newest = NewestRows::new(bounds.decisions);
-    for row in visible.rows {
+    for (judged, row) in visible.rows.into_iter().enumerate() {
+        if judged % ROWS_PER_CHECK == 0
+            && let Some(end) = stop(budget)
+        {
+            return Err(end);
+        }
         if filter
             .matches(row.scope_id.as_deref(), &mut terms)
             .map_err(failed)?
@@ -344,7 +404,7 @@ fn candidate_summaries(
         }
         let read = kernel
             .claim_facts_at_within_budget(chunk, target.target, claims, budget)
-            .map_err(|_| stop(budget).unwrap_or(Count::KernelUnavailable))?;
+            .map_err(|_: ClaimFactsError| stop(budget).unwrap_or(Count::KernelUnavailable))?;
         // The scope filter above already kept only rows whose scope names the project.
         let standing: HashMap<&str, bool> = read
             .claims
@@ -358,6 +418,9 @@ fn candidate_summaries(
                 .cloned(),
         );
     }
+    if let Some(end) = stop(budget) {
+        return Err(end);
+    }
     let sizes: HashMap<String, u64> = kernel
         .decision_payload_sizes_as_of(&kept, tip)
         .map_err(failed)?
@@ -368,6 +431,7 @@ fn candidate_summaries(
     let mut load = Vec::with_capacity(kept.len());
     for id in kept {
         let size = sizes.get(&id).copied().unwrap_or(0);
+        // The cut is a prefix of the newest-first order: once one payload passes the budget, every older one is cut too.
         if cut > 0 || loaded_bytes.saturating_add(size) > bounds.summary_bytes {
             cut = cut.saturating_add(size);
         } else {
