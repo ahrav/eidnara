@@ -18,7 +18,7 @@ before it becomes a carrier.
 - Blank check: `request.event.reason.trim().is_empty()` is
   `AdmissionPolicy` in `prepare_with_facts`
   (`crates/kernel/src/admission.rs:1616-1618`) and in
-  `revoke_approval_inner` (`:1369-1371`).
+  `revoke_approval_inner` (`:1417-1419`).
 - Bound: `redact(value)` returns `InvalidInput` when `value.len() >
   MAX_REDACTABLE_BYTES` (`crates/kernel/src/redaction.rs:72-77`);
   `MAX_REDACTABLE_BYTES = secret_scanner::MAX_INPUT_BYTES = 512 * 1024`
@@ -26,7 +26,7 @@ before it becomes a carrier.
   `crates/secret-scanner/src/api.rs:6`).
 - Redaction: `redact_lossy` runs `redact_durable_text` and returns the
   rewritten text plus detections (`redaction.rs:41-47`); `write_admission`
-  stores `reason.text` (`admission.rs:1749`, `:1777`) and calls
+  stores `reason.text` (`admission.rs:1749`, `:1846`) and calls
   `record(tx, "admission_decision", id, "reason", &reason, commit_seq)`
   (`:1787-1794`), which inserts one `durable_text_redactions` row per
   detection (`redaction.rs:104-130`).
@@ -35,12 +35,12 @@ before it becomes a carrier.
 - Schema: `reason TEXT NOT NULL`, no `CHECK` on length
   (`crates/kernel/src/schema.rs:164`).
 - Route value: the constant `"kernel.commit"` (`commit.rs:100`; inserts at
-  `:594`) for every event except the two disputes; a dispute carries the
-  composed `v=1` reason (`commit.rs:223-229`, passed through at `:732`).
+  `:600`) for every event except the two disputes; a dispute carries the
+  composed `v=1` reason (`commit.rs:223-229`, passed through at `:739`).
   At the PR A tip the route cannot produce a blank, oversize, or
   secret-bearing reason: `DisputeReason::validated` refuses a rendering
   over 4096 bytes or holding a detection
-  (`crates/daemon/src/kernel_routes/dispute.rs:77-79`), and every
+  (`crates/daemon/src/kernel_routes/dispute.rs:75-77`), and every
   rendering starts with `v=1;op=kernel.commit`.
 - Other production reasons: `format!("{kind:?}")` (`lib.rs:14067`),
   `CLASSIFY_KERNEL_PRODUCER` (`lib.rs:15224`), `CAUSE`
@@ -61,8 +61,9 @@ can also approach 512 KiB and abort the whole envelope with
 ## Timing windows and dependencies
 
 None in time. Depends on the detector set in `crates/secret-scanner` and
-on `redact_durable_text` in `crates/context-core/src/redaction.rs`, not
-read in this pass.
+on `redact_durable_text` in `crates/context-core/src/redaction.rs`, which
+the initial pass at `3a3b916b7` did not read; the second investigation
+question below records the read at the PR A tip and its conclusion.
 
 ## What a test must construct
 
@@ -98,7 +99,7 @@ read in this pass.
 - Sources examined: `crates/kernel/src/redaction.rs:41-42`
   (`redact_lossy` calls `context_core::redaction::redact_durable_text`);
   `crates/context-core/src/redaction.rs:462-464`;
-  `crates/daemon/src/kernel_routes/dispute.rs:365-372`, `:354-367`;
+  `crates/daemon/src/kernel_routes/dispute.rs:373-380`, `:362-375`;
   `crates/secret-scanner/conservative_overlay.yaml:5-7`;
   `crates/secret-scanner/default_rules.yaml:410-411`;
   `crates/secret-scanner/src/rules.rs:31`, `:299-306`.

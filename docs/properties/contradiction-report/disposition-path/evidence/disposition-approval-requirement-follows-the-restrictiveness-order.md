@@ -31,7 +31,7 @@ lifecycle transitions.
   approval (`commit.rs:720-723`) so an out-of-scope approval is
   `not_found` before evaluation (`kernel_routes.rs:4508-4519`).
 - The route derives `denied` as `requested_disposition() != disposition`
-  (`commit.rs:776-779`); `requested_disposition` reads the same
+  (`commit.rs:774-777`); `requested_disposition` reads the same
   `event_effect` table (`admission.rs:4384-4386`).
 - A denial still writes one `admission_decisions` row with
   `outcome = deny` (`kernel_routes.rs:4500-4503`).
@@ -41,10 +41,12 @@ lifecycle transitions.
 
 ## Failure scenario
 
-A rank table edit that places Disputed above Stale would make Stale to
-Disputed require approval and block the P4 report on stale findings; one
-that places Contradicted at 1 would let `mark_disputed` relax a
-contradiction without approval. A `validate_approval` regression that
+A rank table edit that places Disputed below Stale would make Stale to
+Disputed a relaxation, so it would require approval and block the P4
+report on stale findings; one that places Contradicted at 1 would make
+Contradicted to Disputed an equal-rank move, so `mark_disputed` would land
+on a contradicted decision without approval. A `validate_approval`
+regression that
 returns true for a quarantined approval would let a plugin relax any
 disposition by citing it.
 
@@ -53,7 +55,7 @@ disposition by citing it.
 The approval's authority is read at evaluation time inside the writer
 transaction. In one envelope, an earlier operation that quarantines the
 approval changes the later operation's answer; the preview refuses that
-combination (`commit.rs:1210-1216`) while the commit judges it
+combination (`commit.rs:1208-1214`) while the commit judges it
 (`kernel_routes.rs:5493`).
 
 ## What a test must construct
@@ -73,8 +75,8 @@ combination (`commit.rs:1210-1216`) while the commit judges it
 
 ### Q: Is a lateral move at equal rank (Stale to Disputed) the intended contract for a consumer-filed report on a stale finding?
 
-- Sources examined: `admission.rs:4241-4248`, `:321-330`; P4 R4 and KTD4
-  ("tightening semantics unchanged"); route test `:4551-4563`.
+- Sources examined: `admission.rs:4241-4248`, `:337-346`; P4 R4 and KTD4
+  ("tightening semantics unchanged"); route test `:4624-4636`.
 - Findings: the code lands the move without approval and records
   `Disputed`; R4's "tightening only" does not name the equal-rank case.
   No test pins it either way.

@@ -5,6 +5,7 @@ use kernel::{
     served_set_digest, use_outcome_id,
 };
 use rusqlite::{Connection, OptionalExtension, params};
+use sha2::Digest;
 
 const HARNESS: &str = "opencode";
 const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
@@ -235,6 +236,48 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
         Err(KernelError::NotFound),
         "a decision row names a registry object"
     );
+    writer(root.path())
+        .execute(
+            "INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES ('o1','observation','domain','fixture','o1',1,1,'normal')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        insert(
+            &store,
+            "observation",
+            spec("s3", &["d1", "o1"], served_at, 100)
+        ),
+        Err(KernelError::InvalidInput),
+        "a decision row names a decision object"
+    );
+    writer(root.path())
+        .execute_batch(&format!(
+            "INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES ('d3','decision','domain','fixture','d3',1,{later},'normal');
+             INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,invalidated_commit_seq,sensitivity_class
+             ) VALUES ('d4','decision','domain','fixture','d4',1,1,{served_at},'normal');",
+            later = served_at + 1
+        ))
+        .unwrap();
+    tick(&store, "later");
+    for (context, ids) in [
+        ("created after the serve", ["d1", "d3"]),
+        ("retired at the serve", ["d1", "d4"]),
+    ] {
+        assert_eq!(
+            insert(&store, context, spec("s3", &ids, served_at, 100)),
+            Err(KernelError::InvalidInput),
+            "{context}"
+        );
+    }
     let next = store.tip().unwrap() + 1;
     let with_secret_id = || {
         let mut ids = vec!["d1".to_string(), SECRET.to_string()];
@@ -295,7 +338,23 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
             Box::new(move |s| s.served_commit_seq = next),
         ),
         ("negative recorded time", Box::new(|s| s.recorded_at = -1)),
-        ("retention overflow", Box::new(|s| s.recorded_at = i64::MAX)),
+        (
+            "recorded time past the clock skew",
+            Box::new(|s| {
+                s.recorded_at = i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap()
+                    + 10 * 60 * 1_000;
+            }),
+        ),
+        (
+            "far-future recorded time",
+            Box::new(|s| s.recorded_at = i64::MAX),
+        ),
     ];
     for (index, (context, corrupt)) in malformed.into_iter().enumerate() {
         let mut bad = spec("s2", &["d1", "d2"], served_at, 100);
@@ -311,7 +370,7 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
         count(
             root.path(),
             "SELECT COUNT(*) FROM commit_log
-             WHERE operation_key GLOB 'bad-*' OR operation_key IN ('again','unknown')"
+             WHERE operation_key GLOB 'bad-*' OR operation_key IN ('again','unknown','observation','created after the serve','retired at the serve')"
         ),
         0,
         "a refused commit appends no commit-log row"
@@ -426,7 +485,13 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
         assert_eq!(sessions.len(), 1, "{object} has one serve");
         assert_eq!(sessions[0].serve.use_outcome_id, id);
         assert_eq!(
-            store.served_counts_for(&project(), object).unwrap(),
+            store
+                .served_counts_for(
+                    &kernel::applicability::EvalBudget::unbounded(),
+                    &project(),
+                    object
+                )
+                .unwrap(),
             ServedCounts {
                 served_sessions: 1,
                 disputed_after_serve: u64::from(sessions[0].disputed_after_serve),
@@ -457,7 +522,13 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
     }
     assert!(store.served_sessions_for("unserved").unwrap().is_empty());
     assert_eq!(
-        store.served_counts_for(&project(), "unserved").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "unserved"
+            )
+            .unwrap(),
         ServedCounts::default()
     );
 
@@ -472,7 +543,11 @@ fn disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage
     );
     assert_eq!(
         store
-            .served_counts_for(&project(), "later-dispute")
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "later-dispute"
+            )
             .unwrap(),
         ServedCounts::default(),
         "a retired record is not counted"
@@ -498,6 +573,7 @@ fn expiry_retires_an_expired_record_under_a_reserved_receipt() {
     let expired = insert(&store, "old", spec("s1", &["d1"], served_at, 0)).unwrap();
     let due = insert(&store, "due", spec("s2", &["d1"], served_at, 1)).unwrap();
     let now = USE_OUTCOME_RETENTION_MS + 1;
+    let digest = format!("{:x}", sha2::Sha256::digest(expired.as_bytes()));
 
     assert_eq!(
         store.expire_use_outcomes(now).unwrap(),
@@ -514,7 +590,8 @@ fn expiry_retires_an_expired_record_under_a_reserved_receipt() {
                  JOIN use_outcomes u ON u.invalidated_commit_seq=r.commit_seq
                  JOIN commit_log c ON c.commit_seq=r.commit_seq
                  WHERE r.producer='eidnara-kernel/use-outcome-expiry'
-                   AND r.operation_key='{now}:{expired}' AND c.producer=r.producer
+                   AND r.operation_key='{now}:{expired}' AND r.request_digest='{digest}'
+                   AND c.producer=r.producer
                    AND c.operation_key GLOB '{now}:page:*'
                    AND u.use_outcome_id='{expired}'"
             )
@@ -781,15 +858,33 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         disputed_after_serve,
     };
     assert_eq!(
-        store.served_counts_for(&project(), "x").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "x"
+            )
+            .unwrap(),
         counts(2, 1)
     );
     assert_eq!(
-        store.served_counts_for(&project(), "never-served").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "never-served"
+            )
+            .unwrap(),
         counts(0, 0)
     );
     assert_eq!(
-        store.served_counts_for(&"b".repeat(64), "x").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &"b".repeat(64),
+                "x"
+            )
+            .unwrap(),
         counts(0, 0),
         "another project's serves are not counted"
     );
@@ -801,17 +896,60 @@ fn disputed_after_serve_is_judged_against_each_serve() {
         .unwrap();
     assert_eq!(answer(&store), [(second, false)]);
     assert_eq!(
-        store.served_counts_for(&project(), "x").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "x"
+            )
+            .unwrap(),
         counts(1, 0),
         "a retired record is not counted"
     );
     let third_at = tick(&store, "third");
     insert(&store, "serve-3", spec("s2", &["x", "y"], third_at, 100)).unwrap();
     assert_eq!(
-        store.served_counts_for(&project(), "x").unwrap(),
+        store
+            .served_counts_for(
+                &kernel::applicability::EvalBudget::unbounded(),
+                &project(),
+                "x"
+            )
+            .unwrap(),
         counts(2, 0),
         "one session served at two served sets holds two records"
     );
+}
+
+/// The by-decision read answers serves oldest first by creating commit even when their ids, which the decision index orders, sort otherwise.
+#[test]
+fn served_sessions_are_ordered_by_creating_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["x"]);
+    let served_at = tick(&store, "tick");
+    let ids: Vec<String> = (0..6)
+        .map(|serve| {
+            insert(
+                &store,
+                &format!("serve-{serve}"),
+                spec(&format!("s{serve}"), &["x"], served_at, 100),
+            )
+            .unwrap()
+        })
+        .collect();
+    let mut by_id = ids.clone();
+    by_id.sort();
+    assert_ne!(
+        by_id, ids,
+        "the serves' ids differ from their creation order"
+    );
+    let answer: Vec<String> = store
+        .served_sessions_for("x")
+        .unwrap()
+        .into_iter()
+        .map(|session| session.serve.use_outcome_id)
+        .collect();
+    assert_eq!(answer, ids);
 }
 
 /// A cited record whose deadline is later than a full page of uncited records is not read by the call that fills the page, and is counted by the call that reaches it.
@@ -866,6 +1004,40 @@ fn lifecycle(store: &KernelStore, session: &str) -> Vec<(Option<i64>, Option<i64
         .collect()
 }
 
+/// The other bindings a lifecycle predicate must leave alone: the same session id under another harness, and under another project.
+const OTHER_HARNESS: &str = "claude-code";
+
+fn other_project() -> String {
+    "b".repeat(64)
+}
+
+/// Inserts `s1` records under the other harness and the other project, and answers a reader of both records' lifecycle columns.
+fn insert_other_bindings(
+    store: &KernelStore,
+    served_at: i64,
+    now: i64,
+) -> impl Fn() -> Vec<(Option<i64>, Option<i64>)> + '_ {
+    let mut harness_record = spec("s1", &["d1"], served_at, now);
+    harness_record.harness = OTHER_HARNESS.to_string();
+    insert(store, "other-harness", harness_record).unwrap();
+    let mut project_record = spec("s1", &["d1"], served_at, now);
+    project_record.project_digest = other_project();
+    insert(store, "other-project", project_record).unwrap();
+    move || {
+        [(project(), OTHER_HARNESS), (other_project(), HARNESS)]
+            .iter()
+            .flat_map(|(project, harness)| {
+                store
+                    .served_set(project, harness, "s1")
+                    .unwrap()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|record| (record.serve.deleted_at, record.serve.last_transform_at))
+            })
+            .collect()
+    }
+}
+
 fn mark_deleted(
     store: &KernelStore,
     key: &str,
@@ -898,6 +1070,7 @@ fn a_session_delete_marks_each_live_record_once() {
     insert(&store, "b", spec("s1", &["d2"], served_at, now)).unwrap();
     insert(&store, "c", spec("s1", &["d3"], served_at, 0)).unwrap();
     insert(&store, "other", spec("s2", &["d1"], served_at, now)).unwrap();
+    let other_bindings = insert_other_bindings(&store, served_at, now);
     assert_eq!(store.expire_use_outcomes(now).unwrap().retired, 1);
 
     assert_eq!(
@@ -916,6 +1089,11 @@ fn a_session_delete_marks_each_live_record_once() {
         "the retired record keeps its state"
     );
     assert_eq!(lifecycle(&store, "s2"), [(None, None)]);
+    assert_eq!(
+        other_bindings(),
+        [(None, None), (None, None)],
+        "the same session id under another harness or project keeps its state"
+    );
     let served_again = tick(&store, "tick-2");
     insert(&store, "e", spec("s1", &["d1", "d2"], served_again, now)).unwrap();
     assert_eq!(mark_deleted(&store, "del-3", "s1", 30), Ok(1));
@@ -946,6 +1124,7 @@ fn last_transform_at_advances_live_records_without_a_commit() {
     insert(&store, "a", spec("s1", &["d1"], served_at, now)).unwrap();
     insert(&store, "c", spec("s2", &["d1"], served_at, now)).unwrap();
     insert(&store, "d", spec("s3", &["d1"], served_at, 0)).unwrap();
+    let other_bindings = insert_other_bindings(&store, served_at, now);
     assert_eq!(store.expire_use_outcomes(now).unwrap().retired, 1);
     let advance = |session: &str, at: i64| {
         store.advance_use_outcome_last_transform(
@@ -962,6 +1141,7 @@ fn last_transform_at_advances_live_records_without_a_commit() {
             count(root, "SELECT COUNT(*) FROM commit_log"),
             count(root, "SELECT COUNT(*) FROM operation_receipts"),
             count(root, "SELECT COUNT(*) FROM change_event"),
+            count(root, "SELECT COUNT(*) FROM outbox"),
         )
     };
     let before = durable(root.path());
@@ -978,6 +1158,31 @@ fn last_transform_at_advances_live_records_without_a_commit() {
         "a retired record is not advanced"
     );
     assert_eq!(lifecycle(&store, "s3"), [(None, None)]);
+    assert_eq!(
+        other_bindings(),
+        [(None, None), (None, None)],
+        "the same session id under another harness or project is not advanced"
+    );
+    // At 100 the advanced record is current while both other bindings' `s1` records are null, so a
+    // predicate that dropped the project or the harness would answer `true` for the first binding.
+    let stale = |project: &str, harness: &str| {
+        store.use_outcome_last_transform_is_stale(
+            &budget(std::time::Duration::from_secs(5)),
+            project,
+            harness,
+            "s1",
+            100,
+        )
+    };
+    assert_eq!(stale(&project(), HARNESS), Ok(false));
+    assert_eq!(
+        (
+            stale(&other_project(), HARNESS),
+            stale(&project(), OTHER_HARNESS)
+        ),
+        (Ok(true), Ok(true)),
+        "the staleness check reads the binding it was asked about"
+    );
     assert_eq!(store.tip().unwrap(), tip);
     assert_eq!(durable(root.path()), before);
 
@@ -995,7 +1200,6 @@ fn last_transform_at_advances_live_records_without_a_commit() {
     assert_eq!(store.tip().unwrap(), tip);
 }
 
-/// With the Kernel writer held, an advance that has rows to move stops at its budget with `Deadline`, and one with nothing to move answers without waiting for the writer.
 #[test]
 fn a_held_writer_bounds_the_advance_and_an_idle_session_skips_it() {
     let root = tempfile::tempdir().unwrap();
@@ -1021,10 +1225,14 @@ fn a_held_writer_bounds_the_advance_and_an_idle_session_skips_it() {
         let advanced =
             store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s1", 10);
         assert_eq!(advanced, Err(KernelError::Deadline));
-        assert!(started.elapsed() >= wait);
+        let waited = started.elapsed();
+        assert!(
+            waited >= wait && waited < wait * 10,
+            "the writer wait is bounded by the budget: {waited:?}"
+        );
         assert_eq!(
-            store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s9", 10),
-            Ok(0)
+            store.use_outcome_last_transform_is_stale(&budget(wait), &project(), HARNESS, "s9", 10),
+            Ok(false)
         );
         release.send(()).unwrap();
         holder.join().unwrap();
@@ -1041,20 +1249,17 @@ fn an_outside_file_lock_bounds_the_advance_at_begin() {
     insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
     let outside = writer(root.path());
     outside.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let wait = std::time::Duration::from_millis(100);
     let started = std::time::Instant::now();
-    let advanced = store.advance_use_outcome_last_transform(
-        &budget(std::time::Duration::from_millis(100)),
-        &project(),
-        HARNESS,
-        "s1",
-        10,
-    );
+    let advanced =
+        store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s1", 10);
     let waited = started.elapsed();
     outside.execute_batch("ROLLBACK").unwrap();
     assert_eq!(advanced, Err(KernelError::Deadline));
+    // Ten budgets of slack for a loaded host, an order of magnitude under the 5 s busy timeout the budget preempts.
     assert!(
-        waited < std::time::Duration::from_secs(2),
-        "the busy timeout did not run: {waited:?}"
+        waited >= wait && waited < wait * 10,
+        "the wait is bounded by the budget, not the busy timeout: {waited:?}"
     );
     assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
 }
@@ -1581,4 +1786,78 @@ fn check_link_definition(
         }
     }
     Ok(())
+}
+
+#[test]
+fn a_held_reader_pool_bounds_the_count_read() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 100)).unwrap();
+    let wait = std::time::Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    let counted = store
+        .with_readers_held_for_test(|| store.served_counts_for(&budget(wait), &project(), "d1"));
+    let waited = started.elapsed();
+    assert_eq!(counted, Err(KernelError::Deadline));
+    assert!(waited >= wait, "{waited:?}");
+    assert_eq!(
+        store.served_counts_for(&budget(wait), &project(), "d1"),
+        Ok(ServedCounts {
+            served_sessions: 1,
+            disputed_after_serve: 0,
+        })
+    );
+}
+
+/// The staleness check answers `true` while a live record of the session holds a `last_transform_at` that is null or before the time, and writes nothing when it does; a spent budget answers `Deadline`. The live-record filter it shares with the advance is covered by `last_transform_at_advances_live_records_without_a_commit`.
+#[test]
+fn the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let stale = |wait: std::time::Duration, at: i64| {
+        store.use_outcome_last_transform_is_stale(&budget(wait), &project(), HARNESS, "s1", at)
+    };
+    let wait = std::time::Duration::from_secs(5);
+    let tip = store.tip().unwrap();
+
+    assert_eq!(stale(wait, 100), Ok(true), "a null value is stale");
+    assert_eq!(
+        lifecycle(&store, "s1"),
+        [(None, None)],
+        "the check writes nothing"
+    );
+    assert_eq!(
+        stale(std::time::Duration::ZERO, 100),
+        Err(KernelError::Deadline)
+    );
+    assert_eq!(
+        store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s1", 100),
+        Ok(1)
+    );
+    assert_eq!(stale(wait, 100), Ok(false));
+    assert_eq!(stale(wait, 99), Ok(false));
+    assert_eq!(stale(wait, 101), Ok(true));
+    assert_eq!(store.tip().unwrap(), tip);
+}
+
+#[test]
+fn the_advance_takes_no_pooled_reader() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1"]);
+    let served_at = tick(&store, "tick");
+    insert(&store, "a", spec("s1", &["d1"], served_at, 1)).unwrap();
+    let advanced = store.with_readers_held_for_test(|| {
+        store.advance_use_outcome_last_transform(
+            &budget(std::time::Duration::from_millis(100)),
+            &project(),
+            HARNESS,
+            "s1",
+            10,
+        )
+    });
+    assert_eq!(advanced, Ok(1));
+    assert_eq!(lifecycle(&store, "s1"), [(None, Some(10))]);
 }

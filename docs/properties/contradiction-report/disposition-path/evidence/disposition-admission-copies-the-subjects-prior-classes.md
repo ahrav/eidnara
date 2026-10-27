@@ -21,9 +21,9 @@ reading; code resolves which describes the disposition path.
   (`:710-712`), which reads `load_prior_for_key(AdmissionKey::Object)`
   (`crates/kernel/src/admission.rs:1052-1059`).
 - `CommitPlan.classes` (the caller's derived pair from `resolve_classes`,
-  `commit.rs:413-446`) is read only by `admit` (`:579-598`) for inserts
+  `commit.rs:413-446`) is read only by `admit` (`:585-604`) for inserts
   and supersedes. The `Operation::Disposition` arm in `apply`
-  (`:1000-1006`) never touches it.
+  (`:998-1004`) never touches it.
 - `evaluate_admission` refuses when the request's classes differ from the
   prior's (`admission.rs:284-289`), so the copy is also what makes the
   route's dispositions pass that gate for every subject class.
@@ -68,7 +68,7 @@ latest row, not the lineage row (`admission.rs:2245-2254` doc).
 
 ### Q: Which wording is the contract, the header's "derived classes" or the plan's "prior source class"?
 
-- Sources examined: `commit.rs:1-10`, `:579-598`, `:694-736`,
+- Sources examined: `commit.rs:1-10`, `:585-604`, `:700-742`,
   `admission.rs:280-289`, plan P4 Problem Frame and R4.
 - Findings: the header describes inserts; the disposition arm copies the
   prior. Both statements are true of their own paths; the header's

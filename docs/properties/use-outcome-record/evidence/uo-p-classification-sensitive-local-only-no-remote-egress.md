@@ -14,9 +14,10 @@ tip.
 
 - DDL CHECKs: `crates/kernel/src/schema.rs:193`; the `use_outcome_sessions`
   row each record names carries the same `sensitive` and `local_only` CHECKs
-  (`crates/kernel/src/schema.rs:188`, added by #1162).
-- Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:316`); it
-  pushes no pending change, so the commit writes no change event or outbox row.
+  (`crates/kernel/src/schema.rs:194`, added by #1162).
+- Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:330`), whose
+  `INSERT` carries the class literals
+  (`crates/kernel/src/use_outcome.rs:345-352`); it pushes no pending change, so the commit writes no change event or outbox row.
 - Class rule: `denies_destination` (`crates/kernel/src/envelope.rs:71`).
 
 - Guarantee under test: Every serving record carries `sensitive`, `local_only`,
@@ -24,9 +25,9 @@ tip.
   `local_only`, the DDL refuses any other value, and no serve
   creates a registry object, evidence row, change event, or outbox entry.
 - Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
-  (`crates/kernel/tests/kernel_schema.rs:2369`);
+  (`crates/kernel/tests/kernel_schema.rs:2422`);
   `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-  (`crates/kernel/tests/kernel_use_outcome.rs:323`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:382`). Status: unaudited.
 
 ## Failure scenario
 

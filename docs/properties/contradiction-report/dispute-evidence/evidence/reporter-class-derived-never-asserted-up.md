@@ -15,16 +15,16 @@ route's derivation, never from a stronger claim by the client.
   (`crates/daemon/src/kernel_routes/commit.rs:370-382`).
 - `resolve_classes` refuses an asserted class ranked above the derived one
   with `ClassOverDeclared` and accepts one at or below it
-  (`commit.rs:413-446`; ranks at `:382-404`).
+  (`commit.rs:413-446`; ranks at `:384-406`).
 - The handler passes the resolved taint to `compose_reason`
-  (`commit.rs:1139-1153`), which renders it as `reporter_taint`
-  (`crates/daemon/src/kernel_routes/dispute.rs:85-89`).
+  (`commit.rs:1137-1151`), which renders it as `reporter_taint`
+  (`crates/daemon/src/kernel_routes/dispute.rs:83-87`).
 - `disposition_request` builds the admission request with the subject's
   prior classes (`commit.rs:732-733`), so the row's class columns are the
   subject's; the Kernel refuses a request whose classes differ from the
   prior (`crates/kernel/src/admission.rs:284-290`).
 - The command sends `sourceKind: "user"`
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:220`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:256`).
 - The route stores `actor` and `cause` as sent; neither enters the class
   derivation (`IntentRequest`, `crates/daemon/src/kernel_routes/project.rs:140-146`).
 
@@ -41,7 +41,7 @@ None. The derivation is a pure function of the request.
 
 ## What a test must construct
 
-All constructed except the tool arm:
+All constructed, the tool arm with #1161:
 
 - `asserted_taint_class: user_explicit` under `assistant` and `user`:
   `class_over_declared`, nothing written; an unknown `source_kind`:
@@ -55,8 +55,18 @@ All constructed except the tool arm:
   the `user` dispute constructs a reporter class that differs from the
   subject's.
 - The command sends `source_kind: "user"` on preview and commit
-  (`memory-mark-command.test.ts:174`).
-- Not constructed: the model tool arm's own surface (#1161).
+  (`memory-mark-command.test.ts:185`).
+- The tool sends `source_kind: "assistant"` with `asserted_source_class`
+  and `asserted_taint_class` both absent on preview and commit: `sends
+  the evidence under the tool identity, actor, cause, and assistant source
+  kind`
+  (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1376`)
+  for OpenCode and `files a dispute under agent:pi and the assistant
+  source kind when allowed`
+  (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:449`) for Pi.
+  `executeDispute` fixes the source kind
+  (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:54`), so
+  the tool cannot send `"user"`.
 
 The check is a per-request route oracle (portfolio refinement R4). It
 reads the request's `source_kind`, `asserted_source_class`, and
@@ -70,10 +80,10 @@ subject's facts, so no store scan can evaluate it.
 
 - Sources examined: `kernel_route_scope`
   (`crates/daemon/src/kernel_routes/mod.rs:415-441`), `RouteScope`
-  (`:405-412`), `handle_kernel_commit` (`commit.rs:1099-1243`).
+  (`:405-412`), `handle_kernel_commit` (`commit.rs:1097-1241`).
 - Findings: no. `RouteScope.harness` is bound but `handle_kernel_commit`
-  reads only `scope.project` and `scope.store` (`commit.rs:1154`,
-  `:1141`, `:1144`); `source_kind` is whatever the body says. The
+  reads only `scope.project` and `scope.store` (`commit.rs:1152`,
+  `:1175`, `:1178`); `source_kind` is whatever the body says. The
   derivation bounds what a claim can reach: a client can claim `user`
   (taint rank 2) from any surface but never `user_explicit`.
 - Missing evidence: an owner decision on binding `source_kind` to the

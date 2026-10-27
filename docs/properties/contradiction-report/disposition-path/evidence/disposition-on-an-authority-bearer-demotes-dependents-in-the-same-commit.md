@@ -17,13 +17,13 @@ subject, and an `adr_accepted` approval is one.
 - Route reachability: `disposition_request` requires only kind
   `decision`, live, in scope, with a prior admission
   (`crates/daemon/src/kernel_routes/commit.rs:713-719`). Route test
-  `:5493` quarantines `approval-1` (seeded by `seed_approval`,
+  `kernel_routes.rs:5493` quarantines `approval-1` (seeded by `seed_approval`,
   `kernel_routes.rs:4362-4393`, an `adr_accepted` decision admitted under
   `ExplicitUser`/`UserExplicit`) through the route and the commit is
   `available` (`:5558-5559`).
 - `record_admission_inner` wraps the write in `with_authority_cascade`
   (`crates/kernel/src/admission.rs:1087-1102`); the bearer list is
-  `[subject]` when `subject_grants_authority(subject)` (`:1071-1073`);
+  `[subject]` when `subject_grants_authority(subject)` (`:1118-1120`);
   after the write, `demote_dependents_if_authority_lost(bearer, reason)`
   runs (`:1079-1081`).
 - `subject_grants_authority` is `subject_is_accepted_decision &&
@@ -53,9 +53,12 @@ subject, and an `adr_accepted` approval is one.
 ## Failure scenario
 
 A model-filed `mark_disputed` against a user's approval object: the
-approval's own row becomes `Disputed`/`candidate`; every decision the
-user promoted by citing it drops to its automatic ceiling in the same
-commit; `auto_inject` stops serving them. The write is admitted because
+approval's own row becomes `Disputed`/`candidate`; every decision whose
+latest row cites it, up to `MAX_AUTHORITY_DEMOTIONS` in one commit,
+receives an `approval_revoked` row with effective maturity at or below
+its automatic ceiling, so the standing the approval granted leaves
+`auto_inject` in the same commit; dependents beyond the cap keep their
+rows until repair. The write is admitted because
 the route copies the approval's own `ExplicitUser` classes (see
 `disposition-admission-copies-the-subjects-prior-classes`), so no class
 gate refuses it. Reversal needs a relaxation with a valid approval, which
@@ -67,7 +70,7 @@ The cascade runs inside the invalidating transaction and holds the single
 writer for its duration. A preview of the same operation shows only the
 approval's own verdict; the dependents' projected visibility is not part
 of the preview (`PreviewRun` reads served rows for the targets only,
-`commit.rs:830-841`).
+`commit.rs:828-839`).
 
 ## What a test must construct
 
@@ -94,8 +97,8 @@ demotion, and does not read `kernel.read`.
 
 ### Q: Is a plugin-filed dispute of an approval, and its cascade, intended behavior under "the report adds data, not authority"?
 
-- Sources examined: P4 KTD4, R4; index D3 and D7; `admission.rs:1087-
-  1139`, `:843-856`; route test `:5493`.
+- Sources examined: P4 KTD4, R4; index D3 and D7; `admission.rs:1041-
+  1139`, `:843-856`; route test `kernel_routes.rs:5493`.
 - Findings: the code admits it and the route test exercises the quarantine
   variant without commenting on intent. The plan's authority invariants
   speak to promotion only.
@@ -106,7 +109,7 @@ demotion, and does not read `kernel.read`.
 
 ### Q: How is a deferred dependent's served visibility repaired?
 
-- Sources examined: `admission.rs:1493-1499`, `:1452-1490`.
+- Sources examined: `admission.rs:1493-1499`, `:1500-1538`.
 - Findings: validity is already withdrawn through the chain read; the
   served row is not rewritten; the comment names chunked repair as
   remaining work. No repair job was found in this pass.
@@ -117,10 +120,10 @@ demotion, and does not read `kernel.read`.
 ### Q: Does the preview show the cascade a dispute on an approval causes (G2)?
 
 - Sources examined: `PreviewRun::disposition`
-  (`crates/daemon/src/kernel_routes/commit.rs:845-884`), `changes_to`
-  (`:537-542`), the route module header (`commit.rs:60-63`), the command
-  usage (`packages/opencode-plugin/src/shared/memory-mark-command.ts:53`)
-  and its test (`memory-mark-command.test.ts:156`), and PR A's
+  (`crates/daemon/src/kernel_routes/commit.rs:843-882`), `changes_to`
+  (`:543-548`), the route module header (`commit.rs:60-63`), the command
+  usage (`packages/opencode-plugin/src/shared/memory-mark-command.ts:54`)
+  and its test (`memory-mark-command.test.ts:167`), and PR A's
   `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents`
   (`crates/daemon/tests/kernel_routes.rs:6199`).
 - Findings: the preview computes `current` and `projected` for the

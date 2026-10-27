@@ -24,7 +24,7 @@ tip.
 - Existing check: `both_latest_decision_formulations_choose_the_same_row`
   (`crates/kernel/tests/kernel_admission.rs:2252`);
   `an_event_that_names_a_disposition_keeps_its_own_outcome`
-  (`crates/kernel/src/admission.rs:5386`). Status: unaudited.
+  (`crates/kernel/src/admission.rs:5410`). Status: unaudited.
 
 ## Failure scenario
 
@@ -44,7 +44,7 @@ committed together.
 
 ## Investigation log
 
-### Q: A decision disputed then re-approved still counts as disputed after se
+### Q: Does a decision disputed then re-approved still count as disputed after serve?
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: A decision disputed then re-approved still counts as disputed after

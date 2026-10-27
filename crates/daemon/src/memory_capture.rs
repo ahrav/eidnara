@@ -5,7 +5,14 @@
 //! durable facts. Coverage proves that a response addressed the batch, not that
 //! the model found every fact. Exact quotations prove provenance, not entailment.
 
+mod cite;
+mod head;
 mod native;
+#[cfg(test)]
+pub(crate) use cite::CITATION_EVENT_KIND;
+#[cfg(test)]
+pub(crate) use head::fixtures as head_fixtures;
+pub(crate) use head::{FrozenHead, observe_head};
 #[cfg(test)]
 pub(crate) use native::LEASE_DURATION;
 pub(crate) use native::NativeCaptureState;
@@ -24,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::dispatch::PreparedOutcome;
 use crate::kernel_routes::{self, KernelOpenCoordinator, ProjectBinding};
 use crate::metered_decode::ResidentReserve;
+use crate::source_capture::SettlementOutcome;
 use crate::{
     HandlerCore, SessionBinding, invalid_params_error, now_ms, respond, store_unavailable_error,
 };
@@ -573,6 +581,29 @@ pub(crate) fn capture_enabled(binding: &SessionBinding) -> bool {
         && binding.config.memory_auto_capture
 }
 
+/// The source and memory consent a capture citation needs. With it off, no
+/// submit waits on a source publish and no decision is looked up.
+fn citation_consent(config: &crate::config::DaemonConfig) -> bool {
+    config.source_capture_enabled && config.memory_enabled
+}
+
+/// Each job session's settlement outcome for one submit; a plan holds at most
+/// `MAX_CAPTURE_MESSAGES` jobs, so a scan finds a session.
+type JobSettlements = Vec<(crate::harness_sources::SessionIdentity, SettlementOutcome)>;
+
+/// The outcome a job's citation lookup reads: its session's, or `Settled` for
+/// a job no source publish can make citable.
+fn job_settlement(settlements: &JobSettlements, job: &CaptureJob) -> SettlementOutcome {
+    cite::settlement_key(job)
+        .and_then(|key| {
+            settlements
+                .iter()
+                .find(|(session, _)| *session == key)
+                .map(|(_, outcome)| *outcome)
+        })
+        .unwrap_or(SettlementOutcome::Settled)
+}
+
 /// Capture storage and leases key on the kernel binding's project digest:
 /// one canonical root is one queue however it is spelled, and two roots that
 /// differ only in bytes a lossy string would fold together stay distinct.
@@ -902,6 +933,7 @@ struct CaptureWork {
     models: Vec<String>,
     cancel: CancellationToken,
     commit_gate: Arc<Mutex<()>>,
+    source_capture: Arc<crate::source_capture::SourceCapture>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -912,6 +944,10 @@ struct PreparedCapture {
     #[serde(default)]
     existing: Vec<ExistingCaptureMemory>,
     memories: Vec<CapturedMemory>,
+    /// Absent from plans frozen without a head observation, which read as
+    /// `HeadUnavailable`.
+    #[serde(default)]
+    head: FrozenHead,
 }
 
 // Unknown outcomes retain their failure allowance, but repeated dispatches still back off.
@@ -965,7 +1001,9 @@ impl CaptureWork {
         Ok(())
     }
 
-    fn publish(&self, job: &CaptureJob) -> Result<(), &'static str> {
+    /// `settlement` is what the session's source publish reached when the
+    /// submit took its citation lookup.
+    fn publish(&self, job: &CaptureJob, settlement: SettlementOutcome) -> Result<(), &'static str> {
         let kernel = self
             .kernel
             .kernel_store()
@@ -989,12 +1027,26 @@ impl CaptureWork {
         if output.version != CAPTURE_SCHEMA_VERSION {
             return Err("invalid_preparation");
         }
+        let settlement = if citation_consent(&self.binding.config) {
+            settlement
+        } else {
+            SettlementOutcome::Off
+        };
+        #[cfg(test)]
+        if settlement != SettlementOutcome::Off {
+            self.source_capture
+                .citation_publishes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let mut reasons = Vec::new();
         let receipt = publish_captured_memories(
             &kernel,
             &self.binding.kernel_project,
             job,
             &output,
             &prepared,
+            settlement,
+            &mut reasons,
         )
         .map_err(|error| {
             if matches!(error, kernel::KernelError::Conflict) {
@@ -1003,6 +1055,9 @@ impl CaptureWork {
                 "kernel_write_failed"
             }
         })?;
+        if !receipt.replayed {
+            self.source_capture.record_capture_decisions(&reasons);
+        }
         self.store
             .complete_memory_capture(&job.project, &job.job_id, receipt.commit_seq)
             .map_err(|_| "store_failed")?;
@@ -1012,8 +1067,12 @@ impl CaptureWork {
     /// A rejected kernel transaction wrote nothing. A revision conflict means a
     /// target moved under the frozen plan, so the source is re-planned; any
     /// other kernel failure keeps the plan and retries on the dispatch backoff.
-    fn publish_or_recover(&self, job: &CaptureJob) -> Result<(), &'static str> {
-        let Err(code) = self.publish(job) else {
+    fn publish_or_recover(
+        &self,
+        job: &CaptureJob,
+        settlement: SettlementOutcome,
+    ) -> Result<(), &'static str> {
+        let Err(code) = self.publish(job, settlement) else {
             return Ok(());
         };
         if code == "reconciliation_conflict" {
@@ -1151,12 +1210,16 @@ fn checked_capture_target(
     Ok(previous.source_revision)
 }
 
+/// `reasons` receives one citation reason and one anchor reason per decision
+/// the closure writes; a replayed receipt runs no closure and adds none.
 fn publish_captured_memories(
     kernel: &kernel::KernelStore,
     project: &ProjectBinding,
     job: &CaptureJob,
     output: &PreparedCapture,
     frozen: &str,
+    settlement: SettlementOutcome,
+    reasons: &mut Vec<crate::source_capture::Count>,
 ) -> Result<kernel::CommitReceipt, kernel::KernelError> {
     use sha2::{Digest, Sha256};
     let intent = kernel::CommitIntent {
@@ -1168,41 +1231,107 @@ fn publish_captured_memories(
         actor: "agent:memory_capture".into(),
         cause: "automatic project memory capture".into(),
     };
-    kernel.commit_before(Instant::now() + Duration::from_secs(5), intent, |envelope| {
-        let mut domains = HashSet::new(); let mut ready = false; let mut refusal = None;
-        kernel_routes::commit::ensure_domain(envelope, "memory", &mut domains)?;
-        kernel_routes::commit::ensure_scope(envelope, project, &mut ready, &mut domains, &mut refusal)?;
-        let mut written = 0;
-        for (index, memory) in output.memories.iter().enumerate() {
-            if memory.replaces.is_some() && job.role != "user" {
-                return Err(kernel::KernelError::Conflict);
+    kernel.commit_before(
+        Instant::now() + Duration::from_secs(5),
+        intent,
+        |envelope| {
+            let mut domains = HashSet::new();
+            let mut ready = false;
+            let mut refusal = None;
+            kernel_routes::commit::ensure_domain(envelope, "memory", &mut domains)?;
+            kernel_routes::commit::ensure_scope(
+                envelope,
+                project,
+                &mut ready,
+                &mut domains,
+                &mut refusal,
+            )?;
+            let mut anchor = cite::anchor_spec(job, &output.head);
+            let anchor_id = anchor.as_ref().map(|spec| spec.anchor_id.clone());
+            let anchor_reason = cite::AnchorReason::of(anchor.as_ref());
+            let mut citation = None;
+            let recorded_at = now_ms();
+            let mut written = 0;
+            for (index, memory) in output.memories.iter().enumerate() {
+                if memory.replaces.is_some() && job.role != "user" {
+                    return Err(kernel::KernelError::Conflict);
+                }
+                if let Some(target) = &memory.duplicate_of {
+                    checked_capture_target(envelope, project, output, target, false)?;
+                    continue;
+                }
+                let source_revision = match &memory.replaces {
+                    Some(target) => {
+                        checked_capture_target(envelope, project, output, target, true)?
+                            .checked_add(1)
+                            .ok_or(kernel::KernelError::InvalidInput)?
+                    }
+                    None => 1,
+                };
+                // The job's first written decision inserts the anchor every
+                // decision of the job names and reads the message's descriptors.
+                if let Some(spec) = anchor.take() {
+                    envelope.insert_anchor(spec)?;
+                }
+                let citation = match &mut citation {
+                    Some(found) => &*found,
+                    slot => slot.insert(cite::Citation::lookup(envelope, job, settlement)?),
+                };
+                let id = format!(
+                    "mem_{:x}",
+                    Sha256::digest(format!("{}:{index}", job.job_id).as_bytes())
+                );
+                let id = &id[..36];
+                let decision_id = format!("dec_{}", &id[4..]);
+                let mut rationale: serde_json::Map<String, Value> = [
+                    ("source", json!("memory_capture")),
+                    ("session", json!(job.session_id)),
+                    ("message", json!(job.message_id)),
+                    ("quote", json!(memory.quote)),
+                    ("model", json!(output.model)),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect();
+                anchor_reason.record(&mut rationale, reasons);
+                let evidence = citation.cite(&job.text, &memory.quote, &mut rationale, reasons);
+                let spec = kernel::DecisionSpec {
+                    decision_id: decision_id.clone(),
+                    object_id: id.into(),
+                    domain_id: "memory".into(),
+                    proposition_id: None,
+                    scope_id: Some(project.scope_id()),
+                    anchor_id: anchor_id.clone(),
+                    evidence_id: None,
+                    decision_kind: memory.category.clone(),
+                    payload: kernel::DecisionPayload {
+                        summary: memory.content.clone(),
+                        rationale: Value::Object(rationale).to_string(),
+                    },
+                    source_kind: "assistant".into(),
+                    source_id: "memory_capture".into(),
+                    source_revision,
+                    sensitivity: kernel::Sensitivity::Normal,
+                };
+                if let Some(target) = &memory.replaces {
+                    envelope.supersede_decision(target, spec)?;
+                } else {
+                    envelope.insert_decision(spec)?;
+                }
+                cite::append_citations(envelope, &decision_id, &evidence, recorded_at)?;
+                kernel_routes::commit::admit(
+                    envelope,
+                    id,
+                    (
+                        kernel::SourceClass::ModelInference,
+                        kernel::TaintClass::AssistantInference,
+                    ),
+                )?;
+                written += 1;
             }
-            if let Some(target) = &memory.duplicate_of {
-                checked_capture_target(envelope, project, output, target, false)?;
-                continue;
-            }
-            let source_revision = match &memory.replaces {
-                Some(target) => checked_capture_target(envelope, project, output, target, true)?.checked_add(1).ok_or(kernel::KernelError::InvalidInput)?,
-                None => 1,
-            };
-            let id = format!("mem_{:x}", Sha256::digest(format!("{}:{index}", job.job_id).as_bytes()));
-            let id = &id[..36];
-            let spec = kernel::DecisionSpec {
-                decision_id: format!("dec_{}", &id[4..]), object_id: id.into(), domain_id:"memory".into(), proposition_id:None, scope_id:Some(project.scope_id()), anchor_id:None, evidence_id:None,
-                decision_kind:memory.category.clone(),
-                payload:kernel::DecisionPayload { summary:memory.content.clone(), rationale:json!({"source":"memory_capture","session":job.session_id,"message":job.message_id,"quote":memory.quote,"model":output.model}).to_string() },
-                source_kind:"assistant".into(), source_id:"memory_capture".into(), source_revision, sensitivity:kernel::Sensitivity::Normal,
-            };
-            if let Some(target) = &memory.replaces {
-                envelope.supersede_decision(target, spec)?;
-            } else {
-                envelope.insert_decision(spec)?;
-            }
-            kernel_routes::commit::admit(envelope, id, (kernel::SourceClass::ModelInference, kernel::TaintClass::AssistantInference))?;
-            written += 1;
-        }
-        Ok(written.to_string())
-    })
+            Ok(written.to_string())
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1482,6 +1611,10 @@ mod tests {
             "a fragment id must satisfy the store's id grammar: {:?}",
             ids[0]
         );
+        assert!(
+            cite::is_hashed_source_id(&ids[0]),
+            "the citation lookup reports a hashed fragment id as unjoinable"
+        );
     }
 
     #[test]
@@ -1552,6 +1685,215 @@ mod tests {
             replaces: None,
             duplicate_of: None,
         }
+    }
+
+    /// Anchor rows as `(anchor_id, object_id, oid)` and decision rows as
+    /// `(decision_id, object_id, anchor_id, payload)`.
+    type PublishedRows = (
+        Vec<(String, String, String)>,
+        Vec<(String, String, Option<String>, Vec<u8>)>,
+    );
+
+    /// The rows one publish of `output` writes for `job` into a fresh Kernel.
+    fn published_rows(
+        kernel_root: &std::path::Path,
+        project: &ProjectBinding,
+        job: &CaptureJob,
+        output: &PreparedCapture,
+    ) -> PublishedRows {
+        let kernel = kernel::KernelStore::open(kernel_root).unwrap();
+        let frozen = serde_json::to_string(output).unwrap();
+        let mut reasons = Vec::new();
+        publish_captured_memories(
+            &kernel,
+            project,
+            job,
+            output,
+            &frozen,
+            SettlementOutcome::Settled,
+            &mut reasons,
+        )
+        .unwrap();
+        assert_eq!(reasons.len(), 2 * output.memories.len());
+        let db = rusqlite::Connection::open_with_flags(
+            kernel_root.join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let anchors = db
+            .prepare(
+                "SELECT anchor_id,object_id,reachable_from_oid FROM anchors ORDER BY anchor_id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let decisions = db
+            .prepare("SELECT decision_id,object_id,anchor_id,decision_payload FROM decisions ORDER BY decision_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        (anchors, decisions)
+    }
+
+    /// A retry after a rolled-back commit starts from the same frozen plan, so
+    /// it writes byte-identical anchor and decision rows: two fresh Kernels
+    /// fed one job and plan hold the same rows, one anchor shared by the
+    /// job's decisions.
+    #[test]
+    fn one_job_and_plan_always_write_the_same_anchor_and_decision_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let output = PreparedCapture {
+            version: CAPTURE_SCHEMA_VERSION,
+            model: "test/model".into(),
+            existing: vec![],
+            memories: vec![memory("Use port 4321."), memory("Deploy on Fridays.")],
+            head: FrozenHead::Commit("ab".repeat(20)),
+        };
+        let mut source = job("job-1");
+        source.text = "Use port 4321.\nDeploy on Fridays.".into();
+        let first = published_rows(&dir.path().join("first"), &project, &source, &output);
+        let second = published_rows(&dir.path().join("second"), &project, &source, &output);
+        assert_eq!(first, second);
+        let (anchors, decisions) = first;
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].2, "ab".repeat(20));
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions
+                .iter()
+                .all(|decision| decision.2.as_deref() == Some(anchors[0].0.as_str()))
+        );
+        let unanchored = PreparedCapture {
+            head: FrozenHead::HeadUnavailable,
+            ..output
+        };
+        let (anchors, decisions) =
+            published_rows(&dir.path().join("third"), &project, &source, &unanchored);
+        assert!(anchors.is_empty());
+        assert!(decisions.iter().all(|decision| decision.2.is_none()));
+    }
+
+    /// A publish refused after its anchor and first decision were written
+    /// rolls back whole, so the retry writes the same rows into the same
+    /// Kernel with no leftover anchor to conflict with.
+    #[test]
+    fn a_retry_after_a_rolled_back_publish_writes_one_anchor_and_the_same_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let mut source = job("job-1");
+        source.role = "assistant".into();
+        source.text = "Use port 4321.".into();
+        let plan = |memories| PreparedCapture {
+            version: CAPTURE_SCHEMA_VERSION,
+            model: "test/model".into(),
+            existing: vec![],
+            memories,
+            head: FrozenHead::Commit("cd".repeat(20)),
+        };
+        let mut replacing = memory("Use port 4321.");
+        replacing.replaces = Some("mem_target".into());
+        let refused = plan(vec![memory("Use port 4321."), replacing]);
+        let kernel_root = dir.path().join("kernel");
+        let kernel = kernel::KernelStore::open(&kernel_root).unwrap();
+        let mut reasons = Vec::new();
+        assert!(matches!(
+            publish_captured_memories(
+                &kernel,
+                &project,
+                &source,
+                &refused,
+                &serde_json::to_string(&refused).unwrap(),
+                SettlementOutcome::Settled,
+                &mut reasons,
+            ),
+            Err(kernel::KernelError::Conflict)
+        ));
+        drop(kernel);
+        let retried = published_rows(
+            &kernel_root,
+            &project,
+            &source,
+            &plan(vec![memory("Use port 4321.")]),
+        );
+        let fresh = published_rows(
+            &dir.path().join("fresh"),
+            &project,
+            &source,
+            &plan(vec![memory("Use port 4321.")]),
+        );
+        assert_eq!(retried.0.len(), 1);
+        assert_eq!(retried, fresh);
+    }
+
+    /// The #1135 probe-bound measurement, run by hand:
+    /// `cargo nextest run -p daemon --all-features --run-ignored only -E 'test(citation_cost)' --no-capture`.
+    /// Times the whole publish closure of one 3-memory job whose lookup runs
+    /// all 256 lineage probes, and the location walk over a 64 KiB job text of
+    /// 64 Ki newlines against one block that spans the whole text and never
+    /// matches.
+    #[test]
+    #[ignore = "measurement"]
+    fn citation_cost_measurement() {
+        const RUNS: usize = 20;
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let text = "\n".repeat(64 * 1024);
+        let mut publishes = Vec::new();
+        // Run 0 also creates the project's memory domain and scope, a
+        // one-time cost of the project's first publish; it is not timed.
+        for run in 0..=RUNS {
+            let mut source = job(&format!("job-{run}"));
+            source.text = text.clone();
+            let output = PreparedCapture {
+                version: CAPTURE_SCHEMA_VERSION,
+                model: "test/model".into(),
+                existing: vec![],
+                memories: vec![memory("one"), memory("two"), memory("three")],
+                head: FrozenHead::Commit("ab".repeat(20)),
+            };
+            let frozen = serde_json::to_string(&output).unwrap();
+            let started = Instant::now();
+            publish_captured_memories(
+                &kernel,
+                &project,
+                &source,
+                &output,
+                &frozen,
+                SettlementOutcome::Settled,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            if run > 0 {
+                publishes.push(started.elapsed());
+            }
+        }
+        let block = cite::Block {
+            index: 0,
+            digest: "0".repeat(64),
+            length: text.len() as u64,
+            evidence_id: "srcev:measure".into(),
+        };
+        let mut walks = Vec::new();
+        for _ in 0..RUNS {
+            let started = Instant::now();
+            assert!(cite::locate(&text, std::slice::from_ref(&block)).is_empty());
+            walks.push(started.elapsed());
+        }
+        publishes.sort();
+        walks.sort();
+        let (publish, walk) = (publishes[RUNS / 2], walks[RUNS / 2]);
+        eprintln!(
+            "citation cost: publish closure with 256 probes median {publish:?} max {:?}; digest walk median {walk:?} max {:?}",
+            publishes[RUNS - 1],
+            walks[RUNS - 1]
+        );
+        assert!(publishes[RUNS - 1] + walks[RUNS - 1] < Duration::from_millis(500));
     }
 
     #[test]
@@ -1636,9 +1978,38 @@ mod tests {
             model: "test/model".into(),
             memories: vec![memory],
             existing,
+            head: FrozenHead::HeadUnavailable,
         };
         let frozen = serde_json::to_string(&output).unwrap();
-        publish_captured_memories(kernel, project, &job(key), &output, &frozen)
+        publish_captured_memories(
+            kernel,
+            project,
+            &job(key),
+            &output,
+            &frozen,
+            SettlementOutcome::Off,
+            &mut Vec::new(),
+        )
+    }
+
+    #[test]
+    fn a_plan_frozen_without_a_head_reads_as_head_unavailable() {
+        let legacy: PreparedCapture = serde_json::from_value(json!({
+            "version": CAPTURE_SCHEMA_VERSION,
+            "model": "test/model",
+            "existing": [],
+            "memories": [],
+        }))
+        .unwrap();
+        assert_eq!(legacy.head, FrozenHead::HeadUnavailable);
+        let frozen = PreparedCapture {
+            head: FrozenHead::Commit("ab".repeat(20)),
+            ..legacy
+        };
+        let text = serde_json::to_string(&frozen).unwrap();
+        let read: PreparedCapture = serde_json::from_str(&text).unwrap();
+        assert_eq!(read.head, frozen.head);
+        assert_eq!(read.version, CAPTURE_SCHEMA_VERSION);
     }
 
     #[test]
@@ -1827,6 +2198,7 @@ mod tests {
             model: "test/model".into(),
             existing: vec![previous],
             memories: vec![proposed],
+            head: FrozenHead::HeadUnavailable,
         };
         let mut source = job("assistant");
         source.role = "assistant".into();
@@ -1836,7 +2208,9 @@ mod tests {
                 &project,
                 &source,
                 &prepared,
-                &serde_json::to_string(&prepared).unwrap()
+                &serde_json::to_string(&prepared).unwrap(),
+                SettlementOutcome::Off,
+                &mut Vec::new(),
             ),
             Err(kernel::KernelError::Conflict)
         ));

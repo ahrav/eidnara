@@ -33,16 +33,16 @@ the change is measured against.
   composed `reason` (`:731-732`); `admit` sets `None` and the constant
   `"kernel.commit"` for inserts (`:589-594`, constant at `:100`).
 - `write_admission` writes those `None`s into `evidence_id` and
-  `trigger_object_id` (`admission.rs:1847`, `:1783`).
+  `trigger_object_id` (`admission.rs:1847`, `:1852`).
 - Receipt shape: `CommitResult.dispositions` is `#[serde(default,
   skip_serializing_if = "Vec::is_empty")]` (`commit.rs:506-508`), so
   receipts recorded before the field existed still decode; the unit test
-  at `:1309` asserts that.
+  at `:1307` asserts that.
 - TypeScript: `DispositionOperation` has `op, object_id, event,
   approval_object_id?`, and at the PR A tip `evidence_id?` and
   `evidence_ref?` (`shared/kernel-client/client.ts:101-111`); the command
   builds the operation with the evidence it parsed
-  (`memory-mark-command.ts:209-215`).
+  (`memory-mark-command.ts:247-254`).
 
 ## Failure scenario
 
@@ -74,7 +74,7 @@ binary is the enabling condition.
 
 ### Q: How does the TypeScript client surface a `kernel.commit` `invalid_params` transport error to the `/eidnara-memory-mark` user?
 
-- Sources examined: `memory-mark-command.ts:222-224`, `:238-239`
+- Sources examined: `memory-mark-command.ts:265-267`, `:296-297`
   (`refused` with the returned state); `client.ts:296-310` (`Invoked`,
   `InvokeOptions`); `kernel-client/state.ts` was not read.
 - Findings: the command reports `refused` with whatever `state` the
@@ -88,7 +88,7 @@ binary is the enabling condition.
 
 ### Q: Does the guarantee hold at the PR A tip?
 
-- Sources examined: `commit.rs:155-172`, `:206-234`, `:722-734`; the
+- Sources examined: `commit.rs:155-172`, `:208-236`, `:729-741`; the
   dispute-evidence route tests (`crates/daemon/tests/kernel_routes.rs:5723`,
   `:5971`).
 - Findings: no. A dispute row now carries the cited `evidence_id`, and

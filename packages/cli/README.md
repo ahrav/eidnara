@@ -15,7 +15,7 @@ eidnara doctor               # check configuration
 eidnara doctor --force       # repair configuration conflicts
 eidnara doctor --issue       # write a redacted diagnostics bundle
 eidnara daemon <action>      # start | stop | restart | status | doctor
-eidnara review <action>      # list | show <causal-identity> | status
+eidnara review <action>      # list | show <causal-identity> | outcome <decision-object-id> | status
 eidnara --version
 eidnara --help
 ```

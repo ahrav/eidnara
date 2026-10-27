@@ -20,19 +20,19 @@ and what each failure answers.
      `NotFound`.
   2. `object_kind != "decision" || invalidated_commit_seq.is_some()` is
      `NotFound` (`:707-709`). `load_object_state` has no liveness filter
-     of its own (`envelope.rs:1905-1919`), so this line is the liveness
+     of its own (`envelope.rs:1925-1939`), so this line is the liveness
      check.
-  3. `subject_admission(object_id)?.ok_or(AdmissionPolicy)` (`:710-712`):
+  3. `subject_admission(object_id)?.ok_or(AdmissionPolicy)` (`:709-711`):
      a decision with no admission row is `AdmissionPolicy`.
   4. `approval_object_id.or(stored_approval)`: the approval and every
      `approval_chain_members` entry pass `scoped_object_state`
-     (`:713-717`); the chain reader refuses above
+     (`:712-716`); the chain reader refuses above
      `MAX_AUTHORITY_CHAIN_DEPTH` with `AdmissionPolicy`
      (`admission.rs:1063-1084`).
 - Mapping: `NotFound -> invalid/not_found`, `AdmissionPolicy ->
   invalid/admission_policy` (`kernel_routes/state.rs:275-276`).
-- Both preview and commit call the same function (`commit.rs:798` in
-  `record_disposition`, `:835` in `PreviewRun::disposition`), so a refusal is identical in both modes
+- Both preview and commit call the same function (`commit.rs:796` in
+  `record_disposition`, `:851` in `PreviewRun::disposition`), so a refusal is identical in both modes
   (`kernel_routes.rs:5355`).
 - Tests: retired subject and unadmitted subject (`kernel_routes.rs:4888-
   4941`); missing id (`:5078-5086`); foreign approval chains of three
@@ -56,7 +56,7 @@ valid authority.
 The writer lock serializes commits, so a retirement that commits first is
 seen by step 2. Preview runs on a read snapshot and can judge a subject
 that the next commit retires; the commit then answers `not_found`
-(`memory-mark-command.ts:238-239` reports `refused/commit`).
+(`memory-mark-command.ts:296-297` reports `refused/commit`).
 
 ## What a test must construct
 
@@ -70,9 +70,15 @@ that the next commit retires; the commit then answers `not_found`
 
 ## Investigation log
 
-No open questions. The retired-stored-approval case is listed as an
-enabling state to construct, not as a question: `scoped_object_state` on
-a retired approval returns the row (no liveness filter in
-`load_object_state`), and `validate_approval` then judges it invalid;
-whether the outcome is `not_found` or a denied relaxation depends on the
-event and was not traced here.
+### Q: Which refusal does a retired stored approval produce?
+
+- Sources examined: `scoped_object_state` and `load_object_state` (no
+  liveness filter, so a retired approval's row is returned);
+  `validate_approval`, which judges the retired approval invalid.
+- Findings: the evaluator sees `approval_valid = false`. Whether the
+  operation then answers `not_found` or lands as a denied relaxation
+  depends on the event, and the event-specific outcome was not traced.
+- Missing evidence: a trace of `validate_approval`'s answer through
+  `evaluate_admission` for each disposition event, or the test listed
+  above under "What a test must construct".
+- Conclusion: unresolved, needs that trace.

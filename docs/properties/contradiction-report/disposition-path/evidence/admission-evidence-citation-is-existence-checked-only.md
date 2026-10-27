@@ -18,8 +18,9 @@ daemon check is specified against it.
 - `write_admission` derives `evidence_id` by `identity()` only
   (`crates/kernel/src/admission.rs:1750-1755`); `identity` rejects a
   value with a detected secret (`crates/kernel/src/redaction.rs:81-88`).
-- Between `:1695` and the INSERT (`:1748-1786`) the only reads are the
-  bearer and dependent caps (`:1727-1739`); none touches `evidence_meta`.
+- Between `admission.rs:1755` and the INSERT (`admission.rs:1816-1859`)
+  the only reads are the bearer and dependent caps (`:1795-1807`); none
+  touches `evidence_meta`.
 - `prepare_with_facts` passes `has_evidence: request.event.evidence_id.
   is_some()` (`:1650`), a request-shape test; it matters only for
   `Enforce` (`:275-277`).
@@ -28,12 +29,12 @@ daemon check is specified against it.
   foreign_keys=ON` at `schema.rs:250` and `crates/kernel/src/open.rs:1035`;
   `sqlite_runtime.rs:127-129` reports a disabled pragma as a violation.
 - `map_sqlite`: `ConstraintViolation => KernelError::Conflict`
-  (`crates/kernel/src/lib.rs:213-225`). The route's `run` turns a
+  (`crates/kernel/src/lib.rs:218-230`). The route's `run` turns a
   `Conflict` raised after entering the operation, with no recorded refusal,
   into `CommitFailure::StorageConstraint`, reported as
-  `invalid/already_exists` (`commit.rs:1086-1094`, `:484`).
+  `invalid/already_exists` (`commit.rs:1084-1092`, `:490`).
 - Production writers that set `Some(evidence_id)`:
-  `crates/daemon/src/harness_sources.rs:976` (`EventKind::Other`) only.
+  `crates/daemon/src/harness_sources.rs:1004` (`EventKind::Other`) only.
   `crates/daemon/src/memory_reviewer/lifecycle.rs:649` was first listed
   here; the portfolio evaluation found it inside `#[cfg(test)]` (module at
   `:500`) and an `ObservationSpec`, so it is not a writer of this path
@@ -41,7 +42,7 @@ daemon check is specified against it.
   route set `None`. At the PR A tip it sets the cited id for a dispute
   (`commit.rs:738`) only after `require_visible_evidence` found the row
   live and cited by the bound project in the same transaction
-  (`commit.rs:726-728`, `:742-759`), so the route never reaches this
+  (`commit.rs:726-728`, `:749-764`), so the route never reaches this
   record's accept-retired or dangling-id branch.
 - Contrast: `validate_trigger` requires the trigger's backing evidence to
   be live (`admission.rs:2841-2847`) and
@@ -97,6 +98,9 @@ to notice.
 - Sources examined: `state.rs:61-99` (`InvalidReason` set), `commit.rs:
   484`, P4 R2 ("refused by name").
 - Findings: today's names that fit are `not_found` (the slice path's
-  answer) and `already_exists` (the FK's). Neither says "evidence".
-- Missing evidence: the P4 implementation's choice.
-- Conclusion: needs human input.
+  answer) and `already_exists` (the FK's). Neither says "evidence". PR A
+  chose `not_found`: `require_visible_evidence` maps every failing case to
+  `KernelError::NotFound` (`commit.rs:754-763`) before the Kernel's FK
+  path could answer `already_exists`.
+- Missing evidence: none.
+- Conclusion: resolved with answer: `not_found`.

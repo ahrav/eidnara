@@ -14,12 +14,12 @@ tip.
 
 - Components: `crates/kernel/src/schema.rs:193` and
   `crates/kernel/src/schema.rs:197`, with the `use_outcome_sessions`
-  component #1162 adds (`crates/kernel/src/schema.rs:188`); the admission
+  component #1162 adds (`crates/kernel/src/schema.rs:194`); the admission
   citing column and
   `idx_admission_use_outcome_fk` in the `admission_decisions` component
   (`crates/kernel/src/schema.rs:164`).
 - Pinned digest: `crates/kernel/tests/kernel_schema.rs:184`
-  (`197430a81f05514d0def36631fb5dea80c05938ed60c9747f9c5d805eca85f03`).
+  (`7a3a869af2d00c1767c0e578ef065b4241255920c2510d0063f8d28361d26b03`).
 - Component-name list: `crates/kernel/tests/kernel_schema.rs:14`; object
   inventory: `kernel_schema_object_inventory_is_pinned_by_kind_and_name`
   (`crates/kernel/tests/kernel_schema.rs:1901`).
@@ -52,9 +52,10 @@ None.
 The fixture test; any later K1 change rotates the pinned digest again and
 updates this record.
 
-Required faults and enabling state: A fixture database at the `a0e3f2993` digest
-(`13437d62f69c77d1f5bdad72195473d1f409c2647efecdcac660554e5c1db07b`) opened by
-this binary.
+Required faults and enabling state: A fixture database under the previous
+baseline, digest `13437d62f69c77d1f5bdad72195473d1f409c2647efecdcac660554e5c1db07b`
+(`crates/kernel/tests/fixtures/prior_kernel_baseline.sql`, captured at `main`
+commit `a0e3f2993`), opened by this binary.
 
 ## Investigation log
 

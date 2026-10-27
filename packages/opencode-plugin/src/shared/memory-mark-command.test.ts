@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type DispositionPreview, KernelClient } from "./kernel-client";
+import { type DispositionPreview, deriveRequestDigest, KernelClient } from "./kernel-client";
 import { FakeKernel, FakeKernelTransport } from "./kernel-client-testing/fake-kernel";
 import {
     formatMemoryMarkOutcome,
@@ -128,6 +128,10 @@ describe("parseMemoryMarkArgs evidence", () => {
             ok: true,
             args: { evidenceId: "ev", evidenceRef: { path: "src/a.rs", git_object_id: OID } },
         });
+        expect(parseMemoryMarkArgs(`mark_disputed mem_1 --path --notes.md@${OID}`)).toMatchObject({
+            ok: true,
+            args: { evidenceRef: { path: "--notes.md", git_object_id: OID } },
+        });
     });
 
     test("a dispute without evidence, and evidence on another event, print usage", () => {
@@ -217,6 +221,21 @@ describe("runMemoryMarkCommand evidence", () => {
         expect(memoryMarkOperationId(SESSION, byId)).not.toBe(
             memoryMarkOperationId(SESSION, byFile),
         );
+        expect(memoryMarkOperationId(SESSION, { ...byId, evidenceId: "ev-b" })).not.toBe(
+            memoryMarkOperationId(SESSION, byId),
+        );
+        expect(
+            memoryMarkOperationId(SESSION, {
+                ...byFile,
+                evidenceRef: { path: "src/lib.rs", git_object_id: "f".repeat(40) },
+            }),
+        ).not.toBe(memoryMarkOperationId(SESSION, byFile));
+        expect(
+            memoryMarkOperationId(SESSION, {
+                ...byFile,
+                evidenceRef: { path: "src/main.rs", git_object_id: OID },
+            }),
+        ).not.toBe(memoryMarkOperationId(SESSION, byFile));
         const first = await run(h, byId);
         const second = await run(h, byFile);
         expect(first).toMatchObject({ kind: "applied", replayed: false });
@@ -227,6 +246,28 @@ describe("runMemoryMarkCommand evidence", () => {
         expect(h.kernel.receipts.size).toBe(2);
     });
 
+    test("the commit sends the reference the preview judged when the caller edits its args during confirmation", async () => {
+        const h = harness();
+        const input: MemoryMarkArgs = {
+            event: "mark_disputed",
+            objectId: "mem_verified",
+            evidenceRef: { path: "docs/a.md", git_object_id: OID },
+            confirmed: false,
+        };
+        let asked = false;
+        const outcome = await run(h, input, async () => {
+            asked = true;
+            (input.evidenceRef as { git_object_id: string }).git_object_id = "f".repeat(40);
+            return true;
+        });
+        expect(asked).toBe(true);
+        expect(outcome.kind).toBe("applied");
+        expect(h.transport.calls.map((call) => call.body.operations[0].evidence_ref)).toEqual([
+            { path: "docs/a.md", git_object_id: OID },
+            { path: "docs/a.md", git_object_id: OID },
+        ]);
+    });
+
     test("the fake refuses the reference shapes the route refuses", async () => {
         for (const evidenceRef of [
             { path: "../a.rs", git_object_id: OID },
@@ -234,6 +275,7 @@ describe("runMemoryMarkCommand evidence", () => {
             { path: "src/.Git/config", git_object_id: OID },
             { path: "double%2Fencoded", git_object_id: OID },
             { path: `${"a".repeat(1025)}`, git_object_id: OID },
+            { path: Array(17).fill("d").join("/"), git_object_id: OID },
         ]) {
             const h = harness();
             const outcome = await run(h, {
@@ -243,6 +285,40 @@ describe("runMemoryMarkCommand evidence", () => {
                 confirmed: false,
             });
             expect(outcome).toMatchObject({ kind: "refused", step: "preview" });
+        }
+    });
+
+    test("the fake accepts a path of 16 components, the route's confined-path limit", async () => {
+        const h = harness();
+        const outcome = await run(h, {
+            event: "mark_disputed",
+            objectId: "mem_labeled",
+            evidenceRef: { path: Array(16).fill("d").join("/"), git_object_id: OID },
+            confirmed: false,
+        });
+        expect(outcome).toMatchObject({ kind: "applied" });
+    });
+
+    test("the fake refuses evidence whose rendered reason exceeds the route's 4096-byte cap", async () => {
+        // An unreserved byte renders as itself and `/` renders as `%2F`.
+        const prefix =
+            "v=1;op=kernel.commit;event=mark_disputed;reporter_taint=user_inferred;evidence_id=";
+        const room = 4096 - prefix.length;
+        for (const [evidenceId, applied] of [
+            ["e".repeat(room), true],
+            ["e".repeat(room + 1), false],
+            ["/".repeat(Math.floor(room / 3) + 1), false],
+        ] as const) {
+            const h = harness();
+            const outcome = await run(h, {
+                event: "mark_disputed",
+                objectId: "mem_labeled",
+                evidenceId,
+                confirmed: false,
+            });
+            expect(outcome).toMatchObject(
+                applied ? { kind: "applied" } : { kind: "refused", step: "preview" },
+            );
         }
     });
 
@@ -518,5 +594,126 @@ describe("runMemoryMarkCommand", () => {
             state: { kind: "unavailable", reason: "outcome_unknown" },
         });
         expect(commits).toBe(1);
+    });
+});
+
+describe("runMemoryMarkCommand cancellation", () => {
+    test("the caller's signal reaches the preview and the commit", async () => {
+        const h = harness();
+        const controller = new AbortController();
+        const input = args("contradict", "mem_verified", true);
+        const outcome = await runMemoryMarkCommand({
+            client: h.client,
+            operationId: memoryMarkOperationId(SESSION, input),
+            actor: "user:test",
+            args: input,
+            signal: controller.signal,
+        });
+        expect(outcome).toMatchObject({ kind: "applied", replayed: false });
+        expect(h.transport.calls).toHaveLength(2);
+        for (const call of h.transport.calls) expect(call.signal).toBe(controller.signal);
+    });
+});
+
+describe("runMemoryMarkCommand approval authority", () => {
+    function approvedQuarantine() {
+        const h = harness();
+        h.kernel.seedApproval("approval-1", PROJECT);
+        const object = h.kernel.seedDecision({
+            object_id: "mem_held",
+            decision_kind: "PROJECT_RULES",
+            summary: "held",
+            disposition: "quarantined",
+            projectRoot: PROJECT,
+        });
+        object.approval_object_id = "approval-1";
+        return h;
+    }
+
+    test("an assistant-sourced dispute is denied a relaxation the stored approval would admit", async () => {
+        const h = approvedQuarantine();
+        const input = args("mark_disputed", "mem_held", true);
+        const outcome = await runMemoryMarkCommand({
+            client: h.client,
+            operationId: memoryMarkOperationId(SESSION, input),
+            actor: "agent:test",
+            sourceKind: "assistant",
+            args: input,
+        });
+        expect(outcome).toMatchObject({
+            kind: "denied",
+            result: {
+                object_id: "mem_held",
+                event: "mark_disputed",
+                previous_disposition: "quarantined",
+                disposition: "quarantined",
+                denied: true,
+            },
+        });
+        expect(
+            h.transport.calls.map((call) => (call.body as { preview?: boolean }).preview),
+        ).toEqual([true]);
+        expect(h.kernel.receipts.size).toBe(0);
+        expect(h.kernel.objects.get("mem_held")?.disposition).toBe("quarantined");
+    });
+
+    test("a user command relaxes through the stored approval", async () => {
+        const h = approvedQuarantine();
+        const outcome = await run(h, args("mark_disputed", "mem_held", true));
+        expect(outcome).toMatchObject({
+            kind: "applied",
+            result: { previous_disposition: "quarantined", disposition: "disputed", denied: false },
+        });
+        expect(h.kernel.objects.get("mem_held")?.disposition).toBe("disputed");
+    });
+});
+
+describe("runMemoryMarkCommand request digest", () => {
+    test("the preview and the commit carry one digest of the operation and the source kind", async () => {
+        for (const sourceKind of ["user", "assistant"] as const) {
+            const h = harness();
+            const input = args("contradict", "mem_verified", true);
+            const outcome = await runMemoryMarkCommand({
+                client: h.client,
+                operationId: memoryMarkOperationId(SESSION, input),
+                actor: "user:test",
+                args: input,
+                ...(sourceKind === "user" ? {} : { sourceKind }),
+            });
+            expect(outcome).toMatchObject({ kind: "applied", replayed: false });
+            const bodies = h.transport.calls.map((call) => call.body as Record<string, any>);
+            expect(bodies.map((body) => body.preview === true)).toEqual([true, false]);
+            const digest = deriveRequestDigest({
+                operations: [
+                    {
+                        op: "disposition",
+                        object_id: "mem_verified",
+                        event: "contradict",
+                        evidence_ref: { path: "src/lib.rs", git_object_id: OID },
+                    },
+                ],
+                sourceKind,
+            });
+            for (const body of bodies) {
+                expect(body.source_kind).toBe(sourceKind);
+                expect(body.intent.request_digest).toBe(digest);
+            }
+        }
+    });
+});
+
+describe("memoryMarkOperationId flag order", () => {
+    test("both flag orders parse to one args value and one identity", () => {
+        const pathFirst = parseMemoryMarkArgs(
+            `mark_disputed mem_1 --path src/a.rs@${OID} --evidence ev`,
+        );
+        const evidenceFirst = parseMemoryMarkArgs(
+            `mark_disputed mem_1 --evidence ev --path src/a.rs@${OID}`,
+        );
+        if (!pathFirst.ok || !evidenceFirst.ok) throw new Error("both orders parse");
+        expect(evidenceFirst.args).toEqual(pathFirst.args);
+        expect(memoryMarkOperationId(SESSION, evidenceFirst.args)).toBe(
+            memoryMarkOperationId(SESSION, pathFirst.args),
+        );
     });
 });

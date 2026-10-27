@@ -10,19 +10,19 @@ dispute the user declined.
 ## Evidence trail
 
 - The handler composes every reason before it branches on `preview`
-  (`crates/daemon/src/kernel_routes/commit.rs:1147-1153`, branch at
-  `:1145`), so form refusals are identical by construction.
+  (`crates/daemon/src/kernel_routes/commit.rs:1145-1151`, branch at
+  `:1179`), so form refusals are identical by construction.
 - The preview runs `PreviewRun::disposition`, which calls the same
-  `disposition_request` as the commit (`commit.rs:853`; commit at `:790`),
+  `disposition_request` as the commit (`commit.rs:851`; commit at `:796`),
   so liveness and visibility refusals are identical at the same tip.
-- The preview runs in `store.preview` (`commit.rs:895-915`), which writes
+- The preview runs in `store.preview` (`commit.rs:893-913`), which writes
   no commit-log row, no receipt, and no admission row; a recorded identity
-  replays its receipt instead (`:880-882`).
+  replays its receipt instead (`:878-880`).
 - A preview refuses tokens and non-disposition operations
-  (`commit.rs:1182-1195`).
+  (`commit.rs:1180-1193`).
 - The command treats the commit's verdict as the one recorded
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:243-244`)
-  and reports a refused preview with no commit (`:223-224`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:301-302`)
+  and reports a refused preview with no commit (`:266-267`).
 
 ## Failure scenario
 
@@ -52,20 +52,20 @@ All constructed:
 - A valid reference previews with counts unchanged, then commits
   (`kernel_routes.rs:5880`).
 - The command reports `refused` at the preview step, writes no receipt,
-  and makes one call (`memory-mark-command.test.ts:242`).
+  and makes one call (`memory-mark-command.test.ts:325`).
 - A tip that moves between preview and commit: the preview answers
   `available`, the evidence's only project citer retires, and the commit
   answers `not_found` with nothing written
   (`a_dispute_previewed_while_its_evidence_was_visible_is_judged_again_at_commit`,
-  `kernel_routes.rs:6381`). The commit's verdict is the one recorded.
+  `kernel_routes.rs:6422`). The commit's verdict is the one recorded.
 
 ## Investigation log
 
 ### Q: Does the preview report the cascade a dispute on an approval causes?
 
-- Sources examined: `PreviewRun::disposition` (`commit.rs:845-884`), the
+- Sources examined: `PreviewRun::disposition` (`commit.rs:843-882`), the
   module header (`commit.rs:60-63`), the command usage
-  (`memory-mark-command.ts:53`), `memory-mark-command.test.ts:156`.
+  (`memory-mark-command.ts:54`), `memory-mark-command.test.ts:167`.
 - Findings: no. `visibility_changes` compares the subject's current and
   projected surfaces only; dependents demoted in the same commit are not
   reported. The limit is documented in the header and in the usage text,

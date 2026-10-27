@@ -17,7 +17,7 @@ constant.
 | F4 approval validity | valid, revoked, out-of-scope, non-`adr_accepted`, chain over depth | yes, route and store API | `seed_approval` with `scope_id` None or another project; quarantine the approval; `approval_chain_reader_sees_envelope_writes_and_refuses_truncation` (`:4579`) builds depth |
 | F5 retired evidence | `evidence_meta` row with `invalidated_commit_seq` set | yes, store API or sweep | `ingest_evidence` (`kernel_admission.rs:92`) then retire; retention sweep for `harness_capture` |
 | F6 dangling evidence id | id with no `evidence_meta` row | yes | any unused string that passes `identity()` |
-| F7 secret-like identity | an id or reason the redactor detects | yes | `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678`, which `redact_durable_text` detects (`crates/daemon/src/kernel_routes/dispute.rs:365-372`); 40- and 64-hex object ids and an ordinary path carry no detection (`dispute.rs:377-390`) |
+| F7 secret-like identity | an id or reason the redactor detects | yes | `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678`, which `redact_durable_text` detects (`crates/daemon/src/kernel_routes/dispute.rs:373-380`); 40- and 64-hex object ids and an ordinary path carry no detection (`dispute.rs:385-398`) |
 | F8 oversize reason | reason above 512 KiB | yes, store API only | `"a".repeat(MAX_REDACTABLE_BYTES + 1)` |
 | F9 unknown body key | extra key on the disposition operation | yes, route | raw JSON with a key outside the six fields; at the PR A tip `evidence_id` and `evidence_ref` are fields |
 | F10 identity replay | same `(producer, operation_key)` with equal digest | yes, route | repeat the request |
@@ -76,6 +76,7 @@ asserts a violation.
 | `disposition_identity_reused` | `stored_receipt` returns `Conflict` for a disposition intent | replay |
 | `disposition_replayed_after_subject_moved` | a replay whose stored `dispositions[0].disposition` differs from the subject's current stored disposition | replay |
 | `command_received_mismatched_verdict` | `verdictFor` returns null in either step | command |
+| `command_preview_visibility_changes` | a preview answer with `visibility_changes == true` and no `receipt`, so the command reaches its confirmation branch | command |
 | `disposition_on_authority_bearer` | `subject_grants_authority(subject) == true` before a disposition write | cascade |
 | `disposition_cascade_demoted_dependents` | `demote_dependents_if_authority_lost` returns a non-zero demoted count after a disposition | cascade |
 | `commit_log_cause_redacted` | `redact(intent.cause)` records at least one detection | commit-log row |
@@ -97,9 +98,10 @@ constructs the state a marker would observe, verified by reading the test.
 | Marker | Constructing test | What it constructs |
 |---|---|---|
 | `disposition_subject_above_candidate` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` (`crates/kernel/src/admission.rs:4605`); `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents` (`crates/daemon/tests/kernel_routes.rs:6199`) | the grid judges disputes against every effective maturity, including above Candidate; the route test disputes an `AcceptedAdr` approval whose historical maturity it asserts is not `candidate` (the prior's effective maturity is not asserted) |
+| `disposition_lateral_move_attempted` | `a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale` (`kernel_routes.rs:6146`) | `mark_disputed` against a `stale` prior, an equal-rank move that lands `disputed` with `denied: false`; the other equal-rank pairs are not constructed |
 | `disposition_relaxation_attempted` | `a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale` (`kernel_routes.rs:6146`); the grid (`admission.rs:4605`) | `mark_disputed` against `rejected`, `contradicted`, and `quarantined` priors, recorded `denied: true` |
 | `admission_write_with_evidence_id` | `a_dispute_citing_live_project_evidence_lands_with_the_id_and_the_reporter` (`kernel_routes.rs:5723`); `kernel_routes.rs:6146`, `:6199` | route disputes whose admission row carries the cited `evidence_id` |
-| `disposition_identity_replayed` | `dispute_identities_land_replay_and_refuse_reuse_like_every_envelope` (`kernel_routes.rs:6080`); `memory-mark-command.test.ts:201` | a byte-identical repeat returns `replayed: true` with no new row |
+| `disposition_identity_replayed` | `dispute_identities_land_replay_and_refuse_reuse_like_every_envelope` (`kernel_routes.rs:6080`); `memory-mark-command.test.ts:212` | a byte-identical repeat returns `replayed: true` with no new row |
 | `disposition_identity_reused` | `kernel_routes.rs:6080` | the same key with another `request_digest` answers `operation_key_reused` |
 | `preview_then_commit_same_tip` | `a_dispute_citing_a_repository_file_records_it_in_the_reason` (`kernel_routes.rs:5880`); `assert_refused_without_writing` (`kernel_routes.rs:5703`) used by `:5801`, `:5880`, `:5971` | a preview and a commit of the same operations with no intervening commit |
 | `disposition_on_authority_bearer` | `kernel_routes.rs:6199` | a route dispute on an approval that a verified dependent cites |
@@ -111,9 +113,7 @@ The same tests also construct `disposition_subject_classes_differ_from_caller`
 `assistant`).
 
 Every other marker in the table above stays a queued coverage check with
-no owning ticket: `disposition_lateral_move_attempted` (Stale to Disputed
-is constructed by `kernel_routes.rs:6146`, but the marker's other lateral
-moves are not), `disposition_relaxation_with_valid_approval`,
+no owning ticket: `disposition_relaxation_with_valid_approval`,
 `disposition_body_with_unknown_key_received`,
 `admission_write_with_retired_evidence_id`,
 `slice_insert_cites_retired_evidence`, `scoped_lookup_of_evidence_object`,

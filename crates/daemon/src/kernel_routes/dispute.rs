@@ -56,9 +56,7 @@ impl DisputeReason {
             return Err(InvalidReason::InvalidInput);
         }
         if let Some(evidence_id) = evidence_id
-            && (evidence_id.is_empty()
-                || !decodes_to_itself(evidence_id)
-                || !redact_durable_text(evidence_id).detections.is_empty())
+            && (evidence_id.is_empty() || !value_is_clean(evidence_id, MAX_REASON_BYTES))
         {
             return Err(InvalidReason::InvalidInput);
         }
@@ -157,12 +155,18 @@ impl EvidenceRef {
 
     fn is_well_formed(&self) -> bool {
         is_lower_hex_oid(&self.git_object_id)
-            && self.path.len() <= MAX_EVIDENCE_PATH_BYTES
+            && value_is_clean(&self.path, MAX_EVIDENCE_PATH_BYTES)
             && confined_path::check(&self.path).is_ok()
-            && decodes_to_itself(&self.path)
-            && redact_durable_text(&self.path).detections.is_empty()
             && redact_durable_text(&self.payload()).detections.is_empty()
     }
+}
+
+/// The length check runs first, so the decode and the secret scan read a
+/// bounded input.
+fn value_is_clean(value: &str, max_bytes: usize) -> bool {
+    value.len() <= max_bytes
+        && decodes_to_itself(value)
+        && redact_durable_text(value).detections.is_empty()
 }
 
 const fn is_unreserved(byte: u8) -> bool {
@@ -324,7 +328,10 @@ mod tests {
         let upper = OID.to_uppercase();
         let sha256 = "a".repeat(64);
         let long = format!("{}/b", "a".repeat(MAX_EVIDENCE_PATH_BYTES));
+        let sixteen = vec!["d"; 16].join("/");
+        let seventeen = vec!["d"; 17].join("/");
         assert!(validated("src/a.rs", &sha256).is_ok());
+        assert!(validated(&sixteen, OID).is_ok());
         for (path, oid) in [
             ("src/a.rs", upper.as_str()),
             ("src/a.rs", &OID[..39]),
@@ -337,6 +344,7 @@ mod tests {
             (".git/config", OID),
             ("src/.eidnara/x", OID),
             (long.as_str(), OID),
+            (seventeen.as_str(), OID),
             ("double%2Fencoded", OID),
         ] {
             assert_eq!(
@@ -421,6 +429,32 @@ mod tests {
             ),
             Err(InvalidReason::InvalidInput)
         );
+        let prefix =
+            "v=1;op=kernel.commit;event=mark_disputed;reporter_taint=user_inferred;evidence_id=";
+        let room = MAX_REASON_BYTES - prefix.len();
+        let at_cap = DisputeReason::validated(
+            EventKind::MarkDisputed,
+            TaintClass::UserInferred,
+            Some(&"e".repeat(room)),
+            None,
+        )
+        .unwrap();
+        assert_eq!(at_cap.len(), MAX_REASON_BYTES);
+        for over in [
+            "e".repeat(room + 1),
+            "/".repeat(room / 3 + 1),
+            "e".repeat(1 << 20),
+        ] {
+            assert_eq!(
+                DisputeReason::validated(
+                    EventKind::MarkDisputed,
+                    TaintClass::UserInferred,
+                    Some(&over),
+                    None
+                ),
+                Err(InvalidReason::InvalidInput)
+            );
+        }
     }
 
     #[test]

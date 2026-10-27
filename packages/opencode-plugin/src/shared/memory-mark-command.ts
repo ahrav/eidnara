@@ -17,6 +17,7 @@ import {
     type DispositionOperation,
     type DispositionPreview,
     type DispositionResult,
+    deriveRequestDigest,
     type EvidenceRef,
     invalid,
     isAvailable,
@@ -80,15 +81,22 @@ function parseEvidenceRef(value: string): EvidenceRef | null {
     return { path, git_object_id: value.slice(at + 1) };
 }
 
-/** Accepts the wire event spelled with `_` or `-`; the flags may appear anywhere, each at most once. */
+function isMemoryMarkFlag(word: string): boolean {
+    return (
+        word === MEMORY_MARK_CONFIRM_FLAG ||
+        word === MEMORY_MARK_EVIDENCE_FLAG ||
+        word === MEMORY_MARK_PATH_FLAG
+    );
+}
+
+/** Accepts the wire event spelled with `_` or `-`; the flags may appear anywhere, each at most once. A value is any word other than one of the three flags, so a repository path that begins with `--` is citable. */
 export function parseMemoryMarkArgs(raw: string): ParsedMemoryMarkArgs {
     const words = raw
         .trim()
         .split(/\s+/)
         .filter((word) => word.length > 0);
     let confirmed = false;
-    let evidenceId: string | undefined;
-    let evidencePath: string | undefined;
+    const valued = new Map<string, string>();
     const positional: string[] = [];
     for (let index = 0; index < words.length; index += 1) {
         const word = words[index] as string;
@@ -96,17 +104,17 @@ export function parseMemoryMarkArgs(raw: string): ParsedMemoryMarkArgs {
             confirmed = true;
         } else if (word === MEMORY_MARK_EVIDENCE_FLAG || word === MEMORY_MARK_PATH_FLAG) {
             const value = words[index + 1];
-            const repeated = word === MEMORY_MARK_EVIDENCE_FLAG ? evidenceId : evidencePath;
-            if (value === undefined || value.startsWith("--") || repeated !== undefined) {
+            if (value === undefined || isMemoryMarkFlag(value) || valued.has(word)) {
                 return { ok: false, message: MEMORY_MARK_USAGE };
             }
-            if (word === MEMORY_MARK_EVIDENCE_FLAG) evidenceId = value;
-            else evidencePath = value;
+            valued.set(word, value);
             index += 1;
         } else {
             positional.push(word);
         }
     }
+    const evidenceId = valued.get(MEMORY_MARK_EVIDENCE_FLAG);
+    const evidencePath = valued.get(MEMORY_MARK_PATH_FLAG);
     if (positional.length !== 2) return { ok: false, message: MEMORY_MARK_USAGE };
     const [rawEvent, objectId] = positional as [string, string];
     const event = rawEvent.replaceAll("-", "_");
@@ -195,6 +203,8 @@ export interface MemoryMarkInput {
     confirm?: (preview: DispositionPreview) => Promise<boolean>;
     /** Checked again before the commit, since the preview and any confirmation take time during which the session can end. */
     isCancelled?: () => boolean;
+    /** The caller's abort signal, passed to the preview and the commit. */
+    signal?: AbortSignal;
 }
 
 /** Repeating the same event on the same object with the same evidence in one session reuses the identity, so the daemon replays the receipt instead of recording twice; other evidence is another dispute. */
@@ -215,6 +225,23 @@ function verdictFor<R extends DispositionResult>(
     return verdict;
 }
 
+/** Mirrors the kernel's `disposition_restrictiveness` (`crates/kernel/src/admission.rs`): a move to a lower rank is a relaxation. */
+const DISPOSITION_RESTRICTIVENESS: ReadonlyMap<string, number> = new Map([
+    ["active", 0],
+    ["stale", 1],
+    ["disputed", 1],
+    ["superseded", 1],
+    ["rejected", 2],
+    ["contradicted", 3],
+    ["quarantined", 3],
+]);
+
+function relaxes(result: DispositionResult): boolean {
+    const before = DISPOSITION_RESTRICTIVENESS.get(result.previous_disposition);
+    const after = DISPOSITION_RESTRICTIVENESS.get(result.disposition);
+    return before === undefined || after === undefined || after < before;
+}
+
 export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<MemoryMarkOutcome> {
     const { client, args } = input;
     const operation: DispositionOperation = {
@@ -222,15 +249,20 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         object_id: args.objectId,
         event: args.event,
         ...(args.evidenceId === undefined ? {} : { evidence_id: args.evidenceId }),
-        ...(args.evidenceRef === undefined ? {} : { evidence_ref: args.evidenceRef }),
+        // A copy, so the commit sends the reference the preview judged even if the caller edits its args during the confirmation wait.
+        ...(args.evidenceRef === undefined ? {} : { evidence_ref: { ...args.evidenceRef } }),
     };
+    const operations = [operation];
+    const sourceKind = input.sourceKind ?? ("user" as const);
     const intent = {
         actor: input.actor,
         operationId: input.operationId,
         cause: input.cause ?? commandLine(args),
-        sourceKind: input.sourceKind ?? ("user" as const),
+        sourceKind,
+        requestDigest: deriveRequestDigest({ operations, sourceKind }),
+        ...(input.signal ? { signal: input.signal } : {}),
     };
-    const previewed = await client.previewDispositions({ ...intent, operations: [operation] });
+    const previewed = await client.previewDispositions({ ...intent, operations });
     if (!isAvailable(previewed))
         return { kind: "refused", step: "preview", state: previewed.state };
     // A recorded identity replays its receipt whatever the object's state is now, so the preview has nothing to judge and asks nothing.
@@ -240,6 +272,19 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         // The reply decoded but does not answer the operation sent: a daemon contract violation, and nothing was written.
         if (!preview) return { kind: "refused", step: "preview", state: invalid("internal") };
         if (preview.denied) return { kind: "denied", result: preview };
+        if (sourceKind === "assistant" && relaxes(preview)) {
+            return {
+                kind: "denied",
+                result: {
+                    object_id: preview.object_id,
+                    event: preview.event,
+                    outcome: preview.outcome,
+                    previous_disposition: preview.previous_disposition,
+                    disposition: preview.previous_disposition,
+                    denied: true,
+                },
+            };
+        }
         visibilityChanged = preview.visibility_changes;
         if (preview.visibility_changes && !args.confirmed) {
             if (!input.confirm) return { kind: "needs_confirmation", preview };
@@ -248,7 +293,7 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
     }
     if (input.isCancelled?.())
         return { kind: "refused", step: "commit", state: { kind: "cancelled" } };
-    const committed = await client.commit({ ...intent, operations: [operation] });
+    const committed = await client.commit({ ...intent, operations });
     if (!isAvailable(committed)) return { kind: "refused", step: "commit", state: committed.state };
     const result = verdictFor(committed.dispositions, operation);
     // The receipt exists, so the commit may have been applied; a verdict list that does not answer the operation leaves its effect unknown rather than refused.

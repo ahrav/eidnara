@@ -15,8 +15,8 @@ tip.
 
 - Writer binding: the INSERT at `crates/kernel/src/admission.rs:1816` binds
   `self.commit_seq` at `crates/kernel/src/admission.rs:1850`.
-- Reader filters: `crates/kernel/src/admission.rs:691`; the new reader
-  `crates/kernel/src/use_outcome.rs:198`.
+- Reader filters: `crates/kernel/src/admission.rs:691`; the new reader's
+  `a.commit_seq IS NOT NULL` predicate at `crates/kernel/src/use_outcome.rs:205`.
 - Reachability: a null-commit row exists only after direct SQL, so the label is
   test-only.
 
@@ -26,7 +26,7 @@ tip.
   `malformed_stored_policy_and_sensitivity_fail_closed_without_read_error`
   (`crates/kernel/tests/kernel_admission.rs:2935`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:342`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:401`). Status: unaudited.
 
 ## Failure scenario
 

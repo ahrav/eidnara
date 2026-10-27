@@ -9,21 +9,21 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 `CommitRequest.preview` doc: "Judges each disposition operation without
 writing: no commit-log row, no receipt, and no token check" (`commit.rs:
 122-125`). The TypeScript command's confirmation decision rests on the
-preview's verdict (`memory-mark-command.ts:222-235`). Lens: protocol
+preview's verdict (`memory-mark-command.ts:265-293`). Lens: protocol
 contracts and idempotency.
 
 ## Evidence trail
 
 - `handle_kernel_commit` refuses a preview with tokens or with a non-
   disposition operation as `invalid_params` (`crates/daemon/src/kernel_
-  routes/commit.rs:1145-1160`).
-- `preview` runs inside `KernelStore::preview` (`:877-899`); if
-  `stored_receipt` is `Some`, returns `Replay(receipt)` (`:880-882`) and
+  routes/commit.rs:1143-1158`).
+- `preview` runs inside `KernelStore::preview` (`:875-897`); if
+  `stored_receipt` is `Some`, returns `Replay(receipt)` (`:878-880`) and
   the response carries `receipt.replayed: true` and `previews: []`
-  (`:1165-1172`).
+  (`:1163-1170`).
 - `PreviewRun::disposition` calls `disposition_request` then
-  `preview.preview_admission(request)` (`:827-865`); `DispositionResult::
-  new` is the same constructor the commit uses (`:792-798`, `:851-857`).
+  `preview.preview_admission(request)` (`:825-863`); `DispositionResult::
+  new` is the same constructor the commit uses (`:790-796`, `:849-855`).
 - `Preview::preview_admission` runs `refuse_succession_events`,
   `prepare_admission`, `refuse_changed_authority`, then inserts into
   `admission_latest` and returns the evaluation without writing
@@ -37,9 +37,10 @@ contracts and idempotency.
   ignores surfaces that are hidden now (`changes_to`, `:537-542`).
 - `refuse_changed_authority` makes the preview refuse what the commit
   would judge differently after a cascade (`admission.rs:1945-1958`,
-  mapped at `commit.rs:1210-1216`).
-- Tests: `:5120` (counts unchanged, surfaces), `:5277` (in-request prior),
-  `:5355` (denials and refusals match), `:5493` (changed authority).
+  mapped at `commit.rs:1208-1214`).
+- Tests: `kernel_routes.rs:5120` (counts unchanged, surfaces), `:5277`
+  (in-request prior), `:5355` (denials and refusals match), `:5493`
+  (changed authority).
 
 ## Failure scenario
 
@@ -53,9 +54,9 @@ question about a change that does not happen, or skip one that does.
 
 Preview and commit are separate requests; the object or its approval can
 move between them. The command treats the commit's verdict as recorded
-(`memory-mark-command.ts:243-244`). Inside one preview, an earlier
-operation's judged state feeds the next (`PreviewRun.judged`, `:800-804`,
-`:831-835`, `:842-845`).
+(`memory-mark-command.ts:301-302`). Inside one preview, an earlier
+operation's judged state feeds the next (`PreviewRun.judged`,
+`commit.rs:818-822`, `:849-853`, `:860-863`).
 
 ## What a test must construct
 

@@ -8,7 +8,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 
 Plan P4 R3: "The event row can be joined to the commit log entry carrying
 caller-asserted `actor`, `cause`, `session_id`, and `source_kind`
-(`project.rs:135-141`, `envelope.rs:1402-1411`)". Lens: claimed safety
+(`project.rs:135-141`, `envelope.rs:1401-1410`)". Lens: claimed safety
 guarantees, resolved against the schema. The record states what the row
 carries so R3's join is specified against the real columns.
 
@@ -19,28 +19,28 @@ carries so R3's join is specified against the real columns.
   (`crates/kernel/src/schema.rs:26`); update and delete triggers abort.
 - INSERT binds exactly `transaction_id, writer_epoch, producer,
   operation_key, request_digest, recorded_at, actor.text, cause.text`
-  (`crates/kernel/src/envelope.rs:1400-1415`).
+  (`crates/kernel/src/envelope.rs:1484-1499`).
 - `RedactedIntent::new` applies `identity()` to `producer` and
   `operation_key` and `redact()` to `actor` and `cause`
-  (`envelope.rs:1699-1714`); `RedactedIntent::record` writes a
+  (`envelope.rs:1784-1798`); `RedactedIntent::record` writes a
   `durable_text_redactions` row per detection for `actor` and `cause`
-  (`:1716-1726`, called at `:1417`).
+  (`:1800-1810`, called at `:1501`).
 - `IntentRequest` has `producer, operation_key, request_digest, actor,
   cause` and is `deny_unknown_fields` (`crates/daemon/src/kernel_routes/
   project.rs:138-146`); `into_intent` namespaces the key (`:148-163`).
 - `session_id` is an envelope key stripped before parsing
   (`kernel_routes/mod.rs:461`); the binding knows the session but nothing
   writes it to the Kernel on this path. `source_kind` is consumed by
-  `resolve_classes` (`commit.rs:1139-1146`) and copied into inserted specs
-  (`:288-294`), never into `commit_log`.
+  `resolve_classes` (`commit.rs:1137-1144`) and copied into inserted specs
+  (`:290-296`), never into `commit_log`.
 - The admission row joins to the commit log by `commit_seq`
   (`admission_decisions.commit_seq REFERENCES commit_log`, `schema.rs:164`).
 - Command values: `actor = "user:opencode"` (`hooks/context/command-
   handler.ts:391`) or `"user:pi"` (`pi-plugin/src/commands/eidnara-memory-
   mark.ts:18`); `cause` is `commandLine(args)`: `/eidnara-memory-mark
   <event> <object_id>`, followed at the PR A tip by `--evidence <id>` and
-  `--path <path>@<oid>` when present (`memory-mark-command.ts:157-159`,
-  set at `:219`); `producer` defaults to the client's (`client.ts:603`).
+  `--path <path>@<oid>` when present (`memory-mark-command.ts:165-167`,
+  set at `:260`); `producer` defaults to the client's (`client.ts:603`).
 - PR A's `a_dispute_citing_live_project_evidence_lands_with_the_id_and_the_reporter`
   (`kernel_routes.rs:5723`) reads `actor` and `cause` from the
   `commit_log` row of two dispute commits (`commit_actor_and_cause`,
@@ -62,7 +62,7 @@ record would miss.
 
 None in time. Depends on `RedactedIntent::new`'s validation
 (`request_digest` lowercase hex 64, non-blank producer and key,
-`envelope.rs:1701-1706`).
+`envelope.rs:1721-1726`).
 
 ## What a test must construct
 
@@ -80,7 +80,7 @@ None in time. Depends on `RedactedIntent::new`'s validation
 
 - Sources examined: P4 R3, U1 Verification ("the receipt and commit log
   carry actor, cause, and session for the event"), U3 (typed reporter
-  columns in Batch K1), OQ4-1; `schema.rs:26`; `envelope.rs:1400-1415`;
+  columns in Batch K1), OQ4-1; `schema.rs:26`; `envelope.rs:1484-1499`;
   `mod.rs:461`.
 - Findings: the commit log carries `actor` and `cause`. The session id is
   dropped at the envelope boundary. OQ4-1 puts the reporter class into a

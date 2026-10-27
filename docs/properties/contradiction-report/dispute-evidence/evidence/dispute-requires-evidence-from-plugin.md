@@ -24,19 +24,19 @@ None`. PR A adds the fields and the requirement.
   with `InvalidReason::InvalidInput` (`:228-229`); non-dispute events get
   `ADMISSION_REASON` (`:231`, constant at `:100`).
 - `DisputeReason::validated` refuses a dispute with neither field and an
-  empty `evidence_id` (`crates/daemon/src/kernel_routes/dispute.rs:55-64`).
+  empty `evidence_id` (`crates/daemon/src/kernel_routes/dispute.rs:55-59`).
 - The handler runs `compose_reason` for every operation after
   `resolve_classes` and before the intent, preview, or commit
-  (`commit.rs:1139-1153`), and answers `state_only(invalid(reason))`, so
+  (`commit.rs:1137-1151`), and answers `state_only(invalid(reason))`, so
   no transaction starts.
 - The module header states the requirement and the refusal names
   (`commit.rs:12-15`, `:46-53`).
 - TypeScript: `parseMemoryMarkArgs` prints usage when a dispute cites
   nothing or another event cites something
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:129-130`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:137-138`).
   The fake kernel mirrors the rule (`disputeEvidenceWellFormed`,
   `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:285-307`,
-  applied at `:647-649`).
+  applied at `:691-693`).
 - No other production writer files the two dispute events: a search of
   `crates/daemon/src`, `crates/kernel/src`, and `packages/*/src` (non-test)
   for `MarkDisputed`, `EventKind::Contradict`, `mark_disputed`, and
@@ -54,7 +54,7 @@ would fall to Candidate on assertion alone.
 ## Timing windows and dependencies
 
 None in time. The check depends on the handler loop running before
-`if parsed.preview` (`commit.rs:1181`); it does, so preview and commit
+`if parsed.preview` (`commit.rs:1179`); it does, so preview and commit
 share it.
 
 ## What a test must construct
@@ -68,8 +68,17 @@ share it.
 
 All four are constructed: `a_dispute_needs_evidence_and_other_events_take_none`
 (`crates/daemon/tests/kernel_routes.rs:5971`), the unit test of the same
-name (`dispute.rs:393`), and the parser test at
-`memory-mark-command.test.ts:126`.
+name (`dispute.rs:401`), and the parser test at
+`memory-mark-command.test.ts:137`. The tool arm (#1161) refuses before
+sending: `refuses missing evidence and unsupported events before sending;
+renders denials and refusals`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1534`)
+calls `dispute` with neither evidence input, with an empty `evidenceId`,
+with empty `path` and `gitObjectId`, with `path` and no `gitObjectId`,
+and with no `objectId`, and asserts the usage error with no daemon call;
+`refuses a dispute without evidence before sending anything`
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:509`)
+sends the same five shapes and asserts the same for Pi.
 
 The check is a per-request route oracle (portfolio refinement R4): it
 reads each disposition operation's `event`, `evidence_id`, and
@@ -83,11 +92,15 @@ row, so a store scan on it is circular.
 ### Q: Does the check cover the model tool arm?
 
 - Sources examined: `packages/*/src` for `"disposition"` operations.
-- Findings: only the shared command runner sends a disposition at this
-  revision; no tool sends one.
-- Missing evidence: the #1161 tool arm.
-- Conclusion: resolved with answer: the record is `partial - command
-  arm`; #1161 extends it.
+- Findings: the shared command runner and, with #1161, `executeDispute`
+  (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:49`)
+  send a disposition; the tool runs the same runner, so the route sees the
+  same body, and the tool's own usage check refuses a dispute citing
+  nothing, and treats an empty evidence value as absent, before any
+  daemon call (`dispute.ts:35-38`, `:48`).
+- Missing evidence: none.
+- Conclusion: resolved with answer: the record is `yes` for the command
+  arm, the tool arm, and raw route bodies.
 
 ### Q: Should the Kernel enforce the requirement for every writer?
 
