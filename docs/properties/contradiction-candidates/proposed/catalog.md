@@ -452,8 +452,17 @@ and `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` (`:560`)
 show K accepted, K + 1 refused with the held rows unchanged, and a project
 at `per_project` evicting the lowest `score_bp`, then oldest, then smallest
 key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest`
-(`:187`) shows another project's rows are untouched. The store
-(`crates/memory-store/src/contradiction_candidates.rs:230`) enforces K and the
+(`:187`) shows another project's rows are untouched;
+`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1351`)
+shows a new row below the cap's floor counted written and dropped with the
+held rows and rowids unchanged; and
+`random_write_and_delete_sequences_match_the_reference_model` (`:1081`)
+compares 24 seeded sequences of writes, late writes, incarnation changes,
+evictions at caps of 2 to 4096, and as-read deletes against a reference model
+of the rules, checking every row, the returned counts, rowid stability, and
+the gauge after each step, and pages, cursors across writes, and the sweep
+every seventh step. The store
+(`crates/memory-store/src/contradiction_candidates.rs:470`) enforces K and the
 project cap in the write transaction; the daemon owns the values. The pass
 arm (M per pass, `rows_written`, replayed units) lands with #1167.
 Guarantee: The table key is (project digest, descriptor evidence object id,
@@ -492,7 +501,7 @@ Reachability: explicit-config-only
 Status: active - PROPOSED
 Exercised: partial - store arm (#1165):
 `truncating_and_replaying_the_writes_rebuilds_the_same_rows`
-(`crates/memory-store/tests/contradiction_candidates.rs:376`) truncates through the test-support
+(`crates/memory-store/tests/contradiction_candidates.rs:372`) truncates through the test-support
 `truncate_contradiction_candidates_for_test` and replays a write sequence,
 reproducing the same rows excluding `created_at_ms`. The pass arm, which
 re-scores retained evidence bytes at one tip, lands with #1167.
@@ -670,7 +679,7 @@ Open questions:
 - G7, sensitivity of descriptor-derived rows: resolved by #1165. A row holds
   ids, integers, and times only (the table's columns are pinned by
   `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
-  `crates/memory-store/tests/contradiction_candidates.rs:415`), the memory
+  `crates/memory-store/tests/contradiction_candidates.rs:411`), the memory
   store is local, and the read answers carry the same closed key set, so a
   derived row inherits local-only egress by construction and carries no
   sensitivity column.
@@ -848,7 +857,7 @@ Existing check: the sweep-arm tests named under Exercised (#1166),
 unaudited.
 Impact: the plan's three stop conditions; a signal would reserve a
 receipt-charged reviewer job against the Q38 ceiling (2,048 per project per
-incarnation, `docs/memory-reviewer-operations.md:257`).
+incarnation, `docs/memory-reviewer-operations.md:263`).
 Open questions: None.
 Falsifier: a non-empty `signals` vector built from candidate rows, or a
 commit-log row attributed to the pass.

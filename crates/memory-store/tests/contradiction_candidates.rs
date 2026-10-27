@@ -681,3 +681,952 @@ fn a_delete_as_read_spares_a_row_rewritten_since_the_read() {
         "a row whose incarnation or digest differs from the one read stays"
     );
 }
+
+/// A deterministic generator for the operation-sequence test, so a failing seed replays.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+
+    fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+        items[usize::try_from(self.below(items.len() as u64)).unwrap()]
+    }
+}
+
+/// The table the store should hold after a write sequence, computed from the documented
+/// write, eviction, and delete rules without SQL.
+#[derive(Default)]
+struct Model {
+    rows: Vec<StoredCandidate>,
+    /// Branches the generated sequences must reach for the comparison to mean anything.
+    late_writes_that_wrote: usize,
+    late_writes_that_evicted: usize,
+    new_rows_evicted_at_once: usize,
+    deletes_that_emptied_a_project: usize,
+}
+
+fn key_of(row: &StoredCandidate) -> (&str, &str, &str) {
+    (
+        &row.project_digest,
+        &row.evidence_id,
+        &row.decision_object_id,
+    )
+}
+
+fn as_read_of(row: &StoredCandidate) -> (&str, &str, &str, i64, i64, &str, &str) {
+    (
+        &row.project_digest,
+        &row.evidence_id,
+        &row.decision_object_id,
+        row.created_at_ms,
+        row.publish_tip,
+        &row.kernel_incarnation_id,
+        &row.matcher_digest,
+    )
+}
+
+impl Model {
+    fn write(
+        &mut self,
+        write: &DescriptorCandidates<'_>,
+        caps: CandidateCaps,
+    ) -> Option<[usize; 3]> {
+        let malformed = write.publish_tip < 0
+            || write.created_at_ms < 0
+            || write.rows.len() > caps.per_descriptor
+            || write.rows.iter().enumerate().any(|(index, row)| {
+                row.matched_terms == 0
+                    || row.matched_terms > row.decision_terms
+                    || write.rows[..index]
+                        .iter()
+                        .any(|earlier| earlier.decision_object_id == row.decision_object_id)
+            });
+        if malformed {
+            return None;
+        }
+        let held_tip = self
+            .rows
+            .iter()
+            .filter(|row| {
+                row.project_digest == write.project_digest
+                    && row.evidence_id == write.evidence_id
+                    && row.kernel_incarnation_id == write.kernel_incarnation_id
+            })
+            .map(|row| row.publish_tip)
+            .max();
+        let late = held_tip.is_some_and(|held| held > write.publish_tip);
+        let held_keys: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|row| {
+                row.project_digest == write.project_digest && row.evidence_id == write.evidence_id
+            })
+            .map(|row| row.decision_object_id.clone())
+            .collect();
+        let mut written = 0;
+        for score in write.rows {
+            let key = (
+                write.project_digest,
+                write.evidence_id,
+                score.decision_object_id,
+            );
+            let existing = self.rows.iter_mut().find(|row| key_of(row) == key);
+            let score_bp = score.matched_terms * 10_000 / score.decision_terms;
+            match existing {
+                Some(row) if late => {
+                    if row.kernel_incarnation_id == write.kernel_incarnation_id {
+                        row.decision_id = score.decision_id.to_string();
+                        row.matched_terms = score.matched_terms;
+                        row.decision_terms = score.decision_terms;
+                        row.score_bp = score_bp;
+                        row.matcher_digest = write.matcher_digest.to_string();
+                        row.created_at_ms = write.created_at_ms;
+                        written += 1;
+                    }
+                }
+                None if late => {}
+                Some(row) => {
+                    row.publish_tip = if row.kernel_incarnation_id == write.kernel_incarnation_id {
+                        row.publish_tip.max(write.publish_tip)
+                    } else {
+                        write.publish_tip
+                    };
+                    row.decision_id = score.decision_id.to_string();
+                    row.matched_terms = score.matched_terms;
+                    row.decision_terms = score.decision_terms;
+                    row.score_bp = score_bp;
+                    row.kernel_incarnation_id = write.kernel_incarnation_id.to_string();
+                    row.matcher_digest = write.matcher_digest.to_string();
+                    row.created_at_ms = write.created_at_ms;
+                    written += 1;
+                }
+                None => {
+                    self.rows.push(StoredCandidate {
+                        project_digest: write.project_digest.to_string(),
+                        evidence_id: write.evidence_id.to_string(),
+                        decision_object_id: score.decision_object_id.to_string(),
+                        decision_id: score.decision_id.to_string(),
+                        matched_terms: score.matched_terms,
+                        decision_terms: score.decision_terms,
+                        score_bp,
+                        publish_tip: write.publish_tip,
+                        kernel_incarnation_id: write.kernel_incarnation_id.to_string(),
+                        matcher_digest: write.matcher_digest.to_string(),
+                        created_at_ms: write.created_at_ms,
+                    });
+                    written += 1;
+                }
+            }
+        }
+        let before = self.rows.len();
+        if !late {
+            self.rows.retain(|row| {
+                row.project_digest != write.project_digest
+                    || row.evidence_id != write.evidence_id
+                    || write
+                        .rows
+                        .iter()
+                        .any(|score| score.decision_object_id == row.decision_object_id)
+            });
+        }
+        let replaced_away = before - self.rows.len();
+        let mut project: Vec<StoredCandidate> = self
+            .rows
+            .iter()
+            .filter(|row| row.project_digest == write.project_digest)
+            .cloned()
+            .collect();
+        let dropped_at_cap = project.len().saturating_sub(caps.per_project);
+        project.sort_by(|a, b| {
+            (
+                a.score_bp,
+                a.created_at_ms,
+                &a.evidence_id,
+                &a.decision_object_id,
+            )
+                .cmp(&(
+                    b.score_bp,
+                    b.created_at_ms,
+                    &b.evidence_id,
+                    &b.decision_object_id,
+                ))
+        });
+        for evicted in &project[..dropped_at_cap] {
+            self.rows.retain(|row| key_of(row) != key_of(evicted));
+            if evicted.evidence_id == write.evidence_id
+                && !held_keys.contains(&evicted.decision_object_id)
+            {
+                self.new_rows_evicted_at_once += 1;
+            }
+        }
+        if late && written > 0 {
+            self.late_writes_that_wrote += 1;
+        }
+        if late && dropped_at_cap > 0 {
+            self.late_writes_that_evicted += 1;
+        }
+        Some([written, replaced_away, dropped_at_cap])
+    }
+
+    fn delete(&mut self, reads: &[&StoredCandidate]) -> usize {
+        let before = self.rows.len();
+        let held: Vec<bool> = [PROJECT, OTHER_PROJECT]
+            .iter()
+            .map(|project| self.rows.iter().any(|row| row.project_digest == *project))
+            .collect();
+        self.rows
+            .retain(|row| !reads.iter().any(|read| as_read_of(row) == as_read_of(read)));
+        for (project, held) in [PROJECT, OTHER_PROJECT].iter().zip(held) {
+            if held && !self.rows.iter().any(|row| row.project_digest == *project) {
+                self.deletes_that_emptied_a_project += 1;
+            }
+        }
+        before - self.rows.len()
+    }
+
+    fn sorted(&self) -> Vec<StoredCandidate> {
+        let mut rows = self.rows.clone();
+        rows.sort_by(|a, b| key_of(a).cmp(&key_of(b)));
+        rows
+    }
+
+    /// The decision's rows in reader order strictly after `after`, a
+    /// `(score_bp, created_at_ms, evidence_id)` position.
+    fn decision_after(
+        &self,
+        project: &str,
+        decision: &str,
+        after: Option<&(u32, i64, String)>,
+    ) -> Vec<StoredCandidate> {
+        let mut rows: Vec<StoredCandidate> = self
+            .rows
+            .iter()
+            .filter(|row| row.project_digest == project && row.decision_object_id == decision)
+            .filter(|row| {
+                after.is_none_or(|(score, created, evidence)| {
+                    row.score_bp < *score
+                        || (row.score_bp == *score && row.created_at_ms < *created)
+                        || (row.score_bp == *score
+                            && row.created_at_ms == *created
+                            && row.evidence_id.as_str() > evidence.as_str())
+                })
+            })
+            .cloned()
+            .collect();
+        reader_order(&mut rows);
+        rows
+    }
+
+    fn gauge(&self, project: Option<&str>) -> (u64, u64) {
+        let rows: Vec<&StoredCandidate> = self
+            .rows
+            .iter()
+            .filter(|row| project.is_none_or(|project| row.project_digest == project))
+            .collect();
+        let bytes = rows
+            .iter()
+            .map(|row| {
+                row.project_digest.len()
+                    + row.evidence_id.len()
+                    + row.decision_object_id.len()
+                    + row.decision_id.len()
+                    + row.kernel_incarnation_id.len()
+                    + row.matcher_digest.len()
+                    + 40
+            })
+            .sum::<usize>();
+        (rows.len() as u64, bytes as u64)
+    }
+}
+
+/// Every row with its rowid, read past the store API.
+fn raw_rows(conn: &Connection) -> Vec<(i64, StoredCandidate)> {
+    conn.prepare(
+        "SELECT rowid,project_digest,evidence_id,decision_object_id,decision_id,matched_terms,
+                decision_terms,score_bp,publish_tip,kernel_incarnation_id,matcher_digest,
+                created_at_ms
+           FROM contradiction_candidates ORDER BY rowid",
+    )
+    .unwrap()
+    .query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            StoredCandidate {
+                project_digest: row.get(1)?,
+                evidence_id: row.get(2)?,
+                decision_object_id: row.get(3)?,
+                decision_id: row.get(4)?,
+                matched_terms: row.get(5)?,
+                decision_terms: row.get(6)?,
+                score_bp: row.get(7)?,
+                publish_tip: row.get(8)?,
+                kernel_incarnation_id: row.get(9)?,
+                matcher_digest: row.get(10)?,
+                created_at_ms: row.get(11)?,
+            },
+        ))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+const MODEL_EVIDENCE: [&str; 6] = ["ev-0", "ev-1", "ev-2", "ev-3", "ev-é", "ev-10"];
+const MODEL_DECISIONS: [&str; 6] = ["d0", "d1", "d2", "d3", "d4", "dé"];
+const MODEL_INCARNATIONS: [&str; 2] = [INCARNATION, "fedcba9876543210fedcba9876543210"];
+const MODEL_MATCHERS: [&str; 2] = [
+    MATCHER,
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+];
+
+/// Pages the decision through the store at random limits and checks every page against
+/// the model.
+fn check_decision_pages(
+    store: &MemoryStore,
+    model: &Model,
+    rng: &mut Lcg,
+    project: &str,
+    decision: &str,
+) {
+    let expected = model.decision_after(project, decision, None);
+    let mut seen = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let asked = usize::try_from(rng.below(8)).unwrap();
+        let page = store
+            .candidates_for_decision(project, decision, after.as_deref(), asked)
+            .unwrap();
+        let limit = asked.clamp(1, MAX_CANDIDATE_PAGE);
+        let remaining = expected.len() - seen.len();
+        assert_eq!(page.items.len(), limit.min(remaining), "page size");
+        assert_eq!(
+            page.next.is_some(),
+            remaining > limit,
+            "next names a further page"
+        );
+        seen.extend(page.items);
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, expected, "pages concatenate to the reader order");
+}
+
+fn model_write_op<'a>(
+    rng: &mut Lcg,
+    rows: &'a mut Vec<CandidateScore<'static>>,
+) -> (DescriptorCandidates<'a>, CandidateCaps) {
+    rows.clear();
+    let count = rng.below(6);
+    for _ in 0..count {
+        let decision_terms = 1 + u32::try_from(rng.below(6)).unwrap();
+        let matched_terms = match rng.below(20) {
+            0 => 0,
+            1 => decision_terms + 1,
+            _ => 1 + u32::try_from(rng.below(u64::from(decision_terms))).unwrap(),
+        };
+        let decision_object_id = rng.pick(&MODEL_DECISIONS);
+        if rng.below(12) != 0
+            && rows
+                .iter()
+                .any(|row| row.decision_object_id == decision_object_id)
+        {
+            continue;
+        }
+        rows.push(CandidateScore {
+            decision_object_id,
+            decision_id: rng.pick(&["x", "yyy", "zzzzzz", "é"]),
+            matched_terms,
+            decision_terms,
+        });
+    }
+    let per_project = [2, 3, 5, 8, 8, 12, 12, 4096][usize::try_from(rng.below(8)).unwrap()];
+    let caps = CandidateCaps {
+        per_descriptor: if rng.below(10) == 0 { 2 } else { 4 },
+        per_project,
+    };
+    let publish_tip = if rng.below(40) == 0 {
+        -1
+    } else {
+        i64::try_from(rng.below(6)).unwrap()
+    };
+    let write = DescriptorCandidates {
+        project_digest: rng.pick(&[PROJECT, PROJECT, OTHER_PROJECT]),
+        evidence_id: rng.pick(&MODEL_EVIDENCE),
+        publish_tip,
+        kernel_incarnation_id: if rng.below(6) == 0 {
+            MODEL_INCARNATIONS[1]
+        } else {
+            MODEL_INCARNATIONS[0]
+        },
+        matcher_digest: rng.pick(&MODEL_MATCHERS),
+        created_at_ms: i64::try_from(rng.below(4)).unwrap(),
+        rows,
+    };
+    (write, caps)
+}
+
+#[test]
+fn random_write_and_delete_sequences_match_the_reference_model() {
+    let mut coverage = [0_usize; 4];
+    for seed in 0..24_u64 {
+        let (dir, store) = open();
+        let conn = raw(&dir);
+        let mut rng = Lcg(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5851_f42d);
+        let mut model = Model::default();
+        let mut rows = Vec::new();
+        let mut held: Vec<(i64, StoredCandidate)> = Vec::new();
+        let mut pending: Option<(String, String, String, usize)> = None;
+        for step in 0..220 {
+            let context = format!("seed {seed} step {step}");
+            if rng.below(8) == 0 {
+                let mut reads = Vec::new();
+                for _ in 0..rng.below(5) {
+                    let key = (
+                        rng.pick(&[PROJECT, OTHER_PROJECT]),
+                        rng.pick(&MODEL_EVIDENCE),
+                        rng.pick(&MODEL_DECISIONS),
+                    );
+                    let mut read = model
+                        .rows
+                        .iter()
+                        .find(|row| key_of(row) == key)
+                        .cloned()
+                        .unwrap_or_else(|| StoredCandidate {
+                            project_digest: key.0.to_string(),
+                            evidence_id: key.1.to_string(),
+                            decision_object_id: key.2.to_string(),
+                            decision_id: "gone".to_string(),
+                            matched_terms: 1,
+                            decision_terms: 1,
+                            score_bp: 1,
+                            publish_tip: 0,
+                            kernel_incarnation_id: INCARNATION.to_string(),
+                            matcher_digest: MATCHER.to_string(),
+                            created_at_ms: 0,
+                        });
+                    if rng.below(4) == 0 {
+                        read.publish_tip += 1;
+                    }
+                    reads.push(read);
+                }
+                let reads: Vec<&StoredCandidate> = reads.iter().collect();
+                let deleted = store.delete_candidates_as_read(&reads).unwrap();
+                assert_eq!(deleted, model.delete(&reads), "{context}: delete count");
+            } else {
+                let (write, caps) = model_write_op(&mut rng, &mut rows);
+                let expected = model.write(&write, caps);
+                match store.replace_candidates_for_descriptor(&write, caps) {
+                    Ok(outcome) => assert_eq!(
+                        Some([
+                            outcome.written,
+                            outcome.replaced_away,
+                            outcome.dropped_at_cap
+                        ]),
+                        expected,
+                        "{context}: {write:?} {caps:?}"
+                    ),
+                    Err(error) => assert_eq!(expected, None, "{context}: {error}"),
+                }
+            }
+
+            let stored = raw_rows(&conn);
+            let mut by_key: Vec<StoredCandidate> =
+                stored.iter().map(|(_, row)| row.clone()).collect();
+            by_key.sort_by(|a, b| key_of(a).cmp(&key_of(b)));
+            assert_eq!(by_key, model.sorted(), "{context}: table contents");
+            for (rowid, row) in &stored {
+                if let Some((held_rowid, _)) =
+                    held.iter().find(|(_, old)| key_of(old) == key_of(row))
+                {
+                    assert_eq!(rowid, held_rowid, "{context}: a held key keeps its rowid");
+                }
+            }
+            held = stored;
+            for project in [Some(PROJECT), Some(OTHER_PROJECT), None] {
+                assert_eq!(
+                    store.candidate_rows_and_bytes(project).unwrap(),
+                    model.gauge(project),
+                    "{context}: gauge"
+                );
+            }
+            for project in [PROJECT, OTHER_PROJECT] {
+                assert_eq!(
+                    store.candidate_rows_and_bytes(Some(project)).unwrap(),
+                    gauge_from_rows(&dir, project),
+                    "{context}: totals against the rows"
+                );
+            }
+
+            if let Some((project, decision, cursor, limit)) = pending.take() {
+                let page = store
+                    .candidates_for_decision(&project, &decision, Some(&cursor), limit)
+                    .unwrap();
+                let parts: Vec<&str> = cursor.splitn(3, '.').collect();
+                let evidence: Vec<u8> = (0..parts[2].len())
+                    .step_by(2)
+                    .map(|at| u8::from_str_radix(&parts[2][at..at + 2], 16).unwrap())
+                    .collect();
+                let after = (
+                    parts[0].parse().unwrap(),
+                    parts[1].parse().unwrap(),
+                    String::from_utf8(evidence).unwrap(),
+                );
+                let expected = model.decision_after(&project, &decision, Some(&after));
+                assert_eq!(
+                    page.items,
+                    expected[..limit.min(expected.len())],
+                    "{context}: a cursor continues from its keyset position after a write"
+                );
+            }
+            if step % 7 == 0 {
+                let project = rng.pick(&[PROJECT, OTHER_PROJECT]);
+                let decision = rng.pick(&MODEL_DECISIONS);
+                check_decision_pages(&store, &model, &mut rng, project, decision);
+                let first = store
+                    .candidates_for_decision(project, decision, None, 1)
+                    .unwrap();
+                if let Some(next) = first.next {
+                    let limit = 1 + usize::try_from(rng.below(4)).unwrap();
+                    pending = Some((project.to_string(), decision.to_string(), next, limit));
+                }
+                let page = usize::try_from(1 + rng.below(5)).unwrap();
+                let mut watermark = 0;
+                let mut swept = Vec::new();
+                loop {
+                    let rows = store.candidate_sweep_page(watermark, page).unwrap();
+                    assert!(rows.len() <= page, "{context}: sweep page bound");
+                    swept.extend(rows.iter().cloned());
+                    match rows.last() {
+                        Some((rowid, _)) if rows.len() == page => watermark = *rowid,
+                        _ => break,
+                    }
+                }
+                assert_eq!(swept, held, "{context}: the sweep walks every row by rowid");
+            }
+        }
+        coverage[0] += model.late_writes_that_wrote;
+        coverage[1] += model.late_writes_that_evicted;
+        coverage[2] += model.new_rows_evicted_at_once;
+        coverage[3] += model.deletes_that_emptied_a_project;
+    }
+    assert!(
+        coverage.iter().all(|reached| *reached > 0),
+        "late writes that wrote, late writes that evicted, new rows evicted at once, \
+         deletes that emptied a project: {coverage:?}"
+    );
+}
+
+#[test]
+fn the_hex_checks_refuse_uppercase_non_hex_and_misfit_lengths() {
+    let (dir, _store) = open();
+    let conn = raw(&dir);
+    let insert = |project: &str, incarnation: &str, matcher: &str| {
+        conn.execute(
+            "INSERT INTO contradiction_candidates VALUES (?1,'e','d','d',1,2,5000,0,?2,?3,0)",
+            rusqlite::params![project, incarnation, matcher],
+        )
+        .map_err(|error| {
+            assert!(
+                error.to_string().contains("CHECK constraint failed"),
+                "{error}"
+            );
+        })
+    };
+    assert!(insert(PROJECT, INCARNATION, MATCHER).is_ok());
+    conn.execute("DELETE FROM contradiction_candidates", [])
+        .unwrap();
+    let wide = "a".repeat(63);
+    for bad in [
+        format!("{wide}A"),
+        format!("{wide}g"),
+        format!("{wide} "),
+        format!("{wide}é"),
+        wide.clone(),
+        "a".repeat(65),
+    ] {
+        assert!(
+            insert(&bad, INCARNATION, MATCHER).is_err(),
+            "project {bad:?}"
+        );
+        assert!(
+            insert(PROJECT, INCARNATION, &bad).is_err(),
+            "matcher {bad:?}"
+        );
+    }
+    let narrow = "0".repeat(31);
+    for bad in [
+        format!("{narrow}F"),
+        format!("{narrow}x"),
+        narrow.clone(),
+        "0".repeat(33),
+    ] {
+        assert!(
+            insert(PROJECT, &bad, MATCHER).is_err(),
+            "incarnation {bad:?}"
+        );
+    }
+}
+
+/// The gauge computed from the rows themselves, past the store's totals.
+fn gauge_from_rows(dir: &tempfile::TempDir, project: &str) -> (u64, u64) {
+    let (rows, bytes): (i64, i64) = raw(dir)
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(octet_length(project_digest) + octet_length(evidence_id)
+                    + octet_length(decision_object_id) + octet_length(decision_id)
+                    + octet_length(kernel_incarnation_id) + octet_length(matcher_digest) + 40), 0)
+               FROM contradiction_candidates WHERE project_digest=?1",
+            [project],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    (rows.unsigned_abs(), bytes.unsigned_abs())
+}
+
+#[test]
+fn the_totals_follow_replaced_ids_late_writes_deletes_and_truncation() {
+    let (dir, store) = open();
+    let ids = ["x", "yyyy", "zzzzzzzzzz", "é", "x"];
+    for (step, id) in ids.iter().enumerate() {
+        let next = ids[(step + 1) % ids.len()];
+        for (evidence, tip) in [("ev-1", 5), ("ev-1", 3), ("ev-2", 5)] {
+            let (first, second) = if tip == 3 { (next, *id) } else { (*id, next) };
+            let rows = [
+                CandidateScore {
+                    decision_id: first,
+                    ..score("d1", 1, 2)
+                },
+                CandidateScore {
+                    decision_id: second,
+                    ..score("d2", 1, 3)
+                },
+            ];
+            let named = if step % 2 == 0 { 2 } else { 1 };
+            store
+                .replace_candidates_for_descriptor(
+                    &write(PROJECT, evidence, tip, 1, &rows[..named]),
+                    CAPS,
+                )
+                .unwrap();
+            assert_eq!(
+                store.candidate_rows_and_bytes(Some(PROJECT)).unwrap(),
+                gauge_from_rows(&dir, PROJECT),
+                "step {step}, {evidence} at tip {tip}"
+            );
+        }
+    }
+    let named = all_rows(&store)
+        .into_iter()
+        .find(|row| key_of(row) == (PROJECT, "ev-2", "d1"))
+        .unwrap();
+    store.delete_candidates_as_read(&[&named]).unwrap();
+    assert_eq!(
+        store.candidate_rows_and_bytes(Some(PROJECT)).unwrap(),
+        gauge_from_rows(&dir, PROJECT)
+    );
+    store.truncate_contradiction_candidates_for_test().unwrap();
+    assert_eq!(store.candidate_rows_and_bytes(None).unwrap(), (0, 0));
+    let totals: i64 = raw(&dir)
+        .query_row(
+            "SELECT COUNT(*) FROM contradiction_candidate_totals",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(totals, 0, "a project without rows keeps no totals row");
+}
+
+#[test]
+fn a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped() {
+    let (dir, store) = open();
+    let caps = CandidateCaps {
+        per_descriptor: 4,
+        per_project: 2,
+    };
+    let high = [score("d1", 4, 4), score("d2", 3, 4)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-high", 1, 10, &high), caps)
+        .unwrap();
+    let held = raw_rows(&raw(&dir));
+    let low = [score("d3", 1, 4), score("d4", 1, 5)];
+    let outcome = store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-low", 1, 20, &low), caps)
+        .unwrap();
+    assert_eq!(
+        (outcome.written, outcome.dropped_at_cap),
+        (2, 2),
+        "both new rows are written and dropped"
+    );
+    assert_eq!(raw_rows(&raw(&dir)), held, "the held rows and rowids stay");
+
+    let mixed = [score("d5", 4, 4), score("d6", 1, 9)];
+    let outcome = store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-mixed", 1, 30, &mixed), caps)
+        .unwrap();
+    assert_eq!((outcome.written, outcome.dropped_at_cap), (2, 2));
+    let kept: Vec<(String, String)> = all_rows(&store)
+        .into_iter()
+        .map(|row| (row.evidence_id, row.decision_object_id))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            ("ev-high".to_string(), "d1".to_string()),
+            ("ev-mixed".to_string(), "d5".to_string())
+        ],
+        "the new full score displaces the held 3/4 row and the new 1/9 row never lands"
+    );
+    let highest_held = held.iter().map(|(rowid, _)| *rowid).max().unwrap();
+    let landed = raw_rows(&raw(&dir))
+        .into_iter()
+        .find(|(_, row)| row.evidence_id == "ev-mixed")
+        .unwrap();
+    assert!(
+        landed.0 > highest_held,
+        "the new row takes a fresh rowid, not the one its write evicted"
+    );
+    assert_eq!(
+        store.candidate_rows_and_bytes(Some(PROJECT)).unwrap(),
+        gauge_from_rows(&dir, PROJECT)
+    );
+}
+
+#[test]
+fn every_candidate_statement_reuses_its_cached_plan() {
+    let (_dir, store) = open();
+    store.start_statement_reuse_probe();
+    let caps = CandidateCaps {
+        per_descriptor: 4,
+        per_project: 6,
+    };
+    for index in 0..12_u32 {
+        let rows = [
+            score("decision", 1 + index % 4, 4),
+            score(["d1", "d2", "d3"][index as usize % 3], 1 + index % 3, 3),
+        ];
+        let evidence = format!("ev-{index}");
+        let tip = i64::from(index % 5);
+        store
+            .replace_candidates_for_descriptor(&write(PROJECT, &evidence, tip, tip, &rows), caps)
+            .unwrap();
+        let page = store
+            .candidates_for_decision(PROJECT, "decision", None, 1 + index as usize % 3)
+            .unwrap();
+        store
+            .candidates_for_decision(PROJECT, "decision", page.next.as_deref(), 2)
+            .unwrap();
+        store
+            .candidate_sweep_page(i64::from(index % 4), 2 + index as usize % 3)
+            .unwrap();
+        let evidence = format!("ev-{}", index / 2);
+        let reads: Vec<StoredCandidate> = all_rows(&store)
+            .into_iter()
+            .filter(|row| key_of(row) == (PROJECT, &evidence, "d1"))
+            .collect();
+        store
+            .delete_candidates_as_read(&reads.iter().collect::<Vec<_>>())
+            .unwrap();
+        store.candidate_rows_and_bytes(Some(PROJECT)).unwrap();
+        let rewrite = [score("d1", 1 + index % 2, 2)];
+        store
+            .replace_candidates_for_descriptor(&write(PROJECT, "ev-0", 9 + tip, 1, &rewrite), caps)
+            .unwrap();
+        store
+            .replace_candidates_for_descriptor(&write(PROJECT, "ev-0", 1, 2, &rewrite), caps)
+            .unwrap();
+        store
+            .replace_candidates_for_descriptor(
+                &write(OTHER_PROJECT, "ev-alone", 1, 1, &rewrite),
+                caps,
+            )
+            .unwrap();
+        let alone = all_rows(&store)
+            .into_iter()
+            .find(|row| key_of(row) == (OTHER_PROJECT, "ev-alone", "d1"))
+            .unwrap();
+        store.delete_candidates_as_read(&[&alone]).unwrap();
+        store.candidate_rows_and_bytes(None).unwrap();
+    }
+    let reuse = store.statement_evictions();
+    let texts: Vec<&String> = reuse
+        .keys()
+        .filter(|sql| sql.contains("contradiction_candidate"))
+        .collect();
+    assert_eq!(texts.len(), 16, "every candidate statement ran: {texts:#?}");
+    for sql in texts {
+        assert_eq!(reuse[sql], 0, "the statement cache re-created {sql}");
+        let reprepared = store
+            .with_fenced_conn_for_test(|conn| {
+                Ok(conn
+                    .prepare_cached(sql)?
+                    .get_status(rusqlite::StatementStatus::RePrepare))
+            })
+            .unwrap();
+        assert_eq!(reprepared, 0, "a rebound parameter re-planned {sql}");
+    }
+}
+
+#[test]
+fn only_the_candidate_module_writes_the_candidate_tables() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let writes = [
+        "insert into contradiction_candidate",
+        "update contradiction_candidate",
+        "delete from contradiction_candidate",
+    ];
+    let mut files = vec![src.join("lib.rs")];
+    for entry in std::fs::read_dir(&src).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
+    let mut checked = 0;
+    for path in files {
+        if path
+            .file_name()
+            .is_some_and(|name| name == "contradiction_candidates.rs")
+        {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap().to_lowercase();
+        for write in writes {
+            assert!(
+                !text.contains(write),
+                "{} runs `{write}`; the totals would drift",
+                path.display()
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked > 1);
+    let (dir, _store) = open();
+    for table in ["contradiction_candidates", "contradiction_candidate_totals"] {
+        let session_scoped: bool = raw(&dir)
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = 'session_id')",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !session_scoped,
+            "the session purge would delete from {table}"
+        );
+    }
+    let baseline = include_str!("../baseline.sql").to_lowercase();
+    for trigger in baseline.split("create trigger").skip(1) {
+        let trigger = trigger.split("end;").next().unwrap_or_default();
+        let head = trigger.split(" begin").next().unwrap_or_default();
+        assert!(
+            !trigger.contains("contradiction_candidate"),
+            "a trigger touches the candidate tables: {head}"
+        );
+    }
+}
+
+#[test]
+fn the_page_sweep_and_eviction_scans_stop_at_their_bound() {
+    let (_dir, store) = open();
+    let caps = CandidateCaps {
+        per_descriptor: 4,
+        per_project: 300,
+    };
+    for index in 0..300_i64 {
+        let rows = [score("decision", 3, 4)];
+        store
+            .replace_candidates_for_descriptor(
+                &write(PROJECT, &format!("ev-{index:03}"), 1, index, &rows),
+                caps,
+            )
+            .unwrap();
+    }
+    store.start_statement_work_ledger();
+    store
+        .candidates_for_decision(PROJECT, "decision", None, 2)
+        .unwrap();
+    store.candidate_sweep_page(0, 3).unwrap();
+    let low = [score("decision", 1, 4)];
+    let outcome = store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-low", 1, 0, &low), caps)
+        .unwrap();
+    assert_eq!(outcome.dropped_at_cap, 1);
+    let work = store.take_statement_work();
+    for needle in [
+        "ORDER BY score_bp DESC",
+        "ORDER BY rowid",
+        "ORDER BY score_bp ASC",
+    ] {
+        let run = work
+            .iter()
+            .find(|run| run.sql.contains(needle))
+            .unwrap_or_else(|| panic!("no run of {needle}: {work:#?}"));
+        assert!(
+            run.vm_steps < 500,
+            "{needle} took {} VM steps over a 300-row project; the scan must stop at its bound",
+            run.vm_steps
+        );
+    }
+}
+
+#[test]
+fn a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores() {
+    let (_dir, store) = open();
+    let caps = CandidateCaps {
+        per_descriptor: 4,
+        per_project: 300,
+    };
+    for (project, created) in [(PROJECT, None), (OTHER_PROJECT, Some(7))] {
+        for index in 0..300_i64 {
+            let rows = [score("decision", 3, 4)];
+            let evidence = format!("ev-{index:03}");
+            store
+                .replace_candidates_for_descriptor(
+                    &write(project, &evidence, 1, created.unwrap_or(index), &rows),
+                    caps,
+                )
+                .unwrap();
+        }
+        let mut expected: Vec<StoredCandidate> = all_rows(&store)
+            .into_iter()
+            .filter(|row| row.project_digest == project)
+            .collect();
+        reader_order(&mut expected);
+        let mut cursor = None;
+        let mut read = Vec::new();
+        for _ in 0..4 {
+            let page = store
+                .candidates_for_decision(project, "decision", cursor.as_deref(), MAX_CANDIDATE_PAGE)
+                .unwrap();
+            read.extend(page.items);
+            cursor = page.next;
+        }
+        assert_eq!(read, expected[..256]);
+        store.start_statement_work_ledger();
+        let page = store
+            .candidates_for_decision(project, "decision", cursor.as_deref(), 2)
+            .unwrap();
+        let work = store.take_statement_work();
+        assert_eq!(page.items, expected[256..258]);
+        let steps: u64 = work
+            .iter()
+            .filter(|run| run.sql.contains("contradiction_candidates"))
+            .map(|run| run.vm_steps)
+            .sum();
+        assert!(
+            steps < 500,
+            "a page 256 rows into a run of equal scores took {steps} VM steps: {work:#?}"
+        );
+    }
+}

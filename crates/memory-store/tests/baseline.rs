@@ -69,6 +69,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "channel1_appends"),
     ("table", "chunk_transcript_totals"),
     ("table", "chunk_transcripts"),
+    ("table", "contradiction_candidate_totals"),
     ("table", "contradiction_candidates"),
     ("table", "covered_system_messages"),
     ("table", "facade_mutation_ledger"),
