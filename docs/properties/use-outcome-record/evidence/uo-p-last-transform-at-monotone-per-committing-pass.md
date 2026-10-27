@@ -11,13 +11,13 @@ Record kind: new obligation activated by #1156.
 References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Hook: `crates/daemon/src/lib.rs:10130` in the settle step, after any rerun,
+- Hook: `crates/daemon/src/lib.rs:10126` in the settle step, after any rerun,
   when the final response committed and the check
-  (`crates/daemon/src/lib.rs:9817`) finds a live record to advance. The update
+  (`crates/daemon/src/lib.rs:9813`) finds a live record to advance. The update
   runs on a scoped thread beside the response build, and the settle joins it
-  before the response returns (`crates/daemon/src/lib.rs:10136`). A pass that
+  before the response returns (`crates/daemon/src/lib.rs:10132`). A pass that
   handed its serve to a tracked job sets `touch_delegated`
-  (`crates/daemon/src/lib.rs:9812`) and the job touches after its serve
+  (`crates/daemon/src/lib.rs:9808`) and the job touches after its serve
   attempt, whatever the serve answered,
   (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:356`)).
 - Update: `crates/kernel/src/use_outcome.rs:43-47` selects the live records with
@@ -27,7 +27,7 @@ revision.
 - Outcomes: the match in `touch_session`
   (`crates/daemon/src/use_outcome_writer.rs:328-338`) counts
   `transform_touched` for an updated row and maps a Kernel error through
-  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:373`) to
+  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:377`) to
   `transform_skipped_deadline` or `transform_skipped_unavailable`.
 
 - Guarantee under test: `last_transform_at` never decreases on a session's

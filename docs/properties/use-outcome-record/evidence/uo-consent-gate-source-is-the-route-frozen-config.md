@@ -12,7 +12,7 @@ re-verified at this branch tip.
 References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Bind: `crates/daemon/src/lib.rs:13557-13567`.
+- Bind: `crates/daemon/src/lib.rs:13553-13563`.
 - Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:6029`) reads
   `self.effective_config` at `crates/daemon/src/lib.rs:6071`.
 - Correction: the spec cited `config.rs:2630, 2753, 2762`, which are config
@@ -22,7 +22,7 @@ revision.
   `route.open`; the wrapup fire reads the live effective config.
 - Existing check:
   `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-  (`crates/daemon/src/lib.rs:39959`);
+  (`crates/daemon/src/lib.rs:39955`);
   `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:181`);
   `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`

@@ -15,11 +15,11 @@ Every location was read at the #1156 branch tip.
 | `unrecognized_stored_classes_read_back_restrictive` | `crates/kernel/src/cas/mod.rs:797` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only` | unaudited |
 | `a_replayed_expiry_receipt_is_not_counted_as_a_retirement` | `crates/kernel/src/local_file.rs:737` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
 | `a_capture_pinned_after_it_was_selected_for_expiry_is_kept` | `crates/kernel/src/local_file.rs:760` | `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
-| `a_record_cited_after_selection_is_kept` | `crates/kernel/src/use_outcome.rs:849` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_page_another_sweep_committed_at_the_same_cutoff_replays` | `crates/kernel/src/use_outcome.rs:877-878` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_record_retired_after_selection_at_another_cutoff_is_skipped` | `crates/kernel/src/use_outcome.rs:940` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited` | `crates/kernel/src/use_outcome.rs:961` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
-| `the_sweep_and_the_reads_use_their_indexes` | `crates/kernel/src/use_outcome.rs:978` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_record_cited_after_selection_is_kept` | `crates/kernel/src/use_outcome.rs:850` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_page_another_sweep_committed_at_the_same_cutoff_replays` | `crates/kernel/src/use_outcome.rs:878-879` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_record_retired_after_selection_at_another_cutoff_is_skipped` | `crates/kernel/src/use_outcome.rs:941` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited` | `crates/kernel/src/use_outcome.rs:962` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
+| `the_sweep_and_the_reads_use_their_indexes` | `crates/kernel/src/use_outcome.rs:979` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
 | `both_latest_decision_formulations_choose_the_same_row` | `crates/kernel/tests/kernel_admission.rs:2252` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
 | `dispositions_and_sensitivity_only_reduce_visibility` | `crates/kernel/tests/kernel_admission.rs:2735` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
 | `every_non_active_disposition_has_the_contracted_surface_row` | `crates/kernel/tests/kernel_admission.rs:2890` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
@@ -63,9 +63,9 @@ Every location was read at the #1156 branch tip.
 | `bytes_past_the_render_cap_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:493` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
 | `rows_past_the_memory_budget_are_neither_injected_nor_digested` | `crates/daemon/src/canonical_memory.rs:515` | `uo-composition-revision-digests-exactly-the-rendered-rows`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
 | `a_subagent_pass_under_native_authority_reports_native_authority` | `crates/daemon/src/fold_authority_handler_tests.rs:143` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds` | unaudited |
-| `route_teardown_keeps_an_admitted_checkpoint_alive` | `crates/daemon/src/lib.rs:25404` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
-| `session_delete_waits_for_the_capture_gate_off_the_runtime_worker` | `crates/daemon/src/lib.rs:26454` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
-| `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired` | `crates/daemon/src/lib.rs:39959` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
+| `route_teardown_keeps_an_admitted_checkpoint_alive` | `crates/daemon/src/lib.rs:25400` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
+| `session_delete_waits_for_the_capture_gate_off_the_runtime_worker` | `crates/daemon/src/lib.rs:26450` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
+| `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired` | `crates/daemon/src/lib.rs:39955` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
 | `the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair` | `crates/daemon/src/memory_reviewer/activation.rs:385` | `uo-activation-gate-closes-on-kernel-baseline-or-incarnation-change` | unaudited |
 | `the_gate_opens_only_for_a_matching_attested_owner_only_record` | `crates/daemon/src/memory_reviewer/activation.rs:448` | `uo-activation-gate-closes-on-kernel-baseline-or-incarnation-change` | unaudited |
 | `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed` | `crates/daemon/src/memory_reviewer/lifecycle.rs:829` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |

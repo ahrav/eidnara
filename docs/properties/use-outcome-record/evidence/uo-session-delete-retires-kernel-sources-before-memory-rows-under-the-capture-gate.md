@@ -29,7 +29,7 @@ revision.
   `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
   (`crates/daemon/src/source_capture_tests.rs:1699`);
   `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-  (`crates/daemon/src/lib.rs:26454`);
+  (`crates/daemon/src/lib.rs:26450`);
   `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`). Status: unaudited.
 
