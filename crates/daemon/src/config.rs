@@ -2320,12 +2320,21 @@ mod tests {
     fn the_daemon_level_flag_follows_the_user_tier_and_a_resolved_config_keeps_its_value() {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("eidnara.jsonc");
+        // Each rewrite carries its own modification time, so the tier cache sees a change even
+        // when the filesystem's clock granularity would give both writes one timestamp.
         let write = |enabled: bool| {
             std::fs::write(
                 &user,
                 format!(r#"{{ "contradiction_candidates": {{ "enabled": {enabled} }} }}"#),
             )
             .unwrap();
+            let age = std::time::Duration::from_secs(if enabled { 20 } else { 10 });
+            std::fs::File::options()
+                .write(true)
+                .open(&user)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - age)
+                .unwrap();
         };
         let mut daemon = ConfigCache::default();
         assert!(!daemon.contradiction_candidates_enabled_from(None));
