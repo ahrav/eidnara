@@ -5,8 +5,7 @@
 //! across a restart. The sweep reads the Kernel and writes only the memory
 //! store.
 
-use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
+use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -154,19 +153,22 @@ struct Judged {
     read_failed: bool,
 }
 
-/// The distinct values `key` takes over the rows still [`Standing::Kept`].
-fn kept_unique<'a, T: Eq + Hash>(
+/// The distinct values `key` takes over the rows still [`Standing::Kept`], in
+/// ascending order, so each Kernel read walks its indexes in key order.
+fn kept_unique<'a, T: Ord>(
     rows: &'a [StoredCandidate],
     standing: &[Standing],
     key: impl Fn(&'a StoredCandidate) -> T,
 ) -> Vec<T> {
-    rows.iter()
+    let mut values: Vec<T> = rows
+        .iter()
         .zip(standing)
         .filter(|(_, standing)| **standing == Standing::Kept)
         .map(|(row, _)| key(row))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect()
+        .collect();
+    values.sort_unstable();
+    values.dedup();
+    values
 }
 
 /// Each row's standing at `target`, from the standing judged without the
