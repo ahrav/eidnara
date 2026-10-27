@@ -36,42 +36,42 @@ landing.
 
 | Line | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
-| 232 | `the_documented_rendering_parses_back` | the documented rendering for one reference | reason | unaudited |
-| 246 | `render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes` | round trip over reserved and non-ASCII bytes for both events | reason, form | unaudited |
-| 280 | `reserved_and_multi_byte_values_encode_to_uppercase_escapes` | fixed witness: `encode` writes reserved and multi-byte input as uppercase escapes and `decode` reverses it | reason, form | unaudited |
-| 292 | `every_accepted_reference_parses_back_to_its_inputs` (proptest) | every accepted path (no NUL, 1 to 64 chars) and optional id renders an ASCII reason within the cap that parses back to the inputs | reason, form | unaudited |
-| 314 | `malformed_references_are_invalid_input` | 12 malformed references refused; a 64-hex oid accepted | form | unaudited |
-| 342 | `a_path_the_secret_scanner_detects_is_invalid_input` | the test token is detected and a path holding it is refused | form | unaudited |
-| 354 | `git_object_ids_and_ordinary_paths_carry_no_detection` | 64 seeded 40- and 64-hex ids beside an ordinary path carry no detection | form, reason | unaudited |
-| 370 | `a_dispute_needs_evidence_and_other_events_take_none` | the requirement at the function level | requirement | unaudited |
-| 390 | `a_reason_over_the_cap_is_invalid_input` | a reason over 4096 bytes is refused | reason | unaudited |
-| 404 | `parse_refuses_every_rendering_render_does_not_produce` | 11 altered renderings parse to `None` | reason | unaudited |
+| 238 | `the_documented_rendering_parses_back` | the documented rendering for one reference | reason | unaudited |
+| 252 | `render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes` | round trip over reserved and non-ASCII bytes for both events | reason, form | unaudited |
+| 286 | `reserved_and_multi_byte_values_encode_to_uppercase_escapes` | fixed witness: `encode` writes reserved and multi-byte input as uppercase escapes and `decode` reverses it | reason, form | unaudited |
+| 298 | `every_accepted_reference_parses_back_to_its_inputs` (proptest) | every accepted path (no NUL, 1 to 64 chars) and optional id renders an ASCII reason within the cap that parses back to the inputs | reason, form | unaudited |
+| 320 | `malformed_references_are_invalid_input` | 12 malformed references refused; a 64-hex oid accepted | form | unaudited |
+| 352 | `a_path_the_secret_scanner_detects_is_invalid_input` | the test token is detected and a path holding it is refused | form | unaudited |
+| 364 | `git_object_ids_and_ordinary_paths_carry_no_detection` | 64 seeded 40- and 64-hex ids beside an ordinary path carry no detection | form, reason | unaudited |
+| 380 | `a_dispute_needs_evidence_and_other_events_take_none` | the requirement at the function level | requirement | unaudited |
+| 400 | `a_reason_over_the_cap_is_invalid_input` | a reason over 4096 bytes is refused | reason | unaudited |
+| 440 | `parse_refuses_every_rendering_render_does_not_produce` | 11 altered renderings parse to `None` | reason | unaudited |
 
 ## Kernel tests
 
 | Location | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
 | `crates/kernel/src/admission.rs:4532` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | over every consistent maturity pair, disposition, dispute event, and evidence flag: `Deny`, historical kept, effective not raised, restrictiveness not lowered, prior kept on a relaxing request | standing | unaudited |
-| `crates/kernel/tests/kernel_slice.rs:2160` | `evidence_cited_in_offers_each_live_citing_scope_once_and_stops_at_the_first_accepted` | live decisions, observations, and decision events offer their scopes once each; unscoped and retired citers offer none; the walk ends at the accepted scope; retired and unknown ids are cited nowhere | liveness, visibility | unaudited |
-| `crates/kernel/tests/kernel_slice.rs:2252` | `evidence_cited_in_matches_the_citation_model_under_seeded_citers` | over 24 seeded rounds of interleaved scoped, unscoped, live, and retired decisions, observations, and decision events, the answer equals the model for every accepted scope set; each scope is offered at most once and only when a live citer carries it; no scope before the last is accepted; a refusal offered every citing scope | visibility | unaudited |
+| `crates/kernel/tests/kernel_slice.rs:2161` | `evidence_cited_in_offers_each_live_citing_scope_once_and_stops_at_the_first_accepted` | live decisions, observations, and decision events offer their scopes once each; unscoped and retired citers offer none; the walk ends at the accepted scope; retired and unknown ids are cited nowhere | liveness, visibility | unaudited |
+| `crates/kernel/tests/kernel_slice.rs:2316` | `evidence_cited_in_matches_the_citation_model_under_seeded_citers` | over 24 seeded rounds of interleaved scoped, unscoped, live, and retired decisions, observations, and decision events, the answer equals the model for every accepted scope set; each scope is offered at most once and only when a live citer carries it; no scope before the last is accepted; a refusal offered every citing scope | visibility | unaudited |
 
 ## TypeScript tests (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts`)
 
 | Line | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
-| 99 | a dispute takes `--evidence`, `--path` split at the last `@`, or both, in any order | parse shapes | form, identity | unaudited |
-| 126 | a dispute without evidence, and evidence on another event, print usage | requirement at the parser | requirement | unaudited |
-| 137 | a flag without a value, a repeated flag, or a malformed path is refused | parser refusals, including U+001F | form, identity | unaudited |
-| 156 | the usage states the evidence requirement, the refusals, and the preview's limit | usage text | preview (G2 limit) | unaudited |
-| 174 | the evidence rides the preview and the commit byte for byte under the user source kind | both bodies carry the operation and `source_kind: "user"`; `cause` names the flags | reporter, identity | unaudited |
-| 201 | two disputes with different evidence in one session are two commits; the same evidence replays | identity | identity | unaudited |
-| 223 | the fake refuses the reference shapes the route refuses | five path shapes the route refuses are refused at the preview step by the fake kernel | form (fake parity) | unaudited |
-| 242 | a dispute the daemon refuses for its evidence is reported by name and writes nothing | refused preview, no receipt, one call | preview | unaudited |
+| 106 | a dispute takes `--evidence`, `--path` split at the last `@`, or both, in any order | parse shapes | form, identity | unaudited |
+| 137 | a dispute without evidence, and evidence on another event, print usage | requirement at the parser | requirement | unaudited |
+| 148 | a flag without a value, a repeated flag, or a malformed path is refused | parser refusals, including U+001F | form, identity | unaudited |
+| 167 | the usage states the evidence requirement, the refusals, and the preview's limit | usage text | preview (G2 limit) | unaudited |
+| 185 | the evidence rides the preview and the commit byte for byte under the user source kind | both bodies carry the operation and `source_kind: "user"`; `cause` names the flags | reporter, identity | unaudited |
+| 212 | two disputes with different evidence in one session are two commits; the same evidence replays | identity | identity | unaudited |
+| 271 | the fake refuses the reference shapes the route refuses | five path shapes the route refuses are refused at the preview step by the fake kernel | form (fake parity) | unaudited |
+| 325 | a dispute the daemon refuses for its evidence is reported by name and writes nothing | refused preview, no receipt, one call | preview | unaudited |
 
 The fake kernel mirrors the form rule, including the daemon's
 confined-path rule and the percent-escape refusal (`disputeEvidenceWellFormed`,
-`packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:285-307`;
-`repositoryPathWellFormed`, `:263-275`); the secret scan, liveness, and
+`packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:335-351`;
+`repositoryPathWellFormed`, `:270-311`); the secret scan, liveness, and
 visibility stay with the daemon;
 its contract test is
 `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.contract.test.ts`.
@@ -81,11 +81,33 @@ its contract test is
 | Location | Guard | Records | Status |
 |---|---|---|---|
 | `commit.rs:206-234` | `compose_reason`: dispute needs valid evidence; other events take none | requirement, form | unaudited |
-| `dispute.rs:49-81` | `DisputeReason::validated`: presence, empty id, a detection in the raw `evidence_id` (`:58-64`), form, cap, a detection in the composed reason (`:77-79`) | requirement, form, reason | unaudited |
-| `dispute.rs:151-159` | `EvidenceRef::is_well_formed` | form | unaudited |
+| `dispute.rs:49-79` | `DisputeReason::validated`: presence, empty id, a detection in the raw `evidence_id` (`:58-59`, through `value_is_clean`, `:159-163`), form, cap, a detection in the composed reason (`:77-79`) | requirement, form, reason | unaudited |
+| `dispute.rs:150-163` | `EvidenceRef::is_well_formed` | form | unaudited |
 | `commit.rs:742-757` | `require_visible_evidence`: live and cited by a scope of the bound project | liveness, visibility | unaudited |
 | `commit.rs:137`, `:168-171` | `deny_unknown_fields` with `reason` skipped, so a body cannot supply `reason` | reason | unaudited |
 | `commit.rs:411-444` | `resolve_classes`: refuse an assertion above the derivation | reporter | unaudited |
+
+## Tool tests (#1161)
+
+| Location | Test | What it asserts | Records | Status |
+|---|---|---|---|---|
+| `packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1341` | is a gated mutation: tool-call identity, agent, and allowlist | no tool-call id, `context_researcher`, and an allowlist without `dispute` each refuse with no transport call | requirement, reporter | unaudited |
+| `tools.test.ts:1359` | is in the exposed schema exactly when the allowlist names it | the `dispute` enum member, its fields, and the description paragraph appear only when allowed | requirement | unaudited |
+| `tools.test.ts:1376` | sends the evidence under the tool identity, actor, cause, and assistant source kind | preview and commit bodies carry the operation, `source_kind: "assistant"`, no asserted class, `agent:opencode`, and the tool-call cause | reporter, identity, form | unaudited |
+| `tools.test.ts:1454` | an aborted tool call sends nothing | a pre-aborted signal refuses at the preview with no send | preview | unaudited |
+| `tools.test.ts:1464` | an abort while the commit is unbound stops the rebind and the resend | one commit attempt, no rebind, object unchanged | preview, identity | unaudited |
+| `tools.test.ts:1491` | never relaxes a disposition through the memory's stored approval | `denied`, disposition kept, no commit call | reporter | unaudited |
+| `tools.test.ts:1514` | a retry with the same tool-call id replays; a new tool-call id is a second write | same id replays without `visibilityChanged`; a new id adds one receipt | identity | unaudited |
+| `tools.test.ts:1534` | refuses missing evidence and unsupported events before sending; renders denials and refusals | five invalid shapes refuse with no send; denied and refused results render | requirement, form | unaudited |
+| `packages/pi-plugin/src/tools/eidnara-memory.test.ts:422` | is absent from the default schema and refused by the default allowlist | the default allowlist omits `dispute` | requirement | unaudited |
+| `eidnara-memory.test.ts:433` | refuses an action outside the canonical set even when a caller's allowlist names it | the canonical-set check runs beside the allowlist | requirement | unaudited |
+| `eidnara-memory.test.ts:449` | files a dispute under agent:pi and the assistant source kind when allowed | preview and commit bodies carry `agent:pi`, `source_kind: "assistant"`, and no asserted class | reporter, identity | unaudited |
+| `eidnara-memory.test.ts:487` | needs a stable tool-call identity and sends an evidence id as evidence_id | no identity refuses; `evidenceId` rides as `evidence_id` | identity, form | unaudited |
+| `eidnara-memory.test.ts:509` | refuses a dispute without evidence before sending anything | the same five invalid shapes refuse with no send | requirement | unaudited |
+
+The shared-runner tests this PR adds (`memory-mark-command.test.ts:601`,
+`:633`, `:660`, `:672`, `:706`) are listed in
+`../disposition-path/existing-checks.md` under "PR A checks".
 
 ## None found
 
@@ -98,10 +120,8 @@ its contract test is
 - No test cites evidence through an asserted-edge citer, and no Rust code
   under `crates/` writes `asserted_edges`.
 - No test sends a raw `evidence_id` holding a secret-scanner detection to
-  the raw-id scan added in `511cd6d73` (`dispute.rs:58-64`).
+  the raw-id scan added in `511cd6d73` (`dispute.rs:58-59`, `:159-163`).
 - No test reads `durable_text_redactions` after a landed dispute.
-- No test asserts that two flag orders produce one identity.
-- No test exercises the model tool arm (#1161).
 
 ## Suspiciously quiet areas
 
