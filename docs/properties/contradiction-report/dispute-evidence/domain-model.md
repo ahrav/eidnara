@@ -590,8 +590,10 @@ conflicts-and-questions.md)
 - C3 (D5 versus R5): D5 says model output never names an evidence id; the
   tool action `dispute` accepts `evidence_id` from the model. Validation
   (KTD2) is the plan's answer; the wording conflict needs a human.
-- C4 (R5 `agent:<harness>`): today both harnesses send `agent:opencode`;
-  the daemon can verify against the binding. Decide whether to verify.
+- C4 (R5 `agent:<harness>`): before #1161 both harnesses sent
+  `agent:opencode`; #1161 keeps it for OpenCode (`execute.ts:50`) and
+  gives Pi `agent:pi` (`pi-plugin/src/tools/eidnara-memory.ts:57`). The
+  daemon can verify against the binding. Decide whether to verify.
 - C5 (A8): the command's operation identity collides on a second evidence.
   Section 7.3 proposes the identity change.
 - C6 (U3 rebuild): PR A rows do not survive the Batch K1 rotation under

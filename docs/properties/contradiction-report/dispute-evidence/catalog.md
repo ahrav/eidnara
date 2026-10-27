@@ -41,9 +41,10 @@ obligation for PR B ([#1162](https://github.com/ahrav/eidnara/issues/1162));
 its `Lifecycle:` line marks it proposed, it keeps the design-time
 `Lifecycle:`, `Falsifier:`, and `Legal witness:` lines, and it has no
 evidence file until PR B makes it checkable. The model
-tool arm of the dispute surface lands with
+tool arm of the dispute surface landed with
 [#1161](https://github.com/ahrav/eidnara/issues/1161); the records that
-name both surfaces cover the command arm only and say so.
+name both surfaces cover the command arm and the tool arm and name the
+tests of each.
 
 ## Reachability classes
 
@@ -424,8 +425,9 @@ asserts the tool's preview and commit both send `source_kind:
 "assistant"` and no asserted class, and the Pi test `files a dispute under
 agent:pi and the assistant source kind when allowed`
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:433`) asserts the
-same for Pi; the route side stores `assistant_inference` for that source
-kind (`kernel_routes.rs:5723`). The harness fixes `source_kind` in
+same for Pi's preview and commit bodies, with `agent:pi`; the route side
+stores `assistant_inference` for that source kind
+(`kernel_routes.rs:5723`). The harness fixes `source_kind` in
 `executeDispute`, so the tool cannot send `"user"`.
 Guarantee: The reporter taint recorded in a dispute's reason equals the
 taint `derive_classes(source_kind)` yields, lowered only by an asserted

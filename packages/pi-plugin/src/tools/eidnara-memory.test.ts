@@ -439,22 +439,31 @@ describe("Pi eidnara_memory dispute", () => {
             await h.execute(disputeArgs, "call-dispute"),
         );
         expect(filed).toMatchObject({ outcome: "applied", disposition: "contradicted" });
-        const commit = h.transport.calls.at(-1)?.body as {
-            intent: { actor: string; cause: string };
-            source_kind: string;
-            operations: unknown[];
-        };
-        expect(commit.intent.actor).toBe("agent:pi");
-        expect(commit.intent.cause).toBe("eidnara_memory dispute call-dispute");
-        expect(commit.source_kind).toBe("assistant");
-        expect(commit.operations).toEqual([
-            {
-                op: "disposition",
-                object_id: "mem_rule",
-                event: "contradict",
-                evidence_ref: { path: "src/a.rs", git_object_id: disputeArgs.gitObjectId },
-            },
-        ]);
+        const bodies = h.transport.calls.map(
+            (call) =>
+                call.body as {
+                    preview?: boolean;
+                    intent: { actor: string; cause: string };
+                    source_kind: string;
+                    asserted_taint_class?: string;
+                    operations: unknown[];
+                },
+        );
+        expect(bodies.map((body) => body.preview === true)).toEqual([true, false]);
+        for (const body of bodies) {
+            expect(body.intent.actor).toBe("agent:pi");
+            expect(body.intent.cause).toBe("eidnara_memory dispute call-dispute");
+            expect(body.source_kind).toBe("assistant");
+            expect(body.asserted_taint_class).toBeUndefined();
+            expect(body.operations).toEqual([
+                {
+                    op: "disposition",
+                    object_id: "mem_rule",
+                    event: "contradict",
+                    evidence_ref: { path: "src/a.rs", git_object_id: disputeArgs.gitObjectId },
+                },
+            ]);
+        }
     });
 
     it("needs a stable tool-call identity and sends an evidence id as evidence_id", async () => {
