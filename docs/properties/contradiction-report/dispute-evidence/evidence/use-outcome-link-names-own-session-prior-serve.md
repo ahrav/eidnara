@@ -46,9 +46,14 @@ the subject inside a larger composition.
 ## Timing windows and dependencies
 
 The lookup and the write share one writer transaction, so a concurrent
-serve commits wholly before or after the dispute. The DDL requires
-`served_commit_seq < created_commit_seq`, so a serve recorded in the
-dispute's own commit or later cannot satisfy the strict bound.
+serve commits wholly before or after the dispute, and the link is written
+once, so a serve recorded after the dispute leaves it as it was. The DDL
+requires `served_commit_seq < created_commit_seq`, so a serve recorded in
+the dispute's own commit would satisfy the strict bound; the route never
+writes one, because `apply` handles observations, decisions, supersedes,
+retirements, and dispositions and no other operation
+(`crates/daemon/src/kernel_routes/commit.rs:917-1060`), and the serve
+writer records in its own commit (`crates/daemon/src/use_outcome_writer.rs:449`).
 
 ## What a test must construct
 
