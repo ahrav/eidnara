@@ -28,6 +28,7 @@ const KERNEL_METHODS: ReadonlySet<string> = new Set<KernelMethod>([
     "kernel.artifact.ingest.page",
     "kernel.artifact.ingest.finish",
     "retrieval.query",
+    "review.candidates",
 ]);
 
 function isKernelMethod(method: string): method is KernelMethod {

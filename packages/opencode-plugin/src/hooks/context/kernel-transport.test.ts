@@ -146,6 +146,26 @@ describe("createKernelTransport ranking route", () => {
     });
 });
 
+describe("createKernelTransport candidates route", () => {
+    test("review.candidates passes the method guard and reaches the module transport", async () => {
+        const transport = createKernelTransport(managedTransport());
+        const sent = transport.call({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            method: "review.candidates",
+            body: {
+                method: "review.candidates",
+                session_id: SESSION,
+                project_root: PROJECT,
+                decision_object_id: "obj-decision",
+                after: null,
+            },
+        });
+        // The demand-start error distinguishes transport execution from method-guard rejection.
+        await expect(sent).rejects.toThrow(/demand start must not run/);
+    });
+});
+
 describe("createKernelTransport store lifecycle translation", () => {
     function storageTransport(storage: "starting" | "unavailable"): HostModuleTransport {
         return new HostModuleTransport({
