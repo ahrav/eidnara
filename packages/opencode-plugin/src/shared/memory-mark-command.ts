@@ -196,6 +196,8 @@ export interface MemoryMarkInput {
     confirm?: (preview: DispositionPreview) => Promise<boolean>;
     /** Checked again before the commit, since the preview and any confirmation take time during which the session can end. */
     isCancelled?: () => boolean;
+    /** The caller's abort signal, passed to the preview and the commit. */
+    signal?: AbortSignal;
 }
 
 /** Repeating the same event on the same object with the same evidence in one session reuses the identity, so the daemon replays the receipt instead of recording twice; other evidence is another dispute. */
@@ -216,6 +218,23 @@ function verdictFor<R extends DispositionResult>(
     return verdict;
 }
 
+/** Mirrors the kernel's `disposition_restrictiveness` (`crates/kernel/src/admission.rs`): a move to a lower rank is a relaxation. */
+const DISPOSITION_RESTRICTIVENESS: ReadonlyMap<string, number> = new Map([
+    ["active", 0],
+    ["stale", 1],
+    ["disputed", 1],
+    ["superseded", 1],
+    ["rejected", 2],
+    ["contradicted", 3],
+    ["quarantined", 3],
+]);
+
+function relaxes(result: DispositionResult): boolean {
+    const before = DISPOSITION_RESTRICTIVENESS.get(result.previous_disposition);
+    const after = DISPOSITION_RESTRICTIVENESS.get(result.disposition);
+    return before === undefined || after === undefined || after < before;
+}
+
 export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<MemoryMarkOutcome> {
     const { client, args } = input;
     const operation: DispositionOperation = {
@@ -233,6 +252,7 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         cause: input.cause ?? commandLine(args),
         sourceKind,
         requestDigest: deriveRequestDigest({ operations, sourceKind }),
+        ...(input.signal ? { signal: input.signal } : {}),
     };
     const previewed = await client.previewDispositions({ ...intent, operations });
     if (!isAvailable(previewed))
@@ -244,6 +264,19 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         // The reply decoded but does not answer the operation sent: a daemon contract violation, and nothing was written.
         if (!preview) return { kind: "refused", step: "preview", state: invalid("internal") };
         if (preview.denied) return { kind: "denied", result: preview };
+        if (sourceKind === "assistant" && relaxes(preview)) {
+            return {
+                kind: "denied",
+                result: {
+                    object_id: preview.object_id,
+                    event: preview.event,
+                    outcome: preview.outcome,
+                    previous_disposition: preview.previous_disposition,
+                    disposition: preview.previous_disposition,
+                    denied: true,
+                },
+            };
+        }
         visibilityChanged = preview.visibility_changes;
         if (preview.visibility_changes && !args.confirmed) {
             if (!input.confirm) return { kind: "needs_confirmation", preview };

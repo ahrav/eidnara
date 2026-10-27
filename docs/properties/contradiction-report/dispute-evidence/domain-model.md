@@ -105,7 +105,7 @@ Actors:
 - Human user, through `/eidnara-memory-mark`. Reporter class derived as
   `(ModelInference, UserInferred)` from `source_kind: "user"`
   (`commit.rs:376`; command sends `sourceKind: "user"` at
-  `memory-mark-command.ts:229`). Actor claim `user:opencode` or `user:pi`
+  `memory-mark-command.ts:248`). Actor claim `user:opencode` or `user:pi`
   (`eidnara-memory-mark.ts:18`).
 - Harness model, through the `eidnara_memory` tool action `dispute` (new).
   Reporter class `(ModelInference, AssistantInference)` from the client's
@@ -293,7 +293,7 @@ can be invalidated later without violating any rule here.
     verdict list is empty when the stored receipt is returned (FACT for
     preview replay, `commit.rs:1165-1172`; the TS command treats a
     missing verdict after a receipt as `outcome_unknown`,
-    `memory-mark-command.ts:258-259`). Design note: a replayed commit
+    `memory-mark-command.ts:291-292`). Design note: a replayed commit
     response should carry the stored `result` so the client can answer
     "already recorded" rather than "unknown" (conflicts Q8).
   - Definitely not applied / domain rejection (`invalid`:
@@ -316,7 +316,7 @@ Same admission and guards as FileDispute, no write (A9). It is a query by
 effect but it reads the receipt table and the admission state, so its
 answer expires as soon as another envelope commits (FACT: the TS command
 accepts that the commit verdict may differ from the preview,
-`memory-mark-command.ts:260`). Consumers: the slash command's confirmation
+`memory-mark-command.ts:293`). Consumers: the slash command's confirmation
 step only. Prohibited decision: a preview result never authorizes skipping
 any check at commit.
 
@@ -408,7 +408,7 @@ evidence.
 - Ordinary writers: both plugins through `deriveOperationKey(producer,
   actor, operationId)` (`client.ts:284-290`) with `operationId =
   [sessionId, event, objectId]` for the command
-  (`memory-mark-command.ts:202-206`) and `sessionId SEP toolCallId` for the
+  (`memory-mark-command.ts:204-208`) and `sessionId SEP toolCallId` for the
   tool (`execute.ts:429-431`).
 - Gap (FACT): the command's `operationId` omits the evidence, so a second
   dispute in one session with different evidence changes the
@@ -424,7 +424,7 @@ evidence.
   parser already does (`memory-mark-command.ts:117-119`).
 - Consequence: the "one dispute per (session, event, object)" replay
   unit the doc comment described at `3a3b916b7` (PR A:
-  `memoryMarkOperationId` at `memory-mark-command.ts:201-206` includes the
+  `memoryMarkOperationId` at `memory-mark-command.ts:203-208` includes the
   evidence flags)
   becomes "one dispute per (session, event, object, evidence)". The logical
   intent of "one dispute" is "this session asserts this evidence against
@@ -478,7 +478,7 @@ record itself has no lifecycle: NOT EARNED.
 | Freshness | Expires at the next commit touching the subject, its approvals, or the evidence |
 | Allowed consumers | The command's confirmation prompt |
 | Prohibited decisions | Skipping A1 to A5 at commit; reporting `applied` from a preview |
-| Mismatch | The commit's verdict wins (FACT: `memory-mark-command.ts:260-261`) |
+| Mismatch | The commit's verdict wins (FACT: `memory-mark-command.ts:293-294`) |
 
 ### 9.2 Structured `reason` (PR A) as a projection of typed data
 

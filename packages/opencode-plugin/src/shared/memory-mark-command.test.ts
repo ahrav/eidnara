@@ -521,6 +521,77 @@ describe("runMemoryMarkCommand", () => {
     });
 });
 
+describe("runMemoryMarkCommand cancellation", () => {
+    test("the caller's signal reaches the preview and the commit", async () => {
+        const h = harness();
+        const controller = new AbortController();
+        const input = args("contradict", "mem_verified", true);
+        const outcome = await runMemoryMarkCommand({
+            client: h.client,
+            operationId: memoryMarkOperationId(SESSION, input),
+            actor: "user:test",
+            args: input,
+            signal: controller.signal,
+        });
+        expect(outcome).toMatchObject({ kind: "applied", replayed: false });
+        expect(h.transport.calls).toHaveLength(2);
+        for (const call of h.transport.calls) expect(call.signal).toBe(controller.signal);
+    });
+});
+
+describe("runMemoryMarkCommand approval authority", () => {
+    function approvedQuarantine() {
+        const h = harness();
+        h.kernel.seedApproval("approval-1", PROJECT);
+        const object = h.kernel.seedDecision({
+            object_id: "mem_held",
+            decision_kind: "PROJECT_RULES",
+            summary: "held",
+            disposition: "quarantined",
+            projectRoot: PROJECT,
+        });
+        object.approval_object_id = "approval-1";
+        return h;
+    }
+
+    test("an assistant-sourced dispute is denied a relaxation the stored approval would admit", async () => {
+        const h = approvedQuarantine();
+        const input = args("mark_disputed", "mem_held", true);
+        const outcome = await runMemoryMarkCommand({
+            client: h.client,
+            operationId: memoryMarkOperationId(SESSION, input),
+            actor: "agent:test",
+            sourceKind: "assistant",
+            args: input,
+        });
+        expect(outcome).toMatchObject({
+            kind: "denied",
+            result: {
+                object_id: "mem_held",
+                event: "mark_disputed",
+                previous_disposition: "quarantined",
+                disposition: "quarantined",
+                denied: true,
+            },
+        });
+        expect(
+            h.transport.calls.map((call) => (call.body as { preview?: boolean }).preview),
+        ).toEqual([true]);
+        expect(h.kernel.receipts.size).toBe(0);
+        expect(h.kernel.objects.get("mem_held")?.disposition).toBe("quarantined");
+    });
+
+    test("a user command relaxes through the stored approval", async () => {
+        const h = approvedQuarantine();
+        const outcome = await run(h, args("mark_disputed", "mem_held", true));
+        expect(outcome).toMatchObject({
+            kind: "applied",
+            result: { previous_disposition: "quarantined", disposition: "disputed", denied: false },
+        });
+        expect(h.kernel.objects.get("mem_held")?.disposition).toBe("disputed");
+    });
+});
+
 describe("runMemoryMarkCommand request digest", () => {
     test("the preview and the commit carry one digest of the operation and the source kind", async () => {
         for (const sourceKind of ["user", "assistant"] as const) {

@@ -1,6 +1,7 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
 import { CONTEXT_RESEARCHER_AGENT } from "../../agents/context-researcher";
 import { resolveSessionDirectory } from "../../hooks/context/session-directory";
+import { HostCallError } from "../../shared/host-client/errors";
 import { KernelClient, TokenCache } from "../../shared/kernel-client";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import { createEidnaraMemoryTools } from "./tools";
@@ -1284,6 +1285,8 @@ describe("eidnara_memory dispute", () => {
 
     function disputeHarness(
         allowedActions: readonly EidnaraMemoryAction[] = EIDNARA_MEMORY_ACTIONS,
+        transportFor: (kernel: FakeKernel) => FakeKernelTransport = (kernel) =>
+            new FakeKernelTransport(kernel),
     ) {
         const kernel = new FakeKernel();
         kernel.seedDecision({
@@ -1303,7 +1306,7 @@ describe("eidnara_memory dispute", () => {
             summary: "q",
             disposition: "quarantined",
         });
-        const transport = new FakeKernelTransport(kernel);
+        const transport = transportFor(kernel);
         const definition = createEidnaraMemoryTools({
             kernelClient: ({ sessionId, projectRoot }) =>
                 new KernelClient({ transport, enabled: true, sessionId, projectRoot }),
@@ -1424,23 +1427,81 @@ describe("eidnara_memory dispute", () => {
         });
     });
 
-    test("an aborted tool call commits nothing", async () => {
-        const h = disputeHarness();
-        const controller = new AbortController();
-        controller.abort();
-        const text = await h.definition.execute(
+    function callWithAbort(
+        h: ReturnType<typeof disputeHarness>,
+        signal: AbortSignal,
+        callID: string,
+    ) {
+        return h.definition.execute(
             byId as never,
             {
                 sessionID: SESSION,
                 directory: ROOT,
-                callID: "call-abort",
+                callID,
                 agent: "primary",
-                abort: controller.signal,
+                abort: signal,
             } as never,
-        );
-        expect(text).toStartWith("Error: dispute refused at commit");
+        ) as Promise<string>;
+    }
+
+    test("an aborted tool call sends nothing", async () => {
+        const h = disputeHarness();
+        const controller = new AbortController();
+        controller.abort();
+        const text = await callWithAbort(h, controller.signal, "call-abort");
+        expect(text).toStartWith("Error: dispute refused at preview");
+        expect(h.transport.calls).toHaveLength(0);
         expect(h.kernel.receipts.size).toBe(0);
+    });
+
+    test("an abort while the commit is unbound stops the rebind and the resend", async () => {
+        const controller = new AbortController();
+        class UnboundCommitTransport extends FakeKernelTransport {
+            private unbound = false;
+            override async call(args: Parameters<FakeKernelTransport["call"]>[0]) {
+                const body = args.body as { preview?: boolean };
+                if (args.method === "kernel.commit" && body.preview !== true && !this.unbound) {
+                    this.unbound = true;
+                    this.calls.push(args);
+                    controller.abort();
+                    throw new HostCallError("terminal", "no binding", "route_unbound");
+                }
+                return super.call(args);
+            }
+        }
+        const h = disputeHarness(
+            EIDNARA_MEMORY_ACTIONS,
+            (kernel) => new UnboundCommitTransport(kernel),
+        );
+        const text = await callWithAbort(h, controller.signal, "call-unbound");
+        expect(text).toStartWith("Error: dispute refused at commit");
+        expect(h.transport.rebinds).toBe(0);
+        expect(commits(h.transport).filter((body) => body.preview !== true)).toHaveLength(1);
+        expect(h.kernel.receipts.size).toBe(0);
+        expect(h.kernel.objects.get("mem_labeled")?.disposition).toBe("active");
+    });
+
+    test("never relaxes a disposition through the memory's stored approval", async () => {
+        const h = disputeHarness();
+        h.kernel.seedApproval("approval-1");
+        const held = h.kernel.seedDecision({
+            object_id: "mem_held",
+            decision_kind: "ARCHITECTURE",
+            summary: "h",
+            disposition: "quarantined",
+        });
+        held.approval_object_id = "approval-1";
+        const text = await h.execute({ ...byId, objectId: "mem_held" }, "call-held");
+        expect(JSON.parse(text)).toEqual({
+            action: "dispute",
+            outcome: "denied",
+            objectId: "mem_held",
+            event: "mark_disputed",
+            previousDisposition: "quarantined",
+            disposition: "quarantined",
+        });
         expect(commits(h.transport).filter((body) => body.preview !== true)).toHaveLength(0);
+        expect(h.kernel.objects.get("mem_held")?.disposition).toBe("quarantined");
     });
 
     test("a retry with the same tool-call id replays; a new tool-call id is a second write", async () => {

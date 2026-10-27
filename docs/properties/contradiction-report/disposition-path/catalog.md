@@ -550,7 +550,7 @@ Open questions:
 Type: safety
 Reachability: default-production - `preview: true` is a request field
 (`commit.rs:126`); the TypeScript command always previews first
-(`memory-mark-command.ts:237`).
+(`memory-mark-command.ts:257`).
 Status: active
 Exercised: partial - route tests cover write-nothing, per-surface
 visibility, in-request ordering, denials and refusals, and the changed-
@@ -586,7 +586,7 @@ Type: safety
 Reachability: default-production - every `kernel.commit` carries an intent
 (`project.rs:138-146`); the command derives `operationId = sessionId SEP
 event SEP objectId`, followed at the PR A tip by the evidence flags
-(`memoryMarkOperationId`, `memory-mark-command.ts:201-206`), and both
+(`memoryMarkOperationId`, `memory-mark-command.ts:203-208`), and both
 command callers pass it in (`command-handler.ts:415`,
 `pi-plugin/src/commands/eidnara-memory-mark.ts:61`).
 Status: active
@@ -655,13 +655,13 @@ cancellation; and reports `outcome_unknown` when the commit's verdict list
 does not answer the sent operation.
 Check: `always` - for one invocation: `previewBody.operations ==
 commitBody.operations == [{op:"disposition", object_id, event,
-evidence_id?, evidence_ref?}]` (`memory-mark-command.ts:221-227`),
+evidence_id?, evidence_ref?}]` (`memory-mark-command.ts:240-246`),
 `previewBody.intent == commitBody.intent`, `source_kind == "user"`;
 `confirm` called at most once; `commit` not called when the preview
 verdict is `denied`, when `confirm` returns false, or when `isCancelled()`
 is true; `verdictFor` returns null whenever `results.length != 1 ||
 object_id != operation.object_id || event != operation.event`
-(`memory-mark-command.ts:209-217`), and a null verdict maps to
+(`memory-mark-command.ts:211-219`), and a null verdict maps to
 `refused(preview, invalid("internal"))` on the preview branch
 (`:243-245`) and to `refused(commit, unavailable("outcome_unknown"))` on
 the commit branch (`:257-259`) (portfolio refinement R6). Every

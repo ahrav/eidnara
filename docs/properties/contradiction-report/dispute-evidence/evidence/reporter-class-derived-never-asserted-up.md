@@ -24,7 +24,7 @@ route's derivation, never from a stronger claim by the client.
   subject's; the Kernel refuses a request whose classes differ from the
   prior (`crates/kernel/src/admission.rs:268-274`).
 - The command sends `sourceKind: "user"`
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:229`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:248`).
 - The route stores `actor` and `cause` as sent; neither enters the class
   derivation (`IntentRequest`, `crates/daemon/src/kernel_routes/project.rs:140-146`).
 

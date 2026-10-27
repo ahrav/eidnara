@@ -8,7 +8,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 
 Lens: idempotency and replay. The command's identity is
 `(sessionId, event, objectId)` at `3a3b916b7`; PR A appends the evidence
-flags (`memoryMarkOperationId`, `memory-mark-command.ts:201-206`), so a
+flags (`memoryMarkOperationId`, `memory-mark-command.ts:203-208`), so a
 user repeating a command with the same evidence in one session hits the
 replay path by design;
 P3 plans to join dispute events by `commit_seq`, which assumes one row set

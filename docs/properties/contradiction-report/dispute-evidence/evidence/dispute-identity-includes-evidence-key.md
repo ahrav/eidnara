@@ -12,7 +12,7 @@ specification recommended adding the evidence key
 
 - `memoryMarkOperationId(sessionId, args)` joins the session, event,
   object id, and `evidenceFlags(args)` with the key separator
-  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:201-206`).
+  (`packages/opencode-plugin/src/shared/memory-mark-command.ts:203-208`).
 - `evidenceFlags` emits `--evidence <id>` then `--path <path>@<oid>`, each
   only when present (`memory-mark-command.ts:145-155`), so flag order on
   the command line does not change the identity.

@@ -17,7 +17,7 @@ today.
 - One operation: `const operation: DispositionOperation = {op:
   "disposition", object_id, event}`, plus `evidence_id` and `evidence_ref`
   when the user gave them (PR A) (`packages/opencode-plugin/src/shared/
-  memory-mark-command.ts:221-227`); both calls send `operations:
+  memory-mark-command.ts:240-246`); both calls send `operations:
   [operation]` with the same `intent` object (`:237`, `:255`).
 - Intent: `actor: input.actor`; `operationId: input.operationId`, which
   the callers derive with `memoryMarkOperationId(sessionId, args)` (PR A

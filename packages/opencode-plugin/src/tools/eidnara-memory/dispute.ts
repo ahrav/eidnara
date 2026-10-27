@@ -22,7 +22,6 @@ export interface ExecuteDisputeArgs {
     operationId: string;
     toolCallId: string;
     actor: string;
-    /** The host tool call's abort signal; once aborted, nothing is committed. */
     signal?: AbortSignal;
 }
 
@@ -52,7 +51,7 @@ export async function executeDispute(input: ExecuteDisputeArgs): Promise<string>
         actor: input.actor,
         cause: `eidnara_memory dispute ${input.toolCallId}`,
         sourceKind: "assistant",
-        isCancelled: () => input.signal?.aborted === true,
+        ...(input.signal ? { signal: input.signal } : {}),
         args: {
             event: args.event,
             objectId,

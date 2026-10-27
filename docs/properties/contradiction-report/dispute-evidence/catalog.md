@@ -104,7 +104,7 @@ usage` (`memory-mark-command.test.ts:133`) covers the TypeScript side.
 counts unchanged; it asserts the error variant, not the refusal name. Tool
 arm (#1161): `refuses missing evidence and unsupported events before
 sending; renders denials and refusals`
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1466`)
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1527`)
 calls `dispute` with neither evidence input, with `path` and no
 `gitObjectId`, and with no `objectId`, and asserts the usage error with no
 daemon call; the Pi test `refuses a dispute without evidence before
@@ -419,7 +419,7 @@ and `assistant_inference` for `assistant`, and asserts the row's
 TypeScript test at `memory-mark-command.test.ts:181` asserts the command
 sends `source_kind: "user"` on both calls. Tool arm (#1161): `sends the
 evidence under the tool identity, actor, cause, and assistant source kind`
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1373`)
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1376`)
 asserts the tool's preview and commit both send `source_kind:
 "assistant"` and no asserted class, and the Pi test `files a dispute under
 agent:pi and the assistant source kind when allowed`
@@ -487,7 +487,22 @@ Candidate. `a_dispute_relaxes_a_contradicted_prior_only_with_a_valid_approval`
 evidence: without an approval it answers `denied: true` and the decision
 stays `contradicted`; with a valid `approval_object_id` it answers
 `denied: false`, lands `disputed`, and the row reads `outcome = deny`
-with the evidence id.
+with the evidence id. Tool arm (#1161): an operation that names no
+approval runs under the subject's stored one (`admission.rs:1574-1583`),
+so a model dispute could otherwise relax a quarantined or contradicted
+memory a human approved. `runMemoryMarkCommand` answers `denied` for an
+`assistant` mark whose preview moves to a less restrictive disposition,
+and sends no commit (`memory-mark-command.ts:267-279`). The runner test
+`an assistant-sourced dispute is denied a relaxation the stored approval
+would admit` (`memory-mark-command.test.ts:557`) and the tool test `never
+relaxes a disposition through the memory's stored approval`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1484`)
+seed a quarantined memory whose stored decision names a live approval and
+assert `denied`, the disposition kept, and one preview call with no
+commit; `a user command relaxes through the stored approval`
+(`memory-mark-command.test.ts:584`) keeps the command's relaxation. The
+check judges the preview, so an object that moves between the preview
+and the commit lands the commit's verdict.
 Guarantee: A dispute carrying evidence yields `outcome = deny`, keeps
 historical maturity, never raises effective maturity, and moves the
 disposition to an equal or more restrictive one unless the operation
@@ -551,7 +566,7 @@ operation_key)` (the unique index on `commit_log`,
 `crates/kernel/src/schema.rs:26`); (b)
 `memoryMarkOperationId(s, a) == memoryMarkOperationId(s, b)` exactly when
 `a` and `b` name the same event, object, and evidence
-(`memory-mark-command.ts:201-206`, `:145-155`); (c) every identity field
+(`memory-mark-command.ts:203-208`, `:145-155`); (c) every identity field
 is free of U+001F (the parser refuses it in the object id, evidence id,
 and path, `memory-mark-command.ts:80`, `:117-122`). Holds on every
 request, so `always`.
@@ -579,7 +594,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - `runMemoryMarkCommand` previews before
-every commit (`memory-mark-command.ts:237`); the route refuses a preview
+every commit (`memory-mark-command.ts:257`); the route refuses a preview
 of anything other than dispositions (`commit.rs:1151-1159`).
 Status: active
 Exercised: yes - `assert_refused_without_writing`
@@ -608,7 +623,7 @@ evidence check runs inside `disposition_request`, which both paths call
 (`commit.rs:790`, `:835`).
 Fault/timing angle: a commit between preview and commit can change the
 answer; the commit's verdict is the one recorded
-(`memory-mark-command.ts:260-261`). Constructed at the route by
+(`memory-mark-command.ts:293-294`). Constructed at the route by
 `kernel_routes.rs:6375`.
 Required faults and enabling state: a preview of each refused input and
 of a valid one at the same tip as the following commit; a commit between
