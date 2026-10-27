@@ -317,7 +317,10 @@ mod tests {
         let upper = OID.to_uppercase();
         let sha256 = "a".repeat(64);
         let long = format!("{}/b", "a".repeat(MAX_EVIDENCE_PATH_BYTES));
+        let sixteen = vec!["d"; 16].join("/");
+        let seventeen = vec!["d"; 17].join("/");
         assert!(validated("src/a.rs", &sha256).is_ok());
+        assert!(validated(&sixteen, OID).is_ok());
         for (path, oid) in [
             ("src/a.rs", upper.as_str()),
             ("src/a.rs", &OID[..39]),
@@ -330,6 +333,7 @@ mod tests {
             (".git/config", OID),
             ("src/.eidnara/x", OID),
             (long.as_str(), OID),
+            (seventeen.as_str(), OID),
             ("double%2Fencoded", OID),
         ] {
             assert_eq!(
@@ -400,6 +404,28 @@ mod tests {
             ),
             Err(InvalidReason::InvalidInput)
         );
+        let prefix =
+            "v=1;op=kernel.commit;event=mark_disputed;reporter_taint=user_inferred;evidence_id=";
+        let room = MAX_REASON_BYTES - prefix.len();
+        let at_cap = DisputeReason::validated(
+            EventKind::MarkDisputed,
+            TaintClass::UserInferred,
+            Some(&"e".repeat(room)),
+            None,
+        )
+        .unwrap();
+        assert_eq!(at_cap.len(), MAX_REASON_BYTES);
+        for over in ["e".repeat(room + 1), "/".repeat(room / 3 + 1)] {
+            assert_eq!(
+                DisputeReason::validated(
+                    EventKind::MarkDisputed,
+                    TaintClass::UserInferred,
+                    Some(&over),
+                    None
+                ),
+                Err(InvalidReason::InvalidInput)
+            );
+        }
     }
 
     #[test]
