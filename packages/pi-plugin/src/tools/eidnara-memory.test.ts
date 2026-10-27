@@ -550,7 +550,7 @@ describe("Pi eidnara_memory candidates", () => {
                 ...(allowedActions ? { allowedActions } : {}),
             });
             const result = await h.execute({ action: "candidates", objectId: "mem_rule" }, "");
-            return (parseResult<{ note: string }>(result)).note;
+            return parseResult<{ note: string }>(result).note;
         };
         expect(await noteFor()).toContain("not admitted in this context");
         expect(await noteFor(["candidates", "dispute"])).not.toContain("not admitted");
