@@ -230,14 +230,14 @@ fn judge(
     }
     let mut filters: HashMap<&str, Option<ScopeFilter>> = HashMap::new();
     let mut terms = |scope: &str| kernel.scope_terms_within_budget(scope, budget);
-    for (row, standing) in rows.iter().zip(standing.iter_mut()) {
-        if *standing == Standing::Dead || row.publish_tip > target.target.through_commit {
+    for (row, row_standing) in rows.iter().zip(standing.iter_mut()) {
+        if *row_standing == Standing::Dead || row.publish_tip > target.target.through_commit {
             continue;
         }
         let claim = match facts.get(&row.decision_object_id) {
             Some(Some(claim)) => claim,
             Some(None) => {
-                *standing = Standing::Dead;
+                *row_standing = Standing::Dead;
                 continue;
             }
             None => continue,
@@ -245,6 +245,12 @@ fn judge(
         let filter = filters
             .entry(&row.project_digest)
             .or_insert_with(|| ScopeFilter::for_digest(&row.project_digest));
+        if cancelled() {
+            return Judged {
+                standing,
+                read_failed,
+            };
+        }
         let names_project = match filter {
             Some(filter) => match filter.matches(claim.decision.scope_id.as_deref(), &mut terms) {
                 Ok(verdict) => verdict,
@@ -256,7 +262,7 @@ fn judge(
             None => false,
         };
         if !eligible(claim, names_project) {
-            *standing = Standing::Dead;
+            *row_standing = Standing::Dead;
         }
     }
     let evidence = kept_unique(rows, &standing, |row| row.evidence_id.as_str());

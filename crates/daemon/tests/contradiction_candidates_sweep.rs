@@ -869,6 +869,42 @@ fn a_sweep_cancelled_during_the_single_decision_reads_reads_no_further_and_delet
 }
 
 #[test]
+fn a_sweep_cancelled_before_the_scope_reads_reads_no_scope_and_deletes_nothing() {
+    let fixture = Fixture::open();
+    let live = fixture.live_evidence.clone();
+    fixture.write(PROJECT, &live, &["active", "other-project"], |_| {});
+    let before = untouched(&fixture);
+    let rows = fixture.rows();
+    let acquisitions = fixture.kernel.controlled_acquisitions_for_test();
+    let polls = std::cell::Cell::new(0_u32);
+    // The poll before the tip capture and the poll before the chunk read
+    // return false; `cancelled` returns true from the poll before the first
+    // scope-term read onward.
+    let cancelled = || {
+        polls.set(polls.get() + 1);
+        polls.get() > 2
+    };
+    let counts = Candidates::default();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &cancelled,
+    );
+    assert_eq!(
+        fixture.kernel.controlled_acquisitions_for_test(),
+        acquisitions + 2,
+        "the tip capture and the chunk read are the only Kernel reads"
+    );
+    assert_eq!(untouched(&fixture), before);
+    assert_eq!(fixture.rows(), rows);
+    assert_eq!(report(&counts)["sweep_dropped"], 0);
+    assert_eq!(report(&counts)["sweep_skipped_kernel_unavailable"], 0);
+}
+
+#[test]
 fn an_empty_page_reads_no_kernel_row_and_still_refreshes_the_gauge() {
     let fixture = Fixture::open();
     let counts = Candidates::default();

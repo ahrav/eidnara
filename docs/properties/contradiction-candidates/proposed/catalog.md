@@ -568,11 +568,11 @@ over-age and retired-evidence rows dropped, and one skip counted;
 `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over`
 (`:517`) bounds each run to one page;
 `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it`
-(`:896`), `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` (`:920`),
-`every_claim_chunk_of_a_page_is_read` (`:949`), and
+(`:932`), `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` (`:956`),
+`every_claim_chunk_of_a_page_is_read` (`:985`), and
 `a_row_at_the_age_bound_stays_and_one_past_it_drops` (`:486`) cover the
 remaining branches. `a_busy_reader_does_not_hold_the_sweep_past_its_budget`
-(`:1105`) holds one Kernel reader while the other is free and observes the
+(`:1141`) holds one Kernel reader while the other is free and observes the
 sweep return inside its budget with both rows judged: each scope-terms read
 goes through `KernelStore::scope_terms_within_budget`
 (`crates/kernel/src/scope.rs:1573`), which polls the whole reader pool and
@@ -743,7 +743,7 @@ hides the table, runs the sweep under a false flag with and without a
 Kernel, and observes every counter at zero, then shows the same table fails
 the first statement an enabled sweep runs;
 `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass`
-(`:994`) drives `pass_then_sweep`
+(`:1030`) drives `pass_then_sweep`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) with the flag off and
 then on. The key is `/contradiction_candidates/enabled`
 (`crates/daemon/src/config.rs:1024`), user-only and default false

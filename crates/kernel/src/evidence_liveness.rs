@@ -71,6 +71,7 @@ impl KernelStore {
             }
             let mut standing = Vec::with_capacity(evidence_ids.len());
             for evidence_id in evidence_ids {
+                limit.check()?;
                 let row: Option<(i64, Option<i64>)> = tx
                     .query_row_cached(
                         "SELECT created_commit_seq, invalidated_commit_seq
