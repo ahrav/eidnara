@@ -97,8 +97,8 @@ Also: `crates/daemon/src/config.rs:2299` and `:2320` (default, tier, and
 resolved-config freezing), `crates/daemon/src/lib.rs:21340` (bound route and
 status block), `crates/host-runtime/src/control.rs:2004` (host forwarding
 allowlist against `docs/host-wire-protocol.md`), and
-`crates/memory-store/tests/contradiction_candidates.rs:663` (a delete as
-read spares a rewritten row).
+`a_delete_as_read_spares_a_row_rewritten_since_the_read`
+(`crates/memory-store/tests/contradiction_candidates.rs:651`).
 
 ## S-B, S-C, S-F, S-H
 

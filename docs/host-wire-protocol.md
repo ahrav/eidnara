@@ -694,13 +694,15 @@ unknown fields are dropped; fields are additive.
 The `context` component MAY also carry a sanitized
 `metrics.contradiction_candidates` object describing write-time
 contradiction candidates: derived rows naming a live memory decision a
-published source descriptor overlaps lexically, kept only under the user-only
-`contradiction_candidates.enabled` (default false); the daemon ignores a
-project-tier value with a warning, and each plugin strips it from the project
-tier before merging. The counters are
-process-local, start at zero when the daemon starts, and stay at zero while
-the flag is off. Every field is a count, a byte total, or milliseconds; no
-field carries descriptor text, an id, a digest, or a per-row score. The block
+published source descriptor overlaps lexically, written and reclaimed only
+while the user-only `contradiction_candidates.enabled` (default false) is on;
+the daemon ignores a project-tier value with a warning, and each plugin strips
+it from the project tier before merging. The counters are process-local, start
+at zero when the daemon starts, and stay at zero until the flag is first on;
+turning the flag off pauses the sweep and leaves the held rows and the counts
+reached so far in place. Every field is a count, a byte total, or
+milliseconds; no field carries descriptor text, an id, a digest, or a per-row
+score. The block
 is sanitized field by field under the `kernel` integer rules: a non-object
 drops the block whole, unknown fields are dropped, and fields are additive.
 

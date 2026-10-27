@@ -1,6 +1,7 @@
 # p5dep-kernel-domain-read-has-no-row-bound
 
-HEAD `3a3b916b7`. Surface S2.
+HEAD `3a3b916b7`; the `claim_facts.rs` reference is re-verified at the
+#1166 branch tip. Surface S2.
 
 ## Discovery trigger
 

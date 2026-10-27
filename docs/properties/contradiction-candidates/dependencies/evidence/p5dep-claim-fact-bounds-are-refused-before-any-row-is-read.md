@@ -1,6 +1,7 @@
 # p5dep-claim-fact-bounds-are-refused-before-any-row-is-read
 
-HEAD `3a3b916b7`. Surface S3.
+HEAD `3a3b916b7`; the `claim_facts.rs` references are re-verified at the
+#1166 branch tip. Surface S3.
 
 ## Discovery trigger
 

@@ -70,7 +70,7 @@ row (`:161-170`), `lock_reader_within(&budget.acquire_limit())` (`:134`).
 plus `decisions_for_objects_on`. `decision_payload_sizes_as_of` (`:330-345`)
 reads `length(decision_payload)` only, no budget. `claim_facts_at_within_budget`
 (`crates/kernel/src/claim_facts.rs:240-257`): `limit.run(..)` then
-`claim_facts_inner` (`:301-334`), which calls `check_claim_bounds` (`:336-358`)
+`claim_facts_inner` (`:301-333`), which calls `check_claim_bounds` (`:336-358`)
 before `reader_with_limit`. `ClaimFactBounds` (`:41-44`), `TooManyClaims`
 (`:49`). `ClaimFacts` (`:146-156`) carries `object`, `decision:
 ClaimDecisionFacts` (`:90-97`, ids only), admission facts, `served:
