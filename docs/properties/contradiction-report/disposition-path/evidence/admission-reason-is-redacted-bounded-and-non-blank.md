@@ -28,7 +28,7 @@ before it becomes a carrier.
   rewritten text plus detections (`redaction.rs:41-47`); `write_admission`
   stores `reason.text` (`admission.rs:1749`, `:1846`) and calls
   `record(tx, "admission_decision", id, "reason", &reason, commit_seq)`
-  (`:1787-1794`), which inserts one `durable_text_redactions` row per
+  (`:1860-1867`), which inserts one `durable_text_redactions` row per
   detection (`redaction.rs:104-130`).
 - The pending change also carries `redactions: vec![("reason", reason)]`
   (`admission.rs:1903`) into the change-event payload.

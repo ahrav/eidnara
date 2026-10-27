@@ -18,16 +18,16 @@ lifecycle transitions.
   Rejected 2; Contradicted, Quarantined 3
   (`crates/kernel/src/admission.rs:4241-4248`).
 - `relaxes_disposition = restrictiveness(requested) <
-  restrictiveness(current_disposition)` (`:321-323`);
-  `requires_approval = (...) || relaxes_disposition` (`:324-329`);
-  `denied = requires_approval && !input.approval_valid` (`:330`); the
-  disposition is `requested` when not denied, else `current` (`:331-334`).
+  restrictiveness(current_disposition)` (`:337-339`);
+  `requires_approval = (...) || relaxes_disposition` (`:340-345`);
+  `denied = requires_approval && !input.approval_valid` (`:346`); the
+  disposition is `requested` when not denied, else `current` (`:347-350`).
 - Equal rank is not a relaxation: Stale to Disputed, Disputed to Stale,
-  and any X to X land without approval. Route test `:4551-4563` covers
+  and any X to X land without approval. Route test `:4624-4636` covers
   Stale to Stale ("admitted, not denied"); no test covers Stale to
   Disputed.
 - `approval_valid` comes from `validate_approval` over the cited or
-  back-filled stored approval (`:1574-1591`); the route scopes the same
+  back-filled stored approval (`:1625-1642`); the route scopes the same
   approval (`commit.rs:720-723`) so an out-of-scope approval is
   `not_found` before evaluation (`kernel_routes.rs:4508-4519`).
 - The route derives `denied` as `requested_disposition() != disposition`

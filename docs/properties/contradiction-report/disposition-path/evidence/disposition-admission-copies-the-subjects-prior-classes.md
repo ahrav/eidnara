@@ -7,7 +7,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 ## Discovery trigger
 
 Plan P4 Problem Frame: "the event is recorded under the subject's prior
-source class (`:587-588`)". Lens: claimed safety guarantees, then data
+source class (`:593-594`)". Lens: claimed safety guarantees, then data
 integrity. The `commit.rs` header (`:7-10`) says every written row is
 "admitted under the derived classes", which disagrees with the plan's
 reading; code resolves which describes the disposition path.
@@ -18,20 +18,20 @@ reading; code resolves which describes the disposition path.
   Some(prior.source_class)` and `taint_class: Some(prior.taint_class)`
   (`crates/daemon/src/kernel_routes/commit.rs:732-733`). `prior` is the
   `PriorDecision` from `envelope.subject_admission(object_id)`
-  (`:710-712`), which reads `load_prior_for_key(AdmissionKey::Object)`
+  (`:717-719`), which reads `load_prior_for_key(AdmissionKey::Object)`
   (`crates/kernel/src/admission.rs:1052-1059`).
 - `CommitPlan.classes` (the caller's derived pair from `resolve_classes`,
   `commit.rs:413-446`) is read only by `admit` (`:585-604`) for inserts
   and supersedes. The `Operation::Disposition` arm in `apply`
-  (`:998-1004`) never touches it.
+  (`:1016-1025`) never touches it.
 - `evaluate_admission` refuses when the request's classes differ from the
   prior's (`admission.rs:284-289`), so the copy is also what makes the
   route's dispositions pass that gate for every subject class.
 - `write_admission` binds `prepared.source_class.as_str()` and
   `prepared.taint_class.as_str()` into the row (`admission.rs:1836-1837`);
   `prepared.source_class` is the request's (`prepare_with_facts`,
-  `:1563-1564`, `:1666-1667`).
-- Route test `:5493` quarantines `approval-1`, an `ExplicitUser`/
+  `:1614-1615`, `:1717-1718`).
+- Route test `:5566` quarantines `approval-1`, an `ExplicitUser`/
   `UserExplicit` subject seeded by `seed_approval`
   (`kernel_routes.rs:4362-4393`), through a route whose caller derives
   (`ModelInference`, `AssistantInference`); the commit is `available`, so

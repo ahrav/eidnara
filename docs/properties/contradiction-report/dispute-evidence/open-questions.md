@@ -33,7 +33,7 @@ list names a "foreign-scope `evidence_id`" refusal.
 Evidence: evidence objects carry no scope. `object_state_sql` reads scope
 only from `decisions` and `observations` (`crates/kernel/src/envelope.rs:
 1878-1891`); the doc comment says every other kind reads `None`
-(`:1924-1925`). `ScopeFilter::matches(None, ..)` returns `false`
+(`:1997-1998`). `ScopeFilter::matches(None, ..)` returns `false`
 (`crates/daemon/src/kernel_routes/project.rs:204-206`), so
 `scoped_object_state` on an evidence object's `object_id` is always
 `NotFound` (`commit.rs:682-696`). Tables with `scope_id`: `propositions`,
@@ -147,7 +147,7 @@ typed columns" can mean. See Q6.
 
 The plan cites `derive_classes` at `commit.rs:228-242` (HEAD: `:370-380`),
 `disposition_request` evidence at `:596-602` (HEAD `3a3b916b7`: `:601-602`;
-PR A: `:731-732`), and the
+PR A: `:738-739`), and the
 reporter join at `envelope.rs:1342-1351` (HEAD: insert at `:1484-1499`).
 Shared-facts corrections are in `domain-model.md` section 0. No semantic
 claim changes.
@@ -393,7 +393,7 @@ No human input needed; record the choice in the route header.
 - KTD4 and R4: `MarkDisputed` and `Contradict` request `Deny` with a more
   restrictive disposition (`admission.rs:4234-4235`); support is withdrawn
   to `Candidate` (`:361-367`); `has_evidence` gates only `Enforce`
-  (`:275-277`).
+  (`:291-293`).
 - Non-goal `ExplicitUser`: `derive_classes` maps every `source_kind` to
   `ModelInference` (`commit.rs:370-380`).
 - Non-goal free-text rationale: `reason` is redacted lossy

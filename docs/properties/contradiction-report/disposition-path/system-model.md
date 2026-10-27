@@ -139,7 +139,7 @@ the difference noted.
   for MarkDisputed (`admission.rs:4234`); `historical = current.max(target)`
   with `target == current` (`admission.rs:352-353`); approval is required
   only when `relaxes_disposition` (`:337-346`); the class check compares
-  the request to the prior (`:268-273`) and the route sends the prior's
+  the request to the prior (`:284-289`) and the route sends the prior's
   classes. Each piece is a claim under test, not a verified fact.
 - Plan: "MarkDisputed forces maturity to Candidate". Code: the forcing is
   on `supported`, hence on `effective_maturity`
@@ -250,7 +250,7 @@ disposition row.
    `slice-write-refuses-non-live-evidence-citations`.
 5. Plan P4 cites `derive_classes` at `commit.rs:228-242` and
    `disposition_request` at `:596-602`; at HEAD they are at `:370-382` and
-   `:694-736` (the request's `evidence_id` at `:731`; `None` at
+   `:700-743` (the request's `evidence_id` at `:738`; `None` at
    `3a3b916b7`, the cited id of a dispute after PR A). Line drift only at
    authoring; the cited behavior matched then.
 6. commit.rs module header (`:7-10`) says every written row is "admitted

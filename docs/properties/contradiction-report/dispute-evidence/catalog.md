@@ -55,8 +55,7 @@ fields on every disposition operation (`commit.rs:155-172`). The command
 that sends them is registered in both harnesses
 (`packages/opencode-plugin/src/hooks/context/command-handler.ts:413-419`,
 `packages/pi-plugin/src/index.ts:550`). Each record restates its own
-evidence. The proposed record's label is the class its path will have
-once PR B writes it; it is not verifiable at HEAD and the record says so.
+evidence.
 
 ## Index
 
@@ -83,7 +82,7 @@ keep these from passing vacuously are listed in
 ### dispute-requires-evidence-from-plugin
 
 Type: safety
-Reachability: default-production - `lib.rs:14529` dispatches
+Reachability: default-production - `lib.rs:14660` dispatches
 `kernel.commit`; `compose_reason` runs for every operation of every
 request after class resolution and before the preview or commit
 transaction (`commit.rs:1145-1151`).
@@ -724,7 +723,9 @@ Check: `always` - for every row whose reason starts with `v=1;`:
 `parse(reason)` is `Some`, `render(parse(reason)) == reason`, `reason` is
 ASCII, `len(reason) <= MAX_REASON_BYTES` (`dispute.rs:14`), and
 `redact_durable_text(reason).detections` is empty
-(`dispute.rs:72-76`). The Kernel stores `redact_lossy(reason)`
+(`dispute.rs:72-76`); for a row with a non-null `reporter_source_class`,
+`render(event_kind, reporter_taint_class, evidence_id, event_payload)`
+equals `reason`. The Kernel stores `redact_lossy(reason)`
 (`crates/kernel/src/redaction.rs:41-42` calls the same
 `redact_durable_text`), so no `durable_text_redactions` row exists for a
 route-written reason. Holds on every write, so `always`.

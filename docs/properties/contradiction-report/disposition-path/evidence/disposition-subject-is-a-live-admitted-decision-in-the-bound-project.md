@@ -15,11 +15,11 @@ and what each failure answers.
 
 - `disposition_request` (`crates/daemon/src/kernel_routes/commit.rs:700-
   736`):
-  1. `scoped_object_state(envelope, filter, object_id)?` (`:706`): the
+  1. `scoped_object_state(envelope, filter, object_id)?` (`:713`): the
      registry row exists and its `scope_id` names the bound project, else
      `NotFound`.
   2. `object_kind != "decision" || invalidated_commit_seq.is_some()` is
-     `NotFound` (`:707-709`). `load_object_state` has no liveness filter
+     `NotFound` (`:714-716`). `load_object_state` has no liveness filter
      of its own (`envelope.rs:1989-2004`), so this line is the liveness
      check.
   3. `subject_admission(object_id)?.ok_or(AdmissionPolicy)` (`:710-712`):

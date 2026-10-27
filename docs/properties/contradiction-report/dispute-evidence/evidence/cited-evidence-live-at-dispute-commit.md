@@ -16,8 +16,8 @@ live". At `3a3b916b7` the admission write checked only that the id exists
 - `evidence_cited_in` reads `invalidated_commit_seq IS NULL` for the row
   inside the envelope's transaction and answers `false` for an unknown or
   retired id before it reads any citer
-  (`crates/kernel/src/envelope.rs:536-547`). The doc comment states the
-  check and a citing write observe one state (`:528-530`).
+  (`crates/kernel/src/envelope.rs:548-564`). The doc comment states the
+  check and a citing write observe one state (`:546-547`).
 - The commit path runs `disposition_request` inside `commit_before`'s
   closure (`commit.rs:1066-1081`, through `apply` at `:1016-1022` and
   `record_disposition` at `:790-797`); the preview path runs it inside

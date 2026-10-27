@@ -230,8 +230,8 @@ Required faults and enabling state: a live admitted decision above
 approval, both store-API only in tests) followed by any of the five events
 from the route.
 Confidence: high - [evidence](evidence/disposition-never-raises-maturity-and-withdraws-effective-support.md).
-Read `evaluate_admission` lines `:264-388` and `event_can_raise_support`
-(`:4189-4199`), which lists no disposition event.
+Read `evaluate_admission` lines `:280-404` and `event_can_raise_support`
+(`:4262-4272`), which lists no disposition event.
 Existing check: `admission.rs:5829`
 (`non_active_dispositions_withdraw_effective_support`), `:5410`
 (`an_event_that_names_a_disposition_keeps_its_own_outcome`),
@@ -724,12 +724,12 @@ rank(automatic_ceiling(d.source_class, d.taint_class))`, or `d` is counted
 in the walk's `deferred` total once `MAX_AUTHORITY_DEMOTIONS` (4,096) rows
 have been written (`with_authority_cascade`, `admission.rs:1107-1129`;
 `demote_authority_dependents`, `:1500-1538`; `approval_row_fields`
-requires `disposition='active'`, `:850`). Every qualifying write, so
+requires `disposition='active'`, `:866`). Every qualifying write, so
 `always`.
 Fault/timing angle: the cascade runs after the subject's row is written,
 inside one transaction; `MAX_APPROVAL_DEPENDENTS` (1,024) bounds grants
 per approval and `MAX_AUTHORITY_DEMOTIONS` (4,096) bounds demotions per
-walk, with the remainder deferred (`:665-670`).
+walk, with the remainder deferred (`:681-686`).
 Required faults and enabling state: an `adr_accepted` decision admitted
 under `ExplicitUser`/`UserExplicit` with `Approved` maturity, in scope; at
 least one dependent promoted by citing it; a `mark_disputed` from a
@@ -986,9 +986,9 @@ Suspected dominance (not proven):
 | `admission-evidence-citation-is-existence-checked-only` | `/testing:test-strategy` (kernel integration test) then `/low-level-systems:defensive-assertions-and-invariant-guards` | decides where the liveness guard belongs |
 | `slice-write-refuses-non-live-evidence-citations` | `/testing:test-strategy` (route test with a retired evidence row) | primitive P4 reuses |
 | `evidence-objects-carry-no-scope-and-fail-scoped-lookup` | `/testing:test-strategy` (route test naming an evidence object id) and human decision on R2 | structural gap |
-| `disposition-subject-is-a-live-admitted-decision-in-the-bound-project` | `/testing:invariant-test-review` for `:4888`, `:4635`; `/testing:test-strategy` for the observation-subject case | mostly covered |
+| `disposition-subject-is-a-live-admitted-decision-in-the-bound-project` | `/testing:invariant-test-review` for `:4961`, `:4708`; `/testing:test-strategy` for the observation-subject case | mostly covered |
 | `disposition-preview-writes-nothing-and-reports-the-commit-verdict` | `/testing:test-strategy` (route-level grid test over subject states, preview then commit; portfolio refinement R10) | differential oracle across states, no simulator needed |
-| `disposition-envelope-identity-replays-without-a-second-write` | `/testing:invariant-test-review` for `:4982`; `/testing:stateful-workload-design` for replay-after-move | per-identity accounting |
+| `disposition-envelope-identity-replays-without-a-second-write` | `/testing:invariant-test-review` for `:5055`; `/testing:stateful-workload-design` for replay-after-move | per-identity accounting |
 | `memory-mark-command-commits-only-the-previewed-operation` | `/testing:invariant-test-review` for the TS suite; `/testing:test-strategy` for body-equality assertion | FakeKernel exists |
 | `disposition-on-an-authority-bearer-demotes-dependents-in-the-same-commit` | human decision first, then `/testing:test-strategy` (route test on an approval subject) | intended-behavior question |
 | `disposition-commit-log-row-carries-actor-and-cause-only` | `/testing:test-strategy` (column-set and redacted-cause assertions) | pin until PR B |

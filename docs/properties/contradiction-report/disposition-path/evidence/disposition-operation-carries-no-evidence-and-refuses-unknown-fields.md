@@ -30,14 +30,14 @@ the change is measured against.
   store access, so nothing is written.
 - `disposition_request` sets `trigger_object_id: None` (`commit.rs:736`)
   and, at the PR A tip, `evidence_id: evidence_id.map(..)` and the
-  composed `reason` (`:731-732`); `admit` sets `None` and the constant
-  `"kernel.commit"` for inserts (`:589-594`, constant at `:100`).
+  composed `reason` (`:738-739`); `admit` sets `None` and the constant
+  `"kernel.commit"` for inserts (`:595-600`, constant at `:100`).
 - `write_admission` writes those `None`s into `evidence_id` and
   `trigger_object_id` (`admission.rs:1847`, `:1852`).
 - Receipt shape: `CommitResult.dispositions` is `#[serde(default,
   skip_serializing_if = "Vec::is_empty")]` (`commit.rs:506-508`), so
   receipts recorded before the field existed still decode; the unit test
-  at `:1307` asserts that.
+  at `:1343` asserts that.
 - TypeScript: `DispositionOperation` has `op, object_id, event,
   approval_object_id?`, and at the PR A tip `evidence_id?` and
   `evidence_ref?` (`shared/kernel-client/client.ts:101-111`); the command

@@ -22,8 +22,8 @@ daemon check is specified against it.
   the only reads are the bearer and dependent caps (`:1795-1807`); none
   touches `evidence_meta`.
 - `prepare_with_facts` passes `has_evidence: request.event.evidence_id.
-  is_some()` (`:1650`), a request-shape test; it matters only for
-  `Enforce` (`:275-277`).
+  is_some()` (`:1701`), a request-shape test; it matters only for
+  `Enforce` (`:291-293`).
 - Schema: `evidence_id TEXT REFERENCES evidence_meta(evidence_id) ON
   DELETE RESTRICT` (`crates/kernel/src/schema.rs:164`); `PRAGMA
   foreign_keys=ON` at `schema.rs:250` and `crates/kernel/src/open.rs:1035`;
@@ -47,9 +47,9 @@ daemon check is specified against it.
 - Contrast: `validate_trigger` requires the trigger's backing evidence to
   be live (`admission.rs:2841-2847`) and
   `approval_qualifies_predicate` requires cited evidence live
-  (`:884-893`); the event's own `evidence_id` has no such predicate.
+  (`:900-909`); the event's own `evidence_id` has no such predicate.
 - Served folding reads `decision_events` with
-  `event_kind='memory_reviewer_support'` (`:3434-3450`), not
+  `event_kind='memory_reviewer_support'` (`:3507-3523`), not
   `admission_decisions.evidence_id`, so a retired citation on an admission
   row changes nothing served today.
 

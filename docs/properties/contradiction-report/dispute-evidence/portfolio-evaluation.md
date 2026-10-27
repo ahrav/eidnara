@@ -29,7 +29,7 @@ or a bias (a framing decision for a human).
 About 45 `file:line` citations were checked. Most are exact, or are off
 by a doc-comment line. Examples: `commit.rs:12-63`, `:208-236`,
 `:726-728`, `:732-733`, `:749-764`, `:1066-1081`, `:1137-1151`,
-`:1149-1157`; `dispute.rs:49-79`, `:103-143`, `:149-157`, `:216-220`;
+`:1185-1193`; `dispute.rs:49-79`, `:103-143`, `:149-157`, `:216-220`;
 `envelope.rs:548-615` (the read, renamed `evidence_cited_in` since);
 `scope.rs:710-716`;
 `lib.rs:14529`; `admission.rs:4241-4248`, `:4605`; all eight route test
@@ -45,7 +45,7 @@ The following were wrong at `16660c3dd`:
 - `catalog.md`, form record, `Exercised:`. It cited `dispute.rs:313`,
   `:335`, `:348` and `:270`. At `f68e895ca` these are 314, 342, 354 and
   246.
-- `catalog.md`, reason record, `Existing check:`. It cited `:390`. At
+- `catalog.md`, reason record, `Existing check:`. It cited `:411`. At
   `f68e895ca` the test is at 404.
 - `commit.rs:1087-1089` is the comment that interprets a conflict. The
   receipt lookup itself runs inside `KernelStore::commit_before`. This is

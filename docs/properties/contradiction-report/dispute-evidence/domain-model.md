@@ -168,7 +168,7 @@ that exist)
 - Subject: live `decision` object in the bound project's scope
   (`scoped_object_state` `commit.rs:682-696`; kind and liveness check
   `:713-716`), and its latest admission row (`subject_admission`,
-  `:710-712`).
+  `:717-719`).
 - Evidence (PROPOSED): `evidence_meta` row by `evidence_id` with
   `invalidated_commit_seq IS NULL`, plus the project-visibility predicate
   of section 5 rule A3.

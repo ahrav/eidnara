@@ -17,7 +17,7 @@ dispute the user declined.
   so liveness and visibility refusals are identical at the same tip.
 - The preview runs in `store.preview` (`commit.rs:893-913`), which writes
   no commit-log row, no receipt, and no admission row; a recorded identity
-  replays its receipt instead (`:878-880`).
+  replays its receipt instead (`:896-898`).
 - A preview refuses tokens and non-disposition operations
   (`commit.rs:1180-1193`).
 - The command treats the commit's verdict as the one recorded

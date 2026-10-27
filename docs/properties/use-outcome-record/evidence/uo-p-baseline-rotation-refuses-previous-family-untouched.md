@@ -14,7 +14,7 @@ tip.
 
 - Components: `crates/kernel/src/schema.rs:193` and
   `crates/kernel/src/schema.rs:197`, with the `use_outcome_sessions`
-  component #1162 adds (`crates/kernel/src/schema.rs:194`); the admission
+  component #1162 adds (`crates/kernel/src/schema.rs:189`); the admission
   citing column and
   `idx_admission_use_outcome_fk` in the `admission_decisions` component
   (`crates/kernel/src/schema.rs:164`).

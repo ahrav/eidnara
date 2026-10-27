@@ -32,7 +32,7 @@ tip.
   `use_outcome_decisions_written_with_record` also require a decision row's
   `session_seq` and `served_commit_seq` to equal its record's, and adds
   `use_outcome_sessions_no_update` and `use_outcome_sessions_no_delete`
-  (`crates/kernel/src/schema.rs:194`); a record's foreign key over
+  (`crates/kernel/src/schema.rs:189`); a record's foreign key over
   `session_seq` and its identity columns ties it to its own session row.
 - Citation rule: the `admission_decisions.use_outcome_id` foreign key, the
   `admission_decisions_use_outcome_immutable` trigger (which also freezes
@@ -55,11 +55,11 @@ tip.
   row is written, never changes, keeps its subject and commit sequence, and its
   row is never deleted.
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-  (`crates/kernel/tests/kernel_schema.rs:2209`);
+  (`crates/kernel/tests/kernel_schema.rs:2212`);
   `use_outcome_classification_and_identity_shapes_are_checked`
-  (`crates/kernel/tests/kernel_schema.rs:2419`);
+  (`crates/kernel/tests/kernel_schema.rs:2429`);
   `an_admission_citation_names_a_recorded_use_outcome_and_never_changes`
-  (`crates/kernel/tests/kernel_schema.rs:2558`). Status: unaudited.
+  (`crates/kernel/tests/kernel_schema.rs:2568`). Status: unaudited.
 
 ## Failure scenario
 

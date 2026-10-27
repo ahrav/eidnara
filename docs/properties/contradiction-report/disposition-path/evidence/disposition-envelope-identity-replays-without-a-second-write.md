@@ -33,9 +33,9 @@ per report.
   `invalid/operation_key_reused` (`:489`).
 - The replayed receipt's `result` is the original `CommitResult` JSON;
   the route re-derives `tokens` from `touched` with `known_as_of =
-  receipt.commit_seq` and copies `dispositions` (`:1188-1204`), so a
+  receipt.commit_seq` and copies `dispositions` (`:1224-1240`), so a
   replay reports the original verdict even if the subject has since moved.
-- Preview honors the same identity (`:872-874`).
+- Preview honors the same identity (`:890-892`).
 - Reissue: the client reissues a write once under the same identity after
   an ambiguous send (`client.ts:300-301`, `:462-468`), relying on this
   property.

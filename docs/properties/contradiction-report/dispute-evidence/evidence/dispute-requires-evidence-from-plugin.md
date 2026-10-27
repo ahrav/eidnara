@@ -21,8 +21,8 @@ None`. PR A adds the fields and the requirement.
   error variant, not the refusal name.
 - `compose_reason` (`commit.rs:208-236`) routes dispute events to
   `DisputeReason::validated` and refuses evidence on every other event
-  with `InvalidReason::InvalidInput` (`:228-229`); non-dispute events get
-  `ADMISSION_REASON` (`:231`, constant at `:100`).
+  with `InvalidReason::InvalidInput` (`:230-231`); non-dispute events get
+  `ADMISSION_REASON` (`:233`, constant at `:100`).
 - `DisputeReason::validated` refuses a dispute with neither field and an
   empty `evidence_id` (`crates/daemon/src/kernel_routes/dispute.rs:55-59`).
 - The handler runs `compose_reason` for every operation after

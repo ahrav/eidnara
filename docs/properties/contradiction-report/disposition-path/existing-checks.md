@@ -34,7 +34,7 @@ test seeds through the store API.
 | 5493 | `a_disposition_preview_refuses_an_operation_whose_authority_an_earlier_one_changes` | quarantine of an approval plus dependent relaxation in one preview is `invalid_params`; separately previewed they judge; the commit denies the relaxation after the quarantine | preview, authority-bearer cascade (partial) | unaudited |
 
 Fixtures: `commit-available-disposition-quarantine.json`,
-`commit-available-disposition-denied.json` (asserted at `:4448`, `:4499`).
+`commit-available-disposition-denied.json` (asserted at `:4521`, `:4572`).
 
 ## Kernel evaluator unit tests (`crates/kernel/src/admission.rs`)
 

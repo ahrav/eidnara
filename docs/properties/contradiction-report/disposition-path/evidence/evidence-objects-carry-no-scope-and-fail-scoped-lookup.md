@@ -30,9 +30,9 @@ states what it answers for evidence.
   filter does not match, "the same answer a missing object gets, prevents
   cross-project object-id enumeration" (`commit.rs:677-697`).
 - Every scoped position in the route goes through it: tokens (`:1072`),
-  disposition subject (`:706`), approval and chain members (`:714-716`),
-  supersede predecessor and replacement (`:945`, `:955`), retire target
-  (`:994`), projected dependencies (`:1027`).
+  disposition subject (`:713`), approval and chain members (`:721-723`),
+  supersede predecessor and replacement (`:963`, `:973`), retire target
+  (`:1012`), projected dependencies (`:1048`).
 - The preview reads served rows with `served_rows_for(.., Some(scope_
   term))` (`commit.rs:836`), another scope-bound read that selects
   decision rows, not evidence.
