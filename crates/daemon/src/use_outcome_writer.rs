@@ -94,8 +94,10 @@ const SERVED_ID_OVERHEAD_BYTES: u64 = 32;
 /// it fails the commit and no job is handed off. The read bounds the id count by [`MAX_READ_ROWS`].
 const SERVED_IDS_BYTES_BOUND: u64 =
     memory_store::MAX_DURABLE_TEXT_BYTES as u64 + MAX_READ_ROWS as u64 * SERVED_ID_OVERHEAD_BYTES;
-/// The identity strings a job carries beside its ids: the project root (at most `PATH_MAX`) and digest, harness,
-/// session id, operation key, request digest, and the digest strings of the set and the spec.
+/// The identity strings a job carries beside its ids: the project root and digest, harness, session id, operation
+/// key, request digest, and the digest strings of the set and the spec. The host bounds the bound route's root at
+/// 4096 bytes, its harness at 128, and its session at 256 (`host_runtime::control`), and a transform runs only on the
+/// route whose binding names its session, so the sum stays near 5 KiB.
 const JOB_IDENTITY_BYTES: u64 = 16 * 1024;
 /// One in-flight write at its peak: the owned [`ServedSet`], the `&str` slice `request_digest` reads, the owned id
 /// copy the insert spec carries into the commit, and the identities.
