@@ -39,15 +39,15 @@ revision.
   `a_recorded_served_set_replays_while_another_writer_holds_the_writer`
   (`crates/daemon/src/use_outcome_writer_tests.rs:848`);
   `every_kernel_error_maps_to_a_closed_outcome`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:974`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:976`);
   `an_emergency_pass_that_reruns_records_one_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:993`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:995`);
   `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1021`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1023`);
   `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1108`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1110`);
   `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1144`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1146`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
