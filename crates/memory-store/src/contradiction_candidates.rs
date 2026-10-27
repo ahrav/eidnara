@@ -432,22 +432,22 @@ impl MemoryStore {
         PreparedWrite::new(DurableWriteFamily::ContradictionCandidates).execute(&self.inner, |tx| {
             let tx = tx.tx();
             let mut deleted = 0;
+            let mut delete = tx.prepare_cached(
+                "DELETE FROM contradiction_candidates
+                  WHERE project_digest=?1 AND evidence_id=?2 AND decision_object_id=?3
+                    AND created_at_ms=?4 AND publish_tip=?5 AND kernel_incarnation_id=?6
+                    AND matcher_digest=?7",
+            )?;
             for row in rows {
-                deleted += tx.execute(
-                    "DELETE FROM contradiction_candidates
-                      WHERE project_digest=?1 AND evidence_id=?2 AND decision_object_id=?3
-                        AND created_at_ms=?4 AND publish_tip=?5 AND kernel_incarnation_id=?6
-                        AND matcher_digest=?7",
-                    params![
-                        row.project_digest,
-                        row.evidence_id,
-                        row.decision_object_id,
-                        row.created_at_ms,
-                        row.publish_tip,
-                        row.kernel_incarnation_id,
-                        row.matcher_digest,
-                    ],
-                )?;
+                deleted += delete.execute(params![
+                    row.project_digest,
+                    row.evidence_id,
+                    row.decision_object_id,
+                    row.created_at_ms,
+                    row.publish_tip,
+                    row.kernel_incarnation_id,
+                    row.matcher_digest,
+                ])?;
             }
             Ok(WriteDisposition::Applied(deleted))
         })
