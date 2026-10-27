@@ -1,7 +1,6 @@
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::{
-    CandidateCaps, CandidateKey, CandidateScore, DescriptorCandidates, MAX_CANDIDATE_PAGE,
-    StoredCandidate,
+    CandidateCaps, CandidateScore, DescriptorCandidates, MAX_CANDIDATE_PAGE, StoredCandidate,
 };
 use rusqlite::Connection;
 
@@ -328,21 +327,18 @@ fn the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys() {
         .unwrap();
     assert_eq!(tail.len(), 2);
 
+    let mut named = all_rows(&store)
+        .into_iter()
+        .find(|row| row.evidence_id == "ev-0" && row.decision_object_id == "d1")
+        .unwrap();
+    let mut missing = named.clone();
+    missing.evidence_id = "ev-missing".to_string();
     let deleted = store
-        .delete_candidates(&[
-            CandidateKey {
-                project_digest: PROJECT,
-                evidence_id: "ev-0",
-                decision_object_id: "d1",
-            },
-            CandidateKey {
-                project_digest: PROJECT,
-                evidence_id: "ev-missing",
-                decision_object_id: "d1",
-            },
-        ])
+        .delete_candidates_as_read(&[&named, &missing])
         .unwrap();
     assert_eq!(deleted, 1);
+    named.created_at_ms += 1;
+    assert_eq!(store.delete_candidates_as_read(&[&named]).unwrap(), 0);
     let remaining = all_rows(&store);
     assert_eq!(remaining.len(), 9);
     assert!(
@@ -534,13 +530,7 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
     store
         .replace_candidates_for_descriptor(&write(PROJECT, "ev-top", 1, 99, &before), CAPS)
         .unwrap();
-    store
-        .delete_candidates(&[CandidateKey {
-            project_digest: PROJECT,
-            evidence_id: &first.items[0].evidence_id,
-            decision_object_id: "decision",
-        }])
-        .unwrap();
+    store.delete_candidates_as_read(&[&first.items[0]]).unwrap();
     let second = store
         .candidates_for_decision(PROJECT, "decision", first.next.as_deref(), 4)
         .unwrap();
@@ -640,13 +630,11 @@ fn a_keyed_delete_names_its_project_and_the_gauge_counts_bytes() {
     store
         .replace_candidates_for_descriptor(&write(OTHER_PROJECT, "ev-é", 1, 1, &rows), CAPS)
         .unwrap();
-    let deleted = store
-        .delete_candidates(&[CandidateKey {
-            project_digest: PROJECT,
-            evidence_id: "ev-é",
-            decision_object_id: "décision-ü",
-        }])
+    let named = all_rows(&store)
+        .into_iter()
+        .find(|row| row.project_digest == PROJECT)
         .unwrap();
+    let deleted = store.delete_candidates_as_read(&[&named]).unwrap();
     assert_eq!(deleted, 1);
     let bytes = 64 + "ev-é".len() + 2 * "décision-ü".len() + 32 + 64 + 40;
     assert_eq!(
@@ -681,4 +669,15 @@ fn a_delete_as_read_spares_a_row_rewritten_since_the_read() {
     let left = all_rows(&store);
     assert_eq!(left, [rewritten[0].clone()]);
     assert_eq!(store.delete_candidates_as_read(&[]).unwrap(), 0);
+    let mut other_incarnation = left[0].clone();
+    other_incarnation.kernel_incarnation_id = "fedcba9876543210fedcba9876543210".to_string();
+    let mut other_digest = left[0].clone();
+    other_digest.matcher_digest = "1".repeat(64);
+    assert_eq!(
+        store
+            .delete_candidates_as_read(&[&other_incarnation, &other_digest])
+            .unwrap(),
+        0,
+        "a row whose incarnation or digest differs from the one read stays"
+    );
 }

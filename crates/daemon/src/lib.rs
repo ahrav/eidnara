@@ -21337,7 +21337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_bound_route_keeps_its_candidate_flag_across_a_reload_and_health_reports_the_block() {
+    async fn a_route_keeps_the_candidate_flag_it_was_bound_with_and_health_reports_the_block() {
         let mut enabled = default_test_config();
         enabled.contradiction_candidates_enabled = true;
         let (handler, _store, _dir, project) =
@@ -21349,10 +21349,10 @@ mod tests {
             BindOutcome::Accept
         ));
         assert!(handler.candidates_enabled()());
-        // A reload changes what the next bind reads; the second route is bound with that value.
-        let mut reloaded = binding(project.to_str().unwrap(), "ses-b");
-        reloaded.config = default_test_config();
-        handler.bind_route(second, reloaded);
+        // A route bound later, after the user tier changed, holds the value read at its own bind.
+        let mut later = binding(project.to_str().unwrap(), "ses-b");
+        later.config = default_test_config();
+        handler.bind_route(second, later);
         let frozen = |route, session| {
             handler
                 .resolve_binding(route, session)

@@ -101,11 +101,24 @@ impl CandidateSweep {
         };
         counts.add(Count::SweepExamined, page.len() as u64);
         let rows: Vec<StoredCandidate> = page.into_iter().map(|(_, row)| row).collect();
+        let max_age_ms = i64::try_from(MAX_CANDIDATE_AGE.as_millis()).expect("age fits");
+        let standing: Vec<Standing> = rows
+            .iter()
+            .map(|row| {
+                if row.matcher_digest != matcher_digest()
+                    || now_ms.saturating_sub(row.created_at_ms) > max_age_ms
+                {
+                    Standing::Dead
+                } else {
+                    Standing::Kept
+                }
+            })
+            .collect();
         let budget = EvalBudget::new(Some(Instant::now() + SWEEP_BUDGET), Arc::default());
         let judged = match kernel.capture_identified_commit_read_target_within_budget(&budget) {
-            Ok(target) => judge(kernel, &target, &rows, now_ms, &budget, cancelled),
+            Ok(target) => judge(kernel, &target, &rows, standing, &budget, cancelled),
             Err(_) => Judged {
-                standing: vec![Standing::Kept; rows.len()],
+                standing,
                 read_failed: true,
             },
         };
@@ -156,29 +169,23 @@ fn kept_unique<'a, T: Eq + Hash>(
         .collect()
 }
 
-/// Each row's standing at `target`. A row written after `target` stays kept.
+/// Each row's standing at `target`, from the standing judged without the
+/// Kernel. A row written after `target` stays kept. A claim chunk the Kernel
+/// refuses is read again one decision at a time, so one decision this build
+/// cannot read keeps only its own rows.
 fn judge(
     kernel: &KernelStore,
     target: &IdentifiedCommitReadTarget,
     rows: &[StoredCandidate],
-    now_ms: i64,
+    mut standing: Vec<Standing>,
     budget: &EvalBudget,
     cancelled: &dyn Fn() -> bool,
 ) -> Judged {
-    let max_age_ms = i64::try_from(MAX_CANDIDATE_AGE.as_millis()).expect("age fits");
-    let mut standing: Vec<Standing> = rows
-        .iter()
-        .map(|row| {
-            if row.kernel_incarnation_id != target.database_incarnation_id
-                || row.matcher_digest != matcher_digest()
-                || now_ms.saturating_sub(row.created_at_ms) > max_age_ms
-            {
-                Standing::Dead
-            } else {
-                Standing::Kept
-            }
-        })
-        .collect();
+    for (row, standing) in rows.iter().zip(standing.iter_mut()) {
+        if row.kernel_incarnation_id != target.database_incarnation_id {
+            *standing = Standing::Dead;
+        }
+    }
     let mut read_failed = false;
     let bounds = ClaimFactBounds {
         max_claims: CLAIM_CHUNK,
@@ -193,16 +200,27 @@ fn judge(
                 read_failed,
             };
         }
-        match kernel.claim_facts_at_within_budget(chunk, target.target, bounds, budget) {
+        let mut read = |ids: &[String]| match kernel.claim_facts_at_within_budget(
+            ids,
+            target.target,
+            bounds,
+            budget,
+        ) {
             Ok(read) => {
-                facts.extend(chunk.iter().map(|id| (id.clone(), None)));
+                facts.extend(ids.iter().map(|id| (id.clone(), None)));
                 facts.extend(
                     read.claims
                         .into_iter()
                         .map(|claim| (claim.object.object_id.clone(), Some(claim))),
                 );
+                true
             }
-            Err(_) => read_failed = true,
+            Err(_) => false,
+        };
+        if !read(chunk) {
+            for id in chunk {
+                read_failed |= !read(std::slice::from_ref(id));
+            }
         }
     }
     let mut filters: HashMap<&str, Option<ScopeFilter>> = HashMap::new();

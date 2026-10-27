@@ -286,6 +286,30 @@ impl Fixture {
             .collect()
     }
 
+    /// One enabled sweep run; no sweep may move the Kernel tip or file a reviewer job.
+    fn sweep(
+        &self,
+        sweep: &mut CandidateSweep,
+        counts: &Candidates,
+        now_ms: i64,
+        cancelled: &dyn Fn() -> bool,
+    ) {
+        let before = untouched(self);
+        sweep.run(
+            &self.store,
+            Some(&self.kernel),
+            true,
+            counts,
+            now_ms,
+            cancelled,
+        );
+        assert_eq!(
+            untouched(self),
+            before,
+            "the sweep commits nothing and files no reviewer job"
+        );
+    }
+
     fn tip(&self) -> i64 {
         self.kernel
             .capture_commit_read_target_within_budget(&EvalBudget::unbounded())
@@ -388,6 +412,20 @@ fn the_eligibility_rule_admits_exactly_active_stale_and_disputed_decisions_of_th
             "{name}"
         );
     }
+    // Either succession fact alone makes a decision ineligible.
+    let active = fixture.facts("active");
+    let terms = fixture
+        .kernel
+        .scope_terms(&format!("project:{PROJECT}"))
+        .unwrap();
+    assert!(eligible(&active, project.names_project(Some(&terms))));
+    let mut succeeded = active.clone();
+    succeeded.object.superseded_by = Some("object-successor".to_string());
+    assert!(!eligible(&succeeded, true));
+    let mut superseded = active.clone();
+    superseded.own_admission.as_mut().unwrap().disposition = Disposition::Superseded;
+    assert!(!eligible(&superseded, true));
+    assert!(!eligible(&active, false), "a scope naming another project");
 }
 
 #[test]
@@ -412,17 +450,9 @@ fn one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_non
         row.created_at_ms = NOW_MS - age_ms - 1;
     });
     let seeded = fixture.rows().len();
-    let before = untouched(&fixture);
     let counts = Candidates::default();
     let mut sweep = CandidateSweep::default();
-    sweep.run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS,
-        &|| false,
-    );
+    fixture.sweep(&mut sweep, &counts, NOW_MS, &|| false);
 
     let mut expected: Vec<(String, String, String)> = ELIGIBLE
         .iter()
@@ -442,25 +472,13 @@ fn one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_non
     let (_, bytes) = fixture.store.candidate_rows_and_bytes(None).unwrap();
     assert_eq!(block["retained_bytes"], bytes);
 
-    sweep.run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS,
-        &|| false,
-    );
+    fixture.sweep(&mut sweep, &counts, NOW_MS, &|| false);
     assert_eq!(
         kept(&fixture),
         expected,
         "a repeat at the same tip drops none"
     );
     assert_eq!(report(&counts)["sweep_dropped"], seeded - expected.len());
-    assert_eq!(
-        untouched(&fixture),
-        before,
-        "the sweep commits nothing and files no reviewer job"
-    );
 }
 
 #[test]
@@ -471,28 +489,12 @@ fn a_row_at_the_age_bound_stays_and_one_past_it_drops() {
     fixture.write(PROJECT, &live, &["active"], |row| {
         row.created_at_ms = NOW_MS - age_ms;
     });
-    let before = untouched(&fixture);
     let counts = Candidates::default();
     let mut sweep = CandidateSweep::default();
-    sweep.run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS,
-        &|| false,
-    );
+    fixture.sweep(&mut sweep, &counts, NOW_MS, &|| false);
     assert_eq!(fixture.rows().len(), 1);
-    sweep.run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS + 1,
-        &|| false,
-    );
+    fixture.sweep(&mut sweep, &counts, NOW_MS + 1, &|| false);
     assert_eq!(fixture.rows().len(), 0);
-    assert_eq!(untouched(&fixture), before);
 }
 
 #[test]
@@ -518,21 +520,19 @@ fn the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over() {
     for index in 1..3 * CANDIDATE_SWEEP_PAGE {
         fixture.write(PROJECT, &format!("evidence-{index}"), &["active"], |_| {});
     }
-    let before = untouched(&fixture);
     let counts = Candidates::default();
     let mut sweep = CandidateSweep::default();
     for run in 1..=3 {
-        sweep.run(
-            &fixture.store,
-            Some(&fixture.kernel),
-            true,
-            &counts,
-            NOW_MS,
-            &|| false,
-        );
+        fixture.sweep(&mut sweep, &counts, NOW_MS, &|| false);
         assert_eq!(
             report(&counts)["sweep_examined"],
             run * CANDIDATE_SWEEP_PAGE
+        );
+        let gauge = report(&counts)["retained_bytes"].clone();
+        assert_eq!(
+            gauge == 0,
+            run < 3,
+            "the gauge is refreshed when the watermark returns to the first row"
         );
     }
     assert_eq!(
@@ -540,20 +540,12 @@ fn the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over() {
         1,
         "rows citing unknown evidence drop; the live descriptor's row stays"
     );
-    sweep.run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS,
-        &|| false,
-    );
+    fixture.sweep(&mut sweep, &counts, NOW_MS, &|| false);
     assert_eq!(
         report(&counts)["sweep_examined"],
         3 * CANDIDATE_SWEEP_PAGE + 1,
         "the fourth run starts over at the first row"
     );
-    assert_eq!(untouched(&fixture), before);
 }
 
 #[test]
@@ -591,14 +583,7 @@ fn a_false_flag_runs_no_table_statement_and_moves_no_counter() {
         "{:?}",
         report(&counts)
     );
-    sweep.run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS,
-        &|| false,
-    );
+    fixture.sweep(&mut sweep, &counts, NOW_MS, &|| false);
     assert_eq!(
         report(&counts)["store_unavailable"],
         1,
@@ -809,14 +794,7 @@ fn a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land() {
         row.created_at_ms = NOW_MS - age_ms - 1;
     });
     let counts = Candidates::default();
-    CandidateSweep::default().run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS,
-        &|| false,
-    );
+    fixture.sweep(&mut CandidateSweep::default(), &counts, NOW_MS, &|| false);
     assert_eq!(
         kept(&fixture),
         [
@@ -843,28 +821,14 @@ fn a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it() {
     });
     let counts = Candidates::default();
     let mut sweep = CandidateSweep::default();
-    sweep.run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS,
-        &|| false,
-    );
+    fixture.sweep(&mut sweep, &counts, NOW_MS, &|| false);
     assert_eq!(
         fixture.rows().len(),
         1,
         "the sweep's tip cannot judge the row"
     );
     ingest(&fixture.kernel, "later");
-    sweep.run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS,
-        &|| false,
-    );
+    fixture.sweep(&mut sweep, &counts, NOW_MS, &|| false);
     assert_eq!(
         fixture.rows().len(),
         0,
@@ -872,6 +836,8 @@ fn a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it() {
     );
 }
 
+/// Cancellation before the delete is observable here; the checks before each Kernel read have no
+/// effect a test can observe without a Kernel read counter.
 #[test]
 fn a_cancelled_sweep_deletes_nothing() {
     let fixture = Fixture::open();
@@ -880,14 +846,7 @@ fn a_cancelled_sweep_deletes_nothing() {
         row.incarnation = "0".repeat(32);
     });
     let counts = Candidates::default();
-    CandidateSweep::default().run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS,
-        &|| true,
-    );
+    fixture.sweep(&mut CandidateSweep::default(), &counts, NOW_MS, &|| true);
     assert_eq!(fixture.rows().len(), 1);
     assert_eq!(report(&counts)["sweep_dropped"], 0);
 }
@@ -911,6 +870,15 @@ fn every_claim_chunk_of_a_page_is_read() {
             Ok(String::new())
         })
         .unwrap();
+    fixture
+        .kernel
+        .commit(intent("retire-many"), |envelope| {
+            for name in &names {
+                envelope.retire_decision(&format!("object-{name}"))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
     for chunk in names.chunks(16) {
         let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
         let evidence = ingest(&fixture.kernel, &chunk[0]);
@@ -919,20 +887,13 @@ fn every_claim_chunk_of_a_page_is_read() {
     let live = fixture.live_evidence.clone();
     fixture.write(PROJECT, &live, &["invalidated"], |_| {});
     let counts = Candidates::default();
-    CandidateSweep::default().run(
-        &fixture.store,
-        Some(&fixture.kernel),
-        true,
-        &counts,
-        NOW_MS,
-        &|| false,
-    );
+    fixture.sweep(&mut CandidateSweep::default(), &counts, NOW_MS, &|| false);
     assert_eq!(
         fixture.rows().len(),
-        names.len(),
-        "only the invalidated row drops"
+        0,
+        "every chunk is judged, whichever chunk a decision lands in"
     );
-    assert_eq!(report(&counts)["sweep_dropped"], 1);
+    assert_eq!(report(&counts)["sweep_dropped"], names.len() + 1);
 }
 
 #[test]
@@ -940,15 +901,38 @@ fn the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass() {
     use daemon::memory_reviewer::lifecycle::{CandidateStep, pass_then_sweep};
     use std::sync::atomic::{AtomicBool, Ordering};
     let fixture = Fixture::open();
-    for index in 0..=CANDIDATE_SWEEP_PAGE {
-        fixture.write(PROJECT, &format!("evidence-{index}"), &["active"], |row| {
-            row.incarnation = "0".repeat(32);
-        });
+    let live = fixture.live_evidence.clone();
+    let names: Vec<String> = (0..CANDIDATE_SWEEP_PAGE)
+        .map(|index| format!("live-{index}"))
+        .collect();
+    let project = format!("project:{PROJECT}");
+    fixture
+        .kernel
+        .commit(intent("live-page"), |envelope| {
+            for name in &names {
+                envelope.insert_decision(decision(name, "memory", &project))?;
+                envelope.record_admission(request(
+                    &format!("object-{name}"),
+                    EventKind::Other,
+                    TRUSTED,
+                ))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    for chunk in names.chunks(16) {
+        let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+        let evidence = ingest(&fixture.kernel, &chunk[0]);
+        fixture.write(PROJECT, &evidence, &refs, |_| {});
     }
+    fixture.write(PROJECT, &live, &["active"], |row| {
+        row.incarnation = "0".repeat(32);
+    });
     let enabled = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&enabled);
+    let counts = Arc::new(Candidates::default());
     let mut step = CandidateStep {
-        counts: Arc::new(Candidates::default()),
+        counts: Arc::clone(&counts),
         enabled: Arc::new(move || flag.load(Ordering::Relaxed)),
         sweep: CandidateSweep::default(),
     };
@@ -966,15 +950,19 @@ fn the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass() {
     assert!(pass(false));
     enabled.store(true, Ordering::Relaxed);
     assert!(!pass(true), "a cancelled pass runs no sweep");
+    assert_eq!(report(&counts)["sweep_examined"], 0);
     assert!(pass(false));
     assert!(pass(false));
-    let block = report(&step.counts);
     assert_eq!(
-        block["sweep_examined"],
+        report(&counts)["sweep_examined"],
         CANDIDATE_SWEEP_PAGE + 1,
-        "the flag-off and cancelled passes examine nothing; the second sweep continues where the first stopped"
+        "the second sweep continues past the first page"
     );
-    assert_eq!(fixture.rows().len(), 0);
+    assert_eq!(
+        fixture.rows().len(),
+        CANDIDATE_SWEEP_PAGE,
+        "only the foreign row drops"
+    );
 }
 
 #[test]

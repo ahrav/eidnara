@@ -444,7 +444,7 @@ pub struct CandidateStep {
     pub sweep: crate::contradiction_candidates::sweep::CandidateSweep,
 }
 
-/// [`sweep_and_sample`], then, when it was not cancelled, one candidate sweep under the flag `step.enabled` reads now. A panic inside the sweep is logged, keeps the pass, and restarts the watermark at the first row.
+/// [`sweep_and_sample`], then, when it was not cancelled, one candidate sweep under the flag `step.enabled` reads now. A panic inside the sweep is logged and keeps the pass; the watermark already stands past the page that panicked.
 pub fn pass_then_sweep(
     store: &MemoryStore,
     kernel: Option<&kernel::KernelStore>,
@@ -462,7 +462,6 @@ pub fn pass_then_sweep(
         }));
         if swept.is_err() {
             eprintln!("daemon: contradiction candidate sweep panicked");
-            step.sweep = crate::contradiction_candidates::sweep::CandidateSweep::default();
         }
     }
     Some(pass)

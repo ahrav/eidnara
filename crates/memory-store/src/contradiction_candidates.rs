@@ -87,14 +87,6 @@ pub struct CandidatePage {
     pub next: Option<String>,
 }
 
-/// A row's key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CandidateKey<'a> {
-    pub project_digest: &'a str,
-    pub evidence_id: &'a str,
-    pub decision_object_id: &'a str,
-}
-
 fn invalid(message: &str) -> MemoryStoreError {
     MemoryStoreError::Serde(format!("contradiction candidate: {message}"))
 }
@@ -421,29 +413,6 @@ impl MemoryStore {
                     .collect::<rusqlite::Result<Vec<_>>>()
             })
             .map_err(MemoryStoreError::from)
-    }
-
-    /// Deletes the rows `keys` name in one transaction and answers how many existed.
-    ///
-    /// # Errors
-    ///
-    /// Storage errors.
-    pub fn delete_candidates(&self, keys: &[CandidateKey<'_>]) -> Result<usize, MemoryStoreError> {
-        if keys.is_empty() {
-            return Ok(0);
-        }
-        PreparedWrite::new(DurableWriteFamily::ContradictionCandidates).execute(&self.inner, |tx| {
-            let tx = tx.tx();
-            let mut deleted = 0;
-            for key in keys {
-                deleted += tx.execute(
-                    "DELETE FROM contradiction_candidates
-                      WHERE project_digest=?1 AND evidence_id=?2 AND decision_object_id=?3",
-                    params![key.project_digest, key.evidence_id, key.decision_object_id],
-                )?;
-            }
-            Ok(WriteDisposition::Applied(deleted))
-        })
     }
 
     /// Deletes each of `rows` whose stored row still holds the values the
