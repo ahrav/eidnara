@@ -17,7 +17,7 @@ subject, and an `adr_accepted` approval is one.
 - Route reachability: `disposition_request` requires only kind
   `decision`, live, in scope, with a prior admission
   (`crates/daemon/src/kernel_routes/commit.rs:706-712`). Route test
-  `:5493` quarantines `approval-1` (seeded by `seed_approval`,
+  `kernel_routes.rs:5493` quarantines `approval-1` (seeded by `seed_approval`,
   `kernel_routes.rs:4362-4393`, an `adr_accepted` decision admitted under
   `ExplicitUser`/`UserExplicit`) through the route and the commit is
   `available` (`:5558-5559`).

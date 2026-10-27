@@ -18,8 +18,9 @@ daemon check is specified against it.
 - `write_admission` derives `evidence_id` by `identity()` only
   (`crates/kernel/src/admission.rs:1690-1695`); `identity` rejects a
   value with a detected secret (`crates/kernel/src/redaction.rs:81-88`).
-- Between `:1695` and the INSERT (`:1748-1786`) the only reads are the
-  bearer and dependent caps (`:1727-1739`); none touches `evidence_meta`.
+- Between `admission.rs:1695` and the INSERT (`admission.rs:1748-1786`)
+  the only reads are the bearer and dependent caps (`:1727-1739`); none
+  touches `evidence_meta`.
 - `prepare_with_facts` passes `has_evidence: request.event.evidence_id.
   is_some()` (`:1650`), a request-shape test; it matters only for
   `Enforce` (`:275-277`).

@@ -23,8 +23,8 @@ today.
   the callers derive with `memoryMarkOperationId(sessionId, args)` (PR A
   moved the derivation to the callers, `command-handler.ts:415`,
   `pi-plugin/src/commands/eidnara-memory-mark.ts:61`); `cause =
-  commandLine(args)`, which appends the evidence flags (`:157-159`);
-  `sourceKind: "user"` (`:216-221`).
+  commandLine(args)`, which appends the evidence flags
+  (`memory-mark-command.ts:157-159`); `sourceKind: "user"` (`:216-221`).
 - `verdictFor` returns null unless `results.length == 1` and the single
   verdict's `object_id` and `event` equal the operation's (`:197-205`).
 - Preview branch: `refused/preview` on a non-available state (`:223-224`);

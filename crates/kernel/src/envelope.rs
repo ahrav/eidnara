@@ -541,7 +541,7 @@ impl Envelope<'_> {
     /// live decisions whose events cite it; an unscoped citer offers no scope.
     /// `accepts` sees each distinct scope id at most once.
     ///
-    /// The seeks in [`LIVE_CITING_SCOPE_SEEKS`] visit each distinct citing
+    /// The seeks in `LIVE_CITING_SCOPE_SEEKS` visit each distinct citing
     /// scope in each table, with one additional seek when the table is
     /// exhausted. An accepted direct citer ends the check before the
     /// decision-event scan, which reads one row per citing event with a live,
