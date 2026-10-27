@@ -11,7 +11,7 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1155 branch tip, the commit that carries this
 revision.
 
-- Role: `crates/daemon/src/use_outcome_writer.rs:223`.
+- Role: `crates/daemon/src/use_outcome_writer.rs:225`.
 
 - Guarantee under test: The stored `session_role` is `subagent` exactly when the
   writing pass's effective subagent flag was true.
