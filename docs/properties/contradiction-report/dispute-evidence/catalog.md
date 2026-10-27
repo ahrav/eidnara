@@ -112,8 +112,8 @@ with no `objectId`, and asserts the usage error with no daemon call; the
 Pi test `refuses a dispute without evidence before sending anything`
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:509`)
 sends the same five shapes and asserts the same for Pi. A route request
-from the tool with neither field is the raw-body case the route test above already refuses
-`invalid_input`, since the tool sends the same `disposition` body.
+from the tool with neither field is the raw-body case the route test
+above already refuses `invalid_input`, since the tool sends the same `disposition` body.
 Guarantee: A `mark_disputed` or `contradict` operation that reaches the
 Kernel writer through `kernel.commit` carries a non-empty `evidence_id`,
 an `evidence_ref`, or both; one with neither, or with an empty id, is
@@ -527,8 +527,8 @@ lands the commit's verdict (see the open question below).
 Guarantee: A dispute carrying evidence yields `outcome = deny`, keeps
 historical maturity, never raises effective maturity, and moves the
 disposition to an equal or more restrictive one unless a valid approval
-is named by the operation or stored on the subject; against a more restrictive prior without a valid
-approval it records `denied` with the prior kept.
+is named by the operation or stored on the subject; against a more
+restrictive prior without a valid approval it records `denied` with the prior kept.
 Check: `always` - for every dispute row `r` and its prior `p`:
 `r.outcome = 'deny'`, `r.maturity = p.maturity`,
 `rank(r.effective_maturity) <= rank(p.effective_maturity)`, and
