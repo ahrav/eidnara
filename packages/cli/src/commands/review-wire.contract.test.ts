@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseExactJson } from "@eidnara/opencode/shared/host-client";
 import {
+    CANDIDATE_ITEM_KEYS,
+    CANDIDATE_TERMINALS,
+} from "@eidnara/opencode/shared/kernel-client/wire";
+import {
     ABSTAIN_REASONS,
     ACTIVATION_STATES,
     decodeUseOutcome,
@@ -111,6 +115,18 @@ describe("review vocabularies are pinned to docs/host-wire-protocol.md", () => {
             '`{"kind":"counts","object_id": string,"served_sessions": u64,"disputed_after_serve": u64}`',
         );
         expect(paragraph).toContain("no greater than 2^53");
+    });
+
+    test("review.candidates is a listed method whose items and terminals are the ones the parser admits", () => {
+        expect(paragraphStarting("Methods: ")).toContain("`review.candidates`");
+        const paragraph = paragraphStarting("`review.candidates` lists");
+        const item = sentence(paragraph, 'Each item is `{"evidence_id"');
+        expect([...item.matchAll(/"([a-z_]+)": /g)].map((match) => match[1])).toEqual([
+            ...CANDIDATE_ITEM_KEYS,
+        ]);
+        expect(
+            [...paragraph.matchAll(/"terminal":"([a-z_]+)"/g)].map((match) => match[1]).sort(),
+        ).toEqual([...CANDIDATE_TERMINALS].sort());
     });
 });
 

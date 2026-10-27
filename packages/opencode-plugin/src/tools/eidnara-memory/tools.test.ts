@@ -1621,4 +1621,38 @@ describe("eidnara_memory candidates", () => {
         expect(text).not.toContain("leaked text");
         expect(text).toContain("does not recognize");
     });
+
+    test("names who can file the confirm form from the allowlist", async () => {
+        const page = { kind: "page", as_of: 41, items: [ITEM], next: null };
+        const byDefault = candidatesHarness([page]);
+        const note = JSON.parse(
+            await byDefault.execute({ action: "candidates", objectId: "mem_labeled" }),
+        ).note;
+        expect(note).toContain("not admitted in this context");
+        const admitted = candidatesHarness([page], ["candidates", "dispute"]);
+        const parsed = JSON.parse(
+            await admitted.execute({ action: "candidates", objectId: "mem_labeled" }),
+        );
+        expect(parsed.note).not.toContain("not admitted");
+        expect(parsed.candidates[0].confirm.action).toBe("dispute");
+    });
+
+    test("refuses a page naming another memory and paging fields the schema would refuse", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 1, items: [{ ...ITEM, decision_object_id: "mem_other" }], next: null },
+        ]);
+        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+        expect(text).toStartWith("Error:");
+        expect(text).not.toContain("srcev:abc");
+        expect(await h.execute({ action: "candidates", objectId: "m", limit: "5" })).toBe(
+            "Error: 'limit' must be an integer from 1 to 64",
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m", limit: 2.5 })).toBe(
+            "Error: 'limit' must be an integer from 1 to 64",
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m", after: 5 })).toBe(
+            "Error: 'after' must be a string or null",
+        );
+        expect(h.calls).toHaveLength(1);
+    });
 });

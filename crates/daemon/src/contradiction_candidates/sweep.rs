@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ use memory_store::contradiction_candidates::StoredCandidate;
 
 use super::eligibility::eligible;
 use super::scorer::matcher_digest;
-use super::{Candidates, Count};
+use super::{CLAIM_CAUSAL_PAYLOAD_BYTES, Candidates, Count};
 use crate::kernel_routes::project::{ScopeFilter, stored_terms};
 
 /// Rows one sweep run examines.
@@ -33,7 +33,6 @@ pub const MAX_CANDIDATE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const SWEEP_BUDGET: Duration = Duration::from_secs(2);
 /// Decisions per claim-facts read.
 const CLAIM_CHUNK: NonZeroUsize = NonZeroUsize::new(64).expect("nonzero");
-const CLAIM_CAUSAL_PAYLOAD_BYTES: NonZeroU64 = NonZeroU64::new(1024 * 1024).expect("nonzero");
 
 // A page's distinct evidence ids fit one liveness read.
 const _: () = assert!(CANDIDATE_SWEEP_PAGE <= kernel::MAX_EVIDENCE_LIVENESS_IDS);

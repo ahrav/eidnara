@@ -629,7 +629,7 @@ export type CandidatesPayload =
     | { kind: "page"; as_of: number; items: CandidateItem[]; next: string | null }
     | { kind: "terminal"; terminal: CandidateTerminal };
 
-const CANDIDATE_ITEM_KEYS = [
+export const CANDIDATE_ITEM_KEYS = [
     "evidence_id",
     "decision_object_id",
     "decision_id",

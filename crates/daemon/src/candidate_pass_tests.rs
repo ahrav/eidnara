@@ -1240,7 +1240,7 @@ fn write_row(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
-    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let (handler, store, dir, project) = candidate_handler(candidate_config(true, true)).await;
     let binding = kernel_routes::ProjectBinding::new(&project);
     let kernel = kernel_of(&handler);
     seed(
@@ -1316,18 +1316,31 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
         3,
         (&incarnation, &"f".repeat(64), tip),
     );
+    let future = ingest(&kernel, "future");
     kernel
         .commit(intent("retire-evidence"), |envelope| {
             envelope.retire_evidence("srcev-object:retired")?;
             Ok(String::new())
         })
         .unwrap();
+    let tip = kernel.tip().unwrap();
+    write_row(
+        &store,
+        &binding,
+        &future,
+        "one",
+        3,
+        (&incarnation, digest, tip + 1),
+    );
 
-    let first = ask(json!({ "decision_object_id": "object-one", "limit": 64 }))
+    let jobs = store.memory_reviewer_status_facts().unwrap();
+    let first = ask(json!({ "decision_object_id": "object-one", "limit": 65 }))
         .await
         .unwrap();
     assert_eq!(first["kind"], "page");
-    assert_eq!(first["as_of"], kernel.tip().unwrap());
+    assert_eq!(first["as_of"], tip);
+    assert_eq!(kernel.tip().unwrap(), tip, "the read commits nothing");
+    assert_eq!(store.memory_reviewer_status_facts().unwrap(), jobs);
     let items = first["items"].as_array().unwrap();
     let keys: Vec<&str> = items[0]
         .as_object()
@@ -1352,8 +1365,9 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
     );
     assert_eq!(
         items.len(),
-        61,
-        "the retired, foreign-incarnation, and stale-digest rows of the first page are left out"
+        60,
+        "a limit of 65 clamps to 64 rows, less the retired, foreign-incarnation, stale-digest, \
+         and future-tip rows"
     );
     let scores: Vec<&Value> = items.iter().map(|item| &item["score"]).collect();
     assert!(
@@ -1373,12 +1387,48 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
     }))
     .await
     .unwrap();
-    assert_eq!(second["items"].as_array().unwrap().len(), 9);
+    assert_eq!(second["items"].as_array().unwrap().len(), 10);
     assert_eq!(second["next"], Value::Null);
+    assert_eq!(counts(&handler)["read_filtered_stale"], 4);
+    let walked: Vec<&Value> = items
+        .iter()
+        .chain(second["items"].as_array().unwrap())
+        .collect();
+    let mut ordered = walked.clone();
+    ordered.sort_by(|left, right| {
+        let key = |item: &Value| {
+            (
+                std::cmp::Reverse(item["score"].as_u64()),
+                std::cmp::Reverse(item["created_at_ms"].as_u64()),
+                item["evidence_id"].as_str().unwrap().to_owned(),
+            )
+        };
+        key(left).cmp(&key(right))
+    });
     assert_eq!(
-        counts(&handler)["read_filtered_stale"],
-        3,
-        "the retired, foreign-incarnation, and stale-digest rows"
+        walked, ordered,
+        "the walk follows the documented page order"
+    );
+    let listed: std::collections::BTreeSet<&str> = walked
+        .iter()
+        .map(|item| item["evidence_id"].as_str().unwrap())
+        .collect();
+    let expected: std::collections::BTreeSet<&str> = evidence.iter().map(String::as_str).collect();
+    assert_eq!(
+        listed, expected,
+        "the pages are disjoint and cover every live row"
+    );
+    let filtered = counts(&handler)["read_filtered_stale"].as_u64().unwrap();
+    let smallest = ask(json!({ "decision_object_id": "object-one", "limit": 0 }))
+        .await
+        .unwrap();
+    assert!(smallest["next"].is_string());
+    assert_eq!(
+        smallest["items"].as_array().unwrap().len() as u64
+            + counts(&handler)["read_filtered_stale"].as_u64().unwrap()
+            - filtered,
+        1,
+        "a limit of zero clamps to one row"
     );
 
     kernel
@@ -1438,16 +1488,72 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
     .unwrap();
     assert_eq!(refused["state"]["kind"], "invalid");
     assert_eq!(refused["state"]["reason"], "project_mismatch");
+    let refused = route_call(
+        &handler,
+        candidates_request(&elsewhere, json!({ "extra": 1 })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        refused["state"]["reason"], "project_mismatch",
+        "the scope is judged before the body"
+    );
 
-    let mut off = binding_with_harness(project.to_str().unwrap(), "opencode", SESSION);
-    off.config = candidate_config(true, false);
-    handler.bind_route(test_route(7), off);
+    let rebind = |harness: &str, enabled: bool| {
+        let mut bound = binding_with_harness(project.to_str().unwrap(), harness, SESSION);
+        bound.config = candidate_config(true, enabled);
+        handler.bind_route(test_route(7), bound);
+    };
+    rebind(crate::OBSERVATIONAL_HARNESS, true);
+    let observed = ask(json!({ "decision_object_id": "object-one" }))
+        .await
+        .unwrap();
+    assert_eq!(observed["kind"], "page", "an observational route reads");
+
+    let path = find_file(dir.path(), "store.db");
+    let rename = |from: &str, to: &str| {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+            .unwrap();
+    };
+    rename(
+        "contradiction_candidates",
+        "contradiction_candidates_hidden",
+    );
+    rebind("opencode", false);
     let filtered = counts(&handler)["read_filtered_stale"].clone();
     assert_eq!(
         ask(json!({ "decision_object_id": "object-one" })).await,
-        Ok(json!({ "kind": "terminal", "terminal": "disabled" }))
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
+        "a false flag answers before any table statement"
     );
     assert_eq!(counts(&handler)["read_filtered_stale"], filtered);
+    rebind("opencode", true);
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
+        "the hidden table fails the read a true flag runs"
+    );
+    rename(
+        "contradiction_candidates_hidden",
+        "contradiction_candidates",
+    );
+}
+
+fn find_file(root: &Path, name: &str) -> PathBuf {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().is_some_and(|file| file == name) {
+                return path;
+            }
+        }
+    }
+    panic!("no {name} under {}", root.display());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1541,11 +1647,13 @@ async fn a_listed_candidate_confirms_through_dispute_while_its_evidence_lives() 
     let listed = ask("object-confirmed").await.unwrap();
     let confirmed_row = listed["items"][0].clone();
     let expired_row = ask("object-expired").await.unwrap()["items"][0].clone();
+    let published: Vec<String> = live_messages(&kernel)
+        .into_iter()
+        .map(|descriptor| descriptor.detail.evidence_id)
+        .collect();
     assert!(
-        confirmed_row["evidence_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("srcev:")
+        published.contains(&confirmed_row["evidence_id"].as_str().unwrap().to_owned()),
+        "{confirmed_row} cites a published descriptor of {published:?}"
     );
     let dispute = |row: &Value, key: &str| {
         crate::kernel_route_fixtures::commit_request(
@@ -1561,9 +1669,26 @@ async fn a_listed_candidate_confirms_through_dispute_while_its_evidence_lives() 
             vec![],
         )
     };
+    let kept = rows(&store)
+        .into_iter()
+        .find(|row| row.decision_object_id == "object-expired")
+        .unwrap();
+    store.truncate_contradiction_candidates_for_test().unwrap();
     let applied = route_call(&handler, dispute(&confirmed_row, "confirm-1"))
         .await
         .unwrap();
+    write_row(
+        &store,
+        &binding,
+        &kept.evidence_id,
+        "expired",
+        kept.matched_terms,
+        (
+            &kept.kernel_incarnation_id,
+            &kept.matcher_digest,
+            kept.publish_tip,
+        ),
+    );
     assert_eq!(applied["state"]["kind"], "available", "{applied}");
     assert_eq!(applied["dispositions"][0]["disposition"], "disputed");
 
@@ -1596,6 +1721,9 @@ fn the_confirm_path_never_reads_the_candidate_table() {
             "candidates_for_decision",
             "contradiction_candidates",
             "candidate_sweep_page",
+            "replace_candidates_for_descriptor",
+            "delete_candidates_as_read",
+            "candidate_rows_and_bytes",
         ] {
             assert!(!text.contains(token), "{name} names {token}");
         }

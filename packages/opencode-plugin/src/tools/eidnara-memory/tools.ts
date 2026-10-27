@@ -185,6 +185,7 @@ function createEidnaraMemoryTool(deps: EidnaraMemoryToolDeps): ToolDefinition {
                         toolCallId: toolCallId ?? "read",
                     },
                     actor: EIDNARA_MEMORY_ACTOR,
+                    disputeAdmitted: primaryActions.includes("dispute"),
                     ...(toolContext.abort ? { signal: toolContext.abort } : {}),
                 });
             } catch (error) {

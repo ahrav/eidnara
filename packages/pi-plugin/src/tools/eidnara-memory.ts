@@ -210,6 +210,7 @@ export function createEidnaraMemoryTool(deps: EidnaraMemoryToolDeps): ToolDefini
                     action,
                     identity: { sessionId, toolCallId: toolCallId || "read" },
                     actor: PI_EIDNARA_MEMORY_ACTOR,
+                    disputeAdmitted: actions.includes("dispute"),
                     ...(signal ? { signal } : {}),
                 });
                 return text.startsWith("Error:") ? err(text) : ok(text);

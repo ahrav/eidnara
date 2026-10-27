@@ -6,7 +6,7 @@
 //! pass reads the Kernel and writes only the memory store.
 
 use std::collections::HashMap;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ use super::scorer::{
     CANDIDATES_PER_DESCRIPTOR, CandidateInput, DescriptorTerms, SummaryScore, TopCandidates,
     matcher_digest,
 };
-use super::{Candidates, Count};
+use super::{CLAIM_CAUSAL_PAYLOAD_BYTES, Candidates, Count};
 use crate::canonical_memory::MEMORY_DOMAIN_ID;
 use crate::kernel_routes::KernelOpenCoordinator;
 use crate::kernel_routes::project::{ProjectBinding, ScopeFilter, stored_terms};
@@ -45,7 +45,6 @@ const SUMMARIES_PER_CHECK: usize = 256;
 /// Visible rows the scope filter judges between budget checks.
 const ROWS_PER_CHECK: usize = 256;
 const CLAIM_CHUNK: NonZeroUsize = NonZeroUsize::new(64).expect("nonzero");
-const CLAIM_CAUSAL_PAYLOAD_BYTES: NonZeroU64 = NonZeroU64::new(1024 * 1024).expect("nonzero");
 
 /// The pass's bounds; production uses [`PassBounds::default`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
