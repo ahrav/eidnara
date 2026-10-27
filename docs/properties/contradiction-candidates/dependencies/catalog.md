@@ -290,6 +290,11 @@ Confidence: high - [evidence](evidence/p5dep-scope-prefilter-is-a-superset-of-th
 Read `admission.rs:3626-3640` (the `WHERE` tail) and `project.rs:199-212`.
 Existing check: `a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain`.
 Status unaudited.
+Re-exercised by #1167: the pass applies the SQL prefilter and then
+`ScopeFilter`, as `read_visible` does;
+`the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_counts_the_cut`
+(`crates/daemon/src/candidate_pass_tests.rs:560`) keeps another project's
+decision out.
 Impact: a P5 pass that trusts the Kernel prefilter alone (without the daemon
 `ScopeFilter`) would see rows of other projects whose scopes are uncertain,
 and rows with no scope (D5); a prefilter that dropped uncertain rows would
@@ -335,6 +340,10 @@ Existing check: `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_trunca
 `bounded_selection_matches_a_full_sort_and_truncate`,
 `a_read_over_the_byte_budget_serves_the_newest_rows_that_fit`. Status
 unaudited.
+Re-exercised by #1167: the pass bounds its candidate set with `NewestRows`
+after the scope filter; the test at
+`crates/daemon/src/candidate_pass_tests.rs:560` cuts the oldest at a reduced
+cap.
 Impact: a P5 pass that copies this pattern (plan U1 "patterns to follow"
 `read.rs:185`) inherits a bound that is applied after full materialization of
 the Kernel rows; see the next record.
@@ -370,6 +379,9 @@ Read the signature at `admission.rs:3165-3176` and `visible_selected_as_of`.
 Existing check: none for the Kernel-side count; the daemon-side cap test
 (`kernel_routes.rs:1958`) constructs over-cap rows and so would witness this
 state if instrumented. Status unaudited.
+Re-exercised by #1167: the pass calls
+`visible_domain_decisions_as_of_in_scope` without a row or budget bound (the
+`sometimes` witness); the pass's own bound applies after the read.
 Impact: the plan's R2 reads the whole scope-filtered domain per pass; the
 work is unbounded in project size at the Kernel layer (plan OQ5-1). A P5
 design that assumes a bounded Kernel read is unsound at HEAD.
@@ -467,6 +479,10 @@ Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_bud
 `an_exhausted_budget_is_refused_before_the_projection_is_read`,
 `exhausted_budget_is_refused_before_kernel_readers_are_taken`
 (`search_catchup.rs:1876`). Status unaudited.
+Re-exercised by #1167:
+`a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor`
+(`crates/daemon/src/candidate_pass_tests.rs:759`) passes a spent budget and
+observes `deadline` before any Kernel read.
 Impact: plan R1/KTD2 give the P5 pass its own deadline; if it uses the
 decision-page API it gets a bounded wait plus a row-bounded scan, not a
 deadline-bounded scan.
@@ -539,6 +555,11 @@ starting during the pass; a prior job holding the slot.
 Confidence: high - [evidence](evidence/p5dep-response-never-waits-on-the-capture-job.md).
 Read `lib.rs:9219-9236`, `:13470-13481`, `dispatch.rs:24-35`, `:445-460`.
 Existing check: the two tests above. Status unaudited.
+Re-exercised by #1167: the pass is offered from the capture job's tracked task
+after `run_settled` returns, so `AfterResponse` still only spawns;
+`the_route_consent_reaches_the_pass_through_a_transform`
+(`crates/daemon/src/candidate_pass_tests.rs:933`) runs the transform and its
+after-response work with consent on and off.
 Impact: a P5 trigger that ran inside `AfterResponse` before `job.run()` or
 awaited the job would re-couple response latency to the kernel; a trigger
 chained after the job's terminal `Count` keeps this property.
@@ -569,6 +590,10 @@ Required faults and enabling state: a second pass handed off while a job
 holds the slot; an injected panic in the blocking closure; cancellation.
 Confidence: high - [evidence](evidence/p5dep-capture-slot-is-single-and-released-on-every-exit.md).
 Existing check: the two tests above. Status unaudited.
+Re-exercised by #1167:
+`a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate`
+(`crates/daemon/src/candidate_pass_tests.rs:282`) observes the slot idle and
+the commit gate free when the pass starts and while it scores.
 Impact: a P5 pass that ran inside the job's closure would extend slot
 occupancy and raise `RefusedQueueFull` for the next pass; a pass outside the
 job must not take the slot.
@@ -601,6 +626,8 @@ Read `harness_sources.rs:612-616`, `:1557`, `:1602-1603`;
 `source_capture.rs:832-840`, `:904-980`.
 Existing check: the 33-unit test; `a_refused_window_still_captures_its_documents`
 (`:2227`) shows the documents batch is independent. Status unaudited.
+Re-exercised by #1167: the pass scores the units one job published, so its
+descriptor count is bounded by the window batch plus the documents batch.
 Impact: the P5 trigger's per-pass input is at most 32 window descriptors plus
 the documents batch's descriptors, not 32 total (D3 corrects the plan's "one
 batch per pass" reading).
@@ -640,6 +667,10 @@ by `end()` inside, and `run` counts join failures at `:672-675`. Exactly-once
 is argued from code structure, not observed.
 Existing check: `the_capture_report_carries_no_unit_text`,
 `the_capture_report_reaches_host_status_field_for_field`. Status unaudited.
+Re-exercised by #1167: the job's `Count` vocabulary is unchanged, and
+`a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate`
+(`crates/daemon/src/candidate_pass_tests.rs:282`) checks two jobs end in two
+`completed` counts with consent on.
 Impact: a P5 trigger that waits for a post-publish hook has nothing to wait
 on at HEAD; it must be inserted at `admission.spawn(job.run())`
 (`lib.rs:9231`) or inside `run`.
