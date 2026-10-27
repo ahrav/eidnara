@@ -8,8 +8,9 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
 - Record triggers: `use_outcomes_identity_immutable`,
   `use_outcomes_deleted_at_set_once`,
@@ -42,9 +43,9 @@ its parent is `d85de937b`).
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
   (`crates/kernel/tests/kernel_schema.rs:2207`);
   `use_outcome_classification_and_identity_shapes_are_checked`
-  (`crates/kernel/tests/kernel_schema.rs:2346`);
+  (`crates/kernel/tests/kernel_schema.rs:2369`);
   `an_admission_citation_names_a_recorded_use_outcome_and_never_changes`
-  (`crates/kernel/tests/kernel_schema.rs:2483`). Status: unaudited.
+  (`crates/kernel/tests/kernel_schema.rs:2506`). Status: unaudited.
 
 ## Failure scenario
 

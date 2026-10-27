@@ -9,8 +9,9 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
 - Pin predicate: `crates/kernel/src/local_file.rs:514`.
 - Citation predicate: `crates/kernel/src/slice/write.rs:42`.

@@ -8,8 +8,9 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
 - DDL CHECKs: `crates/kernel/src/schema.rs:193`; the `use_outcome_sessions`
   row each record names carries the same `sensitive` and `local_only` CHECKs
@@ -23,9 +24,9 @@ its parent is `d85de937b`).
   `local_only`, the DDL refuses any other value, and no serve
   creates a registry object, evidence row, change event, or outbox entry.
 - Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
-  (`crates/kernel/tests/kernel_schema.rs:2346`);
+  (`crates/kernel/tests/kernel_schema.rs:2369`);
   `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-  (`crates/kernel/tests/kernel_use_outcome.rs:322`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:323`). Status: unaudited.
 
 ## Failure scenario
 

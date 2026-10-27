@@ -8,8 +8,9 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
 - Selection: `expired_page` (`crates/kernel/src/use_outcome.rs:686`) reads one
   statement, so one snapshot, in `retain_until`, id order through
@@ -41,11 +42,11 @@ its parent is `d85de937b`).
   inside that commit; a page that retires nothing commits nothing; the Kernel
   maintenance slice calls it once per pass whenever the Kernel is Ready.
 - Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
-  (`crates/kernel/tests/kernel_use_outcome.rs:493`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:494`);
   `an_expiry_backlog_drains_one_page_per_call`
-  (`crates/kernel/tests/kernel_use_outcome.rs:553`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:554`);
   `an_expired_record_cited_by_a_live_report_is_retained`
-  (`crates/kernel/tests/kernel_use_outcome.rs:623`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:624`);
   `a_record_cited_after_selection_is_kept`
   (`crates/kernel/src/use_outcome.rs:851`);
   `a_page_another_sweep_committed_at_the_same_cutoff_replays`
@@ -55,7 +56,7 @@ its parent is `d85de937b`).
   `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
   (`crates/kernel/src/use_outcome.rs:963`);
   `the_cited_count_covers_the_rows_read_before_the_page_fills`
-  (`crates/kernel/tests/kernel_use_outcome.rs:818`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:819`);
   `the_sweep_and_the_reads_use_their_indexes`
   (`crates/kernel/src/use_outcome.rs:980`);
   `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`

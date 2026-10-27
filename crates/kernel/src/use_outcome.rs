@@ -1,6 +1,6 @@
 //! Use outcomes record which decision objects a session was served at one frozen composition, so a later reader can name the sessions a finding reached and whether it was disputed after the serve.
 //!
-//! A serving record is one `use_outcomes` row per (project digest, harness, session, served-set digest) and one `use_outcome_decisions` row per served decision object. The record holds ids, commit sequences, and timestamps only; it is classified `sensitive` and `local_only` by DDL and is neither a registry object nor an evidence row, so no egress path reads it. The identity and the decision set never change after commit. Retirement sets `invalidated_commit_seq`; no row is deleted, so an admission row citing a record keeps resolving it.
+//! A serving record is one `use_outcomes` row per (project digest, harness, session, served-set digest) and one `use_outcome_decisions` row per served decision object; every record of a session names that session's one `use_outcome_sessions` row, which is classified and retained like the records, never changes, and is never deleted. The record holds ids, commit sequences, and timestamps only; it is classified `sensitive` and `local_only` by DDL and is neither a registry object nor an evidence row, so no egress path reads it. The identity and the decision set never change after commit. Retirement sets `invalidated_commit_seq`; no row is deleted, so an admission row citing a record keeps resolving it.
 
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
@@ -1029,6 +1029,7 @@ mod tests {
             REPORTING_SERVE_SQL,
             &[&"decision", &digest, &"opencode", &"session", &NOW],
         );
+        // The first UNIQUE of `use_outcome_sessions` is the session identity.
         assert!(
             link.contains("sqlite_autoindex_use_outcome_sessions_1"),
             "{link}"

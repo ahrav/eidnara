@@ -653,7 +653,7 @@ within the cap that parses back to its inputs. Typed form (#1162):
 is null when none was sent, and that `DisputeReason` rendered from the
 typed columns and the row's `evidence_id` equals the stored `reason`;
 `reporter_columns_are_dispute_only_and_checked_by_the_schema`
-(`crates/kernel/tests/kernel_use_outcome.rs:1249`) asserts other writers
+(`crates/kernel/tests/kernel_use_outcome.rs:1251`) asserts other writers
 store NULL and the CHECKs refuse an unknown class, a half-set pair, and
 non-JSON payload.
 Guarantee: The typed columns (`reporter_source_class`,
@@ -707,7 +707,7 @@ the route commits goes through `Envelope::record_dispute_admission`
 Status: active
 Exercised: yes - Kernel test
 `a_dispute_links_the_reporting_sessions_latest_prior_serve_of_its_subject`
-(`crates/kernel/tests/kernel_use_outcome.rs:1165`) serves `d1` to one
+(`crates/kernel/tests/kernel_use_outcome.rs:1166`) serves `d1` to one
 session at two sequences, serves another decision to the same session and
 `d1` to another session, and asserts the dispute links the later serve, a
 dispute of the other decision links that decision's serve, a session never
@@ -747,7 +747,11 @@ dispute.
 Confidence: high - [evidence](evidence/use-outcome-link-names-own-session-prior-serve.md).
 Read `reporting_serve` and the INSERT; both tests above construct the
 listed faults.
-Existing check: `kernel_use_outcome.rs:1165`; `kernel_routes.rs:6610`.
+Existing check: `kernel_use_outcome.rs:1166`; `kernel_routes.rs:6610`;
+`kernel_use_outcome.rs:1396` (session sequence copied from the record);
+`kernel_use_outcome.rs:1444` (tie on the served sequence);
+`kernel_use_outcome.rs:1480` (stored link equals the record-join definition
+over generated serve histories).
 Status unaudited.
 Impact: a wrong link attributes a harm signal to a session that did not
 receive the finding.

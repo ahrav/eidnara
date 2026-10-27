@@ -51,7 +51,7 @@ under `crates/` writes `asserted_edges`.
 | `dispute-identity-includes-evidence-key` | D9, F10, F11 | two evidence keys; replay; reuse | yes (F12 not constructed) |
 | `dispute-preview-writes-nothing` | D1 to D6, D10 | preview then commit at one tip; a tip that moves between them | yes |
 | `structured-reason-projects-typed-reporter-data` | D7, D13, F15 | reserved bytes; a forged reason; a cascade | partial - PR A form |
-| `use-outcome-link-names-own-session-prior-serve` | (PR B) | a serve before a dispute in one session; two serves; another session; another decision | yes - `kernel_use_outcome.rs:1165`, `kernel_routes.rs:6610` |
+| `use-outcome-link-names-own-session-prior-serve` | (PR B) | a serve before a dispute in one session; two serves; another session; another decision | yes - `kernel_use_outcome.rs:1166`, `kernel_routes.rs:6610` |
 
 ## Coverage checks to add
 

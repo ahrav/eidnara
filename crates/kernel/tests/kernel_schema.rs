@@ -2167,7 +2167,7 @@ fn seed_use_outcome_session(conn: &Connection, session_id: &str) -> i64 {
     .unwrap()
 }
 
-/// Inserts one serving record `id` of session `session-1` served at `served` and created at `created`, with one decision row naming `object_id`, and answers the session's `session_seq`.
+/// Records session `session-1` and inserts its serving record `id` served at `served` and created at `created`, with one decision row naming `object_id`, and answers the session's `session_seq`. A connection seeds this session once.
 fn seed_use_outcome(
     conn: &Connection,
     id: &str,
@@ -2210,10 +2210,28 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
     let root = seed_root_domain(&mut conn);
     seed_object(&conn, "decision-1", "decision", root);
     seed_object(&conn, "decision-2", "decision", root);
+    seed_object(&conn, "decision-3", "decision", root);
     let id = "c".repeat(64);
     let created = next_commit(&conn, "tx-created");
     let session_seq = seed_use_outcome(&conn, &id, "decision-1", root, created);
     let other_session = seed_use_outcome_session(&conn, "session-2");
+    let decision_row = |object_id: &str, session: i64, served: i64| {
+        format!(
+            "INSERT INTO use_outcome_decisions(use_outcome_id,object_id,session_seq,served_commit_seq)
+             VALUES ('{id}','{object_id}',{session},{served})"
+        )
+    };
+    // While the record's commit is the newest, a decision row inserts only with
+    // its record's session and served sequence.
+    for (session, served) in [(other_session, root), (session_seq, created)] {
+        assert_aborts_with(
+            &conn,
+            &decision_row("decision-2", session, served),
+            "use_outcome_decisions are written with their record",
+        );
+    }
+    conn.execute(&decision_row("decision-3", session_seq, root), [])
+        .expect("a decision row copying its record inserts in the record's commit");
     let later = next_commit(&conn, "tx-later");
 
     for (column, value) in [
@@ -2284,10 +2302,7 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
     ] {
         assert_aborts_with(
             &conn,
-            &format!(
-                "INSERT INTO use_outcome_decisions(use_outcome_id,object_id,session_seq,served_commit_seq)
-                 VALUES ('{id}','decision-2',{session},{served})"
-            ),
+            &decision_row("decision-2", session, served),
             "use_outcome_decisions are written with their record",
         );
     }
@@ -2311,6 +2326,14 @@ fn use_outcome_identity_and_served_set_are_never_rewritten() {
         (
             "UPDATE use_outcome_sessions SET session_id='session-3'",
             "use_outcome_sessions are immutable",
+        ),
+        (
+            "INSERT OR REPLACE INTO use_outcome_sessions(
+                 session_seq,project_digest,harness,session_id,sensitivity_class,
+                 provider_egress_class
+             ) SELECT session_seq,project_digest,harness,session_id,sensitivity_class,
+                      provider_egress_class FROM use_outcome_sessions",
+            "use_outcome_sessions are retained history",
         ),
     ] {
         assert_aborts_with(&conn, sql, guard);

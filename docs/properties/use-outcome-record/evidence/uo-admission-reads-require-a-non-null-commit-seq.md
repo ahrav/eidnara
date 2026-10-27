@@ -9,8 +9,9 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
 - Writer binding: the INSERT at `crates/kernel/src/admission.rs:1816` binds
   `self.commit_seq` at `crates/kernel/src/admission.rs:1850`.
@@ -25,7 +26,7 @@ its parent is `d85de937b`).
   `malformed_stored_policy_and_sensitivity_fail_closed_without_read_error`
   (`crates/kernel/tests/kernel_admission.rs:2935`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:341`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:342`). Status: unaudited.
 
 ## Failure scenario
 

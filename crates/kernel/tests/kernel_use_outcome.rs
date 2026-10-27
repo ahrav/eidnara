@@ -4,7 +4,7 @@ use kernel::{
     USE_OUTCOME_RETENTION_CLASS, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
     served_set_digest, use_outcome_id,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 const HARNESS: &str = "opencode";
 const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
@@ -209,7 +209,7 @@ fn served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve() 
     assert_eq!(USE_OUTCOME_RETENTION_CLASS, "use_outcome_capture");
 }
 
-/// A duplicate identity is `Conflict`, an unregistered decision is `NotFound`, a malformed or secret-bearing spec is `InvalidInput`, and a refused commit leaves no row in either table.
+/// A duplicate identity is `Conflict`, an unregistered decision is `NotFound`, a malformed or secret-bearing spec is `InvalidInput`, and a refused commit leaves no row in any of the three use-outcome tables.
 #[test]
 fn duplicate_and_malformed_serves_are_refused_without_rows() {
     let root = tempfile::tempdir().unwrap();
@@ -220,9 +220,10 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
         (
             count(root.path(), "SELECT COUNT(*) FROM use_outcomes"),
             count(root.path(), "SELECT COUNT(*) FROM use_outcome_decisions"),
+            count(root.path(), "SELECT COUNT(*) FROM use_outcome_sessions"),
         )
     };
-    assert_eq!(rows(), (1, 1));
+    assert_eq!(rows(), (1, 1, 1));
 
     assert_eq!(
         insert(&store, "again", spec("s1", &["d1"], served_at, 300)),
@@ -305,7 +306,7 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
             "{context}"
         );
     }
-    assert_eq!(rows(), (1, 1));
+    assert_eq!(rows(), (1, 1, 1));
     assert_eq!(
         count(
             root.path(),
@@ -1242,9 +1243,10 @@ fn a_dispute_links_the_reporting_sessions_latest_prior_serve_of_its_subject() {
     );
 }
 
-/// Only disputes take reporter columns; every other writer stores NULL, and
-/// the DDL refuses a class outside its vocabulary, a half-set pair, and a
-/// payload that is not JSON.
+/// Only disputes take reporter columns; every other writer stores NULL, the
+/// DDL accepts every class pair the Kernel vocabularies name, and it refuses a
+/// class outside its vocabulary, a half-set pair, and a payload that is not
+/// JSON.
 #[test]
 fn reporter_columns_are_dispute_only_and_checked_by_the_schema() {
     let root = tempfile::tempdir().unwrap();
@@ -1317,6 +1319,19 @@ fn reporter_columns_are_dispute_only_and_checked_by_the_schema() {
         .is_ok()
     );
     assert!(insert_row("ok-plain", "mark_stale", "NULL", "NULL", "NULL").is_ok());
+    for source in SourceClass::ALL {
+        for taint in TaintClass::ALL {
+            let id = format!("every-{}-{}", source.as_str(), taint.as_str());
+            let (source, taint) = (
+                format!("'{}'", source.as_str()),
+                format!("'{}'", taint.as_str()),
+            );
+            assert!(
+                insert_row(&id, "contradict", &source, &taint, "NULL").is_ok(),
+                "{id}"
+            );
+        }
+    }
     for (id, event, source, taint, payload) in [
         (
             "bad-source",
@@ -1422,4 +1437,109 @@ fn a_session_is_recorded_once_and_its_decision_rows_copy_their_record() {
         count(root.path(), "SELECT COUNT(*) FROM use_outcome_decisions"),
         6
     );
+}
+
+/// Two records of one session that serve the subject at the same sequence tie on `served_commit_seq`; the dispute links the one with the greater id.
+#[test]
+fn a_tie_on_the_served_sequence_links_the_greater_record_id() {
+    let root = tempfile::tempdir().unwrap();
+    let store = decision_store(root.path(), &["d1", "d2"]);
+    let served_at = tick(&store, "served");
+    let alone = insert(&store, "alone", spec("s1", &["d1"], served_at, 0)).unwrap();
+    let paired = insert(&store, "paired", spec("s1", &["d1", "d2"], served_at, 0)).unwrap();
+    let linked = dispute(
+        &store,
+        root.path(),
+        "tie",
+        "d1",
+        &reporter("s1", TaintClass::AssistantInference, None),
+    );
+    assert_eq!(linked.0, Some(alone.max(paired)));
+}
+
+/// The link as #1162 defines it, read through the record join: the session's record naming the subject with the greatest `served_commit_seq` below the dispute's commit, ties to the greatest id.
+const DEFINITION_SQL: &str = "SELECT u.use_outcome_id FROM use_outcome_decisions d
+     JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
+    WHERE d.object_id=?1 AND u.project_digest=?2 AND u.harness=?3 AND u.session_id=?4
+      AND u.served_commit_seq<?5
+    ORDER BY u.served_commit_seq DESC, u.use_outcome_id DESC LIMIT 1";
+
+/// One generated serve: session and harness indexes, a served-set mask over `d1..d3`, and which earlier tick it was served at.
+type GeneratedServe = (usize, usize, u8, usize);
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: 48,
+        rng_algorithm: proptest::test_runner::RngAlgorithm::ChaCha,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x1162),
+        ..proptest::prelude::ProptestConfig::default()
+    })]
+
+    /// Over generated serve histories (shared and out-of-order served sequences, overlapping served sets, two harnesses, and sessions never served), every dispute stores the link the record-join definition answers.
+    #[test]
+    fn the_stored_link_equals_the_record_join_definition(
+        serves in proptest::collection::vec(
+            (0usize..3, 0usize..2, 0u8..8, 0usize..4),
+            0..12,
+        ),
+    ) {
+        check_link_definition(&serves)?;
+    }
+}
+
+fn check_link_definition(
+    serves: &[GeneratedServe],
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    const OBJECTS: [&str; 3] = ["d1", "d2", "d3"];
+    const SESSIONS: [&str; 4] = ["s1", "s2", "s3", "never"];
+    const HARNESSES: [&str; 2] = [HARNESS, "pi"];
+    let root = tempfile::tempdir().unwrap();
+    let store = decision_store(root.path(), &OBJECTS);
+    let ticks: Vec<i64> = (0..4).map(|n| tick(&store, &format!("tick-{n}"))).collect();
+    for (n, &(session, harness, mask, at)) in serves.iter().enumerate() {
+        let objects: Vec<&str> = (0..OBJECTS.len())
+            .filter(|bit| mask & (1 << bit) != 0)
+            .map(|bit| OBJECTS[bit])
+            .collect();
+        let mut serve = spec(SESSIONS[session], &objects, ticks[at], 0);
+        serve.harness = HARNESSES[harness].to_string();
+        // A repeated identity is `Conflict` and records nothing; the history keeps its first record.
+        let _ = insert(&store, &format!("serve-{n}"), serve);
+    }
+    let reads = writer(root.path());
+    for session in SESSIONS {
+        for subject in OBJECTS {
+            let reporter = reporter(session, TaintClass::AssistantInference, None);
+            let receipt = store
+                .commit(
+                    intent(&format!("dispute-{session}-{subject}")),
+                    |envelope| {
+                        envelope.record_dispute_admission(
+                            request(subject, EventKind::MarkDisputed),
+                            &reporter,
+                        )?;
+                        Ok(String::new())
+                    },
+                )
+                .unwrap();
+            let stored: Option<String> = reads
+                .query_row(
+                    "SELECT use_outcome_id FROM admission_decisions
+                      WHERE commit_seq=?1 AND subject_object_id=?2",
+                    params![receipt.commit_seq, subject],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let defined: Option<String> = reads
+                .query_row(
+                    DEFINITION_SQL,
+                    params![subject, project(), HARNESS, session, receipt.commit_seq],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            proptest::prop_assert_eq!(stored, defined, "{} {}", session, subject);
+        }
+    }
+    Ok(())
 }

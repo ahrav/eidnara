@@ -399,7 +399,7 @@ Existing check:
 `malformed_stored_policy_and_sensitivity_fail_closed_without_read_error`
 (`crates/kernel/tests/kernel_admission.rs:2935`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:342`). Status: unaudited.
 Impact: A null row counted as a dispute would report harm with no committed
 event.
 Open questions: None.
@@ -678,7 +678,7 @@ Existing check: `eligibility_matrix_includes_secret_unknown_and_tombstone`
 `unrecognized_stored_classes_read_back_restrictive`
 (`crates/kernel/src/cas/mod.rs:797`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-(`crates/kernel/tests/kernel_use_outcome.rs:322`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:323`). Status: unaudited.
 Impact: A use-outcome row presented to egress would leave the host.
 Open questions: None.
 
@@ -812,9 +812,9 @@ connection.
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
 (`crates/kernel/tests/kernel_schema.rs:2207`);
 `use_outcome_classification_and_identity_shapes_are_checked`
-(`crates/kernel/tests/kernel_schema.rs:2346`);
+(`crates/kernel/tests/kernel_schema.rs:2369`);
 `an_admission_citation_names_a_recorded_use_outcome_and_never_changes`
-(`crates/kernel/tests/kernel_schema.rs:2483`). Status: unaudited.
+(`crates/kernel/tests/kernel_schema.rs:2506`). Status: unaudited.
 Impact: History rewriting defeats the witness the record exists to be.
 Open questions:
 - OQ3-10: a session that continues after its delete reuses its identity at an
@@ -843,9 +843,9 @@ CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:193`); the insert
 names the classes as literals (`insert_use_outcome`
 (`crates/kernel/src/use_outcome.rs:316`)).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
-(`crates/kernel/tests/kernel_schema.rs:2346`);
+(`crates/kernel/tests/kernel_schema.rs:2369`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
-(`crates/kernel/tests/kernel_use_outcome.rs:322`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:323`). Status: unaudited.
 Impact: A stop condition of the plan: a Remote-eligible serving record.
 Open questions:
 - Backup classification: the backup scan reads every table with a
@@ -874,9 +874,9 @@ the join is `crates/kernel/src/use_outcome.rs:198`, using the admission lineage
 text through `crates/kernel/src/admission.rs:926`.
 Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`);
+(`crates/kernel/tests/kernel_use_outcome.rs:342`);
 `disputed_after_serve_is_judged_against_each_serve`
-(`crates/kernel/tests/kernel_use_outcome.rs:749`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:750`). Status: unaudited.
 Impact: A prior dispute or a stale mark counted as harm after the serve.
 Open questions:
 - A decision disputed then re-approved still counts: event existence counts
@@ -913,11 +913,11 @@ Confidence: high -
 (`crates/kernel/src/use_outcome.rs:710`); receipt
 `crates/kernel/src/local_file.rs:438`.
 Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
-(`crates/kernel/tests/kernel_use_outcome.rs:493`);
+(`crates/kernel/tests/kernel_use_outcome.rs:494`);
 `an_expiry_backlog_drains_one_page_per_call`
-(`crates/kernel/tests/kernel_use_outcome.rs:553`);
+(`crates/kernel/tests/kernel_use_outcome.rs:554`);
 `an_expired_record_cited_by_a_live_report_is_retained`
-(`crates/kernel/tests/kernel_use_outcome.rs:623`);
+(`crates/kernel/tests/kernel_use_outcome.rs:624`);
 `a_record_cited_after_selection_is_kept`
 (`crates/kernel/src/use_outcome.rs:851`);
 `a_page_another_sweep_committed_at_the_same_cutoff_replays`
@@ -927,7 +927,7 @@ Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
 `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
 (`crates/kernel/src/use_outcome.rs:963`);
 `the_cited_count_covers_the_rows_read_before_the_page_fills`
-(`crates/kernel/tests/kernel_use_outcome.rs:818`);
+(`crates/kernel/tests/kernel_use_outcome.rs:819`);
 `the_sweep_and_the_reads_use_their_indexes`
 (`crates/kernel/src/use_outcome.rs:980`);
 `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
@@ -966,7 +966,7 @@ the delete triggers and the retained read hold the Kernel arm (`served_set`
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
 (`crates/kernel/tests/kernel_schema.rs:2207`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`) (a retired record stays
+(`crates/kernel/tests/kernel_use_outcome.rs:342`) (a retired record stays
 readable);
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`);
@@ -1014,7 +1014,7 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:214`),
 `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`
-(`crates/kernel/tests/kernel_use_outcome.rs:713`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:714`). Status: unaudited.
 Impact: Duplicates inflate served counts and P7 removal sets.
 Open questions:
 - Receipts last for the database incarnation and serving records for the
@@ -1064,7 +1064,7 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `duplicate_and_malformed_serves_are_refused_without_rows`
 (`crates/kernel/tests/kernel_use_outcome.rs:214`),
 `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-(`crates/kernel/tests/kernel_use_outcome.rs:734`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:735`). Status: unaudited.
 Impact: The record names findings the session never saw.
 Open questions: None.
 
@@ -1184,7 +1184,7 @@ Existing check:
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:201`); Kernel half:
 `a_session_delete_marks_each_live_record_once`
-(`crates/kernel/tests/kernel_use_outcome.rs:891`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:892`). Status: unaudited.
 Impact: A deleted session reads as live, or a live one as deleted.
 Open questions:
 - A record written after the delete commits, by a pass on a route still bound to
@@ -1234,11 +1234,11 @@ Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 `the_serve_and_the_touch_of_one_pass_share_one_kernel_wait`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:382`); Kernel half:
 `last_transform_at_advances_live_records_without_a_commit`
-(`crates/kernel/tests/kernel_use_outcome.rs:940`),
+(`crates/kernel/tests/kernel_use_outcome.rs:941`),
 `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-(`crates/kernel/tests/kernel_use_outcome.rs:999`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1000`),
 `an_outside_file_lock_bounds_the_advance_at_begin`
-(`crates/kernel/tests/kernel_use_outcome.rs:1036`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1037`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.
@@ -1293,9 +1293,9 @@ Existing check:
 `packages/cli/src/commands/review-wire.contract.test.ts:125`;
 `packages/cli/src/commands/review.test.ts:849`; Kernel half:
 `disputed_after_serve_is_judged_against_each_serve`
-(`crates/kernel/tests/kernel_use_outcome.rs:749`) and
+(`crates/kernel/tests/kernel_use_outcome.rs:750`) and
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-(`crates/kernel/tests/kernel_use_outcome.rs:341`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:342`). Status: unaudited.
 Impact: A zero misread as "no harm observed".
 Open questions:
 - OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome` method

@@ -8,8 +8,9 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
 - Join: `crates/kernel/src/use_outcome.rs:198`; read: `served_sessions_for`
   (`crates/kernel/src/use_outcome.rs:514`).
@@ -22,9 +23,9 @@ its parent is `d85de937b`).
   sequence greater than n.
 - Existing check:
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:341`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:342`);
   `disputed_after_serve_is_judged_against_each_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:749`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:750`). Status: unaudited.
 
 ## Failure scenario
 

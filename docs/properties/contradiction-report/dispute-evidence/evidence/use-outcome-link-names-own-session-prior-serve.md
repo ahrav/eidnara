@@ -55,14 +55,23 @@ Two serves of the subject in one session, a serve of another decision in
 that session, a serve of the subject in another session, a session never
 served the subject, and a serve recorded after the dispute. Both
 `a_dispute_links_the_reporting_sessions_latest_prior_serve_of_its_subject`
-(`crates/kernel/tests/kernel_use_outcome.rs:1165`) and
+(`crates/kernel/tests/kernel_use_outcome.rs:1166`) and
 `a_dispute_row_records_its_reporter_and_links_the_sessions_latest_serve`
 (`crates/daemon/tests/kernel_routes.rs:6610`) construct these.
 `a_session_is_recorded_once_and_its_decision_rows_copy_their_record`
-(`crates/kernel/tests/kernel_use_outcome.rs:1381`) checks that a session is
+(`crates/kernel/tests/kernel_use_outcome.rs:1396`) checks that a session is
 recorded once, that another session, harness, or project gets its own
 `session_seq`, and that every decision row carries its record's
 `session_seq` and `served_commit_seq`.
+`a_tie_on_the_served_sequence_links_the_greater_record_id`
+(`crates/kernel/tests/kernel_use_outcome.rs:1444`) builds two records of one
+session served at the same sequence.
+`the_stored_link_equals_the_record_join_definition`
+(`crates/kernel/tests/kernel_use_outcome.rs:1480`) generates serve histories
+with shared and out-of-order served sequences, overlapping served sets, two
+harnesses, and a session never served, and checks that every dispute stores
+the record the `use_outcome_decisions` and `use_outcomes` join answers under
+the ticket's definition.
 
 ## Investigation log
 

@@ -38,7 +38,7 @@ its parent is `d85de937b`).
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:201`); Kernel half:
   `a_session_delete_marks_each_live_record_once`
-  (`crates/kernel/tests/kernel_use_outcome.rs:891`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:892`). Status: unaudited.
 
 ## Failure scenario
 
