@@ -16,7 +16,7 @@ revision.
   `idx_use_outcomes_live_retention` (defined in the `use_outcomes` DDL,
   `crates/kernel/src/schema.rs:188`; the query plan is asserted by
   `the_sweep_and_the_reads_use_their_indexes`
-  (`crates/kernel/src/use_outcome.rs:1031`)); it
+  (`crates/kernel/src/use_outcome.rs:1032`)); it
   pages up to 64 uncited records and counts the cited ones it reads before the
   page fills. The scan reads cited rows ahead of the page, so its read work
   grows with the cited expired records while its writes stay bounded by the
@@ -52,17 +52,17 @@ revision.
   `an_expired_record_cited_by_a_live_report_is_retained`
   (`crates/kernel/tests/kernel_use_outcome.rs:700`);
   `a_record_cited_after_selection_is_kept`
-  (`crates/kernel/src/use_outcome.rs:902`);
+  (`crates/kernel/src/use_outcome.rs:903`);
   `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-  (`crates/kernel/src/use_outcome.rs:930-931`);
+  (`crates/kernel/src/use_outcome.rs:931-932`);
   `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-  (`crates/kernel/src/use_outcome.rs:993`);
+  (`crates/kernel/src/use_outcome.rs:994`);
   `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-  (`crates/kernel/src/use_outcome.rs:1014`);
+  (`crates/kernel/src/use_outcome.rs:1015`);
   `the_cited_count_covers_the_rows_read_before_the_page_fills`
   (`crates/kernel/tests/kernel_use_outcome.rs:956`);
   `the_sweep_and_the_reads_use_their_indexes`
-  (`crates/kernel/src/use_outcome.rs:1031`);
+  (`crates/kernel/src/use_outcome.rs:1032`);
   `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
   (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
   `a_cancelled_slice_stops_before_the_use_outcome_sweep`

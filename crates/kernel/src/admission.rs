@@ -4530,6 +4530,29 @@ mod tests {
     /// none of this.
     #[test]
     fn a_dispute_with_evidence_never_raises_standing_across_the_grid() {
+        let landed = |prior: Disposition, event: EventKind| match (prior, event) {
+            (
+                Disposition::Active
+                | Disposition::Stale
+                | Disposition::Disputed
+                | Disposition::Superseded,
+                EventKind::MarkDisputed,
+            ) => Disposition::Disputed,
+            (
+                Disposition::Active
+                | Disposition::Stale
+                | Disposition::Disputed
+                | Disposition::Superseded
+                | Disposition::Rejected
+                | Disposition::Contradicted
+                | Disposition::Quarantined,
+                EventKind::Contradict,
+            ) => Disposition::Contradicted,
+            (Disposition::Rejected, EventKind::MarkDisputed) => Disposition::Rejected,
+            (Disposition::Contradicted, EventKind::MarkDisputed) => Disposition::Contradicted,
+            (Disposition::Quarantined, EventKind::MarkDisputed) => Disposition::Quarantined,
+            (prior, event) => unreachable!("{prior:?} {event:?}"),
+        };
         let mut judged = 0;
         for historical in Maturity::ALL {
             for effective in Maturity::ALL {
@@ -4583,6 +4606,7 @@ mod tests {
                             } else {
                                 assert_eq!(result.disposition, requested, "{case}");
                             }
+                            assert_eq!(result.disposition, landed(*disposition, event), "{case}");
                             judged += 1;
                         }
                     }

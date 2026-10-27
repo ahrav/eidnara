@@ -81,15 +81,22 @@ function parseEvidenceRef(value: string): EvidenceRef | null {
     return { path, git_object_id: value.slice(at + 1) };
 }
 
-/** Accepts the wire event spelled with `_` or `-`; the flags may appear anywhere, each at most once. */
+function isMemoryMarkFlag(word: string): boolean {
+    return (
+        word === MEMORY_MARK_CONFIRM_FLAG ||
+        word === MEMORY_MARK_EVIDENCE_FLAG ||
+        word === MEMORY_MARK_PATH_FLAG
+    );
+}
+
+/** Accepts the wire event spelled with `_` or `-`; the flags may appear anywhere, each at most once. A value is any word other than one of the three flags, so a repository path that begins with `--` is citable. */
 export function parseMemoryMarkArgs(raw: string): ParsedMemoryMarkArgs {
     const words = raw
         .trim()
         .split(/\s+/)
         .filter((word) => word.length > 0);
     let confirmed = false;
-    let evidenceId: string | undefined;
-    let evidencePath: string | undefined;
+    const valued = new Map<string, string>();
     const positional: string[] = [];
     for (let index = 0; index < words.length; index += 1) {
         const word = words[index] as string;
@@ -97,17 +104,17 @@ export function parseMemoryMarkArgs(raw: string): ParsedMemoryMarkArgs {
             confirmed = true;
         } else if (word === MEMORY_MARK_EVIDENCE_FLAG || word === MEMORY_MARK_PATH_FLAG) {
             const value = words[index + 1];
-            const repeated = word === MEMORY_MARK_EVIDENCE_FLAG ? evidenceId : evidencePath;
-            if (value === undefined || value.startsWith("--") || repeated !== undefined) {
+            if (value === undefined || isMemoryMarkFlag(value) || valued.has(word)) {
                 return { ok: false, message: MEMORY_MARK_USAGE };
             }
-            if (word === MEMORY_MARK_EVIDENCE_FLAG) evidenceId = value;
-            else evidencePath = value;
+            valued.set(word, value);
             index += 1;
         } else {
             positional.push(word);
         }
     }
+    const evidenceId = valued.get(MEMORY_MARK_EVIDENCE_FLAG);
+    const evidencePath = valued.get(MEMORY_MARK_PATH_FLAG);
     if (positional.length !== 2) return { ok: false, message: MEMORY_MARK_USAGE };
     const [rawEvent, objectId] = positional as [string, string];
     const event = rawEvent.replaceAll("-", "_");
@@ -242,7 +249,8 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         object_id: args.objectId,
         event: args.event,
         ...(args.evidenceId === undefined ? {} : { evidence_id: args.evidenceId }),
-        ...(args.evidenceRef === undefined ? {} : { evidence_ref: args.evidenceRef }),
+        // A copy, so the commit sends the reference the preview judged even if the caller edits its args during the confirmation wait.
+        ...(args.evidenceRef === undefined ? {} : { evidence_ref: { ...args.evidenceRef } }),
     };
     const operations = [operation];
     const sourceKind = input.sourceKind ?? ("user" as const);

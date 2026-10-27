@@ -995,12 +995,12 @@ fn apply(
                 envelope.retire_decision(object_id)?;
                 result.touched.push(object_id.clone());
             }
-            Operation::Disposition { object_id, .. } => {
+            Operation::Disposition { .. } => {
                 let args = operation.disposition().expect("a disposition operation");
                 result
                     .dispositions
                     .push(record_disposition(envelope, filter, args)?);
-                result.touched.push(object_id.clone());
+                result.touched.push(args.object_id.to_string());
             }
             Operation::InsertObservation { spec } => {
                 ensure_domain(

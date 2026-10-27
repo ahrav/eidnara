@@ -128,6 +128,10 @@ describe("parseMemoryMarkArgs evidence", () => {
             ok: true,
             args: { evidenceId: "ev", evidenceRef: { path: "src/a.rs", git_object_id: OID } },
         });
+        expect(parseMemoryMarkArgs(`mark_disputed mem_1 --path --notes.md@${OID}`)).toMatchObject({
+            ok: true,
+            args: { evidenceRef: { path: "--notes.md", git_object_id: OID } },
+        });
     });
 
     test("a dispute without evidence, and evidence on another event, print usage", () => {
@@ -217,6 +221,21 @@ describe("runMemoryMarkCommand evidence", () => {
         expect(memoryMarkOperationId(SESSION, byId)).not.toBe(
             memoryMarkOperationId(SESSION, byFile),
         );
+        expect(memoryMarkOperationId(SESSION, { ...byId, evidenceId: "ev-b" })).not.toBe(
+            memoryMarkOperationId(SESSION, byId),
+        );
+        expect(
+            memoryMarkOperationId(SESSION, {
+                ...byFile,
+                evidenceRef: { path: "src/lib.rs", git_object_id: "f".repeat(40) },
+            }),
+        ).not.toBe(memoryMarkOperationId(SESSION, byFile));
+        expect(
+            memoryMarkOperationId(SESSION, {
+                ...byFile,
+                evidenceRef: { path: "src/main.rs", git_object_id: OID },
+            }),
+        ).not.toBe(memoryMarkOperationId(SESSION, byFile));
         const first = await run(h, byId);
         const second = await run(h, byFile);
         expect(first).toMatchObject({ kind: "applied", replayed: false });
@@ -225,6 +244,28 @@ describe("runMemoryMarkCommand evidence", () => {
         const again = await run(h, byId);
         expect(again).toEqual(replayOf(first));
         expect(h.kernel.receipts.size).toBe(2);
+    });
+
+    test("the commit sends the reference the preview judged when the caller edits its args during confirmation", async () => {
+        const h = harness();
+        const input: MemoryMarkArgs = {
+            event: "mark_disputed",
+            objectId: "mem_verified",
+            evidenceRef: { path: "docs/a.md", git_object_id: OID },
+            confirmed: false,
+        };
+        let asked = false;
+        const outcome = await run(h, input, async () => {
+            asked = true;
+            (input.evidenceRef as { git_object_id: string }).git_object_id = "f".repeat(40);
+            return true;
+        });
+        expect(asked).toBe(true);
+        expect(outcome.kind).toBe("applied");
+        expect(h.transport.calls.map((call) => call.body.operations[0].evidence_ref)).toEqual([
+            { path: "docs/a.md", git_object_id: OID },
+            { path: "docs/a.md", git_object_id: OID },
+        ]);
     });
 
     test("the fake refuses the reference shapes the route refuses", async () => {

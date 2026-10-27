@@ -8,16 +8,17 @@ Record kind: new obligation activated by #1155.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip, the commit that carries this
+References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:424-427`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:428-431`; the request
   digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:475`)).
-- Call sites: `record_use_outcome` runs after the commit bookkeeping of
-  `first_transform` (`crates/daemon/src/lib.rs:10039`) and `rerun_transform`
-  (`crates/daemon/src/lib.rs:9968`), and in `run_transform` when a committed
-  pass fails its boundary read (`crates/daemon/src/lib.rs:9716`).
+  (`crates/daemon/src/use_outcome_writer.rs:479`)).
+- Call sites: `record_use_outcome` runs after the commit bookkeeping, at the
+  call in `first_transform` (`crates/daemon/src/lib.rs:10035`) and the call in
+  `rerun_transform` (`crates/daemon/src/lib.rs:9964`), and at the call in
+  `run_transform` when a committed pass fails its boundary read
+  (`crates/daemon/src/lib.rs:9716`).
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
 - Guarantee under test: For one (project digest, harness, session, served-set
