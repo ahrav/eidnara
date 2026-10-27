@@ -16,9 +16,9 @@ revision.
   (`crates/daemon/src/use_outcome_writer.rs:453-458`)).
 - Call sites: `record_use_outcome` (`crates/daemon/src/lib.rs:9721`) runs after
   each committed attempt: the boundary-failure path in `run_transform`
-  (`crates/daemon/src/lib.rs:9716`), the committed attempt in `first_transform`
-  (`crates/daemon/src/lib.rs:10039`), and the committed rerun in
-  `rerun_transform` (`crates/daemon/src/lib.rs:9968`).
+  (`crates/daemon/src/lib.rs:9630`), the committed attempt in `first_transform`
+  (`crates/daemon/src/lib.rs:10000`), and the committed rerun in
+  `rerun_transform` (`crates/daemon/src/lib.rs:9927`).
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
 - Guarantee under test: For one (project digest, harness, session, served-set
@@ -31,23 +31,23 @@ revision.
   `an_equal_digest_replays_and_another_harness_or_role_conflicts`
   (`crates/daemon/src/use_outcome_writer_tests.rs:131`);
   `an_equal_served_set_at_a_later_known_as_of_replays`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:448`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:477`);
   `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:314`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:343`);
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:719`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:748`);
   `a_recorded_served_set_replays_while_another_writer_holds_the_writer`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:817`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:848`);
   `every_kernel_error_maps_to_a_closed_outcome`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:942`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:974`);
   `an_emergency_pass_that_reruns_records_one_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:961`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:993`);
   `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:989`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1021`);
   `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1076`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1108`);
   `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1112`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1144`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`

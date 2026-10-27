@@ -24,9 +24,9 @@ revision.
   `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
   (`crates/daemon/src/lib.rs:39959`);
   `only_an_available_composition_is_recorded`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:180`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:181`);
   `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:555`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_writer_tests.rs:584`). Status: unaudited.
 
 ## Failure scenario
 
