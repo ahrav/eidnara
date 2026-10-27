@@ -289,13 +289,14 @@ can be invalidated later without violating any rule here.
   - Definitely applied / none / stop. Response carries
     `receipt.commit_seq`, `replayed: false`, and the verdict
     (`outcome`, `previous_disposition`, `disposition`, `denied`).
-  - Definitely applied (earlier) / replay / stop. `replayed: true`; the
-    verdict list is empty when the stored receipt is returned (FACT for
-    preview replay, `commit.rs:1163-1170`; the TS command treats a
-    missing verdict after a receipt as `outcome_unknown`,
-    `memory-mark-command.ts:299-300`). Design note: a replayed commit
-    response should carry the stored `result` so the client can answer
-    "already recorded" rather than "unknown" (conflicts Q8).
+  - Definitely applied (earlier) / replay / stop. `replayed: true`. A
+    replayed preview returns `previews: []` with the receipt
+    (`commit.rs:1163-1170`); a replayed commit returns the stored
+    `dispositions` (`commit.rs:1188-1204`, asserted equal to the first
+    response at `kernel_routes.rs:6114-6121`), so the TS command reports
+    the stored verdict with `replayed: true`. Its `outcome_unknown`
+    branch (`memory-mark-command.ts:299-300`) covers a commit response
+    that omits the verdict (Q8).
   - Definitely not applied / domain rejection (`invalid`:
     `invalid_input` for A1, A4; `not_found` for subject or evidence
     liveness or visibility; `admission_policy` for a subject without an

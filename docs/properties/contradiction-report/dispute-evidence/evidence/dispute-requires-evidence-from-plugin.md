@@ -45,8 +45,8 @@ None`. PR A adds the fields and the requirement.
   (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:49`),
   both of which send through the shared runner; the other hits are this
   route, its client type and wire list, the kernel's event-name table and
-  use-outcome reader, the fake kernel, and the tool schema and
-  description files, none of which sends a dispute. Both harnesses reach
+  use-outcome reader, and the tool schema and description files, none of
+  which sends a dispute. Both harnesses reach
   `executeDispute` only through an allowlist that names `dispute`
   (#1161).
 
