@@ -389,7 +389,7 @@ route refuses both rows before the write (`not_found`,
 construct this record's enabling state.
 Confidence: high - [evidence](evidence/admission-evidence-citation-is-existence-checked-only.md).
 Read `write_admission`, the FK in `schema.rs:164`, `foreign_keys=ON`
-(`schema.rs:245`, `open.rs:1035`), and `map_sqlite`.
+(`schema.rs:250`, `open.rs:1035`), and `map_sqlite`.
 Existing check: none for liveness. `kernel_admission.rs:4211`
 (`a_trigger_whose_evidence_is_gone_cannot_admit`) covers the trigger
 query (`validate_trigger`, `admission.rs:2804`), a different path. Status

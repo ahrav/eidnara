@@ -15,7 +15,7 @@ its parent is `d85de937b`).
 - Writer binding: the INSERT at `crates/kernel/src/admission.rs:1816` binds
   `self.commit_seq` at `crates/kernel/src/admission.rs:1850`.
 - Reader filters: `crates/kernel/src/admission.rs:691`; the new reader
-  `crates/kernel/src/use_outcome.rs:192`.
+  `crates/kernel/src/use_outcome.rs:198`.
 - Reachability: a null-commit row exists only after direct SQL, so the label is
   test-only.
 

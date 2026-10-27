@@ -25,7 +25,7 @@ daemon check is specified against it.
   `Enforce` (`:275-277`).
 - Schema: `evidence_id TEXT REFERENCES evidence_meta(evidence_id) ON
   DELETE RESTRICT` (`crates/kernel/src/schema.rs:164`); `PRAGMA
-  foreign_keys=ON` at `schema.rs:245` and `crates/kernel/src/open.rs:1035`;
+  foreign_keys=ON` at `schema.rs:250` and `crates/kernel/src/open.rs:1035`;
   `sqlite_runtime.rs:127-129` reports a disabled pragma as a violation.
 - `map_sqlite`: `ConstraintViolation => KernelError::Conflict`
   (`crates/kernel/src/lib.rs:213-225`). The route's `run` turns a

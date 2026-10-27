@@ -180,6 +180,12 @@ const USE_OUTCOME_CITED_SQL: &str = "EXISTS(SELECT 1 FROM admission_decisions a
                WHERE a.use_outcome_id=u.use_outcome_id AND a.commit_seq IS NOT NULL
                  AND s.invalidated_commit_seq IS NULL)";
 
+/// The serving record of session (`?2`, `?3`, `?4`) naming object `?1` with the greatest `served_commit_seq` below `?5`, ties to the greatest id: one seek of the session identity, then one descending seek of the decision-object index.
+const REPORTING_SERVE_SQL: &str = "SELECT d.use_outcome_id FROM use_outcome_sessions s
+     JOIN use_outcome_decisions d ON d.object_id=?1 AND d.session_seq=s.session_seq
+    WHERE s.project_digest=?2 AND s.harness=?3 AND s.session_id=?4 AND d.served_commit_seq<?5
+    ORDER BY d.served_commit_seq DESC, d.use_outcome_id DESC LIMIT 1";
+
 static SERVED_SET_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT {SERVE_COLUMNS} FROM use_outcomes u
@@ -286,11 +292,7 @@ impl Envelope<'_> {
         };
         self.tx
             .query_row_cached(
-                "SELECT u.use_outcome_id FROM use_outcome_decisions d
-                   JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
-                  WHERE d.object_id=?1 AND u.project_digest=?2 AND u.harness=?3
-                    AND u.session_id=?4 AND u.served_commit_seq<?5
-                  ORDER BY u.served_commit_seq DESC, u.use_outcome_id DESC LIMIT 1",
+                REPORTING_SERVE_SQL,
                 params![
                     subject,
                     reporter.project_digest,
@@ -337,14 +339,15 @@ impl Envelope<'_> {
             &spec.session_id,
             &spec.served_set_digest,
         );
+        let session_seq = self.use_outcome_session(spec)?;
         self.tx
             .execute_cached(
                 "INSERT INTO use_outcomes(
                      use_outcome_id,project_digest,harness,session_id,served_set_digest,
                      composition_revision,served_commit_seq,session_role,recorded_at,
                      created_commit_seq,retention_class,retain_until,sensitivity_class,
-                     provider_egress_class
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'sensitive','local_only')",
+                     provider_egress_class,session_seq
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'sensitive','local_only',?13)",
                 params![
                     id,
                     spec.project_digest,
@@ -358,18 +361,48 @@ impl Envelope<'_> {
                     self.commit_seq,
                     USE_OUTCOME_RETENTION_CLASS,
                     retain_until,
+                    session_seq,
                 ],
             )
             .map_err(map_sqlite)?;
         for object_id in &spec.decision_object_ids {
             self.tx
                 .execute_cached(
-                    "INSERT INTO use_outcome_decisions(use_outcome_id,object_id) VALUES (?1,?2)",
-                    params![id, object_id],
+                    "INSERT INTO use_outcome_decisions(use_outcome_id,object_id,session_seq,served_commit_seq)
+                     VALUES (?1,?2,?3,?4)",
+                    params![id, object_id, session_seq, spec.served_commit_seq],
                 )
                 .map_err(map_sqlite)?;
         }
         Ok(id)
+    }
+
+    /// The `session_seq` of the spec's session, recording the session on its first serve.
+    fn use_outcome_session(&self, spec: &UseOutcomeSpec) -> Result<i64, KernelError> {
+        let session = params![spec.project_digest, spec.harness, spec.session_id];
+        let recorded = self
+            .tx
+            .query_row_cached(
+                "SELECT session_seq FROM use_outcome_sessions
+                  WHERE project_digest=?1 AND harness=?2 AND session_id=?3",
+                session,
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        match recorded {
+            Some(session_seq) => Ok(session_seq),
+            None => self
+                .tx
+                .query_row_cached(
+                    "INSERT INTO use_outcome_sessions(
+                         project_digest,harness,session_id,sensitivity_class,provider_egress_class
+                     ) VALUES (?1,?2,?3,'sensitive','local_only') RETURNING session_seq",
+                    session,
+                    |row| row.get(0),
+                )
+                .map_err(map_sqlite),
+        }
     }
 }
 
@@ -713,8 +746,8 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        EXPIRED_SQL, SERVED_COUNTS_SQL, SERVED_SESSIONS_SQL, SERVED_SET_SQL, SessionRole,
-        USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
+        EXPIRED_SQL, REPORTING_SERVE_SQL, SERVED_COUNTS_SQL, SERVED_SESSIONS_SQL, SERVED_SET_SQL,
+        SessionRole, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
     };
     use crate::{CommitIntent, DomainSpec, KernelStore, Sensitivity, served_set_digest};
 
@@ -942,7 +975,7 @@ mod tests {
         assert!(retired(&store, "session"));
     }
 
-    /// The sweep scan reads the live-retention index in index order and probes citations through the citing index. The by-session read seeks the identity index. The by-decision read starts from the decision-row index and probes disputes through the subject index. The count read seeks the decision-row index and reads disputes through the subject index in an uncorrelated subquery.
+    /// The sweep scan reads the live-retention index in index order and probes citations through the citing index. The by-session read seeks the identity index. The by-decision read starts from the decision-row index and probes disputes through the subject index. The count read seeks the decision-row index and reads disputes through the subject index in an uncorrelated subquery. The dispute link seeks the session identity and then the decision-object index in descending served order, so it reads one entry with no sort.
     #[test]
     fn the_sweep_and_the_reads_use_their_indexes() {
         let root = tempfile::tempdir().unwrap();
@@ -992,5 +1025,18 @@ mod tests {
         assert!(counts.contains("idx_admission_subject_latest"), "{counts}");
         assert!(!counts.contains("CORRELATED"), "{counts}");
         assert!(!counts.contains("TEMP B-TREE"), "{counts}");
+        let link = plan(
+            REPORTING_SERVE_SQL,
+            &[&"decision", &digest, &"opencode", &"session", &NOW],
+        );
+        assert!(
+            link.contains("sqlite_autoindex_use_outcome_sessions_1"),
+            "{link}"
+        );
+        assert!(
+            link.contains("COVERING INDEX idx_use_outcome_decisions_object_fk (object_id=? AND session_seq=? AND served_commit_seq<?)"),
+            "{link}"
+        );
+        assert!(!link.contains("TEMP B-TREE"), "{link}");
     }
 }

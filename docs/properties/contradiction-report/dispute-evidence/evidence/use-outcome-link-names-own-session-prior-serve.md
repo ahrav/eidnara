@@ -15,10 +15,21 @@ harm signals per served session.
 - A dispute goes through `record_disposition`, which builds a
   `DisputeReporter` and calls `Envelope::record_dispute_admission`
   (`commit.rs:792`; `crates/kernel/src/admission.rs:1015`).
-- `reporting_serve` (`crates/kernel/src/use_outcome.rs:279`) selects the
-  `use_outcome_decisions` row naming the subject, joined to `use_outcomes`
-  of the same (project digest, harness, session), with
-  `served_commit_seq` below the envelope's commit sequence, greatest first.
+- `reporting_serve` (`crates/kernel/src/use_outcome.rs:285`) runs
+  `REPORTING_SERVE_SQL` (`use_outcome.rs:184`): it seeks the
+  `use_outcome_sessions` row of (project digest, harness, session), then
+  seeks `idx_use_outcome_decisions_object_fk` at (subject, `session_seq`)
+  for the greatest `served_commit_seq` below the envelope's commit
+  sequence, ties to the greatest `use_outcome_id`. Each decision row
+  copies its record's `session_seq` and `served_commit_seq`, which the
+  `use_outcome_decisions_written_with_record` trigger checks
+  (`crates/kernel/src/schema.rs:198`), and a record names its session
+  through a foreign key over `session_seq` and its identity columns
+  (`schema.rs:194`), so the seek answers exactly the record join it
+  replaces. The plan is pinned by
+  `the_sweep_and_the_reads_use_their_indexes`
+  (`use_outcome.rs:980`): two index seeks, no sort, whatever the number
+  of serves in the session or of the subject.
 - `write_reported_admission` (`admission.rs:1734`) writes the id in the
   same INSERT as the row, inside the writer transaction.
 - The column, its `ON DELETE RESTRICT` foreign key, its partial index, and
@@ -47,6 +58,11 @@ served the subject, and a serve recorded after the dispute. Both
 (`crates/kernel/tests/kernel_use_outcome.rs:1165`) and
 `a_dispute_row_records_its_reporter_and_links_the_sessions_latest_serve`
 (`crates/daemon/tests/kernel_routes.rs:6610`) construct these.
+`a_session_is_recorded_once_and_its_decision_rows_copy_their_record`
+(`crates/kernel/tests/kernel_use_outcome.rs:1381`) checks that a session is
+recorded once, that another session, harness, or project gets its own
+`session_seq`, and that every decision row carries its record's
+`session_seq` and `served_commit_seq`.
 
 ## Investigation log
 

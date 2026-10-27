@@ -83,7 +83,7 @@ the difference noted.
   `source_class`/`taint_class` are what the request carried,
   `reason TEXT NOT NULL`, `evidence_id TEXT REFERENCES
   evidence_meta(evidence_id) ON DELETE RESTRICT`. No length CHECK on
-  `reason`. `foreign_keys=ON` is set at `schema.rs:245` and `open.rs:1035`.
+  `reason`. `foreign_keys=ON` is set at `schema.rs:250` and `open.rs:1035`.
 - `evidence_meta` (`schema.rs:139`): live means `invalidated_commit_seq IS
   NULL`. The table has no `scope_id` column.
 - `object_state_sql` (`envelope.rs:1878-1892`) reads `scope_id` as

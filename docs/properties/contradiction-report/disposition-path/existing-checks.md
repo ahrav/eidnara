@@ -91,7 +91,7 @@ receipt without `dispositions`.
 | `admission.rs:1616-1618` | blank reason is `AdmissionPolicy` | reason | unaudited |
 | `redaction.rs:72-77` | reason over 512 KiB is `InvalidInput` | reason | unaudited |
 | `admission.rs:2637-2645` | `refuse_succession_events` on `record_admission` and `preview_admission` | (context) | unaudited |
-| `schema.rs:164` | FK `evidence_id REFERENCES evidence_meta ON DELETE RESTRICT`; `foreign_keys=ON` at `schema.rs:245`, `open.rs:1035` | evidence existence | unaudited |
+| `schema.rs:164` | FK `evidence_id REFERENCES evidence_meta ON DELETE RESTRICT`; `foreign_keys=ON` at `schema.rs:250`, `open.rs:1035` | evidence existence | unaudited |
 | `schema.rs:26` | `commit_log` append-only triggers | commit-log row | unaudited |
 | `commit.rs:136-137`, `:108-109` | `deny_unknown_fields` on `Operation` and `CommitRequest` | no-evidence field | unaudited |
 | `commit.rs:1181-1196` | preview refuses tokens and non-disposition operations | preview | unaudited |

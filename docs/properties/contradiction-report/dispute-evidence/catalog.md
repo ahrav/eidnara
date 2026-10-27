@@ -702,7 +702,7 @@ Reachability: default-production - every `mark_disputed` and `contradict`
 the route commits goes through `Envelope::record_dispute_admission`
 (`crates/daemon/src/kernel_routes/commit.rs:792`;
 `crates/kernel/src/admission.rs:1015`), which computes the link with
-`reporting_serve` (`crates/kernel/src/use_outcome.rs:279`) and writes it in
+`reporting_serve` (`crates/kernel/src/use_outcome.rs:285`) and writes it in
 `write_reported_admission` (`admission.rs:1734`) with no flag.
 Status: active
 Exercised: yes - Kernel test

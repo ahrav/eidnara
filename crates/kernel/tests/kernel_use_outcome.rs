@@ -1375,3 +1375,51 @@ fn reporter_columns_are_dispute_only_and_checked_by_the_schema() {
         );
     }
 }
+
+/// A session's first serve records it once; every later serve of the session, whatever its served set, carries the same `session_seq`, another session, harness, or project gets its own, and each decision row copies its record's `session_seq` and `served_commit_seq`.
+#[test]
+fn a_session_is_recorded_once_and_its_decision_rows_copy_their_record() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1", "d2"]);
+    let first_at = tick(&store, "first");
+    insert(&store, "s1-first", spec("s1", &["d1"], first_at, 0)).unwrap();
+    let second_at = tick(&store, "second");
+    insert(&store, "s1-second", spec("s1", &["d1", "d2"], second_at, 0)).unwrap();
+    insert(&store, "s2", spec("s2", &["d1"], second_at, 0)).unwrap();
+    let mut other_harness = spec("s1", &["d2"], second_at, 0);
+    other_harness.harness = "pi".to_string();
+    insert(&store, "other-harness", other_harness).unwrap();
+    let mut other_project = spec("s1", &["d2"], second_at, 0);
+    other_project.project_digest = "b".repeat(64);
+    insert(&store, "other-project", other_project).unwrap();
+
+    assert_eq!(
+        count(root.path(), "SELECT COUNT(*) FROM use_outcome_sessions"),
+        4
+    );
+    assert_eq!(
+        count(
+            root.path(),
+            &format!(
+                "SELECT COUNT(DISTINCT session_seq) FROM use_outcomes
+                  WHERE project_digest='{}' AND harness='{HARNESS}' AND session_id='s1'",
+                project()
+            )
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            root.path(),
+            "SELECT COUNT(*) FROM use_outcome_decisions d
+               JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
+              WHERE d.session_seq IS NOT u.session_seq
+                 OR d.served_commit_seq IS NOT u.served_commit_seq"
+        ),
+        0
+    );
+    assert_eq!(
+        count(root.path(), "SELECT COUNT(*) FROM use_outcome_decisions"),
+        6
+    );
+}

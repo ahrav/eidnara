@@ -11,16 +11,19 @@ Record kind: new obligation activated by #1154.
 References are verified at the #1157 branch tip (the commit that adds this file;
 its parent is `d85de937b`).
 
-- DDL CHECKs: `crates/kernel/src/schema.rs:188`.
-- Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:314`); it
+- DDL CHECKs: `crates/kernel/src/schema.rs:193`; the `use_outcome_sessions`
+  row each record names carries the same `sensitive` and `local_only` CHECKs
+  (`crates/kernel/src/schema.rs:188`, added by #1162).
+- Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:316`); it
   pushes no pending change, so the commit writes no change event or outbox row.
 - Class rule: `denies_destination` (`crates/kernel/src/envelope.rs:71`).
 
 - Guarantee under test: Every serving record carries `sensitive`, `local_only`,
-  and `use_outcome_capture`, the DDL refuses any other value, and no serve
+  and `use_outcome_capture`, every session row carries `sensitive` and
+  `local_only`, the DDL refuses any other value, and no serve
   creates a registry object, evidence row, change event, or outbox entry.
 - Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
-  (`crates/kernel/tests/kernel_schema.rs:2297`);
+  (`crates/kernel/tests/kernel_schema.rs:2346`);
   `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
   (`crates/kernel/tests/kernel_use_outcome.rs:322`). Status: unaudited.
 
