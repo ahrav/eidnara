@@ -490,12 +490,15 @@ describe("Pi eidnara_memory dispute", () => {
 
     it("refuses a dispute without evidence before sending anything", async () => {
         const h = seeded(EIDNARA_MEMORY_ACTIONS);
-        const result = await h.execute(
+        for (const args of [
             { action: "dispute", objectId: "mem_rule", event: "contradict" },
-            "call-x",
-        );
-        expect(textOf(result)).toStartWith("Error: dispute needs objectId");
-        expect(result.isError).toBeTrue();
+            { action: "dispute", objectId: "mem_rule", event: "contradict", path: "src/a.rs" },
+            { action: "dispute", event: "contradict", evidenceId: "ev-1" },
+        ]) {
+            const result = await h.execute(args, "call-x");
+            expect(textOf(result)).toStartWith("Error: dispute needs objectId");
+            expect(result.isError).toBeTrue();
+        }
         expect(h.transport.calls).toHaveLength(0);
     });
 });
