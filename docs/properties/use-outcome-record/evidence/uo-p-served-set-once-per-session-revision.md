@@ -11,7 +11,7 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:418-421`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:424-427`; the request
   digest binds the ids, the harness, and the role (`request_digest`
   (`crates/daemon/src/use_outcome_writer.rs:475`)).
 - Call sites: `record_use_outcome` runs after the commit bookkeeping of

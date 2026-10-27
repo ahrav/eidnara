@@ -1007,7 +1007,7 @@ between; a CAS retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-set-once-per-session-revision.md). the writer
 keys its commit by the project binding, `use-outcome`, the session, and the
-served-set digest (`crates/daemon/src/use_outcome_writer.rs:418-421`); the
+served-set digest (`crates/daemon/src/use_outcome_writer.rs:424-427`); the
 Kernel holds one record per identity tuple.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 (`crates/daemon/src/use_outcome_writer_tests.rs:70`);
@@ -1188,7 +1188,7 @@ with a Canonical read; a primary on each engine.
 Confidence: high -
 [evidence](evidence/uo-p-producer-matches-request-subagent-flag.md). the role
 comes from the pass's `is_subagent`
-(`crates/daemon/src/use_outcome_writer.rs:425-429`). Reachability per engine (B1):
+(`crates/daemon/src/use_outcome_writer.rs:431-435`). Reachability per engine (B1):
 `subagent` rows arise only on the additive engine.
 Existing check: `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
 (`crates/daemon/src/use_outcome_writer_tests.rs:420`); Kernel half:
@@ -1262,7 +1262,7 @@ Open questions:
   unavailable outcomes only.
 - The step marks every live record of the session in one `UPDATE` under one
   commit with no row bound or deadline (`mark_session_deleted`,
-  `crates/daemon/src/use_outcome_writer.rs:278-310`), so it holds the writer
+  `crates/daemon/src/use_outcome_writer.rs:284-316`), so it holds the writer
   and the delete's blocking worker for a time that grows with the session's
   live records; the captured-source retirement before it pages. Whether a
   session can accumulate enough live records to need paging is an owner
@@ -1293,7 +1293,7 @@ memory-enabled route (`use_outcomes_to_touch`
 scoped thread beside the response build that the settle joins before the
 response returns (`crates/daemon/src/lib.rs:10130`, `touch_use_outcomes`
 (`crates/daemon/src/lib.rs:9851`)), within what remains of the pass's Kernel
-wait (`PassWriteBudget::spend`, `crates/daemon/src/use_outcome_writer.rs:385-392`); a pass that handed its
+wait (`PassWriteBudget::spend`, `crates/daemon/src/use_outcome_writer.rs:391-398`); a pass that handed its
 serve to a tracked job leaves the touch to that job, which checks and updates
 after its serve attempt, whatever that serve answered, with a Kernel wait of its
 own (`touch_after_serve`
