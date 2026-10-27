@@ -1528,6 +1528,14 @@ describe("eidnara_memory dispute", () => {
         const h = disputeHarness();
         for (const args of [
             { action: "dispute", objectId: "mem_labeled", event: "mark_disputed" },
+            { action: "dispute", objectId: "mem_labeled", event: "mark_disputed", evidenceId: "" },
+            {
+                action: "dispute",
+                objectId: "mem_labeled",
+                event: "mark_disputed",
+                path: "",
+                gitObjectId: "",
+            },
             {
                 action: "dispute",
                 objectId: "mem_labeled",

@@ -64,7 +64,7 @@ All constructed, the tool arm with #1161:
   source kind when allowed`
   (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:449`) for Pi.
   `executeDispute` fixes the source kind
-  (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:53`), so
+  (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:54`), so
   the tool cannot send `"user"`.
 
 The check is a per-request route oracle (portfolio refinement R4). It

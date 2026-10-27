@@ -32,9 +32,10 @@ function isDisputeEvent(value: unknown): value is (typeof EIDNARA_MEMORY_DISPUTE
 export async function executeDispute(input: ExecuteDisputeArgs): Promise<string> {
     const { args } = input;
     const objectId = args.objectId?.trim();
-    const evidenceId = args.evidenceId ?? undefined;
-    const path = args.path ?? undefined;
-    const gitObjectId = args.gitObjectId ?? undefined;
+    // An empty evidence value is absent: the route refuses it as invalid_input, so the usage check answers first.
+    const evidenceId = args.evidenceId || undefined;
+    const path = args.path || undefined;
+    const gitObjectId = args.gitObjectId || undefined;
     if (!objectId) return DISPUTE_USAGE;
     if (!isDisputeEvent(args.event)) {
         return `Error: dispute event '${String(args.event)}' is not supported; use mark_disputed or contradict.`;

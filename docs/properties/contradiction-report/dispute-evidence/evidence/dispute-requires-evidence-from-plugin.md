@@ -73,9 +73,9 @@ name (`dispute.rs:370`), and the parser test at
 sending: `refuses missing evidence and unsupported events before sending;
 renders denials and refusals`
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1527`)
-calls `dispute` with neither evidence input, with `path` and no
-`gitObjectId`, and with no `objectId`, and asserts the usage error with
-no daemon call; `refuses a dispute without evidence before sending
+calls `dispute` with neither evidence input, with an empty `evidenceId`,
+with empty `path` and `gitObjectId`, with `path` and no `gitObjectId`,
+and with no `objectId`, and asserts the usage error with no daemon call; `refuses a dispute without evidence before sending
 anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:507`)
 asserts the same for Pi.
 
@@ -92,10 +92,11 @@ row, so a store scan on it is circular.
 
 - Sources examined: `packages/*/src` for `"disposition"` operations.
 - Findings: the shared command runner and, with #1161, `executeDispute`
-  (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:48`)
+  (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:49`)
   send a disposition; the tool runs the same runner, so the route sees the
   same body, and the tool's own usage check refuses a dispute citing
-  nothing before any daemon call (`dispute.ts:47`).
+  nothing, and treats an empty evidence value as absent, before any
+  daemon call (`dispute.ts:35-37`, `:48`).
 - Missing evidence: none.
 - Conclusion: resolved with answer: the record is `yes` for the command
   arm, the tool arm, and raw route bodies.
