@@ -540,7 +540,6 @@ pub(crate) fn components(
 /// `unavailable_reason` is permitted only when `kernel_state` is `unavailable`.
 fn sanitize_kernel_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
     // 2^53 is the largest N such that every integer in [0, N] is exactly representable as an IEEE 754 double.
-    const MAX_COUNTER: u64 = 1 << 53;
     let raw = raw.as_object()?;
     let state = raw
         .get(KERNEL_STATE_KEY)
@@ -658,7 +657,6 @@ const MEMORY_REVIEWER_COUNTERS: [&str; 36] = [
 
 /// Retains only MemoryReviewer counters with declared types and ranges, field by field, the way the kernel block is kept. A block without a recognized `memory_reviewer_state` is dropped whole; every counter is an unsigned integer no greater than 2^53 or it is dropped to absent; `sampled_at_ms` alone may be `null`.
 fn sanitize_memory_reviewer_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
-    const MAX_COUNTER: u64 = 1 << 53;
     let raw = raw.as_object()?;
     let state = raw
         .get(MEMORY_REVIEWER_STATE_KEY)
@@ -703,6 +701,9 @@ fn sanitize_memory_reviewer_block(raw: &serde_json::Value) -> Option<serde_json:
     }
     Some(serde_json::Value::Object(block))
 }
+
+/// The largest integer a forwarded counter may hold: the exact-integer range of a JSON double.
+const MAX_COUNTER: u64 = 1 << 53;
 
 pub(crate) const SOURCE_CAPTURE_KEY: &str = "source_capture";
 /// `SOURCE_CAPTURE_COUNTERS` defines the counter allowlist for `metrics.source_capture` in `docs/host-wire-protocol.md`.
@@ -784,7 +785,6 @@ fn sanitize_counters(
     raw: &serde_json::Value,
     names: &[&str],
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
-    const MAX_COUNTER: u64 = 1 << 53;
     let raw = raw.as_object()?;
     Some(
         names
@@ -801,7 +801,6 @@ fn sanitize_counters(
 }
 
 fn sanitize_source_capture_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
-    const MAX_COUNTER: u64 = 1 << 53;
     let mut block = sanitize_counters(raw, &SOURCE_CAPTURE_COUNTERS)?;
     match raw.get(SOURCE_CAPTURE_OLDEST_DEFERRED_KEY) {
         Some(serde_json::Value::Null) => {

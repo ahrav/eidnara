@@ -658,3 +658,27 @@ fn a_keyed_delete_names_its_project_and_the_gauge_counts_bytes() {
         (0, 0)
     );
 }
+
+#[test]
+fn a_delete_as_read_spares_a_row_rewritten_since_the_read() {
+    let (_dir, store) = open();
+    let rows = [score("d1", 3, 4), score("d2", 3, 4)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 1, 1, &rows), CAPS)
+        .unwrap();
+    let read = all_rows(&store);
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 2, 5, &rows), CAPS)
+        .unwrap();
+    let rewritten = all_rows(&store);
+    let deleted = store
+        .delete_candidates_as_read(&[&read[0], &rewritten[1]])
+        .unwrap();
+    assert_eq!(
+        deleted, 1,
+        "only the row still holding the values read goes"
+    );
+    let left = all_rows(&store);
+    assert_eq!(left, [rewritten[0].clone()]);
+    assert_eq!(store.delete_candidates_as_read(&[]).unwrap(), 0);
+}

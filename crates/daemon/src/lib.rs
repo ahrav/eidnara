@@ -4008,8 +4008,11 @@ impl HandlerCore {
                         store,
                         Arc::clone(&kernel),
                         Arc::clone(&source_capture),
-                        Arc::clone(&contradiction_candidates),
-                        Arc::clone(&candidates_enabled),
+                        memory_reviewer::lifecycle::CandidateStep {
+                            counts: Arc::clone(&contradiction_candidates),
+                            enabled: Arc::clone(&candidates_enabled),
+                            sweep: Default::default(),
+                        },
                         cancel.clone(),
                     ));
                 }

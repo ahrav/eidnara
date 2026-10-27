@@ -715,7 +715,7 @@ drops the block whole, unknown fields are dropped, and fields are additive.
 | `read_filtered_stale` | unsigned integer | rows a read filtered because their decision or evidence was no longer live |
 | `completed`, `deadline`, `worker_panicked` | unsigned integer | pass ends by reason |
 | `active` | unsigned integer | passes running now |
-| `retained_bytes` | unsigned integer | stored bytes of the candidate rows at the last sweep or write |
+| `retained_bytes` | unsigned integer | stored bytes of the candidate rows when the sweep last finished a full cycle of the table |
 | `pass_ms_last`, `pass_ms_max` | unsigned integer | wall time of the last and the longest pass |
 
 The `model_execution` component MAY also carry a sanitized

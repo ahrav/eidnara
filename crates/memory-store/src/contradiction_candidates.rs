@@ -446,6 +446,44 @@ impl MemoryStore {
         })
     }
 
+    /// Deletes each of `rows` whose stored row still holds the values the
+    /// caller read: a row rewritten since then keeps its newer values and
+    /// stays. Answers how many rows were deleted.
+    ///
+    /// # Errors
+    ///
+    /// Storage errors.
+    pub fn delete_candidates_as_read(
+        &self,
+        rows: &[&StoredCandidate],
+    ) -> Result<usize, MemoryStoreError> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        PreparedWrite::new(DurableWriteFamily::ContradictionCandidates).execute(&self.inner, |tx| {
+            let tx = tx.tx();
+            let mut deleted = 0;
+            for row in rows {
+                deleted += tx.execute(
+                    "DELETE FROM contradiction_candidates
+                      WHERE project_digest=?1 AND evidence_id=?2 AND decision_object_id=?3
+                        AND created_at_ms=?4 AND publish_tip=?5 AND kernel_incarnation_id=?6
+                        AND matcher_digest=?7",
+                    params![
+                        row.project_digest,
+                        row.evidence_id,
+                        row.decision_object_id,
+                        row.created_at_ms,
+                        row.publish_tip,
+                        row.kernel_incarnation_id,
+                        row.matcher_digest,
+                    ],
+                )?;
+            }
+            Ok(WriteDisposition::Applied(deleted))
+        })
+    }
+
     /// The row count and retained bytes of one project, or of every project
     /// when `project_digest` is `None`. A row's bytes are the lengths of its six
     /// text columns plus eight per integer column.

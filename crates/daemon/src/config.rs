@@ -504,17 +504,26 @@ impl ConfigCache {
     }
 
     /// The daemon-level `contradiction_candidates.enabled`: the user tier's value over the
-    /// default. A project tier cannot set the key, so the merge below names the filesystem root
-    /// as its project and its result holds for every project. Tier warnings are left to the
-    /// routes' loads, which report them on every bind.
+    /// default. A project tier cannot set the key, so the merge names the filesystem root as its
+    /// project and its result holds for every project. Tier warnings are left to the routes'
+    /// loads, which report them on every bind.
     pub fn contradiction_candidates_enabled(&mut self) -> bool {
-        self.effective_for_env(
+        let user = user_config_base_from(
             std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
             std::env::var("HOME").ok().as_deref(),
-            Path::new("/"),
         )
-        .0
-        .contradiction_candidates_enabled
+        .map(discover_tier);
+        self.contradiction_candidates_enabled_from(user)
+    }
+
+    fn contradiction_candidates_enabled_from(&mut self, user: Option<SourceIdentity>) -> bool {
+        const _: () = assert!(matches!(
+            ConfigKey::ContradictionCandidatesEnabled.tier_class(),
+            TierClass::UserOnly
+        ));
+        self.effective_from_sources(user, Path::new("/"))
+            .0
+            .contradiction_candidates_enabled
     }
 
     /// Loads and merges config from explicit user and project paths.
@@ -2302,6 +2311,39 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("/contradiction_candidates/enabled")),
             "{warnings:?}"
+        );
+    }
+
+    /// The daemon-level reader follows a rewritten user tier, while a configuration resolved
+    /// before the rewrite, as a bound route holds it, keeps the value it was resolved with.
+    #[test]
+    fn the_daemon_level_flag_follows_the_user_tier_and_a_resolved_config_keeps_its_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("eidnara.jsonc");
+        let write = |enabled: bool| {
+            std::fs::write(
+                &user,
+                format!(r#"{{ "contradiction_candidates": {{ "enabled": {enabled} }} }}"#),
+            )
+            .unwrap();
+        };
+        let mut daemon = ConfigCache::default();
+        assert!(!daemon.contradiction_candidates_enabled_from(None));
+        write(true);
+        let mut routes = ConfigCache::default();
+        let bound = routes.effective_for_paths(&user, dir.path());
+        assert!(bound.contradiction_candidates_enabled);
+        assert!(daemon.contradiction_candidates_enabled_from(Some(SourceIdentity::of(&user))));
+        write(false);
+        assert!(!daemon.contradiction_candidates_enabled_from(Some(SourceIdentity::of(&user))));
+        assert!(
+            !routes
+                .effective_for_paths(&user, dir.path())
+                .contradiction_candidates_enabled
+        );
+        assert!(
+            bound.contradiction_candidates_enabled,
+            "the resolved config keeps its value"
         );
     }
 

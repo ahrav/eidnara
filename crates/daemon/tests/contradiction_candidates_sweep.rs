@@ -111,8 +111,10 @@ fn domain(id: &str) -> DomainSpec {
     }
 }
 
-const DECISIONS: [&str; 10] = [
+const DECISIONS: [&str; 12] = [
     "active",
+    "sensitive",
+    "secret",
     "stale",
     "disputed",
     "superseded",
@@ -124,7 +126,7 @@ const DECISIONS: [&str; 10] = [
     "other-domain",
 ];
 
-const ELIGIBLE: [&str; 3] = ["active", "stale", "disputed"];
+const ELIGIBLE: [&str; 4] = ["active", "sensitive", "stale", "disputed"];
 
 struct Fixture {
     dir: tempfile::TempDir,
@@ -153,6 +155,14 @@ impl Fixture {
                             decision(name, "memory", &format!("project:{OTHER_PROJECT}"))
                         }
                         "other-domain" => decision(name, "notes", &project),
+                        "sensitive" => DecisionSpec {
+                            sensitivity: Sensitivity::Sensitive,
+                            ..decision(name, "memory", &project)
+                        },
+                        "secret" => DecisionSpec {
+                            sensitivity: Sensitivity::Secret,
+                            ..decision(name, "memory", &project)
+                        },
                         _ => decision(name, "memory", &project),
                     };
                     envelope.insert_decision(spec)?;
@@ -235,6 +245,7 @@ impl Fixture {
             incarnation: self.incarnation(),
             digest: matcher_digest().to_string(),
             created_at_ms: NOW_MS,
+            publish_tip: 1,
         };
         tweak(&mut row);
         let ids: Vec<(String, String)> = decisions
@@ -255,7 +266,7 @@ impl Fixture {
                 &DescriptorCandidates {
                     project_digest: project,
                     evidence_id: evidence,
-                    publish_tip: 1,
+                    publish_tip: row.publish_tip,
                     kernel_incarnation_id: &row.incarnation,
                     matcher_digest: &row.digest,
                     created_at_ms: row.created_at_ms,
@@ -287,6 +298,7 @@ struct Row {
     incarnation: String,
     digest: String,
     created_at_ms: i64,
+    publish_tip: i64,
 }
 
 fn ingest(kernel: &KernelStore, key: &str) -> String {
@@ -313,6 +325,14 @@ fn ingest(kernel: &KernelStore, key: &str) -> String {
         })
         .unwrap()
         .evidence_id
+}
+
+/// The Kernel tip and the reviewer-job facts, which no sweep may change.
+fn untouched(fixture: &Fixture) -> (i64, memory_store::MemoryReviewerStatusFacts) {
+    (
+        fixture.tip(),
+        fixture.store.memory_reviewer_status_facts().unwrap(),
+    )
 }
 
 fn report(counts: &Candidates) -> serde_json::Map<String, Value> {
@@ -378,27 +398,31 @@ fn one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_non
     let retired = fixture.retired_evidence.clone();
     fixture.write(PROJECT, &retired, &["active"], |_| {});
     fixture.write(OTHER_PROJECT, &live, &["other-project", "active"], |_| {});
-    fixture.write(PROJECT, "evidence-foreign", &["active"], |row| {
+    let foreign = ingest(&fixture.kernel, "foreign");
+    fixture.write(PROJECT, &foreign, &["active"], |row| {
         row.incarnation = "0".repeat(32);
     });
-    fixture.write(PROJECT, "evidence-stale-digest", &["active"], |row| {
+    let stale_digest = ingest(&fixture.kernel, "stale-digest");
+    fixture.write(PROJECT, &stale_digest, &["active"], |row| {
         row.digest = "f".repeat(64);
     });
+    let over_age = ingest(&fixture.kernel, "over-age");
     let age_ms = i64::try_from(MAX_CANDIDATE_AGE.as_millis()).unwrap();
-    fixture.write(
-        OTHER_PROJECT,
-        "evidence-over-age",
-        &["other-project"],
-        |row| {
-            row.created_at_ms = NOW_MS - age_ms - 1;
-        },
-    );
+    fixture.write(OTHER_PROJECT, &over_age, &["other-project"], |row| {
+        row.created_at_ms = NOW_MS - age_ms - 1;
+    });
     let seeded = fixture.rows().len();
-    let tip = fixture.tip();
-    let jobs = fixture.store.memory_reviewer_status_facts().unwrap();
+    let before = untouched(&fixture);
     let counts = Candidates::default();
     let mut sweep = CandidateSweep::default();
-    sweep.run(&fixture.store, Some(&fixture.kernel), true, &counts, NOW_MS);
+    sweep.run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
 
     let mut expected: Vec<(String, String, String)> = ELIGIBLE
         .iter()
@@ -418,18 +442,24 @@ fn one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_non
     let (_, bytes) = fixture.store.candidate_rows_and_bytes(None).unwrap();
     assert_eq!(block["retained_bytes"], bytes);
 
-    sweep.run(&fixture.store, Some(&fixture.kernel), true, &counts, NOW_MS);
+    sweep.run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
     assert_eq!(
         kept(&fixture),
         expected,
         "a repeat at the same tip drops none"
     );
     assert_eq!(report(&counts)["sweep_dropped"], seeded - expected.len());
-    assert_eq!(fixture.tip(), tip, "the sweep commits nothing");
     assert_eq!(
-        fixture.store.memory_reviewer_status_facts().unwrap(),
-        jobs,
-        "the sweep files no reviewer job"
+        untouched(&fixture),
+        before,
+        "the sweep commits nothing and files no reviewer job"
     );
 }
 
@@ -441,9 +471,17 @@ fn a_row_at_the_age_bound_stays_and_one_past_it_drops() {
     fixture.write(PROJECT, &live, &["active"], |row| {
         row.created_at_ms = NOW_MS - age_ms;
     });
+    let before = untouched(&fixture);
     let counts = Candidates::default();
     let mut sweep = CandidateSweep::default();
-    sweep.run(&fixture.store, Some(&fixture.kernel), true, &counts, NOW_MS);
+    sweep.run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
     assert_eq!(fixture.rows().len(), 1);
     sweep.run(
         &fixture.store,
@@ -451,8 +489,10 @@ fn a_row_at_the_age_bound_stays_and_one_past_it_drops() {
         true,
         &counts,
         NOW_MS + 1,
+        &|| false,
     );
     assert_eq!(fixture.rows().len(), 0);
+    assert_eq!(untouched(&fixture), before);
 }
 
 #[test]
@@ -462,7 +502,7 @@ fn a_closed_kernel_drops_nothing_and_counts_the_skip() {
         row.incarnation = "0".repeat(32);
     });
     let counts = Candidates::default();
-    CandidateSweep::default().run(&fixture.store, None, true, &counts, NOW_MS);
+    CandidateSweep::default().run(&fixture.store, None, true, &counts, NOW_MS, &|| false);
     assert_eq!(fixture.rows().len(), 1);
     let block = report(&counts);
     assert_eq!(block["sweep_skipped_kernel_unavailable"], 1);
@@ -478,10 +518,18 @@ fn the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over() {
     for index in 1..3 * CANDIDATE_SWEEP_PAGE {
         fixture.write(PROJECT, &format!("evidence-{index}"), &["active"], |_| {});
     }
+    let before = untouched(&fixture);
     let counts = Candidates::default();
     let mut sweep = CandidateSweep::default();
     for run in 1..=3 {
-        sweep.run(&fixture.store, Some(&fixture.kernel), true, &counts, NOW_MS);
+        sweep.run(
+            &fixture.store,
+            Some(&fixture.kernel),
+            true,
+            &counts,
+            NOW_MS,
+            &|| false,
+        );
         assert_eq!(
             report(&counts)["sweep_examined"],
             run * CANDIDATE_SWEEP_PAGE
@@ -492,12 +540,20 @@ fn the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over() {
         1,
         "rows citing unknown evidence drop; the live descriptor's row stays"
     );
-    sweep.run(&fixture.store, Some(&fixture.kernel), true, &counts, NOW_MS);
+    sweep.run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
     assert_eq!(
         report(&counts)["sweep_examined"],
         3 * CANDIDATE_SWEEP_PAGE + 1,
         "the fourth run starts over at the first row"
     );
+    assert_eq!(untouched(&fixture), before);
 }
 
 #[test]
@@ -526,15 +582,23 @@ fn a_false_flag_runs_no_table_statement_and_moves_no_counter() {
             false,
             &counts,
             NOW_MS,
+            &|| false,
         );
-        sweep.run(&fixture.store, None, false, &counts, NOW_MS);
+        sweep.run(&fixture.store, None, false, &counts, NOW_MS, &|| false);
     }
     assert!(
         report(&counts).values().all(|value| value == 0),
         "{:?}",
         report(&counts)
     );
-    sweep.run(&fixture.store, Some(&fixture.kernel), true, &counts, NOW_MS);
+    sweep.run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
     assert_eq!(
         report(&counts)["store_unavailable"],
         1,
@@ -709,5 +773,237 @@ fn every_reviewer_job_the_daemon_builds_carries_no_signal() {
     assert!(
         built > 0,
         "the scan found the daemon's CausalInputs constructions"
+    );
+}
+
+#[test]
+fn a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land() {
+    let fixture = Fixture::open();
+    let live = fixture.live_evidence.clone();
+    let retired = fixture.retired_evidence.clone();
+    fixture.write(PROJECT, &live, &["active", "stale"], |_| {});
+    // An evidence object is no decision, so the claim read of the page's one chunk is refused.
+    fixture
+        .store
+        .replace_candidates_for_descriptor(
+            &DescriptorCandidates {
+                project_digest: PROJECT,
+                evidence_id: &retired,
+                publish_tip: 1,
+                kernel_incarnation_id: &fixture.incarnation(),
+                matcher_digest: matcher_digest(),
+                created_at_ms: NOW_MS,
+                rows: &[CandidateScore {
+                    decision_object_id: "evidence-object-live",
+                    decision_id: "not-a-decision",
+                    matched_terms: 3,
+                    decision_terms: 4,
+                }],
+            },
+            CAPS,
+        )
+        .unwrap();
+    let age_ms = i64::try_from(MAX_CANDIDATE_AGE.as_millis()).unwrap();
+    let over_age = ingest(&fixture.kernel, "over-age");
+    fixture.write(PROJECT, &over_age, &["active"], |row| {
+        row.created_at_ms = NOW_MS - age_ms - 1;
+    });
+    let counts = Candidates::default();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
+    assert_eq!(
+        kept(&fixture),
+        [
+            (
+                PROJECT.to_string(),
+                live.clone(),
+                "object-active".to_string()
+            ),
+            (PROJECT.to_string(), live, "object-stale".to_string()),
+        ],
+        "the chunk's live rows stay; the over-age row and the retired-evidence row drop"
+    );
+    let block = report(&counts);
+    assert_eq!(block["sweep_skipped_kernel_unavailable"], 1);
+    assert_eq!(block["sweep_dropped"], 2);
+}
+
+#[test]
+fn a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it() {
+    let fixture = Fixture::open();
+    let tip = fixture.tip();
+    fixture.write(PROJECT, "evidence-not-yet-published", &["active"], |row| {
+        row.publish_tip = tip + 1;
+    });
+    let counts = Candidates::default();
+    let mut sweep = CandidateSweep::default();
+    sweep.run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
+    assert_eq!(
+        fixture.rows().len(),
+        1,
+        "the sweep's tip cannot judge the row"
+    );
+    ingest(&fixture.kernel, "later");
+    sweep.run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
+    assert_eq!(
+        fixture.rows().len(),
+        0,
+        "at a later tip the unknown evidence drops it"
+    );
+}
+
+#[test]
+fn a_cancelled_sweep_deletes_nothing() {
+    let fixture = Fixture::open();
+    let retired = fixture.retired_evidence.clone();
+    fixture.write(PROJECT, &retired, &["active"], |row| {
+        row.incarnation = "0".repeat(32);
+    });
+    let counts = Candidates::default();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| true,
+    );
+    assert_eq!(fixture.rows().len(), 1);
+    assert_eq!(report(&counts)["sweep_dropped"], 0);
+}
+
+#[test]
+fn every_claim_chunk_of_a_page_is_read() {
+    let fixture = Fixture::open();
+    let names: Vec<String> = (0..65).map(|index| format!("many-{index}")).collect();
+    let project = format!("project:{PROJECT}");
+    fixture
+        .kernel
+        .commit(intent("many"), |envelope| {
+            for name in &names {
+                envelope.insert_decision(decision(name, "memory", &project))?;
+                envelope.record_admission(request(
+                    &format!("object-{name}"),
+                    EventKind::Other,
+                    TRUSTED,
+                ))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    for chunk in names.chunks(16) {
+        let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+        let evidence = ingest(&fixture.kernel, &chunk[0]);
+        fixture.write(PROJECT, &evidence, &refs, |_| {});
+    }
+    let live = fixture.live_evidence.clone();
+    fixture.write(PROJECT, &live, &["invalidated"], |_| {});
+    let counts = Candidates::default();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
+    assert_eq!(
+        fixture.rows().len(),
+        names.len(),
+        "only the invalidated row drops"
+    );
+    assert_eq!(report(&counts)["sweep_dropped"], 1);
+}
+
+#[test]
+fn the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass() {
+    use daemon::memory_reviewer::lifecycle::{CandidateStep, pass_then_sweep};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fixture = Fixture::open();
+    for index in 0..=CANDIDATE_SWEEP_PAGE {
+        fixture.write(PROJECT, &format!("evidence-{index}"), &["active"], |row| {
+            row.incarnation = "0".repeat(32);
+        });
+    }
+    let enabled = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&enabled);
+    let mut step = CandidateStep {
+        counts: Arc::new(Candidates::default()),
+        enabled: Arc::new(move || flag.load(Ordering::Relaxed)),
+        sweep: CandidateSweep::default(),
+    };
+    let mut pass = |cancelled: bool| {
+        pass_then_sweep(
+            &fixture.store,
+            Some(&fixture.kernel),
+            NOW_MS,
+            None,
+            &|| cancelled,
+            &mut step,
+        )
+        .is_some()
+    };
+    assert!(pass(false));
+    enabled.store(true, Ordering::Relaxed);
+    assert!(!pass(true), "a cancelled pass runs no sweep");
+    assert!(pass(false));
+    assert!(pass(false));
+    let block = report(&step.counts);
+    assert_eq!(
+        block["sweep_examined"],
+        CANDIDATE_SWEEP_PAGE + 1,
+        "the flag-off and cancelled passes examine nothing; the second sweep continues where the first stopped"
+    );
+    assert_eq!(fixture.rows().len(), 0);
+}
+
+#[test]
+fn the_evidence_read_refuses_another_incarnation_and_a_future_snapshot() {
+    let fixture = Fixture::open();
+    let other = Fixture::open();
+    let budget = EvalBudget::unbounded();
+    let foreign = other
+        .kernel
+        .capture_commit_read_target_within_budget(&budget)
+        .unwrap();
+    let ids = [fixture.live_evidence.as_str()];
+    assert_eq!(
+        fixture
+            .kernel
+            .evidence_liveness_at_within_budget(&ids, foreign, &budget),
+        Err(EvidenceLivenessError::IncarnationMismatch)
+    );
+    let mut future = fixture
+        .kernel
+        .capture_commit_read_target_within_budget(&budget)
+        .unwrap();
+    future.through_commit += 1;
+    assert_eq!(
+        fixture
+            .kernel
+            .evidence_liveness_at_within_budget(&ids, future, &budget),
+        Err(EvidenceLivenessError::Kernel(
+            kernel::KernelError::FutureSnapshot
+        ))
     );
 }
