@@ -463,7 +463,8 @@ impl MemoryStore {
     /// descriptor's other rows are deleted. A write below that tip is a late
     /// write: it replaces the values of keys the descriptor already holds,
     /// keeps their higher tip, and inserts and deletes nothing, so the
-    /// descriptor never holds more than its cap. While the project then holds
+    /// descriptor keeps the row count its held write established, within the
+    /// `caps.per_descriptor` that write enforced. While the project then holds
     /// more than `caps.per_project` rows, the lowest `score_bp`, then oldest,
     /// then smallest key is evicted. A new row the cap would evict at once is
     /// never inserted and is counted in both `written` and `dropped_at_cap`, so
