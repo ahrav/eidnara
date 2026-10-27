@@ -24,7 +24,7 @@ tip.
 - Existing check: `both_latest_decision_formulations_choose_the_same_row`
   (`crates/kernel/tests/kernel_admission.rs:2252`);
   `an_event_that_names_a_disposition_keeps_its_own_outcome`
-  (`crates/kernel/src/admission.rs:5318`). Status: unaudited.
+  (`crates/kernel/src/admission.rs:5386`). Status: unaudited.
 
 ## Failure scenario
 

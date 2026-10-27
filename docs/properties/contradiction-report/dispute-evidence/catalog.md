@@ -143,7 +143,7 @@ Confidence: high - [evidence](evidence/dispute-requires-evidence-from-plugin.md)
 Read `compose_reason` (`commit.rs:208-236`), `DisputeReason::validated`
 (`dispute.rs:49-81`), the handler loop (`commit.rs:1147-1153`), and the
 route and parser tests above.
-Existing check: `kernel_routes.rs:5971`, `:6252`; `dispute.rs:393`
+Existing check: `kernel_routes.rs:5971`, `:6258`; `dispute.rs:393`
 (`a_dispute_needs_evidence_and_other_events_take_none`, unit);
 `memory-mark-command.test.ts:126`; the fake kernel mirrors the rule
 (`disputeEvidenceWellFormed`,
@@ -227,7 +227,7 @@ case; a citer retired between a preview and its commit.
 Confidence: high - [evidence](evidence/cited-evidence-live-at-dispute-commit.md).
 Read `require_visible_evidence` (`commit.rs:745-766`),
 `evidence_citations` (`envelope.rs:532-577`), and the three route tests.
-Existing check: `kernel_routes.rs:5801`, `:5723`, `:6375`;
+Existing check: `kernel_routes.rs:5801`, `:5723`, `:6381`;
 `kernel_slice.rs:2159`. Status unaudited.
 Impact: a dispute resting on retired evidence cannot be followed by a
 later reader at the moment it was filed.
@@ -294,8 +294,8 @@ loop (`commit.rs:754-765`), and the tests above. The asserted-edge branch
 of the SQL (`envelope.rs:563-564`) has no production writer and no test:
 no Rust code under `crates/` inserts into `asserted_edges`, so the arm is
 read, not exercised.
-Existing check: `kernel_routes.rs:5801`, `:5723`, `:6284`, `:6375`,
-`:6475`; `kernel_slice.rs:2159`. Status unaudited.
+Existing check: `kernel_routes.rs:5801`, `:5723`, `:6290`, `:6381`,
+`:6481`; `kernel_slice.rs:2159`. Status unaudited.
 Impact: accepting a foreign id would attach another project's evidence to
 this project's finding and reveal its existence through the answer.
 Open questions:
@@ -344,13 +344,13 @@ carrying both `evidence_id` and `evidence_ref` and parses both back from
 the reason, and refuses an uppercase-oid reference beside an id that
 would answer `not_found` with `invalid_input`, so the form check runs
 first. Unit tests in `dispute.rs`:
-`malformed_references_are_invalid_input` (`:314`),
-`a_path_the_secret_scanner_detects_is_invalid_input` (`:342`),
-`git_object_ids_and_ordinary_paths_carry_no_detection` (`:354`),
-`render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes` (`:246`),
-`reserved_and_multi_byte_values_encode_to_uppercase_escapes` (`:280`, a
+`malformed_references_are_invalid_input` (`:323`),
+`a_path_the_secret_scanner_detects_is_invalid_input` (`:365`),
+`git_object_ids_and_ordinary_paths_carry_no_detection` (`:377`),
+`render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes` (`:255`),
+`reserved_and_multi_byte_values_encode_to_uppercase_escapes` (`:289`, a
 fixed witness for `encode` and `decode`), and the proptest
-`every_accepted_reference_parses_back_to_its_inputs` (`:292`), which
+`every_accepted_reference_parses_back_to_its_inputs` (`:301`), which
 asserts every accepted path and optional id renders an ASCII reason
 within the cap that parses back to the inputs.
 Guarantee: A stored `evidence_ref` has a `git_object_id` of exactly 40 or
@@ -375,8 +375,8 @@ G3 is recorded in the evidence file: the test token
 `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678` is detected
 (asserted at `dispute.rs:367`), and 64 seeded 40- and 64-hex ids beside
 an ordinary path carry no detection (`dispute.rs:377-390`).
-Existing check: `kernel_routes.rs:5880`, `:6284`; `dispute.rs:255`,
-`:280`, `:292`, `:314`, `:342`, `:354`. Status unaudited.
+Existing check: `kernel_routes.rs:5880`, `:6290`; `dispute.rs:255`,
+`:289`, `:301`, `:323`, `:365`, `:377`. Status unaudited.
 Impact: a malformed reference cannot be followed; a path the redactor
 rewrote would point at a file that does not exist.
 Open questions:
@@ -516,7 +516,7 @@ Confidence: high - [evidence](evidence/dispute-with-evidence-never-raises-standi
 Read `event_effect` (`admission.rs:4234-4235`), the restrictiveness table,
 the relaxation rule, and the five tests.
 Existing check: `admission.rs:4605`; `kernel_routes.rs:5723`, `:6146`,
-`:6199`, `:6418`. Status unaudited.
+`:6199`, `:6424`. Status unaudited.
 Impact: a report would become a promotion path.
 Open questions:
 - A dispute against a `rejected`, `contradicted`, or `quarantined` prior
@@ -615,7 +615,7 @@ a preview and its commit that changes the verdict.
 Confidence: high - [evidence](evidence/dispute-preview-writes-nothing.md).
 Read the handler, `preview` (`commit.rs:895-915`), and the helper.
 Existing check: `kernel_routes.rs:5703`, `:5801`, `:5880`, `:5971`,
-`:6375`; `memory-mark-command.test.ts:242`. Status unaudited.
+`:6381`; `memory-mark-command.test.ts:242`. Status unaudited.
 Impact: a writing preview would record disputes the user declined; a
 disagreeing one would ask the wrong question.
 Open questions:
@@ -639,7 +639,7 @@ Exercised: partial - the PR A form is active and exercised:
 a reference; `a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field`
 (`kernel_routes.rs:6258`) sends a forged `reason` and asserts an error
 with the four row counts unchanged, so the client cannot supply the
-reason; `dispute.rs:241`, `:246`, `:404` cover the documented rendering,
+reason; `dispute.rs:241`, `:255`, `:427` cover the documented rendering,
 the round trip over reserved and non-ASCII bytes, and refusal of every
 rendering `render` does not produce; `dispute.rs:289` pins `encode` and
 `decode` on reserved and multi-byte input; the proptest at
@@ -681,8 +681,8 @@ Read `render`, `parse`, `encode`, `decode`, `decodes_to_itself`
 (`dispute.rs:83-216`), and the Kernel `reason` path
 (`admission.rs:1749`). The redaction-row absence for a landed dispute is
 argued from the shared detector, not asserted by a test.
-Existing check: `kernel_routes.rs:5880`, `:5723`, `:6199`, `:6252`,
-`:6284`; `dispute.rs:241`, `:246`, `:280`, `:292`, `:390`, `:404`.
+Existing check: `kernel_routes.rs:5880`, `:5723`, `:6199`, `:6258`,
+`:6290`; `dispute.rs:241`, `:255`, `:289`, `:301`, `:413`, `:427`.
 Status unaudited.
 Impact: a reader could not recover the reporter or the reference, and PR
 B could not be checked against PR A rows.

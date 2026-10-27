@@ -11,7 +11,8 @@ harm signals per served session.
 
 - The route reads the envelope's `session_id` before the transport strips
   it and carries it, the binding's project digest, and the harness in a
-  `Reporter` (`crates/daemon/src/kernel_routes/commit.rs:1106`).
+  `DisputeReporter` (`crates/daemon/src/kernel_routes/commit.rs:1106`, built
+  at `:1169`).
 - A dispute goes through `record_disposition`, which builds a
   `DisputeReporter` and calls `Envelope::record_dispute_admission`
   (`commit.rs:792`; `crates/kernel/src/admission.rs:1015`).

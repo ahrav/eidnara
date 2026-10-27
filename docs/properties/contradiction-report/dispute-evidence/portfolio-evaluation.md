@@ -31,7 +31,7 @@ by a doc-comment line. Examples: `commit.rs:12-63`, `:206-234`,
 `:719-721`, `:725-726`, `:742-759`, `:1047-1062`, `:1111-1125`,
 `:1151-1159`; `dispute.rs:49-81`, `:108-148`, `:151-159`, `:201-207`;
 `envelope.rs:187-194`, `:532-577`; `scope.rs:710-716`;
-`lib.rs:14529`; `admission.rs:4241-4248`, `:4532`; all eight route test
+`lib.rs:14529`; `admission.rs:4241-4248`, `:4605`; all eight route test
 lines from `kernel_routes.rs:5723` to `:6199`; and all seven TypeScript
 test lines.
 
