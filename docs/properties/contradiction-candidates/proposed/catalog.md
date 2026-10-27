@@ -766,11 +766,14 @@ frozen in the route's consent snapshot like `/source_capture/enabled`
 daemon-level value again on every cleanup pass
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) and, while that value
 is false, runs no table statement and moves no counter.
-Check: `always(!X)` - X is "a pass counter increments, a row exists, or a
-table read statement executes for a route whose frozen flag is false"; this
-is a forbidden state with no dedicated detection point, so `always(!X)`
-rather than `unreachable`; assert by publishing with the flag off and
-checking counters, row count, and a statement-trace hook.
+Check: `always(!X)` - X is "a pass counter increments, a row is written, or
+a table read statement executes for a route whose frozen flag is false"; a
+row written while the flag was on and retained after it turned off is a legal
+state, so the predicate names new writes, not held rows; this is a forbidden
+state with no dedicated detection point, so `always(!X)` rather than
+`unreachable`; assert by publishing with the flag off and checking counters,
+the row count against its value before the publication, and a
+statement-trace hook.
 Fault/timing angle: a config reload that turns the flag on after the route
 bound (the route keeps false, while the sweep follows the reload on its next
 pass); a daemon restart with the flag on (new routes see true).
