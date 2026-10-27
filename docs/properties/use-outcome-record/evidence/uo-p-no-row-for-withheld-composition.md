@@ -11,7 +11,7 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1155 branch tip, the commit that carries this
 revision.
 
-- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9671`); one
+- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9675-9678`); one
   write per pass covers its reruns.
 - A composition read at sequence 0 precedes every commit; the handler skips its
   write, and the next fold after a commit records the serve.

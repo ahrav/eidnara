@@ -84,15 +84,20 @@ const _: () = assert!(UseOutcomeWrite::Refused as usize + 1 == UseOutcomeWrite::
 const WRITES_IN_FLIGHT: usize = 4;
 /// Heap bytes a served id holds beside its text: its string header and the vector slot.
 const SERVED_ID_OVERHEAD_BYTES: u64 = 32;
-/// One retained served set: its ids, digest, revision, and read sequence. A job is handed off only after the pass's
-/// Memory Store commit, which stores the rendered block holding every served id in full as one durable string bounded
-/// by `memory_store::MAX_DURABLE_TEXT_BYTES`; a block past it fails the commit and no job is handed off. The read
-/// bounds the id count by [`MAX_READ_ROWS`].
-const RETAINED_SERVED_SET_BYTES_PER_WRITE: u64 = memory_store::MAX_DURABLE_TEXT_BYTES as u64
-    + MAX_READ_ROWS as u64 * SERVED_ID_OVERHEAD_BYTES
-    + 128;
-/// The served sets in-flight jobs retain after their passes' responses released their charges: a slot is reserved
-/// before the set is built, so at most [`WRITES_IN_FLIGHT`] exist.
+/// The ids' bytes: a job is handed off only after the pass's Memory Store commit, which stores the rendered block
+/// holding every served id in full as one durable string bounded by `memory_store::MAX_DURABLE_TEXT_BYTES`; a block past
+/// it fails the commit and no job is handed off. The read bounds the id count by [`MAX_READ_ROWS`].
+const SERVED_IDS_BYTES_BOUND: u64 =
+    memory_store::MAX_DURABLE_TEXT_BYTES as u64 + MAX_READ_ROWS as u64 * SERVED_ID_OVERHEAD_BYTES;
+/// The identity strings a job carries beside its ids: the project root (at most `PATH_MAX`) and digest, harness,
+/// session id, operation key, request digest, and the digest strings of the set and the spec.
+const JOB_IDENTITY_BYTES: u64 = 16 * 1024;
+/// One in-flight write at its peak: the owned [`ServedSet`], the `&str` slice `request_digest` reads, the owned id
+/// copy the insert spec carries into the commit, and the identities.
+const RETAINED_SERVED_SET_BYTES_PER_WRITE: u64 =
+    2 * SERVED_IDS_BYTES_BOUND + MAX_READ_ROWS as u64 * 16 + JOB_IDENTITY_BYTES;
+/// What in-flight jobs retain after their passes' responses released their charges: a slot is reserved before the set
+/// is built, so at most [`WRITES_IN_FLIGHT`] jobs exist.
 pub(crate) const RETAINED_SERVED_SET_BYTES_BOUND: u64 =
     WRITES_IN_FLIGHT as u64 * RETAINED_SERVED_SET_BYTES_PER_WRITE;
 
