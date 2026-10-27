@@ -140,7 +140,7 @@ Status unaudited. Re-exercised by #1164 through the scorer:
 `an_unscorable_summary_is_reported_and_the_others_still_score`
 (`:243-274`) covers the 8192-byte summary bound. The scorer's atom bounds
 sit one past the most atoms the byte bounds admit
-(`crates/daemon/src/contradiction_candidates/scorer.rs:84-95`), so `TooManyAtoms` is
+(`crates/daemon/src/contradiction_candidates/scorer.rs:85-96`), so `TooManyAtoms` is
 unreachable through it.
 Impact: a P5 pass that analyzes a 64 KiB descriptor and a project's decision
 summaries does unbounded work or allocation per pass if the bound truncates
@@ -173,7 +173,7 @@ Read `analysis.rs:107-199`: only `char` classification, slicing, and
 `String::push`; no I/O, statics, or folding.
 Existing check: the goldens (`tests/lexical_analysis.rs:24-36` harness,
 `:51-218` cases). Status unaudited. Re-exercised by #1164: the scorer folds
-after analysis (`crates/daemon/src/contradiction_candidates/scorer.rs:102-110`),
+after analysis (`crates/daemon/src/contradiction_candidates/scorer.rs:111-132`),
 and its hand-written term sets
 (`crates/daemon/tests/contradiction_candidates_scorer.rs:31-80`, `:131-159`) show
 case-boundary parts (`HTTPServer` to `http`, `server`), kept diacritics,
@@ -213,7 +213,7 @@ Read `identity.rs:36-65` and the test.
 Existing check: `identity_pins_the_manifest`. Status unaudited.
 Re-exercised by #1164: the matcher preimage names `ANALYSIS_CONTRACT_EPOCH`
 and the Unicode version
-(`crates/daemon/src/contradiction_candidates/scorer.rs:301-303`), and
+(`crates/daemon/src/contradiction_candidates/scorer.rs:657-659`), and
 `the_matcher_digest_pins_every_rule`
 (`crates/daemon/tests/contradiction_candidates_scorer.rs:348-400`) asserts the whole
 preimage, including both fields, and the digest literal. `identity_pins_the_manifest` and the retrieval crate are unchanged

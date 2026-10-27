@@ -1,7 +1,8 @@
 # cc-scorer-output-deterministic-under-contract-version
 
 Verified at the #1164 branch tip (base `979fb814e`, scorer commits
-`05acd0107` and `446c7363f`). Surface S-A.
+`05acd0107` and `446c7363f`), and re-verified after the term pipeline moved
+to hashed spellings. Surface S-A.
 
 ## Discovery trigger
 
@@ -12,25 +13,30 @@ iteration. #1163 D1 and C4 fix the total order; #1164 implements it.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/scorer.rs:102-110`
-  `term_set` collects folded, floored terms into a `BTreeSet<String>`, so a
-  text's terms have one order and duplicates collapse.
-- `scorer.rs:139-148` `ScoredCandidate::rank`: score descending by
+- `crates/daemon/src/contradiction_candidates/scorer.rs:111-132` `terms`
+  yields each kept term with its hash. `DescriptorTerms::new` (`:432-465`)
+  sorts the descriptor's terms by hash, then folded bytes, and drops
+  repeats, so equal term sets build equal tables; `score` (`:483-562`)
+  reduces a summary to its distinct `matched_terms` and `decision_terms`
+  counts. Only those counts leave the term pipeline, so no container
+  iteration order reaches the output. `term_set` (`:103-109`) still returns
+  a `BTreeSet<String>`.
+- `scorer.rs:386-395` `ScoredCandidate::rank`: score descending by
   cross-multiplying `matched_terms` and `decision_terms` (no floating point),
   then `matched_terms` descending, `decision_terms` ascending, decision
   object id ascending, decision id ascending. `String` comparison is byte
   order, so `rank` is a total order over distinct (object id, decision id)
   pairs.
-- `scorer.rs:217-233` `TopCandidates::record` scores one summary and offers
-  a passing one; `:235-250` `offer` replaces a kept entry with the same
+- `scorer.rs:573-588` `TopCandidates::record` scores one summary and offers
+  a passing one; `:590-606` `offer` replaces a kept entry with the same
   decision object id only when the new one ranks better, inserts at
-  `partition_point`, and truncates to `CANDIDATES_PER_DESCRIPTOR` (`:62`,
+  `partition_point`, and truncates to `CANDIDATES_PER_DESCRIPTOR` (`:63`,
   K = 4).
-- `scorer.rs:271-288` `score_descriptor` feeds every candidate through
+- `scorer.rs:627-644` `score_descriptor` feeds every candidate through
   `record`, collects unscorable ids, and sorts them (`sort_unstable` on
   `String`, a total order, so equal ids are indistinguishable).
-- `scorer.rs:292-327` `matcher_preimage` names `ORDER_RULE_ID` (`:79-80`);
-  `:338-345` the digest is the SHA-256 of the preimage, held in a
+- `scorer.rs:648-683` `matcher_preimage` names `ORDER_RULE_ID` (`:80-81`);
+  `:694-701` the digest is the SHA-256 of the preimage, held in a
   `LazyLock`.
 - Tests: `crates/daemon/tests/contradiction_candidates_scorer.rs:276-318`
   `the_top_k_is_the_same_under_every_input_order`;
@@ -72,8 +78,8 @@ None. The function is pure: it reads only its arguments and the constant
 
 ### Q: Does the order depend on anything outside the inputs?
 
-- Sources examined: `scorer.rs:102-110`, `:139-148`, `:217-250`,
-  `:271-288`.
+- Sources examined: `scorer.rs:111-132`, `:386-395`, `:432-606`,
+  `:627-644`.
 - Findings: no hash container, clock, global, or I/O reaches the result.
   `rank` ignores the summary and ends at the decision id, so two entries
   tie only when their ids and counts are equal, and such entries give
@@ -85,7 +91,7 @@ None. The function is pure: it reads only its arguments and the constant
 
 ### Q: Which tie-break order applies? (originally needs human input)
 
-- Sources examined: #1163 D1 and C4, #1164 Scope, `scorer.rs:139-148`.
+- Sources examined: #1163 D1 and C4, #1164 Scope, `scorer.rs:386-395`.
 - Findings: the specification fixes score desc, `matched_terms` desc,
   `decision_terms` asc, object id asc; the code adds decision id asc and
   one entry per object id, both named in the order rule id.

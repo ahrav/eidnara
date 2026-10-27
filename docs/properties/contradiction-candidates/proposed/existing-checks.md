@@ -23,10 +23,26 @@ guards). An existing check never removes a record from the catalog.
 | `the_top_k_is_the_same_under_every_input_order` | `:276-318` | K + 1 ties, a lower-score wider match, and an unscorable summary give an equal result over 18 input orders | determinism | unaudited |
 | `a_decision_object_id_appears_once_and_the_better_entry_wins_in_any_order` | `:320-346` | one entry per object id, the better-ranked one, in both orders | determinism | unaudited |
 | `the_matcher_digest_pins_every_rule` | `:348-400` | the full preimage, `ANALYSIS_CONTRACT_EPOCH`, the matcher epoch, and the digest literal | determinism, case fold (pins the rules) | unaudited |
+| `a_non_ascii_spelling_that_folds_to_ascii_matches_the_ascii_spelling` | `:404-425` | the Kelvin sign spelling `\u{212A}elvin` folds to {kelvin} and matches `Kelvin` and `kelvin` across the two sides, 3 of 4 | case fold | unaudited |
+| `a_summary_with_more_than_64_distinct_terms_scores_every_term` | `:429-452` | 70 `termNN` atoms hold 71 terms and score 41 of 71 against 40 of them; the uppercase spelling plus `École` scores 41 of 72 | none directly | unaudited |
+
+## S-A scorer, differential (`crates/daemon/tests/contradiction_candidates_scorer_differential.rs`)
+
+`reference` (`:16-65`) applies the documented rules directly: atoms and
+parts, `str::to_lowercase` per term, the floor on scalar values, a
+`BTreeSet`, and containment with the three gates.
+
+| Check | Location | Asserts | Records | Status |
+| --- | --- | --- | --- | --- |
+| `term_sets_match_the_documented_rules` | `:179-189` | `term_set` equals the reference under both bounds for generated mixed ASCII and non-ASCII text | case fold | unaudited |
+| `summary_scores_match_the_documented_rules` | `:191-205` | `DescriptorTerms::score` equals the reference for generated descriptors and summaries | case fold, oversize (unscorable versus score 0) | unaudited |
+| `summaries_drawn_from_the_descriptor_score_as_the_rules_say` | `:207-230` | summaries built from the descriptor's own words, some uppercased, score as the reference | case fold | unaudited |
+| `ascii_summaries_with_many_distinct_terms_score_as_the_rules_say` | `:235-245` | ASCII summaries of up to 160 numbered words, past 64 distinct terms, score as the reference | none directly | unaudited |
+| `score_descriptor_keeps_the_reference_top_k` | `:247-284` | `score_descriptor` keeps the reference's top K in rank order and lists the reference's unscorable ids | determinism | unaudited |
 
 Production guards: the compile-time assertion that the descriptor bound is
 at least `MAX_SOURCE_UNIT_BYTES`
-(`crates/daemon/src/contradiction_candidates/scorer.rs:65-67`); the
+(`crates/daemon/src/contradiction_candidates/scorer.rs:66-68`); the
 analyzer's refusals (`crates/retrieval/src/lexical/analysis.rs:78-105`),
 which the scorer propagates.
 

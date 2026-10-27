@@ -126,11 +126,12 @@ passing summaries, ties on score and `matched_terms` past position K, an
 unscorable summary, a repeated decision object id, and at least two input
 orders.
 Confidence: high - [evidence](evidence/cc-scorer-output-deterministic-under-contract-version.md).
-Read `crates/daemon/src/contradiction_candidates/scorer.rs:102-110` (terms are a
-`BTreeSet`, so no
-hash iteration order reaches the output), `:139-148` (`rank`, a total order
-ending at both ids), `:217-250` (`record`, `offer`), `:271-288`
-(`score_descriptor` sorts `unscorable`), `:292-327` (the preimage names the
+Read `crates/daemon/src/contradiction_candidates/scorer.rs:424-465` (the
+descriptor table is sorted by hash, then folded text, and a summary
+contributes only its `matched_terms` and `decision_terms` counts, so no
+iteration order reaches the output), `:386-395` (`rank`, a total order
+ending at both ids), `:573-606` (`record`, `offer`), `:627-644`
+(`score_descriptor` sorts `unscorable`), `:648-683` (the preimage names the
 order rule).
 Existing check: the two tests above and `the_matcher_digest_pins_every_rule`
 (`:348-400`), which pins the order rule id in the preimage. Status
@@ -181,7 +182,7 @@ Guarantee: a descriptor over `DESCRIPTOR_BOUNDS` is refused whole:
 no term left after the floor, is `SummaryScore::Unscorable` and its decision
 object id is listed in `unscorable`, while the other summaries score;
 `unscorable` lists decision object ids, not decision ids
-(`crates/daemon/src/contradiction_candidates/scorer.rs:280`), so with a
+(`crates/daemon/src/contradiction_candidates/scorer.rs:636`), so with a
 repeated object id one id can appear twice in `unscorable`, or in both
 `unscorable` and `candidates` when another entry with that id scores; no
 analysis of a prefix of either text contributes to any score; a refusal is
@@ -199,14 +200,14 @@ Required faults and enabling state: a descriptor one byte over the bound and
 one at it with the maximum atom count; a summary one byte over its bound and
 one at it; a floor-emptied summary next to scorable ones. The atom bounds are
 `max_input_bytes / 2 + 1`
-(`crates/daemon/src/contradiction_candidates/scorer.rs:84-95`), one past the
+(`crates/daemon/src/contradiction_candidates/scorer.rs:85-96`), one past the
 most atoms the byte bound admits, because n atoms need at least 2n - 1
 bytes; an input with `max_atoms` atoms exceeds the byte bound first, so
 `TooManyAtoms` is unreachable through the scorer and no test constructs it.
 Confidence: high - [evidence](evidence/cc-oversize-text-refused-whole-never-truncated.md).
-Read `crates/daemon/src/contradiction_candidates/scorer.rs:63-69`, `:84-95`,
-`:102-110`, `:175-207`,
-`:271-288`; the compile-time assertion at `:65-67` holds the descriptor
+Read `crates/daemon/src/contradiction_candidates/scorer.rs:64-70`, `:85-96`,
+`:103-109`, `:432-465`, `:526-562`,
+`:627-644`; the compile-time assertion at `:66-68` holds the descriptor
 bound at or above `MAX_SOURCE_UNIT_BYTES`
 (`crates/daemon/src/harness_sources.rs:612`).
 Existing check: the three tests above; the analyzer's own refusal tests
@@ -251,8 +252,11 @@ gives `configLoader` the terms {configloader, config, loader} and both
 `CONFIGLOADER` and `configloader` the term {configloader}.
 Guarantee: one fold, `str::to_lowercase` per term, is applied to the
 analyzer's output on both sides: every term of the descriptor and of every
-summary passes through the one function `term_set`; no diacritic removal or
-Unicode normalization is applied. The analyzer splits parts on the original
+summary is folded by the same rule in `terms` and `scan_ascii`, which fold
+an ASCII term by its ASCII lowercase (equal to `str::to_lowercase` on
+ASCII) and any other term by `str::to_lowercase`, and `term_set` returns
+those folded terms; no diacritic removal or Unicode normalization is
+applied. The analyzer splits parts on the original
 case before the fold (`crates/retrieval/src/lexical/analysis.rs:193-205`:
 at a lower-to-upper change and before the last capital of an uppercase run
 that two lowercase letters follow), so two texts that differ only in case
@@ -274,11 +278,15 @@ a non-ASCII pair; a pair whose lowercase mapping changes length (`İ`); a
 case-only pair whose case change crosses a part boundary (`configLoader`
 and `configloader`); a diacritic-only pair and an NFC and NFD pair.
 Confidence: high - [evidence](evidence/cc-case-fold-applied-identically-to-both-sides.md).
-Read `crates/daemon/src/contradiction_candidates/scorer.rs:102-110` (the one fold
-site), `:175-181`
-(`DescriptorTerms::new` calls `term_set`), `:182-207` (`score` calls
-`term_set` on the summary), `:18-25` (the module header states the fold is
-not full case folding), `:76` (`FOLD_RULE_ID` enters the preimage);
+Read `crates/daemon/src/contradiction_candidates/scorer.rs:111-132` (`terms`:
+an ASCII term folds as its `to_ascii_lowercase`, which equals
+`str::to_lowercase` on ASCII, and any other term through `str::to_lowercase`
+at `:124`), `:221-270` (`scan_ascii` floors and hashes the ASCII lowercase),
+`:432-465` (`DescriptorTerms::new` takes the descriptor's terms from
+`terms`), `:483-562` (`score` takes the summary's terms from `scan_ascii`
+through `count_ascii`, or from `terms` when a term is not ASCII or more than
+64 are distinct), `:18-25` (the module header states the fold is not full
+case folding), `:77` (`FOLD_RULE_ID` enters the preimage);
 `crates/retrieval/src/lexical/analysis.rs:193-205` (`splits`, the
 case-driven part boundaries).
 Existing check: the three tests above; `the_matcher_digest_pins_every_rule`

@@ -398,3 +398,55 @@ fn the_matcher_digest_pins_every_rule() {
         "a changed matcher rule changes the digest; update the epoch and the digest together"
     );
 }
+
+/// The Kelvin sign `\u{212A}` lowercases to ASCII `k`, so a non-ASCII
+/// spelling folds to the same term as its ASCII equivalent.
+#[test]
+fn a_non_ascii_spelling_that_folds_to_ascii_matches_the_ascii_spelling() {
+    assert_eq!(terms("\u{212A}elvin"), set(&["kelvin"]));
+    assert_eq!(
+        DescriptorTerms::new("Kelvin scale reading")
+            .unwrap()
+            .score("\u{212A}elvin scale reading drift"),
+        SummaryScore::Candidate {
+            matched_terms: 3,
+            decision_terms: 4
+        }
+    );
+    assert_eq!(
+        DescriptorTerms::new("\u{212A}ELVIN SCALE READING")
+            .unwrap()
+            .score("kelvin scale reading drift"),
+        SummaryScore::Candidate {
+            matched_terms: 3,
+            decision_terms: 4
+        }
+    );
+}
+
+/// Each `termNN` atom splits into the parts `term` and `NN`; `NN` is all
+/// numeric, so 70 such atoms hold 71 terms.
+#[test]
+fn a_summary_with_more_than_64_distinct_terms_scores_every_term() {
+    let words = |count: usize| {
+        (0..count)
+            .map(|index| format!("term{index:02}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let descriptor = DescriptorTerms::new(&words(40)).unwrap();
+    assert_eq!(
+        descriptor.score(&words(70)),
+        SummaryScore::Candidate {
+            matched_terms: 41,
+            decision_terms: 71
+        }
+    );
+    assert_eq!(
+        descriptor.score(&format!("{} \u{c9}cole", words(70).to_uppercase())),
+        SummaryScore::Candidate {
+            matched_terms: 41,
+            decision_terms: 72
+        }
+    );
+}
