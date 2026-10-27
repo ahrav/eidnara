@@ -6,7 +6,7 @@ HEAD `3a3b916b7`. Surface S3.
 
 Plan R1/KTD2: the P5 pass runs "under its own deadline and byte budget" and
 "stop[s] at budget exhaustion". The task names the claim "deadline/interrupt
-stop the read". `claim_facts.rs:230-233` claims "reader acquisition and every
+stop the read". `claim_facts.rs:242-245` claims "reader acquisition and every
 statement stop at the deadline or on cancellation"; `slice/read.rs:121`
 claims "The wait for a pooled reader stops at `budget`'s deadline or
 interrupt." Lens: failure recovery; C7, C8; D2.
@@ -36,8 +36,8 @@ interrupt." Lens: failure recovery; C7, C8; D2.
   `LimitedConnection::new` (`:1693-1722`): `limit.check()`, zero busy timeout,
   `set_progress_handler(.., SQL_BUDGET_PROGRESS_STEPS)` when the limit has
   control.
-- `claim_facts.rs:238` `limit.run`; `:261` `reader_with_limit(limit)`;
-  `:274` `limit.check()`; `:350`, `:357` `limit.check()` per claim inside
+- `claim_facts.rs:250` `limit.run`; `:330` `reader_with_limit(limit)`;
+  `:343` `limit.check()`; `:422`, `:426` `limit.check()` per claim inside
   `load_claims_served_in_tx`. So claim facts have acquisition, per-claim, and
   in-statement (progress handler) poll points.
 - `slice/read.rs:134` `decision_page_within_budget`: `self.lock_reader_within

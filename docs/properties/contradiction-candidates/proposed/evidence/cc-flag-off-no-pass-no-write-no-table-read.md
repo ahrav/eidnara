@@ -14,7 +14,7 @@ candidate table statement on any path.
   daemon-level value on each cleanup pass.
 - The pass is offered only when the route's frozen value consents; the
   capture job's offer carries it.
-- `crates/daemon/src/contradiction_candidates/read.rs:132` the read answers
+- `crates/daemon/src/contradiction_candidates/read.rs:148` the read answers
   `disabled` before reaching the store.
 
 ## Failure scenario

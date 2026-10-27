@@ -59,7 +59,7 @@ cover that path through `kernel.read`.
 | `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget` | `crates/daemon/tests/embedding_dispatch.rs:1102` | a held reader pool ends a budgeted read at its bound | unaudited |
 | `exhausted_budget_is_refused_before_kernel_readers_are_taken` | `crates/daemon/tests/search_catchup.rs:1876` | | unaudited |
 
-Production guards: `check_claim_bounds` (`claim_facts.rs:287-304`);
+Production guards: `check_claim_bounds` (`claim_facts.rs:353-371`);
 `AcquireLimit::check` (`open.rs:1535-1541`); progress handler installed by
 `LimitedConnection::new` (`:1712-1720`).
 

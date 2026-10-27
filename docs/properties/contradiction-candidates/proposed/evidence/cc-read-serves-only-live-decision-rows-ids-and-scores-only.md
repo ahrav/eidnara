@@ -10,24 +10,34 @@ carry no descriptor or summary text.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/read.rs:116-128` binds the
+- `crates/daemon/src/contradiction_candidates/read.rs:132-144` binds the
   route through `management_binding` (the frozen flag) and `kernel_request`
-  (scope first, then the strict body with `deny_unknown_fields`, `:29`).
-- `crates/daemon/src/contradiction_candidates/read.rs:65` `decision_is_live`
-  reads the one decision's claim facts at the identified tip and applies
-  `ScopeFilter` and the shared `eligible` predicate; a failure answers
-  `not_live` (`:162`) before the store is read.
-- `crates/daemon/src/contradiction_candidates/read.rs:165`
+  (scope first, then the strict body with `deny_unknown_fields`, `:27`).
+- `crates/daemon/src/contradiction_candidates/read.rs:86` `decision_is_live`
+  reads the one decision's claim standing at the identified tip
+  (`crates/kernel/src/claim_facts.rs:272` `claim_standing_at_within_budget`:
+  the registry row, decision row, own admission, and served standing, each
+  read as claim facts read it) and applies `ScopeFilter` and the shared
+  predicate (`crates/daemon/src/contradiction_candidates/eligibility.rs:20`
+  `standing_is_eligible`, the body `eligible` applies); a failure answers
+  `not_live` (`:178`) before the store is read.
+- `crates/daemon/src/contradiction_candidates/read.rs:181`
   `candidates_for_decision` pages at most 64 rows in reader order with a
-  keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:335`).
-- `crates/daemon/src/contradiction_candidates/read.rs:181` reads evidence
-  liveness for the page's ids at the same target; `is_current` (`:99`) keeps
+  keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:353`).
+- `crates/daemon/src/contradiction_candidates/read.rs:197` reads evidence
+  liveness for the page's ids at the same target; `is_current` (`:115`) keeps
   a row only when its evidence is live, its incarnation and matcher digest
   equal the reader's, and its `publish_tip` is at or below the target, and
-  `:191` counts the rest `read_filtered_stale`.
-- `crates/daemon/src/contradiction_candidates/read.rs:46` `item` emits the
-  eight wire keys; `packages/opencode-plugin/src/shared/kernel-client/wire.ts:652`
+  `:209` counts the rest `read_filtered_stale`.
+- `crates/daemon/src/contradiction_candidates/read.rs:56` `ItemOut` holds the
+  eight wire keys, encoded once into the page bytes; `packages/opencode-plugin/src/shared/kernel-client/wire.ts:652`
   refuses any other key set.
+- Equivalence tests: `crates/kernel/tests/kernel_claim_facts.rs:954`
+  compares the standing read with claim facts field by field and refusal by
+  refusal; `crates/kernel/tests/kernel_source_descriptors.rs:3094` answers
+  liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:688`
+  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:1829`
+  shows a page body is the canonical `serde_json` encoding of its value.
 
 ## Failure scenario
 
@@ -53,15 +63,15 @@ future tip; a superseded decision with rows; a second root. All in
 
 ### Q: Does the read judge rows at the same tip it reports?
 
-- Sources examined: `crates/daemon/src/contradiction_candidates/read.rs:150-197`.
-- Findings: the target is captured once; claim facts, evidence liveness, and
+- Sources examined: `crates/daemon/src/contradiction_candidates/read.rs:166-221`.
+- Findings: the target is captured once; claim standing, evidence liveness, and
   `as_of` all use it.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
 ### Q: Can a foreign root reach the body parser?
 
-- Sources examined: `crates/daemon/src/contradiction_candidates/read.rs:116-128`,
+- Sources examined: `crates/daemon/src/contradiction_candidates/read.rs:132-144`,
   `crates/daemon/src/candidate_pass_tests.rs:1514`.
 - Findings: `kernel_request` answers `project_mismatch` before parsing; a
   foreign root with an unknown field answers the scope refusal.

@@ -412,8 +412,8 @@ Fault/timing angle: none.
 Required faults and enabling state: `max_claims + 1` ids; a budget already
 exhausted at call time; an id of 513 bytes.
 Confidence: high - [evidence](evidence/p5dep-claim-fact-bounds-are-refused-before-any-row-is-read.md).
-Read `claim_facts.rs:230-304`: `limit.run` checks first (`:238`),
-`check_claim_bounds` (`:258`) precedes `reader_with_limit` (`:261`).
+Read `claim_facts.rs:242-371`: `limit.run` checks first (`:250`),
+`check_claim_bounds` (`:326`) precedes `reader_with_limit` (`:330`).
 Existing check: `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`,
 `an_exhausted_budget_is_refused_before_the_projection_is_read`. Status
 unaudited. Re-exercised by #1166: the candidate sweep reads claim facts in
@@ -472,7 +472,7 @@ Required faults and enabling state: a held reader pool
 inside the statement; a parent interrupt raised mid-read.
 Confidence: medium - [evidence](evidence/p5dep-budget-exhaustion-stops-a-budgeted-kernel-read.md).
 Read `slice/read.rs:134`, `:241`, `open.rs:565-593`, `:1654-1664`,
-`:1693-1722`, `claim_facts.rs:238`, `:261`, `:274`, `:350`, `:357`. The
+`:1693-1722`, `claim_facts.rs:250`, `:330`, `:343`, `:422`, `:426`. The
 statement-interrupt path for claim facts is read in code but not observed by
 a test this pass found.
 Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget`,
@@ -849,7 +849,7 @@ Existing check: the wire tests above; the literal-set test at
 `wire.rs:448-463+`. Status unaudited.
 Re-exercised by #1168: `review.candidates` joins the family through
 `kernel_request` with a `deny_unknown_fields` body
-(`crates/daemon/src/contradiction_candidates/read.rs:29`);
+(`crates/daemon/src/contradiction_candidates/read.rs:27`);
 `review_candidates_pages_live_rows_and_answers_each_terminal`
 (`crates/daemon/src/candidate_pass_tests.rs:1242`) answers `invalid_params`
 for an unknown field and a malformed cursor, `project_mismatch` for a foreign

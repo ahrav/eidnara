@@ -10,10 +10,10 @@ differ from an empty page.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/read.rs:132` answers
+- `crates/daemon/src/contradiction_candidates/read.rs:148` answers
   `disabled` for a false frozen flag before the store is reached; `:135`
   answers `store_unavailable` for a daemon with no Memory Store.
-- `crates/daemon/src/contradiction_candidates/read.rs:144` answers
+- `crates/daemon/src/contradiction_candidates/read.rs:160` answers
   `disabled` for a root whose memories authority is not MODULE, and a failed
   authority lookup or page read answers `store_unavailable`.
 - Kernel states come from `kernel_request` and `state_only` and carry no

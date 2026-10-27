@@ -477,7 +477,7 @@ show K accepted, K + 1 refused with the held rows unchanged, and a project
 at `per_project` evicting the lowest `score_bp`, then oldest, then smallest
 key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest`
 (`:187`) shows another project's rows are untouched. The store
-(`crates/memory-store/src/contradiction_candidates.rs:230`) enforces K and the
+(`crates/memory-store/src/contradiction_candidates.rs:248`) enforces K and the
 project cap in the write transaction; the daemon owns the values. Pass arm
 (#1167): `the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows`
 (`crates/daemon/src/candidate_pass_tests.rs:779`) scores K + 1 overlaps into K rows, cuts a pass at M in publish
@@ -656,7 +656,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - the read answers rows only for a route
 whose frozen `contradiction_candidates.enabled` is true
-(`crates/daemon/src/contradiction_candidates/read.rs:132`).
+(`crates/daemon/src/contradiction_candidates/read.rs:148`).
 Status: active
 Exercised: yes - #1168,
 `review_candidates_pages_live_rows_and_answers_each_terminal`
@@ -680,19 +680,19 @@ eligibility predicate's own test covers them
 Guarantee: `review.candidates` and the `candidates` action answer only for the
 route's bound project; the handler judges the decision with the shared
 eligibility predicate at the reader's identified tip
-(`crates/daemon/src/contradiction_candidates/read.rs:65` `decision_is_live`)
+(`crates/daemon/src/contradiction_candidates/read.rs:86` `decision_is_live`, over the Kernel's claim standing read)
 and answers `not_live` with no rows when it fails; otherwise it answers a page
 of at most 64 rows in (score desc, created desc, evidence id asc) order,
 `as_of` the tip, whose items carry exactly `evidence_id`,
 `decision_object_id`, `decision_id`, `matched_terms`, `decision_terms`,
 `score`, `publish_tip`, and `created_at_ms`
-(`crates/daemon/src/contradiction_candidates/read.rs:46`): no descriptor text,
+(`crates/daemon/src/contradiction_candidates/read.rs:56` `ItemOut`): no descriptor text,
 summary, or term. A row is listed only when its evidence is live at `as_of`,
 its Kernel incarnation and matcher digest equal the reader's, and its
 `publish_tip` is at or below `as_of`
-(`crates/daemon/src/contradiction_candidates/read.rs:99` `is_current`); every
+(`crates/daemon/src/contradiction_candidates/read.rs:115` `is_current`); every
 other row on the page is counted `read_filtered_stale`
-(`crates/daemon/src/contradiction_candidates/read.rs:191`). The TypeScript
+(`crates/daemon/src/contradiction_candidates/read.rs:209`). The TypeScript
 parser refuses an item with any other key set
 (`packages/opencode-plugin/src/shared/kernel-client/wire.ts:652`).
 Check: `always` - every answered page satisfies the key, order, bound, and
@@ -747,10 +747,10 @@ each terminal by name and `disabled` as a plain statement
 constructed: a failing authority lookup (dependency fault F18 has no seam).
 Guarantee: after the scope, Kernel-readiness, and body checks, a route whose
 frozen flag is false, or a root whose memories authority is not MODULE,
-answers `disabled` (`crates/daemon/src/contradiction_candidates/read.rs:132`,
+answers `disabled` (`crates/daemon/src/contradiction_candidates/read.rs:148`,
 `:144`); an uninstalled Memory Store, or one that fails the authority lookup
 or the page read, answers `store_unavailable`
-(`crates/daemon/src/contradiction_candidates/read.rs:135`); an unready Kernel
+(`crates/daemon/src/contradiction_candidates/read.rs:151`); an unready Kernel
 or a failed Kernel read answers the kernel routes' state; an eligible decision
 with no rows answers an empty page; no terminal or state renders as a page.
 Check: `always` - the four conditions answer four distinct shapes; the
@@ -811,7 +811,7 @@ renames the table away, answers `disabled` on a flag-off route with
 `read_filtered_stale` unchanged, and shows the same route with the flag on
 answers `store_unavailable` (`:1551`), so the flag-off read runs no table
 statement; the handler answers `disabled` before it reaches the store
-(`crates/daemon/src/contradiction_candidates/read.rs:132`). The `candidates`
+(`crates/daemon/src/contradiction_candidates/read.rs:148`). The `candidates`
 action renders the terminal as a plain statement in both harnesses
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1589`,
 `packages/pi-plugin/src/tools/eidnara-memory.test.ts:495`).
