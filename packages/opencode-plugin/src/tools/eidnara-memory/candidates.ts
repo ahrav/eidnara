@@ -22,7 +22,10 @@ function pagingOf(args: EidnaraMemoryArgs): { after?: string | null; limit?: num
     if (after !== undefined && after !== null && typeof after !== "string") {
         throw new MemoryInputError("'after' must be a string or null");
     }
-    if (limit !== undefined && (!Number.isSafeInteger(limit) || (limit as number) < 1)) {
+    if (
+        limit !== undefined &&
+        (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 64)
+    ) {
         throw new MemoryInputError("'limit' must be an integer from 1 to 64");
     }
     return {

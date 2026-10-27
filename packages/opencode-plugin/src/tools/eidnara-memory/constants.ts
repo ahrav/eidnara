@@ -54,7 +54,13 @@ dispute: objectId + event (mark_disputed or contradict) + evidenceId, or path + 
 
 /** Appended to the description when the allowlist admits `candidates`. */
 const EIDNARA_MEMORY_CANDIDATES_DESCRIPTION = `
-candidates: objectId, with optional after (a prior page's next) and limit (1 to 64). A read listing published sources whose text overlaps the memory lexically, each with the dispute form that would confirm it. An overlap is not a judgment: file a form only with independent evidence of a conflict, and otherwise report the candidate to the user. A page may hold fewer rows than its limit while next is set; keep paging with next until it is null.`;
+candidates: objectId, with optional after (a prior page's next) and limit (1 to 64). A read listing published sources whose text overlaps the memory lexically, each with the dispute form that would confirm it. An overlap is not a judgment. A page may hold fewer rows than its limit while next is set; keep paging with next until it is null.`;
+
+/** How the agent treats a confirm form, by whether the allowlist admits `dispute`. */
+const EIDNARA_MEMORY_CANDIDATES_FILE_FORM =
+    " File a form only with independent evidence of a conflict, and otherwise report the candidate to the user.";
+const EIDNARA_MEMORY_CANDIDATES_REPORT_FORM =
+    " This tool does not file disputes here, so report a candidate and its form to the user.";
 
 /** `a, b, or c`: how the schema's `action` field names the admitted actions. */
 export function actionList(actions: readonly EidnaraMemoryAction[]): string {
@@ -66,7 +72,11 @@ export function actionList(actions: readonly EidnaraMemoryAction[]): string {
 export function eidnaraMemoryDescription(actions: readonly EidnaraMemoryAction[]): string {
     let description = EIDNARA_MEMORY_DESCRIPTION;
     if (actions.includes("candidates")) {
-        description = `${description}\n${EIDNARA_MEMORY_CANDIDATES_DESCRIPTION}`;
+        description = `${description}\n${EIDNARA_MEMORY_CANDIDATES_DESCRIPTION}${
+            actions.includes("dispute")
+                ? EIDNARA_MEMORY_CANDIDATES_FILE_FORM
+                : EIDNARA_MEMORY_CANDIDATES_REPORT_FORM
+        }`;
     }
     if (actions.includes("dispute")) {
         description = `${description}\n${EIDNARA_MEMORY_DISPUTE_DESCRIPTION}`;

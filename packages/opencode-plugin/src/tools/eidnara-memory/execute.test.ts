@@ -58,6 +58,7 @@ function run(
         action,
         identity: identityFor(toolCallId),
         actor: EIDNARA_MEMORY_ACTOR,
+        disputeAdmitted: false,
     });
 }
 

@@ -1334,6 +1334,7 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
     );
 
     let jobs = store.memory_reviewer_status_facts().unwrap();
+    let written = rows(&store);
     let first = ask(json!({ "decision_object_id": "object-one", "limit": 65 }))
         .await
         .unwrap();
@@ -1363,11 +1364,11 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
             "score"
         ]
     );
+    let first_filtered = counts(&handler)["read_filtered_stale"].as_u64().unwrap();
     assert_eq!(
-        items.len(),
-        60,
-        "a limit of 65 clamps to 64 rows, less the retired, foreign-incarnation, stale-digest, \
-         and future-tip rows"
+        items.len() as u64 + first_filtered,
+        64,
+        "a limit of 65 clamps to 64 rows, each listed or filtered"
     );
     let scores: Vec<&Value> = items.iter().map(|item| &item["score"]).collect();
     assert!(
@@ -1387,9 +1388,14 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
     }))
     .await
     .unwrap();
-    assert_eq!(second["items"].as_array().unwrap().len(), 10);
+    assert_eq!(second["items"].as_array().unwrap().len(), 70 - items.len());
     assert_eq!(second["next"], Value::Null);
-    assert_eq!(counts(&handler)["read_filtered_stale"], 4);
+    assert_eq!(
+        counts(&handler)["read_filtered_stale"],
+        4,
+        "the retired, foreign-incarnation, stale-digest, and future-tip rows"
+    );
+    assert_eq!(rows(&store), written, "the read deletes no stale row");
     let walked: Vec<&Value> = items
         .iter()
         .chain(second["items"].as_array().unwrap())
@@ -1572,6 +1578,24 @@ async fn review_candidates_answers_the_store_and_kernel_states_before_any_page()
     .await
     .unwrap();
     assert_eq!(answer["state"]["kind"], "unavailable", "{answer}");
+    assert_eq!(answer["state"]["reason"], "store_starting", "{answer}");
+    assert!(answer.get("items").is_none());
+
+    let blocked = _dir.path().join("kernel-is-a-file");
+    std::fs::write(&blocked, b"").unwrap();
+    starting.kernel.set_expected(true);
+    starting
+        .kernel
+        .open(blocked, StoreOpenPolicy::default(), starting.cancel.clone())
+        .await;
+    let answer = route_call(
+        &starting,
+        candidates_request(&project, json!({ "decision_object_id": "object-one" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer["state"]["kind"], "unavailable", "{answer}");
+    assert_ne!(answer["state"]["reason"], "store_starting", "{answer}");
     assert!(answer.get("items").is_none());
 
     let dir = tempfile::tempdir().unwrap();

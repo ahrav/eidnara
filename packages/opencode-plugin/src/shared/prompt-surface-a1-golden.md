@@ -288,7 +288,7 @@ REJECTED_APPROACH requires antiMemory, not content. Do not invent category names
 
 Memories created here are available through explicit search as labeled model inference. Automatic context injection follows the kernel's admission policy. Agent calls to approve/enforce are rejected.
 
-candidates: objectId, with optional after (a prior page's next) and limit (1 to 64). A read listing published sources whose text overlaps the memory lexically, each with the dispute form that would confirm it. An overlap is not a judgment: file a form only with independent evidence of a conflict, and otherwise report the candidate to the user. A page may hold fewer rows than its limit while next is set; keep paging with next until it is null.
+candidates: objectId, with optional after (a prior page's next) and limit (1 to 64). A read listing published sources whose text overlaps the memory lexically, each with the dispute form that would confirm it. An overlap is not a judgment. A page may hold fewer rows than its limit while next is set; keep paging with next until it is null. This tool does not file disputes here, so report a candidate and its form to the user.
 ```
 
 **Parameters (JSON Schema per parameter, as serialized to the provider):**

@@ -341,7 +341,7 @@ export interface ExecuteEidnaraMemoryArgs {
     /** The host tool call's abort signal, forwarded into every daemon read and commit. */
     signal?: AbortSignal;
     /** Whether the tool's allowlist admits `dispute`; `candidates` replies name who can file their confirm forms. */
-    disputeAdmitted?: boolean;
+    disputeAdmitted: boolean;
 }
 
 /** `objectIds` scopes the read to the named objects, so a preflight or replay probe reaches a target beyond the daemon's row cap. */
@@ -594,7 +594,7 @@ export async function executeEidnaraMemory(input: ExecuteEidnaraMemoryArgs): Pro
         return executeCandidates({
             client,
             args,
-            disputeAdmitted: input.disputeAdmitted === true,
+            disputeAdmitted: input.disputeAdmitted,
             ...(signal ? { signal } : {}),
         });
     }

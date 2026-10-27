@@ -638,7 +638,16 @@ export const CANDIDATE_ITEM_KEYS = [
     "score",
     "publish_tip",
     "created_at_ms",
-] as const;
+] as const satisfies readonly (keyof CandidateItem)[];
+
+/** Fails to compile when `CandidateItem` gains a key the list above omits. */
+const CANDIDATE_ITEM_KEYS_COVER_THE_ITEM: Exclude<
+    keyof CandidateItem,
+    (typeof CANDIDATE_ITEM_KEYS)[number]
+> extends never
+    ? true
+    : never = true;
+void CANDIDATE_ITEM_KEYS_COVER_THE_ITEM;
 
 function parseCandidateItem(raw: unknown): CandidateItem | null {
     if (!isRecord(raw) || Object.keys(raw).length !== CANDIDATE_ITEM_KEYS.length) return null;

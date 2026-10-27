@@ -518,4 +518,41 @@ describe("Pi eidnara_memory candidates", () => {
         );
         expect(calls.map((call) => call.method)).toEqual(["review.candidates"]);
     });
+
+    it("names who can file the confirm form from the Pi allowlist", async () => {
+        const page = {
+            kind: "page",
+            as_of: 3,
+            items: [
+                {
+                    evidence_id: "srcev:pi",
+                    decision_object_id: "mem_rule",
+                    decision_id: "dec_rule",
+                    matched_terms: 2,
+                    decision_terms: 4,
+                    score: 5000,
+                    publish_tip: 3,
+                    created_at_ms: 1,
+                },
+            ],
+            next: null,
+        };
+        const { KernelClient } = await import("@eidnara/opencode/shared/kernel-client");
+        const noteFor = async (allowedActions?: readonly EidnaraMemoryAction[]) => {
+            const transport = {
+                connectionFileExists: () => true,
+                ensureRoute: async () => {},
+                call: async () => page,
+            };
+            const h = harness(new FakeKernel(), {
+                kernelClient: ({ sessionId, projectRoot }) =>
+                    new KernelClient({ transport, enabled: true, sessionId, projectRoot }),
+                ...(allowedActions ? { allowedActions } : {}),
+            });
+            const result = await h.execute({ action: "candidates", objectId: "mem_rule" }, "");
+            return (parseResult<{ note: string }>(result)).note;
+        };
+        expect(await noteFor()).toContain("not admitted in this context");
+        expect(await noteFor(["candidates", "dispute"])).not.toContain("not admitted");
+    });
 });
