@@ -71,7 +71,7 @@ landing.
 The fake kernel mirrors the form rule, including the daemon's
 confined-path rule and the percent-escape refusal (`disputeEvidenceWellFormed`,
 `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:335-351`;
-`repositoryPathWellFormed`, `:270-311`); the secret scan, liveness, and
+`repositoryPathWellFormed`, `:270-283`); the secret scan, liveness, and
 visibility stay with the daemon;
 its contract test is
 `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.contract.test.ts`.
@@ -81,7 +81,7 @@ its contract test is
 | Location | Guard | Records | Status |
 |---|---|---|---|
 | `commit.rs:206-234` | `compose_reason`: dispute needs valid evidence; other events take none | requirement, form | unaudited |
-| `dispute.rs:49-79` | `DisputeReason::validated`: presence, empty id, a detection in the raw `evidence_id` (`:58-59`, through `value_is_clean`, `:159-163`), form, cap, a detection in the composed reason (`:77-79`) | requirement, form, reason | unaudited |
+| `dispute.rs:49-79` | `DisputeReason::validated`: presence, empty id, a detection in the raw `evidence_id` (`:58-59`, through `value_is_clean`, `:159-163`), form, cap, a detection in the composed reason (`:75-77`) | requirement, form, reason | unaudited |
 | `dispute.rs:150-163` | `EvidenceRef::is_well_formed` | form | unaudited |
 | `commit.rs:742-757` | `require_visible_evidence`: live and cited by a scope of the bound project | liveness, visibility | unaudited |
 | `commit.rs:137`, `:168-171` | `deny_unknown_fields` with `reason` skipped, so a body cannot supply `reason` | reason | unaudited |
@@ -122,6 +122,9 @@ The shared-runner tests this PR adds (`memory-mark-command.test.ts:601`,
 - No test sends a raw `evidence_id` holding a secret-scanner detection to
   the raw-id scan added in `511cd6d73` (`dispute.rs:58-59`, `:159-163`).
 - No test reads `durable_text_redactions` after a landed dispute.
+- No test sends different evidence under one tool-call id; A8's tool-arm
+  refusal follows from the receipt mechanism (`operation_key_reused`) and
+  `tools.test.ts:1514` covers same-id replay and new-id second write only.
 
 ## Suspiciously quiet areas
 

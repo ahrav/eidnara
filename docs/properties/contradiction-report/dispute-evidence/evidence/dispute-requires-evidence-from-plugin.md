@@ -40,11 +40,15 @@ None`. PR A adds the fields and the requirement.
 - No other production writer files the two dispute events: a search of
   `crates/daemon/src`, `crates/kernel/src`, and `packages/*/src` (non-test)
   for `MarkDisputed`, `EventKind::Contradict`, `mark_disputed`, and
-  `"contradict"` finds this route, its client type, its wire list, the
-  command, and the tool executor `executeDispute`
+  `"contradict"` finds two senders, the command and the tool executor
+  `executeDispute`
   (`packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts:49`),
-  which both harnesses reach only through an allowlist that names
-  `dispute` (#1161). Every one of them sends through the shared runner.
+  both of which send through the shared runner; the other hits are this
+  route, its client type and wire list, the kernel's event-name table and
+  use-outcome reader, the fake kernel, and the tool schema and
+  description files, none of which sends a dispute. Both harnesses reach
+  `executeDispute` only through an allowlist that names `dispute`
+  (#1161).
 
 ## Failure scenario
 
