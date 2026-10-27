@@ -19,15 +19,15 @@ revision.
   handed its serve to a tracked job sets `touch_delegated`
   (`crates/daemon/src/lib.rs:9812`) and the job touches after its serve
   attempt, whatever the serve answered,
-  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:341`)).
+  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:347`)).
 - Update: `crates/kernel/src/use_outcome.rs:43-47` selects the live records with
   a null or earlier value (the `LIVE_SESSION_WHERE` and `last_transform_at`
   predicates at lines 45-46). A session with none takes no writer, because the
   check above skips it; the update itself holds only the writer.
 - Outcomes: the match in `touch_session`
-  (`crates/daemon/src/use_outcome_writer.rs:305-315`) counts
+  (`crates/daemon/src/use_outcome_writer.rs:311-321`) counts
   `transform_touched` for an updated row and maps a Kernel error through
-  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:358`) to
+  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:364`) to
   `transform_skipped_deadline` or `transform_skipped_unavailable`.
 
 - Guarantee under test: `last_transform_at` never decreases on a session's

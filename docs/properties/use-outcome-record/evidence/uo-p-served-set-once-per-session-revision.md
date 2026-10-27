@@ -11,9 +11,9 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1156 branch tip, the commit that carries this
 revision.
 
-- Key and digest: `crates/daemon/src/use_outcome_writer.rs:409-412`; the request
+- Key and digest: `crates/daemon/src/use_outcome_writer.rs:415-418`; the request
   digest binds the ids, the harness, and the role (`request_digest`
-  (`crates/daemon/src/use_outcome_writer.rs:460-465`)).
+  (`crates/daemon/src/use_outcome_writer.rs:466-471`)).
 - Call sites: `record_use_outcome` (`crates/daemon/src/lib.rs:9721`) runs after
   each committed attempt: the boundary-failure path in `run_transform`
   (`crates/daemon/src/lib.rs:9630`), the committed attempt in `first_transform`
@@ -31,23 +31,23 @@ revision.
   `an_equal_digest_replays_and_another_harness_or_role_conflicts`
   (`crates/daemon/src/use_outcome_writer_tests.rs:131`);
   `an_equal_served_set_at_a_later_known_as_of_replays`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:477`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:487`);
   `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
   (`crates/daemon/src/use_outcome_writer_tests.rs:343`);
   `the_real_failure_paths_count_their_outcomes_and_bound_the_wait`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:748`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:758`);
   `a_recorded_served_set_replays_while_another_writer_holds_the_writer`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:848`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:858`);
   `every_kernel_error_maps_to_a_closed_outcome`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:976`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:986`);
   `an_emergency_pass_that_reruns_records_one_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:995`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1005`);
   `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1023`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1033`);
   `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1110`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1120`);
   `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:1146`); Kernel half:
+  (`crates/daemon/src/use_outcome_writer_tests.rs:1156`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
   (`crates/kernel/tests/kernel_use_outcome.rs:215`),
   `a_repeated_serve_intent_replays_and_a_rebound_key_conflicts`

@@ -83,20 +83,20 @@ Every location was read at the #1156 branch tip.
 | `only_an_available_composition_is_recorded` | `crates/daemon/src/use_outcome_writer_tests.rs:181` | `uo-consent-gate-source-is-the-route-frozen-config`, `uo-p-no-row-when-memory-disabled`, `uo-p-no-row-for-withheld-composition` | unaudited |
 | `a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it` | `crates/daemon/src/use_outcome_writer_tests.rs:282` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
 | `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one` | `crates/daemon/src/use_outcome_writer_tests.rs:343` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `the_session_role_follows_the_pass_subagent_flag_on_each_engine` | `crates/daemon/src/use_outcome_writer_tests.rs:414` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds`, `uo-p-producer-matches-request-subagent-flag` | unaudited |
-| `an_equal_served_set_at_a_later_known_as_of_replays` | `crates/daemon/src/use_outcome_writer_tests.rs:477` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `a_dispute_between_folds_records_the_next_served_set_without_it` | `crates/daemon/src/use_outcome_writer_tests.rs:513` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
-| `a_withheld_read_then_an_available_read_of_the_same_rows_records_once` | `crates/daemon/src/use_outcome_writer_tests.rs:549` | `uo-p-no-row-for-withheld-composition` | unaudited |
-| `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:584` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
-| `the_real_failure_paths_count_their_outcomes_and_bound_the_wait` | `crates/daemon/src/use_outcome_writer_tests.rs:748` | `uo-p-served-set-once-per-session-revision`, `uo-p-no-row-for-withheld-composition` | unaudited |
+| `the_session_role_follows_the_pass_subagent_flag_on_each_engine` | `crates/daemon/src/use_outcome_writer_tests.rs:420` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds`, `uo-p-producer-matches-request-subagent-flag` | unaudited |
+| `an_equal_served_set_at_a_later_known_as_of_replays` | `crates/daemon/src/use_outcome_writer_tests.rs:487` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_dispute_between_folds_records_the_next_served_set_without_it` | `crates/daemon/src/use_outcome_writer_tests.rs:523` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `a_withheld_read_then_an_available_read_of_the_same_rows_records_once` | `crates/daemon/src/use_outcome_writer_tests.rs:559` | `uo-p-no-row-for-withheld-composition` | unaudited |
+| `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:594` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
+| `the_real_failure_paths_count_their_outcomes_and_bound_the_wait` | `crates/daemon/src/use_outcome_writer_tests.rs:758` | `uo-p-served-set-once-per-session-revision`, `uo-p-no-row-for-withheld-composition` | unaudited |
 | `a_hard_fold_records_its_frozen_composition_once_per_served_set` | `crates/daemon/src/use_outcome_writer_tests.rs:70` | `uo-p-served-set-once-per-session-revision`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
-| `a_recorded_served_set_replays_while_another_writer_holds_the_writer` | `crates/daemon/src/use_outcome_writer_tests.rs:848` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `every_kernel_error_maps_to_a_closed_outcome` | `crates/daemon/src/use_outcome_writer_tests.rs:976` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `an_emergency_pass_that_reruns_records_one_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:995` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:1023` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer` | `crates/daemon/src/use_outcome_writer_tests.rs:1110` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it` | `crates/daemon/src/use_outcome_writer_tests.rs:1146` | `uo-p-served-set-once-per-session-revision` | unaudited |
-| `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:1175` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `a_recorded_served_set_replays_while_another_writer_holds_the_writer` | `crates/daemon/src/use_outcome_writer_tests.rs:858` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `every_kernel_error_maps_to_a_closed_outcome` | `crates/daemon/src/use_outcome_writer_tests.rs:986` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `an_emergency_pass_that_reruns_records_one_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:1005` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `only_an_unready_kernel_leaves_the_pass_to_retry_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:1033` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_hard_fold_answers_while_another_writer_holds_the_kernel_writer` | `crates/daemon/src/use_outcome_writer_tests.rs:1120` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it` | `crates/daemon/src/use_outcome_writer_tests.rs:1156` | `uo-p-served-set-once-per-session-revision` | unaudited |
+| `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve` | `crates/daemon/src/use_outcome_writer_tests.rs:1185` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
 | `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it` | `crates/daemon/tests/harness_sources.rs:3356` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
 | `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages` | `crates/daemon/tests/harness_sources.rs:3500` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts`, `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
 | `a_delete_step_with_an_unknown_outcome_converges_on_retry` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:136` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
