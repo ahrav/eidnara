@@ -72,6 +72,10 @@ async fn a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_
     );
     assert_eq!(after[0].decision_object_ids, before[0].decision_object_ids);
     assert_eq!(
+        after[0].serve.last_transform_at, before[0].serve.last_transform_at,
+        "the delete leaves the Kernel timestamp as it was"
+    );
+    assert_eq!(
         lifecycle_counts(&handler),
         [
             ("deleted_marked", 1),
@@ -122,6 +126,10 @@ async fn a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_conver
     );
     assert_eq!(after[0].decision_object_ids, before[0].decision_object_ids);
     assert_eq!(
+        after[0].serve.last_transform_at, before[0].serve.last_transform_at,
+        "the delete leaves the Kernel timestamp as it was"
+    );
+    assert_eq!(
         lifecycle_counts(&handler),
         [
             ("deleted_marked", 1),
@@ -156,6 +164,7 @@ async fn a_delete_step_with_an_unknown_outcome_converges_on_retry() {
     );
 
     let (handler, store, _dir, _project) = served_handler().await;
+    let before = lifecycle_counts(&handler);
     *handler.use_outcome_delete_fault.lock().unwrap() = Some(kernel::KernelError::Conflict);
     let conflicted = delete_session(&handler, "ses").await;
     assert_eq!(
@@ -164,10 +173,8 @@ async fn a_delete_step_with_an_unknown_outcome_converges_on_retry() {
     );
     assert!(store.load("ses").unwrap().row_version.is_some());
     assert_eq!(
-        handler
-            .use_outcome_lifecycle
-            .get(LifecycleWrite::DeleteKernelUnavailable),
-        0,
+        lifecycle_counts(&handler),
+        before,
         "a conflict is counted under no lifecycle name"
     );
 }
@@ -474,6 +481,73 @@ async fn a_serve_deadline_leaves_the_touch_its_own_kernel_wait() {
             .unwrap()
             > touched,
         "the touch advanced the first fold's record"
+    );
+    assert_eq!(lifecycle_counts(&handler), [("transform_touched", 2)]);
+}
+
+/// A tracked serve that waits out its write budget on a held writer still touches afterwards: the job's touch runs under a budget of its own, so once the writer is released the serve counts `deadline` and the touch advances `last_transform_at` for the pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_serve_that_spends_its_wait_leaves_the_touch_a_budget_of_its_own() {
+    let (handler, _store, _dir, project) = served_handler().await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    seed_memories(
+        &kernel,
+        &project,
+        &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
+    );
+    let touched = served(&handler, &project)[0]
+        .serve
+        .last_transform_at
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    handler
+        .use_outcome_writes
+        .set_write_budget(Duration::from_millis(40));
+    // The hold lasts from the pass's hand-off until past the 40 ms serve budget and ends well inside
+    // the touch's own 250 ms, so the serve answers `deadline` and a touch that had inherited the
+    // serve's spent wait would too.
+    let (entered, held) = std::sync::mpsc::channel();
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        let writes = Arc::clone(&handler.use_outcome_writes);
+        std::thread::spawn(move || {
+            kernel
+                .commit(kernel_route_fixtures::intent("hold-writer"), |_| {
+                    entered.send(()).unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !writes.job_in_flight() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the pass never handed off a serve"
+                        );
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    std::thread::sleep(Duration::from_millis(80));
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    held.recv().unwrap();
+    let refold =
+        transform_with_usage_leaving_serves_pending(&handler, big_messages(), 48_000, 50_000).await;
+    assert_eq!(refold["action"], "HARD", "{refold}");
+    holder.join().unwrap();
+    handler.use_outcome_writes.settled().await;
+    assert_eq!(
+        handler
+            .use_outcome_writes
+            .get(crate::use_outcome_writer::UseOutcomeWrite::Deadline),
+        1,
+        "the serve spent its wait on the held writer"
+    );
+    assert!(
+        served(&handler, &project)[0]
+            .serve
+            .last_transform_at
+            .unwrap()
+            > touched,
+        "the job's touch advanced the record after the writer was released"
     );
     assert_eq!(lifecycle_counts(&handler), [("transform_touched", 2)]);
 }

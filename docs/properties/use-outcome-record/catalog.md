@@ -565,7 +565,7 @@ Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
 `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
 (`crates/daemon/tests/kernel_routes.rs:3849`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:208`). Status: unaudited.
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`). Status: unaudited.
 Impact: A teardown that wrote `deleted_at` would mark a live session deleted
 (AC10).
 Open questions: None.
@@ -979,7 +979,7 @@ readable);
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`);
 `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:86`). Status: unaudited.
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:90`). Status: unaudited.
 Impact: The record dies at the event it witnesses (KTD1).
 Open questions:
 - A serve write takes no capture gate, so a pass that committed before the
@@ -1235,15 +1235,15 @@ Existing check:
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`);
 `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:86`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:90`);
 `a_delete_step_with_an_unknown_outcome_converges_on_retry`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:136`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:144`);
 `a_second_delete_marks_records_written_after_the_first`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:177`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:184`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:208`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`);
 `a_session_id_that_reads_as_a_secret_still_deletes`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:538`); Kernel half:
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:612`); Kernel half:
 `a_session_delete_marks_each_live_record_once`
 (`crates/kernel/tests/kernel_use_outcome.rs:969`). Status: unaudited.
 Impact: A deleted session reads as live, or a live one as deleted.
@@ -1297,22 +1297,24 @@ wait (`PassWriteBudget::spend`, `crates/daemon/src/use_outcome_writer.rs:385-392
 serve to a tracked job leaves the touch to that job, which checks and updates
 after its serve attempt, whatever that serve answered, with a Kernel wait of its
 own (`touch_after_serve`
-(`crates/daemon/src/use_outcome_writer.rs:350`)); the Kernel update moves
+(`crates/daemon/src/use_outcome_writer.rs:356`)); the Kernel update moves
 only live records whose value is null or earlier, in one fenced transaction
 with no commit that holds only the writer (`advance_use_outcome_last_transform`
 (`crates/kernel/src/use_outcome.rs:538`)).
 Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:227`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:234`);
 `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:314`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:321`);
 `a_committing_pass_with_a_current_record_takes_no_writer`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:362`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:369`);
 `a_spent_pass_budget_skips_the_touch`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:417`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:424`);
 `a_serve_deadline_leaves_the_touch_its_own_kernel_wait`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:446`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:453`);
+`a_serve_that_spends_its_wait_leaves_the_touch_a_budget_of_its_own`
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:490`);
 `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:483`); Kernel half:
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:557`); Kernel half:
 `last_transform_at_advances_live_records_without_a_commit`
 (`crates/kernel/tests/kernel_use_outcome.rs:1024`),
 `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`

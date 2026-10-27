@@ -19,33 +19,36 @@ revision.
   handed its serve to a tracked job sets `touch_delegated`
   (`crates/daemon/src/lib.rs:9812`) and the job touches after its serve
   attempt, whatever the serve answered,
-  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:350`)).
+  (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:356`)).
 - Update: `crates/kernel/src/use_outcome.rs:43-47` selects the live records with
   a null or earlier value (the `LIVE_SESSION_WHERE` and `last_transform_at`
   predicates at lines 45-46). A session with none takes no writer, because the
   check above skips it; the update itself holds only the writer.
 - Outcomes: the match in `touch_session`
-  (`crates/daemon/src/use_outcome_writer.rs:314-324`) counts
+  (`crates/daemon/src/use_outcome_writer.rs:320-330`) counts
   `transform_touched` for an updated row and maps a Kernel error through
-  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:367`) to
+  `skipped_touch` (`crates/daemon/src/use_outcome_writer.rs:373`) to
   `transform_skipped_deadline` or `transform_skipped_unavailable`.
 
 - Guarantee under test: `last_transform_at` never decreases on a session's
   serving record, and only a pass whose response committed updates it.
 - Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:227`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:234`);
   `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:314`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:321`);
   `a_committing_pass_with_a_current_record_takes_no_writer`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:362`) (the daemon's
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:369`) (the daemon's
   idle-session skip: a current record keeps the pass off a held writer);
   `a_spent_pass_budget_skips_the_touch`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:417`) (the writer function
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:424`) (the writer function
   under a spent `PassWriteBudget`, not a pass);
   `a_serve_deadline_leaves_the_touch_its_own_kernel_wait`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:446`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:453`);
+  `a_serve_that_spends_its_wait_leaves_the_touch_a_budget_of_its_own`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:490`) (a tracked serve
+  spends its wait on a held writer and its touch still lands);
   `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:483`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:557`); Kernel half:
   `last_transform_at_advances_live_records_without_a_commit`
   (`crates/kernel/tests/kernel_use_outcome.rs:1024`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
@@ -93,7 +96,10 @@ Kernel unavailable at the write.
   the serve answered, under a budget of
   the same size, so the serving pass's record carries that pass's time. A serve
   refused for want of a write slot leaves the pass its own touch and its full
-  budget (`a_serve_deadline_leaves_the_touch_its_own_kernel_wait`).
+  budget (`a_serve_deadline_leaves_the_touch_its_own_kernel_wait`), and a
+  tracked serve that spends its wait on a held writer still touches under the
+  job's own budget
+  (`a_serve_that_spends_its_wait_leaves_the_touch_a_budget_of_its_own`).
 - Missing evidence: none beyond what the question names.
 - Conclusion: resolved with answer - see the question text.
 

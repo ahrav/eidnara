@@ -174,6 +174,12 @@ impl UseOutcomeWrites {
         self.counts[outcome as usize].load(Ordering::Relaxed)
     }
 
+    /// Whether a serve job holds a write slot: a test holding the Kernel writer reads this to learn that a pass handed its serve off.
+    #[cfg(test)]
+    pub(crate) fn job_in_flight(&self) -> bool {
+        self.slots.available_permits() < WRITES_IN_FLIGHT
+    }
+
     /// Lengthens or shortens the writer wait of every later job, so a test can hold the Kernel writer across a pass without racing the budget.
     #[cfg(test)]
     pub(crate) fn set_write_budget(&self, budget: Duration) {
