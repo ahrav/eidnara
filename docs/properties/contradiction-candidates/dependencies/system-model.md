@@ -219,7 +219,7 @@ C12 `local_file.rs:240`: owners first, evidence second; cited evidence kept;
 descriptors retired.
 C13 `host-wire-protocol.md:770`, `:790`: strict bodies, project checked before
 the body is read, `disabled`/`store_unavailable` terminals.
-C14 `types.ts:6-30`, `tools.ts:122-125`: closed action list; `get` is the
+C14 `types.ts:6-33`, `tools.ts:122-125`: closed action list; `get` is the
 only read; an omitted allowlist admits the default actions (all but
 `dispute`), an empty one admits none.
 

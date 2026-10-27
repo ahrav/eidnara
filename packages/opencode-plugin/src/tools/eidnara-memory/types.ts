@@ -22,7 +22,10 @@ export const EIDNARA_MEMORY_DEFAULT_ACTIONS: readonly EidnaraMemoryAction[] =
 /** The events a `dispute` files; both must cite evidence. */
 export const EIDNARA_MEMORY_DISPUTE_EVENTS = ["mark_disputed", "contradict"] as const;
 
-const EIDNARA_MEMORY_READ_ACTIONS: ReadonlySet<EidnaraMemoryAction> = new Set(["get", "candidates"]);
+const EIDNARA_MEMORY_READ_ACTIONS: ReadonlySet<EidnaraMemoryAction> = new Set([
+    "get",
+    "candidates",
+]);
 
 /** Whether `action` commits through the kernel rather than reading from it. */
 export function isEidnaraMemoryMutation(action: EidnaraMemoryAction): boolean {

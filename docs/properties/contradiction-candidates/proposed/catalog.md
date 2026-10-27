@@ -745,7 +745,7 @@ a Kernel not yet open (`:1590`), a non-starting `unavailable` state for a
 Kernel whose open failed (`:1607`), and `store_unavailable` for a daemon with
 no Memory Store (`:1638`), each without `items`. The OpenCode tool renders
 each terminal by name and `disabled` as a plain statement
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1584`).
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1589`).
 Guarantee: a route whose frozen flag is false, or a root whose memories
 authority is not MODULE, answers `disabled`
 (`crates/daemon/src/contradiction_candidates/read.rs:132`, `:144`); an
@@ -814,7 +814,7 @@ and shows the same route with the flag on answers `store_unavailable`
 `disabled` before it reaches the store
 (`crates/daemon/src/contradiction_candidates/read.rs:132`). The `candidates`
 action renders the terminal as a plain statement in both harnesses
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1584`,
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1589`,
 `packages/pi-plugin/src/tools/eidnara-memory.test.ts:495`).
 Guarantee: With the route's frozen `contradiction_candidates.enabled` false
 (default), no candidate pass is offered after any publication, no row is
@@ -872,7 +872,7 @@ check that `kernel_routes/commit.rs` and `kernel_routes/dispute.rs` name no
 candidate store method. The OpenCode tool renders each row's confirm form
 `{"action":"dispute","event":"mark_disputed","objectId","evidenceId"}` from
 the row's ids
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1545`).
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1550`).
 Guarantee: a row's `evidence_id` is the `srcev:*` evidence row id the
 publication receipt carries (`Published.evidence_id`,
 `crates/daemon/src/harness_sources.rs:527`), and its `decision_object_id` is

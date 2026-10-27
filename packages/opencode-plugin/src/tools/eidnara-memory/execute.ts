@@ -34,12 +34,12 @@ import {
 } from "../../shared/kernel-client/anti-memory";
 import { MAX_RENDER_FIELD_BYTES, truncateUtf8Bytes } from "../eidnara-search/bounds";
 import { readObjectRowsChunked } from "../eidnara-search/kernel-memory-search";
+import { executeCandidates } from "./candidates";
 import {
     EIDNARA_MEMORY_RESPONSE_BUDGET_BYTES,
     GET_MAX_CLAIMS,
     MERGE_MAX_TARGETS,
 } from "./constants";
-import { executeCandidates } from "./candidates";
 import { executeDispute } from "./dispute";
 import type { EidnaraMemoryAction, EidnaraMemoryArgs } from "./types";
 import { assertEidnaraMemoryFieldTypes, assertEidnaraMemoryWriteShape } from "./write-shape";

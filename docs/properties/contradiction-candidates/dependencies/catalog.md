@@ -938,7 +938,7 @@ Required faults and enabling state: each action under an empty, partial, and
 omitted allowlist; a call with `agent: "context-researcher"`; a pi
 registration with `memoryToolEnabled: false`.
 Confidence: high - [evidence](evidence/p5dep-memory-tool-actions-are-closed-and-allowlisted.md).
-Read `types.ts:6-30`, `tools.ts:48-58`, `:118-158`, `:172-174`,
+Read `types.ts:6-33`, `tools.ts:48-58`, `:118-158`, `:172-174`,
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58`,
 `packages/pi-plugin/src/tools/eidnara-memory.ts:113-125`, `:142-202`,
 `packages/pi-plugin/src/tools/index.ts:30-32`, `:69-75`,
@@ -948,7 +948,7 @@ Re-exercised by #1168: the closed list gains `candidates`
 (`packages/opencode-plugin/src/tools/eidnara-memory/types.ts:6-14`), a read
 in `EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:25`) that both default lists
 admit; `eidnara_memory candidates`
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1545`) runs
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1550`) runs
 it without a tool-call id, and `Pi eidnara_memory candidates`
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:495`) shows it and its
 paging fields in Pi's default schema.

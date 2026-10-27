@@ -1537,7 +1537,12 @@ describe("eidnara_memory candidates", () => {
         const execute = (args: Record<string, unknown>) =>
             definition.execute(
                 args as never,
-                { sessionID: SESSION, directory: ROOT, callID: undefined, agent: "primary" } as never,
+                {
+                    sessionID: SESSION,
+                    directory: ROOT,
+                    callID: undefined,
+                    agent: "primary",
+                } as never,
             ) as Promise<string>;
         return { definition, execute, calls };
     }
@@ -1592,9 +1597,7 @@ describe("eidnara_memory candidates", () => {
         const first = JSON.parse(
             await h.execute({ action: "candidates", objectId: "m", after: "7500.2.62", limit: 5 }),
         );
-        expect(h.calls[0].body).toEqual(
-            expect.objectContaining({ after: "7500.2.62", limit: 5 }),
-        );
+        expect(h.calls[0].body).toEqual(expect.objectContaining({ after: "7500.2.62", limit: 5 }));
         expect(first).toEqual(
             expect.objectContaining({ candidates: [], next: "7500.1.61", asOf: 9 }),
         );
@@ -1639,7 +1642,12 @@ describe("eidnara_memory candidates", () => {
 
     test("refuses a page naming another memory and paging fields the schema would refuse", async () => {
         const h = candidatesHarness([
-            { kind: "page", as_of: 1, items: [{ ...ITEM, decision_object_id: "mem_other" }], next: null },
+            {
+                kind: "page",
+                as_of: 1,
+                items: [{ ...ITEM, decision_object_id: "mem_other" }],
+                next: null,
+            },
         ]);
         const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
         expect(text).toStartWith("Error:");
