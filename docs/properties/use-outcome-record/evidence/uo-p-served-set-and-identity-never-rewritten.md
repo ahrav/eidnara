@@ -8,8 +8,8 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `8ace6c9f8`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Record triggers: `use_outcomes_identity_immutable` (its column list includes
   `decision_count`),

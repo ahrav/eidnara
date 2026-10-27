@@ -9,18 +9,18 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `8ace6c9f8`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
-- Writes happen only when state changed: `crates/daemon/src/transform.rs:3252`,
-  `crates/daemon/src/transform.rs:3749`, `crates/daemon/src/transform.rs:5370`.
+- Writes happen only when state changed: `crates/daemon/src/transform.rs:3262`,
+  `crates/daemon/src/transform.rs:3761`, `crates/daemon/src/transform.rs:5382`.
 
 - Guarantee under test: The per-session pass timestamp
   `last_committed_pass_at_ms` lives on Memory Store session meta and is deleted
   with the session.
 - Existing check:
   `delete_session_sweeps_every_session_table_once_and_scopes_notes`
-  (`crates/memory-store/src/lib.rs:22343`). Status: unaudited.
+  (`crates/memory-store/src/lib.rs:22344`). Status: unaudited.
 
 ## Failure scenario
 

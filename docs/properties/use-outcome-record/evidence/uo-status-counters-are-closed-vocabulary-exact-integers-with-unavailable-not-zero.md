@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `8ace6c9f8`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Ready gate: `packages/cli/src/commands/review-wire.ts:401`.
 - Exact bound:
@@ -22,7 +22,7 @@ its parent is `8ace6c9f8`).
   CLI renders the MemoryReviewer counters unavailable unless the block state is
   ready, through an exact-integer decoder bounded at 2^53.
 - Existing check: `the_capture_report_reaches_host_status_field_for_field`
-  (`crates/daemon/src/source_capture_tests.rs:835`);
+  (`crates/daemon/src/source_capture_tests.rs:845`);
   `packages/cli/src/commands/review.test.ts:771`;
   `packages/cli/src/commands/review.test.ts:822`. Status: unaudited.
 

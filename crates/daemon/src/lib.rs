@@ -104,6 +104,7 @@ pub mod window_coverage;
 pub mod wire;
 
 pub mod transform;
+pub(crate) mod use_outcome_writer;
 
 pub mod production_inputs;
 pub mod projection_admission;
@@ -127,7 +128,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
@@ -593,11 +594,27 @@ impl TaskAdmission {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let _gate = self.gate.lock().expect("module spawn gate mutex");
-        if self.cancel.is_cancelled() {
-            return Err(future);
+        match self.open_gate() {
+            Some(_gate) => Ok(self.tasks.spawn(future)),
+            None => Err(future),
         }
-        Ok(self.tasks.spawn(future))
+    }
+
+    /// As [`Self::spawn`], for work that runs on the blocking pool.
+    fn spawn_blocking<F, T>(&self, work: F) -> Option<tokio::task::JoinHandle<T>>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.open_gate()
+            .map(|_gate| self.tasks.spawn_blocking(work))
+    }
+
+    /// Holds the spawn gate for the caller while admission is open; `None`
+    /// once shutdown has cancelled it.
+    fn open_gate(&self) -> Option<MutexGuard<'_, ()>> {
+        let gate = self.gate.lock().expect("module spawn gate mutex");
+        (!self.cancel.is_cancelled()).then_some(gate)
     }
 }
 
@@ -2577,6 +2594,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 /// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
+/// Each in-flight use-outcome serve write holds the served set it records after the pass's response released its charges; `use_outcome_writer::RETAINED_SERVED_SET_BYTES_BOUND` covers every write slot at the id bytes a block the Memory Store commit admits can hold.
 /// The transform-serving combined budget is the CK previous-output store plus the native previous-output store, which refuses an entry above `NATIVE_OUTPUT_ENTRY_BUDGET_BYTES` and evicts sessions past `NATIVE_OUTPUT_BUDGET_BYTES`.
 /// A ready transform snapshot holds the CK input and scalar fields, never native messages or a delta fallback, so the snapshot and lease budgets bound what `TransformRequest::snapshot_retained_bytes` charges.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
@@ -2603,6 +2621,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES
     + memory_capture::RETAINED_BYTES_BOUND
     + source_capture::RETAINED_BYTES_BOUND
+    + use_outcome_writer::RETAINED_SERVED_SET_BYTES_BOUND
     + config::MERGED_CONFIG_RETAINED_BYTES_BOUND;
 
 const NATIVE_OUTPUT_BUDGET_BYTES: usize = 256 * 1024 * 1024;
@@ -2783,6 +2802,8 @@ pub struct HandlerCore {
     /// The kernel store opens after the cache store under the same managed
     /// directory; routes read it through `kernel_store()`, never the slot.
     kernel: Arc<kernel_routes::KernelOpenCoordinator>,
+    /// Serve writes transform passes hand off after freezing a composition, and their outcome counts.
+    use_outcome_writes: Arc<use_outcome_writer::UseOutcomeWrites>,
     /// The MemoryReviewer sampler's published block; `health()` and status read it and never touch the ledger.
     memory_reviewer_status: Arc<memory_reviewer::lifecycle::MemoryReviewerStatus>,
     /// `initialize` decodes the storage descriptor, and `activate` consumes it: malformed descriptors fail before publication, while storage opens after transport publication.
@@ -2839,6 +2860,10 @@ pub struct HandlerCore {
     reduction_injection: Mutex<HashMap<String, Vec<ReductionDecision>>>,
     #[cfg(test)]
     after_transform_commit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Stands in for the Kernel's answer to the next serve write, between the fold's Memory Store commit and the write:
+    /// `Some(None)` is a Kernel that is not Ready, and `Some(Some(error))` is a commit that returned `error`.
+    #[cfg(test)]
+    use_outcome_fault: Mutex<Option<Option<kernel::KernelError>>>,
     #[cfg(test)]
     between_transform_and_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -3466,7 +3491,7 @@ struct PassIntake {
 }
 
 /// The fixed context of one transform pass. Every transform attempt and the settle read it;
-/// nothing mutates it.
+/// its one interior-mutable field is the latch that settles the pass's serve write.
 struct PassEnv {
     store: Arc<MemoryStore>,
     parsed: Arc<TransformRequest>,
@@ -3477,6 +3502,9 @@ struct PassEnv {
     project_path: String,
     note_project_path: String,
     project_memory: Option<canonical_memory::CanonicalMemoryRead>,
+    /// `use_outcome_settled` records this pass's serve-write handoff to a Ready Kernel, regardless of outcome. If the Kernel is
+    /// not Ready, `use_outcome_settled` remains clear so a rerun can retry.
+    use_outcome_settled: std::sync::atomic::AtomicBool,
     snapshot_generation: u64,
     pass_now: i64,
     timings: PassTimings,
@@ -3662,8 +3690,12 @@ impl Handler {
         request: Value,
     ) -> PreparedOutcome {
         let runner = transform_unit::DetachedRunner::default();
-        self.handle_transform_with_runner(route, request, &runner)
-            .await
+        let outcome = self
+            .handle_transform_with_runner(route, request, &runner)
+            .await;
+        // Callers read settled serve writes when this returns.
+        self.use_outcome_writes.settled().await;
+        outcome
     }
 
     /// Runs a transform as a client would: names the input snapshot, then applies the wire recipe
@@ -3806,6 +3838,7 @@ impl Handler {
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
             source_capture: Arc::default(),
+            use_outcome_writes: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
@@ -3843,6 +3876,8 @@ impl Handler {
             reduction_injection: Mutex::new(HashMap::new()),
             #[cfg(test)]
             after_transform_commit: Mutex::new(None),
+            #[cfg(test)]
+            use_outcome_fault: Mutex::new(None),
             #[cfg(test)]
             between_transform_and_prepare: Mutex::new(None),
             #[cfg(test)]
@@ -4335,6 +4370,7 @@ impl Handler {
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
             source_capture: Arc::default(),
+            use_outcome_writes: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
@@ -4367,6 +4403,7 @@ impl Handler {
             test_client: Mutex::new(HashMap::new()),
             reduction_injection: Mutex::new(HashMap::new()),
             after_transform_commit: Mutex::new(None),
+            use_outcome_fault: Mutex::new(None),
             between_transform_and_prepare: Mutex::new(None),
             wrapup_operation_budget: Mutex::new(None),
             unknown_module_retry_delay: Mutex::new(None),
@@ -9518,6 +9555,7 @@ impl HandlerCore {
             project_path,
             note_project_path,
             project_memory,
+            use_outcome_settled: std::sync::atomic::AtomicBool::new(false),
             snapshot_generation,
             pass_now,
             timings: PassTimings {
@@ -9623,7 +9661,98 @@ impl HandlerCore {
         };
         let mut pass = transform_with_projection_cached(store, parsed, &producer_ctx)?;
         self.promote_derived_state(store, env, &mut pass);
+        // A boundary read failure fails the pass after its commit froze the composition, so the serve is recorded here; a successful pass records it after the bookkeeping its commit implies.
+        if pass.boundary_read_error.is_some() {
+            self.record_use_outcome(env, &pass);
+        }
         pass.finished()
+    }
+
+    fn record_use_outcome(&self, env: &PassEnv, pass: &TransformWithProjection) {
+        if !(pass.froze_composition && pass.response.committed) {
+            return;
+        }
+        let Some(canonical_memory::CanonicalMemoryRead::Available(snapshot)) =
+            env.project_memory.as_ref()
+        else {
+            return;
+        };
+        debug_assert_eq!(
+            pass.response.project_memory,
+            env.project_memory
+                .as_ref()
+                .map(canonical_memory::CanonicalMemoryRead::composition),
+            "the recorded snapshot is the composition the pass froze"
+        );
+        // A read at sequence 0 precedes every commit, so its serve has no commit to name.
+        if snapshot.known_as_of() == 0 {
+            return;
+        }
+        if env
+            .use_outcome_settled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let fault = self.use_outcome_fault();
+        let ready = match &fault {
+            Some(injected) => injected.is_some(),
+            None => self.kernel.kernel_store().is_ok(),
+        };
+        // A Kernel that is not Ready at the hand-off leaves the pass eligible to retry in a rerun; a write handed to a
+        // Ready Kernel settles the pass regardless of outcome.
+        if !ready {
+            self.use_outcome_writes
+                .record(use_outcome_writer::UseOutcomeWrite::KernelUnavailable);
+            return;
+        }
+        env.use_outcome_settled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // The slot is reserved before the served set is built, so a full set of slots allocates nothing.
+        let Some(slot) = self.use_outcome_writes.reserve() else {
+            return;
+        };
+        let injected = fault.flatten();
+        let kernel = Arc::clone(&self.kernel);
+        let project = env.binding.kernel_project.clone();
+        let harness = env.binding.harness.clone();
+        let session_id = env.parsed.session_id.clone();
+        let is_subagent = env.parsed.is_subagent;
+        let served = snapshot.served_set();
+        let recorded_at = env.pass_now;
+        let write_budget = self.use_outcome_writes.write_budget();
+        let job = self.use_outcome_writes.job(slot, move || match injected {
+            Some(error) => Some(use_outcome_writer::UseOutcomeWrite::from_error(error)),
+            None => use_outcome_writer::record_serve(
+                &kernel,
+                &use_outcome_writer::Serve {
+                    project: &project,
+                    harness: &harness,
+                    session_id: &session_id,
+                    is_subagent,
+                    served: &served,
+                    recorded_at,
+                },
+                write_budget,
+            ),
+        });
+        if self.admission().spawn_blocking(job).is_none() {
+            self.use_outcome_writes
+                .record(use_outcome_writer::UseOutcomeWrite::KernelUnavailable);
+        }
+    }
+
+    #[cfg(test)]
+    fn use_outcome_fault(&self) -> Option<Option<kernel::KernelError>> {
+        self.use_outcome_fault
+            .lock()
+            .expect("use-outcome fault mutex")
+            .take()
+    }
+
+    #[cfg(not(test))]
+    fn use_outcome_fault(&self) -> Option<Option<kernel::KernelError>> {
+        None
     }
 
     fn promote_derived_state(
@@ -9714,6 +9843,7 @@ impl HandlerCore {
             pass.result.response.user_hint = decided_before;
         }
         self.forget_guidance_pin_on_commit(env, &pass.result);
+        self.record_use_outcome(env, &pass.result);
         Ok(())
     }
 
@@ -9784,6 +9914,7 @@ impl HandlerCore {
         // The guidance pin is stale once a pass commits; the removal moves with the commit,
         // since nothing else recomputes it before the next pass renders.
         self.forget_guidance_pin_on_commit(env, &result);
+        self.record_use_outcome(env, &result);
         let emergency_pre_floor = if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
             Self::read_publication_floor(env)
         } else {
@@ -18890,6 +19021,8 @@ mod tests {
     mod source_recovery_tests;
     #[path = "tool_vocabulary_tests.rs"]
     mod tool_vocabulary_tests;
+    #[path = "use_outcome_writer_tests.rs"]
+    mod use_outcome_writer_tests;
     #[path = "transform/window_admission.rs"]
     mod window_admission;
     #[path = "window_cap_tests.rs"]

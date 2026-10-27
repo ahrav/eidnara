@@ -609,6 +609,12 @@ impl ProducerContext<'_> {
     }
 }
 
+/// Assigns the pinned read's composition to `meta` at a HARD freeze site and reports that this attempt froze one; the caller of the pass checks whether the read was Available.
+fn freeze_project_memory(meta: &mut ModuleMeta, ctx: &ProducerContext<'_>) -> bool {
+    meta.project_memory = ctx.project_memory_composition();
+    true
+}
+
 /// A history segment end anchor: the bare mid of the segment's end block and its `sequence`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoundaryAnchor {
@@ -1658,6 +1664,8 @@ pub struct TransformWithProjection {
     pub fold_authority: AppliedFoldAuthority,
     pub(crate) derived: Option<ProposedDerivedState>,
     pub(crate) boundary_read_error: Option<TransformError>,
+    /// Whether this attempt assigned the pinned read's composition to session meta in a `Hard` or `MigrateHard` arm; with `response.committed`, the composition is frozen and durable.
+    pub(crate) froze_composition: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2779,6 +2787,7 @@ fn lineage_protocol_passthrough(
         fold_authority: AppliedFoldAuthority::default(),
         derived: None,
         boundary_read_error: None,
+        froze_composition: false,
         response: TransformResponse::passthrough(
             req.messages
                 .iter()
@@ -2864,6 +2873,7 @@ fn apply_additive_only(
         ..TransformTimings::default()
     };
     let token_cache_stats_at_start = crate::token_cache::local_stats();
+    let mut froze_composition = false;
     if let Some(id) = duplicate_ids(&projection.blocks) {
         return Err(TransformError::DuplicateBlockId(id));
     }
@@ -3109,7 +3119,7 @@ fn apply_additive_only(
             meta.coverage_history_segment_seq = Some(applied_m1_signal.max_history_segment_seq);
             // When compaction is off, record the current maximum sequence so pre-existing rows do not appear in `m1` as new history.
             meta.folded_history_segment_seq = applied_m1_signal.max_history_segment_seq;
-            meta.project_memory = ctx.project_memory_composition();
+            froze_composition = freeze_project_memory(&mut meta, ctx);
             meta.expiry_cutoff_ms = ctx.now_ms;
             meta.memory_disabled = !ctx.memory_enabled;
             meta.m1_revision = applied_m1_signal.revision;
@@ -3306,6 +3316,7 @@ fn apply_additive_only(
         fold_authority: AppliedFoldAuthority::default(),
         derived: None,
         boundary_read_error: None,
+        froze_composition,
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
@@ -3354,6 +3365,7 @@ fn apply_once(
     }
     let mut authority = *authority;
     let total_started_at = Instant::now();
+    let mut froze_composition = false;
     let mut timings = TransformTimings::default();
     let token_cache_stats_at_start = crate::token_cache::local_stats();
     let mut m1_revision_read_timings = M1RevisionReadTimings::default();
@@ -4728,7 +4740,7 @@ fn apply_once(
                 meta.coverage_history_segment_seq = Some(comp.folded_history_segment_seq);
                 meta.folded_history_segment_seq = comp.folded_history_segment_seq;
                 meta.legacy_history_segment_seqs = Some(comp.legacy_history_segment_seqs);
-                meta.project_memory = ctx.project_memory_composition();
+                froze_composition = freeze_project_memory(&mut meta, ctx);
                 meta.expiry_cutoff_ms = ctx.now_ms; // FROZEN here, atomic with the m0 bytes
                 let applied_m1_signal = revision_signal_for_context(
                     store,
@@ -4883,7 +4895,7 @@ fn apply_once(
                     meta.coverage_history_segment_seq = Some(comp.folded_history_segment_seq);
                     meta.folded_history_segment_seq = comp.folded_history_segment_seq;
                     meta.legacy_history_segment_seqs = Some(comp.legacy_history_segment_seqs);
-                    meta.project_memory = ctx.project_memory_composition();
+                    froze_composition = freeze_project_memory(&mut meta, ctx);
                     meta.expiry_cutoff_ms = ctx.now_ms;
                     let applied_m1_signal = revision_signal_for_context(
                         store,
@@ -5495,6 +5507,7 @@ fn apply_once(
         fold_authority: AppliedFoldAuthority::default(),
         derived: Some(derived),
         boundary_read_error: None,
+        froze_composition,
     })
 }
 
@@ -7137,6 +7150,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         fold_authority: AppliedFoldAuthority::default(),
         derived,
         boundary_read_error: None,
+        froze_composition: false,
         response,
     }
 }
@@ -20874,6 +20888,45 @@ pub(crate) mod tests {
             ("HARD".to_string(), Some("pressure_refold".to_string()))
         );
         assert_eq!(outcome(None).0, "SOFT");
+    }
+
+    /// The pressure refold assigns the pass's composition at its own freeze site: the committed pass reports that it froze one, so the use-outcome writer records the refold's serve, and the reloaded session meta holds the pinned read's composition.
+    #[test]
+    fn a_pressure_refold_reports_its_frozen_composition() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let ids = ["a", "b", "c", "d", "e", "f"];
+        let rows: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| comp(i as i64 + 1, i as i64 + 1, i as i64 + 1, id, "S"))
+            .collect();
+        s.replace_history_segments("ses", &rows).unwrap();
+        s.arm_soft_refresh("ses").unwrap();
+        let mut live: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| item(id, i as u64 + 1, "raw"))
+            .collect();
+        live.push(item("tail", 7, "tail"));
+        let mut request = req("ses", "cfg0", live);
+        request.geometry = Some(TransformGeometry {
+            usable_soft: 1_024,
+            usable_hard: 1_024,
+            derivation: "test".to_string(),
+        });
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        ctx.injected_reductions = spine();
+        let pass = transform_with_projection(&s, &request, &ctx).unwrap();
+        assert_eq!(
+            pass.response.materialize_reason.as_deref(),
+            Some("pressure_refold")
+        );
+        assert!(pass.froze_composition && pass.response.committed);
+        let frozen = ctx.project_memory_composition();
+        assert!(frozen.is_some());
+        assert_eq!(s.load("ses").unwrap().meta.project_memory, frozen);
     }
 
     /// Overlay rows keyed by blocks outside the projection are not read, and they change

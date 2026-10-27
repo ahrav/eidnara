@@ -35,6 +35,8 @@ pub struct CanonicalMemorySnapshot {
     truncated: bool,
     rows: Vec<CanonicalMemory>,
     revision: u64,
+    /// The served-set digest of [`Self::served_ids`]: the identity a use-outcome record of this composition carries.
+    served_set_digest: String,
 }
 
 impl CanonicalMemorySnapshot {
@@ -48,23 +50,37 @@ impl CanonicalMemorySnapshot {
     /// changes no digested byte. `truncated` is not digested: it does not
     /// change the rendered bytes.
     pub fn new(known_as_of: i64, truncated: bool, rows: Vec<CanonicalMemory>) -> Self {
-        let mut rendered: Vec<&CanonicalMemory> = rows
-            .iter()
-            .filter(|row| is_positive_memory_category(&row.category))
-            .collect();
-        rendered.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+        let rendered = rendered_rows(&rows);
         let mut hasher = DefaultHasher::new();
         "eidnara-project-memory-revision-v1".hash(&mut hasher);
-        for row in rendered {
+        for row in &rendered {
             row.category.hash(&mut hasher);
             render_memory_line(row).hash(&mut hasher);
         }
+        let served_set_digest =
+            kernel::served_set_digest(rendered.iter().map(|row| row.object_id.as_str()));
         Self {
             known_as_of,
             truncated,
             rows,
             revision: hasher.finish(),
+            served_set_digest,
         }
+    }
+
+    /// The decision object ids the block renders, ascending and distinct.
+    pub fn served_ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = rendered_rows(&self.rows)
+            .into_iter()
+            .map(|row| row.object_id.as_str())
+            .collect();
+        ids.dedup();
+        ids
+    }
+
+    /// The domain-separated SHA-256 over [`Self::served_ids`]: equal digests name one served id set whatever bytes rendered it.
+    pub fn served_set_digest(&self) -> &str {
+        &self.served_set_digest
     }
 
     /// The kernel commit sequence the rows were read at.
@@ -86,6 +102,54 @@ impl CanonicalMemorySnapshot {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+
+    /// What a use-outcome serve records of this snapshot, owned, so a write can outlive the pass without its rows.
+    pub fn served_set(&self) -> ServedSet {
+        ServedSet {
+            ids: self.served_ids().into_iter().map(str::to_string).collect(),
+            digest: self.served_set_digest.clone(),
+            revision: self.revision,
+            known_as_of: self.known_as_of,
+        }
+    }
+}
+
+/// The identity a serve record carries: the rendered decision ids, ascending and distinct, their digest, the
+/// revision, and the commit sequence the rows were read at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedSet {
+    ids: Vec<String>,
+    digest: String,
+    revision: u64,
+    known_as_of: i64,
+}
+
+impl ServedSet {
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.ids.iter().map(String::as_str)
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn known_as_of(&self) -> i64 {
+        self.known_as_of
+    }
+}
+
+/// The rows the block renders, in object-id order; the revision and the served-set digest derive from them.
+fn rendered_rows(rows: &[CanonicalMemory]) -> Vec<&CanonicalMemory> {
+    let mut rendered: Vec<&CanonicalMemory> = rows
+        .iter()
+        .filter(|row| is_positive_memory_category(&row.category))
+        .collect();
+    rendered.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+    rendered
 }
 
 /// The outcome of one canonical read for a pass.
@@ -311,6 +375,45 @@ mod tests {
         );
     }
 
+    /// The served-set digest names the rendered rows' ids: it ignores order and rendered bytes, drops rows the renderer drops, and changes with the id set.
+    #[test]
+    fn the_served_set_digest_names_the_rendered_ids_and_not_their_bytes() {
+        let row = |object_id: &str, category: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let first = CanonicalMemorySnapshot::new(
+            7,
+            false,
+            vec![
+                row("b", "PROJECT_RULES", "Rule b."),
+                row("a", "NAMING", "Name a."),
+                row("a", "PROJECT_RULES", "A second row of one object."),
+                row("dropped", "not-a-memory-category", "Dropped."),
+            ],
+        );
+        assert_eq!(first.served_ids(), ["a", "b"]);
+        assert_eq!(
+            first.served_set_digest(),
+            kernel::served_set_digest(["a", "b"])
+        );
+        let reworded = CanonicalMemorySnapshot::new(
+            8,
+            false,
+            vec![
+                row("a", "NAMING", "Name a, reworded."),
+                row("b", "PROJECT_RULES", "Rule b."),
+            ],
+        );
+        assert_ne!(first.revision(), reworded.revision());
+        assert_eq!(first.served_set_digest(), reworded.served_set_digest());
+        let smaller = CanonicalMemorySnapshot::new(8, false, vec![row("a", "NAMING", "Name a.")]);
+        assert_ne!(first.served_set_digest(), smaller.served_set_digest());
+        let empty = CanonicalMemorySnapshot::new(8, false, Vec::new());
+        assert_eq!(empty.served_set_digest(), kernel::served_set_digest([]));
+    }
+
     #[test]
     fn revision_changes_only_when_the_rendered_inputs_change() {
         let base = injectable_snapshot(
@@ -444,6 +547,12 @@ mod tests {
             only_short.revision(),
             "a row the budget excludes must not be digested"
         );
+        assert_eq!(
+            trimmed.served_ids(),
+            ["short"],
+            "a row the budget excludes is not served"
+        );
+        assert_eq!(trimmed.served_set_digest(), only_short.served_set_digest());
         let edited_long = decision("long", "PROJECT_RULES", &format!("{long_summary} edited"));
         let edited = injectable_snapshot(response(rows(), vec![edited_long, short]), budget);
         assert_eq!(

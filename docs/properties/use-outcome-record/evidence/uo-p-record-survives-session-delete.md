@@ -9,8 +9,8 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `8ace6c9f8`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Delete triggers: `crates/kernel/src/schema.rs:188`.
 - Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:393`) answers

@@ -9,8 +9,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `8ace6c9f8`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
 - Page bound and order: `expired_captures_sql`
   (`crates/kernel/src/local_file.rs:558`).
@@ -25,9 +25,9 @@ its parent is `8ace6c9f8`).
   cutoff and id and rechecked under the writer.
 - Existing check:
   `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it`
-  (`crates/daemon/tests/harness_sources.rs:3338`);
+  (`crates/daemon/tests/harness_sources.rs:3356`);
   `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
-  (`crates/daemon/tests/harness_sources.rs:3482`);
+  (`crates/daemon/tests/harness_sources.rs:3500`);
   `a_replayed_expiry_receipt_is_not_counted_as_a_retirement`
   (`crates/kernel/src/local_file.rs:737`). Status: unaudited.
 

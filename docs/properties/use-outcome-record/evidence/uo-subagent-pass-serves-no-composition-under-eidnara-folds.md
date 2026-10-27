@@ -9,14 +9,14 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `8ace6c9f8`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
-- Folding plan rule: `crates/daemon/src/transform.rs:4227` sets `Defer` when the
+- Folding plan rule: `crates/daemon/src/transform.rs:4239` sets `Defer` when the
   scheduler defers and `Soft` otherwise.
-- Subagent stepping: `crates/daemon/src/transform.rs:4466`.
-- Routing: `crates/daemon/src/transform.rs:3352`.
-- Correction: the spec cited `transform.rs:27022`, now inside the test
+- Subagent stepping: `crates/daemon/src/transform.rs:4478`.
+- Routing: `crates/daemon/src/transform.rs:3363`.
+- Correction: the spec cited `transform.rs` line 27022, now inside the test
   `terse_text_compression_gates_subagents_reasoning_and_protected_tail`.
 
 - Guarantee under test: Under `eidnara_folds`, a subagent pass plans `Soft` or
@@ -26,7 +26,9 @@ its parent is `8ace6c9f8`).
   `a_subagent_pass_under_native_authority_reports_native_authority`
   (`crates/daemon/src/fold_authority_handler_tests.rs:143`);
   `subagent_first_active_render_commits_tagged_bytes_before_replay`
-  (`crates/daemon/src/transform.rs:23731`). Status: unaudited.
+  (`crates/daemon/src/transform.rs:23784`);
+  `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:382`). Status: unaudited.
 
 ## Failure scenario
 
@@ -60,7 +62,7 @@ a model chain) and a subagent request; the same request under native authority.
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: Correction: a native subagent lineage switch routes to `apply_once`
-  and answers a passthrough (`crates/daemon/src/transform.rs:3352`), so "no
+  and answers a passthrough (`crates/daemon/src/transform.rs:3363`), so "no
   subagent rule applies under native authority" holds for the plan, not for
   routing.
 - Missing evidence: none beyond what the question names.

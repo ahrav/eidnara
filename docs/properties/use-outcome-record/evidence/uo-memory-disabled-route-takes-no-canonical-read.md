@@ -9,14 +9,14 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1154 branch tip (the commit that adds this file;
-its parent is `8ace6c9f8`).
+References are verified at the #1155 branch tip, the commit that carries this
+revision.
 
-- Gate: `project_memory_read` (`crates/daemon/src/lib.rs:5483`); the pass calls
+- Gate: `project_memory_read` (`crates/daemon/src/lib.rs:5529`); the pass calls
   it with the route-frozen config.
 - With `None`, `project_memory_composition()` is `None`, so meta and the
   response carry no composition.
-- Correction: the spec cited `canonical_memory.rs:457`, which is
+- Correction: the spec cited `canonical_memory.rs` line 457, which is
   `withheld_reads_record_the_verdict_and_inject_nothing`, a Withheld-read test.
 
 - Guarantee under test: A route bound with `memory.enabled` off takes no Kernel

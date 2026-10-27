@@ -426,7 +426,8 @@ fn parse_compile_option_int(text: &str) -> Option<i64> {
 
 /// Sentinel row_version meaning "no row present" (COALESCE default inside the txn).
 const NO_ROW: i64 = -1;
-const MAX_DURABLE_TEXT_BYTES: usize = 512 * 1024;
+/// Bytes one durable string field may hold; a longer field fails its commit with `InputLimit`.
+pub const MAX_DURABLE_TEXT_BYTES: usize = 512 * 1024;
 const MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES: usize = 256 * 1024;
 /// Cap decompression so a small compressed row cannot allocate an unbounded transcript.
 const MAX_CHUNK_TRANSCRIPT_INFLATED_BYTES: usize = 512 * 1024;
