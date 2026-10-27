@@ -19,6 +19,7 @@ import {
     DISPOSITION_EVENTS,
     type DispositionEvent,
     type DispositionResult,
+    type EvidenceRef,
     type KernelMemorySnapshot,
     type KernelTransport,
     type KernelTransportCall,
@@ -257,10 +258,102 @@ function checkQueryRequest(body: Record<string, unknown>): void {
     }
 }
 
+const GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const PERCENT_ESCAPE = /%[0-9A-Fa-f]{2}/;
+/** `confined_path::MAX_COMPONENTS` in the daemon. */
+const MAX_PATH_COMPONENTS = 16;
+/** `dispute::MAX_REASON_BYTES` in the daemon. */
+const MAX_REASON_BYTES = 4096;
+const UNRESERVED_BYTE = /^[A-Za-z0-9\-._~]$/;
+
+/** Path validation mirrors the daemon's `confined_path::check` and the route's 1024-byte path cap. */
+function repositoryPathWellFormed(path: string): boolean {
+    if (Buffer.byteLength(path, "utf8") > 1024 || path.includes("\0")) return false;
+    const components = path.split("/");
+    return (
+        components.length <= MAX_PATH_COMPONENTS &&
+        components.every(
+            (component) =>
+                component !== "" &&
+                component !== "." &&
+                component !== ".." &&
+                ![".git", ".eidnara"].includes(component.toLowerCase()),
+        )
+    );
+}
+
+/** The UTF-8 bytes of `value` under the route's reason encoding: an unreserved byte stays one byte and every other byte becomes a three-byte escape. */
+function encodedBytes(value: string): number {
+    let length = 0;
+    for (const byte of Buffer.from(value, "utf8")) {
+        length += UNRESERVED_BYTE.test(String.fromCharCode(byte)) ? 1 : 3;
+    }
+    return length;
+}
+
+/** The byte length of the `v=1` reason the route renders for a dispute. */
+function disputeReasonBytes(
+    event: string,
+    taint: string,
+    id: string | undefined,
+    ref: EvidenceRef | undefined,
+): number {
+    let length = `v=1;op=kernel.commit;event=${event};reporter_taint=${taint}`.length;
+    if (id !== undefined) length += ";evidence_id=".length + encodedBytes(id);
+    if (ref !== undefined) {
+        length +=
+            ";path=".length +
+            encodedBytes(ref.path) +
+            ";oid=".length +
+            encodedBytes(ref.git_object_id);
+    }
+    return length;
+}
+
+function evidenceRefWellFormed(ref: {
+    path?: unknown;
+    git_object_id?: unknown;
+}): ref is EvidenceRef {
+    return (
+        typeof ref.path === "string" &&
+        repositoryPathWellFormed(ref.path) &&
+        !PERCENT_ESCAPE.test(ref.path) &&
+        typeof ref.git_object_id === "string" &&
+        GIT_OBJECT_ID.test(ref.git_object_id)
+    );
+}
+
+/**
+ * The route's evidence form rule, checked before any transaction: a
+ * `mark_disputed` or `contradict` cites a non-empty `evidence_id`, a
+ * well-formed `evidence_ref`, or both, and every other event cites neither.
+ * A value holding a percent escape is refused, as the route's one-reading
+ * rule refuses it, and so is a dispute whose rendered reason, carrying the
+ * reporter's `taint`, exceeds 4096 bytes. The daemon's secret scan and its
+ * liveness and visibility checks are left to the daemon.
+ */
+function disputeEvidenceWellFormed(operation: Operation, taint: string): boolean {
+    if (operation.op !== "disposition") return true;
+    const raw = operation as {
+        evidence_id?: unknown;
+        evidence_ref?: { path?: unknown; git_object_id?: unknown } | null;
+    };
+    const id = raw.evidence_id ?? undefined;
+    const ref = raw.evidence_ref ?? undefined;
+    if (operation.event !== "mark_disputed" && operation.event !== "contradict") {
+        return id === undefined && ref === undefined;
+    }
+    if (id === undefined && ref === undefined) return false;
+    if (id !== undefined && (typeof id !== "string" || id.length === 0 || PERCENT_ESCAPE.test(id)))
+        return false;
+    if (ref !== undefined && !evidenceRefWellFormed(ref)) return false;
+    return disputeReasonBytes(operation.event, taint, id, ref) <= MAX_REASON_BYTES;
+}
+
 /** An assertion above the derived class is refused rather than clamped so the caller learns its claim was not accepted. */
 function resolveClasses(
     body: Record<string, unknown>,
-): { sourceKind: string } | { reply: WireReply } {
+): { sourceKind: string; taint: string } | { reply: WireReply } {
     const sourceKind = body.source_kind;
     if (typeof sourceKind !== "string") throw invalidParams("kernel.commit requires source_kind");
     const derived = DERIVED_CLASSES[sourceKind];
@@ -291,7 +384,7 @@ function resolveClasses(
     if (source !== "model_inference" || !MODEL_INFERENCE_TAINTS.has(taint)) {
         return { reply: invalid("invalid_input") };
     }
-    return { sourceKind };
+    return { sourceKind, taint };
 }
 
 export class FakeKernel {
@@ -595,6 +688,9 @@ export class FakeKernel {
         }
         const classes = resolveClasses(body);
         if ("reply" in classes) return classes;
+        if (operations.some((operation) => !disputeEvidenceWellFormed(operation, classes.taint))) {
+            return { reply: invalid("invalid_input") };
+        }
         const intent = body.intent as { operation_key: string; request_digest: string };
         const replayed = this.receipts.get(intent.operation_key) ?? null;
         if (replayed && replayed.request_digest !== intent.request_digest) {

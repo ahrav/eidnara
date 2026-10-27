@@ -9,6 +9,7 @@ import {
     formatMemoryMarkOutcome,
     MEMORY_MARK_COMMAND,
     MEMORY_MARK_DESCRIPTION,
+    memoryMarkOperationId,
     parseMemoryMarkArgs,
     runMemoryMarkCommand,
 } from "@eidnara/opencode/shared/memory-mark-command";
@@ -57,7 +58,7 @@ export function registerEidnaraMemoryMarkCommand(
             };
             const outcome = await runMemoryMarkCommand({
                 client: deps.kernelClient({ sessionId, projectRoot }),
-                sessionId,
+                operationId: memoryMarkOperationId(sessionId, parsed.args),
                 actor: PI_MEMORY_MARK_ACTOR,
                 args: parsed.args,
                 isCancelled,

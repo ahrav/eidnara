@@ -68,7 +68,9 @@ describe("Pi /eidnara-memory-mark", () => {
             decision_kind: "PROJECT_RULES",
             summary: "r",
         });
-        const entry = await h.run("mark_disputed mem_rule");
+        const entry = await h.run(
+            "mark_disputed mem_rule --path src/lib.rs@0123456789abcdef0123456789abcdef01234567",
+        );
         expect(h.confirmations).toEqual([]);
         expect(entry.level).toBe("success");
         expect(entry.text).toContain("active -> disputed");

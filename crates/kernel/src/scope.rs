@@ -707,7 +707,8 @@ impl CanonicalScope {
     }
 }
 
-pub(crate) fn is_lower_hex_oid(value: &str) -> bool {
+/// Whether `value` is a git object id: 40 (SHA-1) or 64 (SHA-256) lowercase hex bytes.
+pub fn is_lower_hex_oid(value: &str) -> bool {
     (value.len() == 40 || value.len() == 64)
         && value
             .bytes()

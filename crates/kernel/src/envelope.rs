@@ -9,7 +9,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::time::Instant;
 
@@ -253,6 +253,24 @@ pub(super) const MAX_STAGING_LEASE_MS: i64 = 3_600_000;
 /// stays small against the lease cap so a future timestamp cannot extend the
 /// reaper boundary.
 pub(super) const MAX_STAGING_CLOCK_SKEW_MS: i64 = 60_000;
+
+/// `INDEXED BY` requires each seek to use its table's partial index of live,
+/// scoped citing rows. SQLite fails statement preparation when that index is
+/// unusable.
+const LIVE_CITING_SCOPE_SEEKS: [&str; 3] = [
+    "SELECT scope_id FROM decisions INDEXED BY idx_decisions_live_evidence_scope
+      WHERE evidence_id=?1 AND scope_id>=?2 AND scope_id IS NOT NULL
+        AND invalidated_commit_seq IS NULL
+      ORDER BY scope_id LIMIT 1",
+    "SELECT scope_id FROM observations INDEXED BY idx_observations_live_evidence_scope
+      WHERE evidence_id=?1 AND scope_id>=?2 AND scope_id IS NOT NULL
+        AND invalidated_commit_seq IS NULL
+      ORDER BY scope_id LIMIT 1",
+    "SELECT scope_id FROM asserted_edges INDEXED BY idx_edges_live_evidence_scope
+      WHERE evidence_id=?1 AND scope_id>=?2 AND scope_id IS NOT NULL
+        AND invalidated_commit_seq IS NULL
+      ORDER BY scope_id LIMIT 1",
+];
 
 pub const OPERATOR_REDACTION_PLACEHOLDER: &str = super::schema::operator_redaction_placeholder!();
 
@@ -515,6 +533,113 @@ impl Envelope<'_> {
     /// that follows it observe one state.
     pub fn object_state(&self, object_id: &str) -> Result<Option<ObjectState>, KernelError> {
         load_object_state(self.tx, object_id)
+    }
+
+    /// Whether the evidence row `evidence_id` is live and cited by a live row
+    /// whose scope `accepts` takes. The citers are the live decisions,
+    /// observations, and asserted edges whose `evidence_id` is this row, and the
+    /// live decisions whose events cite it; an unscoped citer offers no scope.
+    /// `accepts` sees each distinct scope id at most once.
+    ///
+    /// The seeks in `LIVE_CITING_SCOPE_SEEKS` visit each distinct citing
+    /// scope in each table, with one additional seek when the table is
+    /// exhausted. An accepted direct citer ends the check before the
+    /// decision-event scan. All reads use the envelope's transaction.
+    pub fn evidence_cited_in(
+        &self,
+        evidence_id: &str,
+        mut accepts: impl FnMut(&str) -> Result<bool, KernelError>,
+    ) -> Result<bool, KernelError> {
+        let live = self
+            .tx
+            .query_row_cached(
+                "SELECT invalidated_commit_seq IS NULL FROM evidence_meta WHERE evidence_id=?1",
+                [evidence_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        if live != Some(true) {
+            return Ok(false);
+        }
+        let mut refused: HashSet<String> = HashSet::new();
+        let mut judge = |scope_id: &str| -> Result<bool, KernelError> {
+            if refused.contains(scope_id) {
+                return Ok(false);
+            }
+            if accepts(scope_id)? {
+                return Ok(true);
+            }
+            refused.insert(scope_id.to_string());
+            Ok(false)
+        };
+        for sql in LIVE_CITING_SCOPE_SEEKS {
+            let mut statement = self.tx.prepare_cached(sql).map_err(map_sqlite)?;
+            // Under BINARY collation the smallest string after `scope_id` is
+            // `scope_id` followed by NUL, so seeking from it skips every row
+            // of the scope just judged.
+            let mut from = String::new();
+            while let Some(scope_id) = statement
+                .query_row(params![evidence_id, from], |row| row.get::<_, String>(0))
+                .optional()
+                .map_err(map_sqlite)?
+            {
+                if judge(&scope_id)? {
+                    return Ok(true);
+                }
+                from = scope_id;
+                from.push('\0');
+            }
+        }
+        let mut statement = self
+            .tx
+            .prepare_cached(
+                "SELECT d.scope_id FROM decision_events e
+                   JOIN decisions d ON d.decision_id=e.decision_id
+                  WHERE e.evidence_id=?1 AND d.scope_id IS NOT NULL
+                    AND d.invalidated_commit_seq IS NULL",
+            )
+            .map_err(map_sqlite)?;
+        let mut rows = statement.query([evidence_id]).map_err(map_sqlite)?;
+        while let Some(row) = rows.next().map_err(map_sqlite)? {
+            let scope_id = row
+                .get_ref(0)
+                .map_err(map_sqlite)?
+                .as_str()
+                .map_err(|_| KernelError::Io)?;
+            if judge(scope_id)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Counts the SQLite virtual-machine instructions `read` executes on this
+    /// envelope's connection. The one-instruction progress handler replaces
+    /// any existing handler and is removed after `read` returns.
+    #[cfg(feature = "test-support")]
+    pub fn sqlite_steps_for_test<T>(
+        &self,
+        read: impl FnOnce(&Self) -> Result<T, KernelError>,
+    ) -> Result<(u64, T), KernelError> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let steps = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&steps);
+        self.tx
+            .progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .map_err(map_sqlite)?;
+        let result = read(self);
+        self.tx
+            .progress_handler(0, None::<fn() -> bool>)
+            .map_err(map_sqlite)?;
+        Ok((steps.load(Ordering::Relaxed), result?))
     }
 
     pub fn commit_seq(&self) -> i64 {

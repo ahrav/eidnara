@@ -699,7 +699,15 @@ async fn review_use_outcome_counts_serves_and_later_disputes_of_one_decision() {
     let contradicted = daemon
         .commit(
             "contradict",
-            vec![json!({"op": "disposition", "object_id": decision, "event": "contradict"})],
+            vec![json!({
+                "op": "disposition",
+                "object_id": decision,
+                "event": "contradict",
+                "evidence_ref": {
+                    "path": "src/lib.rs",
+                    "git_object_id": "0123456789abcdef0123456789abcdef01234567",
+                },
+            })],
         )
         .await;
     assert_eq!(contradicted["state"]["kind"], "available", "{contradicted}");

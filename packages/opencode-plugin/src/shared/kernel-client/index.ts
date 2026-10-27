@@ -10,6 +10,7 @@ export {
     deriveObjectId,
     deriveOperationKey,
     deriveRequestDigest,
+    type EvidenceRef,
     type IntentArgs,
     isAvailable,
     isSeparatorFree,

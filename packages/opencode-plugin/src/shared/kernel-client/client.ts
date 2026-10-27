@@ -92,12 +92,22 @@ export interface DecisionSpecInput {
     sensitivity?: Sensitivity;
 }
 
+/** A repository file at a git object id: the `evidence_ref` a dispute may cite. The daemon validates both fields. */
+export interface EvidenceRef {
+    path: string;
+    git_object_id: string;
+}
+
 export interface DispositionOperation {
     op: "disposition";
     object_id: string;
     event: DispositionEvent;
     /** Names the approval that authorizes a move toward a less restrictive disposition; a tightening needs none. */
     approval_object_id?: string;
+    /** A live Kernel evidence id of the bound project. `mark_disputed` and `contradict` carry this, `evidence_ref`, or both; every other event carries neither. */
+    evidence_id?: string;
+    /** A repository file the dispute cites; see `evidence_id` for which events take it. */
+    evidence_ref?: EvidenceRef;
 }
 
 export type CommitOperation =

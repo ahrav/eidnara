@@ -251,6 +251,18 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
         ["quarantine", "quarantine", "quarantined"],
     ] as const;
 
+    /** The route test's `disposition(..)`: a dispute cites a repository file. */
+    function citation(event: DispositionEvent) {
+        return event === "mark_disputed" || event === "contradict"
+            ? {
+                  evidence_ref: {
+                      path: "src/lib.rs",
+                      git_object_id: "0123456789abcdef0123456789abcdef01234567",
+                  },
+              }
+            : {};
+    }
+
     function dispose(
         h: ReturnType<typeof harness>,
         objectId: string,
@@ -259,7 +271,7 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
     ) {
         return h.client().commit({
             ...intent(key),
-            operations: [{ op: "disposition", object_id: objectId, event }],
+            operations: [{ op: "disposition", object_id: objectId, event, ...citation(event) }],
         });
     }
 
@@ -382,6 +394,7 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
                     object_id: "decision-object-1",
                     event: "contradict",
                     approval_object_id: "approval-1",
+                    ...citation("contradict"),
                 },
             ],
         });

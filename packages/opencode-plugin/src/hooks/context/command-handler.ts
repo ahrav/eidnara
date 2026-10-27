@@ -19,6 +19,7 @@ import type { KernelClientResolver } from "../../shared/kernel-client";
 import {
     formatMemoryMarkOutcome,
     MEMORY_MARK_COMMAND,
+    memoryMarkOperationId,
     parseMemoryMarkArgs,
     runMemoryMarkCommand,
 } from "../../shared/memory-mark-command";
@@ -411,7 +412,7 @@ async function executeMemoryMark(
     if (isSessionDeleted()) throwSentinel(MEMORY_MARK_COMMAND);
     const outcome = await runMemoryMarkCommand({
         client: deps.kernelClient({ sessionId, projectRoot }),
-        sessionId,
+        operationId: memoryMarkOperationId(sessionId, parsed.args),
         actor: MEMORY_MARK_ACTOR,
         args: parsed.args,
         isCancelled: isSessionDeleted,

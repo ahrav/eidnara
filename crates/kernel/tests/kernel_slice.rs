@@ -3,7 +3,8 @@
 use std::{cell::Cell, fs};
 
 use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent, DecisionEventPayload,
+    AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
+    ArtifactDeletionRequest, ArtifactIngestRequest, CommitIntent, DecisionEventPayload,
     DecisionEventSpec, DecisionPayload, DecisionSpec, DependentObservationQuery, DomainSpec,
     EventKind, KernelError, KernelStore, ObservationDependencySpec, ObservationPayload,
     ObservationSpec, ProviderEgress, RepositoryProvenance, Sensitivity, SourceClass, TaintClass,
@@ -2130,4 +2131,414 @@ fn linked_decision_evidence_matches_the_window_model_under_seeded_citations() {
             assert_eq!(actual, expected, "snapshot {requested}, max {max}");
         }
     }
+}
+
+fn branch_scope(scope_id: &str) -> kernel::ScopeSpec {
+    kernel::ScopeSpec {
+        scope_id: scope_id.to_string(),
+        object_id: format!("{scope_id}-object"),
+        domain_id: "domain".to_string(),
+        source_kind: "fixture".to_string(),
+        source_id: scope_id.to_string(),
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+        terms: vec![kernel::ScopeTermSpec {
+            dimension: "branch".to_string(),
+            operator: "exact".to_string(),
+            exact_value: Some(scope_id.to_string()),
+            ..kernel::ScopeTermSpec::default()
+        }],
+    }
+}
+
+/// An evidence row is cited within a set of scopes when it is live and a live
+/// decision, observation, or decision event (through its live decision) whose
+/// scope the predicate accepts cites it. The predicate sees each citing scope
+/// at most once, never an unscoped or retired citer's, and the walk stops at
+/// the first accepted scope; a retired row and an unknown id are cited
+/// nowhere.
+#[test]
+fn evidence_cited_in_offers_each_live_citing_scope_once_and_stops_at_the_first_accepted() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let evidence = ingest_evidence(&store, "cited", 'e');
+    // The verdict and the scopes offered, in order, when `accepted` names the
+    // only scope the predicate takes.
+    let cited_in = |evidence_id: &str, accepted: Option<&str>| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (_, seen) = store
+            .preview(deadline, |preview| {
+                let mut offered = Vec::new();
+                let cited = preview.evidence_cited_in(evidence_id, |scope_id| {
+                    offered.push(scope_id.to_string());
+                    Ok(Some(scope_id) == accepted)
+                })?;
+                Ok((cited, offered))
+            })
+            .unwrap();
+        seen
+    };
+    assert_eq!(cited_in(&evidence, None), (false, Vec::new()));
+    assert_eq!(cited_in("evidence-unknown", None), (false, Vec::new()));
+
+    store
+        .commit(intent("citers", 'c'), |envelope| {
+            for scope_id in ["scope-b", "scope-a", "scope-c", "scope-d"] {
+                envelope.insert_scope(branch_scope(scope_id))?;
+            }
+            let citing = |index: i64, scope_id: Option<&str>, evidence_id: Option<&str>| {
+                let mut spec = decision(index);
+                spec.scope_id = scope_id.map(str::to_string);
+                spec.evidence_id = evidence_id.map(str::to_string);
+                spec
+            };
+            envelope.insert_decision(citing(1, Some("scope-b"), Some(&evidence)))?;
+            envelope.insert_decision(citing(2, Some("scope-b"), Some(&evidence)))?;
+            envelope.insert_decision(citing(3, None, Some(&evidence)))?;
+            envelope.insert_decision(citing(4, Some("scope-c"), None))?;
+            envelope.insert_decision(citing(5, Some("scope-d"), Some(&evidence)))?;
+            let mut observed = observation(1, "decision-object-1");
+            observed.scope_id = Some("scope-a".to_string());
+            observed.evidence_id = Some(evidence.clone());
+            envelope.insert_observation(observed)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    cite_all(&store, "decision-4", "event", 'd', &[Some(&evidence)]);
+    store
+        .commit(intent("retire-citer", 'f'), |envelope| {
+            envelope.retire_decision("decision-object-5")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let (cited, mut offered) = cited_in(&evidence, None);
+    assert!(!cited);
+    offered.sort();
+    assert_eq!(offered, ["scope-a", "scope-b", "scope-c"]);
+    for accepted in ["scope-a", "scope-b", "scope-c"] {
+        let (cited, offered) = cited_in(&evidence, Some(accepted));
+        assert!(cited, "{accepted}");
+        assert_eq!(offered.last().map(String::as_str), Some(accepted));
+        assert_eq!(
+            offered
+                .iter()
+                .filter(|scope| scope.as_str() == accepted)
+                .count(),
+            1
+        );
+    }
+    // A scope only a retired or uncited row names is never offered.
+    assert!(!cited_in(&evidence, Some("scope-d")).0);
+
+    // Evidence retires only once nothing live cites it.
+    let retired = ingest_evidence(&store, "retired", '7');
+    store
+        .commit(intent("retire-evidence", '8'), |envelope| {
+            envelope.retire_evidence("evidence-object-retired")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(cited_in(&retired, None), (false, Vec::new()));
+}
+
+/// Artifact deletion invalidates an evidence row that live scoped decisions
+/// still cite; the liveness read refuses it before any citer offers a scope.
+#[test]
+fn evidence_cited_in_refuses_a_deleted_evidence_row_that_live_decisions_still_cite() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let evidence = ingest_evidence(&store, "deleted", 'd');
+    store
+        .commit(intent("deleted-citer", 'c'), |envelope| {
+            envelope.insert_scope(branch_scope("scope-own"))?;
+            let mut spec = decision(1);
+            spec.scope_id = Some("scope-own".to_string());
+            spec.evidence_id = Some(evidence.clone());
+            envelope.insert_decision(spec)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let cited_in = |evidence_id: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (_, seen) = store
+            .preview(deadline, |preview| {
+                let mut offered = Vec::new();
+                let cited = preview.evidence_cited_in(evidence_id, |scope_id| {
+                    offered.push(scope_id.to_string());
+                    Ok(scope_id == "scope-own")
+                })?;
+                Ok((cited, offered))
+            })
+            .unwrap();
+        seen
+    };
+    assert_eq!(cited_in(&evidence), (true, vec!["scope-own".to_string()]));
+
+    store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("delete-cited-evidence", 'f'),
+            identity: ArtifactDeletionIdentity::EvidenceId(evidence.clone()),
+            kind: ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: 42,
+        })
+        .unwrap();
+    let connection = Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let (evidence_retired, citer_live): (bool, bool) = connection
+        .query_row(
+            "SELECT (SELECT invalidated_commit_seq IS NOT NULL FROM evidence_meta WHERE evidence_id=?1),
+                    (SELECT invalidated_commit_seq IS NULL FROM decisions WHERE evidence_id=?1)",
+            [&evidence],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(evidence_retired && citer_live);
+    assert_eq!(cited_in(&evidence), (false, Vec::new()));
+}
+
+/// `evidence_cited_in` agrees with a model of seeded citations for every
+/// accepted scope set: the evidence is cited within the set exactly when a
+/// live citer's scope is in it, each scope is offered at most once and only
+/// when a live row cites the evidence under it, an accepted answer ends at the
+/// first accepted scope, and a refused answer offered every citing scope.
+/// Citers of one evidence row interleave in row order across scopes, kinds,
+/// retirements, and unscoped rows, so a refused scope often precedes an
+/// accepted one.
+#[test]
+fn evidence_cited_in_matches_the_citation_model_under_seeded_citers() {
+    use std::collections::BTreeSet;
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let scopes = ["scope-0", "scope-1", "scope-2", "scope-3"];
+    let pool: Vec<String> = (0..6)
+        .map(|n| ingest_evidence(&store, &format!("model-{n}"), '1'))
+        .collect();
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move |bound: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        usize::try_from(seed % bound).unwrap()
+    };
+    // Each live citing row as (evidence index, object id, scope), and each
+    // decision's scope, so events and retirements can follow it.
+    #[derive(Clone)]
+    struct Citer {
+        evidence: usize,
+        owner: String,
+        scope: Option<&'static str>,
+    }
+    let mut citers: Vec<Citer> = Vec::new();
+    let mut decisions: Vec<(String, String, Option<&'static str>)> = Vec::new();
+    store
+        .commit(intent("model-scopes", '2'), |envelope| {
+            for scope_id in scopes {
+                envelope.insert_scope(branch_scope(scope_id))?;
+            }
+            envelope.insert_decision(decision(0))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    for round in 0..24_i64 {
+        let mut retired: Vec<String> = Vec::new();
+        store
+            .commit(intent(&format!("model-round-{round}"), '3'), |envelope| {
+                for slot in 0..4_i64 {
+                    let index = 1 + round * 4 + slot;
+                    let scope = [
+                        None,
+                        Some(scopes[0]),
+                        Some(scopes[1]),
+                        Some(scopes[2]),
+                        Some(scopes[3]),
+                    ][next(5)];
+                    let evidence = next(pool.len() as u64 + 1);
+                    let cited = pool.get(evidence).cloned();
+                    match next(3) {
+                        0 => {
+                            let mut spec = decision(index);
+                            spec.scope_id = scope.map(str::to_string);
+                            spec.evidence_id = cited.clone();
+                            envelope.insert_decision(spec)?;
+                            let object_id = format!("decision-object-{index}");
+                            if cited.is_some() {
+                                citers.push(Citer {
+                                    evidence,
+                                    owner: object_id.clone(),
+                                    scope,
+                                });
+                            }
+                            decisions.push((format!("decision-{index}"), object_id, scope));
+                        }
+                        1 => {
+                            let mut spec = observation(index, "decision-object-0");
+                            spec.scope_id = scope.map(str::to_string);
+                            spec.evidence_id = cited.clone();
+                            envelope.insert_observation(spec)?;
+                            if cited.is_some() {
+                                citers.push(Citer {
+                                    evidence,
+                                    owner: format!("observation-object-{index}"),
+                                    scope,
+                                });
+                            }
+                        }
+                        _ if !decisions.is_empty() && cited.is_some() => {
+                            let (decision_id, object_id, scope) =
+                                decisions[next(decisions.len() as u64)].clone();
+                            envelope.append_decision_event(
+                                &decision_id,
+                                DecisionEventSpec {
+                                    event_kind: "evidence".to_string(),
+                                    payload: DecisionEventPayload {
+                                        summary: format!("model event {index}"),
+                                    },
+                                    evidence_id: cited.clone(),
+                                    recorded_at: index,
+                                },
+                            )?;
+                            citers.push(Citer {
+                                evidence,
+                                owner: object_id,
+                                scope,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                if round % 3 == 2 && !citers.is_empty() {
+                    let owner = citers[next(citers.len() as u64)].owner.clone();
+                    if owner.starts_with("decision-object-") {
+                        envelope.retire_decision(&owner)?;
+                        decisions.retain(|(_, object_id, _)| *object_id != owner);
+                    } else {
+                        envelope.retire_observation(&owner)?;
+                    }
+                    retired.push(owner);
+                }
+                Ok(String::new())
+            })
+            .unwrap();
+        citers.retain(|citer| !retired.contains(&citer.owner));
+    }
+
+    let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut accepted_answers = 0;
+    for (evidence, evidence_id) in pool.iter().enumerate() {
+        let citing: BTreeSet<&str> = citers
+            .iter()
+            .filter(|citer| citer.evidence == evidence)
+            .filter_map(|citer| citer.scope)
+            .collect();
+        for mask in 0..(1_u32 << scopes.len()) {
+            let accepted: BTreeSet<&str> = scopes
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, scope)| *scope)
+                .collect();
+            let (_, (cited, offered)) = store
+                .preview(deadline(), |preview| {
+                    let mut offered: Vec<String> = Vec::new();
+                    let cited = preview.evidence_cited_in(evidence_id, |scope_id| {
+                        offered.push(scope_id.to_string());
+                        Ok(accepted.contains(scope_id))
+                    })?;
+                    Ok((cited, offered))
+                })
+                .unwrap();
+            let case = format!("evidence {evidence}, accepted {accepted:?}, offered {offered:?}");
+            assert_eq!(cited, !citing.is_disjoint(&accepted), "{case}");
+            let distinct: BTreeSet<&str> = offered.iter().map(String::as_str).collect();
+            assert_eq!(distinct.len(), offered.len(), "{case}");
+            assert!(distinct.is_subset(&citing), "{case}");
+            let (last, earlier) = match offered.split_last() {
+                Some((last, earlier)) => (Some(last.as_str()), earlier),
+                None => (None, &[][..]),
+            };
+            assert!(
+                earlier
+                    .iter()
+                    .all(|scope| !accepted.contains(scope.as_str())),
+                "{case}"
+            );
+            if cited {
+                accepted_answers += 1;
+                assert!(last.is_some_and(|scope| accepted.contains(scope)), "{case}");
+            } else {
+                assert_eq!(distinct, citing, "{case}");
+            }
+        }
+    }
+    assert!(accepted_answers > 0);
+}
+
+fn accepted_citation_steps(history: i64) -> u64 {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let evidence = ingest_evidence(&store, "history", 'e');
+    let citing = |index: i64, scope_id: &str| {
+        let mut spec = decision(index);
+        spec.scope_id = Some(scope_id.to_string());
+        spec.evidence_id = Some(evidence.clone());
+        spec
+    };
+    store
+        .commit(intent("history-citers", 'c'), |envelope| {
+            for scope_id in ["scope-foreign", "scope-own"] {
+                envelope.insert_scope(branch_scope(scope_id))?;
+            }
+            envelope.insert_decision(decision(0))?;
+            for index in 1..=history {
+                envelope.insert_decision(citing(index, "scope-own"))?;
+                let mut observed = observation(index, "decision-object-0");
+                observed.scope_id = Some("scope-own".to_string());
+                observed.evidence_id = Some(evidence.clone());
+                envelope.insert_observation(observed)?;
+                envelope.insert_decision(citing(history + index, "scope-foreign"))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    store
+        .commit(intent("history-retire", 'f'), |envelope| {
+            for index in 1..=history {
+                envelope.retire_decision(&format!("decision-object-{index}"))?;
+                envelope.retire_observation(&format!("observation-object-{index}"))?;
+            }
+            envelope.insert_decision(citing(3 * history + 1, "scope-own"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (_, (steps, cited)) = store
+        .preview(deadline, |preview| {
+            preview.sqlite_steps_for_test(|envelope| {
+                envelope.evidence_cited_in(&evidence, |scope_id| Ok(scope_id == "scope-own"))
+            })
+        })
+        .unwrap();
+    assert!(cited, "history {history}");
+    steps
+}
+
+#[test]
+fn an_accepted_evidence_check_costs_the_same_however_long_the_citation_history() {
+    let short = accepted_citation_steps(1);
+    let long = accepted_citation_steps(200);
+    assert!(
+        long <= short + short / 4,
+        "a check over 200 retired and foreign citers took {long} SQLite steps; over 1, {short}"
+    );
 }
