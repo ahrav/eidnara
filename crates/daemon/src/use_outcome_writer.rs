@@ -183,6 +183,12 @@ impl UseOutcomeWrites {
             .expect("the slots semaphore stays open");
     }
 
+    /// Write slots a job holds at this instant.
+    #[cfg(test)]
+    pub(crate) fn writes_in_flight(&self) -> usize {
+        WRITES_IN_FLIGHT - self.slots.available_permits()
+    }
+
     #[cfg(test)]
     pub(crate) fn occupy_every_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
         self.slots

@@ -66,7 +66,8 @@ refold on the folding engine, and a CAS conflict inside one pass.
   commit succeeded, and
   `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
   (`crates/daemon/src/use_outcome_writer_tests.rs:305`) asserts that a rival
-  commit lands while no composition is stored and that one record results.
+  commit lands while no composition is stored, no write slot is held, and no
+  write is counted, and that one record results.
   The test inspects the Memory Store row version, the frozen composition, the
   Kernel served-set count, and the `written` counter; other durable state is
   outside its scope.
