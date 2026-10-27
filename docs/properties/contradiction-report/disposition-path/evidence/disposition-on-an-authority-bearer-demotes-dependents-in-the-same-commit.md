@@ -53,9 +53,12 @@ subject, and an `adr_accepted` approval is one.
 ## Failure scenario
 
 A model-filed `mark_disputed` against a user's approval object: the
-approval's own row becomes `Disputed`/`candidate`; every decision the
-user promoted by citing it drops to its automatic ceiling in the same
-commit; `auto_inject` stops serving them. The write is admitted because
+approval's own row becomes `Disputed`/`candidate`; every decision whose
+latest row cites it, up to `MAX_AUTHORITY_DEMOTIONS` in one commit,
+receives an `approval_revoked` row with effective maturity at or below
+its automatic ceiling, so the standing the approval granted leaves
+`auto_inject` in the same commit; dependents beyond the cap keep their
+rows until repair. The write is admitted because
 the route copies the approval's own `ExplicitUser` classes (see
 `disposition-admission-copies-the-subjects-prior-classes`), so no class
 gate refuses it. Reversal needs a relaxation with a valid approval, which

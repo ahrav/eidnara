@@ -98,6 +98,9 @@ to notice.
 - Sources examined: `state.rs:61-99` (`InvalidReason` set), `commit.rs:
   484`, P4 R2 ("refused by name").
 - Findings: today's names that fit are `not_found` (the slice path's
-  answer) and `already_exists` (the FK's). Neither says "evidence".
-- Missing evidence: the P4 implementation's choice.
-- Conclusion: needs human input.
+  answer) and `already_exists` (the FK's). Neither says "evidence". PR A
+  chose `not_found`: `require_visible_evidence` maps every failing case to
+  `KernelError::NotFound` (`commit.rs:747-756`) before the Kernel's FK
+  path could answer `already_exists`.
+- Missing evidence: none.
+- Conclusion: resolved with answer: `not_found`.

@@ -243,10 +243,13 @@ describe("runMemoryMarkCommand evidence", () => {
             evidenceRef: { path: "docs/a.md", git_object_id: OID },
             confirmed: false,
         };
+        let asked = false;
         const outcome = await run(h, input, async () => {
+            asked = true;
             (input.evidenceRef as { git_object_id: string }).git_object_id = "f".repeat(40);
             return true;
         });
+        expect(asked).toBe(true);
         expect(outcome.kind).toBe("applied");
         expect(h.transport.calls.map((call) => call.body.operations[0].evidence_ref)).toEqual([
             { path: "docs/a.md", git_object_id: OID },

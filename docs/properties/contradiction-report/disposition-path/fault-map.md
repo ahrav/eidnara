@@ -98,6 +98,7 @@ constructs the state a marker would observe, verified by reading the test.
 | Marker | Constructing test | What it constructs |
 |---|---|---|
 | `disposition_subject_above_candidate` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` (`crates/kernel/src/admission.rs:4532`); `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents` (`crates/daemon/tests/kernel_routes.rs:6199`) | the grid judges disputes against every effective maturity, including above Candidate; the route test disputes an `AcceptedAdr` approval whose historical maturity it asserts is not `candidate` (the prior's effective maturity is not asserted) |
+| `disposition_lateral_move_attempted` | `a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale` (`kernel_routes.rs:6146`) | `mark_disputed` against a `stale` prior, an equal-rank move that lands `disputed` with `denied: false`; the other equal-rank pairs are not constructed |
 | `disposition_relaxation_attempted` | `a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale` (`kernel_routes.rs:6146`); the grid (`admission.rs:4532`) | `mark_disputed` against `rejected`, `contradicted`, and `quarantined` priors, recorded `denied: true` |
 | `admission_write_with_evidence_id` | `a_dispute_citing_live_project_evidence_lands_with_the_id_and_the_reporter` (`kernel_routes.rs:5723`); `kernel_routes.rs:6146`, `:6199` | route disputes whose admission row carries the cited `evidence_id` |
 | `disposition_identity_replayed` | `dispute_identities_land_replay_and_refuse_reuse_like_every_envelope` (`kernel_routes.rs:6080`); `memory-mark-command.test.ts:201` | a byte-identical repeat returns `replayed: true` with no new row |
@@ -112,9 +113,7 @@ The same tests also construct `disposition_subject_classes_differ_from_caller`
 `assistant`).
 
 Every other marker in the table above stays a queued coverage check with
-no owning ticket: `disposition_lateral_move_attempted` (Stale to Disputed
-is constructed by `kernel_routes.rs:6146`, but the marker's other lateral
-moves are not), `disposition_relaxation_with_valid_approval`,
+no owning ticket: `disposition_relaxation_with_valid_approval`,
 `disposition_body_with_unknown_key_received`,
 `admission_write_with_retired_evidence_id`,
 `slice_insert_cites_retired_evidence`, `scoped_lookup_of_evidence_object`,
