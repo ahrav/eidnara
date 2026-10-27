@@ -24,7 +24,7 @@ tip.
   hidden on `auto_inject` and `auto_search` and served labeled on
   `explicit_search`.
 - Existing check: `visibility_matrix_and_sensitivity_ceiling_are_total`
-  (`crates/kernel/src/admission.rs:5056`);
+  (`crates/kernel/src/admission.rs:5080`);
   `every_non_active_disposition_has_the_contracted_surface_row`
   (`crates/kernel/tests/kernel_admission.rs:2890`);
   `dispositions_and_sensitivity_only_reduce_visibility`

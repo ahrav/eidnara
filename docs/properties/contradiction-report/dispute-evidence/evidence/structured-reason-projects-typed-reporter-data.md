@@ -18,7 +18,7 @@ therefore be a faithful, parseable carrier.
 - `render` writes the fields in order, percent-encoding every value
   (`dispute.rs:83-101`); `encode` keeps RFC 3986 unreserved bytes and
   writes every other byte as `%` and two uppercase hex digits
-  (`dispute.rs:168-182`).
+  (`dispute.rs:172-186`).
 - `parse` reads the fields in order, rejects an unknown version, an
   unknown event or taint, a value that decodes to a different string a
   second time, a path without an oid or the reverse, and any input whose
@@ -50,28 +50,28 @@ None in time. The reason depends on the scanner's rule set, as in
 ## What a test must construct
 
 - The documented rendering for one reference
-  (`the_documented_rendering_parses_back`, `dispute.rs:241`).
+  (`the_documented_rendering_parses_back`, `dispute.rs:245`).
 - Round trip over `;`, `=`, `%`, a malformed escape, `@`, spaces,
   non-ASCII, and unreserved punctuation, for both events, with an evidence
   id holding `;=%` (`render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes`,
-  `dispute.rs:255`).
+  `dispute.rs:259`).
 - `encode` and `decode` on reserved and multi-byte input give uppercase
   escapes and the original string
   (`reserved_and_multi_byte_values_encode_to_uppercase_escapes`,
-  `dispute.rs:289`). Every accepted path and optional id renders an ASCII
+  `dispute.rs:293`). Every accepted path and optional id renders an ASCII
   reason within the cap that parses back to its inputs (proptest
-  `every_accepted_reference_parses_back_to_its_inputs`, `dispute.rs:301`).
+  `every_accepted_reference_parses_back_to_its_inputs`, `dispute.rs:305`).
 - Refusal of every rendering `render` does not produce
   (`parse_refuses_every_rendering_render_does_not_produce`,
-  `dispute.rs:427`) and of a reason over the cap
-  (`a_reason_over_the_cap_is_invalid_input`, `dispute.rs:413`).
+  `dispute.rs:461`) and of a reason over the cap
+  (`a_reason_over_the_cap_is_invalid_input`, `dispute.rs:421`).
 - A client cannot supply the reason: a body carrying `reason` answers an
   error with nothing written (`kernel_routes.rs:6258`).
 - Stored reasons through the route parse back, re-render to the stored
   bytes, and are ASCII (`kernel_routes.rs:5880`); event, reporter taint,
   and evidence id parse back (`kernel_routes.rs:5723`); the cascade row's
   reason parses (`kernel_routes.rs:6199`); a reason carrying both an
-  evidence id and a reference parses back (`kernel_routes.rs:6290`).
+  evidence id and a reference parses back (`kernel_routes.rs:6291`).
 - Not constructed: a read of `durable_text_redactions` after a landed
   dispute. The absence of a redaction row is argued from the shared
   detector.

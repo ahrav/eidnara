@@ -42,7 +42,7 @@ and the decision would keep serving on automatic surfaces.
 
 None in time. A subject whose approval chain changes earlier in the same
 envelope is judged after that change; the preview refuses that
-combination separately (`commit.rs:1210-1216`).
+combination separately (`commit.rs:1208-1214`).
 
 ## What a test must construct
 
@@ -66,8 +66,8 @@ All constructed:
   `approval_object_id`, `denied: false`, `disputed`, `outcome = deny`, and
   the evidence id on the row
   (`a_dispute_relaxes_a_contradicted_prior_only_with_a_valid_approval`,
-  `kernel_routes.rs:6424`). The grid test fixes `approval_valid: false`
-  (`admission.rs:4630`), so this route test is the only one that
+  `kernel_routes.rs:6465`). The grid test fixes `approval_valid: false`
+  (`admission.rs:4653`), so this route test is the only one that
   constructs the approved relaxation.
 - An approval above Candidate disputed through the route: historical
   maturity kept, effective maturity `candidate`

@@ -11,12 +11,12 @@ harm signals per served session.
 
 - The route reads the envelope's `session_id` before the transport strips
   it and carries it, the binding's project digest, and the harness in a
-  `DisputeReporter` (`crates/daemon/src/kernel_routes/commit.rs:1106`, built
-  at `:1169`).
+  `DisputeReporter` (`crates/daemon/src/kernel_routes/commit.rs:1104`, built
+  at `:1167`).
 - A dispute goes through `record_disposition`, which builds a
   `DisputeReporter` and calls `Envelope::record_dispute_admission`
-  (`commit.rs:792`; `crates/kernel/src/admission.rs:1015`).
-- `reporting_serve` (`crates/kernel/src/use_outcome.rs:285`) runs
+  (`commit.rs:790`; `crates/kernel/src/admission.rs:1015`).
+- `reporting_serve` (`crates/kernel/src/use_outcome.rs:299`) runs
   `REPORTING_SERVE_SQL` (`use_outcome.rs:184`): it seeks the
   `use_outcome_sessions` row of (project digest, harness, session), then
   seeks `idx_use_outcome_decisions_object_fk` at (subject, `session_seq`)
@@ -29,7 +29,7 @@ harm signals per served session.
   (`schema.rs:194`), so the seek answers exactly the record join it
   replaces. The plan is pinned by
   `the_sweep_and_the_reads_use_their_indexes`
-  (`use_outcome.rs:980`): two index seeks, no sort, whatever the number
+  (`use_outcome.rs:1100`): two index seeks, no sort, whatever the number
   of serves in the session or of the subject.
 - `write_reported_admission` (`admission.rs:1734`) writes the id in the
   same INSERT as the row, inside the writer transaction.
@@ -56,19 +56,19 @@ Two serves of the subject in one session, a serve of another decision in
 that session, a serve of the subject in another session, a session never
 served the subject, and a serve recorded after the dispute. Both
 `a_dispute_links_the_reporting_sessions_latest_prior_serve_of_its_subject`
-(`crates/kernel/tests/kernel_use_outcome.rs:1166`) and
+(`crates/kernel/tests/kernel_use_outcome.rs:1371`) and
 `a_dispute_row_records_its_reporter_and_links_the_sessions_latest_serve`
-(`crates/daemon/tests/kernel_routes.rs:6610`) construct these.
+(`crates/daemon/tests/kernel_routes.rs:6651`) construct these.
 `a_session_is_recorded_once_and_its_decision_rows_copy_their_record`
-(`crates/kernel/tests/kernel_use_outcome.rs:1396`) checks that a session is
+(`crates/kernel/tests/kernel_use_outcome.rs:1601`) checks that a session is
 recorded once, that another session, harness, or project gets its own
 `session_seq`, and that every decision row carries its record's
 `session_seq` and `served_commit_seq`.
 `a_tie_on_the_served_sequence_links_the_greater_record_id`
-(`crates/kernel/tests/kernel_use_outcome.rs:1444`) builds two records of one
+(`crates/kernel/tests/kernel_use_outcome.rs:1649`) builds two records of one
 session served at the same sequence.
 `the_stored_link_equals_the_record_join_definition`
-(`crates/kernel/tests/kernel_use_outcome.rs:1480`) generates serve histories
+(`crates/kernel/tests/kernel_use_outcome.rs:1685`) generates serve histories
 with shared and out-of-order served sequences, overlapping served sets, two
 harnesses, and a session never served, and checks that every dispute stores
 the record the `use_outcome_decisions` and `use_outcomes` join answers under
@@ -86,7 +86,7 @@ the ticket's definition.
 - Conclusion: needs human input.
 
 ### Q: Does the link survive the P3 sweep?
-- Sources examined: route test `kernel_routes.rs:6610`.
+- Sources examined: route test `kernel_routes.rs:6651`.
 - Findings: after `expire_use_outcomes` at a time past the record's
   retention, the sweep reports one cited record and the linked record
   stays live.
