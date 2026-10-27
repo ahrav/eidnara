@@ -1416,9 +1416,15 @@ describe("eidnara_memory dispute", () => {
             },
             "call-2",
         );
-        expect(JSON.parse(byFile)).toMatchObject({
+        expect(JSON.parse(byFile)).toEqual({
+            action: "dispute",
             outcome: "applied",
+            objectId: "mem_verified",
+            event: "contradict",
+            previousDisposition: "active",
             disposition: "contradicted",
+            commitSeq: expect.any(Number),
+            replayed: false,
             visibilityChanged: true,
         });
         expect(commits(h.transport).at(-1)?.operations[0].evidence_ref).toEqual({

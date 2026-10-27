@@ -108,8 +108,9 @@ sending; renders denials and refusals`
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1527`)
 calls `dispute` with neither evidence input, with an empty `evidenceId`,
 with empty `path` and `gitObjectId`, with `path` and no `gitObjectId`, and
-with no `objectId`, and asserts the usage error with no daemon call; the Pi test `refuses a dispute without evidence before
-sending anything` (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:507`)
+with no `objectId`, and asserts the usage error with no daemon call; the
+Pi test `refuses a dispute without evidence before sending anything`
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:507`)
 asserts the same for Pi. A route request from the tool with neither field
 is the raw-body case the route test above already refuses
 `invalid_input`, since the tool sends the same `disposition` body.
