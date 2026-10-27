@@ -646,7 +646,7 @@ Reachability: default-production - `MemoryStore::open` runs on every daemon
 start; `evaluate` runs on every MemoryReviewer pass and before every job
 (`memory-reviewer-operations.md:44`).
 Status: active
-Exercised: yes - `crates/memory-store/tests/baseline.rs:495-517` opens a
+Exercised: yes - `crates/memory-store/tests/baseline.rs:496-518` opens a
 prior-baseline file and observes refusal with unchanged bytes; #1165
 re-exercises it with the fixture frozen at the baseline before
 `contradiction_candidates` (`crates/memory-store/tests/fixtures/prior_baseline.sql`);

@@ -458,8 +458,17 @@ and `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` (`:570`)
 show K accepted, K + 1 refused with the held rows unchanged, and a project
 at `per_project` evicting the lowest `score_bp`, then oldest, then smallest
 key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest`
-(`:188`) shows another project's rows are untouched. The store
-(`crates/memory-store/src/contradiction_candidates.rs:230`) enforces K and the
+(`:188`) shows another project's rows are untouched;
+`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1298`)
+shows a new row below the cap's floor counted written and dropped with the
+held rows and rowids unchanged; and
+`random_write_and_delete_sequences_match_the_reference_model` (`:1049`)
+compares 24 seeded sequences of writes, late writes, incarnation changes,
+evictions at caps of 2 to 4096, and keyed deletes against a reference model
+of the rules, checking every row, the returned counts, rowid stability, and
+the gauge after each step, and pages, cursors across writes, and the sweep
+every seventh step. The store
+(`crates/memory-store/src/contradiction_candidates.rs:478`) enforces K and the
 project cap in the write transaction; the daemon owns the values. The pass
 arm (M per pass, `rows_written`, replayed units) lands with #1167.
 Guarantee: The table key is (project digest, descriptor evidence object id,
