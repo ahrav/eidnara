@@ -404,7 +404,13 @@ Read `claim_facts.rs:230-304`: `limit.run` checks first (`:238`),
 `check_claim_bounds` (`:258`) precedes `reader_with_limit` (`:261`).
 Existing check: `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`,
 `an_exhausted_budget_is_refused_before_the_projection_is_read`. Status
-unaudited.
+unaudited. Re-exercised by #1166: the candidate sweep reads claim facts in
+chunks of 64 under `max_claims` = 64, so `TooManyClaims` cannot arise from
+it; `every_claim_chunk_of_a_page_is_read`
+(`crates/daemon/tests/contradiction_candidates_sweep.rs:855`) reads 66
+decisions in two chunks, and
+`a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land`
+(`:765`) shows a chunk refused as `NotADecision` keeps that chunk's rows.
 Impact: for P5 R2 this bound caps the ids per call but, per D1, the call
 returns no summary text; the plan's data path through this API does not
 exist at HEAD.
@@ -714,7 +720,12 @@ refusal on one capture of a multi-capture page.
 Confidence: high - [evidence](evidence/p5dep-harness-sweep-retires-owners-before-evidence.md).
 Read `local_file.rs:64-70`, `:245-310`, `:453-501`, `:514-565`;
 `slice/write.rs:569-577`, `:627-666`.
-Existing check: the three tests above. Status unaudited.
+Existing check: the three tests above. Status unaudited. Re-exercised by
+#1166: `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it`
+(`crates/daemon/tests/harness_sources.rs:3338`) passes at the #1166 tip and
+observes the descriptor and evidence retired in one commit, descriptor
+first; the candidate sweep keys a descriptor's liveness on that evidence
+row, so it drops the rows of a swept, uncited capture.
 Impact: P5 R4's sweep drops rows "whose descriptor is retired"; P4 C6 refuses
 a `dispute` whose evidence is not live as `not_found`. A candidate older than
 30 days cannot be confirmed once its evidence is retired.
@@ -765,9 +776,13 @@ retired, so P5 R4's "descriptor retired" sweep rule and P4's "evidence live"
 confirm rule diverge for a confirmed candidate. The P5 design must decide
 which row its sweep keys on.
 Open questions:
-- Does P5 R4 intend to drop a candidate whose descriptor is retired even when
-  its evidence is live because the candidate was confirmed? (needs human
-  input)
+- Resolved by #1166: the candidate sweep keys on the evidence row, so a
+  confirmed candidate whose evidence a dispute citation keeps live is kept
+  while its descriptor is retired, matching P4's confirm check.
+  `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
+  (`crates/daemon/tests/harness_sources.rs:3482`) re-exercises the kept
+  evidence with an observation citation at the #1166 tip; a decision-event
+  citation is still unexercised.
 
 ### p5dep-review-reads-parse-strict-bodies-after-the-envelope
 

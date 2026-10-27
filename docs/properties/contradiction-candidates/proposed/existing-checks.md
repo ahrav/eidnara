@@ -39,31 +39,57 @@ Analyzer checks the scorer relies on:
 
 | Check | Location | Asserts | Records | Status |
 | --- | --- | --- | --- | --- |
-| `each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` | `:73` | one row per key; lower-tip rewrite keeps the tip; a newer write removes unnamed keys | row key and caps | unaudited |
-| `a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` | `:115` | K + 1 rows, bad counts, repeated decisions, bad ids and digests refused; nothing written | row key and caps | unaudited |
-| `an_id_the_scanner_detects_is_refused_and_nothing_is_written` | `:169` | a secret-bearing id is refused | read keys (no text) | unaudited |
-| `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest` | `:188` | eviction order and count; another project untouched | row key and caps | unaudited |
-| `a_decision_pages_in_reader_order_with_a_stable_cursor` | `:236` | reader order; 70 rows at limit 64 page as 64, 6, none; clamp | read serves only live rows (store arm) | unaudited |
-| `the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys` | `:309` | sweep page by rowid; keyed delete; row and byte gauge | sweep (store arm) | unaudited |
-| `truncating_and_replaying_the_writes_rebuilds_the_same_rows` | `:376` | truncate then replay reproduces the rows | rebuildable (store arm) | unaudited |
-| `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:415` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
-| `a_late_write_replaces_held_keys_and_adds_none` | `:458` | a write below the held tip adds no key | row key and caps | unaudited |
-| `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:492` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
-| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:517` | rows added before or removed from page one move nothing after the cursor; non-canonical cursors refused | read (paging) | unaudited |
-| `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:570` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
-| `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:634` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
+| `each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` | `:72` | one row per key; lower-tip rewrite keeps the tip; a newer write removes unnamed keys | row key and caps | unaudited |
+| `a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` | `:114` | K + 1 rows, bad counts, repeated decisions, bad ids and digests refused; nothing written | row key and caps | unaudited |
+| `an_id_the_scanner_detects_is_refused_and_nothing_is_written` | `:168` | a secret-bearing id is refused | read keys (no text) | unaudited |
+| `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest` | `:187` | eviction order and count; another project untouched | row key and caps | unaudited |
+| `a_decision_pages_in_reader_order_with_a_stable_cursor` | `:235` | reader order; 70 rows at limit 64 page as 64, 6, none; clamp | read serves only live rows (store arm) | unaudited |
+| `the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys` | `:308` | sweep page by rowid; keyed delete; row and byte gauge | sweep (store arm) | unaudited |
+| `truncating_and_replaying_the_writes_rebuilds_the_same_rows` | `:372` | truncate then replay reproduces the rows | rebuildable (store arm) | unaudited |
+| `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:411` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
+| `a_late_write_replaces_held_keys_and_adds_none` | `:454` | a write below the held tip adds no key | row key and caps | unaudited |
+| `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:488` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
+| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:513` | rows added before or removed from page one move nothing after the cursor; non-canonical cursors refused | read (paging) | unaudited |
+| `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:560` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
+| `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:624` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
 
 Baseline: `crates/memory-store/tests/baseline.rs` pins the table and its two
 indexes in `EXPECTED_OBJECTS` and refuses a store at the prior baseline
 untouched (`:495`).
 
-## S-B, S-C, S-E to S-H and R5
+## S-E sweep, S-G flag, and R5 (`crates/daemon/tests/contradiction_candidates_sweep.rs`, #1166)
 
-None found. The trigger, candidate set, store, sweep, read, flag, and
-dispute-handoff behavior does not exist at the branch tip; the store
-(#1165), sweep (#1166), pass (#1167), and read (#1168) tickets add the code
-and the checks. The 12 proposed records carry `Existing check: none;
-proposed`.
+| Check | Location | Asserts | Records | Status |
+| --- | --- | --- | --- | --- |
+| `the_eligibility_rule_admits_exactly_active_stale_and_disputed_decisions_of_the_project` | `:377` | dispositions read back through claim facts; the predicate admits active, sensitive, stale, disputed of the bound project only | sweep | unaudited |
+| `one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_none` | `:432` | each drop reason on its own row; repeat drops zero; tip and job facts unchanged; gauge | sweep, R5 | unaudited |
+| `a_row_at_the_age_bound_stays_and_one_past_it_drops` | `:485` | age boundary | sweep | unaudited |
+| `a_closed_kernel_drops_nothing_and_counts_the_skip` | `:501` | no Kernel: no read, one skip | sweep | unaudited |
+| `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over` | `:516` | page bound and wrap | sweep | unaudited |
+| `a_false_flag_runs_no_table_statement_and_moves_no_counter` | `:552` | hidden table, false flag: no statement, zero counters | flag off (sweep arm) | unaudited |
+| `the_counter_block_holds_exactly_the_closed_vocabulary_as_integers` | `:600` | the 27 names, integers only | flag off (status arm) | unaudited |
+| `the_evidence_read_answers_liveness_at_its_snapshot_in_request_order` | `:640` | Live, Retired, Unknown; bound; deadline | sweep | unaudited |
+| `the_candidate_modules_name_no_kernel_write_path` | `:694` | no Kernel write entry point in the module | R5 | unaudited |
+| `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:718` | every production `CausalInputs` literal has empty `signals` | R5 | unaudited |
+| `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land` | `:765` | a refused chunk keeps its rows; Kernel-free drops land | sweep | unaudited |
+| `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:816` | rows above the tip are not judged | sweep | unaudited |
+| `a_cancelled_sweep_deletes_nothing` | `:842` | cancellation | sweep | unaudited |
+| `every_claim_chunk_of_a_page_is_read` | `:855` | two claim chunks | sweep | unaudited |
+| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:900` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
+| `the_evidence_read_refuses_another_incarnation_and_a_future_snapshot` | `:969` | incarnation and snapshot refusals | sweep | unaudited |
+
+Also: `crates/daemon/src/config.rs:2299` and `:2320` (default, tier, and
+resolved-config freezing), `crates/daemon/src/lib.rs:21340` (bound route and
+status block), `crates/host-runtime/src/control.rs:2004` (host forwarding
+allowlist against `docs/host-wire-protocol.md`), and
+`crates/memory-store/tests/contradiction_candidates.rs:663` (a delete as
+read spares a rewritten row).
+
+## S-B, S-C, S-F, S-H
+
+None found. The trigger, candidate set, read, and dispute-handoff behavior
+does not exist at the branch tip; the pass (#1167) and read (#1168) tickets
+add the code and the checks.
 
 ## Suspiciously quiet areas
 
