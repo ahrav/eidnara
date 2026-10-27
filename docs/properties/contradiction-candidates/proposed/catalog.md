@@ -257,7 +257,7 @@ an ASCII term by its ASCII lowercase (equal to `str::to_lowercase` on
 ASCII) and any other term by `str::to_lowercase`, and `term_set` returns
 those folded terms; no diacritic removal or Unicode normalization is
 applied. The analyzer splits parts on the original
-case before the fold (`crates/retrieval/src/lexical/analysis.rs:193-205`:
+case before the fold (`crates/retrieval/src/lexical/analysis.rs:193-204`:
 at a lower-to-upper change and before the last capital of an uppercase run
 that two lowercase letters follow), so two texts that differ only in case
 have equal term sets and score as the text against itself when the case
@@ -287,7 +287,7 @@ at `:124`), `:221-270` (`scan_ascii` floors and hashes the ASCII lowercase),
 through `count_ascii`, or from `terms` when a term is not ASCII or more than
 64 are distinct), `:18-25` (the module header states the fold is not full
 case folding), `:77` (`FOLD_RULE_ID` enters the preimage);
-`crates/retrieval/src/lexical/analysis.rs:193-205` (`splits`, the
+`crates/retrieval/src/lexical/analysis.rs:193-204` (`splits`, the
 case-driven part boundaries).
 Existing check: the three tests above; `the_matcher_digest_pins_every_rule`
 (`:348-400`) pins the fold rule id. Status unaudited.

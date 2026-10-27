@@ -41,7 +41,7 @@ analysis, no diacritic or Unicode normalization.
   `:163-171` `a_case_change_inside_an_identifier_changes_its_parts`
   (`configLoader` gives {configloader, config, loader}; `CONFIGLOADER` and
   `configloader` give {configloader}).
-- `crates/retrieval/src/lexical/analysis.rs:193-205` `splits` places part
+- `crates/retrieval/src/lexical/analysis.rs:193-204` `splits` places part
   boundaries from the original case: at a lower-to-upper change (`:198`)
   and before the last capital of an uppercase run that two lowercase
   letters follow (`:199-201`). The analyzer runs before the fold
@@ -103,7 +103,7 @@ None; pure computation.
 ### Q: Do two texts that differ only in case always have equal term sets?
 
 - Sources examined: `crates/retrieval/src/lexical/analysis.rs:4`,
-  `:193-205`, `scorer.rs:111-132`, the test at `:163-171`.
+  `:193-204`, `scorer.rs:111-132`, the test at `:163-171`.
 - Findings: no. The analyzer splits parts on the original case and the
   scorer folds afterwards, so `configLoader` yields {configloader, config,
   loader} and `configloader` yields {configloader}. Case changes that keep
