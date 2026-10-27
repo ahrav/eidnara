@@ -912,9 +912,9 @@ Required faults and enabling state: An expired record; an expired cited record;
 70 expired records; a citation inserted after selection.
 Confidence: high -
 [evidence](evidence/uo-p-sweep-retires-only-expired-uncited-rows.md).
-`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:561`); predicate
+`expire_use_outcomes` (`crates/kernel/src/use_outcome.rs:566`); predicate
 `crates/kernel/src/use_outcome.rs:169`; recheck `retire_due_use_outcome`
-(`crates/kernel/src/use_outcome.rs:698`); receipt
+(`crates/kernel/src/use_outcome.rs:703`); receipt
 `crates/kernel/src/local_file.rs:438`.
 Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
 (`crates/kernel/tests/kernel_use_outcome.rs:533`);
@@ -923,17 +923,17 @@ Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
 `an_expired_record_cited_by_a_live_report_is_retained`
 (`crates/kernel/tests/kernel_use_outcome.rs:665`);
 `a_record_cited_after_selection_is_kept`
-(`crates/kernel/src/use_outcome.rs:844`);
+(`crates/kernel/src/use_outcome.rs:849`);
 `a_page_another_sweep_committed_at_the_same_cutoff_replays`
-(`crates/kernel/src/use_outcome.rs:872-873`);
+(`crates/kernel/src/use_outcome.rs:877-878`);
 `a_record_retired_after_selection_at_another_cutoff_is_skipped`
-(`crates/kernel/src/use_outcome.rs:935`);
+(`crates/kernel/src/use_outcome.rs:940`);
 `a_record_kept_at_a_cutoff_retires_at_that_cutoff_once_uncited`
-(`crates/kernel/src/use_outcome.rs:956`);
+(`crates/kernel/src/use_outcome.rs:961`);
 `the_cited_count_covers_the_rows_read_before_the_page_fills`
 (`crates/kernel/tests/kernel_use_outcome.rs:862`);
 `the_sweep_and_the_reads_use_their_indexes`
-(`crates/kernel/src/use_outcome.rs:973`);
+(`crates/kernel/src/use_outcome.rs:978`);
 `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
 `a_cancelled_slice_stops_before_the_use_outcome_sweep`
@@ -957,8 +957,8 @@ row read before the delete reads the same after `ok`, across a stop between the
 stores and a retry; the tests run no serve beside the delete)
 Guarantee: After `session.delete` answers `ok`, every serving record and
 decision row of the session that was readable before it is readable after it,
-with the same ids. A serve whose write lands beside the delete adds a record
-and removes none (OQ3-10).
+with the same ids. A serve whose write lands beside the delete may add a record,
+for a served set the session has no record of, and removes none (OQ3-10).
 Check: `always` - the record ids and decision ids of the session read before
 any delete path are a subset of those read after it, and every record read
 before keeps its decision ids.
@@ -1205,9 +1205,11 @@ Exercised: yes - a delete marks the records before the memory delete; a stop
 between the stores, an unknown commit outcome, and a Kernel that is not Ready
 each converge on one repeat that keeps the first timestamp; a second delete
 marks records written after the first; a route teardown leaves the records live
-Guarantee: `deleted_at` is set exactly when a `session.delete` for the session
-committed its Kernel step, before the memory-store delete; route teardown leaves
-it null.
+Guarantee: `deleted_at` is set on a record exactly when a `session.delete` for
+the session committed a Kernel step that selected it as live, before the
+memory-store delete; a record expiry retired before that step keeps its state,
+a serve published after it stays live until a later delete (OQ3-10), and route
+teardown leaves it null.
 Check: `always` - after `ok` every record the Kernel step selected as live has
 `deleted_at` set and the memory rows are gone; a record expiry retired before
 the delete keeps its state with `deleted_at` null, and a serve whose job lands
@@ -1239,7 +1241,7 @@ Existing check:
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:208`);
 `a_session_id_that_reads_as_a_secret_still_deletes`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:483`); Kernel half:
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:538`); Kernel half:
 `a_session_delete_marks_each_live_record_once`
 (`crates/kernel/tests/kernel_use_outcome.rs:969`). Status: unaudited.
 Impact: A deleted session reads as live, or a live one as deleted.
@@ -1295,27 +1297,29 @@ after its serve commits with a Kernel wait of its own (`touch_after_serve`
 (`crates/daemon/src/use_outcome_writer.rs:334`)); the Kernel update moves
 only live records whose value is null or earlier, in one fenced transaction
 with no commit that holds only the writer (`advance_use_outcome_last_transform`
-(`crates/kernel/src/use_outcome.rs:533`)).
+(`crates/kernel/src/use_outcome.rs:538`)).
 Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:227`);
 `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:314`);
-`a_spent_pass_budget_skips_the_touch`
+`a_committing_pass_with_a_current_record_takes_no_writer`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:362`);
+`a_spent_pass_budget_skips_the_touch`
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:417`);
 `a_serve_deadline_leaves_the_touch_its_own_kernel_wait`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:391`);
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:446`);
 `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
-(`crates/daemon/src/use_outcome_lifecycle_tests.rs:428`); Kernel half:
+(`crates/daemon/src/use_outcome_lifecycle_tests.rs:483`); Kernel half:
 `last_transform_at_advances_live_records_without_a_commit`
 (`crates/kernel/tests/kernel_use_outcome.rs:1024`),
 `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-(`crates/kernel/tests/kernel_use_outcome.rs:1108`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1109`),
 `an_outside_file_lock_bounds_the_advance_at_begin`
-(`crates/kernel/tests/kernel_use_outcome.rs:1145`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1150`),
 `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-(`crates/kernel/tests/kernel_use_outcome.rs:1169`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1174`),
 `the_advance_takes_no_pooled_reader`
-(`crates/kernel/tests/kernel_use_outcome.rs:1201`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1206`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.

@@ -1130,7 +1130,11 @@ fn a_held_writer_bounds_the_advance_and_an_idle_session_skips_it() {
         let advanced =
             store.advance_use_outcome_last_transform(&budget(wait), &project(), HARNESS, "s1", 10);
         assert_eq!(advanced, Err(KernelError::Deadline));
-        assert!(started.elapsed() >= wait);
+        let waited = started.elapsed();
+        assert!(
+            waited >= wait && waited < wait * 10,
+            "the writer wait is bounded by the budget: {waited:?}"
+        );
         assert_eq!(
             store.use_outcome_last_transform_is_stale(&budget(wait), &project(), HARNESS, "s9", 10),
             Ok(false)

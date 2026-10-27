@@ -35,23 +35,26 @@ revision.
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:227`);
   `a_held_writer_skips_the_update_and_the_next_committing_pass_catches_up`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:314`);
+  `a_committing_pass_with_a_current_record_takes_no_writer`
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:362`) (the daemon's
+  idle-session skip: a current record keeps the pass off a held writer);
   `a_spent_pass_budget_skips_the_touch`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:362`) (the writer function
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:417`) (the writer function
   under a spent `PassWriteBudget`, not a pass);
   `a_serve_deadline_leaves_the_touch_its_own_kernel_wait`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:391`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:446`);
   `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:428`); Kernel half:
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:483`); Kernel half:
   `last_transform_at_advances_live_records_without_a_commit`
   (`crates/kernel/tests/kernel_use_outcome.rs:1024`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1108`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1109`),
   `an_outside_file_lock_bounds_the_advance_at_begin`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1145`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1150`),
   `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1169`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1174`),
   `the_advance_takes_no_pooled_reader`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1201`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:1206`). Status: unaudited.
 
 ## Failure scenario
 

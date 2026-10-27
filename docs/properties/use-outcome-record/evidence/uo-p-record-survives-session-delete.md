@@ -19,7 +19,8 @@ revision.
 - Guarantee under test: After `session.delete` answers `ok`, every serving
   record and decision row of the session that was readable before it is
   readable after it, with the same ids. A serve whose write lands beside the
-  delete adds a record and removes none (OQ3-10).
+  delete may add a record, for a served set the session has no record of, and
+  removes none (OQ3-10).
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
   (`crates/kernel/tests/kernel_schema.rs:2177`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`

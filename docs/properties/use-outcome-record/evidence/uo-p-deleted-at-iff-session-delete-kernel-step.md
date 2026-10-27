@@ -18,7 +18,7 @@ revision.
   (`crates/daemon/src/use_outcome_writer.rs:262-294`); the digest keeps the key
   clear of the Kernel's identity check for any session id the wire admits
   (`a_session_id_that_reads_as_a_secret_still_deletes`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:483`)); an envelope that
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:538`)); an envelope that
   marks nothing rolls back.
 - Order: the step runs at `crates/daemon/src/lib.rs:7007`, before the
   `stop_after_retirement` hook and the memory delete; a `kernel_unavailable`
