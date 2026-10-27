@@ -52,7 +52,7 @@ event".
 
 Evidence: `commit_log` columns are `commit_seq, transaction_id,
 writer_epoch, producer, operation_key, request_digest, recorded_at, actor,
-cause` (`schema.rs:26`; insert `envelope.rs:1419-1435`). `IntentRequest`
+cause` (`schema.rs:26`; insert `envelope.rs:1484-1499`). `IntentRequest`
 carries `producer, operation_key, request_digest, actor, cause`
 (`project.rs:139-146`). The transport strips `session_id` before the body
 is parsed (`mod.rs:461-473`). `operation_key` is
@@ -148,7 +148,7 @@ typed columns" can mean. See Q6.
 The plan cites `derive_classes` at `commit.rs:226-240` (HEAD: `:368-378`),
 `disposition_request` evidence at `:590-596` (HEAD `3a3b916b7`: `:595-596`;
 PR A: `:731-732`), and the
-reporter join at `envelope.rs:1342-1351` (HEAD: insert at `:1419-1435`).
+reporter join at `envelope.rs:1342-1351` (HEAD: insert at `:1484-1499`).
 Shared-facts corrections are in `domain-model.md` section 0. No semantic
 claim changes.
 

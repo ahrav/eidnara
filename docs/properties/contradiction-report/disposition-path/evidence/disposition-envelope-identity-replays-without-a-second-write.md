@@ -24,7 +24,7 @@ per report.
 - `commit_prepared_with_writer` opens the writer transaction, checks the
   fence, then `stored_receipt` (`crates/kernel/src/envelope.rs:1403-1416`):
   a `Some` returns the stored receipt without running the operation;
-  `Conflict` when the digest differs (`:1363-1393`).
+  `Conflict` when the digest differs (`:1362-1392`).
 - `operation_receipts` is `UNIQUE(producer, operation_key)` with no-delete
   and identity-immutable triggers (`schema.rs:42`); `commit_log` has
   `idx_commit_operation UNIQUE(producer, operation_key)` (`:26`).

@@ -58,16 +58,16 @@ All constructed:
   a path over 1024 bytes, a path holding the test token (same test).
 - Unit refusals of empty oid, absolute path, empty path,
   `src/.eidnara/x`, and `double%2Fencoded`:
-  `malformed_references_are_invalid_input` (`dispute.rs:315`).
+  `malformed_references_are_invalid_input` (`dispute.rs:320`).
 - Both fields on one dispute land and parse back, and a malformed
   reference beside an id that would answer `not_found` answers
   `invalid_input`, so the form check runs before the visibility check
   (`a_dispute_judges_every_citer_and_both_evidence_fields_together`,
   `kernel_routes.rs:6285`).
 - Every accepted path renders and parses back to itself (proptest
-  `every_accepted_reference_parses_back_to_its_inputs`, `dispute.rs:293`);
+  `every_accepted_reference_parses_back_to_its_inputs`, `dispute.rs:298`);
   `encode` on reserved and multi-byte input has a fixed witness
-  (`dispute.rs:281`).
+  (`dispute.rs:286`).
 - The fake kernel refuses five path shapes the route refuses
   (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts:271`).
 - Command parser: `--path` split at the last `@`; a path without `@`, an
@@ -80,8 +80,8 @@ All constructed:
 ### Q: Which token does the scanner detect, and do object ids and ordinary paths pass (G3)?
 
 - Sources examined: `a_path_the_secret_scanner_detects_is_invalid_input`
-  (`dispute.rs:343-350`); `git_object_ids_and_ordinary_paths_carry_no_detection`
-  (`dispute.rs:355-368`); `crates/secret-scanner/conservative_overlay.yaml:5-7`;
+  (`dispute.rs:352-359`); `git_object_ids_and_ordinary_paths_carry_no_detection`
+  (`dispute.rs:364-377`); `crates/secret-scanner/conservative_overlay.yaml:5-7`;
   `crates/secret-scanner/default_rules.yaml:410-411`;
   `context_core::redaction::redact_durable_text`
   (`crates/context-core/src/redaction.rs:462-464`).

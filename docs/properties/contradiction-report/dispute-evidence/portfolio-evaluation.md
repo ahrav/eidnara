@@ -30,7 +30,7 @@ About 45 `file:line` citations were checked. Most are exact, or are off
 by a doc-comment line. Examples: `commit.rs:12-63`, `:206-234`,
 `:719-721`, `:725-726`, `:742-757`, `:1045-1060`, `:1109-1123`,
 `:1149-1157`; `dispute.rs:49-76`, `:103-143`, `:150-163`, `:202-208`;
-`envelope.rs:520-597` (the read, renamed `evidence_cited_in` since);
+`envelope.rs:548-615` (the read, renamed `evidence_cited_in` since);
 `scope.rs:710-716`;
 `lib.rs:14529`; `admission.rs:4168-4175`, `:4532`; all eight route test
 lines from `kernel_routes.rs:5723` to `:6199`; and all seven TypeScript
@@ -42,8 +42,8 @@ The following were wrong at `16660c3dd`:
   off by 17. The listed lines were 252, 266, 300, 328, 340, 356, 376 and
   390. At `f68e895ca` the tests are at 232, 246, 314, 342, 354, 370, 390
   and 404.
-- `catalog.md`, form record, `Exercised:`. It cited `dispute.rs:301`,
-  `:329`, `:341` and `:267`. At `f68e895ca` these are 314, 342, 354 and
+- `catalog.md`, form record, `Exercised:`. It cited `dispute.rs:300`,
+  `:328`, `:340` and `:266`. At `f68e895ca` these are 314, 342, 354 and
   246.
 - `catalog.md`, reason record, `Existing check:`. It cited `:390`. At
   `f68e895ca` the test is at 404.

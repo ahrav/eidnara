@@ -446,7 +446,7 @@ Impact: its semantics (retired is `NotFound`, mapped to
 Open questions:
 - Resolved by PR A: the daemon's dispute check calls neither helper. It
   calls the new Kernel read `Envelope::evidence_cited_in`
-  (`crates/kernel/src/envelope.rs:520-597`) inside the writer transaction
+  (`crates/kernel/src/envelope.rs:548-615`) inside the writer transaction
   and answers `not_found` for a retired row, the same name this record's
   helpers give (`cited-evidence-live-at-dispute-commit` in
   [`../dispute-evidence/catalog.md`](../dispute-evidence/catalog.md)).
@@ -492,7 +492,7 @@ token, or projected dependency under any binding. Re-labelled at the PR A
 tip: the guarantee still holds, and dispute evidence no longer depends on
 it. The route judges a cited `evidence_id` through its live citers
 (`require_visible_evidence`, `commit.rs:742-757`, over
-`Envelope::evidence_cited_in`, `envelope.rs:520-597`), which is
+`Envelope::evidence_cited_in`, `envelope.rs:548-615`), which is
 `cited-evidence-visible-to-bound-project` in
 [`../dispute-evidence/catalog.md`](../dispute-evidence/catalog.md).
 Open questions:
@@ -665,8 +665,8 @@ is true; `verdictFor` returns null whenever `results.length != 1 ||
 object_id != operation.object_id || event != operation.event`
 (`memory-mark-command.ts:218-226`), and a null verdict maps to
 `refused(preview, invalid("internal"))` on the preview branch
-(`:263-265`) and to `refused(commit, unavailable("outcome_unknown"))` on
-the commit branch (`:290-292`) (portfolio refinement R6). Every
+(`:271-273`) and to `refused(commit, unavailable("outcome_unknown"))` on
+the commit branch (`:298-300`) (portfolio refinement R6). Every
 invocation, so `always`. Coverage marker to add:
 `command_preview_visibility_changes` (the confirmation branch is reached
 only when `visibility_changes` is true, so the at-most-once clause is
@@ -680,7 +680,7 @@ mismatched, empty, or multiple verdicts; a recorded identity; a
 Confidence: high - [evidence](evidence/memory-mark-command-commits-only-the-previewed-operation.md).
 Existing check: `memory-mark-command.test.ts:344`, `:367`, `:388`, `:407`,
 `:424`, `:435`, `:448`, `:466`, `:497`, `:513`, `:527`, and PR A's `:185`,
-`:208`, `:284`. Status unaudited.
+`:212`, `:325`. Status unaudited.
 Impact: committing an operation the user did not preview, or treating a
 foreign verdict as the answer, would apply a disposition the confirmation
 dialog never described.
@@ -763,7 +763,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - every non-replayed `kernel.commit`
-inserts one `commit_log` row (`envelope.rs:1420-1435`).
+inserts one `commit_log` row (`envelope.rs:1484-1499`).
 Status: active
 Exercised: partial - PR A's `kernel_routes.rs:5723` reads the `commit_log`
 row of two dispute commits and asserts `actor` and `cause` equal the
@@ -854,8 +854,8 @@ Open questions:
   `redact_durable_text` the route scans with
   (`crates/kernel/src/redaction.rs:41-42`). The scanner detects the test
   token `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678`
-  (`dispute.rs:343-350`), and 64 seeded 40- and 64-hex object ids beside
-  an ordinary repository path carry no detection (`dispute.rs:355-368`).
+  (`dispute.rs:352-359`), and 64 seeded 40- and 64-hex object ids beside
+  an ordinary repository path carry no detection (`dispute.rs:364-377`).
   The evidence file records which rule the token matches and that the
   attribution is inferred from the rule regexes.
 

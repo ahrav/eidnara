@@ -70,7 +70,7 @@ the difference noted.
 - `commit_log` columns: `commit_seq, transaction_id, writer_epoch,
   producer, operation_key, request_digest, recorded_at, actor, cause`
   (`crates/kernel/src/schema.rs:26`); INSERT at
-  `crates/kernel/src/envelope.rs:1420-1435`. Append-only triggers. No
+  `crates/kernel/src/envelope.rs:1484-1499`. Append-only triggers. No
   `session_id`, no `source_kind` column.
 - `operation_receipts` keyed `UNIQUE(producer, operation_key)` with
   `request_digest` and `result_payload` (`schema.rs:42`);
@@ -227,7 +227,7 @@ disposition row.
 1. Plan P4 R3 says the event row "can be joined to the commit log entry
    carrying caller-asserted `actor`, `cause`, `session_id`, and
    `source_kind`" citing `envelope.rs:1401-1410`. The `commit_log` schema
-   (`schema.rs:26`) and the INSERT (`envelope.rs:1420-1435`) carry
+   (`schema.rs:26`) and the INSERT (`envelope.rs:1484-1499`) carry
    `actor` and `cause` only. `session_id` is stripped at
    `kernel_routes/mod.rs:461` and `source_kind` is consumed by
    `resolve_classes`. Joinability today is by `actor` and `cause` text.

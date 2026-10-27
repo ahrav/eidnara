@@ -22,11 +22,11 @@ and what each failure answers.
      `NotFound` (`:707-709`). `load_object_state` has no liveness filter
      of its own (`envelope.rs:1925-1939`), so this line is the liveness
      check.
-  3. `subject_admission(object_id)?.ok_or(AdmissionPolicy)` (`:710-712`):
+  3. `subject_admission(object_id)?.ok_or(AdmissionPolicy)` (`:709-711`):
      a decision with no admission row is `AdmissionPolicy`.
   4. `approval_object_id.or(stored_approval)`: the approval and every
      `approval_chain_members` entry pass `scoped_object_state`
-     (`:713-717`); the chain reader refuses above
+     (`:712-716`); the chain reader refuses above
      `MAX_AUTHORITY_CHAIN_DEPTH` with `AdmissionPolicy`
      (`admission.rs:1017-1038`).
 - Mapping: `NotFound -> invalid/not_found`, `AdmissionPolicy ->

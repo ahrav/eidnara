@@ -68,7 +68,7 @@ share it.
 
 All four are constructed: `a_dispute_needs_evidence_and_other_events_take_none`
 (`crates/daemon/tests/kernel_routes.rs:5971`), the unit test of the same
-name (`dispute.rs:371`), and the parser test at
+name (`dispute.rs:380`), and the parser test at
 `memory-mark-command.test.ts:137`. The tool arm (#1161) refuses before
 sending: `refuses missing evidence and unsupported events before sending;
 renders denials and refusals`

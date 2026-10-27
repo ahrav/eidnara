@@ -40,13 +40,13 @@ Fixtures: `commit-available-disposition-quarantine.json`,
 
 | Line | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
-| 4912 | `restrictive_disposition_and_origin_classification_are_sticky` | a Rejected prior stays Rejected under `CodeObserved`; a request with other classes than the prior is `AdmissionPolicy` | classes | unaudited |
-| 5208 | `leaving_a_restricted_disposition_requires_authority` | Rejected, Contradicted, Quarantined to Stale or Disputed: denied without approval, moves with one | restrictiveness | unaudited |
-| 5313 | `an_event_that_names_a_disposition_keeps_its_own_outcome` | each disposition event keeps its table outcome, not `DemoteSupport` | maturity | unaudited |
-| 5407 | `relaxing_a_restrictive_disposition_requires_approval` | relaxation needs approval | restrictiveness | unaudited |
-| 5473 | `prior_with_effective_above_historical_is_rejected` | inconsistent prior is `AdmissionPolicy` | classes (refusal branch) | unaudited |
-| 5732 | `non_active_dispositions_withdraw_effective_support` | an `Enforce` on a Rejected prior raises `historical` to Enforced and keeps `effective` at Candidate | maturity | unaudited |
-| 4736 | `an_authority_event_requires_approval_even_at_an_unchanged_rung` | authority events need approval | (context) | unaudited |
+| 4936 | `restrictive_disposition_and_origin_classification_are_sticky` | a Rejected prior stays Rejected under `CodeObserved`; a request with other classes than the prior is `AdmissionPolicy` | classes | unaudited |
+| 5232 | `leaving_a_restricted_disposition_requires_authority` | Rejected, Contradicted, Quarantined to Stale or Disputed: denied without approval, moves with one | restrictiveness | unaudited |
+| 5337 | `an_event_that_names_a_disposition_keeps_its_own_outcome` | each disposition event keeps its table outcome, not `DemoteSupport` | maturity | unaudited |
+| 5431 | `relaxing_a_restrictive_disposition_requires_approval` | relaxation needs approval | restrictiveness | unaudited |
+| 5497 | `prior_with_effective_above_historical_is_rejected` | inconsistent prior is `AdmissionPolicy` | classes (refusal branch) | unaudited |
+| 5756 | `non_active_dispositions_withdraw_effective_support` | an `Enforce` on a Rejected prior raises `historical` to Enforced and keeps `effective` at Candidate | maturity | unaudited |
+| 4760 | `an_authority_event_requires_approval_even_at_an_unchanged_rung` | authority events need approval | (context) | unaudited |
 
 Compile-time guard: `admission.rs:4317-4324` asserts the maturity rank
 order. `commit.rs:1293` (`every_disposition_event_names_a_disposition_
@@ -72,17 +72,17 @@ receipt without `dispositions`.
 | Line | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
 | 81, 92 | `parseMemoryMarkArgs` | event spelling, flag position, refusals of a target disposition, missing id, flag-shaped id | command | unaudited |
-| 303 | tightening on a labeled object applies without confirmation | no `confirm` call; `applied` | command | unaudited |
-| 326 | the same command on a verified object asks first; no dialog writes nothing | `needs_confirmation` | command | unaudited |
-| 347 | declining writes nothing; accepting applies | `declined`, `applied` | command | unaudited |
-| 366 | a relaxation without an approval is denied before anything is written | `denied` from preview, no commit | command, restrictiveness | unaudited |
-| 383 | repeating a command with the same identity replays the receipt | `replayed: true` | replay | unaudited |
-| 394 | a repeat after the object moved on still replays | replay with stale verdict | replay | unaudited |
-| 407 | a denial recorded by the commit itself is reported as denied | `denied` from commit | command | unaudited |
-| 425 | a session that ends after the preview commits nothing | `isCancelled` honored | command | unaudited |
-| 456 | an actor carrying the key separator is refused before any call | `RangeError` path | command | unaudited |
-| 472 | a refused preview names the state and writes nothing | `refused/preview` | command | unaudited |
-| 486 | a verdict for another object or event never decides the one the user named | `verdictFor` null paths | command | unaudited |
+| 344 | tightening on a labeled object applies without confirmation | no `confirm` call; `applied` | command | unaudited |
+| 367 | the same command on a verified object asks first; no dialog writes nothing | `needs_confirmation` | command | unaudited |
+| 388 | declining writes nothing; accepting applies | `declined`, `applied` | command | unaudited |
+| 407 | a relaxation without an approval is denied before anything is written | `denied` from preview, no commit | command, restrictiveness | unaudited |
+| 424 | repeating a command with the same identity replays the receipt | `replayed: true` | replay | unaudited |
+| 435 | a repeat after the object moved on still replays | replay with stale verdict | replay | unaudited |
+| 448 | a denial recorded by the commit itself is reported as denied | `denied` from commit | command | unaudited |
+| 466 | a session that ends after the preview commits nothing | `isCancelled` honored | command | unaudited |
+| 497 | an actor carrying the key separator is refused before any call | `RangeError` path | command | unaudited |
+| 513 | a refused preview names the state and writes nothing | `refused/preview` | command | unaudited |
+| 527 | a verdict for another object or event never decides the one the user named | `verdictFor` null paths | command | unaudited |
 
 ## Production guards
 

@@ -98,7 +98,7 @@ demotion, and does not read `kernel.read`.
 ### Q: Is a plugin-filed dispute of an approval, and its cascade, intended behavior under "the report adds data, not authority"?
 
 - Sources examined: P4 KTD4, R4; index D3 and D7; `admission.rs:1041-
-  1139`, `:843-856`; route test `:5493`.
+  1139`, `:843-856`; route test `kernel_routes.rs:5493`.
 - Findings: the code admits it and the route test exercises the quarantine
   variant without commenting on intent. The plan's authority invariants
   speak to promotion only.

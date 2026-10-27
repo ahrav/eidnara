@@ -22,7 +22,7 @@ The evidence a `mark_disputed` or `contradict` disposition carries on
   `crates/daemon/src/kernel_routes/commit.rs`; the reference form rules and
   the `v=1` reason grammar in `crates/daemon/src/kernel_routes/dispute.rs`;
 - the Kernel read `Envelope::evidence_cited_in`
-  (`crates/kernel/src/envelope.rs:520-597`) and the exported
+  (`crates/kernel/src/envelope.rs:548-615`) and the exported
   `kernel::is_lower_hex_oid` (`crates/kernel/src/scope.rs:710-716`);
 - the shared command runner
   `packages/opencode-plugin/src/shared/memory-mark-command.ts`, the client
@@ -146,7 +146,7 @@ Confidence: high - [evidence](evidence/dispute-requires-evidence-from-plugin.md)
 Read `compose_reason` (`commit.rs:206-234`), `DisputeReason::validated`
 (`dispute.rs:49-76`), the handler loop (`commit.rs:1117-1123`), and the
 route and parser tests above.
-Existing check: `kernel_routes.rs:5971`, `:6252`; `dispute.rs:371`
+Existing check: `kernel_routes.rs:5971`, `:6252`; `dispute.rs:380`
 (`a_dispute_needs_evidence_and_other_events_take_none`, unit);
 `memory-mark-command.test.ts:137`; the fake kernel mirrors the rule
 (`disputeEvidenceWellFormed`,
@@ -213,7 +213,7 @@ row's commit because a citation holds no retention: evidence may be
 retired later without fault (`commit.rs:59-60`). Holds on every write, so
 `always`.
 Fault/timing angle: a retirement ordered between a client's read and the
-commit. The read (`Envelope::evidence_cited_in`, `envelope.rs:531-597`)
+commit. The read (`Envelope::evidence_cited_in`, `envelope.rs:548-615`)
 runs inside the commit's exclusive writer transaction, so a retirement
 either commits before it (refused) or after the dispute commits (the
 as-of predicate holds). Not constructed: a retirement queued in the same
@@ -231,7 +231,7 @@ before the dispute; a never-ingested id; a live cited id for the positive
 case; a citer retired between a preview and its commit.
 Confidence: high - [evidence](evidence/cited-evidence-live-at-dispute-commit.md).
 Read `require_visible_evidence` (`commit.rs:738-757`),
-`evidence_cited_in` (`envelope.rs:520-597`), and the three route tests.
+`evidence_cited_in` (`envelope.rs:548-615`), and the three route tests.
 Existing check: `kernel_routes.rs:5801`, `:5723`, `:6416`;
 `kernel_slice.rs:2161`. Status unaudited.
 Impact: a dispute resting on retired evidence cannot be followed by a
@@ -282,7 +282,7 @@ otherwise the request is refused `not_found`, the same name a nonexistent
 id gets.
 Check: `always` - for every dispute row `r` with `r.evidence_id`, at
 `r.commit_seq` the scope of at least one live citer that
-`Envelope::evidence_cited_in` offered (`envelope.rs:520-597`) passed
+`Envelope::evidence_cited_in` offered (`envelope.rs:548-615`) passed
 `ScopeFilter::matches` for the bound project (`commit.rs:747-751`). Every refusal case (unknown, retired,
 uncited, unscoped-only, foreign-only) answers the same `not_found` with
 row counts unchanged, so this check answers the same for another
@@ -301,9 +301,9 @@ projects with the foreign citers written first; evidence cited only by an
 unscoped row; an uncited live row; a citer retired between preview and
 commit; an insert citing the evidence earlier in the dispute's envelope.
 Confidence: high - [evidence](evidence/cited-evidence-visible-to-bound-project.md).
-Read the SQL and the walk in `evidence_cited_in` (`envelope.rs:548-596`),
+Read the SQL and the walk in `evidence_cited_in` (`envelope.rs:548-615`),
 the predicate (`commit.rs:747-751`), and the tests above. The
-asserted-edge branch of the SQL (`envelope.rs:560-562`) has no production
+asserted-edge branch of the SQL (`envelope.rs:269-272`) has no production
 writer and no test:
 no Rust code under `crates/` inserts into `asserted_edges`, so the arm is
 read, not exercised.
@@ -330,7 +330,7 @@ Open questions:
   "already cited by this project" or "citable by this project", and
   whether inserts should get the same check, is an owner decision.
   (needs human input)
-- `Envelope::evidence_cited_in` (`envelope.rs:520-597`) stops at the
+- `Envelope::evidence_cited_in` (`envelope.rs:548-615`) stops at the
   first live citer whose scope the filter accepts, so an accepted dispute
   whose project citer is read first reads one citing row however many
   rows cite the id. A refused dispute, and an accepted one whose project
@@ -362,13 +362,13 @@ carrying both `evidence_id` and `evidence_ref` and parses both back from
 the reason, and refuses an uppercase-oid reference beside an id that
 would answer `not_found` with `invalid_input`, so the form check runs
 first. Unit tests in `dispute.rs`:
-`malformed_references_are_invalid_input` (`:314`),
-`a_path_the_secret_scanner_detects_is_invalid_input` (`:342`),
-`git_object_ids_and_ordinary_paths_carry_no_detection` (`:354`),
-`render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes` (`:246`),
-`reserved_and_multi_byte_values_encode_to_uppercase_escapes` (`:280`, a
+`malformed_references_are_invalid_input` (`:320`),
+`a_path_the_secret_scanner_detects_is_invalid_input` (`:352`),
+`git_object_ids_and_ordinary_paths_carry_no_detection` (`:364`),
+`render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes` (`:252`),
+`reserved_and_multi_byte_values_encode_to_uppercase_escapes` (`:286`, a
 fixed witness for `encode` and `decode`), and the proptest
-`every_accepted_reference_parses_back_to_its_inputs` (`:292`), which
+`every_accepted_reference_parses_back_to_its_inputs` (`:298`), which
 asserts every accepted path and optional id renders an ASCII reason
 within the cap that parses back to the inputs.
 Guarantee: A stored `evidence_ref` has a `git_object_id` of exactly 40 or
@@ -391,10 +391,10 @@ Confidence: high - [evidence](evidence/evidence-ref-well-formed-and-redaction-st
 Read `is_well_formed`, `validated`, `confined_path::check`, and the tests.
 G3 is recorded in the evidence file: the test token
 `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678` is detected
-(asserted at `dispute.rs:345`), and 64 seeded 40- and 64-hex ids beside
-an ordinary path carry no detection (`dispute.rs:355-368`).
-Existing check: `kernel_routes.rs:5880`, `:6285`; `dispute.rs:247`,
-`:281`, `:293`, `:315`, `:343`, `:355`. Status unaudited.
+(asserted at `dispute.rs:354`), and 64 seeded 40- and 64-hex ids beside
+an ordinary path carry no detection (`dispute.rs:364-377`).
+Existing check: `kernel_routes.rs:5880`, `:6285`; `dispute.rs:252`,
+`:286`, `:298`, `:320`, `:352`, `:364`. Status unaudited.
 Impact: a malformed reference cannot be followed; a path the redactor
 rewrote would point at a file that does not exist.
 Open questions:
@@ -675,11 +675,11 @@ Exercised: partial - the PR A form is active and exercised:
 a reference; `a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field`
 (`kernel_routes.rs:6252`) sends a forged `reason` and asserts an error
 with the four row counts unchanged, so the client cannot supply the
-reason; `dispute.rs:233`, `:247`, `:405` cover the documented rendering,
+reason; `dispute.rs:238`, `:252`, `:440` cover the documented rendering,
 the round trip over reserved and non-ASCII bytes, and refusal of every
-rendering `render` does not produce; `dispute.rs:281` pins `encode` and
+rendering `render` does not produce; `dispute.rs:286` pins `encode` and
 `decode` on reserved and multi-byte input; the proptest at
-`dispute.rs:293` asserts every accepted value renders an ASCII reason
+`dispute.rs:298` asserts every accepted value renders an ASCII reason
 within the cap that parses back to its inputs. The typed form (reporter
 columns and `event_payload`) arrives in PR B (#1162) and is not yet
 exercised.
@@ -706,7 +706,7 @@ Read `render`, `parse`, `encode`, `decode`, `decodes_to_itself`
 (`admission.rs:1689`). The redaction-row absence for a landed dispute is
 argued from the shared detector, not asserted by a test.
 Existing check: `kernel_routes.rs:5880`, `:5723`, `:6199`, `:6252`,
-`:6285`; `dispute.rs:233`, `:247`, `:281`, `:293`, `:391`, `:405`.
+`:6285`; `dispute.rs:238`, `:252`, `:286`, `:298`, `:400`, `:440`.
 Status unaudited.
 Impact: a reader could not recover the reporter or the reference, and PR
 B could not be checked against PR A rows.

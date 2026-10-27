@@ -19,12 +19,12 @@ carries so R3's join is specified against the real columns.
   (`crates/kernel/src/schema.rs:26`); update and delete triggers abort.
 - INSERT binds exactly `transaction_id, writer_epoch, producer,
   operation_key, request_digest, recorded_at, actor.text, cause.text`
-  (`crates/kernel/src/envelope.rs:1420-1435`).
+  (`crates/kernel/src/envelope.rs:1484-1499`).
 - `RedactedIntent::new` applies `identity()` to `producer` and
   `operation_key` and `redact()` to `actor` and `cause`
-  (`envelope.rs:1719-1734`); `RedactedIntent::record` writes a
+  (`envelope.rs:1784-1798`); `RedactedIntent::record` writes a
   `durable_text_redactions` row per detection for `actor` and `cause`
-  (`:1737-1747`, called at `:1438`).
+  (`:1800-1810`, called at `:1501`).
 - `IntentRequest` has `producer, operation_key, request_digest, actor,
   cause` and is `deny_unknown_fields` (`crates/daemon/src/kernel_routes/
   project.rs:138-146`); `into_intent` namespaces the key (`:148-163`).
@@ -80,7 +80,7 @@ None in time. Depends on `RedactedIntent::new`'s validation
 
 - Sources examined: P4 R3, U1 Verification ("the receipt and commit log
   carry actor, cause, and session for the event"), U3 (typed reporter
-  columns in Batch K1), OQ4-1; `schema.rs:26`; `envelope.rs:1420-1435`;
+  columns in Batch K1), OQ4-1; `schema.rs:26`; `envelope.rs:1484-1499`;
   `mod.rs:461`.
 - Findings: the commit log carries `actor` and `cause`. The session id is
   dropped at the envelope boundary. OQ4-1 puts the reporter class into a

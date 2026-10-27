@@ -27,18 +27,18 @@ today.
   (`memory-mark-command.ts:165-167`);
   `sourceKind` defaults to `"user"` (`:256` and `:261`).
 - `verdictFor` returns null unless `results.length == 1` and the single
-  verdict's `object_id` and `event` equal the operation's (`:211-219`).
-- Preview branch: `refused/preview` on a non-available state (`:258-259`);
+  verdict's `object_id` and `event` equal the operation's (`:218-226`).
+- Preview branch: `refused/preview` on a non-available state (`:266-267`);
   when `receipt` is present (replay) the preview judges nothing and
-  confirmation is skipped (`:262`); a null verdict is `refused/preview`
-  with `invalid("internal")` (`:263-265`); `denied` returns before any
-  commit (`:266`); confirmation only when `visibility_changes &&
-  !args.confirmed`, asked once (`:281-284`).
-- `isCancelled` is checked before the commit (`:286-287`).
-- Commit branch: non-available is `refused/commit` (`:289`); a null
+  confirmation is skipped (`:270`); a null verdict is `refused/preview`
+  with `invalid("internal")` (`:271-273`); `denied` returns before any
+  commit (`:274`); confirmation only when `visibility_changes &&
+  !args.confirmed`, asked once (`:289-292`).
+- `isCancelled` is checked before the commit (`:294-295`).
+- Commit branch: non-available is `refused/commit` (`:297`); a null
   verdict is `unavailable("outcome_unknown")` because a receipt exists
-  (`:290-292`); `denied` from the commit is reported as `denied` (`:294`);
-  otherwise `applied` with `commitSeq` and `replayed` (`:295-301`).
+  (`:298-300`); `denied` from the commit is reported as `denied` (`:302`);
+  otherwise `applied` with `commitSeq` and `replayed` (`:303-309`).
 - Actors: `user:opencode` (`hooks/context/command-handler.ts:391`),
   `user:pi` (`packages/pi-plugin/src/commands/eidnara-memory-mark.ts:18`).
 - Client: `targetIds` collects tokens for `supersede_decision` and
@@ -47,8 +47,8 @@ today.
   which adds `preview: true` (`:597-641`, `:773`, `:789`).
 - Tests: `memory-mark-command.test.ts:343-598`, including the mismatched-
   verdict matrix at `:527`; PR A adds `:185` (both bodies carry the same
-  operation with its evidence and `source_kind: "user"`), `:208`, and
-  `:284`.
+  operation with its evidence and `source_kind: "user"`), `:212`, and
+  `:325`.
 
 ## Failure scenario
 
