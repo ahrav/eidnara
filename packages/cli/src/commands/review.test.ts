@@ -836,6 +836,20 @@ describe("review outcome", () => {
         });
         expect(await runReviewCommand(["outcome", "mem-1", "--json"], oldJson.deps)).toBe(1);
         expect(JSON.parse(oldJson.recorded.stdout[0]).kind).toBe("unavailable");
+        const unparsable = harness({
+            respond: () => {
+                throw new HostCallError(
+                    "terminal",
+                    "response body was not valid JSON",
+                    "invalid_response_body",
+                );
+            },
+        });
+        expect(await runReviewCommand(["outcome", "mem-1"], unparsable.deps)).toBe(1);
+        expect(unparsable.recorded.stdout).toEqual([
+            "Use-outcome counts: unavailable (the daemon's answer could not be decoded).",
+        ]);
+        expect(unparsable.recorded.stderr).toEqual([]);
         const lost = harness({
             respond: () => {
                 throw new HostCallError("outcome_unknown", "lost", undefined);

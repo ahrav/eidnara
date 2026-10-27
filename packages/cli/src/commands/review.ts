@@ -471,11 +471,20 @@ async function renderOutcome(
             { exactIntegers: true },
         );
     } catch (error) {
-        if (!isHostCallError(error) || error.code !== "unrecognized_request_shape") throw error;
-        return unavailable(
-            { kind: "error", code: error.code },
-            "the daemon does not answer review.use_outcome",
-        );
+        if (!isHostCallError(error)) throw error;
+        if (error.code === "unrecognized_request_shape") {
+            return unavailable(
+                { kind: "error", code: error.code },
+                "the daemon does not answer review.use_outcome",
+            );
+        }
+        if (error.code === "invalid_response_body") {
+            return unavailable(
+                { kind: "error", code: error.code },
+                "the daemon's answer could not be decoded",
+            );
+        }
+        throw error;
     }
     const answer = decodeUseOutcome(raw, parsed.objectId);
     if (answer.kind === "state")

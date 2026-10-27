@@ -97,7 +97,7 @@ Check semantics: 31 `always`, 1 `always-or-unreached`, 2 `always(!X)`. No record
 | [`uo-p-producer-matches-request-subagent-flag`](#uo-p-producer-matches-request-subagent-flag) | new (#1155) | safety | `always` | default-production | yes | active |
 | [`uo-p-deleted-at-iff-session-delete-kernel-step`](#uo-p-deleted-at-iff-session-delete-kernel-step) | new (#1156) | safety | `always` | default-production | yes | active |
 | [`uo-p-last-transform-at-monotone-per-committing-pass`](#uo-p-last-transform-at-monotone-per-committing-pass) | new (#1156) | safety | `always` | default-production | yes | active |
-| [`uo-p-counts-exact-and-unavailable-not-zero`](#uo-p-counts-exact-and-unavailable-not-zero) | new (#1157) | safety | `always` | default-production | yes | active |
+| [`uo-p-counts-exact-and-unavailable-not-zero`](#uo-p-counts-exact-and-unavailable-not-zero) | new (#1157) | safety | `always` | default-production | partial | active |
 
 ## Records
 
