@@ -52,10 +52,15 @@ Analyzer checks the scorer relies on:
 | `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:517` | rows added before or removed from page one move nothing after the cursor; non-canonical cursors refused | read (paging) | unaudited |
 | `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:570` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
 | `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:634` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
+| `random_write_and_delete_sequences_match_the_reference_model` | `:1049` | seeded write and delete sequences match a reference model: rows, counts, rowid stability, and the gauge each step; pages, cursors across writes, and the sweep every seventh step | row key and caps; read (paging); sweep (store arm) | unaudited |
+| `the_hex_checks_refuse_uppercase_non_hex_and_misfit_lengths` | `:1177` | the hex-shape CHECKs refuse uppercase, non-hex, and wrong-length digests | read keys (no text) | unaudited |
+| `the_totals_follow_replaced_ids_late_writes_deletes_and_truncation` | `:1243` | the gauge equals a sum over the rows through replaced ids, late writes, deletes, and truncation | sweep (store arm) | unaudited |
+| `a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` | `:1298` | a new row below the cap's floor is counted written and dropped; held rows and rowids stay; a landing row takes a fresh rowid | row key and caps | unaudited |
+| `only_the_candidate_module_writes_the_candidate_tables` | `:1429` | no other memory-store source, trigger, or session purge writes either candidate table, so the totals the cap and gauge read stay exact | row key and caps; sweep (store arm) | unaudited |
 
-Baseline: `crates/memory-store/tests/baseline.rs` pins the table and its two
-indexes in `EXPECTED_OBJECTS` and refuses a store at the prior baseline
-untouched (`:495`).
+Baseline: `crates/memory-store/tests/baseline.rs` pins the table, its two
+indexes, and `contradiction_candidate_totals` in `EXPECTED_OBJECTS` and
+refuses a store at the prior baseline untouched (`:496`).
 
 ## S-B, S-C, S-E to S-H and R5
 
