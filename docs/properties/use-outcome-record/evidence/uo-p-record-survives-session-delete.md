@@ -23,7 +23,7 @@ tip.
   delete may add a record, for a served set the session has no record of, and
   removes none (OQ3-10).
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-  (`crates/kernel/tests/kernel_schema.rs:2212`);
+  (`crates/kernel/tests/kernel_schema.rs:2210`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
   (`crates/kernel/tests/kernel_use_outcome.rs:401`) (a retired record stays
   readable);

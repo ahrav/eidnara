@@ -820,11 +820,11 @@ in the `use_outcomes` and `use_outcome_decisions` components
 trigger (`crates/kernel/src/schema.rs:164`); `recursive_triggers` is on for
 every Kernel connection.
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-(`crates/kernel/tests/kernel_schema.rs:2212`);
+(`crates/kernel/tests/kernel_schema.rs:2210`);
 `use_outcome_classification_and_identity_shapes_are_checked`
-(`crates/kernel/tests/kernel_schema.rs:2429`);
+(`crates/kernel/tests/kernel_schema.rs:2427`);
 `an_admission_citation_names_a_recorded_use_outcome_and_never_changes`
-(`crates/kernel/tests/kernel_schema.rs:2568`). Status: unaudited.
+(`crates/kernel/tests/kernel_schema.rs:2566`). Status: unaudited.
 Impact: History rewriting defeats the witness the record exists to be.
 Open questions:
 - OQ3-10: a session that continues after its delete reuses its identity at an
@@ -853,7 +853,7 @@ CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:193`); the insert
 names the classes as literals in its `INSERT` statement
 (`crates/kernel/src/use_outcome.rs:180`).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
-(`crates/kernel/tests/kernel_schema.rs:2429`);
+(`crates/kernel/tests/kernel_schema.rs:2427`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
 (`crates/kernel/tests/kernel_use_outcome.rs:382`). Status: unaudited.
 Impact: A stop condition of the plan: a Remote-eligible serving record.
@@ -977,7 +977,7 @@ the delete triggers and the retained read hold the Kernel arm (`served_set`
 `deleted_at` (`mark_use_outcomes_deleted`
 (`crates/kernel/src/use_outcome.rs:426`)).
 Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-(`crates/kernel/tests/kernel_schema.rs:2212`);
+(`crates/kernel/tests/kernel_schema.rs:2210`);
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
 (`crates/kernel/tests/kernel_use_outcome.rs:401`) (a retired record stays
 readable);
