@@ -616,15 +616,17 @@ Open questions:
 - Terminal name and the section 7.8 method literal (API handoff); whether
   `matched_atoms` as a count is acceptable where the atom list is not (yes
   proposed: a count is not text).
-- G7, sensitivity of descriptor-derived rows: the store half is resolved by
-  #1165. A row holds ids, integers, and times only (the table's columns are
-  pinned by `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
-  `crates/memory-store/tests/contradiction_candidates.rs:415`), and the
-  memory store is local, so a derived row inherits local-only egress by
-  construction and carries no sensitivity column. The read half is
-  unresolved until #1168: whether the answers carry the six-name key set
-  above is a check on the U4 read route, and the store's `StoredCandidate`
-  carries `project_digest`, `kernel_incarnation_id`, `matcher_digest`, and
+- G7, sensitivity and egress class of descriptor-derived rows: the
+  sensitivity half is resolved by #1165. A row holds ids, integers, and times
+  only (the table's columns are pinned by
+  `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
+  `crates/memory-store/tests/contradiction_candidates.rs:415`), so a derived
+  row carries none of the captured text and needs no sensitivity column. The
+  egress half is unresolved until #1168: the store's `candidates_for_decision`
+  returns rows to its caller and enforces no egress policy, so what leaves
+  the daemon is decided by the U4 read route. That route also owns the
+  six-name key-set check above, and the store's `StoredCandidate` carries
+  `project_digest`, `kernel_incarnation_id`, `matcher_digest`, and
   `decision_terms` beyond that set, so the read projects the row rather than
   returning it.
 Falsifier: the read answers rows for a `superseded` decision, or a row
