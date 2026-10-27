@@ -9,11 +9,11 @@ per descriptor.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/pass.rs:243` `score_descriptors`
+- `crates/daemon/src/contradiction_candidates/pass.rs:242` `score_descriptors`
   checks the budget before each descriptor, every 256 summaries while scoring,
   and before the write; a stop returns before that descriptor's write and counts
   it and every later descriptor `descriptors_unscored`.
-- `crates/daemon/src/contradiction_candidates/pass.rs:229` `score_publication`
+- `crates/daemon/src/contradiction_candidates/pass.rs:228` `score_publication`
   counts the end once (`deadline` when the deadline passed, `budget_exhausted`
   for the daemon cancel).
 

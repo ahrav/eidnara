@@ -71,15 +71,15 @@ untouched (`:495`).
 | `the_evidence_read_answers_liveness_at_its_snapshot_in_request_order` | `:640` | Live, Retired, Unknown; bound; deadline | sweep | unaudited |
 | `the_candidate_modules_name_no_kernel_write_path` | `:694` | no Kernel write entry point named in the module's files (lexical) | R5 | unaudited |
 | `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:718` | every `CausalInputs {` literal under `crates/daemon/src` has empty `signals` (lexical) | R5 | unaudited |
-| `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land` | `:765` | a refused chunk keeps its rows; Kernel-free drops land | sweep | unaudited |
+| `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land` | `:764` | a refused chunk keeps its rows; Kernel-free drops land | sweep | unaudited |
 | `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:816` | rows above the tip are not judged | sweep | unaudited |
 | `a_cancelled_sweep_deletes_nothing` | `:842` | cancellation | sweep | unaudited |
-| `every_claim_chunk_of_a_page_is_read` | `:855` | two claim chunks | sweep | unaudited |
-| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:900` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
+| `every_claim_chunk_of_a_page_is_read` | `:854` | two claim chunks | sweep | unaudited |
+| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:899` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
 | `the_evidence_read_refuses_another_incarnation_and_a_future_snapshot` | `:969` | incarnation and snapshot refusals | sweep | unaudited |
 
 Also: `crates/daemon/src/config.rs:2299` and `:2320` (default, tier, and
-resolved-config freezing), `crates/daemon/src/lib.rs:21340` (bound route and
+resolved-config freezing), `crates/daemon/src/lib.rs:21367` (bound route and
 status block), `crates/host-runtime/src/control.rs:2004` (host forwarding
 allowlist against `docs/host-wire-protocol.md`), and
 `crates/memory-store/tests/contradiction_candidates.rs:663` (a delete as
@@ -135,7 +135,7 @@ checks are named with their files.
 - The scorer's `TooManyAtoms` path is unreachable by construction and has no
   test; the analyzer's own test covers the refusal.
 - The pass records `matcher_digest()` with each row
-  (`crates/daemon/src/contradiction_candidates/pass.rs:343`); no test reads
+  (`crates/daemon/src/contradiction_candidates/pass.rs:342`); no test reads
   the digest back from a pass-written row.
 - No test fails a store write inside a pass; that path counts the failed
   descriptor as analyzed and the later ones as unscored.

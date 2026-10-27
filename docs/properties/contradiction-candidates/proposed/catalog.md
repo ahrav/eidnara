@@ -96,7 +96,7 @@ the fold function F, the formula, threshold, and K.
 Type: safety
 Reachability: explicit-config-only - the candidate pass calls the scorer
 (`DescriptorTerms::new` and `TopCandidates`,
-`crates/daemon/src/contradiction_candidates/pass.rs:288,292`) for every
+`crates/daemon/src/contradiction_candidates/pass.rs:287,291`) for every
 publication it scores, and the pass runs only under the route's frozen
 `contradiction_candidates.enabled` (#1167).
 Status: active
@@ -153,7 +153,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - the candidate pass calls the scorer
 (`DescriptorTerms::new` and `TopCandidates`,
-`crates/daemon/src/contradiction_candidates/pass.rs:288,292`) for every
+`crates/daemon/src/contradiction_candidates/pass.rs:287,291`) for every
 publication it scores, and the pass runs only under the route's frozen
 `contradiction_candidates.enabled` (#1167).
 Status: active
@@ -228,7 +228,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - the candidate pass calls the scorer
 (`DescriptorTerms::new` and `TopCandidates`,
-`crates/daemon/src/contradiction_candidates/pass.rs:288,292`) for every
+`crates/daemon/src/contradiction_candidates/pass.rs:287,291`) for every
 publication it scores, and the pass runs only under the route's frozen
 `contradiction_candidates.enabled` (#1167).
 Status: active
@@ -317,7 +317,7 @@ the median publication hold within three times the flag-off median plus
 50 ms. The job hands its kept texts out through `CaptureJob::run_settled`
 (`crates/daemon/src/source_capture.rs:675`) after the blocking closure has
 dropped the slot permit, and the pass runs under its own `EvalBudget`
-(`crates/daemon/src/contradiction_candidates/pass.rs:165`), a fact read from
+(`crates/daemon/src/contradiction_candidates/pass.rs:164`), a fact read from
 the code. Not constructed: the `between_screen_and_commit` hook held, a
 cancel while the job waits in a hook, and the `refused_shutting_down`
 branch.
@@ -360,7 +360,7 @@ descriptor's rows, `descriptors_unscored` = 2, and `active` back at 0;
 `a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_a_parked_pass`
 (`:983`) shows a panicking pass counted with its permit and charge released
 and shutdown waiting for a parked pass. P = 1 per store through a
-non-waiting permit (`crates/daemon/src/contradiction_candidates/pass.rs:112`).
+non-waiting permit (`crates/daemon/src/contradiction_candidates/pass.rs:111`).
 Guarantee: At most P = 1 candidate pass exists at once per store; an offer
 that finds the permit taken is refused and counted `refused_pass_busy`, never
 queued; a daemon cancel ends a running pass at its next budget check, after
@@ -399,7 +399,7 @@ decision unread; `the_summary_byte_cut_skips_payloads_before_any_load`
 (`:667`) cuts payloads before any load and counts their bytes. Not
 constructed at the production N: the tests cut at a reduced cap. The
 no test shows the pass's `eligible` filter
-(`crates/daemon/src/contradiction_candidates/pass.rs:363`) as the reason a
+(`crates/daemon/src/contradiction_candidates/pass.rs:362`) as the reason a
 decision is dropped.
 Guarantee: The pass's candidate set is built by the project scope term
 prefilter (`admission.rs:3138-3144`, `project.rs:106-111`) and the
@@ -443,7 +443,7 @@ of descriptors 1 and 2, none for 3 to 5, `descriptors_unscored` = 3, and
 (`:398`) cover the empty prefix and a cancel at the second of three
 descriptors. The pass
 writes each descriptor's rows in one store write after its full candidate
-set is scored (`crates/daemon/src/contradiction_candidates/pass.rs:243`).
+set is scored (`crates/daemon/src/contradiction_candidates/pass.rs:242`).
 Guarantee: When the pass's budget is exhausted or interrupted, the rows
 written equal exactly the rows a complete pass would have written for a
 prefix of the publication's descriptors in publish order; a descriptor whose
@@ -526,7 +526,7 @@ Reachability: explicit-config-only
 Status: active
 Exercised: yes - store arm (#1165):
 `truncating_and_replaying_the_writes_rebuilds_the_same_rows`
-(`crates/memory-store/tests/contradiction_candidates.rs:376`) truncates through the test-support
+(`crates/memory-store/tests/contradiction_candidates.rs:372`) truncates through the test-support
 `truncate_contradiction_candidates_for_test` and replays a write sequence,
 reproducing the same rows excluding `created_at_ms`. Pass arm (#1167):
 `a_rerun_from_the_retained_bytes_at_one_tip_rebuilds_the_rows_and_the_kernel_is_untouched`
@@ -590,7 +590,7 @@ over-age and retired-evidence rows dropped, and one skip counted;
 `every_claim_chunk_of_a_page_is_read` (`:855`), and
 `a_row_at_the_age_bound_stays_and_one_past_it_drops` (`:485`) cover the
 remaining branches. The sweep is `CandidateSweep::run`
-(`crates/daemon/src/contradiction_candidates/sweep.rs:71`); it reads the page
+(`crates/daemon/src/contradiction_candidates/sweep.rs:70`); it reads the page
 before it captures the tip and deletes through
 `MemoryStore::delete_candidates_as_read`, so a row written above the tip or
 rewritten after the read stays. Retirement observability (G4): the sweep
@@ -783,7 +783,7 @@ Exercised: yes - sweep and status arm (#1166):
 runs the sweep under a false flag with and without a Kernel, and observes
 every counter at zero, then shows the same table fails the first statement an
 enabled sweep runs;
-`the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` (`:900`)
+`the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` (`:899`)
 drives `pass_then_sweep`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) with the flag off and
 then on. The key is `/contradiction_candidates/enabled`
@@ -793,7 +793,7 @@ then on. The key is `/contradiction_candidates/enabled`
 its value (`config.rs:2320`), and a bound route keeps the value it was bound
 with
 (`a_route_keeps_the_candidate_flag_it_was_bound_with_and_health_reports_the_block`,
-`crates/daemon/src/lib.rs:21340`), which also shows the status block carrying
+`crates/daemon/src/lib.rs:21367`), which also shows the status block carrying
 the key with every counter zero. Pass arm (#1167):
 `a_route_without_consent_offers_no_pass_and_writes_no_row`
 (`crates/daemon/src/candidate_pass_tests.rs:251`) sets the offer's consent off
