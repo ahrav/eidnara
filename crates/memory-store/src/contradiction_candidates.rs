@@ -104,16 +104,22 @@ fn invalid(message: &str) -> MemoryStoreError {
     MemoryStoreError::Serde(format!("contradiction candidate: {message}"))
 }
 
-/// A Kernel-issued id the row stores verbatim: non-empty, bounded, free of
-/// control characters and of secret-scanner detections. The detection check
-/// runs before the write, so a refused id leaves no scan record.
-fn check_id(field: &str, value: &str) -> Result<(), MemoryStoreError> {
+/// Reads use shape validation; secret scanning guards ids written to the table.
+fn check_id_shape(field: &str, value: &str) -> Result<(), MemoryStoreError> {
     if value.is_empty()
         || value.len() > MAX_CANDIDATE_ID_BYTES
         || value.chars().any(char::is_control)
     {
         return Err(invalid(&format!("{field} is not a storable id")));
     }
+    Ok(())
+}
+
+/// A Kernel-issued id the row stores verbatim: non-empty, bounded, free of
+/// control characters and of secret-scanner detections. The detection check
+/// runs before the write, so a refused id leaves no scan record.
+fn check_id(field: &str, value: &str) -> Result<(), MemoryStoreError> {
+    check_id_shape(field, value)?;
     if !redact_durable_text(value).detections.is_empty() {
         return Err(MemoryStoreError::Redaction(
             RedactionErrorKind::SecretDetected,
@@ -498,11 +504,7 @@ impl MemoryStore {
                     }
                     continue;
                 };
-                let statement = match (late, prior.same_incarnation) {
-                    (true, false) => continue,
-                    (true, true) => UPDATE_LATE,
-                    (false, _) => UPDATE_HELD,
-                };
+                let statement = if late { UPDATE_LATE } else { UPDATE_HELD };
                 written += tx
                     .prepare_cached(statement)?
                     .execute(row_values(write, row))?;
@@ -593,7 +595,7 @@ impl MemoryStore {
         limit: usize,
     ) -> Result<CandidatePage, MemoryStoreError> {
         check_hex("project_digest", project_digest, 64)?;
-        check_id("decision_object_id", decision_object_id)?;
+        check_id_shape("decision_object_id", decision_object_id)?;
         let after = after.map(decode_cursor).transpose()?;
         let limit = limit.clamp(1, MAX_CANDIDATE_PAGE);
         let want = limit + 1;
@@ -668,8 +670,8 @@ impl MemoryStore {
     /// At most `page` rows of every project with a rowid above `after_rowid`,
     /// in rowid order, each with its rowid, for a sweep's watermark. A rewrite
     /// of a held key keeps its rowid. A new row can take a rowid at or below a
-    /// watermark after the highest row is deleted, including by the eviction in
-    /// the same write, so a sweep wraps to 0 after a short page.
+    /// watermark after the highest row is deleted, so a sweep wraps to 0 after a
+    /// short page.
     ///
     /// # Errors
     ///

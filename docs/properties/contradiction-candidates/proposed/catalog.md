@@ -462,7 +462,7 @@ evictions at caps of 2 to 4096, and as-read deletes against a reference model
 of the rules, checking every row, the returned counts, rowid stability, and
 the gauge after each step, and pages, cursors across writes, and the sweep
 every seventh step. The store
-(`crates/memory-store/src/contradiction_candidates.rs:471`) enforces K and the
+(`crates/memory-store/src/contradiction_candidates.rs:477`) enforces K and the
 project cap in the write transaction; the daemon owns the values. The pass
 arm (M per pass, `rows_written`, replayed units) lands with #1167.
 Guarantee: The table key is (project digest, descriptor evidence object id,
@@ -683,19 +683,22 @@ Open questions:
 - Terminal name and the section 7.8 method literal (API handoff); whether
   `matched_atoms` as a count is acceptable where the atom list is not (yes
   proposed: a count is not text).
-- G7, sensitivity and egress class of descriptor-derived rows: the
-  sensitivity half is resolved by #1165. A row holds ids, integers, and times
-  only (the table's columns are pinned by
+- G7, sensitivity and egress class of descriptor-derived rows: unresolved,
+  needs a policy decision. #1165 fixes the facts the decision rests on: a row
+  holds ids, integers, and times only (the table's columns are pinned by
   `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
   `crates/memory-store/tests/contradiction_candidates.rs:411`), so a derived
-  row carries none of the captured text and needs no sensitivity column. The
-  egress half is unresolved until #1168: the store's `candidates_for_decision`
-  returns rows to its caller and enforces no egress policy, so what leaves
-  the daemon is decided by the U4 read route. That route also owns the
-  six-name key-set check above, and the store's `StoredCandidate` carries
-  `project_digest`, `kernel_incarnation_id`, `matcher_digest`, and
-  `decision_terms` beyond that set, so the read projects the row rather than
-  returning it.
+  row carries none of the captured text, and the store has no sensitivity
+  column. The descriptor it derives from publishes as `Sensitive` with
+  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:715-716`);
+  whether the term counts, the score, and the evidence-to-decision link
+  inherit that class is the open question, and a column set does not answer
+  it. The egress half waits on #1168: the store's `candidates_for_decision`
+  returns rows to its caller, so what leaves the daemon is decided by the U4
+  read route. That route also owns the six-name key-set check above, and the
+  store's `StoredCandidate` carries `project_digest`, `kernel_incarnation_id`,
+  `matcher_digest`, and `decision_terms` beyond that set, so the read projects
+  the row rather than returning it (needs human input).
 Falsifier: the read answers rows for a `superseded` decision, or a row
 includes `summary`.
 Legal witness: active decision with 3 rows answers 3 rows and `next: null`;
