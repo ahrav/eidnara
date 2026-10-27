@@ -16,6 +16,14 @@ active records in [`dispute-evidence/catalog.md`](catalog.md)
 and [`disposition-path/catalog.md`](../disposition-path/catalog.md) state the PR A
 behavior.
 
+Reference note (PR B, #1162): the U3 columns in section 3.1
+(`reporter_source_class`, `reporter_taint_class`, `event_payload`,
+`use_outcome_id`) are stored since #1162; the rows keep their design-time
+`PROPOSED` labels, and the active records
+`structured-reason-projects-typed-reporter-data` and
+`use-outcome-link-names-own-session-prior-serve` in
+[`catalog.md`](catalog.md) state the implemented behavior.
+
 Method: `/software-design:invariant-driven-domain-modeling`. The two-axis
 rule table, enforcement sets, certainty-first outcomes, and earning verdicts
 are that skill's authored procedure, not a theorem.
