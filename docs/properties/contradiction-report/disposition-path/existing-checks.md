@@ -40,13 +40,13 @@ Fixtures: `commit-available-disposition-quarantine.json`,
 
 | Line | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
-| 4912 | `restrictive_disposition_and_origin_classification_are_sticky` | a Rejected prior stays Rejected under `CodeObserved`; a request with other classes than the prior is `AdmissionPolicy` | classes | unaudited |
-| 5208 | `leaving_a_restricted_disposition_requires_authority` | Rejected, Contradicted, Quarantined to Stale or Disputed: denied without approval, moves with one | restrictiveness | unaudited |
-| 5313 | `an_event_that_names_a_disposition_keeps_its_own_outcome` | each disposition event keeps its table outcome, not `DemoteSupport` | maturity | unaudited |
-| 5407 | `relaxing_a_restrictive_disposition_requires_approval` | relaxation needs approval | restrictiveness | unaudited |
-| 5473 | `prior_with_effective_above_historical_is_rejected` | inconsistent prior is `AdmissionPolicy` | classes (refusal branch) | unaudited |
-| 5732 | `non_active_dispositions_withdraw_effective_support` | an `Enforce` on a Rejected prior raises `historical` to Enforced and keeps `effective` at Candidate | maturity | unaudited |
-| 4736 | `an_authority_event_requires_approval_even_at_an_unchanged_rung` | authority events need approval | (context) | unaudited |
+| 4936 | `restrictive_disposition_and_origin_classification_are_sticky` | a Rejected prior stays Rejected under `CodeObserved`; a request with other classes than the prior is `AdmissionPolicy` | classes | unaudited |
+| 5232 | `leaving_a_restricted_disposition_requires_authority` | Rejected, Contradicted, Quarantined to Stale or Disputed: denied without approval, moves with one | restrictiveness | unaudited |
+| 5337 | `an_event_that_names_a_disposition_keeps_its_own_outcome` | each disposition event keeps its table outcome, not `DemoteSupport` | maturity | unaudited |
+| 5431 | `relaxing_a_restrictive_disposition_requires_approval` | relaxation needs approval | restrictiveness | unaudited |
+| 5497 | `prior_with_effective_above_historical_is_rejected` | inconsistent prior is `AdmissionPolicy` | classes (refusal branch) | unaudited |
+| 5756 | `non_active_dispositions_withdraw_effective_support` | an `Enforce` on a Rejected prior raises `historical` to Enforced and keeps `effective` at Candidate | maturity | unaudited |
+| 4760 | `an_authority_event_requires_approval_even_at_an_unchanged_rung` | authority events need approval | (context) | unaudited |
 
 Compile-time guard: `admission.rs:4317-4324` asserts the maturity rank
 order. `commit.rs:1293` (`every_disposition_event_names_a_disposition_
@@ -71,18 +71,18 @@ receipt without `dispositions`.
 
 | Line | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
-| 74, 85 | `parseMemoryMarkArgs` | event spelling, flag position, refusals of a target disposition, missing id, flag-shaped id | command | unaudited |
-| 261 | tightening on a labeled object applies without confirmation | no `confirm` call; `applied` | command | unaudited |
-| 283 | the same command on a verified object asks first; no dialog writes nothing | `needs_confirmation` | command | unaudited |
-| 304 | declining writes nothing; accepting applies | `declined`, `applied` | command | unaudited |
-| 323 | a relaxation without an approval is denied before anything is written | `denied` from preview, no commit | command, restrictiveness | unaudited |
-| 340 | repeating a command with the same identity replays the receipt | `replayed: true` | replay | unaudited |
-| 351 | a repeat after the object moved on still replays | replay with stale verdict | replay | unaudited |
-| 364 | a denial recorded by the commit itself is reported as denied | `denied` from commit | command | unaudited |
-| 382 | a session that ends after the preview commits nothing | `isCancelled` honored | command | unaudited |
-| 413 | an actor carrying the key separator is refused before any call | `RangeError` path | command | unaudited |
-| 429 | a refused preview names the state and writes nothing | `refused/preview` | command | unaudited |
-| 443 | a verdict for another object or event never decides the one the user named | `verdictFor` null paths | command | unaudited |
+| 81, 92 | `parseMemoryMarkArgs` | event spelling, flag position, refusals of a target disposition, missing id, flag-shaped id | command | unaudited |
+| 344 | tightening on a labeled object applies without confirmation | no `confirm` call; `applied` | command | unaudited |
+| 367 | the same command on a verified object asks first; no dialog writes nothing | `needs_confirmation` | command | unaudited |
+| 388 | declining writes nothing; accepting applies | `declined`, `applied` | command | unaudited |
+| 407 | a relaxation without an approval is denied before anything is written | `denied` from preview, no commit | command, restrictiveness | unaudited |
+| 424 | repeating a command with the same identity replays the receipt | `replayed: true` | replay | unaudited |
+| 435 | a repeat after the object moved on still replays | replay with stale verdict | replay | unaudited |
+| 448 | a denial recorded by the commit itself is reported as denied | `denied` from commit | command | unaudited |
+| 466 | a session that ends after the preview commits nothing | `isCancelled` honored | command | unaudited |
+| 497 | an actor carrying the key separator is refused before any call | `RangeError` path | command | unaudited |
+| 513 | a refused preview names the state and writes nothing | `refused/preview` | command | unaudited |
+| 527 | a verdict for another object or event never decides the one the user named | `verdictFor` null paths | command | unaudited |
 
 ## Production guards
 
@@ -109,8 +109,13 @@ receipt without `dispositions`.
 | `kernel_routes.rs:6146` | `a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale` | restrictiveness (Stale to Disputed) | unaudited |
 | `kernel_routes.rs:6199` | `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents` | authority-bearer cascade, classes, maturity | unaudited |
 | `admission.rs:4532` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | maturity, restrictiveness (dispute events) | unaudited |
-| `memory-mark-command.test.ts:174` | the evidence rides the preview and the commit byte for byte under the user source kind | command (both bodies, `source_kind`) | unaudited |
-| `memory-mark-command.test.ts:201` | two disputes with different evidence in one session are two commits; the same evidence replays | replay | unaudited |
+| `memory-mark-command.test.ts:185` | the evidence rides the preview and the commit byte for byte under the user source kind | command (both bodies, `source_kind`) | unaudited |
+| `memory-mark-command.test.ts:212` | two disputes with different evidence in one session are two commits; the same evidence replays | replay | unaudited |
+| `memory-mark-command.test.ts:601` | the caller's signal reaches the preview and the commit | command (signal propagation to both requests) | unaudited |
+| `memory-mark-command.test.ts:633` | an assistant-sourced dispute is denied a relaxation the stored approval would admit | authority-bearer cascade, command (assistant source kind, preview guard) | unaudited |
+| `memory-mark-command.test.ts:660` | a user command relaxes through the stored approval | command (user source kind, stored approval) | unaudited |
+| `memory-mark-command.test.ts:672` | the preview and the commit carry one digest of the operation and the source kind | replay (request digest), caller-asserted fields | unaudited |
+| `memory-mark-command.test.ts:706` | both flag orders parse to one args value and one identity | replay (operation identity), command | unaudited |
 
 ## None found
 
@@ -136,7 +141,7 @@ At authoring (`3a3b916b7`), with the PR A state noted:
   to Disputed (`kernel_routes.rs:6146`); Disputed to Stale is not driven.
 - No TypeScript test asserted the commit body equals the preview body. PR
   A matches both bodies against one expected operation
-  (`memory-mark-command.test.ts:174`).
+  (`memory-mark-command.test.ts:185`).
 - No liveness check existed on this surface. PR A adds the dispute
   evidence check (`require_visible_evidence`, `commit.rs:742-757`).
 

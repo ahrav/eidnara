@@ -5,14 +5,17 @@ import { toolCallIdFromContext } from "../../plugin/rust-tool-backends";
 import { MemoryInputError } from "../../shared/kernel-client/anti-memory";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import {
-    EIDNARA_MEMORY_DESCRIPTION,
+    actionList,
     EIDNARA_MEMORY_TOOL_NAME,
     EIDNARA_MEMORY_UNWRAP_RULES,
+    eidnaraMemoryDescription,
     WRITABLE_MEMORY_CATEGORIES,
 } from "./constants";
 import { EIDNARA_MEMORY_ACTOR, executeEidnaraMemory } from "./execute";
 import {
     EIDNARA_MEMORY_ACTIONS,
+    EIDNARA_MEMORY_DEFAULT_ACTIONS,
+    EIDNARA_MEMORY_DISPUTE_EVENTS,
     type EidnaraMemoryAction,
     type EidnaraMemoryArgs,
     type EidnaraMemoryToolDeps,
@@ -42,11 +45,19 @@ const antiMemoryShape = {
         ),
 };
 
-const eidnaraMemoryArgsShape = {
-    action: tool.schema
-        .enum([...EIDNARA_MEMORY_ACTIONS])
+/** The `action` field lists exactly the actions the tool admits, so a model never sees one it cannot run. */
+function actionField(actions: readonly EidnaraMemoryAction[]) {
+    const [first, ...rest] = actions;
+    if (first === undefined) {
+        return tool.schema.never().optional().describe("no action is available");
+    }
+    return tool.schema
+        .enum([first, ...rest])
         .optional()
-        .describe("create, get, revise, archive, or merge"),
+        .describe(actionList(actions));
+}
+
+const eidnaraMemoryArgsShape = {
     content: tool.schema.string().optional().describe("Memory content for create/revise/merge"),
     category: tool.schema
         .enum([...WRITABLE_MEMORY_CATEGORIES])
@@ -67,18 +78,44 @@ const eidnaraMemoryArgsShape = {
     reason: tool.schema.string().optional().describe("Lifecycle-change reason"),
 };
 
-const eidnaraMemoryArgsSchema = tool.schema.object(eidnaraMemoryArgsShape).passthrough();
+/** The fields only `dispute` reads; exposed exactly when the allowlist admits it. */
+const disputeArgsShape = {
+    objectId: tool.schema.string().optional().describe("Object id for revise/archive/dispute"),
+    event: tool.schema
+        .enum([...EIDNARA_MEMORY_DISPUTE_EVENTS])
+        .optional()
+        .describe("dispute event: mark_disputed or contradict"),
+    evidenceId: tool.schema.string().optional().describe("Live evidence id a dispute cites"),
+    path: tool.schema
+        .string()
+        .optional()
+        .describe("Relative repository path a dispute cites, with gitObjectId"),
+    gitObjectId: tool.schema
+        .string()
+        .optional()
+        .describe("40- or 64-character lowercase hex git object id for path"),
+};
 
-/** An omitted `allowedActions` admits every action; an explicit empty list admits none, so a caller whose computed allowlist is empty exposes no operation. */
+const eidnaraMemoryArgsSchema = tool.schema
+    .object({ ...eidnaraMemoryArgsShape, ...disputeArgsShape })
+    .passthrough();
+
+/** An omitted `allowedActions` admits the default actions, which exclude `dispute`; an explicit empty list admits none, so a caller whose computed allowlist is empty exposes no operation. */
 function allowedActions(deps: EidnaraMemoryToolDeps): readonly EidnaraMemoryAction[] {
-    return deps.allowedActions ?? EIDNARA_MEMORY_ACTIONS;
+    return deps.allowedActions ?? EIDNARA_MEMORY_DEFAULT_ACTIONS;
 }
 
 function createEidnaraMemoryTool(deps: EidnaraMemoryToolDeps): ToolDefinition {
     const primaryActions = allowedActions(deps);
     return tool({
-        description: EIDNARA_MEMORY_DESCRIPTION,
-        args: eidnaraMemoryArgsShape,
+        description: eidnaraMemoryDescription(primaryActions),
+        args: {
+            ...(primaryActions.includes("dispute")
+                ? { ...eidnaraMemoryArgsShape, ...disputeArgsShape }
+                : (eidnaraMemoryArgsShape as typeof eidnaraMemoryArgsShape &
+                      typeof disputeArgsShape)),
+            action: actionField(primaryActions),
+        },
         async execute(rawArgs: EidnaraMemoryArgs, toolContext) {
             try {
                 const parsed = eidnaraMemoryArgsSchema.safeParse(rawArgs);

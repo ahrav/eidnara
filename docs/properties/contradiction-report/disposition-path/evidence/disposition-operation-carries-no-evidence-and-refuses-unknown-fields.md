@@ -42,7 +42,7 @@ the change is measured against.
   approval_object_id?`, and at the PR A tip `evidence_id?` and
   `evidence_ref?` (`shared/kernel-client/client.ts:101-111`); the command
   builds the operation with the evidence it parsed
-  (`memory-mark-command.ts:209-215`).
+  (`memory-mark-command.ts:247-254`).
 
 ## Failure scenario
 
@@ -74,7 +74,7 @@ binary is the enabling condition.
 
 ### Q: How does the TypeScript client surface a `kernel.commit` `invalid_params` transport error to the `/eidnara-memory-mark` user?
 
-- Sources examined: `memory-mark-command.ts:222-224`, `:238-239`
+- Sources examined: `memory-mark-command.ts:265-267`, `:296-297`
   (`refused` with the returned state); `client.ts:296-310` (`Invoked`,
   `InvokeOptions`); `kernel-client/state.ts` was not read.
 - Findings: the command reports `refused` with whatever `state` the

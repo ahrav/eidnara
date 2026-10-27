@@ -29,8 +29,8 @@ or a bias (a framing decision for a human).
 About 45 `file:line` citations were checked. Most are exact, or are off
 by a doc-comment line. Examples: `commit.rs:12-63`, `:206-234`,
 `:719-721`, `:725-726`, `:742-757`, `:1045-1060`, `:1109-1123`,
-`:1149-1157`; `dispute.rs:49-81`, `:108-148`, `:151-159`, `:201-207`;
-`envelope.rs:520-598` (the read, renamed `evidence_cited_in` since);
+`:1149-1157`; `dispute.rs:49-79`, `:103-143`, `:150-163`, `:209-213`;
+`envelope.rs:548-615` (the read, renamed `evidence_cited_in` since);
 `scope.rs:710-716`;
 `lib.rs:14529`; `admission.rs:4168-4175`, `:4532`; all eight route test
 lines from `kernel_routes.rs:5723` to `:6199`; and all seven TypeScript
@@ -89,8 +89,9 @@ request-scoped validator. Situation coverage lives in the seven
 fault-map markers. None of the seven exists in code: `git grep` finds no
 marker name outside `docs/` (R5).
 
-Two records are partial because the model tool arm lands with #1161.
-Both say so. The bypass through Kernel API writers is an open question
+Two records were partial while the model tool arm waited on #1161; both
+now read `Exercised: yes` with the tool arm's tests named. The bypass
+through Kernel API writers is an open question
 in requirement and liveness, marked "needs human input". It is recorded
 consistently.
 
@@ -135,13 +136,15 @@ consistently.
   `mark_disputed` against a `contradicted` prior lands `disputed`. That
   breaks the standing check
   `restrictiveness(r) >= restrictiveness(p)`. The grid test fixes
-  `approval_valid: false` (`admission.rs:4557`), and no route test sends
+  `approval_valid: false` (`admission.rs:4580`), and no route test sends
   an approval with a dispute (R1).
 - **Whitespace in paths.** The command splits arguments on `/\s+/`
-  (`memory-mark-command.ts:85-88`). A path containing a space cannot be
+  (`memory-mark-command.ts:94-97`). A path containing a space cannot be
   cited from the command. The route accepts such paths
-  (`kernel_routes.rs:5880`), and the usage text does not mention the limit
-  (R2).
+  (`kernel_routes.rs:5880`); the usage text names the limit since
+  `511cd6d73` (`memory-mark-command.ts:52`), which closed R2. Whether the
+  command should accept quoted or escaped paths stays open on the form
+  record.
 
 ## Finding disposition
 
@@ -150,7 +153,7 @@ consistently.
 | G1 | gap | Visibility check is satisfiable by self-citation through route inserts; insert answers leak evidence existence. Add one record or an open question on visibility (needs human input) | Queued as an open question (needs human input) on `cited-evidence-visible-to-bound-project`. The test `an_insert_citing_evidence_makes_it_citable_later_in_the_same_commit` (`kernel_routes.rs:6516`) shows a dispute citing uncited live evidence alone answers `not_found`, and the same dispute after an `insert_decision` citing that evidence in one envelope lands with the id on the row. Under the resolved OQ4-3 definition, evidence is citable once this project cites it, in the same envelope included. The insert path's live-versus-unknown answer is pre-existing behavior outside #1160 |
 | G2 | gap | No test sends `approval_object_id` on a dispute; add the route case alongside R1 | Closed by `a_dispute_relaxes_a_contradicted_prior_only_with_a_valid_approval` (`kernel_routes.rs:6459`): without the approval the dispute is `denied: true` and the decision stays `contradicted`; with a valid approval it answers `denied: false`, lands `disputed`, and the row reads `outcome = deny` with the evidence id |
 | R1 | refinement | Standing: condition the restrictiveness clause on `approval_object_id IS NULL`, or state the approved-relaxation clause; fix the Guarantee | Applied: the standing Guarantee and Check hold the restrictiveness clause unless the row names a valid approval, matching AC8 "no relaxation without a valid approval" |
-| R2 | refinement | Form: add an open question on whitespace paths in the command, next to the `%XX` one | Applied: open question on the form record; at `511cd6d73` the usage names the limit (`memory-mark-command.ts:51`) |
+| R2 | refinement | Form: add an open question on whitespace paths in the command, next to the `%XX` one | Applied: open question on the form record; at `511cd6d73` the usage names the limit (`memory-mark-command.ts:52`) |
 | R3 | refinement | Fix the `dispute.rs` line numbers in `existing-checks.md` and in the form and reason records | Applied to every `dispute.rs` line number in both parts, at `f68e895ca` |
 | R4 | refinement | Reporter and requirement: state the checks as per-request route oracles; name the request fields they read | Applied: both Check lines are per-request route oracles naming `source_kind`, `asserted_source_class`, `asserted_taint_class` (`commit.rs:115-119`) and the operation's `event`, `evidence_id`, `evidence_ref` (`commit.rs:155-172`) |
 | R5 | refinement | Fault map: rename "Constructed by" to "Precondition reached by" and state that no marker exists in code | Applied in `fault-map.md` |

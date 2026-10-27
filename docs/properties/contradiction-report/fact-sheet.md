@@ -9,6 +9,16 @@ constant reason, the command identity, and the visibility of
 `is_lower_hex_oid`) describe `3a3b916b7`; the active records in
 `dispute-evidence/catalog.md` state the PR A behavior.
 
+Reference note (PR B, #1161): the line references were remapped again to
+the #1161 branch tip. Facts #1161 changed describe `3a3b916b7` as well:
+the tool's action list gains `dispute` (`types.ts:6-13`), the default
+allowlist both harnesses pass excludes it (`types.ts:17-19`,
+`plugin/tool-registry.ts:58`, `pi-plugin/src/tools/eidnara-memory.ts:135`),
+and the Pi tool sends `agent:pi` (`PI_EIDNARA_MEMORY_ACTOR`,
+`pi-plugin/src/tools/eidnara-memory.ts:58`) while OpenCode keeps
+`agent:opencode`. The active records in `dispute-evidence/catalog.md`
+state the #1161 behavior.
+
 Repository: /local/home/ahrav/scratch/eidnara (Rust 1.98 workspace + Bun/TypeScript packages). Read root AGENTS.md and packages/opencode-plugin/AGENTS.md before citing package rules. Settled plan: docs/plans/2026-10-24-adaptive-discovery/04-contradiction-report-plan.md; plan-set index: docs/plans/2026-10-24-adaptive-discovery/00-index.md; related P3 plan: 03-use-outcome-record-plan.md.
 
 ## Route today
@@ -27,13 +37,13 @@ Repository: /local/home/ahrav/scratch/eidnara (Rust 1.98 workspace + Bun/TypeScr
 - Evidence objects carry NO scope: `load_object_state` doc (crates/kernel/src/envelope.rs ~1870): "Decisions and observations are the object kinds that carry a scope and an evidence citation; every other kind reads None for both." `ScopeFilter::matches(None, ..)` returns false (kernel_routes/project.rs:199-206), so `scoped_object_state` on an evidence object's object_id is always NotFound. Tables with scope_id: asserted_edges, decisions, observations, propositions, scope_term, scopes.
 - Existing liveness primitives: `require_live_evidence` (crates/kernel/src/slice/write.rs:1151-1178) and `require_optional_live(tx, "evidence_meta", ...)` (write.rs:1107) on insert and decision-event paths; `append_decision_events` cites evidence on `decision_events` rows (a different table from admission_decisions).
 - Served sensitivity folding reads `decision_events` with `event_kind='memory_reviewer_support'` (admission.rs:3434-3450), not `admission_decisions.evidence_id`.
-- `commit_log` columns: commit_seq, transaction_id, writer_epoch, producer, operation_key, request_digest, recorded_at, actor, cause (schema.rs; INSERT at envelope.rs:1420-1436). No session_id, no source_kind.
-- Idempotency: `stored_receipt` (envelope.rs:1363-1393): lookup by (producer, operation_key); a different request_digest -> `KernelError::Conflict` (route: invalid/operation_key_reused); same digest -> replayed receipt, `replayed: true`. The `preview: true` request judges dispositions without writing (no commit-log row, receipt, or token check).
+- `commit_log` columns: commit_seq, transaction_id, writer_epoch, producer, operation_key, request_digest, recorded_at, actor, cause (schema.rs; INSERT at envelope.rs:1419-1435). No session_id, no source_kind.
+- Idempotency: `stored_receipt` (envelope.rs:1362-1392): lookup by (producer, operation_key); a different request_digest -> `KernelError::Conflict` (route: invalid/operation_key_reused); same digest -> replayed receipt, `replayed: true`. The `preview: true` request judges dispositions without writing (no commit-log row, receipt, or token check).
 
 ## TypeScript peers
 - Client (packages/opencode-plugin/src/shared/kernel-client/client.ts:284-290, 604-628): `operation_key = sha256(producer, actor, operationId)`; `request_digest` covers operations, source_kind, and asserted classes; default `sourceKind` is "assistant". `DispositionOperation { op: "disposition", object_id, event, approval_object_id? }` (client.ts:101-111). Wire types in shared/kernel-client/wire.ts (DISPOSITION_EVENTS at :94-106, DispositionResult, DispositionPreview with per-surface visibility, CommitPayload.dispositions).
 - Slash command (packages/opencode-plugin/src/shared/memory-mark-command.ts): `operationId = [sessionId, event, objectId].join(OPERATION_KEY_SEPARATOR)`; `cause = "/eidnara-memory-mark <event> <object_id>"`; `sourceKind: "user"`; actor `user:opencode` (OpenCode) or `user:pi` (packages/pi-plugin/src/commands/eidnara-memory-mark.ts:18); flow = preview -> confirm if a serving surface's visibility changes (or `--yes`) -> commit; outcomes needs_confirmation | declined | denied | applied | refused(preview|commit) incl. `outcome_unknown` when the commit returns no matching verdict. Usage: `/eidnara-memory-mark <event> <object_id> [--yes]`.
-- Tool `eidnara_memory` (packages/opencode-plugin/src/tools/eidnara-memory/{types,execute,tools}.ts; Pi definition packages/pi-plugin/src/tools/eidnara-memory.ts, registered from packages/pi-plugin/src/tools/index.ts:70-74): actions create | get | revise | archive | merge; `operationId = sessionId SEP toolCallId` (execute.ts:429-431); actor constant `EIDNARA_MEMORY_ACTOR = "agent:opencode"` used on BOTH harnesses (execute.ts:49; pi eidnara-memory.ts:166); `approve`/`enforce` refused as human-host-owned; `allowedActions` allowlist (tools.ts:72-78; plugin/tool-registry.ts:58 passes the full action list); a mutation without a stable tool-call id is refused (tools.ts:115-117); the `context_researcher` agent cannot use the tool.
+- Tool `eidnara_memory` (packages/opencode-plugin/src/tools/eidnara-memory/{types,execute,tools}.ts; Pi definition packages/pi-plugin/src/tools/eidnara-memory.ts, registered from packages/pi-plugin/src/tools/index.ts:70-74): actions create | get | revise | archive | merge; `operationId = sessionId SEP toolCallId` (execute.ts:430-432); actor constant `EIDNARA_MEMORY_ACTOR = "agent:opencode"` used on BOTH harnesses (execute.ts:50; pi eidnara-memory.ts:198); `approve`/`enforce` refused as human-host-owned; `allowedActions` allowlist (tools.ts:103-109; plugin/tool-registry.ts:58 passes the full action list); a mutation without a stable tool-call id is refused (tools.ts:151-153); the `context_researcher` agent cannot use the tool.
 
 ## Bounds and validators that exist
 - Repository path: daemon `confined_path::check` plus `MAX_PATH_BYTES = kernel::MAX_TEXT_FIELD_BYTES = 1024` (crates/daemon/src/memory_reviewer/project_text.rs:37, 627-640): relative, no root, no `.`/`..`, no empty component, no NUL, protected components refused (`PathRefusal::Protected`).

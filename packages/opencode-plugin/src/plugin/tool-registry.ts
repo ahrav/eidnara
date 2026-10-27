@@ -8,7 +8,7 @@ import type { SessionDirectoryResolver } from "../hooks/context/session-director
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../shared/prompt-surface-runtime";
 import { createPromptSurfaceRuntime } from "../shared/prompt-surface-runtime";
-import { createEidnaraMemoryTools, EIDNARA_MEMORY_ACTIONS } from "../tools/eidnara-memory";
+import { createEidnaraMemoryTools, EIDNARA_MEMORY_DEFAULT_ACTIONS } from "../tools/eidnara-memory";
 import { createEidnaraNoteTools } from "../tools/eidnara-note";
 import { createEidnaraReduceTools } from "../tools/eidnara-reduce";
 import { createEidnaraSearchTools } from "../tools/eidnara-search";
@@ -55,7 +55,7 @@ export function createToolRegistry(args: {
             kernelClient,
             resolveProjectPath,
             resolveSessionDirectory: args.resolveSessionDirectory,
-            allowedActions: [...EIDNARA_MEMORY_ACTIONS],
+            allowedActions: [...EIDNARA_MEMORY_DEFAULT_ACTIONS],
         }),
     };
 

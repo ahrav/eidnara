@@ -70,14 +70,14 @@ the difference noted.
 - `commit_log` columns: `commit_seq, transaction_id, writer_epoch,
   producer, operation_key, request_digest, recorded_at, actor, cause`
   (`crates/kernel/src/schema.rs:26`); INSERT at
-  `crates/kernel/src/envelope.rs:1421-1436`. Append-only triggers. No
+  `crates/kernel/src/envelope.rs:1484-1499`. Append-only triggers. No
   `session_id`, no `source_kind` column.
 - `operation_receipts` keyed `UNIQUE(producer, operation_key)` with
   `request_digest` and `result_payload` (`schema.rs:42`);
-  `stored_receipt` (`envelope.rs:1363-1393`) replays on equal digest and
+  `stored_receipt` (`envelope.rs:1426-1456`) replays on equal digest and
   returns `Conflict` on a different digest. The lookup runs before the
   operation inside the writer transaction
-  (`envelope.rs:1409-1417`).
+  (`envelope.rs:1472-1481`).
 - `admission_decisions` (`schema.rs:163`): `source_kind`/`source_id` are
   the subject's (`load_subject_facts`, `admission.rs:2131-2170`),
   `source_class`/`taint_class` are what the request carried,
@@ -86,11 +86,11 @@ the difference noted.
   `reason`. `foreign_keys=ON` is set at `schema.rs:244` and `open.rs:1035`.
 - `evidence_meta` (`schema.rs:139`): live means `invalidated_commit_seq IS
   NULL`. The table has no `scope_id` column.
-- `object_state_sql` (`envelope.rs:1899-1913`) reads `scope_id` as
+- `object_state_sql` (`envelope.rs:1962-1976`) reads `scope_id` as
   `COALESCE(dec.scope_id, obs.scope_id)`, so any object that is not a
   decision or observation has `scope_id = None`. `load_object_state`
-  (`envelope.rs:1926-1940`) carries the doc comment at
-  `envelope.rs:1924-1925` (shared-facts cites "~1870").
+  (`envelope.rs:1989-2004`) carries the doc comment at
+  `envelope.rs:1987-1988` (shared-facts cites "~1870").
 - `ScopeFilter::matches` returns `Ok(false)` for `scope_id = None`
   (`kernel_routes/project.rs:199-206`), so `scoped_object_state`
   (`commit.rs:676-691`) answers `NotFound` for every evidence object id.
@@ -108,7 +108,7 @@ the difference noted.
 ## Lens: concurrency model
 
 - One exclusive writer transaction per commit (`TransactionBehavior::
-  Immediate`, `envelope.rs:1404-1407`); `deadline_ms` bounds writer
+  Immediate`, `envelope.rs:1459-1469`); `deadline_ms` bounds writer
   acquisition only, operation count bounds the hold (`commit.rs:91-93`).
 - Within an envelope, `admission_latest` caches each subject's newest
   decision so a later operation on the same object sees the earlier one as
@@ -119,7 +119,7 @@ the difference noted.
   `invalid_params`, `commit.rs:1172-1178`).
 - Preview and commit are separate requests; the object can move between
   them. The TypeScript command treats the commit's verdict as the recorded
-  one (`memory-mark-command.ts:243-244`).
+  one (`memory-mark-command.ts:301-302`).
 
 ## Lens: claimed safety guarantees (claims under test)
 
@@ -186,7 +186,7 @@ disposition row.
   `kernel_routes.rs:4479-4503`).
 - TypeScript: a commit whose verdict list does not match the sent
   operation is `unavailable(outcome_unknown)` because a receipt exists
-  (`memory-mark-command.ts:240-242`).
+  (`memory-mark-command.ts:298-300`).
 
 ## Lens: unproven assumptions
 
@@ -215,26 +215,26 @@ disposition row.
   scope) that ends the approval's authority
   (`approval_row_fields` requires `disposition='active'`,
   `admission.rs:850`) and demotes every dependent in the same commit.
-  Route test `:5493` quarantines an approval and observes the dependent
-  relaxation denied afterwards; no route test files `mark_disputed`
-  against an approval.
+  Route test `kernel_routes.rs:5493` quarantines an approval and observes
+  the dependent relaxation denied afterwards; no route test files
+  `mark_disputed` against an approval.
 - `Preview` with an already recorded identity replays the receipt and
   judges nothing (`commit.rs:878-880`); the command then commits, which
-  also replays (`memory-mark-command.ts:226-238`).
+  also replays (`memory-mark-command.ts:270-296`).
 
 ## Contract-versus-code disagreements preserved as leads
 
 1. Plan P4 R3 says the event row "can be joined to the commit log entry
    carrying caller-asserted `actor`, `cause`, `session_id`, and
-   `source_kind`" citing `envelope.rs:1402-1411`. The `commit_log` schema
-   (`schema.rs:26`) and the INSERT (`envelope.rs:1421-1436`) carry
+   `source_kind`" citing `envelope.rs:1401-1410`. The `commit_log` schema
+   (`schema.rs:26`) and the INSERT (`envelope.rs:1484-1499`) carry
    `actor` and `cause` only. `session_id` is stripped at
    `kernel_routes/mod.rs:461` and `source_kind` is consumed by
    `resolve_classes`. Joinability today is by `actor` and `cause` text.
    Lead for record `disposition-commit-log-row-carries-actor-and-cause-only`.
 2. Plan P4 R2 says a cited `evidence_id` "must resolve to a live
    `evidence_meta` row visible to the caller's project scope". Evidence
-   objects carry no scope (`envelope.rs:1924-1925`, `:1902`), and
+   objects carry no scope (`envelope.rs:1923-1924`, `:1901`), and
    `scoped_object_state` answers `NotFound` for every evidence object id.
    The route's project-scope mechanism cannot answer R2 as written. Lead
    for record `evidence-objects-carry-no-scope-and-fail-scoped-lookup`.

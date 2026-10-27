@@ -19,7 +19,7 @@ behavior.
 ## 1. Harness fit
 
 Routing for `/testing:test-strategy`. No record needs a simulator: the
-single `Immediate` writer transaction (`envelope.rs:1404-1407`) turns every
+single `Immediate` writer transaction (`envelope.rs:1459-1469`) turns every
 "retired between read and commit" window into two sequential requests, and
 all 14 `always` checks hold over per-request state.
 
@@ -73,7 +73,7 @@ are an open question. Situation coverage lives in 21 `sometimes` markers in
 Observability: every column check is readable through the test store
 connection at route level. Two checks name kernel-internal functions a
 daemon test cannot call: evidence-scope cites `load_object_state`
-(`pub(super)`, `envelope.rs:1926`) and cascade cites `validate_approval`;
+(`pub(super)`, `envelope.rs:1989`) and cascade cites `validate_approval`;
 the route-visible proxies are `not_found` and a later relaxation denied.
 
 Constructibility: F1 to F11 and F13 to F16 are available as the fault map
@@ -103,7 +103,7 @@ differ, prior above Candidate, retired id cited); none negates a check.
 - Baseline pins: no-evidence, commit-log, evidence-scope, and the
   accept-retired branch of evidence-existence assert behavior P4 intends to
   change; a test written from them fails on the intended change (B1).
-- Replay after move: `memory-mark-command.test.ts:351` pins that a repeat
+- Replay after move: `memory-mark-command.test.ts:435` pins that a repeat
   reports `applied` with the original verdict while the stored disposition
   differs (`commit.rs:1188-1204`). Safe for the store, possibly misleading
   for the user; no record asks (R5).
@@ -128,7 +128,7 @@ differ, prior above Candidate, retired id cited); none negates a check.
 | R3 | refinement | evidence-scope: split observation into route `not_found` and a kernel-crate `scope_id == None` assertion |
 | R4 | refinement | subject: evidence says the retired-stored-approval outcome "was not traced"; record says `Open questions: None`. Add it |
 | R5 | refinement | replay: add open question on reporting the original verdict after a move (needs human input) |
-| R6 | refinement | command: preview null verdict is `refused/preview invalid(internal)` (`memory-mark-command.ts:227-229`), commit null is `outcome_unknown` (`:240-242`); fix the check; add marker `command_preview_visibility_changes` |
+| R6 | refinement | command: preview null verdict is `refused/preview invalid(internal)` (`memory-mark-command.ts:271-273`), commit null is `outcome_unknown` (`:298-300`); fix the check; add marker `command_preview_visibility_changes` |
 | R7 | refinement | cascade: mark the `deferred` branch `Exercised: not yet - 4,096 dependents` |
 | R8 | refinement | restrictiveness: extend the lateral-move question to Superseded to Disputed |
 | R9 | refinement | no-evidence: add a row-existence floor to the second clause |

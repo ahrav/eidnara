@@ -17,6 +17,7 @@ import {
     type DispositionOperation,
     type DispositionPreview,
     type DispositionResult,
+    deriveRequestDigest,
     type EvidenceRef,
     invalid,
     isAvailable,
@@ -172,7 +173,14 @@ export type MemoryMarkOutcome =
     | { kind: "declined"; preview: DispositionPreview }
     /** A relaxation without a valid approval, refused at the preview or recorded as denied by the commit; the disposition is unchanged. */
     | { kind: "denied"; result: DispositionResult }
-    | { kind: "applied"; result: DispositionResult; commitSeq: number; replayed: boolean }
+    | {
+          kind: "applied";
+          result: DispositionResult;
+          commitSeq: number;
+          replayed: boolean;
+          /** Whether the preview reported a served surface changing; absent when the identity replayed and no preview was judged. */
+          visibilityChanged?: boolean;
+      }
     /** The daemon answered the preview or the commit with a non-available state. */
     | { kind: "refused"; step: "preview" | "commit"; state: MemoryState };
 
@@ -180,7 +188,11 @@ export interface MemoryMarkInput {
     client: KernelClient;
     /** The operation's stable identity; the command derives it with `memoryMarkOperationId`. */
     operationId: string;
-    /** Separator-free identity of the human command surface, such as `user:opencode`. */
+    /** The audit text for `intent.cause`; the command line by default. */
+    cause?: string;
+    /** The reporter's source kind: `user` for the command by default, `assistant` for the model tool. */
+    sourceKind?: "user" | "assistant";
+    /** Separator-free identity of the calling surface: `user:opencode` or `user:pi` for the command, the tool actor for a model dispute. */
     actor: string;
     args: MemoryMarkArgs;
     /**
@@ -191,6 +203,8 @@ export interface MemoryMarkInput {
     confirm?: (preview: DispositionPreview) => Promise<boolean>;
     /** Checked again before the commit, since the preview and any confirmation take time during which the session can end. */
     isCancelled?: () => boolean;
+    /** The caller's abort signal, passed to the preview and the commit. */
+    signal?: AbortSignal;
 }
 
 /** Repeating the same event on the same object with the same evidence in one session reuses the identity, so the daemon replays the receipt instead of recording twice; other evidence is another dispute. */
@@ -211,6 +225,23 @@ function verdictFor<R extends DispositionResult>(
     return verdict;
 }
 
+/** Mirrors the kernel's `disposition_restrictiveness` (`crates/kernel/src/admission.rs`): a move to a lower rank is a relaxation. */
+const DISPOSITION_RESTRICTIVENESS: ReadonlyMap<string, number> = new Map([
+    ["active", 0],
+    ["stale", 1],
+    ["disputed", 1],
+    ["superseded", 1],
+    ["rejected", 2],
+    ["contradicted", 3],
+    ["quarantined", 3],
+]);
+
+function relaxes(result: DispositionResult): boolean {
+    const before = DISPOSITION_RESTRICTIVENESS.get(result.previous_disposition);
+    const after = DISPOSITION_RESTRICTIVENESS.get(result.disposition);
+    return before === undefined || after === undefined || after < before;
+}
+
 export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<MemoryMarkOutcome> {
     const { client, args } = input;
     const operation: DispositionOperation = {
@@ -221,21 +252,40 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         // A copy, so the commit sends the reference the preview judged even if the caller edits its args during the confirmation wait.
         ...(args.evidenceRef === undefined ? {} : { evidence_ref: { ...args.evidenceRef } }),
     };
+    const operations = [operation];
+    const sourceKind = input.sourceKind ?? ("user" as const);
     const intent = {
         actor: input.actor,
         operationId: input.operationId,
-        cause: commandLine(args),
-        sourceKind: "user" as const,
+        cause: input.cause ?? commandLine(args),
+        sourceKind,
+        requestDigest: deriveRequestDigest({ operations, sourceKind }),
+        ...(input.signal ? { signal: input.signal } : {}),
     };
-    const previewed = await client.previewDispositions({ ...intent, operations: [operation] });
+    const previewed = await client.previewDispositions({ ...intent, operations });
     if (!isAvailable(previewed))
         return { kind: "refused", step: "preview", state: previewed.state };
     // A recorded identity replays its receipt whatever the object's state is now, so the preview has nothing to judge and asks nothing.
+    let visibilityChanged: boolean | undefined;
     if (previewed.receipt === undefined) {
         const preview = verdictFor(previewed.previews, operation);
         // The reply decoded but does not answer the operation sent: a daemon contract violation, and nothing was written.
         if (!preview) return { kind: "refused", step: "preview", state: invalid("internal") };
         if (preview.denied) return { kind: "denied", result: preview };
+        if (sourceKind === "assistant" && relaxes(preview)) {
+            return {
+                kind: "denied",
+                result: {
+                    object_id: preview.object_id,
+                    event: preview.event,
+                    outcome: preview.outcome,
+                    previous_disposition: preview.previous_disposition,
+                    disposition: preview.previous_disposition,
+                    denied: true,
+                },
+            };
+        }
+        visibilityChanged = preview.visibility_changes;
         if (preview.visibility_changes && !args.confirmed) {
             if (!input.confirm) return { kind: "needs_confirmation", preview };
             if (!(await input.confirm(preview))) return { kind: "declined", preview };
@@ -243,7 +293,7 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
     }
     if (input.isCancelled?.())
         return { kind: "refused", step: "commit", state: { kind: "cancelled" } };
-    const committed = await client.commit({ ...intent, operations: [operation] });
+    const committed = await client.commit({ ...intent, operations });
     if (!isAvailable(committed)) return { kind: "refused", step: "commit", state: committed.state };
     const result = verdictFor(committed.dispositions, operation);
     // The receipt exists, so the commit may have been applied; a verdict list that does not answer the operation leaves its effect unknown rather than refused.
@@ -255,6 +305,7 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         result,
         commitSeq: committed.receipt.commit_seq,
         replayed: committed.receipt.replayed,
+        ...(visibilityChanged === undefined ? {} : { visibilityChanged }),
     };
 }
 

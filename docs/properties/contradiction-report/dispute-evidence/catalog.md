@@ -22,7 +22,7 @@ The evidence a `mark_disputed` or `contradict` disposition carries on
   `crates/daemon/src/kernel_routes/commit.rs`; the reference form rules and
   the `v=1` reason grammar in `crates/daemon/src/kernel_routes/dispute.rs`;
 - the Kernel read `Envelope::evidence_cited_in`
-  (`crates/kernel/src/envelope.rs:520-598`) and the exported
+  (`crates/kernel/src/envelope.rs:548-615`) and the exported
   `kernel::is_lower_hex_oid` (`crates/kernel/src/scope.rs:710-716`);
 - the shared command runner
   `packages/opencode-plugin/src/shared/memory-mark-command.ts`, the client
@@ -41,9 +41,10 @@ obligation for PR B ([#1162](https://github.com/ahrav/eidnara/issues/1162));
 its `Lifecycle:` line marks it proposed, it keeps the design-time
 `Lifecycle:`, `Falsifier:`, and `Legal witness:` lines, and it has no
 evidence file until PR B makes it checkable. The model
-tool arm of the dispute surface lands with
+tool arm of the dispute surface landed with
 [#1161](https://github.com/ahrav/eidnara/issues/1161); the records that
-name both surfaces cover the command arm only and say so.
+name both surfaces cover the command arm and the tool arm and name the
+tests of each.
 
 ## Reachability classes
 
@@ -62,11 +63,11 @@ once PR B writes it; it is not verifiable at HEAD and the record says so.
 
 | Slug | Type | Reachability | Status | Exercised | Semantics |
 |---|---|---|---|---|---|
-| `dispute-requires-evidence-from-plugin` | safety | default-production | active | partial | always |
+| `dispute-requires-evidence-from-plugin` | safety | default-production | active | yes | always |
 | `cited-evidence-live-at-dispute-commit` | safety | default-production | active | yes | always |
 | `cited-evidence-visible-to-bound-project` | safety | default-production | active | yes | always |
 | `evidence-ref-well-formed-and-redaction-stable` | safety | default-production | active | yes | always |
-| `reporter-class-derived-never-asserted-up` | safety | default-production | active | partial | always |
+| `reporter-class-derived-never-asserted-up` | safety | default-production | active | yes | always |
 | `dispute-with-evidence-never-raises-standing` | safety | default-production | active | yes | always |
 | `dispute-identity-includes-evidence-key` | safety | default-production | active | yes | always |
 | `dispute-preview-writes-nothing` | safety | default-production | active | yes | always-or-unreached |
@@ -88,7 +89,7 @@ Reachability: default-production - `lib.rs:14529` dispatches
 request after class resolution and before the preview or commit
 transaction (`commit.rs:1117-1123`).
 Status: active
-Exercised: partial - command arm: route test
+Exercised: yes - command arm, tool arm, and raw route bodies: route test
 `a_dispute_needs_evidence_and_other_events_take_none`
 (`crates/daemon/tests/kernel_routes.rs:5971`) sends `mark_disputed` and
 `contradict` with neither field and with an empty `evidence_id`, and
@@ -97,12 +98,23 @@ preview and the commit with the four row counts unchanged; it lands
 `mark_stale`, `explicit_reject`, and `quarantine` without evidence with
 `reason = "kernel.commit"` and `evidence_id IS NULL`. The command parser
 test `a dispute without evidence, and evidence on another event, print
-usage` (`memory-mark-command.test.ts:126`) covers the TypeScript side.
+usage` (`memory-mark-command.test.ts:137`) covers the TypeScript side.
 `a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field`
 (`kernel_routes.rs:6252`) sends a `mark_disputed` body carrying a forged
 `reason` field and asserts the route answers an error with the four row
-counts unchanged; it asserts the error variant, not the refusal name. The
-model tool arm sends no disposition at this revision and lands with #1161.
+counts unchanged; it asserts the error variant, not the refusal name. Tool
+arm (#1161): `refuses missing evidence and unsupported events before
+sending; renders denials and refusals`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1534`)
+calls `dispute` with neither evidence input, with an empty `evidenceId`,
+with empty `path` and `gitObjectId`, with `path` and no `gitObjectId`, and
+with no `objectId`, and asserts the usage error with no daemon call; the
+Pi test `refuses a dispute without evidence before sending anything`
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:509`)
+sends the same five shapes and asserts the same for Pi. A route request
+from the tool with neither field is the raw-body case the route test
+above already refuses `invalid_input`, since the tool sends the same
+`disposition` body.
 Guarantee: A `mark_disputed` or `contradict` operation that reaches the
 Kernel writer through `kernel.commit` carries a non-empty `evidence_id`,
 an `evidence_ref`, or both; one with neither, or with an empty id, is
@@ -118,7 +130,7 @@ row reads `reason = 'kernel.commit' AND evidence_id IS NULL`; every other
 request answers `invalid_input` with the four row counts unchanged. The
 dispute clause also has a store screen: every `admission_decisions` row
 with `event_kind IN ('mark_disputed','contradict')` whose `reason` parses
-as a `v=1` `DisputeReason` (`dispute.rs:108-148`) has `evidence_id IS NOT
+as a `v=1` `DisputeReason` (`dispute.rs:103-143`) has `evidence_id IS NOT
 NULL OR parse(reason).evidence_ref IS NOT NULL`. The non-dispute clause
 has no store form: for those events the constant reason is the only
 marker of a route-written row, so a scan on it is circular. The predicate
@@ -133,13 +145,14 @@ either field; a body carrying its own `reason`; a client that bypasses
 the TypeScript parser and sends the raw body (the route tests do this).
 Confidence: high - [evidence](evidence/dispute-requires-evidence-from-plugin.md).
 Read `compose_reason` (`commit.rs:206-234`), `DisputeReason::validated`
-(`dispute.rs:49-81`), the handler loop (`commit.rs:1117-1123`), and the
+(`dispute.rs:49-79`), the handler loop (`commit.rs:1117-1123`), and the
 route and parser tests above.
-Existing check: `kernel_routes.rs:5971`, `:6252`; `dispute.rs:370`
+Existing check: `kernel_routes.rs:5971`, `:6252`; `dispute.rs:380`
 (`a_dispute_needs_evidence_and_other_events_take_none`, unit);
-`memory-mark-command.test.ts:126`; the fake kernel mirrors the rule
+`memory-mark-command.test.ts:137`; the fake kernel mirrors the rule
 (`disputeEvidenceWellFormed`,
-`packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:285-307`).
+`packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:335-351`,
+applied at `:691`).
 Status unaudited.
 Impact: a dispute with nothing to check lowers a finding's standing on
 assertion alone, and a later reader has no evidence to follow.
@@ -151,6 +164,16 @@ Open questions:
   `crates/daemon/src`, `crates/kernel/src`, and `packages/*/src`). Whether
   the Kernel should enforce the requirement itself stays open. (needs
   human input)
+- The model tool arm (#1161) bounds a model-filed dispute by evidence
+  form and, for an `evidence_id`, liveness and visibility. A `path` with
+  `gitObjectId` is checked for form only, so a model can cite a reference
+  it invented. The tool also admits `contradict`, which moves the subject
+  to `contradicted` (audit-only serving), past the `disputed` blast radius
+  spec N3 records, and a dispute on an approval demotes its dependents.
+  Nothing caps disputes per session beyond the per-request operation cap;
+  the allowlist, which omits `dispute` by default, is the rollout lever.
+  Whether to limit the tool to `mark_disputed` or add a per-session cap
+  before enabling it is an owner decision. (needs human input)
 
 ### cited-evidence-live-at-dispute-commit
 
@@ -178,7 +201,7 @@ refusal comes from the citer walk that shares the read; it shows that
 rather than trusting the preview. The Kernel read's liveness answer is
 covered by
 `evidence_cited_in_offers_each_live_citing_scope_once_and_stops_at_the_first_accepted`
-(`crates/kernel/tests/kernel_slice.rs:2160`): a retired row and an
+(`crates/kernel/tests/kernel_slice.rs:2161`): a retired row and an
 unknown id are cited nowhere.
 Guarantee: A dispute row's `evidence_id`, when present, names an
 `evidence_meta` row whose `invalidated_commit_seq` is NULL in the same
@@ -192,7 +215,7 @@ row's commit because a citation holds no retention: evidence may be
 retired later without fault (`commit.rs:59-60`). Holds on every write, so
 `always`.
 Fault/timing angle: a retirement ordered between a client's read and the
-commit. The read (`Envelope::evidence_cited_in`, `envelope.rs:531-598`)
+commit. The read (`Envelope::evidence_cited_in`, `envelope.rs:548-615`)
 runs inside the commit's exclusive writer transaction, so a retirement
 either commits before it (refused) or after the dispute commits (the
 as-of predicate holds). Not constructed: a retirement queued in the same
@@ -210,9 +233,9 @@ before the dispute; a never-ingested id; a live cited id for the positive
 case; a citer retired between a preview and its commit.
 Confidence: high - [evidence](evidence/cited-evidence-live-at-dispute-commit.md).
 Read `require_visible_evidence` (`commit.rs:738-757`),
-`evidence_cited_in` (`envelope.rs:520-598`), and the three route tests.
+`evidence_cited_in` (`envelope.rs:548-615`), and the three route tests.
 Existing check: `kernel_routes.rs:5801`, `:5723`, `:6416`;
-`kernel_slice.rs:2160`. Status unaudited.
+`kernel_slice.rs:2161`. Status unaudited.
 Impact: a dispute resting on retired evidence cannot be followed by a
 later reader at the moment it was filed.
 Open questions:
@@ -233,12 +256,12 @@ cites, a live id cited only by an unscoped decision, and a live id cited
 only by a decision of a second bound project; each answers `not_found`
 from the preview and the commit with nothing written, under both dispute
 events. `kernel_routes.rs:5723` lands an id cited by a decision of the
-bound project. `kernel_slice.rs:2160` asserts which citers offer a
+bound project. `kernel_slice.rs:2161` asserts which citers offer a
 scope: live decisions, live observations, and decision events through a
 live decision; unscoped and retired citers offer none, each scope is
 offered once, and the walk stops at the first accepted scope.
 `evidence_cited_in_matches_the_citation_model_under_seeded_citers`
-(`kernel_slice.rs:2252`) checks the answer and the offered scopes against
+(`kernel_slice.rs:2316`) checks the answer and the offered scopes against
 a citation model over seeded interleavings of all three citer kinds, live
 and retired, for every accepted scope set.
 `a_dispute_judges_every_citer_and_both_evidence_fields_together`
@@ -261,7 +284,7 @@ otherwise the request is refused `not_found`, the same name a nonexistent
 id gets.
 Check: `always` - for every dispute row `r` with `r.evidence_id`, at
 `r.commit_seq` the scope of at least one live citer that
-`Envelope::evidence_cited_in` offered (`envelope.rs:520-598`) passed
+`Envelope::evidence_cited_in` offered (`envelope.rs:548-615`) passed
 `ScopeFilter::matches` for the bound project (`commit.rs:747-751`). Every refusal case (unknown, retired,
 uncited, unscoped-only, foreign-only) answers the same `not_found` with
 row counts unchanged, so this check answers the same for another
@@ -280,14 +303,14 @@ projects with the foreign citers written first; evidence cited only by an
 unscoped row; an uncited live row; a citer retired between preview and
 commit; an insert citing the evidence earlier in the dispute's envelope.
 Confidence: high - [evidence](evidence/cited-evidence-visible-to-bound-project.md).
-Read the SQL and the walk in `evidence_cited_in` (`envelope.rs:548-597`),
+Read the SQL and the walk in `evidence_cited_in` (`envelope.rs:548-615`),
 the predicate (`commit.rs:747-751`), and the tests above. The
-asserted-edge branch of the SQL (`envelope.rs:561-563`) has no production
+asserted-edge branch of the SQL (`envelope.rs:269-272`) has no production
 writer and no test:
 no Rust code under `crates/` inserts into `asserted_edges`, so the arm is
 read, not exercised.
 Existing check: `kernel_routes.rs:5801`, `:5723`, `:6285`, `:6416`,
-`:6516`; `kernel_slice.rs:2160`, `:2252`. Status unaudited.
+`:6516`; `kernel_slice.rs:2161`, `:2316`. Status unaudited.
 Impact: accepting a foreign id would attach another project's evidence to
 this project's finding and reveal its existence through the answer.
 Open questions:
@@ -309,7 +332,7 @@ Open questions:
   "already cited by this project" or "citable by this project", and
   whether inserts should get the same check, is an owner decision.
   (needs human input)
-- `Envelope::evidence_cited_in` (`envelope.rs:520-598`) stops at the
+- `Envelope::evidence_cited_in` (`envelope.rs:548-615`) stops at the
   first live citer whose scope the filter accepts, so an accepted dispute
   whose project citer is read first reads one citing row however many
   rows cite the id. A refused dispute, and an accepted one whose project
@@ -328,7 +351,7 @@ Open questions:
 Type: safety
 Reachability: default-production - `DisputeReason::validated` runs for
 every dispute in `compose_reason` (`commit.rs:221-227`); the command's
-`--path <path>@<oid>` reaches it (`memory-mark-command.ts:75-81`).
+`--path <path>@<oid>` reaches it (`memory-mark-command.ts:76-82`).
 Status: active
 Exercised: yes - `a_dispute_citing_a_repository_file_records_it_in_the_reason`
 (`kernel_routes.rs:5880`) lands five paths holding `;`, `=`, `%`, `@`,
@@ -341,13 +364,13 @@ carrying both `evidence_id` and `evidence_ref` and parses both back from
 the reason, and refuses an uppercase-oid reference beside an id that
 would answer `not_found` with `invalid_input`, so the form check runs
 first. Unit tests in `dispute.rs`:
-`malformed_references_are_invalid_input` (`:314`),
-`a_path_the_secret_scanner_detects_is_invalid_input` (`:342`),
-`git_object_ids_and_ordinary_paths_carry_no_detection` (`:354`),
-`render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes` (`:246`),
-`reserved_and_multi_byte_values_encode_to_uppercase_escapes` (`:280`, a
+`malformed_references_are_invalid_input` (`:320`),
+`a_path_the_secret_scanner_detects_is_invalid_input` (`:352`),
+`git_object_ids_and_ordinary_paths_carry_no_detection` (`:364`),
+`render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes` (`:252`),
+`reserved_and_multi_byte_values_encode_to_uppercase_escapes` (`:286`, a
 fixed witness for `encode` and `decode`), and the proptest
-`every_accepted_reference_parses_back_to_its_inputs` (`:292`), which
+`every_accepted_reference_parses_back_to_its_inputs` (`:298`), which
 asserts every accepted path and optional id renders an ASCII reason
 within the cap that parses back to the inputs.
 Guarantee: A stored `evidence_ref` has a `git_object_id` of exactly 40 or
@@ -360,7 +383,7 @@ Check: `always` - for every `v=1` reason `r` with an `evidence_ref`,
 MAX_EVIDENCE_PATH_BYTES` (`dispute.rs:12`), `confined_path::check(path)`
 is `Ok` (`crates/daemon/src/confined_path.rs:29-45`), the path holds no
 `%` followed by two hex digits, and `redact_durable_text(path).detections`
-is empty (`EvidenceRef::is_well_formed`, `dispute.rs:151-159`). Holds on
+is empty (`EvidenceRef::is_well_formed`, `dispute.rs:150-163`). Holds on
 every stored row, so `always`.
 Fault/timing angle: none; intrinsic admission.
 Required faults and enabling state: each malformed shape above; a path
@@ -370,10 +393,10 @@ Confidence: high - [evidence](evidence/evidence-ref-well-formed-and-redaction-st
 Read `is_well_formed`, `validated`, `confined_path::check`, and the tests.
 G3 is recorded in the evidence file: the test token
 `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678` is detected
-(asserted at `dispute.rs:344`), and 64 seeded 40- and 64-hex ids beside
-an ordinary path carry no detection (`dispute.rs:354-367`).
-Existing check: `kernel_routes.rs:5880`, `:6285`; `dispute.rs:246`,
-`:280`, `:292`, `:314`, `:342`, `:354`. Status unaudited.
+(asserted at `dispute.rs:354`), and 64 seeded 40- and 64-hex ids beside
+an ordinary path carry no detection (`dispute.rs:364-377`).
+Existing check: `kernel_routes.rs:5880`, `:6285`; `dispute.rs:252`,
+`:286`, `:298`, `:320`, `:352`, `:364`. Status unaudited.
 Impact: a malformed reference cannot be followed; a path the redactor
 rewrote would point at a file that does not exist.
 Open questions:
@@ -383,17 +406,17 @@ Open questions:
   decision to verify blobs exists.
 - A path with a literal `%XX` sequence (for example a file named
   `100%41.md`) is refused by the decode-idempotence rule
-  (`dispute.rs:201-207`). The command help does not mention the rule.
+  (`dispute.rs:209-213`). The command help does not mention the rule.
 - A path holding a space cannot be cited from the command: the parser
-  splits its arguments on `/\s+/` (`memory-mark-command.ts:85-88`), while
+  splits its arguments on `/\s+/` (`memory-mark-command.ts:94-97`), while
   the route accepts such paths (`kernel_routes.rs:5880`). At `511cd6d73`
   the usage text names the limit ("a relative repository path without
-  spaces", `memory-mark-command.ts:51`). Whether the command should accept
+  spaces", `memory-mark-command.ts:52`). Whether the command should accept
   quoted or escaped paths is open. (needs human input)
 - `evidence_ref.path` accepts C0 and bidi control characters:
   `confined_path::check` refuses NUL only among control bytes
   (`confined_path.rs:30-31`), and `encode` stores every such byte
-  percent-encoded (`dispute.rs:165-175`). Review disposition: a nit, not
+  percent-encoded (`dispute.rs:169-179`). Review disposition: a nit, not
   fixed in #1160.
 
 ### reporter-class-derived-never-asserted-up
@@ -403,7 +426,7 @@ Reachability: default-production - `resolve_classes` runs on every
 `kernel.commit` (`commit.rs:1109-1116`) and its taint is the reporter
 taint `compose_reason` renders (`commit.rs:1120`).
 Status: active
-Exercised: partial - command arm and raw route bodies:
+Exercised: yes - command arm, tool arm, and raw route bodies:
 `a_dispute_reporter_class_is_derived_and_never_asserted_up`
 (`kernel_routes.rs:6025`) refuses `asserted_taint_class: user_explicit`
 under `source_kind` `assistant` and `user` with `class_over_declared`, an
@@ -412,9 +435,19 @@ unknown `source_kind` with `invalid_input`, nothing written, and records
 `kernel_routes.rs:5723` records `user_inferred` for `source_kind: "user"`
 and `assistant_inference` for `assistant`, and asserts the row's
 `(source_class, taint_class)` equal the subject's prior row. The
-TypeScript test at `memory-mark-command.test.ts:174` asserts the command
-sends `source_kind: "user"` on both calls. The model tool arm lands with
-#1161.
+TypeScript test at `memory-mark-command.test.ts:185` asserts the command
+sends `source_kind: "user"` on both calls. Tool arm (#1161): `sends the
+evidence under the tool identity, actor, cause, and assistant source kind`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1376`)
+asserts the tool's preview and commit both send `source_kind:
+"assistant"` with `asserted_source_class` and `asserted_taint_class` both
+absent, and the Pi test `files a dispute under
+agent:pi and the assistant source kind when allowed`
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:449`) asserts the
+same for Pi's preview and commit bodies, with `agent:pi`; the route side
+stores `assistant_inference` for that source kind
+(`kernel_routes.rs:5723`). The harness fixes `source_kind` in
+`executeDispute`, so the tool cannot send `"user"`.
 Guarantee: The reporter taint recorded in a dispute's reason equals the
 taint `derive_classes(source_kind)` yields, lowered only by an asserted
 class at or below it; the row's own `source_class` and `taint_class` keep
@@ -475,12 +508,29 @@ Candidate. `a_dispute_relaxes_a_contradicted_prior_only_with_a_valid_approval`
 evidence: without an approval it answers `denied: true` and the decision
 stays `contradicted`; with a valid `approval_object_id` it answers
 `denied: false`, lands `disputed`, and the row reads `outcome = deny`
-with the evidence id.
+with the evidence id. Tool arm (#1161): an operation that names no
+approval runs under the subject's stored one (`admission.rs:1574-1585`),
+so a model dispute could otherwise relax a quarantined or contradicted
+memory a human approved. `runMemoryMarkCommand` answers `denied` for an
+`assistant` mark whose preview moves to a less restrictive disposition,
+and sends no commit (`memory-mark-command.ts:275-287`). The runner test
+`an assistant-sourced dispute is denied a relaxation the stored approval
+would admit` (`memory-mark-command.test.ts:633`) and the tool test `never
+relaxes a disposition through the memory's stored approval`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1491`)
+seed a quarantined memory whose stored decision names a live approval and
+assert `denied`, the disposition kept, and no commit call; the runner
+test also asserts exactly one preview call. `a user command relaxes
+through the stored approval` (`memory-mark-command.test.ts:660`) keeps
+the command's relaxation. The check judges the preview and runs in the
+plugin, so an object that moves between the preview and the commit
+lands the commit's verdict (see the open question below).
 Guarantee: A dispute carrying evidence yields `outcome = deny`, keeps
 historical maturity, never raises effective maturity, and moves the
-disposition to an equal or more restrictive one unless the operation
-names a valid approval; against a more restrictive prior without a valid
-approval it records `denied` with the prior kept.
+disposition to an equal or more restrictive one unless a valid approval
+is named by the operation or stored on the subject; against a more
+restrictive prior without a valid approval it records `denied` with the
+prior kept.
 Check: `always` - for every dispute row `r` and its prior `p`:
 `r.outcome = 'deny'`, `r.maturity = p.maturity`,
 `rank(r.effective_maturity) <= rank(p.effective_maturity)`, and
@@ -511,7 +561,25 @@ Open questions:
 - A dispute against a `rejected`, `contradicted`, or `quarantined` prior
   is recorded `denied: true` with the evidence on the row, not refused
   outright. The test pins the recorded form; see
-  [open-questions.md](open-questions.md) Q9. (needs human input)
+  [open-questions.md](open-questions.md) Q9. Through the shared runner
+  a denied preview returns before the commit
+  (`memory-mark-command.ts:274`), so when the object is unchanged between
+  the preview and the commit the command and tool arms write no denied
+  row; a denied commit verdict (`:302`) still lands one. (needs human
+  input)
+- The assistant no-relaxation rule runs in the plugin against the
+  preview (`memory-mark-command.ts:275-287`); the route back-fills the
+  subject's stored approval for every source kind
+  (`admission.rs:1574-1585`). A subject quarantined under a valid
+  approval between the preview and the commit lands `quarantined ->
+  disputed` with `denied: false`. Remedy under consideration: deny the
+  relaxation in the writer transaction when the derived taint is
+  `AssistantInference`; the deny shape is the owner's to pick. (needs
+  human input)
+- `visibilityChanged` in an applied tool result is the preview's
+  `visibility_changes` (`memory-mark-command.ts:288`, `:308`); after a
+  concurrent move it describes the previewed object, not the committed
+  verdict. Rename or re-read after the commit. (needs human input)
 
 ### dispute-identity-includes-evidence-key
 
@@ -521,7 +589,7 @@ identity with `memoryMarkOperationId(sessionId, args)`
 (`command-handler.ts:415`,
 `packages/pi-plugin/src/commands/eidnara-memory-mark.ts:61`).
 Status: active
-Exercised: yes - `memory-mark-command.test.ts:201` files a dispute by id
+Exercised: yes - `memory-mark-command.test.ts:212` files a dispute by id
 and one by file in one session: two identities, two commits, two
 receipts; a repeat of the first replays with `replayed: true` and no new
 receipt. `dispute_identities_land_replay_and_refuse_reuse_like_every_envelope`
@@ -539,9 +607,9 @@ operation_key)` (the unique index on `commit_log`,
 `crates/kernel/src/schema.rs:26`); (b)
 `memoryMarkOperationId(s, a) == memoryMarkOperationId(s, b)` exactly when
 `a` and `b` name the same event, object, and evidence
-(`memory-mark-command.ts:189-194`, `:144-154`); (c) every identity field
+(`memory-mark-command.ts:210-215`, `:152-162`); (c) every identity field
 is free of U+001F (the parser refuses it in the object id, evidence id,
-and path, `memory-mark-command.ts:79`, `:116-121`). Holds on every
+and path, `memory-mark-command.ts:80`, `:124-129`). Holds on every
 request, so `always`.
 Fault/timing angle: a lost response followed by the client's reissue
 under the same identity must replay. The receipt lookup precedes the
@@ -552,22 +620,23 @@ in one session; an identical repeat; the same key with other bytes.
 Confidence: high - [evidence](evidence/dispute-identity-includes-evidence-key.md).
 Read `memoryMarkOperationId`, `evidenceFlags`, `parseMemoryMarkArgs`, and
 the two tests.
-Existing check: `memory-mark-command.test.ts:201`; `kernel_routes.rs:6080`.
+Existing check: `memory-mark-command.test.ts:212`; `kernel_routes.rs:6080`.
 Status unaudited.
 Impact: a second piece of evidence would be refused with a message about
 a reused key and the record would keep only the first.
 Open questions:
 - `--evidence A --path p@o` and `--path p@o --evidence A` produce one
   identity because `evidenceFlags` orders the flags
-  (`memory-mark-command.ts:144-154`); the parser test asserts both orders
-  parse (`memory-mark-command.test.ts:99`) but no test asserts the two
-  identities are equal. Read, not exercised.
+  (`memory-mark-command.ts:152-162`); `both flag orders parse to one args
+  value and one identity` (`memory-mark-command.test.ts:706`) parses both
+  orders and asserts equal `args` and equal `memoryMarkOperationId`
+  results. Exercised.
 
 ### dispute-preview-writes-nothing
 
 Type: safety
 Reachability: default-production - `runMemoryMarkCommand` previews before
-every commit (`memory-mark-command.ts:222`); the route refuses a preview
+every commit (`memory-mark-command.ts:265`); the route refuses a preview
 of anything other than dispositions (`commit.rs:1149-1157`).
 Status: active
 Exercised: yes - `assert_refused_without_writing`
@@ -582,7 +651,7 @@ reference with counts unchanged and then commits it.
 retires the evidence's only project citer, and commits: the commit
 answers `not_found` and writes nothing, so the commit's verdict is the
 one that holds when the tip moves.
-`memory-mark-command.test.ts:242` reports a refused preview by name with
+`memory-mark-command.test.ts:325` reports a refused preview by name with
 no receipt and one call.
 Guarantee: A `preview: true` envelope carrying the evidence fields runs
 the same form, liveness, and visibility checks as the commit, writes no
@@ -596,7 +665,7 @@ evidence check runs inside `disposition_request`, which both paths call
 (`commit.rs:788`, `:833`).
 Fault/timing angle: a commit between preview and commit can change the
 answer; the commit's verdict is the one recorded
-(`memory-mark-command.ts:243-244`). Constructed at the route by
+(`memory-mark-command.ts:301-302`). Constructed at the route by
 `kernel_routes.rs:6416`.
 Required faults and enabling state: a preview of each refused input and
 of a valid one at the same tip as the following commit; a commit between
@@ -604,13 +673,13 @@ a preview and its commit that changes the verdict.
 Confidence: high - [evidence](evidence/dispute-preview-writes-nothing.md).
 Read the handler, `preview` (`commit.rs:875-895`), and the helper.
 Existing check: `kernel_routes.rs:5703`, `:5801`, `:5880`, `:5971`,
-`:6416`; `memory-mark-command.test.ts:242`. Status unaudited.
+`:6416`; `memory-mark-command.test.ts:325`. Status unaudited.
 Impact: a writing preview would record disputes the user declined; a
 disagreeing one would ask the wrong question.
 Open questions:
 - The preview reports the subject's visibility only; a dispute on an
   approval also demotes its dependents in the commit. The limit is
-  documented (`commit.rs:60-63`, `memory-mark-command.ts:53`) and tracked
+  documented (`commit.rs:60-63`, `memory-mark-command.ts:54`) and tracked
   as G2 on `disposition-on-an-authority-bearer-demotes-dependents-in-the-same-commit`.
 
 ### structured-reason-projects-typed-reporter-data
@@ -628,11 +697,11 @@ Exercised: partial - the PR A form is active and exercised:
 a reference; `a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field`
 (`kernel_routes.rs:6252`) sends a forged `reason` and asserts an error
 with the four row counts unchanged, so the client cannot supply the
-reason; `dispute.rs:232`, `:246`, `:404` cover the documented rendering,
+reason; `dispute.rs:238`, `:252`, `:440` cover the documented rendering,
 the round trip over reserved and non-ASCII bytes, and refusal of every
-rendering `render` does not produce; `dispute.rs:280` pins `encode` and
+rendering `render` does not produce; `dispute.rs:286` pins `encode` and
 `decode` on reserved and multi-byte input; the proptest at
-`dispute.rs:292` asserts every accepted value renders an ASCII reason
+`dispute.rs:298` asserts every accepted value renders an ASCII reason
 within the cap that parses back to its inputs. The typed form (reporter
 columns and `event_payload`) arrives in PR B (#1162) and is not yet
 exercised.
@@ -644,7 +713,7 @@ Check: `always` - for every row whose reason starts with `v=1;`:
 `parse(reason)` is `Some`, `render(parse(reason)) == reason`, `reason` is
 ASCII, `len(reason) <= MAX_REASON_BYTES` (`dispute.rs:14`), and
 `redact_durable_text(reason).detections` is empty
-(`dispute.rs:77-79`). The Kernel stores `redact_lossy(reason)`
+(`dispute.rs:72-76`). The Kernel stores `redact_lossy(reason)`
 (`crates/kernel/src/redaction.rs:41-42` calls the same
 `redact_durable_text`), so no `durable_text_redactions` row exists for a
 route-written reason. Holds on every write, so `always`.
@@ -655,11 +724,11 @@ dispute on an approval so the cascade copies the reason; a body carrying
 its own `reason`.
 Confidence: high - [evidence](evidence/structured-reason-projects-typed-reporter-data.md).
 Read `render`, `parse`, `encode`, `decode`, `decodes_to_itself`
-(`dispute.rs:83-207`), and the Kernel `reason` path
+(`dispute.rs:83-213`), and the Kernel `reason` path
 (`admission.rs:1689`). The redaction-row absence for a landed dispute is
 argued from the shared detector, not asserted by a test.
 Existing check: `kernel_routes.rs:5880`, `:5723`, `:6199`, `:6252`,
-`:6285`; `dispute.rs:232`, `:246`, `:280`, `:292`, `:390`, `:404`.
+`:6285`; `dispute.rs:238`, `:252`, `:286`, `:298`, `:400`, `:440`.
 Status unaudited.
 Impact: a reader could not recover the reporter or the reference, and PR
 B could not be checked against PR A rows.

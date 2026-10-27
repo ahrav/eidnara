@@ -98,7 +98,7 @@ demotion, and does not read `kernel.read`.
 ### Q: Is a plugin-filed dispute of an approval, and its cascade, intended behavior under "the report adds data, not authority"?
 
 - Sources examined: P4 KTD4, R4; index D3 and D7; `admission.rs:1041-
-  1139`, `:843-856`; route test `:5493`.
+  1139`, `:843-856`; route test `kernel_routes.rs:5493`.
 - Findings: the code admits it and the route test exercises the quarantine
   variant without commenting on intent. The plan's authority invariants
   speak to promotion only.
@@ -122,8 +122,8 @@ demotion, and does not read `kernel.read`.
 - Sources examined: `PreviewRun::disposition`
   (`crates/daemon/src/kernel_routes/commit.rs:825-864`), `changes_to`
   (`:537-542`), the route module header (`commit.rs:60-63`), the command
-  usage (`packages/opencode-plugin/src/shared/memory-mark-command.ts:53`)
-  and its test (`memory-mark-command.test.ts:156`), and PR A's
+  usage (`packages/opencode-plugin/src/shared/memory-mark-command.ts:54`)
+  and its test (`memory-mark-command.test.ts:167`), and PR A's
   `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents`
   (`crates/daemon/tests/kernel_routes.rs:6199`).
 - Findings: the preview computes `current` and `projected` for the

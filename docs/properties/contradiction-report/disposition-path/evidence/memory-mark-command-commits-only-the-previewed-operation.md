@@ -17,37 +17,38 @@ today.
 - One operation: `const operation: DispositionOperation = {op:
   "disposition", object_id, event}`, plus `evidence_id` and `evidence_ref`
   when the user gave them (PR A) (`packages/opencode-plugin/src/shared/
-  memory-mark-command.ts:209-215`); both calls send `operations:
-  [operation]` with the same `intent` object (`:222`, `:238`).
+  memory-mark-command.ts:247-254`); both calls send `operations:
+  [operation]` with the same `intent` object (`:255-264`, `:265`, `:296`).
 - Intent: `actor: input.actor`; `operationId: input.operationId`, which
   the callers derive with `memoryMarkOperationId(sessionId, args)` (PR A
   moved the derivation to the callers, `command-handler.ts:415`,
   `pi-plugin/src/commands/eidnara-memory-mark.ts:61`); `cause =
   commandLine(args)`, which appends the evidence flags
-  (`memory-mark-command.ts:157-159`); `sourceKind: "user"` (`:216-221`).
+  (`memory-mark-command.ts:165-167`);
+  `sourceKind` defaults to `"user"` (`:256` and `:261`).
 - `verdictFor` returns null unless `results.length == 1` and the single
-  verdict's `object_id` and `event` equal the operation's (`:197-205`).
-- Preview branch: `refused/preview` on a non-available state (`:223-224`);
+  verdict's `object_id` and `event` equal the operation's (`:218-226`).
+- Preview branch: `refused/preview` on a non-available state (`:266-267`);
   when `receipt` is present (replay) the preview judges nothing and
-  confirmation is skipped (`:226`); a null verdict is `refused/preview`
-  with `invalid("internal")` (`:227-229`); `denied` returns before any
-  commit (`:230`); confirmation only when `visibility_changes &&
-  !args.confirmed`, asked once (`:231-234`).
-- `isCancelled` is checked before the commit (`:236-237`).
-- Commit branch: non-available is `refused/commit` (`:239`); a null
+  confirmation is skipped (`:270`); a null verdict is `refused/preview`
+  with `invalid("internal")` (`:271-273`); `denied` returns before any
+  commit (`:274`); confirmation only when `visibility_changes &&
+  !args.confirmed`, asked once (`:289-292`).
+- `isCancelled` is checked before the commit (`:294-295`).
+- Commit branch: non-available is `refused/commit` (`:297`); a null
   verdict is `unavailable("outcome_unknown")` because a receipt exists
-  (`:240-242`); `denied` from the commit is reported as `denied` (`:244`);
-  otherwise `applied` with `commitSeq` and `replayed` (`:245-250`).
+  (`:298-300`); `denied` from the commit is reported as `denied` (`:302`);
+  otherwise `applied` with `commitSeq` and `replayed` (`:303-309`).
 - Actors: `user:opencode` (`hooks/context/command-handler.ts:391`),
   `user:pi` (`packages/pi-plugin/src/commands/eidnara-memory-mark.ts:18`).
 - Client: `targetIds` collects tokens for `supersede_decision` and
   `retire_decision` only (`client.ts:644-651`), so a disposition commit
   sends no tokens; `previewDispositions` sends `commitBody(.., true)`,
   which adds `preview: true` (`:597-641`, `:773`, `:789`).
-- Tests: `memory-mark-command.test.ts:260-514`, including the mismatched-
-  verdict matrix at `:443`; PR A adds `:174` (both bodies carry the same
-  operation with its evidence and `source_kind: "user"`), `:201`, and
-  `:242`.
+- Tests: `memory-mark-command.test.ts:343-598`, including the mismatched-
+  verdict matrix at `:527`; PR A adds `:185` (both bodies carry the same
+  operation with its evidence and `source_kind: "user"`), `:212`, and
+  `:325`.
 
 ## Failure scenario
 

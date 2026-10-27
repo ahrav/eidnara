@@ -2,17 +2,17 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
 import { MemoryInputError } from "@eidnara/opencode/shared/kernel-client/anti-memory";
 import {
-    EIDNARA_MEMORY_DESCRIPTION,
+    actionList,
     EIDNARA_MEMORY_TOOL_NAME,
     EIDNARA_MEMORY_UNWRAP_RULES,
+    eidnaraMemoryDescription,
     WRITABLE_MEMORY_CATEGORIES,
 } from "@eidnara/opencode/tools/eidnara-memory/constants";
-import {
-    EIDNARA_MEMORY_ACTOR,
-    executeEidnaraMemory,
-} from "@eidnara/opencode/tools/eidnara-memory/execute";
+import { executeEidnaraMemory } from "@eidnara/opencode/tools/eidnara-memory/execute";
 import {
     EIDNARA_MEMORY_ACTIONS,
+    EIDNARA_MEMORY_DEFAULT_ACTIONS,
+    EIDNARA_MEMORY_DISPUTE_EVENTS,
     type EidnaraMemoryAction,
     type EidnaraMemoryArgs,
     isEidnaraMemoryMutation,
@@ -50,37 +50,66 @@ const AntiMemorySchema = Type.Object(
     },
 );
 
-const ParamsSchema = Type.Object(
-    {
-        action: Type.Optional(
-            Type.String({
-                enum: EIDNARA_MEMORY_ACTIONS,
-                description: "create, get, revise, archive, or merge",
-            }),
-        ),
-        content: Type.Optional(
-            Type.String({ description: "Memory content for create/revise/merge" }),
-        ),
-        category: Type.Optional(
-            Type.String({
-                enum: WRITABLE_MEMORY_CATEGORIES,
-                description: `Memory category for create/revise/merge: ${WRITABLE_MEMORY_CATEGORIES.join(", ")}.`,
-            }),
-        ),
-        antiMemory: Type.Optional(AntiMemorySchema),
-        objectId: Type.Optional(Type.String({ description: "Object id for revise/archive" })),
-        objectIds: Type.Optional(
-            Type.Array(Type.String(), {
-                maxItems: 20,
-                description: "Object ids for get, or the objects merge folds into one survivor",
-            }),
-        ),
-        reason: Type.Optional(Type.String({ description: "Lifecycle-change reason" })),
-    },
-    { additionalProperties: true },
-);
+/**
+ * The actor every Pi `eidnara_memory` write records. The daemon does not verify
+ * it against the binding, and it enters the operation key, so a Pi tool call
+ * retried across the change from `agent:opencode` lands as a new write.
+ */
+export const PI_EIDNARA_MEMORY_ACTOR = "agent:pi";
 
-type EidnaraMemoryParams = Static<typeof ParamsSchema>;
+const SHARED_PARAMS = {
+    content: Type.Optional(Type.String({ description: "Memory content for create/revise/merge" })),
+    category: Type.Optional(
+        Type.String({
+            enum: WRITABLE_MEMORY_CATEGORIES,
+            description: `Memory category for create/revise/merge: ${WRITABLE_MEMORY_CATEGORIES.join(", ")}.`,
+        }),
+    ),
+    antiMemory: Type.Optional(AntiMemorySchema),
+    objectId: Type.Optional(Type.String({ description: "Object id for revise/archive" })),
+    objectIds: Type.Optional(
+        Type.Array(Type.String(), {
+            maxItems: 20,
+            description: "Object ids for get, or the objects merge folds into one survivor",
+        }),
+    ),
+    reason: Type.Optional(Type.String({ description: "Lifecycle-change reason" })),
+};
+
+/** The fields only `dispute` reads; exposed exactly when the allowlist admits it. */
+const DISPUTE_PARAMS = {
+    objectId: Type.Optional(Type.String({ description: "Object id for revise/archive/dispute" })),
+    event: Type.Optional(
+        Type.String({
+            enum: [...EIDNARA_MEMORY_DISPUTE_EVENTS],
+            description: "dispute event: mark_disputed or contradict",
+        }),
+    ),
+    evidenceId: Type.Optional(Type.String({ description: "Live evidence id a dispute cites" })),
+    path: Type.Optional(
+        Type.String({ description: "Relative repository path a dispute cites, with gitObjectId" }),
+    ),
+    gitObjectId: Type.Optional(
+        Type.String({ description: "40- or 64-character lowercase hex git object id for path" }),
+    ),
+};
+
+/** The `action` field lists exactly the actions the tool admits. */
+function paramsSchema(actions: readonly EidnaraMemoryAction[]) {
+    return Type.Object(
+        {
+            action: Type.Optional(
+                Type.String({ enum: [...actions], description: actionList(actions) }),
+            ),
+            ...SHARED_PARAMS,
+            ...(actions.includes("dispute") ? DISPUTE_PARAMS : {}),
+        },
+        { additionalProperties: true },
+    );
+}
+
+type ParamsSchema = ReturnType<typeof paramsSchema>;
+type EidnaraMemoryParams = Static<ParamsSchema>;
 
 function ok(text: string) {
     return { content: [{ type: "text" as const, text }], details: undefined };
@@ -98,16 +127,17 @@ export interface EidnaraMemoryToolDeps {
     /** Resolves the client bound to the calling session and filesystem project root. */
     kernelClient: KernelClientResolver;
     resolveProjectPath: (directory: string) => string | undefined;
+    /** The actions the tool admits; the default excludes `dispute`, as the OpenCode registry's does. */
+    allowedActions?: readonly EidnaraMemoryAction[];
 }
 
-export function createEidnaraMemoryTool(
-    deps: EidnaraMemoryToolDeps,
-): ToolDefinition<typeof ParamsSchema> {
+export function createEidnaraMemoryTool(deps: EidnaraMemoryToolDeps): ToolDefinition<ParamsSchema> {
+    const actions = deps.allowedActions ?? EIDNARA_MEMORY_DEFAULT_ACTIONS;
     return {
         name: EIDNARA_MEMORY_TOOL_NAME,
         label: "Eidnara: Memory",
-        description: EIDNARA_MEMORY_DESCRIPTION,
-        parameters: ParamsSchema,
+        description: eidnaraMemoryDescription(actions),
+        parameters: paramsSchema(actions),
         prepareArguments(raw) {
             if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
                 throw new MemoryInputError("eidnara_memory arguments must be an object");
@@ -130,9 +160,11 @@ export function createEidnaraMemoryTool(
                         "Error: approve and enforce are human-host-owned commands, not agent actions.",
                     );
                 }
+                // EIDNARA_MEMORY_ACTIONS bounds the actions a caller can authorize through the allowlist.
                 if (
                     typeof rawAction !== "string" ||
-                    !(EIDNARA_MEMORY_ACTIONS as readonly string[]).includes(rawAction)
+                    !(EIDNARA_MEMORY_ACTIONS as readonly string[]).includes(rawAction) ||
+                    !(actions as readonly string[]).includes(rawAction)
                 ) {
                     return err(
                         `Error: Action '${String(rawAction)}' is not allowed in this context.`,
@@ -163,7 +195,7 @@ export function createEidnaraMemoryTool(
                     args,
                     action,
                     identity: { sessionId, toolCallId: toolCallId || "read" },
-                    actor: EIDNARA_MEMORY_ACTOR,
+                    actor: PI_EIDNARA_MEMORY_ACTOR,
                     ...(signal ? { signal } : {}),
                 });
                 return text.startsWith("Error:") ? err(text) : ok(text);

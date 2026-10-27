@@ -9,7 +9,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 `CommitRequest.preview` doc: "Judges each disposition operation without
 writing: no commit-log row, no receipt, and no token check" (`commit.rs:
 122-125`). The TypeScript command's confirmation decision rests on the
-preview's verdict (`memory-mark-command.ts:222-235`). Lens: protocol
+preview's verdict (`memory-mark-command.ts:265-293`). Lens: protocol
 contracts and idempotency.
 
 ## Evidence trail
@@ -54,7 +54,7 @@ question about a change that does not happen, or skip one that does.
 
 Preview and commit are separate requests; the object or its approval can
 move between them. The command treats the commit's verdict as recorded
-(`memory-mark-command.ts:243-244`). Inside one preview, an earlier
+(`memory-mark-command.ts:301-302`). Inside one preview, an earlier
 operation's judged state feeds the next (`PreviewRun.judged`,
 `commit.rs:800-804`, `:831-835`, `:842-845`).
 

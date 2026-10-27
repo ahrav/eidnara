@@ -52,7 +52,7 @@ event".
 
 Evidence: `commit_log` columns are `commit_seq, transaction_id,
 writer_epoch, producer, operation_key, request_digest, recorded_at, actor,
-cause` (`schema.rs:26`; insert `envelope.rs:1420-1436`). `IntentRequest`
+cause` (`schema.rs:26`; insert `envelope.rs:1484-1499`). `IntentRequest`
 carries `producer, operation_key, request_digest, actor, cause`
 (`project.rs:139-146`). The transport strips `session_id` before the body
 is parsed (`mod.rs:461-473`). `operation_key` is
@@ -73,7 +73,7 @@ identities; model output never names an evidence id (P2 KTD3, P4 KTD2)."
 
 Plan R5: the `eidnara_memory` tool action `dispute` accepts `evidence_id`
 or `path` plus `git_object_id`; the tool is the model's surface
-(`EIDNARA_MEMORY_ACTOR = "agent:opencode"`, `execute.ts:49`).
+(`EIDNARA_MEMORY_ACTOR = "agent:opencode"`, `execute.ts:50`).
 
 Evidence: both statements are in the plan set; the code has neither. The
 CI gate "Invented provenance" exists (index, common verification). Whether
@@ -89,9 +89,11 @@ Not resolvable from code. See Q11 (needs human input).
 
 Plan R5: the tool sends `actor: agent:<harness>`.
 
-Evidence: both harnesses send the constant `agent:opencode`
-(`packages/opencode-plugin/src/tools/eidnara-memory/execute.ts:49`;
-`packages/pi-plugin/src/tools/eidnara-memory.ts:166`). The daemon knows
+Evidence: before #1161 both harnesses sent the constant `agent:opencode`;
+#1161 keeps it for OpenCode
+(`packages/opencode-plugin/src/tools/eidnara-memory/execute.ts:50`) and
+gives the Pi tool `agent:pi`
+(`packages/pi-plugin/src/tools/eidnara-memory.ts:58`). The daemon knows
 the bound harness (`RouteScope.harness`, `mod.rs:410`) and does not check
 the actor against it; the actor is a claim (`docs/host-wire-protocol.md:
 26`).
@@ -109,16 +111,20 @@ list). See Q4.
 Plan: none of R1 to R7 mentions the operation identity; the plan assumes a
 dispute with evidence rides today's envelope.
 
-Evidence: `memoryMarkOperationId` is `[sessionId, event, objectId]`
-(`memory-mark-command.ts:190-194`); `deriveRequestDigest` covers the
-operations (`client.ts:272-281`); a stored receipt with a different digest
-is `KernelError::Conflict` (`envelope.rs:1386-1388`), which `run` maps to
+Evidence at `3a3b916b7`: `memoryMarkOperationId` was `[sessionId, event,
+objectId]`; `deriveRequestDigest` covers the operations
+(`client.ts:272-281`); a stored receipt with a different digest is
+`KernelError::Conflict` (`envelope.rs:1385-1387`), which `run` maps to
 `OperationKeyReused` when raised before entering the closure
 (`commit.rs:1062-1070`).
 
-Consequence: a user who disputes the same finding twice in one session with
-different evidence gets `operation_key_reused`. The tool's identity is per
-tool call (`execute.ts:429-431`) and does not collide. See Q2.
+Consequence at `3a3b916b7`: a user who disputed the same finding twice in
+one session with different evidence got `operation_key_reused`. PR A
+closed it: `memoryMarkOperationId` appends the evidence flags
+(`memory-mark-command.ts:210-215`), so two pieces of evidence are two
+identities; see `domain-model.md` section 7.3 and
+`memory-mark-command.test.ts:212`. The tool's identity is per tool call
+(`execute.ts:430-432`) and never collided. See Q2.
 
 ### C6. U3 typed columns cannot be backfilled from PR A rows
 
@@ -142,7 +148,7 @@ typed columns" can mean. See Q6.
 The plan cites `derive_classes` at `commit.rs:226-240` (HEAD: `:368-378`),
 `disposition_request` evidence at `:590-596` (HEAD `3a3b916b7`: `:595-596`;
 PR A: `:731-732`), and the
-reporter join at `envelope.rs:1343-1352` (HEAD: insert at `:1420-1436`).
+reporter join at `envelope.rs:1342-1351` (HEAD: insert at `:1484-1499`).
 Shared-facts corrections are in `domain-model.md` section 0. No semantic
 claim changes.
 
@@ -204,12 +210,12 @@ Options:
 Recommendation: (a). It matches the plan's objective (evidence recorded so
 a later reader can check it: two references, two rows) and keeps the
 replay guarantee the command's doc comment promises (PR A implements (a):
-`memoryMarkOperationId`, `memory-mark-command.ts:189-194`). Alternative: (b), if the product wants one
+`memoryMarkOperationId`, `memory-mark-command.ts:210-215`). Alternative: (b), if the product wants one
 dispute per session and a clear "already disputed" message. (c) loses the
 replay property and is not recommended. Under (a), the evidence key must be
 U+001F-free (`client.ts:247-255`); A4 excludes NUL only, so the parser must
 also refuse U+001F in `path` as it does for `object_id`
-(`memory-mark-command.ts:116-118`).
+(`memory-mark-command.ts:124-126`).
 
 ### Q3. How the reporting session is joinable (needs human input)
 
@@ -305,16 +311,17 @@ admission. Alternative (b) is a retention-policy change and needs an owner.
 ### Q8. Replay response shape for a committed dispute
 
 Fact: a replayed preview returns `previews: []` with the receipt
-(`commit.rs:1163-1170`); the TS command treats a commit receipt with no
-matching verdict as `outcome_unknown` (`memory-mark-command.ts:241-242`).
-Whether a replayed commit returns the stored verdict list was not traced
-end to end here.
+(`commit.rs:1163-1170`); a replayed commit deserializes the stored
+receipt and returns its `dispositions` (`commit.rs:1188-1204`), and
+`dispute_identities_land_replay_and_refuse_reuse_like_every_envelope`
+asserts the replayed list equals the first response
+(`kernel_routes.rs:6114-6121`). The TS command therefore reports the
+stored verdict with `replayed: true`; its `outcome_unknown` branch
+(`memory-mark-command.ts:299-300`) covers a commit response that omits
+the verdict.
 
-Recommendation: the commit replay returns the stored `result` so the
-client reports "already recorded (replayed)" rather than
-`outcome_unknown`. Alternative: keep today's shape and have the client
-treat `replayed: true` as applied. Verify the actual replay body before
-choosing.
+Resolution: the recommended shape is already the route's behavior; no
+change needed.
 
 ### Q9. A dispute against a more restrictive prior (needs human input)
 
@@ -328,7 +335,7 @@ Options:
 
 - (a) Keep the table: the row lands `denied`, the evidence is on it, the
   client reports "denied" (today's `denied` outcome,
-  `memory-mark-command.ts:244`).
+  `memory-mark-command.ts:302`).
 - (b) Refuse at the route before writing when the requested disposition
   is less restrictive than the prior, so no evidence is recorded against a
   finding that is already more than disputed.

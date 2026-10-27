@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type DispositionPreview, KernelClient } from "./kernel-client";
+import { type DispositionPreview, deriveRequestDigest, KernelClient } from "./kernel-client";
 import { FakeKernel, FakeKernelTransport } from "./kernel-client-testing/fake-kernel";
 import {
     formatMemoryMarkOutcome,
@@ -48,6 +48,13 @@ function args(event: MemoryMarkArgs["event"], objectId: string, confirmed = fals
     return event === "mark_disputed" || event === "contradict"
         ? { event, objectId, evidenceRef: { path: "src/lib.rs", git_object_id: OID }, confirmed }
         : { event, objectId, confirmed };
+}
+
+/** A replayed identity answers its receipt without a preview, so it carries no visibility verdict. */
+function replayOf(first: Awaited<ReturnType<typeof runMemoryMarkCommand>>) {
+    if (first.kind !== "applied") throw new Error(first.kind);
+    const { visibilityChanged: _judged, ...receipt } = first;
+    return { ...receipt, replayed: true };
 }
 
 /** Confirmation is refused by default so a test that expects none fails loudly if it is asked. */
@@ -235,7 +242,7 @@ describe("runMemoryMarkCommand evidence", () => {
         expect(second).toMatchObject({ kind: "applied", replayed: false });
         expect(h.kernel.receipts.size).toBe(2);
         const again = await run(h, byId);
-        expect(again).toEqual({ ...first, replayed: true });
+        expect(again).toEqual(replayOf(first));
         expect(h.kernel.receipts.size).toBe(2);
     });
 
@@ -349,6 +356,7 @@ describe("runMemoryMarkCommand", () => {
             },
             commitSeq: 3,
             replayed: false,
+            visibilityChanged: false,
         });
         expect(h.kernel.objects.get("mem_labeled")?.disposition).toBe("stale");
         expect(h.transport.methods()).toEqual(["kernel.commit", "kernel.commit"]);
@@ -417,7 +425,7 @@ describe("runMemoryMarkCommand", () => {
         const h = harness();
         const first = await run(h, args("mark_disputed", "mem_labeled"));
         const again = await run(h, args("mark_disputed", "mem_labeled"));
-        expect(again).toEqual({ ...first, replayed: true });
+        expect(again).toEqual(replayOf(first));
         expect(h.kernel.receipts.size).toBe(1);
         expect(formatMemoryMarkOutcome(again, args("mark_disputed", "mem_labeled"))).toContain(
             "replayed receipt",
@@ -432,7 +440,7 @@ describe("runMemoryMarkCommand", () => {
         const receipts = h.kernel.receipts.size;
         // Judged fresh, `mark_stale` on a quarantined object would be a denied relaxation.
         const again = await run(h, args("mark_stale", "mem_labeled"));
-        expect(again).toEqual({ ...first, replayed: true });
+        expect(again).toEqual(replayOf(first));
         expect(h.kernel.receipts.size).toBe(receipts);
         expect(h.kernel.objects.get("mem_labeled")?.disposition).toBe("quarantined");
     });
@@ -586,5 +594,126 @@ describe("runMemoryMarkCommand", () => {
             state: { kind: "unavailable", reason: "outcome_unknown" },
         });
         expect(commits).toBe(1);
+    });
+});
+
+describe("runMemoryMarkCommand cancellation", () => {
+    test("the caller's signal reaches the preview and the commit", async () => {
+        const h = harness();
+        const controller = new AbortController();
+        const input = args("contradict", "mem_verified", true);
+        const outcome = await runMemoryMarkCommand({
+            client: h.client,
+            operationId: memoryMarkOperationId(SESSION, input),
+            actor: "user:test",
+            args: input,
+            signal: controller.signal,
+        });
+        expect(outcome).toMatchObject({ kind: "applied", replayed: false });
+        expect(h.transport.calls).toHaveLength(2);
+        for (const call of h.transport.calls) expect(call.signal).toBe(controller.signal);
+    });
+});
+
+describe("runMemoryMarkCommand approval authority", () => {
+    function approvedQuarantine() {
+        const h = harness();
+        h.kernel.seedApproval("approval-1", PROJECT);
+        const object = h.kernel.seedDecision({
+            object_id: "mem_held",
+            decision_kind: "PROJECT_RULES",
+            summary: "held",
+            disposition: "quarantined",
+            projectRoot: PROJECT,
+        });
+        object.approval_object_id = "approval-1";
+        return h;
+    }
+
+    test("an assistant-sourced dispute is denied a relaxation the stored approval would admit", async () => {
+        const h = approvedQuarantine();
+        const input = args("mark_disputed", "mem_held", true);
+        const outcome = await runMemoryMarkCommand({
+            client: h.client,
+            operationId: memoryMarkOperationId(SESSION, input),
+            actor: "agent:test",
+            sourceKind: "assistant",
+            args: input,
+        });
+        expect(outcome).toMatchObject({
+            kind: "denied",
+            result: {
+                object_id: "mem_held",
+                event: "mark_disputed",
+                previous_disposition: "quarantined",
+                disposition: "quarantined",
+                denied: true,
+            },
+        });
+        expect(
+            h.transport.calls.map((call) => (call.body as { preview?: boolean }).preview),
+        ).toEqual([true]);
+        expect(h.kernel.receipts.size).toBe(0);
+        expect(h.kernel.objects.get("mem_held")?.disposition).toBe("quarantined");
+    });
+
+    test("a user command relaxes through the stored approval", async () => {
+        const h = approvedQuarantine();
+        const outcome = await run(h, args("mark_disputed", "mem_held", true));
+        expect(outcome).toMatchObject({
+            kind: "applied",
+            result: { previous_disposition: "quarantined", disposition: "disputed", denied: false },
+        });
+        expect(h.kernel.objects.get("mem_held")?.disposition).toBe("disputed");
+    });
+});
+
+describe("runMemoryMarkCommand request digest", () => {
+    test("the preview and the commit carry one digest of the operation and the source kind", async () => {
+        for (const sourceKind of ["user", "assistant"] as const) {
+            const h = harness();
+            const input = args("contradict", "mem_verified", true);
+            const outcome = await runMemoryMarkCommand({
+                client: h.client,
+                operationId: memoryMarkOperationId(SESSION, input),
+                actor: "user:test",
+                args: input,
+                ...(sourceKind === "user" ? {} : { sourceKind }),
+            });
+            expect(outcome).toMatchObject({ kind: "applied", replayed: false });
+            const bodies = h.transport.calls.map((call) => call.body as Record<string, any>);
+            expect(bodies.map((body) => body.preview === true)).toEqual([true, false]);
+            const digest = deriveRequestDigest({
+                operations: [
+                    {
+                        op: "disposition",
+                        object_id: "mem_verified",
+                        event: "contradict",
+                        evidence_ref: { path: "src/lib.rs", git_object_id: OID },
+                    },
+                ],
+                sourceKind,
+            });
+            for (const body of bodies) {
+                expect(body.source_kind).toBe(sourceKind);
+                expect(body.intent.request_digest).toBe(digest);
+            }
+        }
+    });
+});
+
+describe("memoryMarkOperationId flag order", () => {
+    test("both flag orders parse to one args value and one identity", () => {
+        const pathFirst = parseMemoryMarkArgs(
+            `mark_disputed mem_1 --path src/a.rs@${OID} --evidence ev`,
+        );
+        const evidenceFirst = parseMemoryMarkArgs(
+            `mark_disputed mem_1 --evidence ev --path src/a.rs@${OID}`,
+        );
+        if (!pathFirst.ok || !evidenceFirst.ok) throw new Error("both orders parse");
+        expect(evidenceFirst.args).toEqual(pathFirst.args);
+        expect(memoryMarkOperationId(SESSION, evidenceFirst.args)).toBe(
+            memoryMarkOperationId(SESSION, pathFirst.args),
+        );
     });
 });

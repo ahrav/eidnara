@@ -1,9 +1,15 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
+import { CONTEXT_RESEARCHER_AGENT } from "../../agents/context-researcher";
 import { resolveSessionDirectory } from "../../hooks/context/session-directory";
+import { HostCallError } from "../../shared/host-client/errors";
 import { KernelClient, TokenCache } from "../../shared/kernel-client";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import { createEidnaraMemoryTools } from "./tools";
-import { EIDNARA_MEMORY_ACTIONS, type EidnaraMemoryAction } from "./types";
+import {
+    EIDNARA_MEMORY_ACTIONS,
+    EIDNARA_MEMORY_DEFAULT_ACTIONS,
+    type EidnaraMemoryAction,
+} from "./types";
 
 const PROJECT = "git:kernel-opencode";
 const ROOT = "/tmp/kernel-opencode";
@@ -1189,7 +1195,23 @@ describe("eidnara_memory action allowlist", () => {
         expect(tool.transport.calls).toHaveLength(0);
     });
 
-    test("an omitted allowlist admits every action", async () => {
+    test("an omitted allowlist admits the default actions, which exclude dispute", async () => {
+        const tool = toolWith(undefined);
+        expect(
+            await tool.execute(
+                {
+                    action: "dispute",
+                    objectId: "mem_allow",
+                    event: "mark_disputed",
+                    evidenceId: "e",
+                },
+                "call-dispute-default",
+            ),
+        ).toBe("Error: Action 'dispute' is not allowed in this context.");
+        expect(tool.transport.calls).toHaveLength(0);
+    });
+
+    test("an omitted allowlist admits every default action", async () => {
         const tool = toolWith(undefined);
         const text = await tool.execute(
             { action: "get", objectIds: ["mem_allow"] },
@@ -1255,5 +1277,304 @@ describe("eidnara_memory response byte budget", () => {
         expect(got.memories[0].content.endsWith("… [truncated]")).toBeTrue();
         expect(got.memories[0].content.length).toBeLessThan(2 * 1024);
         expect(got.elidedObjectIds).toBeUndefined();
+    });
+});
+
+describe("eidnara_memory dispute", () => {
+    const OID = "0123456789abcdef0123456789abcdef01234567";
+
+    function disputeHarness(
+        allowedActions: readonly EidnaraMemoryAction[] = EIDNARA_MEMORY_ACTIONS,
+        transportFor: (kernel: FakeKernel) => FakeKernelTransport = (kernel) =>
+            new FakeKernelTransport(kernel),
+    ) {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({
+            object_id: "mem_labeled",
+            decision_kind: "ARCHITECTURE",
+            summary: "l",
+        });
+        kernel.seedDecision({
+            object_id: "mem_verified",
+            decision_kind: "ARCHITECTURE",
+            summary: "v",
+            labeled: false,
+        });
+        kernel.seedDecision({
+            object_id: "mem_quarantined",
+            decision_kind: "ARCHITECTURE",
+            summary: "q",
+            disposition: "quarantined",
+        });
+        const transport = transportFor(kernel);
+        const definition = createEidnaraMemoryTools({
+            kernelClient: ({ sessionId, projectRoot }) =>
+                new KernelClient({ transport, enabled: true, sessionId, projectRoot }),
+            resolveProjectPath: () => PROJECT,
+            allowedActions: [...allowedActions],
+        }).eidnara_memory;
+        const execute = (
+            args: Record<string, unknown>,
+            callID: string | undefined,
+            agent = "primary",
+        ) =>
+            definition.execute(
+                args as never,
+                { sessionID: SESSION, directory: ROOT, callID, agent } as never,
+            ) as Promise<string>;
+        return { definition, execute, transport, kernel };
+    }
+
+    const byId = {
+        action: "dispute",
+        objectId: "mem_labeled",
+        event: "mark_disputed",
+        evidenceId: "ev-1",
+    };
+
+    function commits(transport: FakeKernelTransport) {
+        return transport.calls
+            .filter((call) => call.method === "kernel.commit")
+            .map((call) => call.body as Record<string, any>);
+    }
+
+    test("is a gated mutation: tool-call identity, agent, and allowlist", async () => {
+        const h = disputeHarness();
+        expect(await h.execute(byId, undefined)).toContain("requires a stable tool-call identity");
+        expect(await h.execute(byId, "call-r", CONTEXT_RESEARCHER_AGENT)).toContain(
+            "not available to the context_researcher agent",
+        );
+        const narrowed = disputeHarness(["get"]);
+        expect(await narrowed.execute(byId, "call-n")).toBe(
+            "Error: Action 'dispute' is not allowed in this context.",
+        );
+        expect(h.transport.calls).toHaveLength(0);
+        expect(narrowed.transport.calls).toHaveLength(0);
+        expect(EIDNARA_MEMORY_DEFAULT_ACTIONS).not.toContain("dispute");
+        for (const forbidden of ["approve", "enforce"]) {
+            expect(EIDNARA_MEMORY_ACTIONS as readonly string[]).not.toContain(forbidden);
+        }
+    });
+
+    test("is in the exposed schema exactly when the allowlist names it", () => {
+        const shapeOf = (actions: readonly EidnaraMemoryAction[]) =>
+            disputeHarness(actions).definition.args as Record<string, any>;
+        const allowed = shapeOf(EIDNARA_MEMORY_ACTIONS);
+        const defaulted = shapeOf(EIDNARA_MEMORY_DEFAULT_ACTIONS);
+        expect(allowed.action.safeParse("dispute").success).toBeTrue();
+        expect(defaulted.action.safeParse("dispute").success).toBeFalse();
+        for (const field of ["event", "evidenceId", "path", "gitObjectId"]) {
+            expect(Object.hasOwn(allowed, field)).toBeTrue();
+            expect(Object.hasOwn(defaulted, field)).toBeFalse();
+        }
+        expect(disputeHarness(EIDNARA_MEMORY_ACTIONS).definition.description).toContain("dispute:");
+        expect(disputeHarness(EIDNARA_MEMORY_DEFAULT_ACTIONS).definition.description).not.toContain(
+            "dispute:",
+        );
+    });
+
+    test("sends the evidence under the tool identity, actor, cause, and assistant source kind", async () => {
+        const h = disputeHarness();
+        const text = await h.execute(byId, "call-1");
+        expect(JSON.parse(text)).toEqual({
+            action: "dispute",
+            outcome: "applied",
+            objectId: "mem_labeled",
+            event: "mark_disputed",
+            previousDisposition: "active",
+            disposition: "disputed",
+            commitSeq: expect.any(Number),
+            replayed: false,
+            visibilityChanged: false,
+        });
+        const [preview, commit] = commits(h.transport);
+        for (const body of [preview, commit]) {
+            expect(body.operations).toEqual([
+                {
+                    op: "disposition",
+                    object_id: "mem_labeled",
+                    event: "mark_disputed",
+                    evidence_id: "ev-1",
+                },
+            ]);
+            expect(body.source_kind).toBe("assistant");
+            expect(body.asserted_source_class).toBeUndefined();
+            expect(body.asserted_taint_class).toBeUndefined();
+            expect(body.intent).toMatchObject({
+                actor: "agent:opencode",
+                cause: "eidnara_memory dispute call-1",
+            });
+        }
+        expect(preview.preview).toBeTrue();
+
+        const byFile = await h.execute(
+            {
+                action: "dispute",
+                objectId: "mem_verified",
+                event: "contradict",
+                path: "src/a.rs",
+                gitObjectId: OID,
+            },
+            "call-2",
+        );
+        expect(JSON.parse(byFile)).toEqual({
+            action: "dispute",
+            outcome: "applied",
+            objectId: "mem_verified",
+            event: "contradict",
+            previousDisposition: "active",
+            disposition: "contradicted",
+            commitSeq: expect.any(Number),
+            replayed: false,
+            visibilityChanged: true,
+        });
+        expect(commits(h.transport).at(-1)?.operations[0].evidence_ref).toEqual({
+            path: "src/a.rs",
+            git_object_id: OID,
+        });
+    });
+
+    function callWithAbort(
+        h: ReturnType<typeof disputeHarness>,
+        signal: AbortSignal,
+        callID: string,
+    ) {
+        return h.definition.execute(
+            byId as never,
+            {
+                sessionID: SESSION,
+                directory: ROOT,
+                callID,
+                agent: "primary",
+                abort: signal,
+            } as never,
+        ) as Promise<string>;
+    }
+
+    test("an aborted tool call sends nothing", async () => {
+        const h = disputeHarness();
+        const controller = new AbortController();
+        controller.abort();
+        const text = await callWithAbort(h, controller.signal, "call-abort");
+        expect(text).toStartWith("Error: dispute refused at preview");
+        expect(h.transport.calls).toHaveLength(0);
+        expect(h.kernel.receipts.size).toBe(0);
+    });
+
+    test("an abort while the commit is unbound stops the rebind and the resend", async () => {
+        const controller = new AbortController();
+        class UnboundCommitTransport extends FakeKernelTransport {
+            private unbound = false;
+            override async call(args: Parameters<FakeKernelTransport["call"]>[0]) {
+                const body = args.body as { preview?: boolean };
+                if (args.method === "kernel.commit" && body.preview !== true && !this.unbound) {
+                    this.unbound = true;
+                    this.calls.push(args);
+                    controller.abort();
+                    throw new HostCallError("terminal", "no binding", "route_unbound");
+                }
+                return super.call(args);
+            }
+        }
+        const h = disputeHarness(
+            EIDNARA_MEMORY_ACTIONS,
+            (kernel) => new UnboundCommitTransport(kernel),
+        );
+        const text = await callWithAbort(h, controller.signal, "call-unbound");
+        expect(text).toStartWith("Error: dispute refused at commit");
+        expect(h.transport.rebinds).toBe(0);
+        expect(commits(h.transport).filter((body) => body.preview !== true)).toHaveLength(1);
+        expect(h.kernel.receipts.size).toBe(0);
+        expect(h.kernel.objects.get("mem_labeled")?.disposition).toBe("active");
+    });
+
+    test("never relaxes a disposition through the memory's stored approval", async () => {
+        const h = disputeHarness();
+        h.kernel.seedApproval("approval-1");
+        const held = h.kernel.seedDecision({
+            object_id: "mem_held",
+            decision_kind: "ARCHITECTURE",
+            summary: "h",
+            disposition: "quarantined",
+        });
+        held.approval_object_id = "approval-1";
+        const text = await h.execute({ ...byId, objectId: "mem_held" }, "call-held");
+        expect(JSON.parse(text)).toEqual({
+            action: "dispute",
+            outcome: "denied",
+            objectId: "mem_held",
+            event: "mark_disputed",
+            previousDisposition: "quarantined",
+            disposition: "quarantined",
+        });
+        expect(commits(h.transport).filter((body) => body.preview !== true)).toHaveLength(0);
+        expect(h.kernel.objects.get("mem_held")?.disposition).toBe("quarantined");
+    });
+
+    test("a retry with the same tool-call id replays; a new tool-call id is a second write", async () => {
+        const h = disputeHarness();
+        const first = JSON.parse(await h.execute(byId, "call-a"));
+        const again = JSON.parse(await h.execute(byId, "call-a"));
+        expect(again).toEqual({
+            action: "dispute",
+            outcome: "applied",
+            objectId: "mem_labeled",
+            event: "mark_disputed",
+            previousDisposition: first.previousDisposition,
+            disposition: first.disposition,
+            commitSeq: first.commitSeq,
+            replayed: true,
+        });
+        const receipts = h.kernel.receipts.size;
+        const second = JSON.parse(await h.execute(byId, "call-b"));
+        expect(second.replayed).toBeFalse();
+        expect(h.kernel.receipts.size).toBe(receipts + 1);
+    });
+
+    test("refuses missing evidence and unsupported events before sending; renders denials and refusals", async () => {
+        const h = disputeHarness();
+        for (const args of [
+            { action: "dispute", objectId: "mem_labeled", event: "mark_disputed" },
+            { action: "dispute", objectId: "mem_labeled", event: "mark_disputed", evidenceId: "" },
+            {
+                action: "dispute",
+                objectId: "mem_labeled",
+                event: "mark_disputed",
+                path: "",
+                gitObjectId: "",
+            },
+            {
+                action: "dispute",
+                objectId: "mem_labeled",
+                event: "mark_disputed",
+                path: "src/a.rs",
+            },
+            { action: "dispute", event: "mark_disputed", evidenceId: "ev" },
+        ]) {
+            expect(await h.execute(args, "call-usage")).toStartWith(
+                "Error: dispute needs objectId",
+            );
+        }
+        expect(await h.execute({ ...byId, event: "quarantine" }, "call-event")).toStartWith(
+            "Error: dispute event 'quarantine' is not supported",
+        );
+        expect(h.transport.calls).toHaveLength(0);
+
+        const denied = JSON.parse(
+            await h.execute({ ...byId, objectId: "mem_quarantined" }, "call-denied"),
+        );
+        expect(denied).toMatchObject({ outcome: "denied", disposition: "quarantined" });
+        const refused = await h.execute(
+            {
+                action: "dispute",
+                objectId: "mem_labeled",
+                event: "contradict",
+                path: "src/a.rs",
+                gitObjectId: OID.toUpperCase(),
+            },
+            "call-refused",
+        );
+        expect(refused).toStartWith("Error: dispute refused at preview: ");
+        expect(refused).toContain("(invalid:invalid_input)");
     });
 });
