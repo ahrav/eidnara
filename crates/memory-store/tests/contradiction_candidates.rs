@@ -1588,3 +1588,18 @@ fn a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores() {
         );
     }
 }
+
+#[test]
+fn a_read_with_a_secret_shaped_id_answers_an_empty_page() {
+    let (_dir, store) = open();
+    let secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
+    let page = store
+        .candidates_for_decision(PROJECT, secret, None, 4)
+        .expect("a read stores nothing, so a secret-shaped id answers an empty page");
+    assert!(page.items.is_empty());
+    assert_eq!(page.next, None);
+    assert!(
+        store.candidates_for_decision(PROJECT, "", None, 4).is_err(),
+        "the shape check still refuses an empty id"
+    );
+}
