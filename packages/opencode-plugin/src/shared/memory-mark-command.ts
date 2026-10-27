@@ -80,7 +80,15 @@ function parseEvidenceRef(value: string): EvidenceRef | null {
     return { path, git_object_id: value.slice(at + 1) };
 }
 
-/** Accepts the wire event spelled with `_` or `-`; the flags may appear anywhere, each at most once. */
+function isMemoryMarkFlag(word: string): boolean {
+    return (
+        word === MEMORY_MARK_CONFIRM_FLAG ||
+        word === MEMORY_MARK_EVIDENCE_FLAG ||
+        word === MEMORY_MARK_PATH_FLAG
+    );
+}
+
+/** Accepts the wire event spelled with `_` or `-`; the flags may appear anywhere, each at most once. A value is any word other than one of the three flags, so a repository path that begins with `--` is citable. */
 export function parseMemoryMarkArgs(raw: string): ParsedMemoryMarkArgs {
     const words = raw
         .trim()
@@ -95,7 +103,7 @@ export function parseMemoryMarkArgs(raw: string): ParsedMemoryMarkArgs {
             confirmed = true;
         } else if (word === MEMORY_MARK_EVIDENCE_FLAG || word === MEMORY_MARK_PATH_FLAG) {
             const value = words[index + 1];
-            if (value === undefined || value.startsWith("--") || valued.has(word)) {
+            if (value === undefined || isMemoryMarkFlag(value) || valued.has(word)) {
                 return { ok: false, message: MEMORY_MARK_USAGE };
             }
             valued.set(word, value);

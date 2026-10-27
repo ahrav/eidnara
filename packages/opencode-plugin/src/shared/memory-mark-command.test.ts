@@ -121,6 +121,10 @@ describe("parseMemoryMarkArgs evidence", () => {
             ok: true,
             args: { evidenceId: "ev", evidenceRef: { path: "src/a.rs", git_object_id: OID } },
         });
+        expect(parseMemoryMarkArgs(`mark_disputed mem_1 --path --notes.md@${OID}`)).toMatchObject({
+            ok: true,
+            args: { evidenceRef: { path: "--notes.md", git_object_id: OID } },
+        });
     });
 
     test("a dispute without evidence, and evidence on another event, print usage", () => {
