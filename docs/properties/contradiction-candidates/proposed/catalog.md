@@ -453,10 +453,10 @@ show K accepted, K + 1 refused with the held rows unchanged, and a project
 at `per_project` evicting the lowest `score_bp`, then oldest, then smallest
 key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest`
 (`:187`) shows another project's rows are untouched;
-`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1351`)
+`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1349`)
 shows a new row below the cap's floor counted written and dropped with the
 held rows and rowids unchanged; and
-`random_write_and_delete_sequences_match_the_reference_model` (`:1081`)
+`random_write_and_delete_sequences_match_the_reference_model` (`:1079`)
 compares 24 seeded sequences of writes, late writes, incarnation changes,
 evictions at caps of 2 to 4096, and as-read deletes against a reference model
 of the rules, checking every row, the returned counts, rowid stability, and
@@ -568,11 +568,11 @@ over-age and retired-evidence rows dropped, and one skip counted;
 `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over`
 (`:517`) bounds each run to one page;
 `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it`
-(`:816`), `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` (`:842`),
-`every_claim_chunk_of_a_page_is_read` (`:871`), and
+(`:896`), `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` (`:920`),
+`every_claim_chunk_of_a_page_is_read` (`:949`), and
 `a_row_at_the_age_bound_stays_and_one_past_it_drops` (`:486`) cover the
 remaining branches. `a_busy_reader_does_not_hold_the_sweep_past_its_budget`
-(`:1027`) holds one Kernel reader while the other is free and observes the
+(`:1105`) holds one Kernel reader while the other is free and observes the
 sweep return inside its budget with both rows judged: each scope-terms read
 goes through `KernelStore::scope_terms_within_budget`
 (`crates/kernel/src/scope.rs:1573`), which polls the whole reader pool and
@@ -743,7 +743,7 @@ hides the table, runs the sweep under a false flag with and without a
 Kernel, and observes every counter at zero, then shows the same table fails
 the first statement an enabled sweep runs;
 `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass`
-(`:916`) drives `pass_then_sweep`
+(`:994`) drives `pass_then_sweep`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) with the flag off and
 then on. The key is `/contradiction_candidates/enabled`
 (`crates/daemon/src/config.rs:1024`), user-only and default false

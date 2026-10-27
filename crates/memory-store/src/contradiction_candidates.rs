@@ -720,7 +720,8 @@ impl MemoryStore {
                 " FROM contradiction_candidates
                   WHERE project_digest=?1 AND evidence_id=?2 AND decision_object_id=?3
                     AND created_at_ms=?4 AND publish_tip=?5 AND kernel_incarnation_id=?6
-                    AND matcher_digest=?7"
+                    AND matcher_digest=?7 AND decision_id=?8 AND matched_terms=?9
+                    AND decision_terms=?10 AND score_bp=?11"
             ))?;
             let mut delete = tx.prepare_cached(DELETE_ROWID)?;
             for row in rows {
@@ -734,6 +735,10 @@ impl MemoryStore {
                             row.publish_tip,
                             row.kernel_incarnation_id,
                             row.matcher_digest,
+                            row.decision_id,
+                            row.matched_terms,
+                            row.decision_terms,
+                            row.score_bp,
                         ],
                         |found| Ok((found.get::<_, i64>(0)?, found.get::<_, i64>(1)?)),
                     )

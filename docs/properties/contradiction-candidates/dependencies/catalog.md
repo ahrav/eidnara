@@ -410,7 +410,7 @@ applies the same id checks (`check_claim_ids`, `:343`) inside `limit.run`
 before its reader acquisition (`:284`), in chunks of 64 under
 `max_claims` = 64, so `TooManyClaims` cannot arise from it;
 `every_claim_chunk_of_a_page_is_read`
-(`crates/daemon/tests/contradiction_candidates_sweep.rs:871`) reads 66
+(`crates/daemon/tests/contradiction_candidates_sweep.rs:949`) reads 66
 decisions in two chunks, and
 `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land`
 (`:765`) shows a chunk refused as `NotADecision` keeps that chunk's rows.

@@ -53,14 +53,14 @@ Analyzer checks the scorer relies on:
 | `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:513` | rows added before or removed from page one move nothing after the cursor; non-canonical cursors refused | read (paging) | unaudited |
 | `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:560` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
 | `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:624` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
-| `random_write_and_delete_sequences_match_the_reference_model` | `:1081` | seeded write and as-read delete sequences match a reference model: rows, counts, rowid stability, and the gauge each step; pages, cursors across writes, and the sweep every seventh step | row key and caps; read (paging); sweep (store arm) | unaudited |
-| `the_hex_checks_refuse_uppercase_non_hex_and_misfit_lengths` | `:1232` | the hex-shape CHECKs refuse uppercase, non-hex, and wrong-length digests | read keys (no text) | unaudited |
-| `the_totals_follow_replaced_ids_late_writes_deletes_and_truncation` | `:1298` | the gauge equals a sum over the rows through replaced ids, late writes, deletes, and truncation | sweep (store arm) | unaudited |
-| `a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` | `:1351` | a new row below the cap's floor is counted written and dropped; held rows and rowids stay; a landing row takes a fresh rowid | row key and caps | unaudited |
-| `only_the_candidate_module_writes_the_candidate_tables` | `:1481` | no other memory-store source, trigger, or session purge writes either candidate table, so the totals the cap and gauge read stay exact | row key and caps; sweep (store arm) | unaudited |
-| `every_candidate_statement_reuses_its_cached_plan` | `:1406` | 12 rounds of writes, late writes, pages, sweep pages, keyed deletes, and gauge reads run 16 distinct candidate statements; the statement cache re-creates and re-plans none | row key and caps; read (paging); sweep (store arm) (the cost of the checks, not a record directly) | unaudited |
-| `the_page_sweep_and_eviction_scans_stop_at_their_bound` | `:1550` | over a 300-row project, a two-row page, a three-row sweep page, and a one-row eviction each run under 500 VM steps | read (paging); sweep (store arm); row key and caps (bounded scans) | unaudited |
-| `a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores` | `:1594` | 256 rows into a run of equal scores, with and without equal `created_at_ms`, the continuation page returns the next two rows under 500 VM steps | read (paging) | unaudited |
+| `random_write_and_delete_sequences_match_the_reference_model` | `:1079` | seeded write and as-read delete sequences match a reference model: rows, counts, rowid stability, and the gauge each step; pages, cursors across writes, and the sweep every seventh step | row key and caps; read (paging); sweep (store arm) | unaudited |
+| `the_hex_checks_refuse_uppercase_non_hex_and_misfit_lengths` | `:1230` | the hex-shape CHECKs refuse uppercase, non-hex, and wrong-length digests | read keys (no text) | unaudited |
+| `the_totals_follow_replaced_ids_late_writes_deletes_and_truncation` | `:1296` | the gauge equals a sum over the rows through replaced ids, late writes, deletes, and truncation | sweep (store arm) | unaudited |
+| `a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` | `:1349` | a new row below the cap's floor is counted written and dropped; held rows and rowids stay; a landing row takes a fresh rowid | row key and caps | unaudited |
+| `only_the_candidate_module_writes_the_candidate_tables` | `:1479` | no other memory-store source, trigger, or session purge writes either candidate table, so the totals the cap and gauge read stay exact | row key and caps; sweep (store arm) | unaudited |
+| `every_candidate_statement_reuses_its_cached_plan` | `:1404` | 12 rounds of writes, late writes, pages, sweep pages, keyed deletes, and gauge reads run 16 distinct candidate statements; the statement cache re-creates and re-plans none | row key and caps; read (paging); sweep (store arm) (the cost of the checks, not a record directly) | unaudited |
+| `the_page_sweep_and_eviction_scans_stop_at_their_bound` | `:1548` | over a 300-row project, a two-row page, a three-row sweep page, and a one-row eviction each run under 500 VM steps | read (paging); sweep (store arm); row key and caps (bounded scans) | unaudited |
+| `a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores` | `:1592` | 256 rows into a run of equal scores, with and without equal `created_at_ms`, the continuation page returns the next two rows under 500 VM steps | read (paging) | unaudited |
 
 Baseline: `crates/memory-store/tests/baseline.rs` pins the table, its two
 indexes, and `contradiction_candidate_totals` in `EXPECTED_OBJECTS` and
@@ -81,12 +81,14 @@ refuses a store at the prior baseline untouched (`:496`).
 | `the_candidate_modules_name_no_kernel_write_path` | `:695` | no Kernel write entry point named in the module's files (lexical) | R5 | unaudited |
 | `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:719` | every `CausalInputs {` literal under `crates/daemon/src` has empty `signals` (lexical) | R5 | unaudited |
 | `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land` | `:765` | a refused chunk keeps its rows; Kernel-free drops land | sweep | unaudited |
-| `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:816` | rows above the tip are not judged | sweep | unaudited |
-| `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` | `:842` | cancellation before the first Kernel read: no reader taken, nothing deleted | sweep | unaudited |
-| `every_claim_chunk_of_a_page_is_read` | `:871` | two claim chunks | sweep | unaudited |
-| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:916` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
-| `the_evidence_read_refuses_another_incarnation_a_future_snapshot_and_a_negative_one` | `:985` | incarnation, future-snapshot, and negative-snapshot refusals | sweep | unaudited |
-| `a_busy_reader_does_not_hold_the_sweep_past_its_budget` | `:1027` | one held reader: the sweep's scope reads take the free reader and the run stays inside its budget | sweep | unaudited |
+| `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:896` | rows above the tip are not judged | sweep | unaudited |
+| `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` | `:920` | cancellation before the first Kernel read: no reader taken, nothing deleted | sweep | unaudited |
+| `a_sweep_cancelled_during_the_single_decision_reads_reads_no_further_and_deletes_nothing` | `:816` | cancellation inside the single-decision fallback: the tip capture and the refused chunk are the only Kernel reads; nothing deleted | sweep | unaudited |
+| `an_empty_page_reads_no_kernel_row_and_still_refreshes_the_gauge` | `:872` | an empty page takes no Kernel reader, counts no skip, and refreshes `retained_bytes` | sweep | unaudited |
+| `every_claim_chunk_of_a_page_is_read` | `:949` | two claim chunks | sweep | unaudited |
+| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:994` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
+| `the_evidence_read_refuses_another_incarnation_a_future_snapshot_and_a_negative_one` | `:1063` | incarnation, future-snapshot, and negative-snapshot refusals | sweep | unaudited |
+| `a_busy_reader_does_not_hold_the_sweep_past_its_budget` | `:1105` | one held reader: the sweep's scope reads take the free reader and the run stays inside its budget | sweep | unaudited |
 | `the_budgeted_scope_read_answers_as_the_unbudgeted_one_and_stops_at_its_deadline` | `crates/kernel/tests/kernel_scope.rs:460` | `scope_terms_within_budget` equals `scope_terms`, answers `None` for a missing scope, and returns `Deadline` on an expired budget and on a fully held reader pool | sweep | unaudited |
 | `every_standing_equals_the_claim_facts_of_its_claim_at_every_snapshot`, `standing_refusals_match_the_claim_facts_refusals` | `crates/kernel/tests/kernel_claim_standing.rs:111`, `:168` | the sweep's claim standing read equals the registry row, decision row, own admission row, and served standing of claim facts at every snapshot, and refuses as claim facts does | sweep | unaudited |
 

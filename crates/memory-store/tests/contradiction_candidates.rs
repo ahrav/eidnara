@@ -680,6 +680,17 @@ fn a_delete_as_read_spares_a_row_rewritten_since_the_read() {
         0,
         "a row whose incarnation or digest differs from the one read stays"
     );
+    let read = all_rows(&store);
+    let rescored = [score("d1", 1, 2)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 2, 5, &rescored), CAPS)
+        .unwrap();
+    assert_eq!(
+        store.delete_candidates_as_read(&[&read[0]]).unwrap(),
+        0,
+        "a same-tip rewrite in the same millisecond that changes only the score stays"
+    );
+    assert_eq!(all_rows(&store).len(), 1);
 }
 
 /// A deterministic generator for the operation-sequence test, so a failing seed replays.
@@ -720,18 +731,6 @@ fn key_of(row: &StoredCandidate) -> (&str, &str, &str) {
         &row.project_digest,
         &row.evidence_id,
         &row.decision_object_id,
-    )
-}
-
-fn as_read_of(row: &StoredCandidate) -> (&str, &str, &str, i64, i64, &str, &str) {
-    (
-        &row.project_digest,
-        &row.evidence_id,
-        &row.decision_object_id,
-        row.created_at_ms,
-        row.publish_tip,
-        &row.kernel_incarnation_id,
-        &row.matcher_digest,
     )
 }
 
@@ -884,8 +883,7 @@ impl Model {
             .iter()
             .map(|project| self.rows.iter().any(|row| row.project_digest == *project))
             .collect();
-        self.rows
-            .retain(|row| !reads.iter().any(|read| as_read_of(row) == as_read_of(read)));
+        self.rows.retain(|row| !reads.contains(&row));
         for (project, held) in [PROJECT, OTHER_PROJECT].iter().zip(held) {
             if held && !self.rows.iter().any(|row| row.project_digest == *project) {
                 self.deletes_that_emptied_a_project += 1;

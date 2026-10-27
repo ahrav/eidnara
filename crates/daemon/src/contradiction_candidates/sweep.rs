@@ -110,15 +110,22 @@ impl CandidateSweep {
             })
             .collect();
         let budget = EvalBudget::new(Some(Instant::now() + SWEEP_BUDGET), Arc::default());
-        if cancelled() {
-            return;
-        }
-        let judged = match kernel.capture_identified_commit_read_target_within_budget(&budget) {
-            Ok(target) => judge(kernel, &target, &rows, standing, &budget, cancelled),
-            Err(_) => Judged {
+        let judged = if rows.is_empty() {
+            Judged {
                 standing,
-                read_failed: true,
-            },
+                read_failed: false,
+            }
+        } else {
+            if cancelled() {
+                return;
+            }
+            match kernel.capture_identified_commit_read_target_within_budget(&budget) {
+                Ok(target) => judge(kernel, &target, &rows, standing, &budget, cancelled),
+                Err(_) => Judged {
+                    standing,
+                    read_failed: true,
+                },
+            }
         };
         if judged.read_failed {
             counts.add(Count::SweepSkippedKernelUnavailable, 1);
@@ -211,6 +218,12 @@ fn judge(
         };
         if !read(chunk) {
             for id in chunk {
+                if cancelled() {
+                    return Judged {
+                        standing,
+                        read_failed,
+                    };
+                }
                 read_failed |= !read(std::slice::from_ref(id));
             }
         }

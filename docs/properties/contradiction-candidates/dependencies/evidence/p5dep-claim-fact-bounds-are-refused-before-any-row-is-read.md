@@ -21,11 +21,11 @@ Lenses: resource boundaries; protocol contracts.
   budget.acquire_limit(); limit.run(|| self.claim_facts_inner(..))`.
   `AcquireLimit::run` (`open.rs:1543-1549`) calls `check()` first, so an
   exhausted budget returns `Deadline` before `claim_facts_inner`.
-- `claim_facts.rs:301-334` `claim_facts_inner`: `check_claim_bounds` at
-  `:258`, `requested < 0` at `:259`, `reader_with_limit` at `:261` (first
-  reader acquisition), `IncarnationMismatch` at `:268-270` under the reader
-  guard, `load_claims_in_tx` at `:271`, final `limit.check()` at `:274`.
-- `claim_facts.rs:336-358` `check_claim_bounds`: `len > max_claims` ->
+- `claim_facts.rs:301-333` `claim_facts_inner`: `check_claim_bounds` at
+  `:309`, `requested < 0` at `:310`, `reader_with_limit` at `:313` (first
+  reader acquisition), `IncarnationMismatch` at `:321-322` under the reader
+  guard, `load_claims_in_tx` at `:324`, final `limit.check()` at `:326`.
+- `claim_facts.rs:336-358` `check_claim_bounds` and `check_claim_ids`: `len > max_claims` ->
   `TooManyClaims`; empty or > 512-byte id -> `InvalidInput`; duplicate ->
   `DuplicateClaim`. No store access.
 - `claim_facts.rs:146-156` `ClaimFacts { object, decision: ClaimDecisionFacts,

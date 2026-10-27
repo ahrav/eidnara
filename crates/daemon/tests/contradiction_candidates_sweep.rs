@@ -813,6 +813,86 @@ fn a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land() {
 }
 
 #[test]
+fn a_sweep_cancelled_during_the_single_decision_reads_reads_no_further_and_deletes_nothing() {
+    let fixture = Fixture::open();
+    let live = fixture.live_evidence.clone();
+    let retired = fixture.retired_evidence.clone();
+    fixture.write(PROJECT, &live, &["active", "stale"], |_| {});
+    fixture
+        .store
+        .replace_candidates_for_descriptor(
+            &DescriptorCandidates {
+                project_digest: PROJECT,
+                evidence_id: &retired,
+                publish_tip: 1,
+                kernel_incarnation_id: &fixture.incarnation(),
+                matcher_digest: matcher_digest(),
+                created_at_ms: NOW_MS,
+                rows: &[CandidateScore {
+                    decision_object_id: "evidence-object-live",
+                    decision_id: "not-a-decision",
+                    matched_terms: 3,
+                    decision_terms: 4,
+                }],
+            },
+            CAPS,
+        )
+        .unwrap();
+    let before = untouched(&fixture);
+    let rows = fixture.rows();
+    let acquisitions = fixture.kernel.controlled_acquisitions_for_test();
+    let polls = std::cell::Cell::new(0_u32);
+    // The poll before the tip capture and the poll before the chunk read
+    // return false; `cancelled` returns true once the refused chunk falls
+    // back to single-decision reads.
+    let cancelled = || {
+        polls.set(polls.get() + 1);
+        polls.get() > 2
+    };
+    let counts = Candidates::default();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &cancelled,
+    );
+    assert_eq!(
+        fixture.kernel.controlled_acquisitions_for_test(),
+        acquisitions + 2,
+        "the tip capture and the refused chunk read are the only Kernel reads"
+    );
+    assert_eq!(untouched(&fixture), before);
+    assert_eq!(fixture.rows(), rows);
+    assert_eq!(report(&counts)["sweep_dropped"], 0);
+}
+
+#[test]
+fn an_empty_page_reads_no_kernel_row_and_still_refreshes_the_gauge() {
+    let fixture = Fixture::open();
+    let counts = Candidates::default();
+    let acquisitions = fixture.kernel.controlled_acquisitions_for_test();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
+    assert_eq!(
+        fixture.kernel.controlled_acquisitions_for_test(),
+        acquisitions,
+        "an empty page gives the Kernel nothing to judge"
+    );
+    let block = report(&counts);
+    assert_eq!(block["sweep_examined"], 0);
+    assert_eq!(block["sweep_skipped_kernel_unavailable"], 0);
+    assert_eq!(block["retained_bytes"], 0);
+}
+
+#[test]
 fn a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it() {
     let fixture = Fixture::open();
     let tip = fixture.tip();
@@ -836,8 +916,6 @@ fn a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it() {
     );
 }
 
-/// Cancellation before the delete is observable here; the checks before each Kernel read have no
-/// effect a test can observe without a Kernel read counter.
 #[test]
 fn a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row() {
     let fixture = Fixture::open();
