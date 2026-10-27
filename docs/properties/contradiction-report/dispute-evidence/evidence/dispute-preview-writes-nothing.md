@@ -22,7 +22,7 @@ dispute the user declined.
   (`commit.rs:1146-1159`).
 - The command treats the commit's verdict as the one recorded
   (`packages/opencode-plugin/src/shared/memory-mark-command.ts:293-294`)
-  and reports a refused preview with no commit (`:238-239`).
+  and reports a refused preview with no commit (`:258-259`).
 
 ## Failure scenario
 

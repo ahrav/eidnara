@@ -17,7 +17,7 @@ specification recommended adding the evidence key
   only when present (`memory-mark-command.ts:145-155`), so flag order on
   the command line does not change the identity.
 - The runner takes `operationId` from its caller (`MemoryMarkInput`,
-  `memory-mark-command.ts:183`; used at `:232`). Both callers pass
+  `memory-mark-command.ts:183`; used at `:251`). Both callers pass
   `memoryMarkOperationId(sessionId, parsed.args)`
   (`packages/opencode-plugin/src/hooks/context/command-handler.ts:415`,
   `packages/pi-plugin/src/commands/eidnara-memory-mark.ts:61`).

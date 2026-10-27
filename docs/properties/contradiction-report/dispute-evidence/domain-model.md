@@ -409,7 +409,7 @@ evidence.
   actor, operationId)` (`client.ts:284-290`) with `operationId =
   [sessionId, event, objectId]` for the command
   (`memory-mark-command.ts:204-208`) and `sessionId SEP toolCallId` for the
-  tool (`execute.ts:429-431`).
+  tool (`execute.ts:430-432`).
 - Gap (FACT): the command's `operationId` omits the evidence, so a second
   dispute in one session with different evidence changes the
   `request_digest` (`deriveRequestDigest` covers operations,

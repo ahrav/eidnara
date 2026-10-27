@@ -74,7 +74,7 @@ binary is the enabling condition.
 
 ### Q: How does the TypeScript client surface a `kernel.commit` `invalid_params` transport error to the `/eidnara-memory-mark` user?
 
-- Sources examined: `memory-mark-command.ts:257-259`, `:255-256`
+- Sources examined: `memory-mark-command.ts:257-259`, `:288-289`
   (`refused` with the returned state); `client.ts:296-310` (`Invoked`,
   `InvokeOptions`); `kernel-client/state.ts` was not read.
 - Findings: the command reports `refused` with whatever `state` the

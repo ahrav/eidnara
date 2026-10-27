@@ -663,8 +663,8 @@ is true; `verdictFor` returns null whenever `results.length != 1 ||
 object_id != operation.object_id || event != operation.event`
 (`memory-mark-command.ts:211-219`), and a null verdict maps to
 `refused(preview, invalid("internal"))` on the preview branch
-(`:243-245`) and to `refused(commit, unavailable("outcome_unknown"))` on
-the commit branch (`:257-259`) (portfolio refinement R6). Every
+(`:263-265`) and to `refused(commit, unavailable("outcome_unknown"))` on
+the commit branch (`:290-292`) (portfolio refinement R6). Every
 invocation, so `always`. Coverage marker to add:
 `command_preview_visibility_changes` (the confirmation branch is reached
 only when `visibility_changes` is true, so the at-most-once clause is
@@ -785,7 +785,7 @@ Required faults and enabling state: a disposition commit from the command
 (`actor = user:opencode | user:pi`; `cause` is the command line
 `commandLine(args)`, `/eidnara-memory-mark <event> <object_id>` followed
 at the PR A tip by `--evidence <id>` and `--path <path>@<oid>` when
-present, `memory-mark-command.ts:158-160`, `:230-236`); a `cause` carrying
+present, `memory-mark-command.ts:158-160`, `:252`); a `cause` carrying
 a secret-like token.
 Confidence: high - [evidence](evidence/disposition-commit-log-row-carries-actor-and-cause-only.md).
 Read the schema and the INSERT.

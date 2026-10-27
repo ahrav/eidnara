@@ -73,7 +73,7 @@ identities; model output never names an evidence id (P2 KTD3, P4 KTD2)."
 
 Plan R5: the `eidnara_memory` tool action `dispute` accepts `evidence_id`
 or `path` plus `git_object_id`; the tool is the model's surface
-(`EIDNARA_MEMORY_ACTOR = "agent:opencode"`, `execute.ts:49`).
+(`EIDNARA_MEMORY_ACTOR = "agent:opencode"`, `execute.ts:50`).
 
 Evidence: both statements are in the plan set; the code has neither. The
 CI gate "Invented provenance" exists (index, common verification). Whether
@@ -120,7 +120,7 @@ is `KernelError::Conflict` (`envelope.rs:1365-1367`), which `run` maps to
 
 Consequence: a user who disputes the same finding twice in one session with
 different evidence gets `operation_key_reused`. The tool's identity is per
-tool call (`execute.ts:429-431`) and does not collide. See Q2.
+tool call (`execute.ts:430-432`) and does not collide. See Q2.
 
 ### C6. U3 typed columns cannot be backfilled from PR A rows
 
