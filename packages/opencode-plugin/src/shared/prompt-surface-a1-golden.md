@@ -287,23 +287,14 @@ Positive categories (exact names): PROJECT_RULES (project conventions), ARCHITEC
 REJECTED_APPROACH requires antiMemory, not content. Do not invent category names.
 
 Memories created here are available through explicit search as labeled model inference. Automatic context injection follows the kernel's admission policy. Agent calls to approve/enforce are rejected.
+
+candidates: objectId, with optional after (a prior page's next) and limit (1 to 64). A read listing published sources whose text overlaps the memory lexically, each with the dispute form that would confirm it. An overlap is not a judgment; read the source before filing the form.
 ```
 
 **Parameters (JSON Schema per parameter, as serialized to the provider):**
 
 ```json
 {
-  "action": {
-    "description": "create, get, revise, archive, or merge",
-    "type": "string",
-    "enum": [
-      "create",
-      "get",
-      "revise",
-      "archive",
-      "merge"
-    ]
-  },
   "content": {
     "description": "Memory content for create/revise/merge",
     "type": "string"
@@ -423,7 +414,7 @@ Memories created here are available through explicit search as labeled model inf
     "additionalProperties": false
   },
   "objectId": {
-    "description": "Object id for revise/archive",
+    "description": "Object id for revise/archive/candidates",
     "type": "string"
   },
   "objectIds": {
@@ -437,6 +428,35 @@ Memories created here are available through explicit search as labeled model inf
   "reason": {
     "description": "Lifecycle-change reason",
     "type": "string"
+  },
+  "after": {
+    "description": "The next cursor of a prior candidates page",
+    "anyOf": [
+      {
+        "type": "string"
+      },
+      {
+        "type": "null"
+      }
+    ]
+  },
+  "limit": {
+    "description": "candidates page size, 1 to 64",
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 64
+  },
+  "action": {
+    "description": "create, get, revise, archive, merge, or candidates",
+    "type": "string",
+    "enum": [
+      "create",
+      "get",
+      "revise",
+      "archive",
+      "merge",
+      "candidates"
+    ]
   }
 }
 ```

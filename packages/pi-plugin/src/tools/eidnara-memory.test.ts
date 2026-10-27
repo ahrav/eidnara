@@ -422,7 +422,7 @@ describe("Pi eidnara_memory dispute", () => {
     it("is absent from the default schema and refused by the default allowlist", async () => {
         const h = seeded();
         expect(h.tool.parameters.properties.action).toMatchObject({
-            enum: ["create", "get", "revise", "archive", "merge"],
+            enum: ["create", "get", "revise", "archive", "merge", "candidates"],
         });
         expect(h.tool.parameters.properties).not.toHaveProperty("evidenceId");
         const refused = await h.execute(disputeArgs, "call-default");
@@ -488,5 +488,34 @@ describe("Pi eidnara_memory dispute", () => {
         expect(textOf(result)).toStartWith("Error: dispute needs objectId");
         expect(result.isError).toBeTrue();
         expect(h.transport.calls).toHaveLength(0);
+    });
+});
+
+describe("Pi eidnara_memory candidates", () => {
+    it("is in the default schema with its paging fields and reads without a stable tool-call identity", async () => {
+        const calls: { method: string; body: Record<string, unknown> }[] = [];
+        const transport = {
+            connectionFileExists: () => true,
+            ensureRoute: async () => {},
+            call: async (call: { method: string; body: unknown }) => {
+                calls.push({ method: call.method, body: call.body as Record<string, unknown> });
+                return { kind: "terminal", terminal: "disabled" };
+            },
+        };
+        const { KernelClient } = await import("@eidnara/opencode/shared/kernel-client");
+        const h = harness(new FakeKernel(), {
+            kernelClient: ({ sessionId, projectRoot }) =>
+                new KernelClient({ transport, enabled: true, sessionId, projectRoot }),
+        });
+        expect(h.tool.parameters.properties.action).toMatchObject({
+            enum: expect.arrayContaining(["candidates"]),
+        });
+        expect(h.tool.parameters.properties).toHaveProperty("after");
+        expect(h.tool.parameters.properties).toHaveProperty("limit");
+        const result = await h.execute({ action: "candidates", objectId: "mem_rule" }, "");
+        expect(textOf(result)).toBe(
+            "Contradiction candidates are off in the daemon for this project.",
+        );
+        expect(calls.map((call) => call.method)).toEqual(["review.candidates"]);
     });
 });

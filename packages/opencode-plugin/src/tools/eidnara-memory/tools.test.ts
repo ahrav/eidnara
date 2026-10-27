@@ -1502,3 +1502,123 @@ describe("eidnara_memory dispute", () => {
         expect(refused).toContain("(invalid:invalid_input)");
     });
 });
+
+describe("eidnara_memory candidates", () => {
+    const ITEM = {
+        evidence_id: "srcev:abc",
+        decision_object_id: "mem_labeled",
+        decision_id: "dec_labeled",
+        matched_terms: 3,
+        decision_terms: 4,
+        score: 7500,
+        publish_tip: 41,
+        created_at_ms: 1_700_000_000_000,
+    };
+
+    function candidatesHarness(
+        replies: unknown[],
+        allowedActions?: readonly EidnaraMemoryAction[],
+    ) {
+        const calls: { method: string; body: Record<string, unknown> }[] = [];
+        const transport = {
+            connectionFileExists: () => true,
+            ensureRoute: async () => {},
+            call: async (call: { method: string; body: unknown }) => {
+                calls.push({ method: call.method, body: call.body as Record<string, unknown> });
+                return replies.shift();
+            },
+        };
+        const definition = createEidnaraMemoryTools({
+            kernelClient: ({ sessionId, projectRoot }) =>
+                new KernelClient({ transport, enabled: true, sessionId, projectRoot }),
+            resolveProjectPath: () => PROJECT,
+            ...(allowedActions === undefined ? {} : { allowedActions: [...allowedActions] }),
+        }).eidnara_memory;
+        const execute = (args: Record<string, unknown>) =>
+            definition.execute(
+                args as never,
+                { sessionID: SESSION, directory: ROOT, callID: undefined, agent: "primary" } as never,
+            ) as Promise<string>;
+        return { definition, execute, calls };
+    }
+
+    test("is a default read: admitted without a tool-call identity and present in the schema", async () => {
+        const h = candidatesHarness([{ kind: "page", as_of: 41, items: [ITEM], next: null }]);
+        const action = (h.definition.args as Record<string, any>).action;
+        expect(action.safeParse("candidates").success).toBe(true);
+        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+        const parsed = JSON.parse(text);
+        expect(h.calls).toEqual([
+            {
+                method: "review.candidates",
+                body: expect.objectContaining({
+                    method: "review.candidates",
+                    decision_object_id: "mem_labeled",
+                    after: null,
+                }),
+            },
+        ]);
+        expect(parsed.asOf).toBe(41);
+        expect(parsed.next).toBeNull();
+        expect(parsed.note).toContain("lexical overlap");
+        expect(parsed.note).toContain("not a judgment");
+        expect(parsed.candidates).toEqual([
+            {
+                evidenceId: "srcev:abc",
+                decisionId: "dec_labeled",
+                score: 7500,
+                matchedTerms: 3,
+                decisionTerms: 4,
+                publishTip: 41,
+                createdAtMs: 1_700_000_000_000,
+                confirm: {
+                    action: "dispute",
+                    event: "mark_disputed",
+                    objectId: "mem_labeled",
+                    evidenceId: "srcev:abc",
+                },
+            },
+        ]);
+    });
+
+    test("pages with after and limit and renders each terminal by name", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 9, items: [], next: "7500.1.61" },
+            { kind: "terminal", terminal: "disabled" },
+            { kind: "terminal", terminal: "not_live" },
+            { kind: "terminal", terminal: "store_unavailable" },
+            { state: { kind: "unavailable", reason: "store_starting" } },
+        ]);
+        const first = JSON.parse(
+            await h.execute({ action: "candidates", objectId: "m", after: "7500.2.62", limit: 5 }),
+        );
+        expect(h.calls[0].body).toEqual(
+            expect.objectContaining({ after: "7500.2.62", limit: 5 }),
+        );
+        expect(first).toEqual(
+            expect.objectContaining({ candidates: [], next: "7500.1.61", asOf: 9 }),
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m" })).toBe(
+            "Contradiction candidates are off in the daemon for this project.",
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m" })).toContain("not_live");
+        expect(await h.execute({ action: "candidates", objectId: "m" })).toContain(
+            "store_unavailable",
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m" })).toContain(
+            "while the store opens",
+        );
+        expect(await h.execute({ action: "candidates" })).toBe(
+            "Error: 'objectId' is required when action is 'candidates'.",
+        );
+    });
+
+    test("refuses a page whose item carries any key outside the documented set", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 1, items: [{ ...ITEM, summary: "leaked text" }], next: null },
+        ]);
+        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+        expect(text).not.toContain("leaked text");
+        expect(text).toContain("does not recognize");
+    });
+});

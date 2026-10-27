@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 
 pub mod eligibility;
 pub mod pass;
+pub(crate) mod read;
 pub mod scorer;
 pub mod sweep;
 

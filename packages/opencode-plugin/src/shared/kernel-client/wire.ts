@@ -608,3 +608,90 @@ export function parseQueryResponse(raw: unknown): Parsed<QueryPayload> {
         },
     };
 }
+
+/** The terminals `review.candidates` answers in place of a page. */
+export const CANDIDATE_TERMINALS = ["disabled", "store_unavailable", "not_live"] as const;
+export type CandidateTerminal = (typeof CANDIDATE_TERMINALS)[number];
+
+/** One `review.candidates` item: ids, integers, and times; `score` is in basis points. */
+export interface CandidateItem {
+    evidence_id: string;
+    decision_object_id: string;
+    decision_id: string;
+    matched_terms: number;
+    decision_terms: number;
+    score: number;
+    publish_tip: number;
+    created_at_ms: number;
+}
+
+export type CandidatesPayload =
+    | { kind: "page"; as_of: number; items: CandidateItem[]; next: string | null }
+    | { kind: "terminal"; terminal: CandidateTerminal };
+
+const CANDIDATE_ITEM_KEYS = [
+    "evidence_id",
+    "decision_object_id",
+    "decision_id",
+    "matched_terms",
+    "decision_terms",
+    "score",
+    "publish_tip",
+    "created_at_ms",
+] as const;
+
+function parseCandidateItem(raw: unknown): CandidateItem | null {
+    if (!isRecord(raw) || Object.keys(raw).length !== CANDIDATE_ITEM_KEYS.length) return null;
+    const { evidence_id, decision_object_id, decision_id } = raw;
+    const { matched_terms, decision_terms, score, publish_tip, created_at_ms } = raw;
+    if (
+        typeof evidence_id !== "string" ||
+        typeof decision_object_id !== "string" ||
+        typeof decision_id !== "string" ||
+        !isNonNegativeInteger(matched_terms) ||
+        !isNonNegativeInteger(decision_terms) ||
+        !isNonNegativeInteger(score) ||
+        !isNonNegativeInteger(publish_tip) ||
+        !isNonNegativeInteger(created_at_ms)
+    ) {
+        return null;
+    }
+    return {
+        evidence_id,
+        decision_object_id,
+        decision_id,
+        matched_terms,
+        decision_terms,
+        score,
+        publish_tip,
+        created_at_ms,
+    };
+}
+
+/** A `review.candidates` answer: a kernel state, a closed terminal, or a page whose items carry exactly the documented keys. */
+export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload> {
+    if (!isRecord(raw)) return failed();
+    if (raw.kind === undefined && raw.state !== undefined) {
+        const state = parseKernelState(raw.state);
+        return state.kind === "available" ? failed() : { state, payload: null };
+    }
+    if (raw.kind === "terminal") {
+        return oneOf(CANDIDATE_TERMINALS, raw.terminal)
+            ? { state: available(), payload: { kind: "terminal", terminal: raw.terminal } }
+            : failed();
+    }
+    if (raw.kind !== "page" || !isNonNegativeInteger(raw.as_of) || !Array.isArray(raw.items)) {
+        return failed();
+    }
+    if (raw.next !== null && typeof raw.next !== "string") return failed();
+    const items: CandidateItem[] = [];
+    for (const entry of raw.items) {
+        const item = parseCandidateItem(entry);
+        if (!item) return failed();
+        items.push(item);
+    }
+    return {
+        state: available(),
+        payload: { kind: "page", as_of: raw.as_of, items, next: raw.next },
+    };
+}

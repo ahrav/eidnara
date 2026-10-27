@@ -69,7 +69,7 @@ const eidnaraMemoryArgsShape = {
         .describe(
             "Rejected-approach payload. Required with category REJECTED_APPROACH, and content must be omitted; invalid with any other category.",
         ),
-    objectId: tool.schema.string().optional().describe("Object id for revise/archive"),
+    objectId: tool.schema.string().optional().describe("Object id for revise/archive/candidates"),
     objectIds: tool.schema
         .array(tool.schema.string())
         .max(20)
@@ -80,7 +80,10 @@ const eidnaraMemoryArgsShape = {
 
 /** The fields only `dispute` reads; exposed exactly when the allowlist admits it. */
 const disputeArgsShape = {
-    objectId: tool.schema.string().optional().describe("Object id for revise/archive/dispute"),
+    objectId: tool.schema
+        .string()
+        .optional()
+        .describe("Object id for revise/archive/dispute/candidates"),
     event: tool.schema
         .enum([...EIDNARA_MEMORY_DISPUTE_EVENTS])
         .optional()
@@ -96,8 +99,24 @@ const disputeArgsShape = {
         .describe("40- or 64-character lowercase hex git object id for path"),
 };
 
+/** The paging fields only `candidates` reads; exposed exactly when the allowlist admits it. */
+const candidatesArgsShape = {
+    after: tool.schema
+        .string()
+        .nullable()
+        .optional()
+        .describe("The next cursor of a prior candidates page"),
+    limit: tool.schema
+        .number()
+        .int()
+        .min(1)
+        .max(64)
+        .optional()
+        .describe("candidates page size, 1 to 64"),
+};
+
 const eidnaraMemoryArgsSchema = tool.schema
-    .object({ ...eidnaraMemoryArgsShape, ...disputeArgsShape })
+    .object({ ...eidnaraMemoryArgsShape, ...candidatesArgsShape, ...disputeArgsShape })
     .passthrough();
 
 /** An omitted `allowedActions` admits the default actions, which exclude `dispute`; an explicit empty list admits none, so a caller whose computed allowlist is empty exposes no operation. */
@@ -110,10 +129,11 @@ function createEidnaraMemoryTool(deps: EidnaraMemoryToolDeps): ToolDefinition {
     return tool({
         description: eidnaraMemoryDescription(primaryActions),
         args: {
-            ...(primaryActions.includes("dispute")
-                ? { ...eidnaraMemoryArgsShape, ...disputeArgsShape }
-                : (eidnaraMemoryArgsShape as typeof eidnaraMemoryArgsShape &
-                      typeof disputeArgsShape)),
+            ...(eidnaraMemoryArgsShape as typeof eidnaraMemoryArgsShape &
+                typeof candidatesArgsShape &
+                typeof disputeArgsShape),
+            ...(primaryActions.includes("candidates") ? candidatesArgsShape : {}),
+            ...(primaryActions.includes("dispute") ? disputeArgsShape : {}),
             action: actionField(primaryActions),
         },
         async execute(rawArgs: EidnaraMemoryArgs, toolContext) {

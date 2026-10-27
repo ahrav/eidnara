@@ -1124,3 +1124,480 @@ async fn publish_latency_with_candidates_on_stays_within_the_off_baseline() {
         medians[0]
     );
 }
+
+fn activate_memories_authority(store: &MemoryStore, root: &Path) {
+    let project = "git:candidates";
+    let preparing = store
+        .authority_begin_prepare("ctx", project, "memories")
+        .unwrap();
+    let checksum = store
+        .authority_seed_checksum("ctx", project, "memories")
+        .unwrap();
+    store
+        .authority_verify_prepare(
+            "ctx",
+            project,
+            "memories",
+            preparing.generation,
+            &checksum,
+            &checksum,
+        )
+        .unwrap();
+    store
+        .authority_ack_prepare("ctx", project, "memories", preparing.generation)
+        .unwrap();
+    store
+        .bind_authority_route("ctx", project, root.to_str().unwrap())
+        .unwrap();
+}
+
+fn candidates_request(project: &Path, body: Value) -> Value {
+    let mut request = json!({
+        "method": "review.candidates",
+        "session_id": SESSION,
+        "project_root": project.to_str().unwrap(),
+    });
+    for (key, value) in body.as_object().unwrap() {
+        request[key] = value.clone();
+    }
+    request
+}
+
+async fn route_call(handler: &Handler, request: Value) -> Result<Value, String> {
+    match handler
+        .dispatch_value_for_test(test_route(7), request)
+        .await
+    {
+        PreparedOutcome::Response(output) => {
+            let mut bytes = Vec::new();
+            output.measure().unwrap().write_to(&mut bytes).unwrap();
+            Ok(serde_json::from_slice(&bytes).unwrap())
+        }
+        PreparedOutcome::Error { code, .. } => Err(code),
+        PreparedOutcome::Streamed => panic!("the route streamed"),
+    }
+}
+
+fn ingest(kernel: &KernelStore, key: &str) -> String {
+    let payload = format!("descriptor {key}").into_bytes();
+    let mut request = intent(&format!("evidence-{key}"));
+    request.request_digest = kernel::source_identity::identity_digest(&payload);
+    kernel
+        .ingest_exact_artifact(kernel::ArtifactIngestRequest {
+            intent: request,
+            payload,
+            evidence_id: format!("srcev:{key}"),
+            object_id: format!("srcev-object:{key}"),
+            object_kind: "evidence".to_owned(),
+            domain_id: crate::canonical_memory::MEMORY_DOMAIN_ID.to_owned(),
+            source_kind: "messages".to_owned(),
+            source_id: format!("native/{key}"),
+            source_revision: 1,
+            media_type: "text/plain".to_owned(),
+            retention_class: "canonical".to_owned(),
+            retain_until: None,
+            asserted_sensitivity: kernel::Sensitivity::Normal,
+            provider_egress: kernel::ProviderEgress::LocalOnly,
+            provenance: None,
+        })
+        .unwrap()
+        .evidence_id
+}
+
+fn write_row(
+    store: &MemoryStore,
+    project: &kernel_routes::ProjectBinding,
+    evidence: &str,
+    decision: &str,
+    matched: u32,
+    (incarnation, digest, tip): (&str, &str, i64),
+) {
+    let object = format!("object-{decision}");
+    let id = format!("decision-{decision}");
+    store
+        .replace_candidates_for_descriptor(
+            &memory_store::contradiction_candidates::DescriptorCandidates {
+                project_digest: project.digest(),
+                evidence_id: evidence,
+                publish_tip: tip,
+                kernel_incarnation_id: incarnation,
+                matcher_digest: digest,
+                created_at_ms: now_ms(),
+                rows: &[memory_store::contradiction_candidates::CandidateScore {
+                    decision_object_id: &object,
+                    decision_id: &id,
+                    matched_terms: matched,
+                    decision_terms: 5,
+                }],
+            },
+            memory_store::contradiction_candidates::CandidateCaps {
+                per_descriptor: 4,
+                per_project: 4096,
+            },
+        )
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(
+        &kernel,
+        &binding,
+        &[
+            ("one", TOPIC, EventKind::Other),
+            ("replaced", TOPIC, EventKind::Other),
+        ],
+    );
+    let ask = |body: Value| route_call(&handler, candidates_request(&project, body));
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
+        "a root without MODULE memories authority"
+    );
+    activate_memories_authority(&store, &project);
+    let incarnation = kernel
+        .capture_identified_commit_read_target_within_budget(
+            &kernel::applicability::EvalBudget::unbounded(),
+        )
+        .unwrap()
+        .database_incarnation_id;
+    let digest = crate::contradiction_candidates::scorer::matcher_digest();
+    let evidence: Vec<String> = (0..70)
+        .map(|index| ingest(&kernel, &format!("e{index}")))
+        .collect();
+    let retired = ingest(&kernel, "retired");
+    let tip = kernel.tip().unwrap();
+    for (index, evidence) in evidence.iter().enumerate() {
+        write_row(
+            &store,
+            &binding,
+            evidence,
+            "one",
+            3 + u32::from(index < 35),
+            (&incarnation, digest, tip),
+        );
+    }
+    write_row(
+        &store,
+        &binding,
+        &retired,
+        "one",
+        5,
+        (&incarnation, digest, tip),
+    );
+    let replaced_evidence = ingest(&kernel, "replaced");
+    write_row(
+        &store,
+        &binding,
+        &replaced_evidence,
+        "replaced",
+        5,
+        (&incarnation, digest, tip),
+    );
+    let foreign = ingest(&kernel, "foreign");
+    let stale = ingest(&kernel, "stale");
+    let tip = kernel.tip().unwrap();
+    write_row(
+        &store,
+        &binding,
+        &foreign,
+        "one",
+        3,
+        (&"0".repeat(32), digest, tip),
+    );
+    write_row(
+        &store,
+        &binding,
+        &stale,
+        "one",
+        3,
+        (&incarnation, &"f".repeat(64), tip),
+    );
+    kernel
+        .commit(intent("retire-evidence"), |envelope| {
+            envelope.retire_evidence("srcev-object:retired")?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    let first = ask(json!({ "decision_object_id": "object-one", "limit": 64 }))
+        .await
+        .unwrap();
+    assert_eq!(first["kind"], "page");
+    assert_eq!(first["as_of"], kernel.tip().unwrap());
+    let items = first["items"].as_array().unwrap();
+    let keys: Vec<&str> = items[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let mut keys = keys;
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "created_at_ms",
+            "decision_id",
+            "decision_object_id",
+            "decision_terms",
+            "evidence_id",
+            "matched_terms",
+            "publish_tip",
+            "score"
+        ]
+    );
+    assert_eq!(
+        items.len(),
+        61,
+        "the retired, foreign-incarnation, and stale-digest rows of the first page are left out"
+    );
+    let scores: Vec<&Value> = items.iter().map(|item| &item["score"]).collect();
+    assert!(
+        items[..35].iter().all(|item| item["score"] == 8000),
+        "{scores:?}"
+    );
+    assert!(
+        items
+            .iter()
+            .all(|item| item["evidence_id"] != json!(retired))
+    );
+    assert!(first["next"].is_string());
+    let second = ask(json!({
+        "decision_object_id": "object-one",
+        "limit": 64,
+        "after": first["next"],
+    }))
+    .await
+    .unwrap();
+    assert_eq!(second["items"].as_array().unwrap().len(), 9);
+    assert_eq!(second["next"], Value::Null);
+    assert_eq!(
+        counts(&handler)["read_filtered_stale"],
+        3,
+        "the retired, foreign-incarnation, and stale-digest rows"
+    );
+
+    kernel
+        .commit(intent("supersede-replaced"), |envelope| {
+            envelope.correct_decision(
+                "object-replaced",
+                DecisionSpec {
+                    decision_id: "decision-successor".to_owned(),
+                    object_id: "object-successor".to_owned(),
+                    domain_id: crate::canonical_memory::MEMORY_DOMAIN_ID.to_owned(),
+                    proposition_id: None,
+                    scope_id: Some(binding.scope_id()),
+                    anchor_id: None,
+                    evidence_id: None,
+                    decision_kind: "architecture".to_owned(),
+                    payload: DecisionPayload {
+                        summary: "a successor".to_owned(),
+                        rationale: "fixture".to_owned(),
+                    },
+                    source_kind: "fixture".to_owned(),
+                    source_id: "lineage-replaced".to_owned(),
+                    source_revision: 2,
+                    sensitivity: kernel::Sensitivity::Normal,
+                },
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-replaced" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "not_live" })),
+        "rows exist for the replaced decision"
+    );
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-missing" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "not_live" }))
+    );
+    for body in [
+        json!({ "decision_object_id": "object-one", "extra": 1 }),
+        json!({ "decision_object_id": "object-one", "after": "not-a-cursor" }),
+        json!({ "decision_object_id": "" }),
+        json!({}),
+    ] {
+        assert_eq!(
+            ask(body.clone()).await,
+            Err("invalid_params".to_owned()),
+            "{body}"
+        );
+    }
+    let elsewhere = project.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let refused = route_call(
+        &handler,
+        candidates_request(&elsewhere, json!({ "decision_object_id": "object-one" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refused["state"]["kind"], "invalid");
+    assert_eq!(refused["state"]["reason"], "project_mismatch");
+
+    let mut off = binding_with_harness(project.to_str().unwrap(), "opencode", SESSION);
+    off.config = candidate_config(true, false);
+    handler.bind_route(test_route(7), off);
+    let filtered = counts(&handler)["read_filtered_stale"].clone();
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" }))
+    );
+    assert_eq!(counts(&handler)["read_filtered_stale"], filtered);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_answers_the_store_and_kernel_states_before_any_page() {
+    let (starting, _store, _dir, project) = handler_with_store(
+        Arc::new(ProducerState::default()),
+        candidate_config(true, true),
+    );
+    let mut bound = binding_with_harness(project.to_str().unwrap(), "opencode", SESSION);
+    bound.config = candidate_config(true, true);
+    starting.bind_route(test_route(7), bound);
+    let answer = route_call(
+        &starting,
+        candidates_request(&project, json!({ "decision_object_id": "object-one" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer["state"]["kind"], "unavailable", "{answer}");
+    assert!(answer.get("items").is_none());
+
+    let dir = tempfile::tempdir().unwrap();
+    let storeless = Handler::with_producer_factory_config_resolver(
+        Arc::new(TestProducerFactory {
+            state: Arc::new(ProducerState::default()),
+        }),
+        candidate_config(true, true),
+        Arc::new(MissingSessionResolver),
+    );
+    storeless.kernel.set_expected(true);
+    storeless
+        .kernel
+        .open(
+            dir.path().join("kernel"),
+            StoreOpenPolicy::default(),
+            storeless.cancel.clone(),
+        )
+        .await;
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut bound = binding_with_harness(root.to_str().unwrap(), "opencode", SESSION);
+    bound.config = candidate_config(true, true);
+    storeless.bind_route(test_route(7), bound);
+    assert_eq!(
+        route_call(
+            &storeless,
+            candidates_request(&root, json!({ "decision_object_id": "object-one" })),
+        )
+        .await,
+        Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_listed_candidate_confirms_through_dispute_while_its_evidence_lives() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    activate_memories_authority(&store, &project);
+    seed(
+        &kernel,
+        &binding,
+        &[
+            ("confirmed", TOPIC, EventKind::Other),
+            (
+                "expired",
+                "harbor lighthouse ferry anchor dock",
+                EventKind::Other,
+            ),
+        ],
+    );
+    publish(
+        &handler,
+        &project,
+        &window(0, &format!("{TOPIC} first")),
+        true,
+    );
+    settle(&handler).await;
+    publish(
+        &handler,
+        &project,
+        &window(1, "harbor lighthouse ferry anchor dock second"),
+        true,
+    );
+    settle(&handler).await;
+    let ask = |decision: &str| {
+        route_call(
+            &handler,
+            candidates_request(&project, json!({ "decision_object_id": decision })),
+        )
+    };
+    let listed = ask("object-confirmed").await.unwrap();
+    let confirmed_row = listed["items"][0].clone();
+    let expired_row = ask("object-expired").await.unwrap()["items"][0].clone();
+    assert!(
+        confirmed_row["evidence_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("srcev:")
+    );
+    let dispute = |row: &Value, key: &str| {
+        crate::kernel_route_fixtures::commit_request(
+            &project,
+            SESSION,
+            key,
+            vec![json!({
+                "op": "disposition",
+                "object_id": row["decision_object_id"],
+                "event": "mark_disputed",
+                "evidence_id": row["evidence_id"],
+            })],
+            vec![],
+        )
+    };
+    let applied = route_call(&handler, dispute(&confirmed_row, "confirm-1"))
+        .await
+        .unwrap();
+    assert_eq!(applied["state"]["kind"], "available", "{applied}");
+    assert_eq!(applied["dispositions"][0]["disposition"], "disputed");
+
+    let later = now_ms() + 31 * 24 * 60 * 60 * 1000;
+    kernel.expire_harness_captures(later).unwrap();
+    let filtered = counts(&handler)["read_filtered_stale"].as_u64().unwrap();
+    let after = ask("object-expired").await.unwrap();
+    assert_eq!(
+        after["items"],
+        json!([]),
+        "the retired evidence's row is left out"
+    );
+    assert_eq!(
+        counts(&handler)["read_filtered_stale"].as_u64().unwrap(),
+        filtered + 1
+    );
+    let refused = route_call(&handler, dispute(&expired_row, "confirm-2"))
+        .await
+        .unwrap();
+    assert_eq!(refused["state"]["kind"], "invalid", "{refused}");
+    assert_eq!(refused["state"]["reason"], "not_found");
+}
+
+#[test]
+fn the_confirm_path_never_reads_the_candidate_table() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/kernel_routes");
+    for name in ["commit.rs", "dispute.rs"] {
+        let text = std::fs::read_to_string(root.join(name)).unwrap();
+        for token in [
+            "candidates_for_decision",
+            "contradiction_candidates",
+            "candidate_sweep_page",
+        ] {
+            assert!(!text.contains(token), "{name} names {token}");
+        }
+    }
+}

@@ -52,6 +52,10 @@ Memories created here are available through explicit search as labeled model inf
 const EIDNARA_MEMORY_DISPUTE_DESCRIPTION = `
 dispute: objectId + event (mark_disputed or contradict) + evidenceId, or path + gitObjectId, or both. It marks a served memory disputed or contradicted and cites evidence: a live evidence id of this project, which the daemon checks is live, or a relative repository path at a 40- or 64-character lowercase hex git object id, whose form the daemon checks but whose existence it does not. It can only lower the memory's standing; a dispute on an approval also demotes the memories that rest on it. The result names the applied disposition and whether served visibility changed.`;
 
+/** Appended to the description when the allowlist admits `candidates`. */
+const EIDNARA_MEMORY_CANDIDATES_DESCRIPTION = `
+candidates: objectId, with optional after (a prior page's next) and limit (1 to 64). A read listing published sources whose text overlaps the memory lexically, each with the dispute form that would confirm it. An overlap is not a judgment; read the source before filing the form.`;
+
 /** `a, b, or c`: how the schema's `action` field names the admitted actions. */
 export function actionList(actions: readonly EidnaraMemoryAction[]): string {
     if (actions.length < 2) return actions.join("");
@@ -60,9 +64,14 @@ export function actionList(actions: readonly EidnaraMemoryAction[]): string {
 
 /** The tool description for the actions a caller exposes. */
 export function eidnaraMemoryDescription(actions: readonly EidnaraMemoryAction[]): string {
-    return actions.includes("dispute")
-        ? `${EIDNARA_MEMORY_DESCRIPTION}\n${EIDNARA_MEMORY_DISPUTE_DESCRIPTION}`
-        : EIDNARA_MEMORY_DESCRIPTION;
+    let description = EIDNARA_MEMORY_DESCRIPTION;
+    if (actions.includes("candidates")) {
+        description = `${description}\n${EIDNARA_MEMORY_CANDIDATES_DESCRIPTION}`;
+    }
+    if (actions.includes("dispute")) {
+        description = `${description}\n${EIDNARA_MEMORY_DISPUTE_DESCRIPTION}`;
+    }
+    return description;
 }
 export const GET_MAX_CLAIMS = 20;
 /** Byte budget for the memories a get response serializes, matching the ~16 KiB scale of eidnara_search's 4096-token render budget; entries past the budget are elided and reported. */
@@ -102,4 +111,6 @@ export const EIDNARA_MEMORY_UNWRAP_RULES: ImitatedArgsSchema = {
     evidenceId: "string",
     path: "string",
     gitObjectId: "string",
+    after: "string",
+    limit: "number",
 };

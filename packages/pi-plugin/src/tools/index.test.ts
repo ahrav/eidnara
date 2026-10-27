@@ -115,6 +115,8 @@ describe("registerEidnaraTools", () => {
                 "objectId",
                 "objectIds",
                 "reason",
+                "after",
+                "limit",
             ],
             eidnara_note: [
                 "action",
