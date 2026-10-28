@@ -333,7 +333,11 @@ one terminal count; a replayed unit is scored again with its rows' tip at or
 above the earlier one. `publish_latency_with_candidates_on_stays_within_the_off_baseline`
 (`:1254`) commits at least one publication beside a running pass and keeps
 the median publication hold within three times the flag-off median plus
-50 ms. The job hands its kept texts out through `CaptureJob::run_settled`
+50 ms. `a_job_whose_document_capture_ends_in_deadline_still_offers_its_published_units`
+(`:1574`) commits a window batch and then ends the job `deadline` in its
+document batch, and observes one offered pass and one row: a kept unit's
+commit landed and the memo holds it, so the pass is offered whatever count
+ended the job after that commit. The job hands its kept texts out through `CaptureJob::run_settled`
 (`crates/daemon/src/source_capture.rs:800`) after the blocking closure has
 dropped the slot permit, and the pass runs under its own `EvalBudget`
 (`crates/daemon/src/contradiction_candidates/pass.rs:166`), a fact read from
@@ -436,8 +440,10 @@ in a deterministic newest-first order, counting each decision cut when more
 were visible, before the eligibility filter; summary bytes are bounded before
 any payload is loaded (`decision_payload_sizes_as_of`, `slice/read.rs:330`);
 the pass never loads more than N summaries or more than the byte bound.
-Check: `always` - with N + k eligible decisions the pass scores exactly N, the
-k oldest are the ones omitted, and `candidates_truncated` increments by k; a
+Check: `always` - with N + k scope-matched visible decisions the pass keeps
+exactly the N newest for the eligibility judgment, the k oldest are the ones
+omitted, and `candidates_truncated` increments by k, so the rows scored are
+the eligible among those N; a
 decision with an oversize payload is skipped before load and counted; the
 semantics is `always` because every pass must stay inside the bound.
 Fault/timing angle: a project whose `memory` decisions exceed N; a decision

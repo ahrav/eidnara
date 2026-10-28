@@ -397,8 +397,9 @@ fn score_descriptors(
                 counts.add(Count::RowsWritten, outcome.written as u64);
                 counts.add(Count::DroppedAtCap, outcome.dropped_at_cap as u64);
             }
+            // The descriptor was scored; the write that did not land is named by the end count, as for a failed write.
             Err(MemoryStoreError::Store(storage::StoreError::Deadline)) => {
-                return unscored(index, Count::Deadline);
+                return unscored(index + 1, Count::Deadline);
             }
             Err(error) => {
                 eprintln!("daemon: contradiction candidate write failed: {error}");

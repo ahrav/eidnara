@@ -1560,6 +1560,63 @@ fn a_write_behind_a_held_store_connection_ends_at_the_pass_deadline() {
         "the write waited {waited:?} for a connection held past the deadline"
     );
     assert_eq!(core.count("deadline"), 1);
-    assert_eq!(core.count("descriptors_unscored"), 1);
+    assert_eq!(core.count("descriptors_analyzed"), 1);
+    assert_eq!(
+        core.count("descriptors_unscored"),
+        0,
+        "the descriptor was scored; the deadline names the write that did not land"
+    );
     assert!(core.rows_for(&descriptor.evidence_id).is_empty());
+}
+
+/// The window batch's publications are durable and memoized once their commit lands, so a document capture that ends the job `deadline` afterwards still offers them to a pass; a later capture replays them without a pass.
+#[tokio::test]
+async fn a_job_whose_document_capture_ends_in_deadline_still_offers_its_published_units() {
+    use crate::project_docs::{DocumentRead, admit_document_paths};
+    use crate::source_capture::REPOSITORY_WALK_BUDGET;
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let kernel = kernel_of(&handler);
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    std::fs::write(project.join("ARCHITECTURE.md"), "# Architecture\n").unwrap();
+    super::source_corpus::git(&project, &["init", "-q", "-b", "main"]).unwrap();
+    super::source_corpus::git(&project, &["add", "-A"]).unwrap();
+    super::source_corpus::git(&project, &["commit", "-q", "-m", "documents"]).unwrap();
+    // The repository walk's own deadline passes inside the hook, so the identity derivation reports its budget and the document batch ends `deadline` after the window batch committed.
+    *handler
+        .source_capture
+        .before_repository_derivation
+        .lock()
+        .unwrap() = Some(Arc::new(|| {
+        std::thread::sleep(REPOSITORY_WALK_BUDGET + Duration::from_millis(200));
+    }));
+    let path = admit_document_paths(&["ARCHITECTURE.md"])
+        .unwrap()
+        .remove(0);
+    let reads = Arc::new(std::sync::Mutex::new(Some(vec![(
+        path,
+        DocumentRead::Text("# Architecture\n".to_owned()),
+    )])));
+    let offer = source_capture::Offer {
+        profile: SerializerProfile::OpencodeAiSdk,
+        session_id: SESSION.to_owned(),
+        project: binding,
+        window: window(1, TOPIC).iter().cloned().map(Arc::new).collect(),
+        epoch: handler.source_capture.epoch(),
+        documents: Some(reads),
+        candidates: true,
+    };
+    handler
+        .capture_after_response(offer)
+        .expect("a charged window")
+        .run();
+    settle(&handler).await;
+    let capture = capture_report(&handler);
+    assert_eq!(capture["deadline"], 1, "{capture}");
+    assert_eq!(capture["documents_refused"], 1, "{capture}");
+    assert_eq!(capture["units_published"], 1, "{capture}");
+    let report = counts(&handler);
+    assert_eq!(report["offered"], 1, "{report}");
+    assert_eq!(report["completed"], 1, "{report}");
+    assert_eq!(rows(&store).len(), 1, "the published unit was scored");
 }

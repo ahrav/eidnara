@@ -41,7 +41,7 @@ to the evidence it cites. Lenses: data integrity; wildcard.
   Disposition::Disputed, Outcome::Deny`. The event row carries the evidence
   id (the `AdmissionEvent.evidence_id` field, `kernel_scope.rs:302` shows the
   shape).
-- `source_capture.rs:569-572` `record_expiry` surfaces `retained` as
+- `source_capture.rs:666-669` `record_expiry` surfaces `retained` as
   `expiry_retained` in the capture report.
 - Tests: none found that place a foreign citation on a harness capture's
   evidence and sweep. `retire_evidence`'s `Conflict` is exercised elsewhere
