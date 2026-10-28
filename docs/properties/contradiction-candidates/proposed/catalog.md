@@ -77,9 +77,11 @@ Record count: 15. By surface: S-A 3, S-B 2, S-C 2, S-D 2, S-E 1, S-F 2,
 S-G 1, S-H 1, R5 cross-cutting 1.
 
 Vocabulary used below: "eligible decision" is the one shared predicate OQ-B
-fixes (proposed: registry row live at the snapshot, `memory` domain, project
-scope term accepted, disposition not in {`superseded`, `contradicted`,
-`rejected`, `quarantined`}). "Scorer contract version V" names the constant
+fixed, built by #1166 as `eligible`
+(`crates/daemon/src/contradiction_candidates/eligibility.rs:7-24`: registry
+row served at the snapshot, `memory` domain, project scope term accepted,
+visible to explicit search, no successor, disposition not in {`superseded`,
+`contradicted`, `rejected`, `quarantined`}). "Scorer contract version V" names the constant
 that embeds `ANALYSIS_CONTRACT_EPOCH` (`crates/retrieval/src/lexical/mod.rs:40`),
 the fold function F, the formula, threshold, and K.
 
@@ -577,16 +579,16 @@ over-age and retired-evidence rows dropped, and one skip counted;
 `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over`
 (`:517`) bounds each run to one page;
 `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it`
-(`:932`), `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` (`:956`),
-`every_claim_chunk_of_a_page_is_read` (`:985`), and
+(`:994`), `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` (`:1018`),
+`every_claim_chunk_of_a_page_is_read` (`:1047`), and
 `a_row_at_the_age_bound_stays_and_one_past_it_drops` (`:486`) cover the
 remaining branches. `a_busy_reader_does_not_hold_the_sweep_past_its_budget`
-(`:1141`) holds one Kernel reader while the other is free and observes the
+(`:1203`) holds one Kernel reader while the other is free and observes the
 sweep return inside its budget with both rows judged: each scope-terms read
 goes through `KernelStore::scope_terms_within_budget`
 (`crates/kernel/src/scope.rs:1573`), which polls the whole reader pool and
 stops at the sweep's deadline. The sweep is `CandidateSweep::run`
-(`crates/daemon/src/contradiction_candidates/sweep.rs:66`); it reads the page
+(`crates/daemon/src/contradiction_candidates/sweep.rs:69`); it reads the page
 before it captures the tip, reads each chunk of decisions in ascending id
 order through `KernelStore::claim_standing_at_within_budget`
 (`crates/kernel/src/claim_facts.rs:270`), which returns the registry row,
@@ -607,9 +609,11 @@ stale matcher digest, an age past `MAX_CANDIDATE_AGE`, a foreign Kernel
 incarnation, a decision with no registry row in its claim standing or failing
 `eligible` at the tip, or descriptor evidence that is `Retired` or `Unknown`
 at the tip; every other row is kept. A row written above the tip is spared
-the Kernel judgments (standing, eligibility, evidence); the Kernel-free
-drops (stale digest, over-age, foreign incarnation) apply to it as to any
-row. A repeat over the same page at the same tip drops zero, and a cycle of
+the Kernel judgments (standing, eligibility, evidence); the stale-digest
+and over-age drops need no Kernel and apply to it as to any row, and the
+foreign-incarnation drop applies once the tip capture has answered the
+database identity. A restore between the tip capture and a Kernel read
+keeps every row the Kernel would have judged and counts one skip. A repeat over the same page at the same tip drops zero, and a cycle of
 `n` runs over an `n`-page table reaches a fixed point: the next cycle at the
 same tip drops zero. The sweep writes no Kernel row.
 With no Kernel the sweep reads nothing, drops nothing, and counts one skip. A
@@ -759,7 +763,7 @@ hides the table, runs the sweep under a false flag with and without a
 Kernel, and observes every counter at zero, then shows the same table fails
 the first statement an enabled sweep runs;
 `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass`
-(`:1030`) drives `pass_then_sweep`
+(`:1092`) drives `pass_then_sweep`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) with the flag off and
 then on. The key is `/contradiction_candidates/enabled`
 (`crates/daemon/src/config.rs:1024`), user-only and default false

@@ -869,6 +869,68 @@ fn a_sweep_cancelled_during_the_single_decision_reads_reads_no_further_and_delet
 }
 
 #[test]
+fn a_restore_between_the_claim_read_and_the_evidence_read_deletes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::open();
+    let destination = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = fixture
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    fixture
+        .kernel
+        .commit(intent("reject-active"), |envelope| {
+            envelope.record_admission(request(
+                "object-active",
+                EventKind::ExplicitReject,
+                TRUSTED,
+            ))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let live = fixture.live_evidence.clone();
+    fixture.write(PROJECT, &live, &["active"], |_| {});
+    let rows = fixture.rows();
+    let polls = std::cell::Cell::new(0_u32);
+    // The claim read at the rejected tip marks the row dead; the restore before
+    // the evidence read returns the Kernel to the backup, where the decision is
+    // active, so the evidence read refuses the stale target.
+    let cancelled = || {
+        polls.set(polls.get() + 1);
+        if polls.get() == 4 {
+            fixture.kernel.restore(&backup.destination_path).unwrap();
+        }
+        false
+    };
+    let counts = Candidates::default();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &cancelled,
+    );
+    assert_eq!(
+        fixture.rows(),
+        rows,
+        "a judgment that spans a restore deletes nothing"
+    );
+    let block = report(&counts);
+    assert_eq!(block["sweep_dropped"], 0);
+    assert_eq!(block["sweep_skipped_kernel_unavailable"], 1);
+    assert_eq!(
+        fixture.facts("active").own_admission.unwrap().disposition,
+        Disposition::Active
+    );
+}
+
+#[test]
 fn a_sweep_cancelled_before_the_scope_reads_reads_no_scope_and_deletes_nothing() {
     let fixture = Fixture::open();
     let live = fixture.live_evidence.clone();

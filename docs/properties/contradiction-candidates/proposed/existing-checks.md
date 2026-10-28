@@ -98,15 +98,16 @@ refuses a store at the prior baseline untouched (`:496`).
 | `the_candidate_modules_name_no_kernel_write_path` | `:695` | no Kernel write entry point named in the module's files (lexical) | R5 | unaudited |
 | `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:719` | every `CausalInputs {` literal under `crates/daemon/src` has empty `signals` (lexical) | R5 | unaudited |
 | `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land` | `:765` | a refused chunk keeps its rows; Kernel-free drops land | sweep | unaudited |
-| `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:932` | rows above the tip are not judged | sweep | unaudited |
-| `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` | `:956` | cancellation before the first Kernel read: no reader taken, nothing deleted | sweep | unaudited |
+| `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:994` | rows above the tip are not judged | sweep | unaudited |
+| `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` | `:1018` | cancellation before the first Kernel read: no reader taken, nothing deleted | sweep | unaudited |
 | `a_sweep_cancelled_during_the_single_decision_reads_reads_no_further_and_deletes_nothing` | `:816` | cancellation inside the single-decision fallback: the tip capture and the refused chunk are the only Kernel reads; nothing deleted | sweep | unaudited |
-| `a_sweep_cancelled_before_the_scope_reads_reads_no_scope_and_deletes_nothing` | `:872` | cancellation before the scope-term reads: the tip capture and the chunk read are the only Kernel reads; nothing deleted | sweep | unaudited |
-| `an_empty_page_reads_no_kernel_row_and_still_refreshes_the_gauge` | `:908` | an empty page takes no Kernel reader, counts no skip, and refreshes `retained_bytes` | sweep | unaudited |
-| `every_claim_chunk_of_a_page_is_read` | `:985` | two claim chunks | sweep | unaudited |
-| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:1030` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
-| `the_evidence_read_refuses_another_incarnation_a_future_snapshot_and_a_negative_one` | `:1099` | incarnation, future-snapshot, and negative-snapshot refusals | sweep | unaudited |
-| `a_busy_reader_does_not_hold_the_sweep_past_its_budget` | `:1141` | one held reader: the sweep's scope reads take the free reader and the run stays inside its budget | sweep | unaudited |
+| `a_sweep_cancelled_before_the_scope_reads_reads_no_scope_and_deletes_nothing` | `:934` | cancellation before the scope-term reads: the tip capture and the chunk read are the only Kernel reads; nothing deleted | sweep | unaudited |
+| `a_restore_between_the_claim_read_and_the_evidence_read_deletes_nothing` | `:872` | a restore between the claim read and the evidence read keeps the row the claim read had marked dead and counts one skip | sweep | unaudited |
+| `an_empty_page_reads_no_kernel_row_and_still_refreshes_the_gauge` | `:970` | an empty page takes no Kernel reader, counts no skip, and refreshes `retained_bytes` | sweep | unaudited |
+| `every_claim_chunk_of_a_page_is_read` | `:1047` | two claim chunks | sweep | unaudited |
+| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:1092` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
+| `the_evidence_read_refuses_another_incarnation_a_future_snapshot_and_a_negative_one` | `:1161` | incarnation, future-snapshot, and negative-snapshot refusals | sweep | unaudited |
+| `a_busy_reader_does_not_hold_the_sweep_past_its_budget` | `:1203` | one held reader: the sweep's scope reads take the free reader and the run stays inside its budget | sweep | unaudited |
 | `the_budgeted_scope_read_answers_as_the_unbudgeted_one_and_stops_at_its_deadline` | `crates/kernel/tests/kernel_scope.rs:460` | `scope_terms_within_budget` equals `scope_terms`, answers `None` for a missing scope, and returns `Deadline` on an expired budget and on a fully held reader pool | sweep | unaudited |
 | `every_standing_equals_the_claim_facts_of_its_claim_at_every_snapshot`, `standing_refusals_match_the_claim_facts_refusals` | `crates/kernel/tests/kernel_claim_standing.rs:111`, `:168` | the sweep's claim standing read equals the registry row, decision row, own admission row, and served standing of claim facts at every snapshot, and refuses as claim facts does | sweep | unaudited |
 

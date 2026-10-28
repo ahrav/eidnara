@@ -7,11 +7,10 @@ until the specification resolves it on its own evidence; the dependency
 catalog does not resolve any of them (see bias B3 in
 `../dependencies/portfolio-evaluation.md`).
 
-## Unknowns OQ-B to OQ-E
+## Unknowns OQ-C to OQ-E
 
 | Id | Question | Owner |
 | --- | --- | --- |
-| OQ-B | One eligibility predicate shared by the pass, the sweep, and the reads: which dispositions are candidates and which are swept; `Stale` and `Quarantined` need a human decision (certificate conflict 6). | specification owner |
 | OQ-C | Descriptor text source (H3): carried out of the publication job past the capture commit gate, or read back from the Kernel evidence bytes (certificate conflict 4). | specification owner |
 | OQ-D | The candidate-set bound N, and whether a budgeted Kernel id read is needed given the unbounded `visible_domain_decisions_as_of_in_scope` (plan OQ5-1; certificate conflict 2). | specification owner |
 | OQ-E | Whether the TS plugin hides the `candidates` action from the tool schema when the daemon flag is off (certificate conflict 3). | specification owner |
@@ -30,6 +29,7 @@ in OQ5-3; the code follows the literals (see
 | Id | Question | Resolution |
 | --- | --- | --- |
 | OQ-A | Definition of the case-fold function F applied to both sides before comparison, and how it relates to the FTS5 diacritic handling (certificate R-A3). | Resolved by #1164 OQ5-5: `str::to_lowercase` per term, no diacritic folding; implemented by `terms` at `crates/daemon/src/contradiction_candidates/scorer.rs:111-132`. |
+| OQ-B | One eligibility predicate shared by the pass, the sweep, and the reads: which dispositions are candidates and which are swept; `Stale` and `Quarantined` need a human decision (certificate conflict 6). | Resolved by #1166: `eligible` (`crates/daemon/src/contradiction_candidates/eligibility.rs:7-24`) is the one predicate; a decision is eligible when its registry row is served, in the `memory` domain, its scope names the project, it is visible to explicit search, it has no successor, and its disposition is none of `Superseded`, `Contradicted`, `Rejected`, `Quarantined`; `Stale` and `Disputed` stay eligible. The sweep drops rows whose decision fails it; the pass (#1167) and read (#1168) take the same predicate. |
 
 ## Plan-versus-HEAD conflicts
 

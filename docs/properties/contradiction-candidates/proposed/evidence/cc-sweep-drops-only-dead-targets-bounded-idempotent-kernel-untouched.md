@@ -12,7 +12,7 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/sweep.rs:66` `CandidateSweep::run`
+- `crates/daemon/src/contradiction_candidates/sweep.rs:69` `CandidateSweep::run`
   returns before any statement when the flag is false, counts one skip with
   no Kernel, reads `CANDIDATE_SWEEP_PAGE + 1` rows after the watermark, and
   only then captures the identified Kernel target, so every row on the page
@@ -20,7 +20,7 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
   `judge`.
 - `run` marks a row dead without a Kernel read when its matcher digest
   differs from `matcher_digest()` or its age exceeds `MAX_CANDIDATE_AGE`;
-  these drops land even when the tip capture fails. `sweep.rs:184` `judge`
+  these drops land even when the tip capture fails. `sweep.rs:196` `judge`
   then marks a row with a foreign `database_incarnation_id` dead, reads
   claim standing for the distinct decisions in ascending id order in chunks
   of 64 (a refused chunk is read again one decision at a time), and applies
