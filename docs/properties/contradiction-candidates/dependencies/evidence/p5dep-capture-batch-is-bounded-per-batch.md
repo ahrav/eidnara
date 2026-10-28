@@ -33,14 +33,14 @@ descriptors a job publishes. Lens: resource boundaries; C9; D3.
   all in one kernel commit; returns `Vec<Published>` in order.
 - `harness_sources.rs:520-532` `Published { object_id, occurrence_id,
   evidence_object_id, replaced_object_id, replayed, admission }`.
-- `source_capture.rs:900-908`: the window batch through
+- `source_capture.rs:1034-1042`: the window batch through
   `publish_screened_between(publisher, &candidates, observed_at,
   Some(&self.budget), hook)`.
-- `source_capture.rs:894-898`: `if candidates.is_empty() { return
-  capture_documents(..) }`; `:929`, `:953`: after the window batch (Ok or
+- `source_capture.rs:1028-1031`: `if candidates.is_empty() { return
+  capture_documents(..) }`; `:1065`, `:1088`: after the window batch (Ok or
   Err), `capture_documents` runs.
-- `source_capture.rs:972-973` `capture_documents` doc: documents are captured
-  "in their own batch after the window's, under the commit gate"; `:1048`
+- `source_capture.rs:1097` `capture_documents` doc: documents are captured
+  "in their own batch after the window's, under the commit gate"; `:1183`
   `publish_screened(publisher, &units, now, Some(&self.budget))`.
 - `source_capture.rs:3` header: "publishes at most one screened batch under a
   5 s budget" (D3: the documents batch is a second `publish_screened` call).

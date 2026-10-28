@@ -12,11 +12,13 @@ publication wait on them.
 
 - `crates/daemon/src/source_capture.rs:827` `publish_settled` runs inside the
   job's blocking closure; it destructures the job, so the slot permit
-  (`ActivePass` of the capture) drops before the closure returns, and the commit
+  (`source_capture::ActiveSlot`, `:473`) drops before the closure returns, and the commit
   gate guard was dropped at the end of `publish`.
 - `crates/daemon/src/source_capture.rs:800` `run_settled` returns the settled
   publication only after the join, so the pass is offered from the async side
-  after physical completion.
+  after physical completion; `publish_settled` (`:827-871`) hands out every
+  kept unit whatever count ended the job after the window batch's commit,
+  since that commit landed and the memo holds the unit.
 - `crates/daemon/src/lib.rs:9279` `capture_after_response` offers the pass from
   the same tracked task after `run_settled` returns, and only when the route's
   frozen flag and a memory store are present.

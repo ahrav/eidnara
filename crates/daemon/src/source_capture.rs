@@ -836,7 +836,8 @@ impl CaptureJob {
         let units = kept_for_pass
             .map(std::cell::RefCell::into_inner)
             .unwrap_or_default();
-        if end != Count::Completed || units.is_empty() {
+        // A kept unit's commit landed and the memo holds it, whatever ended the job after that commit, so the pass sees it now or never.
+        if units.is_empty() {
             return (end, None);
         }
         let kept: usize = units

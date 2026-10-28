@@ -34,7 +34,8 @@ Without the heap and the byte cut a project with 100,000 decisions would load
 Every read uses the tip captured at the pass start (G2: ids, claim facts, sizes,
 and payloads share one snapshot, so a later commit cannot mix two states into
 one candidate set). Explicit search hides rejected, contradicted, quarantined,
-and secret rows at `crates/kernel/src/admission.rs:4194`.
+and secret rows: `surface_visibility` (`crates/kernel/src/admission.rs:4197-4218`)
+and `visibility_row` (`:4324-4336`).
 
 ## What a test must construct
 
