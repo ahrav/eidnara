@@ -674,8 +674,7 @@ impl SourcePublisher<'_> {
                     stored_receipt(preview, self.evidence_intent(&unit), &unit, self)?
                         .map_or_else(|| unit.request_digest.clone(), |(_, digest)| digest);
                 Ok((
-                    stored_receipt(preview, descriptor_intent.clone(), &unit, self)?
-                        .map(|(receipt, _)| receipt),
+                    stored_descriptor(preview, descriptor_intent.clone(), &unit, self)?,
                     unit.rule.resolve(preview)?,
                     evidence_digest,
                 ))
@@ -690,12 +689,14 @@ impl SourcePublisher<'_> {
                     evidence: None,
                 },
             })?;
-        if let Some(receipt) = stored {
+        if let Some((receipt, cited)) = stored {
+            let (evidence_id, evidence_object_id) =
+                cited.unwrap_or((evidence_id, evidence_object_id));
             return Ok(Published {
                 object_id: receipt.result,
                 occurrence_id: unit.occurrence_id,
                 evidence_object_id,
-                evidence_id: evidence_id.clone(),
+                evidence_id,
                 replaced_object_id: None,
                 replayed: true,
                 admission,
@@ -1289,13 +1290,12 @@ fn publish_prepared(
                 let mut step = || {
                     publisher.check_scope_once(unit, preview, &mut scopes)?;
                     Ok((
-                        stored_receipt(
+                        stored_descriptor(
                             preview,
                             publisher.descriptor_intent(unit),
                             unit,
                             publisher,
-                        )?
-                        .map(|(receipt, _)| receipt),
+                        )?,
                         unit.rule.resolve(preview)?,
                         stored_receipt(preview, publisher.evidence_intent(unit), unit, publisher)?
                             .map(|(receipt, _)| receipt),
@@ -1331,15 +1331,19 @@ fn publish_prepared(
             );
         }
         match stored {
-            Some(receipt) => outcomes.push(Some(Published {
-                object_id: receipt.result,
-                occurrence_id: unit.occurrence_id.clone(),
-                evidence_object_id: unit.evidence_object_id(),
-                evidence_id: unit.evidence_id(),
-                replaced_object_id: None,
-                replayed: true,
-                admission,
-            })),
+            Some((receipt, cited)) => {
+                let (evidence_id, evidence_object_id) =
+                    cited.unwrap_or_else(|| (unit.evidence_id(), unit.evidence_object_id()));
+                outcomes.push(Some(Published {
+                    object_id: receipt.result,
+                    occurrence_id: unit.occurrence_id.clone(),
+                    evidence_object_id,
+                    evidence_id,
+                    replaced_object_id: None,
+                    replayed: true,
+                    admission,
+                }));
+            }
             None => {
                 outcomes.push(None);
                 pending.push(index);
@@ -2084,6 +2088,22 @@ impl Prepared<'_> {
         (self.unit.class == OccurrenceClass::RepositoryDocuments && self.revision > 1)
             .then(|| self.revision - 1)
     }
+}
+
+/// The `(evidence_id, evidence object id)` a stored descriptor cites.
+type CitedEvidence = Option<(String, String)>;
+
+fn stored_descriptor(
+    preview: &kernel::Envelope<'_>,
+    intent: CommitIntent,
+    unit: &Prepared<'_>,
+    publisher: &SourcePublisher<'_>,
+) -> Result<Option<(kernel::CommitReceipt, CitedEvidence)>, KernelError> {
+    let Some((receipt, _)) = stored_receipt(preview, intent, unit, publisher)? else {
+        return Ok(None);
+    };
+    let cited = preview.source_descriptor_evidence(&receipt.result)?;
+    Ok(Some((receipt, cited)))
 }
 
 /// Where a unit's admission classes come from.

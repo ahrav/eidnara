@@ -878,6 +878,23 @@ impl Envelope<'_> {
         historical_head(self.tx, lineage_id)
     }
 
+    /// Returns the `(evidence_id, evidence object id)` of the evidence row cited by descriptor `object_id` in this envelope's view, including retired observations. Returns `None` when the observation is absent or cites no evidence row.
+    pub fn source_descriptor_evidence(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<(String, String)>, KernelError> {
+        self.tx
+            .query_row_cached(
+                "SELECT e.evidence_id,e.object_id FROM observations o
+                 JOIN evidence_meta e ON e.evidence_id=o.evidence_id
+                 WHERE o.object_id=?1",
+                [object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(map_sqlite)
+    }
+
     /// The live descriptor of `class` in lineage `lineage_id` in this envelope's view, or `None` when the lineage has no live revision. The read restricts descriptor scanning to the lineage's `srcdesc:{lineage_id}:` object id range and applies [`KernelStore::live_source_descriptors`]' liveness predicate and row checks.
     ///
     /// # Errors
