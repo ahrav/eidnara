@@ -50,14 +50,14 @@ At HEAD `0ff62b29a`:
 Checks at HEAD:
 
 - `no_fire_reason_is_durable_change_gated_and_cleared_by_fire`
-  (`crates/daemon/src/lib.rs:41214`). The binding carries
+  (`crates/daemon/src/lib.rs:41234`). The binding carries
   `default_test_config()` with a chain (`binding`, `:19680-19698`), while
   the handler's live configuration has an empty chain. The pass adopts
   Eidnara and then records `no_models`; a repeat leaves `row_version`
   unchanged.
 - `session_wrapup_no_models_is_terminal_and_retains_command` (`:37597`).
 - `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix`
-  (`crates/daemon/src/fold_authority_handler_tests.rs:1037`).
+  (`crates/daemon/src/fold_authority_handler_tests.rs:1036`).
 
 Citation corrections from `265df096` to HEAD: callers `lib.rs:9014`, `:9150`
 are now `:9011`, `:9077`; `:9538-9555` (the preparation entry) is

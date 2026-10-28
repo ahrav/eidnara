@@ -503,10 +503,10 @@ Read at HEAD. Corrections: callers `lib.rs:9014`, `:9150` are now `:9011`,
 `history_summarizer_chunk.rs:619-623` is `:908-912`;
 `history_summarizer.rs:1655-1657` is `:1840-1842`; the checks at
 `lib.rs:42058` and `:39354` are at `:41167` and `:37569`.
-Existing check: `crates/daemon/src/lib.rs:41214`
+Existing check: `crates/daemon/src/lib.rs:41234`
 `no_fire_reason_is_durable_change_gated_and_cleared_by_fire`; `:37597`
 `session_wrapup_no_models_is_terminal_and_retains_command`;
-`crates/daemon/src/fold_authority_handler_tests.rs:1037`
+`crates/daemon/src/fold_authority_handler_tests.rs:1036`
 `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix`.
 Replacement: FA-N05.
 Impact: High at `265df096`: an empty-chain session paid for preparation on
@@ -551,7 +551,7 @@ live chain beside the captured `memory_enabled` (`lib.rs:5640`).
 Corrections: `lib.rs:211-251` is now `:227-263`; `:5722` is `:5428`;
 `:5924-5925` is `:5640`; `config.rs:2158` is `:2350`.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:245`,
-`:778`; `crates/daemon/src/lib.rs:41214`;
+`:778`; `crates/daemon/src/lib.rs:41234`;
 `crates/daemon/src/config.rs:2350`
 `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`.
 Impact: High. Route mode alone is not a session-wide authority fact, which
@@ -1369,7 +1369,7 @@ empties the segment batch (`crates/memory-store/src/lib.rs:12099-12104`).
 Served fingerprints and baseline parts are not `ModuleMeta` fields after
 #905 and #906.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:54`,
-`:245`, `:866`, `:581`, `:671`, `:1056` (through `assert_native_state`,
+`:245`, `:865`, `:581`, `:671`, `:1055` (through `assert_native_state`,
 `:19`); `crates/daemon/src/pi_native_serving_tests.rs:621`
 `assert_native_commit`, used by `:652`, `:778`, and `:843` (#1068);
 `crates/memory-store/src/lib.rs:26941`

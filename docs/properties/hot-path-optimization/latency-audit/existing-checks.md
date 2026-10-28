@@ -702,7 +702,7 @@ not a claim that no related check exists anywhere in the repository.
 
 [hook]: ../../../../crates/daemon/src/lib.rs#L8943-L8956
 [no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5761
-[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L38886
+[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L38906
 [t-emergency]: ../../../../crates/daemon/src/lib.rs#L38046
 [t-cas]: ../../../../crates/daemon/src/lib.rs#L25283
 [t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L18554
@@ -719,7 +719,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-secret]: ../../../../crates/memory-store/src/lib.rs#L16559
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21058
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20682
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38750
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38770
 [t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L21176
 [t-truncate]: ../../../../crates/memory-store/src/lib.rs#L22638
 [t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L16295
