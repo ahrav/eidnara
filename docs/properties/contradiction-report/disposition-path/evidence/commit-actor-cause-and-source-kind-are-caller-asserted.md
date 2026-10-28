@@ -18,16 +18,19 @@ which makes the provenance of `source_kind` part of the dispute record.
 - `CommitRequest` carries `source_kind` and the optional asserted classes
   (`crates/daemon/src/kernel_routes/commit.rs:108-127`); `resolve_classes`
   derives the classes from `source_kind` and refuses an assertion above
-  the derivation (`commit.rs:411-444`); the handler passes the resolved
-  taint to the dispute reason (`commit.rs:1109-1123`).
+  the derivation (`commit.rs:413-446`); the handler passes the resolved
+  taint to the dispute reason (`commit.rs:1137-1151`).
 - `kernel_route_scope` binds the store, the project, the root, the
   harness, and the capabilities (`crates/daemon/src/kernel_routes/mod.rs:415-441`;
-  `RouteScope` at `:405-412`). `handle_kernel_commit` reads only
-  `scope.project` and `scope.store` (`commit.rs:1124`, `:1139`, `:1142`);
-  `scope.harness` is not read on this route.
+  `RouteScope` at `:405-412`). `handle_kernel_commit` reads
+  `scope.project` and `scope.store` (`commit.rs:1152`, `:1175`, `:1178`)
+  and, since #1162, `scope.harness` with the bound `session_id` into the
+  `DisputeReporter` (`commit.rs:1172-1173`) that `record_disposition`
+  forwards to `record_dispute_admission` (`commit.rs:798-800`); a dispute
+  row stores them as its reporting session, and no other event reads them.
 - `management_binding` requires a non-empty `session_id` and refuses one
   that differs from the channel's bound session with `session_mismatch`
-  (`crates/daemon/src/lib.rs:6596-6631`). `kernel_request` then strips
+  (`crates/daemon/src/lib.rs:6629-6664`). `kernel_request` then strips
   `method`, `kind`, `session_id`, and `project_root` before parsing the
   body (`ENVELOPE_KEYS`, `mod.rs:461`; `parse_request_body`,
   `:463-474`), so the session reaches no Kernel row.
@@ -74,7 +77,7 @@ runs before body parsing for every `kernel.*` route.
 
 ### Q: Does the route verify `actor` against `RouteScope.harness`?
 
-- Sources examined: `mod.rs:405-441`, `commit.rs:1076-1205`,
+- Sources examined: `mod.rs:405-441`, `commit.rs:1097-1241`,
   `project.rs:138-165`.
 - Findings: no. `harness` is bound and unused on `kernel.commit`; `actor`
   is copied from the body.
@@ -84,7 +87,7 @@ runs before body parsing for every `kernel.*` route.
 
 ### Q: Is `source_kind` bound to the calling surface?
 
-- Sources examined: `commit.rs:368-380`, `:411-444`, `:1109-1123`.
+- Sources examined: `commit.rs:370-382`, `:413-446`, `:1137-1151`.
 - Findings: no. Any bound client may send any of `assistant`, `model`,
   `memory_classifier`, or `user`; the derivation bounds the resulting
   taint at `user_inferred` for the strongest claim.

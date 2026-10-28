@@ -28,8 +28,8 @@ on them.
   `append_decision_citations` (`:240`, call at `:266`).
 - Route reachability: `DecisionRequest.evidence_id` and
   `ObservationRequest.evidence_id` (`crates/daemon/src/kernel_routes/
-  commit.rs:274`, `:314`) flow into the specs (`:292`, `:344`) and into
-  `envelope.insert_decision` / `insert_observation` (`:925`, `:1031`).
+  commit.rs:276`, `:316`) flow into the specs (`:294`, `:346`) and into
+  `envelope.insert_decision` / `insert_observation` (`:943`, `:1052`).
 - `NotFound` maps to `invalid/not_found` (`kernel_routes/state.rs:276`),
   whose doc reads "does not exist, is not live, or is not scoped to the
   bound project" (`:79-81`).
@@ -57,7 +57,7 @@ input was not read.
 ## Timing windows and dependencies
 
 The `harness_capture` expiry (`local_file.rs:245`, `retire_expired_capture`
-at `:453`) can retire a row between the client's read and the commit; the
+at `:462`) can retire a row between the client's read and the commit; the
 predicate runs inside the writer transaction and sees the retirement.
 
 ## What a test must construct
@@ -76,7 +76,7 @@ predicate runs inside the writer transaction and sees the retirement.
 - Sources examined: `slice/write.rs:1095-1178` (all private `fn`);
   PR A's `Envelope::evidence_cited_in` (`envelope.rs:520-598`) and
   `require_visible_evidence`
-  (`crates/daemon/src/kernel_routes/commit.rs:742-757`).
+  (`crates/daemon/src/kernel_routes/commit.rs:749-764`).
 - Findings: at `3a3b916b7` no public read returned an evidence row's
   liveness by id. PR A adds `evidence_cited_in`, which reads the row's
   liveness and walks the scopes of its live citers inside the envelope's

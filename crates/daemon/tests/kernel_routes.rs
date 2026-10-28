@@ -6243,6 +6243,12 @@ async fn a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_depende
     assert_eq!(dependent.commit_seq, approval.commit_seq);
     assert_eq!(dependent.reason, approval.reason);
     assert!(DisputeReason::parse(&dependent.reason).is_some());
+    let (_, source, taint, payload, _, _) = typed_row(&daemon, "decision-object-1");
+    assert_eq!(
+        (source, taint, payload),
+        (None, None, None),
+        "a cascade row is not a dispute"
+    );
     daemon.handler.shutdown().await.unwrap();
 }
 
@@ -6556,5 +6562,211 @@ async fn an_insert_citing_evidence_makes_it_citable_later_in_the_same_commit() {
             .as_deref(),
         Some(uncited.as_str())
     );
+    daemon.handler.shutdown().await.unwrap();
+}
+
+// --- dispute rows: typed reporter columns and the use-outcome link ---
+
+/// The typed columns of the newest admission row for `object_id`:
+/// `(use_outcome_id, reporter_source_class, reporter_taint_class, event_payload, evidence_id, reason)`.
+type TypedRow = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+fn typed_row(daemon: &Daemon, object_id: &str) -> TypedRow {
+    core_connection(daemon)
+        .query_row(
+            "SELECT use_outcome_id, reporter_source_class, reporter_taint_class, event_payload,
+                    evidence_id, reason
+               FROM admission_decisions WHERE subject_object_id=?1
+              ORDER BY commit_seq DESC, admission_decision_id DESC LIMIT 1",
+            [object_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap()
+}
+
+impl Daemon {
+    /// Records that `session` on the bound route's harness was served `objects` at the tip.
+    fn serve(&self, key: &str, session: &str, objects: &[&str], recorded_at: i64) -> String {
+        let digest = self
+            .project_scope_id_blocking()
+            .strip_prefix("project:")
+            .unwrap()
+            .to_string();
+        let served_at = self.tip();
+        let mut ids: Vec<String> = objects.iter().map(|id| (*id).to_string()).collect();
+        ids.sort();
+        let id = std::cell::RefCell::new(String::new());
+        self.store()
+            .commit(intent(key), |envelope| {
+                *id.borrow_mut() = envelope.insert_use_outcome(kernel::UseOutcomeSpec {
+                    project_digest: digest.clone(),
+                    harness: "test".to_string(),
+                    session_id: session.to_string(),
+                    served_set_digest: kernel::served_set_digest(objects.iter().copied()),
+                    composition_revision: 1,
+                    served_commit_seq: served_at,
+                    session_role: kernel::SessionRole::Primary,
+                    recorded_at,
+                    decision_object_ids: ids.clone(),
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+        id.into_inner()
+    }
+
+    fn project_scope_id_blocking(&self) -> String {
+        core_connection(self)
+            .query_row(
+                "SELECT scope_id FROM scopes WHERE scope_id LIKE 'project:%' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+}
+
+/// A dispute row carries the reporter's classes and the reference it cites in
+/// typed columns whose rendering is its `reason`, and links the reporting
+/// session's latest prior serve of the subject; a session never served it
+/// links nothing, and other events write none of the columns. A record the
+/// dispute cites survives the retention sweep after it expires.
+#[tokio::test]
+async fn a_dispute_row_records_its_reporter_and_links_the_sessions_latest_serve() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", (1..=3).map(insert_decision).collect(), vec![])
+            .await,
+        "available",
+        None,
+    );
+    let first = daemon.serve("serve-1", SESSION, &["decision-object-1"], 0);
+    let second = daemon.serve(
+        "serve-2",
+        SESSION,
+        &["decision-object-1", "decision-object-2"],
+        0,
+    );
+    daemon.serve("serve-other", "session-z", &["decision-object-1"], 0);
+    assert_ne!(first, second);
+    let evidence = daemon.project_evidence("cited", 9).await;
+
+    let path = "docs/a b@c.md";
+    let by_file = dispute(
+        "decision-object-1",
+        "mark_disputed",
+        cites_file(path, EVIDENCE_OID),
+    );
+    let command = daemon
+        .commit_as(
+            "command",
+            vec![by_file],
+            "user",
+            "user:opencode",
+            "/eidnara-memory-mark",
+            false,
+        )
+        .await;
+    assert_state(&command, "available", None);
+    let (link, source, taint, payload, evidence_id, reason) =
+        typed_row(&daemon, "decision-object-1");
+    assert_eq!(link.as_deref(), Some(second.as_str()));
+    assert_eq!(
+        (source.as_deref(), taint.as_deref()),
+        (Some("model_inference"), Some("user_inferred"))
+    );
+    assert_eq!(
+        payload.as_deref(),
+        Some(format!(r#"{{"path":"docs/a b@c.md","git_object_id":"{EVIDENCE_OID}"}}"#).as_str())
+    );
+    let rendered = DisputeReason {
+        event: EventKind::MarkDisputed,
+        reporter_taint: TaintClass::try_from(taint.as_deref().unwrap()).unwrap(),
+        evidence_id,
+        evidence_ref: Some(serde_json::from_str(payload.as_deref().unwrap()).unwrap()),
+    }
+    .render();
+    assert_eq!(rendered, reason);
+
+    // The bound session was never served `decision-object-3`.
+    let mut tool = commit_request(
+        &daemon.project,
+        SESSION,
+        "tool",
+        vec![dispute(
+            "decision-object-3",
+            "contradict",
+            cites_id(&evidence),
+        )],
+        vec![],
+    );
+    tool["intent"]["actor"] = json!("agent:opencode");
+    assert_state(&daemon.call(daemon.route, tool).await, "available", None);
+    let (link, source, taint, payload, evidence_id, reason) =
+        typed_row(&daemon, "decision-object-3");
+    assert_eq!(link, None);
+    assert_eq!(
+        (source.as_deref(), taint.as_deref(), payload),
+        (Some("model_inference"), Some("assistant_inference"), None)
+    );
+    assert_eq!(evidence_id.as_deref(), Some(evidence.as_str()));
+    assert_eq!(
+        DisputeReason {
+            event: EventKind::Contradict,
+            reporter_taint: TaintClass::try_from(taint.as_deref().unwrap()).unwrap(),
+            evidence_id,
+            evidence_ref: None,
+        }
+        .render(),
+        reason
+    );
+
+    assert_state(
+        &daemon
+            .commit(
+                "stale",
+                vec![disposition("decision-object-2", "mark_stale")],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    let (link, source, taint, payload, _, reason) = typed_row(&daemon, "decision-object-2");
+    assert_eq!((link, source, taint, payload), (None, None, None, None));
+    assert_eq!(reason, "kernel.commit");
+
+    let expired = daemon
+        .store()
+        .expire_use_outcomes(kernel::USE_OUTCOME_RETENTION_MS + 1)
+        .unwrap();
+    assert_eq!(expired.cited, 1, "{expired:?}");
+    let still_live: i64 = core_connection(&daemon)
+        .query_row(
+            "SELECT COUNT(*) FROM use_outcomes WHERE use_outcome_id=?1
+               AND invalidated_commit_seq IS NULL",
+            [&second],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(still_live, 1);
     daemon.handler.shutdown().await.unwrap();
 }

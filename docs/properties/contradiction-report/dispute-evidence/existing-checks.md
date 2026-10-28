@@ -54,7 +54,7 @@ landing.
 
 | Location | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
-| `crates/kernel/src/admission.rs:4532` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | over every consistent maturity pair, disposition, dispute event, and evidence flag: `Deny`, historical kept, effective not raised, restrictiveness not lowered, prior kept on a relaxing request | standing | unaudited |
+| `crates/kernel/src/admission.rs:4608` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | over every consistent maturity pair, disposition, dispute event, and evidence flag: `Deny`, historical kept, effective not raised, restrictiveness not lowered, prior kept on a relaxing request | standing | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:2161` | `evidence_cited_in_offers_each_live_citing_scope_once_and_stops_at_the_first_accepted` | live decisions, observations, and decision events offer their scopes once each; unscoped and retired citers offer none; the walk ends at the accepted scope; retired and unknown ids are cited nowhere | liveness, visibility | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:2316` | `evidence_cited_in_matches_the_citation_model_under_seeded_citers` | over 24 seeded rounds of interleaved scoped, unscoped, live, and retired decisions, observations, and decision events, the answer equals the model for every accepted scope set; each scope is offered at most once and only when a live citer carries it; no scope before the last is accepted; a refusal offered every citing scope | visibility | unaudited |
 
@@ -83,12 +83,12 @@ its contract test is
 
 | Location | Guard | Records | Status |
 |---|---|---|---|
-| `commit.rs:206-234` | `compose_reason`: dispute needs valid evidence; other events take none | requirement, form | unaudited |
-| `dispute.rs:49-79` | `DisputeReason::validated`: presence, empty id, a detection in the raw `evidence_id` (`:58-59`, through `value_is_clean`, `:159-163`), form, cap, a detection in the composed reason (`:75-77`) | requirement, form, reason | unaudited |
-| `dispute.rs:150-163` | `EvidenceRef::is_well_formed` | form | unaudited |
-| `commit.rs:742-757` | `require_visible_evidence`: live and cited by a scope of the bound project | liveness, visibility | unaudited |
+| `commit.rs:208-236` | `compose_reason`: dispute needs valid evidence; other events take none | requirement, form | unaudited |
+| `dispute.rs:49-79` | `DisputeReason::validated`: presence, empty id, a detection in the raw `evidence_id` (`:58-59`, through `value_is_clean`, `:166-170`), form, cap, a detection in the composed reason (`:75-77`) | requirement, form, reason | unaudited |
+| `dispute.rs:149-162` | `EvidenceRef::is_well_formed` | form | unaudited |
+| `commit.rs:749-764` | `require_visible_evidence`: live and cited by a scope of the bound project | liveness, visibility | unaudited |
 | `commit.rs:137`, `:168-171` | `deny_unknown_fields` with `reason` skipped, so a body cannot supply `reason` | reason | unaudited |
-| `commit.rs:411-444` | `resolve_classes`: refuse an assertion above the derivation | reporter | unaudited |
+| `commit.rs:413-446` | `resolve_classes`: refuse an assertion above the derivation | reporter | unaudited |
 
 ## Tool tests (#1161)
 
@@ -118,12 +118,12 @@ The shared-runner tests this PR adds (`memory-mark-command.test.ts:601`,
   holds it. For the cited evidence row this state is not constructible:
   `retire_evidence` refuses evidence a live row cites
   (`crates/kernel/src/slice/write.rs:585-608`). The reachable form is a
-  citer retirement queued behind the dispute; `kernel_routes.rs:6416`
+  citer retirement queued behind the dispute; `kernel_routes.rs:6422`
   constructs its sequential form only.
 - No test cites evidence through an asserted-edge citer, and no Rust code
   under `crates/` writes `asserted_edges`.
 - No test sends a raw `evidence_id` holding a secret-scanner detection to
-  the raw-id scan added in `511cd6d73` (`dispute.rs:58-59`, `:159-163`).
+  the raw-id scan added in `511cd6d73` (`dispute.rs:58-59`, `:166-170`).
 - No test reads `durable_text_redactions` after a landed dispute.
 - No test sends different evidence under one tool-call id; A8's tool-arm
   refusal follows from the receipt mechanism (`operation_key_reused`) and

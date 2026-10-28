@@ -171,6 +171,22 @@ pub struct AdmissionRequest {
     pub event: AdmissionEvent,
 }
 
+/// Who filed a `mark_disputed` or `contradict` and from which session, for
+/// [`Envelope::record_dispute_admission`]. The classes are the reporter's, kept
+/// apart from the row's own class columns, which stay the subject's prior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisputeReporter {
+    pub source_class: SourceClass,
+    pub taint_class: TaintClass,
+    /// The event payload stored on the row, as JSON; `None` when the dispute
+    /// cites no repository reference.
+    pub event_payload: Option<String>,
+    /// The reporting session, as its serving records name it.
+    pub project_digest: String,
+    pub harness: String,
+    pub session_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionDomainSpec {
     pub domain_id: String,
@@ -983,7 +999,40 @@ impl Envelope<'_> {
         &mut self,
         request: AdmissionRequest,
     ) -> Result<AdmissionDecision, KernelError> {
-        self.guarded(|envelope| envelope.record_admission_inner(request))
+        self.guarded(|envelope| envelope.record_admission_inner(request, None))
+    }
+
+    /// [`Self::record_admission`] for a `mark_disputed` or `contradict`, storing
+    /// the reporter's classes and event payload on the row and linking the
+    /// reporting session's serving record of the subject: the one with the
+    /// greatest `served_commit_seq` strictly below this commit, or none.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::record_admission`]; `InvalidInput` for another event kind, a
+    /// request without a subject, or a payload that is not a JSON object or
+    /// that a secret detector matches.
+    pub fn record_dispute_admission(
+        &mut self,
+        request: AdmissionRequest,
+        reporter: &DisputeReporter,
+    ) -> Result<AdmissionDecision, KernelError> {
+        self.guarded(|envelope| {
+            let is_dispute = matches!(
+                request.event.kind,
+                EventKind::MarkDisputed | EventKind::Contradict
+            );
+            // The length check runs first, so the parse and the later secret scan read a bounded input.
+            let payload_is_object = reporter.event_payload.as_deref().is_none_or(|payload| {
+                payload.len() <= context_core::redaction::MAX_REDACTABLE_BYTES
+                    && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(payload)
+                        .is_ok()
+            });
+            if !is_dispute || request.subject_object_id.is_none() || !payload_is_object {
+                return Err(KernelError::InvalidInput);
+            }
+            envelope.record_admission_inner(request, Some(reporter))
+        })
     }
 
     /// The serving rows for `ids`, the registry's live objects among them whose scope can match `scope`, keyed by object id.
@@ -1041,6 +1090,7 @@ impl Envelope<'_> {
     fn record_admission_inner(
         &mut self,
         request: AdmissionRequest,
+        reporter: Option<&DisputeReporter>,
     ) -> Result<AdmissionDecision, KernelError> {
         refuse_succession_events(&request)?;
         let subject_object_id = request.subject_object_id.clone();
@@ -1050,7 +1100,7 @@ impl Envelope<'_> {
             subject_object_id.as_deref(),
             candidate_id.as_deref(),
             &reason,
-            |envelope| envelope.apply_admission(request),
+            |envelope| envelope.apply_admission(request, reporter),
         )
     }
 
@@ -1144,9 +1194,10 @@ impl Envelope<'_> {
     fn apply_admission(
         &mut self,
         request: AdmissionRequest,
+        reporter: Option<&DisputeReporter>,
     ) -> Result<AdmissionDecision, KernelError> {
         let prepared = self.prepare_admission(request)?;
-        self.write_admission(prepared, None)
+        self.write_reported_admission(prepared, None, reporter)
     }
 
     /// Writes the revocation of a source-scoped decision. The lineage, not a
@@ -1505,19 +1556,22 @@ impl Envelope<'_> {
         let source_class = SourceClass::try_from(source_class.as_str())?;
         let taint_class = TaintClass::try_from(taint_class.as_str())?;
         let decision = match subject {
-            DependentSubject::Object(object_id) => self.apply_admission(AdmissionRequest {
-                candidate_id: None,
-                subject_object_id: Some(object_id),
-                source_class: Some(source_class),
-                taint_class: Some(taint_class),
-                event: AdmissionEvent {
-                    kind: EventKind::ApprovalRevoked,
-                    trigger_object_id: None,
-                    approval_object_id: None,
-                    evidence_id: None,
-                    reason: reason.to_string(),
+            DependentSubject::Object(object_id) => self.apply_admission(
+                AdmissionRequest {
+                    candidate_id: None,
+                    subject_object_id: Some(object_id),
+                    source_class: Some(source_class),
+                    taint_class: Some(taint_class),
+                    event: AdmissionEvent {
+                        kind: EventKind::ApprovalRevoked,
+                        trigger_object_id: None,
+                        approval_object_id: None,
+                        evidence_id: None,
+                        reason: reason.to_string(),
+                    },
                 },
-            })?,
+                None,
+            )?,
             DependentSubject::Lineage(lineage) => {
                 self.apply_lineage_revocation(lineage, source_class, taint_class, reason)?
             }
@@ -1677,6 +1731,15 @@ impl Envelope<'_> {
         prepared: PreparedDecision,
         materialized: Option<ObjectRow>,
     ) -> Result<AdmissionDecision, KernelError> {
+        self.write_reported_admission(prepared, materialized, None)
+    }
+
+    fn write_reported_admission(
+        &mut self,
+        prepared: PreparedDecision,
+        materialized: Option<ObjectRow>,
+        reporter: Option<&DisputeReporter>,
+    ) -> Result<AdmissionDecision, KernelError> {
         let latest_key = prepared.facts.key();
         let latest = prepared.stored();
         let admission_decision_id = format!("{}:{:020}", self.commit_seq, self.admission_ordinal);
@@ -1714,6 +1777,14 @@ impl Envelope<'_> {
             .as_ref()
             .map(|object| object.object_id.clone())
             .or_else(|| prepared.facts.subject_object_id().map(str::to_string));
+        let use_outcome_id = match reporter {
+            Some(reporter) => self.reporting_serve(reporter, subject_object_id.as_deref())?,
+            None => None,
+        };
+        let event_payload = reporter
+            .and_then(|reporter| reporter.event_payload.as_deref())
+            .map(identity)
+            .transpose()?;
         // An approval only grants support above the automatic ceiling, so a decision
         // resting at or below it derives nothing from the approval it cites. Stored
         // rather than re-derived in SQL, which would duplicate the ceiling table.
@@ -1751,9 +1822,10 @@ impl Envelope<'_> {
                      source_revision,source_class,taint_class,event_kind,maturity,
                      effective_maturity,disposition,visibility,outcome,sensitivity_class,
                      policy_revision,reason,evidence_id,approval_object_id,elevated_support,
-                     commit_seq,decided_at,trigger_object_id
+                     commit_seq,decided_at,trigger_object_id,use_outcome_id,
+                     reporter_source_class,reporter_taint_class,event_payload
                  ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,
-                           ?20,?21,?22,?23,?24,?25,?26)",
+                           ?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)",
                 params![
                     admission_decision_id,
                     prepared.facts.candidate_id(),
@@ -1781,6 +1853,10 @@ impl Envelope<'_> {
                     self.commit_seq,
                     current_time_ms(),
                     prepared.trigger_object_id,
+                    use_outcome_id,
+                    reporter.map(|reporter| reporter.source_class.as_str()),
+                    reporter.map(|reporter| reporter.taint_class.as_str()),
+                    event_payload,
                 ],
             )
             .map_err(map_sqlite)?;

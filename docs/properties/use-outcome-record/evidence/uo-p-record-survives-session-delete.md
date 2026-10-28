@@ -9,11 +9,12 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip, the commit that carries this
-revision.
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
-- Delete triggers: `crates/kernel/src/schema.rs:188`.
-- Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:468`) answers
+- Delete triggers: `crates/kernel/src/schema.rs:194`.
+- Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:536`) answers
   retired records.
 
 - Guarantee under test: After `session.delete` answers `ok`, every serving
@@ -22,9 +23,9 @@ revision.
   delete may add a record, for a served set the session has no record of, and
   removes none (OQ3-10).
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-  (`crates/kernel/tests/kernel_schema.rs:2177`);
+  (`crates/kernel/tests/kernel_schema.rs:2210`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:400`) (a retired record stays
+  (`crates/kernel/tests/kernel_use_outcome.rs:401`) (a retired record stays
   readable);
   `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`);

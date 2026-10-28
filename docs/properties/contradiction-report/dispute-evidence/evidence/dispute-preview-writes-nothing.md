@@ -10,16 +10,16 @@ dispute the user declined.
 ## Evidence trail
 
 - The handler composes every reason before it branches on `preview`
-  (`crates/daemon/src/kernel_routes/commit.rs:1117-1123`, branch at
-  `:1143`), so form refusals are identical by construction.
+  (`crates/daemon/src/kernel_routes/commit.rs:1145-1151`, branch at
+  `:1179`), so form refusals are identical by construction.
 - The preview runs `PreviewRun::disposition`, which calls the same
-  `disposition_request` as the commit (`commit.rs:833`; commit at `:788`),
+  `disposition_request` as the commit (`commit.rs:851`; commit at `:796`),
   so liveness and visibility refusals are identical at the same tip.
-- The preview runs in `store.preview` (`commit.rs:875-895`), which writes
+- The preview runs in `store.preview` (`commit.rs:893-913`), which writes
   no commit-log row, no receipt, and no admission row; a recorded identity
-  replays its receipt instead (`:878-880`).
+  replays its receipt instead (`:896-898`).
 - A preview refuses tokens and non-disposition operations
-  (`commit.rs:1144-1157`).
+  (`commit.rs:1180-1193`).
 - The command treats the commit's verdict as the one recorded
   (`packages/opencode-plugin/src/shared/memory-mark-command.ts:301-302`)
   and reports a refused preview with no commit (`:266-267`).
@@ -57,13 +57,13 @@ All constructed:
   `available`, the evidence's only project citer retires, and the commit
   answers `not_found` with nothing written
   (`a_dispute_previewed_while_its_evidence_was_visible_is_judged_again_at_commit`,
-  `kernel_routes.rs:6416`). The commit's verdict is the one recorded.
+  `kernel_routes.rs:6422`). The commit's verdict is the one recorded.
 
 ## Investigation log
 
 ### Q: Does the preview report the cascade a dispute on an approval causes?
 
-- Sources examined: `PreviewRun::disposition` (`commit.rs:825-864`), the
+- Sources examined: `PreviewRun::disposition` (`commit.rs:843-882`), the
   module header (`commit.rs:60-63`), the command usage
   (`memory-mark-command.ts:54`), `memory-mark-command.test.ts:167`.
 - Findings: no. `visibility_changes` compares the subject's current and

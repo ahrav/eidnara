@@ -8,11 +8,12 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip, the commit that carries this
-revision.
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
-- Join: `crates/kernel/src/use_outcome.rs:190-208`; read: `served_sessions_for`
-  (`crates/kernel/src/use_outcome.rs:502`).
+- Join: `crates/kernel/src/use_outcome.rs:198-216`; read: `served_sessions_for`
+  (`crates/kernel/src/use_outcome.rs:570`).
 - The read takes the newest qualifying commit sequence once for the object and
   compares each serve's `served_commit_seq` against it, so a serve is disputed
   exactly when some qualifying event is later than it.
@@ -25,9 +26,9 @@ revision.
   sequence greater than n.
 - Existing check:
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:400`);
+  (`crates/kernel/tests/kernel_use_outcome.rs:401`);
   `disputed_after_serve_is_judged_against_each_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:826`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:827`). Status: unaudited.
 
 ## Failure scenario
 

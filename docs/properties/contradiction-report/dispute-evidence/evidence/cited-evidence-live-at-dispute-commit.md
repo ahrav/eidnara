@@ -10,19 +10,19 @@ live". At `3a3b916b7` the admission write checked only that the id exists
 ## Evidence trail
 
 - `disposition_request` calls `require_visible_evidence` when the
-  operation names an id (`crates/daemon/src/kernel_routes/commit.rs:719-721`).
+  operation names an id (`crates/daemon/src/kernel_routes/commit.rs:726-728`).
 - `require_visible_evidence` calls `Envelope::evidence_cited_in` and maps
-  a `false` answer to `KernelError::NotFound` (`commit.rs:747-756`).
+  a `false` answer to `KernelError::NotFound` (`commit.rs:754-763`).
 - `evidence_cited_in` reads `invalidated_commit_seq IS NULL` for the row
   inside the envelope's transaction and answers `false` for an unknown or
   retired id before it reads any citer
-  (`crates/kernel/src/envelope.rs:536-547`). The doc comment states the
-  check and a citing write observe one state (`:528-530`).
+  (`crates/kernel/src/envelope.rs:548-564`). The doc comment states the
+  check and a citing write observe one state (`:546-547`).
 - The commit path runs `disposition_request` inside `commit_before`'s
-  closure (`commit.rs:1045-1060`, through `apply` at `:998-1004` and
-  `record_disposition` at `:783-789`); the preview path runs it inside
-  `store.preview` (`commit.rs:875-895`, through `PreviewRun::disposition`
-  at `:833`).
+  closure (`commit.rs:1066-1081`, through `apply` at `:1016-1022` and
+  `record_disposition` at `:790-797`); the preview path runs it inside
+  `store.preview` (`commit.rs:893-913`, through `PreviewRun::disposition`
+  at `:851`).
 - The refusal maps to `invalid/not_found` and writes nothing: the commit
   closure returns `Err`, which rolls back the envelope.
 - The module header states the rule and that a citation holds no
@@ -55,7 +55,7 @@ read inside the transaction, the dispute either sees the retirement
   project citer retires in a separate commit, and the commit answers
   `not_found` with nothing written
   (`a_dispute_previewed_while_its_evidence_was_visible_is_judged_again_at_commit`,
-  `crates/daemon/tests/kernel_routes.rs:6416`). The evidence row stays
+  `crates/daemon/tests/kernel_routes.rs:6422`). The evidence row stays
   live; the refusal comes from the citer walk that shares the read, so
   the test shows the read runs again inside the commit transaction.
 - A later retirement is permitted: the check is stated as of the row's
@@ -96,7 +96,7 @@ read inside the transaction, the dispute either sees the retirement
 
 ### Q: Does the Kernel admission write check liveness for other writers?
 
-- Sources examined: `write_admission` (`crates/kernel/src/admission.rs:1675`),
+- Sources examined: `write_admission` (`crates/kernel/src/admission.rs:1729`),
   `commit.rs:55-58`.
 - Findings: no; it checks identity and the FK only.
 - Missing evidence: an owner decision.

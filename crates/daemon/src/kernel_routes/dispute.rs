@@ -3,7 +3,7 @@
 
 use context_core::redaction::redact_durable_text;
 use kernel::{EventKind, TaintClass, is_lower_hex_oid};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::InvalidReason;
 use crate::confined_path;
@@ -18,7 +18,7 @@ const VERSION: &str = "1";
 const OPERATION: &str = "kernel.commit";
 
 /// A repository file at a git object id, as the wire carries it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceRef {
     pub path: String,
@@ -147,10 +147,17 @@ impl DisputeReason {
 }
 
 impl EvidenceRef {
+    /// The JSON a dispute row stores in `event_payload`: `{"path":..,"git_object_id":..}`.
+    #[must_use]
+    pub fn payload(&self) -> String {
+        serde_json::to_string(self).expect("two string fields serialize")
+    }
+
     fn is_well_formed(&self) -> bool {
         is_lower_hex_oid(&self.git_object_id)
             && value_is_clean(&self.path, MAX_EVIDENCE_PATH_BYTES)
             && confined_path::check(&self.path).is_ok()
+            && redact_durable_text(&self.payload()).detections.is_empty()
     }
 }
 
@@ -346,6 +353,20 @@ mod tests {
                 "{path:?} {oid:?}"
             );
         }
+    }
+
+    /// The stored payload is scanned as the commit stores it, so a path whose
+    /// detection appears only in its JSON form is refused before the preview.
+    #[test]
+    fn a_path_detected_only_in_its_payload_form_is_invalid_input() {
+        let path = "a/api_key=\"";
+        assert!(redact_durable_text(path).detections.is_empty());
+        assert!(
+            !redact_durable_text(&reference(path, OID).payload())
+                .detections
+                .is_empty()
+        );
+        assert_eq!(validated(path, OID), Err(InvalidReason::InvalidInput));
     }
 
     #[test]

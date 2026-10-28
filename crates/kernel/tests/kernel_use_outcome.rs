@@ -4,7 +4,7 @@ use kernel::{
     USE_OUTCOME_RETENTION_CLASS, USE_OUTCOME_RETENTION_MS, UseOutcomeExpiry, UseOutcomeSpec,
     served_set_digest, use_outcome_id,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::Digest;
 
 const HARNESS: &str = "opencode";
@@ -210,7 +210,7 @@ fn served_set_answers_records_and_distinguishes_no_record_from_an_empty_serve() 
     assert_eq!(USE_OUTCOME_RETENTION_CLASS, "use_outcome_capture");
 }
 
-/// A duplicate identity is `Conflict`, an unregistered decision is `NotFound`, a malformed or secret-bearing spec is `InvalidInput`, and a refused commit leaves no row in either table.
+/// A duplicate identity is `Conflict`, an unregistered decision is `NotFound`, a malformed or secret-bearing spec is `InvalidInput`, and a refused commit leaves no row in any of the three use-outcome tables.
 #[test]
 fn duplicate_and_malformed_serves_are_refused_without_rows() {
     let root = tempfile::tempdir().unwrap();
@@ -221,9 +221,10 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
         (
             count(root.path(), "SELECT COUNT(*) FROM use_outcomes"),
             count(root.path(), "SELECT COUNT(*) FROM use_outcome_decisions"),
+            count(root.path(), "SELECT COUNT(*) FROM use_outcome_sessions"),
         )
     };
-    assert_eq!(rows(), (1, 1));
+    assert_eq!(rows(), (1, 1, 1));
 
     assert_eq!(
         insert(&store, "again", spec("s1", &["d1"], served_at, 300)),
@@ -364,7 +365,7 @@ fn duplicate_and_malformed_serves_are_refused_without_rows() {
             "{context}"
         );
     }
-    assert_eq!(rows(), (1, 1));
+    assert_eq!(rows(), (1, 1, 1));
     assert_eq!(
         count(
             root.path(),
@@ -1261,6 +1262,540 @@ fn an_outside_file_lock_bounds_the_advance_at_begin() {
         "the wait is bounded by the budget, not the busy timeout: {waited:?}"
     );
     assert_eq!(lifecycle(&store, "s1"), [(None, None)]);
+}
+
+// --- Dispute rows: reporter columns and the use-outcome link ---
+
+use kernel::{
+    AdmissionEvent, AdmissionRequest, DecisionPayload, DecisionSpec, DisputeReporter, EventKind,
+    SourceClass, TaintClass,
+};
+
+/// A store holding live, admitted decisions `objects` under the route's
+/// plugin classes.
+fn decision_store(root: &std::path::Path, objects: &[&str]) -> KernelStore {
+    let store = store_with_objects(root, &[]);
+    for object in objects {
+        store
+            .commit(intent(&format!("decide-{object}")), |envelope| {
+                envelope.insert_decision(DecisionSpec {
+                    decision_id: format!("{object}-decision"),
+                    object_id: (*object).to_string(),
+                    domain_id: "domain".to_string(),
+                    proposition_id: None,
+                    scope_id: None,
+                    anchor_id: None,
+                    evidence_id: None,
+                    decision_kind: "memory".to_string(),
+                    payload: DecisionPayload {
+                        summary: (*object).to_string(),
+                        rationale: String::new(),
+                    },
+                    source_kind: "assistant".to_string(),
+                    source_id: format!("{object}-lineage"),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                envelope.record_admission(request(object, EventKind::Other))?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+    store
+}
+
+fn request(subject: &str, kind: EventKind) -> AdmissionRequest {
+    AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(subject.to_string()),
+        source_class: Some(SourceClass::ModelInference),
+        taint_class: Some(TaintClass::AssistantInference),
+        event: AdmissionEvent {
+            kind,
+            trigger_object_id: None,
+            approval_object_id: None,
+            evidence_id: None,
+            reason: "dispute".to_string(),
+        },
+    }
+}
+
+fn reporter(session: &str, taint: TaintClass, payload: Option<&str>) -> DisputeReporter {
+    DisputeReporter {
+        source_class: SourceClass::ModelInference,
+        taint_class: taint,
+        event_payload: payload.map(str::to_string),
+        project_digest: project(),
+        harness: HARNESS.to_string(),
+        session_id: session.to_string(),
+    }
+}
+
+/// Files a dispute and answers its row's `(use_outcome_id, reporter source,
+/// reporter taint, payload)`.
+fn dispute(
+    store: &KernelStore,
+    root: &std::path::Path,
+    key: &str,
+    subject: &str,
+    reporter: &DisputeReporter,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let receipt = store
+        .commit(intent(key), |envelope| {
+            envelope
+                .record_dispute_admission(request(subject, EventKind::MarkDisputed), reporter)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    writer(root)
+        .query_row(
+            "SELECT use_outcome_id,reporter_source_class,reporter_taint_class,event_payload
+               FROM admission_decisions WHERE commit_seq=?1 AND subject_object_id=?2",
+            params![receipt.commit_seq, subject],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+}
+
+/// A dispute links the reporting session's serve of its subject with the
+/// greatest served sequence below the dispute's commit: not an older serve, not
+/// another session's, not a serve of another decision, and none for a session
+/// never served the subject. A serve recorded after the dispute leaves the
+/// dispute's link as it was written.
+#[test]
+fn a_dispute_links_the_reporting_sessions_latest_prior_serve_of_its_subject() {
+    let root = tempfile::tempdir().unwrap();
+    let store = decision_store(root.path(), &["d1", "d2", "d3"]);
+    let first_at = tick(&store, "first");
+    let older = insert(&store, "older", spec("s1", &["d1"], first_at, 0)).unwrap();
+    let second_at = tick(&store, "second");
+    let newer = insert(&store, "newer", spec("s1", &["d1", "d2"], second_at, 0)).unwrap();
+    let third_at = tick(&store, "third");
+    let other_decision =
+        insert(&store, "other-decision", spec("s1", &["d2"], third_at, 0)).unwrap();
+    insert(&store, "other-session", spec("s2", &["d1"], third_at, 0)).unwrap();
+    let mut other_harness = spec("s1", &["d1"], third_at, 0);
+    other_harness.harness = "pi".to_string();
+    insert(&store, "other-harness", other_harness).unwrap();
+    let mut other_project = spec("s1", &["d1"], third_at, 0);
+    other_project.project_digest = "b".repeat(64);
+    insert(&store, "other-project", other_project).unwrap();
+    assert_ne!(older, newer);
+
+    let payload =
+        r#"{"path":"src/a.rs","git_object_id":"0123456789abcdef0123456789abcdef01234567"}"#;
+    let served = reporter("s1", TaintClass::UserInferred, Some(payload));
+    let linked = dispute(&store, root.path(), "dispute-d1", "d1", &served);
+    assert_eq!(
+        linked,
+        (
+            Some(newer.clone()),
+            Some("model_inference".to_string()),
+            Some("user_inferred".to_string()),
+            Some(payload.to_string()),
+        )
+    );
+    assert_eq!(
+        dispute(
+            &store,
+            root.path(),
+            "dispute-d2",
+            "d2",
+            &reporter("s1", TaintClass::AssistantInference, None)
+        )
+        .0,
+        Some(other_decision)
+    );
+    let unserved = dispute(
+        &store,
+        root.path(),
+        "unserved",
+        "d1",
+        &reporter("s3", TaintClass::AssistantInference, None),
+    );
+    assert_eq!(
+        unserved,
+        (
+            None,
+            Some("model_inference".to_string()),
+            Some("assistant_inference".to_string()),
+            None
+        )
+    );
+
+    let later_at = tick(&store, "later");
+    insert(
+        &store,
+        "later-serve",
+        spec("s1", &["d1", "d3"], later_at, 0),
+    )
+    .unwrap();
+    assert_eq!(
+        count(
+            root.path(),
+            &format!(
+                "SELECT COUNT(*) FROM admission_decisions
+                  WHERE subject_object_id='d1' AND use_outcome_id='{newer}'"
+            )
+        ),
+        1,
+        "the first dispute keeps the link it was written with"
+    );
+}
+
+/// Only disputes take reporter columns; every other writer stores NULL, the
+/// DDL accepts every class pair the Kernel vocabularies name, and it refuses a
+/// class outside its vocabulary, a half-set pair, and a payload that is not
+/// JSON.
+#[test]
+fn reporter_columns_are_dispute_only_and_checked_by_the_schema() {
+    let root = tempfile::tempdir().unwrap();
+    let store = decision_store(root.path(), &["d1"]);
+    assert_eq!(
+        count(
+            root.path(),
+            "SELECT COUNT(*) FROM admission_decisions WHERE reporter_source_class IS NULL
+               AND reporter_taint_class IS NULL AND event_payload IS NULL AND use_outcome_id IS NULL"
+        ),
+        1
+    );
+    let refused = store.commit(intent("stale-as-dispute"), |envelope| {
+        envelope.record_dispute_admission(
+            request("d1", EventKind::MarkStale),
+            &reporter("s1", TaintClass::UserInferred, None),
+        )?;
+        Ok(String::new())
+    });
+    assert_eq!(refused.unwrap_err(), KernelError::InvalidInput);
+    for (key, request, payload) in [
+        (
+            "no-subject",
+            AdmissionRequest {
+                subject_object_id: None,
+                ..request("d1", EventKind::MarkDisputed)
+            },
+            None::<String>,
+        ),
+        (
+            "array-payload",
+            request("d1", EventKind::MarkDisputed),
+            Some("[1]".to_string()),
+        ),
+        // Pins the refusal; the length check runs before the parse, and the secret scan refuses the same input.
+        (
+            "oversized-payload",
+            request("d1", EventKind::MarkDisputed),
+            Some(format!(
+                "{{\"path\":\"{}\"}}",
+                "a".repeat(context_core::redaction::MAX_REDACTABLE_BYTES)
+            )),
+        ),
+    ] {
+        let refused = store.commit(intent(key), |envelope| {
+            envelope.record_dispute_admission(
+                request,
+                &reporter("s1", TaintClass::UserInferred, payload.as_deref()),
+            )?;
+            Ok(String::new())
+        });
+        assert_eq!(refused.unwrap_err(), KernelError::InvalidInput, "{key}");
+    }
+
+    let insert_row = |id: &str, event: &str, source: &str, taint: &str, payload: &str| {
+        writer(root.path()).execute(
+            &format!(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,
+                     source_revision,source_class,taint_class,event_kind,maturity,
+                     effective_maturity,disposition,visibility,outcome,sensitivity_class,
+                     policy_revision,reason,decided_at,reporter_source_class,
+                     reporter_taint_class,event_payload
+                 ) VALUES ('{id}','d1','fixture','d1',1,'model_inference','assistant_inference',
+                           '{event}','candidate','candidate','disputed','explicit_labeled',
+                           'deny','normal',1,'r',1,{source},{taint},{payload})"
+            ),
+            [],
+        )
+    };
+    assert!(
+        insert_row(
+            "ok",
+            "mark_disputed",
+            "'model_inference'",
+            "'user_inferred'",
+            "'{}'"
+        )
+        .is_ok()
+    );
+    assert!(insert_row("ok-plain", "mark_stale", "NULL", "NULL", "NULL").is_ok());
+    for source in SourceClass::ALL {
+        for taint in TaintClass::ALL {
+            let id = format!("every-{}-{}", source.as_str(), taint.as_str());
+            let (source, taint) = (
+                format!("'{}'", source.as_str()),
+                format!("'{}'", taint.as_str()),
+            );
+            assert!(
+                insert_row(&id, "contradict", &source, &taint, "NULL").is_ok(),
+                "{id}"
+            );
+        }
+    }
+    for (id, event, source, taint, payload) in [
+        (
+            "bad-source",
+            "contradict",
+            "'oracle'",
+            "'user_inferred'",
+            "NULL",
+        ),
+        (
+            "bad-taint",
+            "contradict",
+            "'model_inference'",
+            "'oracle'",
+            "NULL",
+        ),
+        (
+            "half-source",
+            "contradict",
+            "'model_inference'",
+            "NULL",
+            "NULL",
+        ),
+        (
+            "half-taint",
+            "contradict",
+            "NULL",
+            "'user_inferred'",
+            "NULL",
+        ),
+        (
+            "not-json",
+            "contradict",
+            "'model_inference'",
+            "'user_inferred'",
+            "'{'",
+        ),
+        (
+            "not-object",
+            "contradict",
+            "'model_inference'",
+            "'user_inferred'",
+            "'[1]'",
+        ),
+        (
+            "not-a-dispute",
+            "mark_stale",
+            "'model_inference'",
+            "'user_inferred'",
+            "NULL",
+        ),
+        ("payload-alone", "contradict", "NULL", "NULL", "'{}'"),
+    ] {
+        assert!(
+            insert_row(id, event, source, taint, payload).is_err(),
+            "{id}"
+        );
+    }
+}
+
+/// A session's first serve records it once; every later serve of the session, whatever its served set, carries the same `session_seq`, another session, harness, or project gets its own, and each decision row copies its record's `session_seq` and `served_commit_seq`.
+#[test]
+fn a_session_is_recorded_once_and_its_decision_rows_copy_their_record() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store_with_objects(root.path(), &["d1", "d2"]);
+    let first_at = tick(&store, "first");
+    insert(&store, "s1-first", spec("s1", &["d1"], first_at, 0)).unwrap();
+    let second_at = tick(&store, "second");
+    insert(&store, "s1-second", spec("s1", &["d1", "d2"], second_at, 0)).unwrap();
+    insert(&store, "s2", spec("s2", &["d1"], second_at, 0)).unwrap();
+    let mut other_harness = spec("s1", &["d2"], second_at, 0);
+    other_harness.harness = "pi".to_string();
+    insert(&store, "other-harness", other_harness).unwrap();
+    let mut other_project = spec("s1", &["d2"], second_at, 0);
+    other_project.project_digest = "b".repeat(64);
+    insert(&store, "other-project", other_project).unwrap();
+
+    assert_eq!(
+        count(root.path(), "SELECT COUNT(*) FROM use_outcome_sessions"),
+        4
+    );
+    assert_eq!(
+        count(
+            root.path(),
+            &format!(
+                "SELECT COUNT(DISTINCT session_seq) FROM use_outcomes
+                  WHERE project_digest='{}' AND harness='{HARNESS}' AND session_id='s1'",
+                project()
+            )
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            root.path(),
+            "SELECT COUNT(*) FROM use_outcome_decisions d
+               JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
+              WHERE d.session_seq IS NOT u.session_seq
+                 OR d.served_commit_seq IS NOT u.served_commit_seq"
+        ),
+        0
+    );
+    assert_eq!(
+        count(root.path(), "SELECT COUNT(*) FROM use_outcome_decisions"),
+        6
+    );
+}
+
+/// Two records of one session that serve the subject at the same sequence tie on `served_commit_seq`; the dispute links the one with the greater id.
+#[test]
+fn a_tie_on_the_served_sequence_links_the_greater_record_id() {
+    let root = tempfile::tempdir().unwrap();
+    let store = decision_store(root.path(), &["d1", "d2"]);
+    let served_at = tick(&store, "served");
+    let alone = insert(&store, "alone", spec("s1", &["d1"], served_at, 0)).unwrap();
+    let paired = insert(&store, "paired", spec("s1", &["d1", "d2"], served_at, 0)).unwrap();
+    let linked = dispute(
+        &store,
+        root.path(),
+        "tie",
+        "d1",
+        &reporter("s1", TaintClass::AssistantInference, None),
+    );
+    assert_eq!(linked.0, Some(alone.max(paired)));
+}
+
+/// The link as #1162 defines it, read through the record join: the session's record naming the subject with the greatest `served_commit_seq` below the dispute's commit, ties to the greatest id.
+const DEFINITION_SQL: &str = "SELECT u.use_outcome_id FROM use_outcome_decisions d
+     JOIN use_outcomes u ON u.use_outcome_id=d.use_outcome_id
+    WHERE d.object_id=?1 AND u.project_digest=?2 AND u.harness=?3 AND u.session_id=?4
+      AND u.served_commit_seq<?5
+    ORDER BY u.served_commit_seq DESC, u.use_outcome_id DESC LIMIT 1";
+
+/// One generated event: kind (0 or 1 a serve, 2 a tick, 3 a dispute), session, harness, and project indexes, a served-set mask over `d1..d3` (a dispute's subject is `mask % 3`), and which tick a serve was served at.
+type GeneratedEvent = (u8, usize, usize, usize, u8, usize);
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: 48,
+        rng_algorithm: proptest::test_runner::RngAlgorithm::ChaCha,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x1162),
+        ..proptest::prelude::ProptestConfig::default()
+    })]
+
+    /// Over generated histories that interleave serves, ticks, and disputes (shared and out-of-order served sequences, overlapping served sets, two harnesses, two projects, and sessions never served), every dispute stores the link the record-join definition answers when it commits.
+    #[test]
+    fn the_stored_link_equals_the_record_join_definition(
+        events in proptest::collection::vec(
+            (0u8..4, 0usize..4, 0usize..2, 0usize..2, 0u8..8, 0usize..8),
+            0..24,
+        ),
+    ) {
+        check_link_definition(&events)?;
+    }
+}
+
+fn check_link_definition(
+    events: &[GeneratedEvent],
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    const OBJECTS: [&str; 3] = ["d1", "d2", "d3"];
+    const SESSIONS: [&str; 4] = ["s1", "s2", "s3", "never"];
+    const HARNESSES: [&str; 2] = [HARNESS, "pi"];
+    let projects = [project(), "b".repeat(64)];
+    let root = tempfile::tempdir().unwrap();
+    let store = decision_store(root.path(), &OBJECTS);
+    let mut ticks: Vec<i64> = (0..2).map(|n| tick(&store, &format!("tick-{n}"))).collect();
+    let reads = writer(root.path());
+    let check_dispute = |key: &str,
+                         session: usize,
+                         harness: usize,
+                         project: usize,
+                         subject: &str|
+     -> Result<(), proptest::test_runner::TestCaseError> {
+        let reporter = DisputeReporter {
+            project_digest: projects[project].clone(),
+            harness: HARNESSES[harness].to_string(),
+            ..reporter(SESSIONS[session], TaintClass::AssistantInference, None)
+        };
+        let receipt = store
+            .commit(intent(key), |envelope| {
+                envelope.record_dispute_admission(
+                    request(subject, EventKind::MarkDisputed),
+                    &reporter,
+                )?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let stored: Option<String> = reads
+            .query_row(
+                "SELECT use_outcome_id FROM admission_decisions
+                  WHERE commit_seq=?1 AND subject_object_id=?2",
+                params![receipt.commit_seq, subject],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let defined: Option<String> = reads
+            .query_row(
+                DEFINITION_SQL,
+                params![
+                    subject,
+                    reporter.project_digest,
+                    reporter.harness,
+                    reporter.session_id,
+                    receipt.commit_seq
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        proptest::prop_assert_eq!(stored, defined, "{}", key);
+        Ok(())
+    };
+    for (n, &(kind, session, harness, project, mask, at)) in events.iter().enumerate() {
+        match kind {
+            0 | 1 => {
+                let objects: Vec<&str> = (0..OBJECTS.len())
+                    .filter(|bit| mask & (1 << bit) != 0)
+                    .map(|bit| OBJECTS[bit])
+                    .collect();
+                // Serves draw from the first three sessions, so `SESSIONS[3]` only ever disputes.
+                let mut serve = spec(SESSIONS[session % 3], &objects, ticks[at % ticks.len()], 0);
+                serve.harness = HARNESSES[harness].to_string();
+                serve.project_digest = projects[project].clone();
+                // A repeated identity is `Conflict` and records nothing; the history keeps its first record.
+                match insert(&store, &format!("serve-{n}"), serve) {
+                    Ok(_) | Err(KernelError::Conflict) => {}
+                    Err(error) => proptest::prop_assert!(false, "serve {} refused: {:?}", n, error),
+                }
+            }
+            2 => ticks.push(tick(&store, &format!("tick-event-{n}"))),
+            _ => check_dispute(
+                &format!("dispute-{n}"),
+                session,
+                harness,
+                project,
+                OBJECTS[usize::from(mask) % OBJECTS.len()],
+            )?,
+        }
+    }
+    for (session, _) in SESSIONS.iter().enumerate() {
+        for subject in OBJECTS {
+            check_dispute(
+                &format!("final-{session}-{subject}"),
+                session,
+                0,
+                0,
+                subject,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[test]

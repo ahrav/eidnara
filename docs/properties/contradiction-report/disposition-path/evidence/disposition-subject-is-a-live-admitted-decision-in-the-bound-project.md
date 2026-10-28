@@ -13,13 +13,13 @@ and what each failure answers.
 
 ## Evidence trail
 
-- `disposition_request` (`crates/daemon/src/kernel_routes/commit.rs:694-
+- `disposition_request` (`crates/daemon/src/kernel_routes/commit.rs:700-
   736`):
-  1. `scoped_object_state(envelope, filter, object_id)?` (`:706`): the
+  1. `scoped_object_state(envelope, filter, object_id)?` (`:713`): the
      registry row exists and its `scope_id` names the bound project, else
      `NotFound`.
   2. `object_kind != "decision" || invalidated_commit_seq.is_some()` is
-     `NotFound` (`:707-709`). `load_object_state` has no liveness filter
+     `NotFound` (`:714-716`). `load_object_state` has no liveness filter
      of its own (`envelope.rs:1989-2004`), so this line is the liveness
      check.
   3. `subject_admission(object_id)?.ok_or(AdmissionPolicy)` (`:710-712`):
@@ -28,11 +28,11 @@ and what each failure answers.
      `approval_chain_members` entry pass `scoped_object_state`
      (`:713-717`); the chain reader refuses above
      `MAX_AUTHORITY_CHAIN_DEPTH` with `AdmissionPolicy`
-     (`admission.rs:1017-1038`).
+     (`admission.rs:1066-1087`).
 - Mapping: `NotFound -> invalid/not_found`, `AdmissionPolicy ->
   invalid/admission_policy` (`kernel_routes/state.rs:275-276`).
-- Both preview and commit call the same function (`commit.rs:788` in
-  `record_disposition`, `:833` in `PreviewRun::disposition`), so a refusal is identical in both modes
+- Both preview and commit call the same function (`commit.rs:796` in
+  `record_disposition`, `:851` in `PreviewRun::disposition`), so a refusal is identical in both modes
   (`kernel_routes.rs:5355`).
 - Tests: retired subject and unadmitted subject (`kernel_routes.rs:4888-
   4941`); missing id (`:5078-5086`); foreign approval chains of three
@@ -40,7 +40,7 @@ and what each failure answers.
 - An in-scope `observation` object has `scope_id` and is live, so step 1
   passes and step 2 refuses it; no test drives this.
 - `load_subject_facts` in the Kernel filters `invalidated_commit_seq IS
-  NULL` again (`admission.rs:2143`), a second liveness gate.
+  NULL` again (`admission.rs:2219`), a second liveness gate.
 
 ## Failure scenario
 

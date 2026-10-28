@@ -16,36 +16,36 @@ subject, and an `adr_accepted` approval is one.
 
 - Route reachability: `disposition_request` requires only kind
   `decision`, live, in scope, with a prior admission
-  (`crates/daemon/src/kernel_routes/commit.rs:706-712`). Route test
+  (`crates/daemon/src/kernel_routes/commit.rs:713-719`). Route test
   `kernel_routes.rs:5493` quarantines `approval-1` (seeded by `seed_approval`,
   `kernel_routes.rs:4362-4393`, an `adr_accepted` decision admitted under
   `ExplicitUser`/`UserExplicit`) through the route and the commit is
   `available` (`:5558-5559`).
 - `record_admission_inner` wraps the write in `with_authority_cascade`
-  (`crates/kernel/src/admission.rs:1041-1055`); the bearer list is
-  `[subject]` when `subject_grants_authority(subject)` (`:1071-1073`);
+  (`crates/kernel/src/admission.rs:1090-1105`); the bearer list is
+  `[subject]` when `subject_grants_authority(subject)` (`:1121-1123`);
   after the write, `demote_dependents_if_authority_lost(bearer, reason)`
-  runs (`:1079-1081`).
+  runs (`:1129-1131`).
 - `subject_grants_authority` is `subject_is_accepted_decision &&
-  validate_approval(subject)` (`:1109-1120`).
+  validate_approval(subject)` (`:1159-1170`).
 - `demote_dependents_if_authority_lost` returns `(0, 0)` while
   `validate_approval(subject)` still holds, else runs
-  `demote_authority_dependents` (`:1125-1139`).
+  `demote_authority_dependents` (`:1175-1189`).
 - `validate_approval` walks `authority_chain_cte` and requires
   `approval_qualifies_predicate` on each member, whose `approval_row_
   fields` demand `disposition='active'`, `effective_maturity IN
-  ('approved','enforced')` (`:843-856`). A disposition that writes
+  ('approved','enforced')` (`:859-872`). A disposition that writes
   `disposition != active` and `effective_maturity = candidate` (see
   `disposition-never-raises-maturity-and-withdraws-effective-support`)
   fails both.
 - `demote_authority_dependents` walks the frontier, writes one
   `ApprovalRevoked` per dependent via `demote_one_dependent`, and defers
-  past `MAX_AUTHORITY_DEMOTIONS = 4_096` (`:665-670`, `:1452-1490`). The
-  doc at `:1445-1451` says a deferred dependent "already grants nothing"
+  past `MAX_AUTHORITY_DEMOTIONS = 4_096` (`:681-686`, `:1503-1541`). The
+  doc at `:1496-1502` says a deferred dependent "already grants nothing"
   because validity is read from the chain.
 - `ApprovalRevoked` lowers `effective_maturity` to `min(prior.effective,
-  automatic_ceiling)` (`remaining_support`, `:1620-1625`; evaluator
-  `:293-302`).
+  automatic_ceiling)` (`remaining_support`, `:1674-1679`; evaluator
+  `:309-318`).
 - Kernel test `quarantining_an_approval_demotes_its_dependents_and_ends_
   its_authority` (`kernel_admission.rs:1503`) asserts the dependent's
   latest row is `explicit_labeled` after the quarantine (`:1536-1544`).
@@ -70,7 +70,7 @@ The cascade runs inside the invalidating transaction and holds the single
 writer for its duration. A preview of the same operation shows only the
 approval's own verdict; the dependents' projected visibility is not part
 of the preview (`PreviewRun` reads served rows for the targets only,
-`commit.rs:810-821`).
+`commit.rs:828-839`).
 
 ## What a test must construct
 
@@ -98,7 +98,7 @@ demotion, and does not read `kernel.read`.
 ### Q: Is a plugin-filed dispute of an approval, and its cascade, intended behavior under "the report adds data, not authority"?
 
 - Sources examined: P4 KTD4, R4; index D3 and D7; `admission.rs:1041-
-  1139`, `:843-856`; route test `kernel_routes.rs:5493`.
+  1139`, `:859-872`; route test `kernel_routes.rs:5493`.
 - Findings: the code admits it and the route test exercises the quarantine
   variant without commenting on intent. The plan's authority invariants
   speak to promotion only.
@@ -109,7 +109,7 @@ demotion, and does not read `kernel.read`.
 
 ### Q: How is a deferred dependent's served visibility repaired?
 
-- Sources examined: `admission.rs:1445-1451`, `:1452-1490`.
+- Sources examined: `admission.rs:1496-1502`, `:1503-1541`.
 - Findings: validity is already withdrawn through the chain read; the
   served row is not rewritten; the comment names chunked repair as
   remaining work. No repair job was found in this pass.
@@ -120,8 +120,8 @@ demotion, and does not read `kernel.read`.
 ### Q: Does the preview show the cascade a dispute on an approval causes (G2)?
 
 - Sources examined: `PreviewRun::disposition`
-  (`crates/daemon/src/kernel_routes/commit.rs:825-864`), `changes_to`
-  (`:537-542`), the route module header (`commit.rs:60-63`), the command
+  (`crates/daemon/src/kernel_routes/commit.rs:843-882`), `changes_to`
+  (`:543-548`), the route module header (`commit.rs:60-63`), the command
   usage (`packages/opencode-plugin/src/shared/memory-mark-command.ts:54`)
   and its test (`memory-mark-command.test.ts:167`), and PR A's
   `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents`

@@ -10,22 +10,22 @@ ordinary path.
 ## Evidence trail
 
 - `EvidenceRef` is strict: `path` and `git_object_id`, `deny_unknown_fields`
-  (`crates/daemon/src/kernel_routes/dispute.rs:20-26`).
+  (`crates/daemon/src/kernel_routes/dispute.rs:20-26`); it also derives `Serialize` for `event_payload`.
 - `is_well_formed` requires `kernel::is_lower_hex_oid(git_object_id)`,
   `path.len() <= MAX_EVIDENCE_PATH_BYTES` (1024, `dispute.rs:12`),
   `confined_path::check(path)`, `decodes_to_itself(path)`, and no
-  `redact_durable_text` detection in the path (`dispute.rs:150-163`).
+  `redact_durable_text` detection in the path (`dispute.rs:149-162`).
 - `is_lower_hex_oid` accepts exactly 40 or 64 lowercase hex bytes; PR A
   made it `pub` (`crates/kernel/src/scope.rs:710-716`) and re-exported it
-  (`crates/kernel/src/lib.rs:149`).
+  (`crates/kernel/src/lib.rs:155`).
 - `confined_path::check` refuses NUL, empty, `.`, and `..` components,
   protected components, and more than `MAX_COMPONENTS` components
   (`crates/daemon/src/confined_path.rs:29-45`). An absolute path has an
   empty first component and is refused.
 - `decodes_to_itself` refuses any `%` followed by two hex digits
-  (`dispute.rs:209-213`), so a stored value has one reading.
+  (`dispute.rs:216-220`), so a stored value has one reading.
 - `validated` scans the raw `evidence_id` (`dispute.rs:58-59` through
-  `value_is_clean`, `:159-163`; added in `511cd6d73`) and the composed
+  `value_is_clean`, `:166-170`; added in `511cd6d73`) and the composed
   reason (`dispute.rs:75`). The raw scan covers an `evidence_id` whose
   secret the percent-encoding would break up in the reason.
 - The route stores the received bytes and does not look the object up
@@ -58,16 +58,16 @@ All constructed:
   a path over 1024 bytes, a path holding the test token (same test).
 - Unit refusals of empty oid, absolute path, empty path,
   `src/.eidnara/x`, and `double%2Fencoded`:
-  `malformed_references_are_invalid_input` (`dispute.rs:320`).
+  `malformed_references_are_invalid_input` (`dispute.rs:327`).
 - Both fields on one dispute land and parse back, and a malformed
   reference beside an id that would answer `not_found` answers
   `invalid_input`, so the form check runs before the visibility check
   (`a_dispute_judges_every_citer_and_both_evidence_fields_together`,
-  `kernel_routes.rs:6285`).
+  `kernel_routes.rs:6291`).
 - Every accepted path renders and parses back to itself (proptest
-  `every_accepted_reference_parses_back_to_its_inputs`, `dispute.rs:298`);
+  `every_accepted_reference_parses_back_to_its_inputs`, `dispute.rs:305`);
   `encode` on reserved and multi-byte input has a fixed witness
-  (`dispute.rs:286`).
+  (`dispute.rs:293`).
 - The fake kernel refuses five path shapes the route refuses
   (`packages/opencode-plugin/src/shared/memory-mark-command.test.ts:271`).
 - Command parser: `--path` split at the last `@`; a path without `@`, an
@@ -80,8 +80,8 @@ All constructed:
 ### Q: Which token does the scanner detect, and do object ids and ordinary paths pass (G3)?
 
 - Sources examined: `a_path_the_secret_scanner_detects_is_invalid_input`
-  (`dispute.rs:352-359`); `git_object_ids_and_ordinary_paths_carry_no_detection`
-  (`dispute.rs:364-377`); `crates/secret-scanner/conservative_overlay.yaml:5-7`;
+  (`dispute.rs:373-380`); `git_object_ids_and_ordinary_paths_carry_no_detection`
+  (`dispute.rs:385-398`); `crates/secret-scanner/conservative_overlay.yaml:5-7`;
   `crates/secret-scanner/default_rules.yaml:410-411`;
   `context_core::redaction::redact_durable_text`
   (`crates/context-core/src/redaction.rs:462-464`).
@@ -122,7 +122,7 @@ All constructed:
 
 - Sources examined: `confined_path::check`
   (`crates/daemon/src/confined_path.rs:29-45`), `encode`
-  (`dispute.rs:169-179`).
+  (`dispute.rs:176-186`).
 - Findings: only NUL among control bytes. C0 and bidi control characters
   pass, and `encode` stores them percent-encoded, so the stored reason
   stays ASCII. A review round recorded this as a nit, not fixed in

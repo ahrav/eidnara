@@ -21,7 +21,7 @@ or merge verdict.
 | G4 | The summarizer restart reattach as a third consent source | gap | Confirmed by a read of the reattach path; recorded on `uo-consent-gate-source-is-the-route-frozen-config` (needs human input) |
 | G5 | Every written retention-class string is a compiled constant | gap | `use_outcome_capture` is a constant; `canonical` has none; recorded on `uo-expiry-keeps-pinned-and-cited-evidence` (needs human input) |
 | G6 | The status surface names no identifiers | gap | Resolved at #1157 (AC19) by inspection: the `review.use_outcome` handler logs nothing and adds no `host.status` field; recorded on `uo-status-counters-are-closed-vocabulary-exact-integers-with-unavailable-not-zero` and `uo-p-counts-exact-and-unavailable-not-zero` |
-| R7 | Line reference correction (`admission.rs:1776`) | refinement | Applied: the record cites the binding line at this tip |
+| R7 | Line reference correction (`admission.rs:1853`) | refinement | Applied: the record cites the binding line at this tip |
 | R8 | An as-of read in the `known_as_of` evidence | refinement | Applied in `evidence/uo-known-as-of-is-the-tip-bound-read-sequence.md` |
 | R9 | Convergence as a bound: one repeat with the Kernel Ready completes `ok` | refinement | Applied to `uo-p-deleted-at-iff-session-delete-kernel-step` |
 | R10 | Convergence as a bound: N records drain in ceil(N / 64) calls | refinement | Applied to `uo-p-sweep-retires-only-expired-uncited-rows` and checked by `an_expiry_backlog_drains_one_page_per_call` |

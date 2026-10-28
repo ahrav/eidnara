@@ -13,10 +13,10 @@ the existing canonical reader excludes before bounded selection.
 - [read.rs:84-92][keeps] admits only decisions in the requested memory domain.
 - [read.rs:174-187][filter] applies that predicate and the scope algebra before
   rows enter `NewestRows`; exclusions do not set its dropped flag.
-- [admission.rs:3185-3221][sql] has an inner own-admission join, no domain/kind
+- [admission.rs:3261-3297][sql] has an inner own-admission join, no domain/kind
   restriction, and a conservative scope prefilter. Unadmitted registry rows
   are not its returned candidates.
-- [admission.rs:2880-2910][visible] removes Hidden rows from the visible result.
+- [admission.rs:2956-2986][visible] removes Hidden rows from the visible result.
 - [canonical_memory.rs:195-210][late] filters Visible/positive categories and
   trims the memory budget after the route reader has applied its caps.
 
@@ -56,6 +56,6 @@ truncation. K3 supplies pressure; existing generic cap checks remain
 
 [keeps]: ../../../../crates/daemon/src/kernel_routes/read.rs#L84-L92
 [filter]: ../../../../crates/daemon/src/kernel_routes/read.rs#L174-L187
-[sql]: ../../../../crates/kernel/src/admission.rs#L3185-L3221
-[visible]: ../../../../crates/kernel/src/admission.rs#L2880-L2910
+[sql]: ../../../../crates/kernel/src/admission.rs#L3261-L3297
+[visible]: ../../../../crates/kernel/src/admission.rs#L2956-L2986
 [late]: ../../../../crates/daemon/src/canonical_memory.rs#L195-L210

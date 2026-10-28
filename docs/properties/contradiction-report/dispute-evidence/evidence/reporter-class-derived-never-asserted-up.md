@@ -12,17 +12,17 @@ route's derivation, never from a stronger claim by the client.
   `(ModelInference, AssistantInference)`, `memory_classifier` to
   `(ModelInference, MemoryClassifierInference)`, `user` to
   `(ModelInference, UserInferred)`, and anything else to `None`
-  (`crates/daemon/src/kernel_routes/commit.rs:368-380`).
+  (`crates/daemon/src/kernel_routes/commit.rs:370-382`).
 - `resolve_classes` refuses an asserted class ranked above the derived one
   with `ClassOverDeclared` and accepts one at or below it
-  (`commit.rs:411-444`; ranks at `:382-404`).
+  (`commit.rs:413-446`; ranks at `:384-406`).
 - The handler passes the resolved taint to `compose_reason`
-  (`commit.rs:1109-1123`), which renders it as `reporter_taint`
+  (`commit.rs:1137-1151`), which renders it as `reporter_taint`
   (`crates/daemon/src/kernel_routes/dispute.rs:83-87`).
 - `disposition_request` builds the admission request with the subject's
-  prior classes (`commit.rs:725-726`), so the row's class columns are the
+  prior classes (`commit.rs:732-733`), so the row's class columns are the
   subject's; the Kernel refuses a request whose classes differ from the
-  prior (`crates/kernel/src/admission.rs:268-274`).
+  prior (`crates/kernel/src/admission.rs:284-290`).
 - The command sends `sourceKind: "user"`
   (`packages/opencode-plugin/src/shared/memory-mark-command.ts:256`).
 - The route stores `actor` and `cause` as sent; neither enters the class
@@ -80,10 +80,10 @@ subject's facts, so no store scan can evaluate it.
 
 - Sources examined: `kernel_route_scope`
   (`crates/daemon/src/kernel_routes/mod.rs:415-441`), `RouteScope`
-  (`:405-412`), `handle_kernel_commit` (`commit.rs:1076-1205`).
+  (`:405-412`), `handle_kernel_commit` (`commit.rs:1097-1241`).
 - Findings: no. `RouteScope.harness` is bound but `handle_kernel_commit`
-  reads only `scope.project` and `scope.store` (`commit.rs:1124`,
-  `:1139`, `:1142`); `source_kind` is whatever the body says. The
+  reads only `scope.project` and `scope.store` (`commit.rs:1152`,
+  `:1175`, `:1178`); `source_kind` is whatever the body says. The
   derivation bounds what a claim can reach: a client can claim `user`
   (taint rank 2) from any surface but never `user_explicit`.
 - Missing evidence: an owner decision on binding `source_kind` to the

@@ -8,7 +8,7 @@ described in the investigation log.
 
 ## Discovery trigger
 
-Plan P4 Problem Frame: "the evidence is dropped at `commit.rs:590-596`".
+Plan P4 Problem Frame: "the evidence is dropped at `commit.rs:596-602`".
 Lens: protocol contracts and version compatibility. The plan adds
 `evidence_id` and `evidence_ref` to the operation in PR A; what a HEAD
 daemon does with those keys, and what it writes today, is the baseline
@@ -28,16 +28,16 @@ the change is measured against.
   (`kernel_routes/mod.rs:463-471`). This runs after
   `kernel_route_scope` binds the project (`mod.rs:452-453`) and before any
   store access, so nothing is written.
-- `disposition_request` sets `trigger_object_id: None` (`commit.rs:729`)
+- `disposition_request` sets `trigger_object_id: None` (`commit.rs:736`)
   and, at the PR A tip, `evidence_id: evidence_id.map(..)` and the
-  composed `reason` (`:731-732`); `admit` sets `None` and the constant
-  `"kernel.commit"` for inserts (`:589-594`, constant at `:100`).
+  composed `reason` (`:738-739`); `admit` sets `None` and the constant
+  `"kernel.commit"` for inserts (`:595-600`, constant at `:100`).
 - `write_admission` writes those `None`s into `evidence_id` and
-  `trigger_object_id` (`admission.rs:1778`, `:1783`).
+  `trigger_object_id` (`admission.rs:1850`, `:1855`).
 - Receipt shape: `CommitResult.dispositions` is `#[serde(default,
-  skip_serializing_if = "Vec::is_empty")]` (`commit.rs:500-502`), so
+  skip_serializing_if = "Vec::is_empty")]` (`commit.rs:506-508`), so
   receipts recorded before the field existed still decode; the unit test
-  at `:1307` asserts that.
+  at `:1343` asserts that.
 - TypeScript: `DispositionOperation` has `op, object_id, event,
   approval_object_id?`, and at the PR A tip `evidence_id?` and
   `evidence_ref?` (`shared/kernel-client/client.ts:101-111`); the command
@@ -88,7 +88,7 @@ binary is the enabling condition.
 
 ### Q: Does the guarantee hold at the PR A tip?
 
-- Sources examined: `commit.rs:155-172`, `:206-234`, `:722-734`; the
+- Sources examined: `commit.rs:155-172`, `:208-236`, `:729-741`; the
   dispute-evidence route tests (`crates/daemon/tests/kernel_routes.rs:5723`,
   `:5971`).
 - Findings: no. A dispute row now carries the cited `evidence_id`, and

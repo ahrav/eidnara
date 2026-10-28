@@ -8,8 +8,9 @@ Record kind: new obligation activated by #1156.
 
 ## Evidence trail
 
-References are verified at the #1156 branch tip, the commit that carries this
-revision.
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
 - Hook: `crates/daemon/src/lib.rs:10126` in the settle step, after any rerun,
   when the final response committed and the check
@@ -20,7 +21,7 @@ revision.
   (`crates/daemon/src/lib.rs:9808`) and the job touches after its serve
   attempt, whatever the serve answered,
   (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:356`)).
-- Update: `crates/kernel/src/use_outcome.rs:43-47` selects the live records with
+- Update: `crates/kernel/src/use_outcome.rs:45-49` selects the live records with
   a null or earlier value (the `LIVE_SESSION_WHERE` and `last_transform_at`
   predicates at lines 45-46). A session with none takes no writer, because the
   check above skips it; the update itself holds only the writer.
@@ -50,15 +51,15 @@ revision.
   `a_touch_waiting_on_the_writer_overlaps_the_settle_and_lands_before_the_response`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:557`); Kernel half:
   `last_transform_at_advances_live_records_without_a_commit`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1118`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1119`),
   `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1203`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1204`),
   `an_outside_file_lock_bounds_the_advance_at_begin`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1244`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1245`),
   `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1290`),
+  (`crates/kernel/tests/kernel_use_outcome.rs:1825`),
   `the_advance_takes_no_pooled_reader`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1322`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:1857`). Status: unaudited.
 
 ## Failure scenario
 

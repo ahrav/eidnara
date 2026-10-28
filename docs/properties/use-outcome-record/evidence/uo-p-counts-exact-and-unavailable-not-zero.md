@@ -8,10 +8,11 @@ Record kind: new obligation activated by #1157.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip, the commit that carries this
-revision.
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
-- Count read: `crates/kernel/src/use_outcome.rs:214-224` counts the object's
+- Count read: `crates/kernel/src/use_outcome.rs:222-232` counts the object's
   decision rows in one statement and compares each serve with the newest
   qualifying dispute, the rule the by-decision read applies per serve.
 - Route: `crates/daemon/src/memory_reviewer/wire.rs:314` binds through
@@ -34,11 +35,11 @@ revision.
   `packages/cli/src/commands/review.test.ts:822-861`;
   `packages/cli/src/commands/review.test.ts:863`; Kernel half:
   `disputed_after_serve_is_judged_against_each_serve`
-  (`crates/kernel/tests/kernel_use_outcome.rs:826`) and
+  (`crates/kernel/tests/kernel_use_outcome.rs:827`) and
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:400`); the read bound:
+  (`crates/kernel/tests/kernel_use_outcome.rs:401`); the read bound:
   `a_held_reader_pool_bounds_the_count_read`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1267`) and
+  (`crates/kernel/tests/kernel_use_outcome.rs:1801`) and
   `review_use_outcome_reads_the_kernel_under_a_bounded_budget`
   (`crates/daemon/tests/memory_reviewer_wire.rs:787`). Status: unaudited.
 
@@ -72,7 +73,7 @@ two sessions with one later dispute.
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: `served_sessions` counts unretired serving records, one per
   (harness, session, served set), the record identity the `use_outcomes`
-  UNIQUE constraint holds within a project (`crates/kernel/src/schema.rs:188`),
+  UNIQUE constraint holds within a project (`crates/kernel/src/schema.rs:194`),
   so a session served the decision at two served sets counts twice; the name
   follows the ticket.
 - Missing evidence: none beyond what the question names.

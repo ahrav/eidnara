@@ -8,32 +8,35 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip, the commit that carries this
-revision.
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
-- Components: `crates/kernel/src/schema.rs:188` and
-  `crates/kernel/src/schema.rs:192`; the admission citing column and
+- Components: `crates/kernel/src/schema.rs:194` and
+  `crates/kernel/src/schema.rs:198`, with the `use_outcome_sessions`
+  component #1162 adds (`crates/kernel/src/schema.rs:189`); the admission
+  citing column and
   `idx_admission_use_outcome_fk` in the `admission_decisions` component
-  (`crates/kernel/src/schema.rs:163`).
-- Pinned digest: `crates/kernel/tests/kernel_schema.rs:183`
-  (`40cf9b503ce6458c98e352324df95e4a7ad97066f6e9b4b5e699bd62140e150b`).
+  (`crates/kernel/src/schema.rs:164`).
+- Pinned digest: `crates/kernel/tests/kernel_schema.rs:184`
+  (`7a3a869af2d00c1767c0e578ef065b4241255920c2510d0063f8d28361d26b03`).
 - Component-name list: `crates/kernel/tests/kernel_schema.rs:14`; object
   inventory: `kernel_schema_object_inventory_is_pinned_by_kind_and_name`
-  (`crates/kernel/tests/kernel_schema.rs:1900`).
+  (`crates/kernel/tests/kernel_schema.rs:1901`).
 - Refusal: `classify_existing_family` (`crates/kernel/src/open.rs:796`).
 
 - Guarantee under test: A Kernel family at the previous baseline opens as
   `IdentityMismatch` with its main file and `-wal` byte-identical; a new family
-  contains both use-outcome tables and its digest equals the pinned literal.
+  contains the use-outcome tables and its digest equals the pinned literal.
 - Existing check:
   `a_family_created_under_the_previous_baseline_is_refused_untouched`
   (`crates/kernel/tests/kernel_open.rs:582`);
   `kernel_schema_digest_is_pinned_to_the_frozen_v1_shape`
-  (`crates/kernel/tests/kernel_schema.rs:599`);
+  (`crates/kernel/tests/kernel_schema.rs:600`);
   `kernel_schema_object_inventory_is_pinned_by_kind_and_name`
-  (`crates/kernel/tests/kernel_schema.rs:1900`);
+  (`crates/kernel/tests/kernel_schema.rs:1901`);
   `kernel_schema_has_one_ordered_full_shape`
-  (`crates/kernel/tests/kernel_schema.rs:151`). Status: unaudited.
+  (`crates/kernel/tests/kernel_schema.rs:152`). Status: unaudited.
 
 ## Failure scenario
 

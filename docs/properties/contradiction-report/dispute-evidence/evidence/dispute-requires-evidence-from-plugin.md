@@ -16,18 +16,18 @@ None`. PR A adds the fields and the requirement.
   `reason` field is `#[serde(skip)]` (`:168-171`), so a body that sends
   `reason` is refused as an unknown field and the caller cannot supply it.
   `a_disposition_carrying_its_own_reason_is_refused_as_an_unknown_field`
-  (`crates/daemon/tests/kernel_routes.rs:6252`) sends such a body and
+  (`crates/daemon/tests/kernel_routes.rs:6258`) sends such a body and
   asserts an error with the four row counts unchanged; it asserts the
   error variant, not the refusal name.
-- `compose_reason` (`commit.rs:206-234`) routes dispute events to
+- `compose_reason` (`commit.rs:208-236`) routes dispute events to
   `DisputeReason::validated` and refuses evidence on every other event
-  with `InvalidReason::InvalidInput` (`:228-229`); non-dispute events get
-  `ADMISSION_REASON` (`:231`, constant at `:100`).
+  with `InvalidReason::InvalidInput` (`:230-231`); non-dispute events get
+  `ADMISSION_REASON` (`:233`, constant at `:100`).
 - `DisputeReason::validated` refuses a dispute with neither field and an
   empty `evidence_id` (`crates/daemon/src/kernel_routes/dispute.rs:55-59`).
 - The handler runs `compose_reason` for every operation after
   `resolve_classes` and before the intent, preview, or commit
-  (`commit.rs:1109-1123`), and answers `state_only(invalid(reason))`, so
+  (`commit.rs:1137-1151`), and answers `state_only(invalid(reason))`, so
   no transaction starts.
 - The module header states the requirement and the refusal names
   (`commit.rs:12-15`, `:46-53`).
@@ -61,7 +61,7 @@ would fall to Candidate on assertion alone.
 ## Timing windows and dependencies
 
 None in time. The check depends on the handler loop running before
-`if parsed.preview` (`commit.rs:1143`); it does, so preview and commit
+`if parsed.preview` (`commit.rs:1179`); it does, so preview and commit
 share it.
 
 ## What a test must construct
@@ -75,7 +75,7 @@ share it.
 
 All four are constructed: `a_dispute_needs_evidence_and_other_events_take_none`
 (`crates/daemon/tests/kernel_routes.rs:5971`), the unit test of the same
-name (`dispute.rs:380`), and the parser test at
+name (`dispute.rs:401`), and the parser test at
 `memory-mark-command.test.ts:137`. The tool arm (#1161) refuses before
 sending: `refuses missing evidence and unsupported events before sending;
 renders denials and refusals`
@@ -112,7 +112,7 @@ row, so a store scan on it is circular.
 ### Q: Should the Kernel enforce the requirement for every writer?
 
 - Sources examined: `commit.rs:55-58`; `record_admission`
-  (`crates/kernel/src/admission.rs:982`).
+  (`crates/kernel/src/admission.rs:998`).
 - Findings: the Kernel accepts a dispute without evidence from any
   in-process caller; the route documents itself as the validator for
   plugin-written disputes and marks its rows with the `v=1` prefix.

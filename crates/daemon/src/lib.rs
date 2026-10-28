@@ -38417,14 +38417,34 @@ mod tests {
         (handler, store, dir, project)
     }
 
+    /// Opens the store at `data_home` once the previous owner's lease is released. A dropped
+    /// handler's background work can still hold the store for a moment; the daemon's own open
+    /// waits out a live lease under the same predicate (`store_open_error_is_live_lease`) with
+    /// its own backoff policy.
+    pub(crate) fn reopen_store_after_restart(data_home: &str) -> MemoryStore {
+        let descriptor = dev_descriptor_at(data_home);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match MemoryStore::open(&descriptor) {
+                Ok(store) => return store,
+                Err(error)
+                    if store_open_error_is_live_lease(&error)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("reopen the store after a restart: {error}"),
+            }
+        }
+    }
+
     fn restarted_handler(
         dir: &tempfile::TempDir,
         project: &Path,
         session: &str,
     ) -> (Handler, Arc<MemoryStore>) {
         let data_home = dir.path().join("data");
-        let store =
-            Arc::new(MemoryStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap());
+        let store = Arc::new(reopen_store_after_restart(data_home.to_str().unwrap()));
         let handler = Handler::with_producer_factory_config_resolver(
             Arc::new(TestProducerFactory {
                 state: Arc::new(ProducerState::default()),

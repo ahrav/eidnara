@@ -23,11 +23,11 @@ violation.
 | D7 reserved bytes in a valid reference | `;`, `=`, `%`, `@`, spaces, non-ASCII | yes, route | raw body |
 | D8 raised reporter assertion | `asserted_taint_class` above the derivation | yes, route | raw body |
 | D9 same session, other evidence | two disputes of one subject under two identities | yes, command and route | `memoryMarkOperationId` with two `args` |
-| D10 citer retired after preview | the only project citer retired between a preview and its commit | yes, route | `retire_decision` between `preview` and `commit` (`kernel_routes.rs:6416`) |
-| D11 mixed citers | one evidence id cited by the project and by a foreign scope that sorts first or whose citers were written first | yes, store API and route | `insert_scope` and a foreign `insert_decision` (`kernel_routes.rs:6285`) |
-| D12 citer in the same envelope | an `insert_decision` citing the evidence ahead of the dispute in one envelope | yes, route | `citing_decision` before `dispute` in one commit (`kernel_routes.rs:6516`) |
-| D13 forged reason field | a disposition body carrying `reason` | yes, route | raw body (`kernel_routes.rs:6252`) |
-| D14 approved relaxation | a dispute naming a valid approval against a more restrictive prior | yes, route | `seed_approval` and `approval_object_id` (`kernel_routes.rs:6459`) |
+| D10 citer retired after preview | the only project citer retired between a preview and its commit | yes, route | `retire_decision` between `preview` and `commit` (`kernel_routes.rs:6422`) |
+| D11 mixed citers | one evidence id cited by the project and by a foreign scope that sorts first or whose citers were written first | yes, store API and route | `insert_scope` and a foreign `insert_decision` (`kernel_routes.rs:6291`) |
+| D12 citer in the same envelope | an `insert_decision` citing the evidence ahead of the dispute in one envelope | yes, route | `citing_decision` before `dispute` in one commit (`kernel_routes.rs:6522`) |
+| D13 forged reason field | a disposition body carrying `reason` | yes, route | raw body (`kernel_routes.rs:6258`) |
+| D14 approved relaxation | a dispute naming a valid approval against a more restrictive prior | yes, route | `seed_approval` and `approval_object_id` (`kernel_routes.rs:6465`) |
 
 Not available: a second writer blocked on the writer lock while a dispute
 holds it (needed to construct a retirement queued behind the dispute), and
@@ -51,7 +51,7 @@ under `crates/` writes `asserted_edges`.
 | `dispute-identity-includes-evidence-key` | D9, F10, F11 | two evidence keys; replay; reuse | yes (F12 not constructed) |
 | `dispute-preview-writes-nothing` | D1 to D6, D10 | preview then commit at one tip; a tip that moves between them | yes |
 | `structured-reason-projects-typed-reporter-data` | D7, D13, F15 | reserved bytes; a forged reason; a cascade | partial - PR A form |
-| `use-outcome-link-names-own-session-prior-serve` | (PR B) | a serve before a dispute in one session | not yet |
+| `use-outcome-link-names-own-session-prior-serve` | (PR B) | a serve before a dispute in one session; two serves; another session; another decision | yes - `kernel_use_outcome.rs:1371`, `kernel_routes.rs:6651` |
 
 ## Coverage checks to add
 

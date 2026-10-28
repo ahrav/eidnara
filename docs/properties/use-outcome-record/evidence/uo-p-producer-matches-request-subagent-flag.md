@@ -20,7 +20,7 @@ revision.
   `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
   (`crates/daemon/src/use_outcome_writer_tests.rs:420`); Kernel half:
   `session_roles_round_trip_and_the_served_set_digest_is_order_free`
-  (`crates/kernel/tests/kernel_use_outcome.rs:811`). Status: unaudited.
+  (`crates/kernel/tests/kernel_use_outcome.rs:812`). Status: unaudited.
 
 ## Failure scenario
 
