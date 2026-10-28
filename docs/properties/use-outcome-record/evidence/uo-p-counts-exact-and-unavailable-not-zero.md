@@ -39,7 +39,7 @@ tip.
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
   (`crates/kernel/tests/kernel_use_outcome.rs:401`); the read bound:
   `a_held_reader_pool_bounds_the_count_read`
-  (`crates/kernel/tests/kernel_use_outcome.rs:1792`) and
+  (`crates/kernel/tests/kernel_use_outcome.rs:1801`) and
   `review_use_outcome_reads_the_kernel_under_a_bounded_budget`
   (`crates/daemon/tests/memory_reviewer_wire.rs:787`). Status: unaudited.
 

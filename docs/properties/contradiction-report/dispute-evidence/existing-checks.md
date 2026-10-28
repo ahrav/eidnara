@@ -54,7 +54,7 @@ landing.
 
 | Location | Test | What it asserts | Records | Status |
 |---|---|---|---|---|
-| `crates/kernel/src/admission.rs:4605` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | over every consistent maturity pair, disposition, dispute event, and evidence flag: `Deny`, historical kept, effective not raised, restrictiveness not lowered, prior kept on a relaxing request | standing | unaudited |
+| `crates/kernel/src/admission.rs:4608` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | over every consistent maturity pair, disposition, dispute event, and evidence flag: `Deny`, historical kept, effective not raised, restrictiveness not lowered, prior kept on a relaxing request | standing | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:2161` | `evidence_cited_in_offers_each_live_citing_scope_once_and_stops_at_the_first_accepted` | live decisions, observations, and decision events offer their scopes once each; unscoped and retired citers offer none; the walk ends at the accepted scope; retired and unknown ids are cited nowhere | liveness, visibility | unaudited |
 | `crates/kernel/tests/kernel_slice.rs:2316` | `evidence_cited_in_matches_the_citation_model_under_seeded_citers` | over 24 seeded rounds of interleaved scoped, unscoped, live, and retired decisions, observations, and decision events, the answer equals the model for every accepted scope set; each scope is offered at most once and only when a live citer carries it; no scope before the last is accepted; a refusal offered every citing scope | visibility | unaudited |
 

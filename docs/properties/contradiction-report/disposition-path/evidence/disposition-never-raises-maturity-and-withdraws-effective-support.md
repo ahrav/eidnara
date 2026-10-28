@@ -15,7 +15,7 @@ claim: "never a maturity promotion".
 ## Evidence trail
 
 - `event_effect` returns `(current, Some(<disposition>), <outcome>)` for
-  all five events (`crates/kernel/src/admission.rs:4233-4236`), so
+  all five events (`crates/kernel/src/admission.rs:4236-4239`), so
   `requested == current`.
 - `event_can_raise_support` lists no disposition event (`:4265-4275`), so
   `raises_support` is false (`:334-335`).
@@ -74,7 +74,7 @@ sees the earlier one's row as prior (`admission_latest`, `:1908-1916`).
 
 ### Q: Is the preserved `maturity` history intended to be visible to P3/P4 readers?
 
-- Sources examined: `admission.rs:352-367`, `:1839-1840`; P4 Problem
+- Sources examined: `admission.rs:352-367`, `:1842-1843`; P4 Problem
   Frame; P3 plan R3 ("whether a `MarkDisputed` or `Contradict` event
   landed after the served commit sequence").
 - Findings: the row keeps `maturity` (historical) at its prior value and

@@ -22,8 +22,8 @@ subject, and an `adr_accepted` approval is one.
   `ExplicitUser`/`UserExplicit`) through the route and the commit is
   `available` (`:5558-5559`).
 - `record_admission_inner` wraps the write in `with_authority_cascade`
-  (`crates/kernel/src/admission.rs:1087-1102`); the bearer list is
-  `[subject]` when `subject_grants_authority(subject)` (`:1118-1120`);
+  (`crates/kernel/src/admission.rs:1090-1105`); the bearer list is
+  `[subject]` when `subject_grants_authority(subject)` (`:1121-1123`);
   after the write, `demote_dependents_if_authority_lost(bearer, reason)`
   runs (`:1129-1131`).
 - `subject_grants_authority` is `subject_is_accepted_decision &&
@@ -109,7 +109,7 @@ demotion, and does not read `kernel.read`.
 
 ### Q: How is a deferred dependent's served visibility repaired?
 
-- Sources examined: `admission.rs:1493-1499`, `:1500-1538`.
+- Sources examined: `admission.rs:1496-1502`, `:1503-1541`.
 - Findings: validity is already withdrawn through the chain read; the
   served row is not rewritten; the comment names chunked repair as
   remaining work. No repair job was found in this pass.

@@ -14,9 +14,9 @@ References were first verified at the #1157 branch tip (the commit that adds
 this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
 tip.
 
-- Disposition mapping: `crates/kernel/src/admission.rs:4234`.
-- Row and surface: `visibility_row` (`crates/kernel/src/admission.rs:4321`),
-  `crates/kernel/src/admission.rs:4194`.
+- Disposition mapping: `crates/kernel/src/admission.rs:4237`.
+- Row and surface: `visibility_row` (`crates/kernel/src/admission.rs:4324`),
+  `crates/kernel/src/admission.rs:4197`.
 - Correction: both integration tests cited by the spec exercise `AutoSearch`;
   the `AutoInject` cell is proved by the unit matrix.
 
@@ -24,7 +24,7 @@ tip.
   hidden on `auto_inject` and `auto_search` and served labeled on
   `explicit_search`.
 - Existing check: `visibility_matrix_and_sensitivity_ceiling_are_total`
-  (`crates/kernel/src/admission.rs:5080`);
+  (`crates/kernel/src/admission.rs:5083`);
   `every_non_active_disposition_has_the_contracted_surface_row`
   (`crates/kernel/tests/kernel_admission.rs:2890`);
   `dispositions_and_sensitivity_only_reduce_visibility`

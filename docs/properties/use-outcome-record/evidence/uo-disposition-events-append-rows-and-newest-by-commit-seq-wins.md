@@ -13,7 +13,7 @@ References were first verified at the #1157 branch tip (the commit that adds
 this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
 tip.
 
-- Append: `crates/kernel/src/admission.rs:1816`.
+- Append: `crates/kernel/src/admission.rs:1819`.
 - Newest wins: `crates/kernel/src/admission.rs:691`.
 - Correction: the spec's `kernel_admission.rs:2571` and `:2832` test retirement
   and time travel, not append or newest-wins.
@@ -24,7 +24,7 @@ tip.
 - Existing check: `both_latest_decision_formulations_choose_the_same_row`
   (`crates/kernel/tests/kernel_admission.rs:2252`);
   `an_event_that_names_a_disposition_keeps_its_own_outcome`
-  (`crates/kernel/src/admission.rs:5410`). Status: unaudited.
+  (`crates/kernel/src/admission.rs:5413`). Status: unaudited.
 
 ## Failure scenario
 

@@ -491,7 +491,7 @@ Reachability: default-production - every dispute reaches
 Status: active
 Exercised: yes - the evaluator grid test
 `a_dispute_with_evidence_never_raises_standing_across_the_grid`
-(`admission.rs:4605`) judges both dispute events with and without
+(`admission.rs:4608`) judges both dispute events with and without
 evidence against every consistent `(historical, effective)` maturity pair
 and every prior disposition. Route tests: `kernel_routes.rs:5723` reads
 `outcome = deny`, unchanged `maturity`, and `effective_maturity =
@@ -507,7 +507,7 @@ evidence: without an approval it answers `denied: true` and the decision
 stays `contradicted`; with a valid `approval_object_id` it answers
 `denied: false`, lands `disputed`, and the row reads `outcome = deny`
 with the evidence id. Tool arm (#1161): an operation that names no
-approval runs under the subject's stored one (`admission.rs:1625-1636`),
+approval runs under the subject's stored one (`admission.rs:1628-1639`),
 so a model dispute could otherwise relax a quarantined or contradicted
 memory a human approved. `runMemoryMarkCommand` answers `denied` for an
 `assistant` mark whose preview moves to a less restrictive disposition,
@@ -534,9 +534,9 @@ Check: `always` - for every dispute row `r` and its prior `p`:
 `rank(r.effective_maturity) <= rank(p.effective_maturity)`, and
 `disposition_restrictiveness(r.disposition) >=
 disposition_restrictiveness(p.disposition)`
-(`admission.rs:4241-4248`) unless `r.approval_object_id` names an
+(`admission.rs:4244-4251`) unless `r.approval_object_id` names an
 approval the evaluator judged valid for `r`'s subject in `r`'s
-transaction (`validate_approval`, `admission.rs:1638-1642`; the
+transaction (`validate_approval`, `admission.rs:1641-1645`; the
 relaxation rule at `admission.rs:337-350`). This matches AC8: no
 relaxation without a valid approval. Validity is not a stored column, so
 the approval clause is evaluated per request from the answer's `denied`
@@ -550,9 +550,9 @@ valid approval named on a dispute against a more restrictive prior. The
 only evaluator gate on evidence is `Enforce` (`admission.rs:291`), so the
 field has no lever on these events.
 Confidence: high - [evidence](evidence/dispute-with-evidence-never-raises-standing.md).
-Read `event_effect` (`admission.rs:4234-4235`), the restrictiveness table,
+Read `event_effect` (`admission.rs:4237-4238`), the restrictiveness table,
 the relaxation rule, and the five tests.
-Existing check: `admission.rs:4605`; `kernel_routes.rs:5723`, `:6146`,
+Existing check: `admission.rs:4608`; `kernel_routes.rs:5723`, `:6146`,
 `:6199`, `:6465`. Status unaudited.
 Impact: a report would become a promotion path.
 Open questions:
@@ -568,7 +568,7 @@ Open questions:
 - The assistant no-relaxation rule runs in the plugin against the
   preview (`memory-mark-command.ts:275-287`); the route back-fills the
   subject's stored approval for every source kind
-  (`admission.rs:1625-1636`). A subject quarantined under a valid
+  (`admission.rs:1628-1639`). A subject quarantined under a valid
   approval between the preview and the commit lands `quarantined ->
   disputed` with `denied: false`. Remedy under consideration: deny the
   relaxation in the writer transaction when the derived taint is
@@ -741,7 +741,7 @@ its own `reason`.
 Confidence: high - [evidence](evidence/structured-reason-projects-typed-reporter-data.md).
 Read `render`, `parse`, `encode`, `decode`, `decodes_to_itself`
 (`dispute.rs:83-220`), and the Kernel `reason` path
-(`admission.rs:1749`). The redaction-row absence for a landed dispute is
+(`admission.rs:1752`). The redaction-row absence for a landed dispute is
 argued from the shared detector, not asserted by a test.
 Existing check: `kernel_routes.rs:5880`, `:5723`, `:6199`, `:6258`,
 `:6291`; `dispute.rs:245`, `:259`, `:293`, `:305`, `:421`, `:461`.
@@ -765,7 +765,7 @@ the route commits goes through `Envelope::record_dispute_admission`
 (`crates/daemon/src/kernel_routes/commit.rs:790`;
 `crates/kernel/src/admission.rs:1015`), which computes the link with
 `reporting_serve` (`crates/kernel/src/use_outcome.rs:299`) and writes it in
-`write_reported_admission` (`admission.rs:1734`) with no flag.
+`write_reported_admission` (`admission.rs:1737`) with no flag.
 Status: active
 Exercised: yes - Kernel test
 `a_dispute_links_the_reporting_sessions_latest_prior_serve_of_its_subject`
@@ -810,9 +810,9 @@ Confidence: high - [evidence](evidence/use-outcome-link-names-own-session-prior-
 Read `reporting_serve` and the INSERT; both tests above construct the
 listed faults.
 Existing check: `kernel_use_outcome.rs:1371`; `kernel_routes.rs:6651`;
-`kernel_use_outcome.rs:1601` (session sequence copied from the record);
-`kernel_use_outcome.rs:1649` (tie on the served sequence);
-`kernel_use_outcome.rs:1685` (stored link equals the record-join definition
+`kernel_use_outcome.rs:1610` (session sequence copied from the record);
+`kernel_use_outcome.rs:1658` (tie on the served sequence);
+`kernel_use_outcome.rs:1694` (stored link equals the record-join definition
 over generated serve histories).
 Status unaudited.
 Impact: a wrong link attributes a harm signal to a session that did not

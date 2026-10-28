@@ -33,7 +33,7 @@ the change is measured against.
   composed `reason` (`:738-739`); `admit` sets `None` and the constant
   `"kernel.commit"` for inserts (`:595-600`, constant at `:100`).
 - `write_admission` writes those `None`s into `evidence_id` and
-  `trigger_object_id` (`admission.rs:1847`, `:1852`).
+  `trigger_object_id` (`admission.rs:1850`, `:1855`).
 - Receipt shape: `CommitResult.dispositions` is `#[serde(default,
   skip_serializing_if = "Vec::is_empty")]` (`commit.rs:506-508`), so
   receipts recorded before the field existed still decode; the unit test

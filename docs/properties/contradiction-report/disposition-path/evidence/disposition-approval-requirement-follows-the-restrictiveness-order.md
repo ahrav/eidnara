@@ -16,7 +16,7 @@ lifecycle transitions.
 
 - `disposition_restrictiveness`: Active 0; Stale, Disputed, Superseded 1;
   Rejected 2; Contradicted, Quarantined 3
-  (`crates/kernel/src/admission.rs:4241-4248`).
+  (`crates/kernel/src/admission.rs:4244-4251`).
 - `relaxes_disposition = restrictiveness(requested) <
   restrictiveness(current_disposition)` (`:337-339`);
   `requires_approval = (...) || relaxes_disposition` (`:340-345`);
@@ -32,7 +32,7 @@ lifecycle transitions.
   `not_found` before evaluation (`kernel_routes.rs:4508-4519`).
 - The route derives `denied` as `requested_disposition() != disposition`
   (`commit.rs:774-777`); `requested_disposition` reads the same
-  `event_effect` table (`admission.rs:4384-4386`).
+  `event_effect` table (`admission.rs:4387-4389`).
 - A denial still writes one `admission_decisions` row with
   `outcome = deny` (`kernel_routes.rs:4500-4503`).
 - Tests: route `:4398` (Active to each), `:4458` (Quarantined to Stale
@@ -75,8 +75,8 @@ combination (`commit.rs:1208-1214`) while the commit judges it
 
 ### Q: Is a lateral move at equal rank (Stale to Disputed) the intended contract for a consumer-filed report on a stale finding?
 
-- Sources examined: `admission.rs:4241-4248`, `:337-346`; P4 R4 and KTD4
-  ("tightening semantics unchanged"); route test `:4624-4636`.
+- Sources examined: `admission.rs:4244-4251`, `:337-346`; P4 R4 and KTD4
+  ("tightening semantics unchanged"); route test `:4627-4639`.
 - Findings: the code lands the move without approval and records
   `Disputed`; R4's "tightening only" does not name the equal-rank case.
   No test pins it either way.

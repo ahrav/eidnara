@@ -28,7 +28,7 @@ contracts and idempotency.
 - `Preview::preview_admission` runs `refuse_succession_events`,
   `prepare_admission`, `refuse_changed_authority`, then inserts into
   `admission_latest` and returns the evaluation without writing
-  (`crates/kernel/src/admission.rs:1932-1943`). `record_admission_inner`
+  (`crates/kernel/src/admission.rs:1935-1946`). `record_admission_inner`
   runs `refuse_succession_events` then `with_authority_cascade(apply_
   admission)` (`:1090-1105`); `apply_admission` is `prepare_admission`
   then `write_reported_admission` (`:1194-1201`). The evaluation both paths return
@@ -37,7 +37,7 @@ contracts and idempotency.
   `served_rows_for` plus the evaluation (`:853-863`); `visibility_changes`
   ignores surfaces that are hidden now (`changes_to`, `:553-558`).
 - `refuse_changed_authority` makes the preview refuse what the commit
-  would judge differently after a cascade (`admission.rs:1945-1958`,
+  would judge differently after a cascade (`admission.rs:1948-1961`,
   mapped at `commit.rs:1208-1214`).
 - Tests: `kernel_routes.rs:5120` (counts unchanged, surfaces), `:5277`
   (in-request prior), `:5355` (denials and refusals match), `:5493`

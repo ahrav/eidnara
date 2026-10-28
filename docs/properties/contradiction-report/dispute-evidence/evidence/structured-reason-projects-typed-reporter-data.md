@@ -32,7 +32,7 @@ grammar).
   `511cd6d73` it also refuses a raw `evidence_id` holding a detection
   before rendering (`dispute.rs:58-62`); the scan of the composed reason
   alone could miss a secret the percent-encoding breaks up.
-- The Kernel stores `redact(reason)` (`crates/kernel/src/admission.rs:1749`);
+- The Kernel stores `redact(reason)` (`crates/kernel/src/admission.rs:1752`);
   `redact_lossy` calls the same `redact_durable_text`
   (`crates/kernel/src/redaction.rs:41-42`), so a reason the route accepted
   is stored unchanged and records no redaction.

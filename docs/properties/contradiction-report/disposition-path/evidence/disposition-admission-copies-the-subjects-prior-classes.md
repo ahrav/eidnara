@@ -19,7 +19,7 @@ reading; code resolves which describes the disposition path.
   (`crates/daemon/src/kernel_routes/commit.rs:732-733`). `prior` is the
   `PriorDecision` from `envelope.subject_admission(object_id)`
   (`:717-719`), which reads `load_prior_for_key(AdmissionKey::Object)`
-  (`crates/kernel/src/admission.rs:1052-1059`).
+  (`crates/kernel/src/admission.rs:1055-1062`).
 - `CommitPlan.classes` (the caller's derived pair from `resolve_classes`,
   `commit.rs:413-446`) is read only by `admit` (`:585-604`) for inserts
   and supersedes. The `Operation::Disposition` arm in `apply`
@@ -28,7 +28,7 @@ reading; code resolves which describes the disposition path.
   prior's (`admission.rs:284-289`), so the copy is also what makes the
   route's dispositions pass that gate for every subject class.
 - `write_admission` binds `prepared.source_class.as_str()` and
-  `prepared.taint_class.as_str()` into the row (`admission.rs:1836-1837`);
+  `prepared.taint_class.as_str()` into the row (`admission.rs:1839-1840`);
   `prepared.source_class` is the request's (`prepare_with_facts`,
   `:1617-1618`, `:1720-1721`).
 - Route test `:5569` quarantines `approval-1`, an `ExplicitUser`/
@@ -49,7 +49,7 @@ relabel the subject's lineage as model inference, and the subject's next
 ## Timing windows and dependencies
 
 None in time. Depends on `subject_admission` returning the object-scoped
-latest row, not the lineage row (`admission.rs:2245-2254` doc).
+latest row, not the lineage row (`admission.rs:2248-2257` doc).
 
 ## What a test must construct
 

@@ -27,7 +27,7 @@ all 14 `always` checks hold over per-request state.
 |---|---|---|
 | classes | route-level daemon test | reads the written row; store helpers exist (`kernel_routes.rs:4340`) |
 | maturity | kernel unit (evaluator) plus one route row read | `evaluate_admission` is pure (`admission.rs:280-367`) |
-| restrictiveness | kernel unit (7x5 grid) plus route cases for lateral moves | table at `admission.rs:4241-4248` |
+| restrictiveness | kernel unit (7x5 grid) plus route cases for lateral moves | table at `admission.rs:4244-4251` |
 | no-evidence | route-level, raw JSON body | parse refusal at `mod.rs:463-471` |
 | evidence-existence | kernel integration (store API) | the route set `None` at `3a3b916b7`; PR A sets a checked id (`commit.rs:738`) |
 | slice-liveness | kernel integration; one route case for the `not_found` mapping | helpers private to `write.rs` |

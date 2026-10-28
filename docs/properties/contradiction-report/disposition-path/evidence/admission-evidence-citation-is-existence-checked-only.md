@@ -7,7 +7,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 ## Discovery trigger
 
 Plan P4 KTD2: "The Kernel persists `evidence_id` on `admission_decisions`
-(`admission.rs:1817-1852`) but the disposition path does not check
+(`admission.rs:1820-1855`) but the disposition path does not check
 liveness." Shared-facts: "No evidence liveness check exists on this path."
 Lens: data integrity, then failure recovery (what a retired citation does
 to later readers). The record pins what the Kernel enforces so the P4
@@ -16,10 +16,10 @@ daemon check is specified against it.
 ## Evidence trail
 
 - `write_admission` derives `evidence_id` by `identity()` only
-  (`crates/kernel/src/admission.rs:1750-1755`); `identity` rejects a
+  (`crates/kernel/src/admission.rs:1753-1758`); `identity` rejects a
   value with a detected secret (`crates/kernel/src/redaction.rs:81-88`).
-- Between `admission.rs:1755` and the INSERT (`admission.rs:1816-1859`)
-  the only reads are the bearer and dependent caps (`:1795-1807`); none
+- Between `admission.rs:1758` and the INSERT (`admission.rs:1819-1862`)
+  the only reads are the bearer and dependent caps (`:1798-1810`); none
   touches `evidence_meta`.
 - `prepare_with_facts` passes `has_evidence: request.event.evidence_id.
   is_some()` (`:1704`), a request-shape test; it matters only for
@@ -45,7 +45,7 @@ daemon check is specified against it.
   (`commit.rs:726-728`, `:749-764`), so the route never reaches this
   record's accept-retired or dangling-id branch.
 - Contrast: `validate_trigger` requires the trigger's backing evidence to
-  be live (`admission.rs:2841-2847`) and
+  be live (`admission.rs:2844-2850`) and
   `approval_qualifies_predicate` requires cited evidence live
   (`:900-909`); the event's own `evidence_id` has no such predicate.
 - Served folding reads `decision_events` with
@@ -85,7 +85,7 @@ to notice.
 
 ### Q: Should the Kernel refuse a retired `evidence_id` on `write_admission`, or is the daemon the only intended gate?
 
-- Sources examined: P4 KTD2, D5 in the index, `admission.rs:1750-1859`,
+- Sources examined: P4 KTD2, D5 in the index, `admission.rs:1753-1862`,
   `slice/write.rs:1138-1178`.
 - Findings: the slice write path enforces liveness; the admission path
   does not. KTD2 places the check in the daemon. Nothing in the plan says

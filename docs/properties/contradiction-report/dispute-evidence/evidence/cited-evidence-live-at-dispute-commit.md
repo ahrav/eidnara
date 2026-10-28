@@ -96,7 +96,7 @@ read inside the transaction, the dispute either sees the retirement
 
 ### Q: Does the Kernel admission write check liveness for other writers?
 
-- Sources examined: `write_admission` (`crates/kernel/src/admission.rs:1726`),
+- Sources examined: `write_admission` (`crates/kernel/src/admission.rs:1729`),
   `commit.rs:55-58`.
 - Findings: no; it checks identity and the FK only.
 - Missing evidence: an owner decision.

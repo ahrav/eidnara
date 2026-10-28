@@ -368,10 +368,10 @@ Required faults and enabling state: A decision admitted, then a committed
 Confidence: high -
 [evidence](evidence/uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search.md).
 `visibility_row` maps `Disputed` to `ExplicitLabeled` (`visibility_row`
-(`crates/kernel/src/admission.rs:4321`)); `surface_visibility` hides it on every
-surface but explicit search (`crates/kernel/src/admission.rs:4194`).
+(`crates/kernel/src/admission.rs:4324`)); `surface_visibility` hides it on every
+surface but explicit search (`crates/kernel/src/admission.rs:4197`).
 Existing check: `visibility_matrix_and_sensitivity_ceiling_are_total`
-(`crates/kernel/src/admission.rs:5080`);
+(`crates/kernel/src/admission.rs:5083`);
 `every_non_active_disposition_has_the_contracted_surface_row`
 (`crates/kernel/tests/kernel_admission.rs:2890`);
 `dispositions_and_sensitivity_only_reduce_visibility`
@@ -397,7 +397,7 @@ Confidence: high -
 [evidence](evidence/uo-admission-reads-require-a-non-null-commit-seq.md). the
 predicates filter `commit_seq IS NOT NULL`
 (`crates/kernel/src/admission.rs:691`); the production writer binds the envelope
-sequence at `crates/kernel/src/admission.rs:1850`. The use-outcome dispute join
+sequence at `crates/kernel/src/admission.rs:1853`. The use-outcome dispute join
 and citation predicate filter the same way
 (`crates/kernel/src/use_outcome.rs:180`).
 Existing check:
@@ -429,7 +429,7 @@ its single-row seek.
 Existing check: `both_latest_decision_formulations_choose_the_same_row`
 (`crates/kernel/tests/kernel_admission.rs:2252`);
 `an_event_that_names_a_disposition_keeps_its_own_outcome`
-(`crates/kernel/src/admission.rs:5410`). Status: unaudited.
+(`crates/kernel/src/admission.rs:5413`). Status: unaudited.
 Impact: The dispute join counts event existence (C12), so this record bounds
 what a reader sees, not the join.
 Open questions:
@@ -1329,9 +1329,9 @@ Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 `an_outside_file_lock_bounds_the_advance_at_begin`
 (`crates/kernel/tests/kernel_use_outcome.rs:1245`),
 `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-(`crates/kernel/tests/kernel_use_outcome.rs:1816`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1825`),
 `the_advance_takes_no_pooled_reader`
-(`crates/kernel/tests/kernel_use_outcome.rs:1848`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1857`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.
@@ -1427,7 +1427,7 @@ Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
 (`crates/kernel/tests/kernel_use_outcome.rs:401`); the read bound:
 `a_held_reader_pool_bounds_the_count_read`
-(`crates/kernel/tests/kernel_use_outcome.rs:1792`) and
+(`crates/kernel/tests/kernel_use_outcome.rs:1801`) and
 `review_use_outcome_reads_the_kernel_under_a_bounded_budget`
 (`crates/daemon/tests/memory_reviewer_wire.rs:787`). Status: unaudited.
 Impact: A zero misread as "no harm observed".

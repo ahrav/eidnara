@@ -10,8 +10,8 @@ Every location was read at the #1157 branch tip.
 
 | Check | Location | Records | Status |
 | --- | --- | --- | --- |
-| `visibility_matrix_and_sensitivity_ceiling_are_total` | `crates/kernel/src/admission.rs:5080` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
-| `an_event_that_names_a_disposition_keeps_its_own_outcome` | `crates/kernel/src/admission.rs:5410` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
+| `visibility_matrix_and_sensitivity_ceiling_are_total` | `crates/kernel/src/admission.rs:5083` | `uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search` | unaudited |
+| `an_event_that_names_a_disposition_keeps_its_own_outcome` | `crates/kernel/src/admission.rs:5413` | `uo-disposition-events-append-rows-and-newest-by-commit-seq-wins` | unaudited |
 | `unrecognized_stored_classes_read_back_restrictive` | `crates/kernel/src/cas/mod.rs:797` | `uo-sensitive-class-denies-remote-and-unknown-egress-is-local-only` | unaudited |
 | `a_replayed_expiry_receipt_is_not_counted_as_a_retirement` | `crates/kernel/src/local_file.rs:737` | `uo-capture-expiry-retires-at-most-a-page-per-call-under-reserved-receipts` | unaudited |
 | `a_capture_pinned_after_it_was_selected_for_expiry_is_kept` | `crates/kernel/src/local_file.rs:760` | `uo-expiry-keeps-pinned-and-cited-evidence` | unaudited |
@@ -50,9 +50,9 @@ Every location was read at the #1157 branch tip.
 | `a_session_delete_marks_each_live_record_once` | `crates/kernel/tests/kernel_use_outcome.rs:1064` | `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `last_transform_at_advances_live_records_without_a_commit` | `crates/kernel/tests/kernel_use_outcome.rs:1119` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 | `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it` | `crates/kernel/tests/kernel_use_outcome.rs:1204` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `a_held_reader_pool_bounds_the_count_read` | `crates/kernel/tests/kernel_use_outcome.rs:1792` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
-| `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing` | `crates/kernel/tests/kernel_use_outcome.rs:1816` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `the_advance_takes_no_pooled_reader` | `crates/kernel/tests/kernel_use_outcome.rs:1848` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `a_held_reader_pool_bounds_the_count_read` | `crates/kernel/tests/kernel_use_outcome.rs:1801` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
+| `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing` | `crates/kernel/tests/kernel_use_outcome.rs:1825` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `the_advance_takes_no_pooled_reader` | `crates/kernel/tests/kernel_use_outcome.rs:1857` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 
 ## Daemon
 

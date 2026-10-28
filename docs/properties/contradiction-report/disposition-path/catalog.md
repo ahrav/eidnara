@@ -176,11 +176,11 @@ derived pair; a disposition request from a plugin `source_kind`.
 Confidence: high - [evidence](evidence/disposition-admission-copies-the-subjects-prior-classes.md).
 Read `disposition_request` (`commit.rs:700-743`), the class-equality
 refusal (`admission.rs:284-289`), and `write_admission` column binding
-(`admission.rs:1836-1837`).
+(`admission.rs:1839-1840`).
 Existing check: `crates/daemon/tests/kernel_routes.rs:4398`
 (`disposition_events_apply_the_fixed_table_and_report_outcome_and_disposition`)
 asserts disposition and outcome only; `kernel_routes.rs:5723` and `:6199`
-assert the row's classes for disputes; `admission.rs:5009`
+assert the row's classes for disputes; `admission.rs:5012`
 (`restrictive_disposition_and_origin_classification_are_sticky`) asserts
 the class-mismatch refusal at the evaluator. Status unaudited.
 Impact: if the caller's class were written, a model-filed dispute would
@@ -203,13 +203,13 @@ reaches `evaluate_admission` through `record_admission`
 (`admission.rs:998-1003`).
 Status: active
 Exercised: partial - evaluator unit tests cover the withdrawal
-(`admission.rs:5829`, `:5410`); kernel integration tests cover
+(`admission.rs:5832`, `:5413`); kernel integration tests cover
 `MarkStale` on a `CodeObserved` subject (`kernel_admission.rs:2735`).
 PR A route tests read `maturity` and `effective_maturity` after a dispute:
 `kernel_routes.rs:5723` (historical kept, effective `candidate`) and
 `:6199` (an approval above Candidate keeps its historical maturity and
 falls to effective `candidate`); the evaluator grid
-`admission.rs:4605` covers both dispute events over every maturity pair.
+`admission.rs:4608` covers both dispute events over every maturity pair.
 No route test reads the maturity columns after `mark_stale`,
 `explicit_reject`, or `quarantine`.
 Guarantee: A disposition event never raises `maturity` or
@@ -219,7 +219,7 @@ Check: `always` - for each disposition row written at `commit_seq = c`
 with prior row `p`: `maturity == p.maturity`, `rank(effective_maturity) <=
 rank(p.effective_maturity)`, and `disposition != 'active' implies
 effective_maturity == 'candidate'`. Derived from `event_effect` returning
-`current` for all five events (`admission.rs:4223-4236`), `historical =
+`current` for all five events (`admission.rs:4226-4239`), `historical =
 current.max(target)` (`:353`), and the Candidate forcing (`:361-365`).
 Holds on every write, so `always`.
 Fault/timing angle: a subject at `Verified`, `Approved`, or `Enforced`
@@ -232,8 +232,8 @@ from the route.
 Confidence: high - [evidence](evidence/disposition-never-raises-maturity-and-withdraws-effective-support.md).
 Read `evaluate_admission` lines `:280-404` and `event_can_raise_support`
 (`:4265-4275`), which lists no disposition event.
-Existing check: `admission.rs:5829`
-(`non_active_dispositions_withdraw_effective_support`), `:5410`
+Existing check: `admission.rs:5832`
+(`non_active_dispositions_withdraw_effective_support`), `:5413`
 (`an_event_that_names_a_disposition_keeps_its_own_outcome`),
 `kernel_admission.rs:2735` (`dispositions_and_sensitivity_only_reduce_
 visibility`). Status unaudited.
@@ -255,7 +255,7 @@ Exercised: partial - route tests cover Active to each of the five
 (`kernel_routes.rs:4398`), Quarantined to Stale denied and then permitted
 with a scoped approval (`:4458`), Stale to Stale admitted (`:4551-4565`);
 evaluator tests cover Rejected/Contradicted/Quarantined to Stale/Disputed
-(`admission.rs:5305`, `:5504`). PR A drives Stale to Disputed through the
+(`admission.rs:5308`, `:5507`). PR A drives Stale to Disputed through the
 route (`kernel_routes.rs:6146`) and Rejected, Contradicted, and
 Quarantined to Disputed denied without approval (same test). Disputed to
 Stale and Disputed to Contradicted are not driven by any test.
@@ -270,7 +270,7 @@ Check: `always` - for each disposition result `r` with prior `p`: if
 cited or stored approval is invalid then `r.disposition == p.disposition
 && r.outcome == "deny" && r.denied == true` and one new
 `admission_decisions` row exists; else `r.disposition ==
-requested(event)`. Table at `admission.rs:4241-4248`, rule at `:337-346`,
+requested(event)`. Table at `admission.rs:4244-4251`, rule at `:337-346`,
 `denied` derivation at `commit.rs:767-787`. Every evaluation, so `always`.
 Fault/timing angle: the approval's authority changing between preview and
 commit; an approval quarantined earlier in the same envelope
@@ -283,8 +283,8 @@ Read the restrictiveness table, `relaxes_disposition`, and both route and
 evaluator tests.
 Existing check: `kernel_routes.rs:4458`
 (`a_relaxation_is_denied_without_a_valid_approval_and_permitted_with_one`),
-`admission.rs:5305` (`leaving_a_restricted_disposition_requires_authority`),
-`admission.rs:5504` (`relaxing_a_restrictive_disposition_requires_approval`).
+`admission.rs:5308` (`leaving_a_restricted_disposition_requires_authority`),
+`admission.rs:5507` (`relaxing_a_restrictive_disposition_requires_approval`).
 Status unaudited.
 Impact: a relaxation that landed without approval would let a plugin undo
 a quarantine; a tightening that required approval would block the P4
@@ -379,7 +379,7 @@ if `e` has a secret-like substring then `InvalidInput`; else if no
 route would report as `invalid/already_exists` (`commit.rs:1084-1092`); else
 the row is written with `evidence_id = e` whether or not
 `invalidated_commit_seq IS NULL`. No liveness predicate exists between
-`admission.rs:1750-1755` and the INSERT at `:1816-1854`. Holds on every
+`admission.rs:1753-1758` and the INSERT at `:1819-1857`. Holds on every
 write, so `always`.
 Fault/timing angle: an evidence row retired by the retention sweep between
 the caller's read and the commit; a dangling id the FK rejects after the
@@ -394,7 +394,7 @@ Read `write_admission`, the FK in `schema.rs:164`, `foreign_keys=ON`
 (`schema.rs:250`, `open.rs:1035`), and `map_sqlite`.
 Existing check: none for liveness. `kernel_admission.rs:4211`
 (`a_trigger_whose_evidence_is_gone_cannot_admit`) covers the trigger
-query (`validate_trigger`, `admission.rs:2804`), a different path. Status
+query (`validate_trigger`, `admission.rs:2807`), a different path. Status
 unaudited.
 Impact: PR A places the liveness check in the daemon (KTD2), so any other
 writer can still record a dispute citing retired evidence, and a reader of
@@ -568,7 +568,7 @@ their values before it; and for a preview `P` and a commit `C` of the same
 operations against the same tip with no intervening commit, each
 `P.previews[i]` restricted to `DispositionResult` fields equals
 `C.dispositions[i]`. Preview and commit share `disposition_request` and
-`prepare_admission` (`commit.rs:843-881`; `admission.rs:1932-1943`).
+`prepare_admission` (`commit.rs:843-881`; `admission.rs:1935-1946`).
 Every request, so `always`.
 Fault/timing angle: a commit landing between preview and commit changes
 the prior; an earlier operation in the same preview changing an approval
@@ -722,8 +722,8 @@ prior row cited `s` as `approval_object_id`, either a row
 exists with `rank(effective_maturity) <=
 rank(automatic_ceiling(d.source_class, d.taint_class))`, or `d` is counted
 in the walk's `deferred` total once `MAX_AUTHORITY_DEMOTIONS` (4,096) rows
-have been written (`with_authority_cascade`, `admission.rs:1107-1129`;
-`demote_authority_dependents`, `:1500-1538`; `approval_row_fields`
+have been written (`with_authority_cascade`, `admission.rs:1110-1132`;
+`demote_authority_dependents`, `:1503-1541`; `approval_row_fields`
 requires `disposition='active'`, `:866`). Every qualifying write, so
 `always`.
 Fault/timing angle: the cascade runs after the subject's row is written,
@@ -758,7 +758,7 @@ Open questions:
   state that the preview reports the named memory's visibility only. The
   preview still does not report the cascade.
 - How does a deferred dependent (past `MAX_AUTHORITY_DEMOTIONS`) get its
-  visibility repaired? The code comment at `admission.rs:1493-1499` calls
+  visibility repaired? The code comment at `admission.rs:1496-1502` calls
   chunking "the remaining work". (partial: validity is already withdrawn
   by `validate_approval`; the served row is not)
 
@@ -814,7 +814,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - every admission row passes
-`write_admission` (`admission.rs:1726`); the route's reason is the
+`write_admission` (`admission.rs:1729`); the route's reason is the
 constant `"kernel.commit"` (`commit.rs:100`) for every event except the two
 disputes, which carry the `v=1` structured reason the route composes and
 caps at 4096 bytes (`commit.rs:223-229`;
@@ -829,11 +829,11 @@ Guarantee: The stored `reason` is `redact(reason).text`; a reason longer
 than 512 KiB is refused with `InvalidInput`; a blank reason is refused with
 `AdmissionPolicy`; a redaction is recorded beside the row.
 Check: `always` - for every `AdmissionRequest`: `reason.trim().is_empty()
-implies Err(AdmissionPolicy)` (`admission.rs:1616-1618`);
+implies Err(AdmissionPolicy)` (`admission.rs:1619-1621`);
 `reason.len() > MAX_REDACTABLE_BYTES implies Err(InvalidInput)`
 (`redaction.rs:72-77`); otherwise the row's `reason` equals
 `redact_lossy(reason).text` and a `durable_text_redactions` row exists for
-each detection (`record(.., "reason", ..)`, `admission.rs:1860-1867`). Every
+each detection (`record(.., "reason", ..)`, `admission.rs:1863-1870`). Every
 write, so `always`.
 Fault/timing angle: none in time; the bound is per request.
 Required faults and enabling state: a store-API caller with a long or
@@ -932,7 +932,7 @@ Shared mechanisms:
   `disposition-never-raises-maturity-and-withdraws-effective-support` and
   `disposition-approval-requirement-follows-the-restrictiveness-order`;
   both are pure-function checks over `EvaluationInputs`.
-- `write_admission` (`admission.rs:1726-1926`) is shared by
+- `write_admission` (`admission.rs:1729-1929`) is shared by
   `admission-evidence-citation-is-existence-checked-only`,
   `admission-reason-is-redacted-bounded-and-non-blank`, and the column
   assertions in the first two records.

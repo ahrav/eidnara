@@ -28,7 +28,7 @@ and what each failure answers.
      `approval_chain_members` entry pass `scoped_object_state`
      (`:713-717`); the chain reader refuses above
      `MAX_AUTHORITY_CHAIN_DEPTH` with `AdmissionPolicy`
-     (`admission.rs:1063-1084`).
+     (`admission.rs:1066-1087`).
 - Mapping: `NotFound -> invalid/not_found`, `AdmissionPolicy ->
   invalid/admission_policy` (`kernel_routes/state.rs:275-276`).
 - Both preview and commit call the same function (`commit.rs:796` in
@@ -40,7 +40,7 @@ and what each failure answers.
 - An in-scope `observation` object has `scope_id` and is live, so step 1
   passes and step 2 refuses it; no test drives this.
 - `load_subject_facts` in the Kernel filters `invalidated_commit_seq IS
-  NULL` again (`admission.rs:2216`), a second liveness gate.
+  NULL` again (`admission.rs:2219`), a second liveness gate.
 
 ## Failure scenario
 

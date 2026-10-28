@@ -32,7 +32,7 @@ by a doc-comment line. Examples: `commit.rs:12-63`, `:208-236`,
 `:1185-1193`; `dispute.rs:49-79`, `:103-143`, `:149-157`, `:216-220`;
 `envelope.rs:548-615` (the read, renamed `evidence_cited_in` since);
 `scope.rs:710-716`;
-`lib.rs:14529`; `admission.rs:4241-4248`, `:4605`; all eight route test
+`lib.rs:14529`; `admission.rs:4244-4251`, `:4608`; all eight route test
 lines from `kernel_routes.rs:5723` to `:6199`; and all seven TypeScript
 test lines.
 
@@ -136,7 +136,7 @@ consistently.
   `mark_disputed` against a `contradicted` prior lands `disputed`. That
   breaks the standing check
   `restrictiveness(r) >= restrictiveness(p)`. The grid test fixes
-  `approval_valid: false` (`admission.rs:4653`), and no route test sends
+  `approval_valid: false` (`admission.rs:4656`), and no route test sends
   an approval with a dispute (R1).
 - **Whitespace in paths.** The command splits arguments on `/\s+/`
   (`memory-mark-command.ts:94-97`). A path containing a space cannot be

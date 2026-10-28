@@ -48,7 +48,7 @@ Fixtures: `commit-available-disposition-quarantine.json`,
 | 5756 | `non_active_dispositions_withdraw_effective_support` | an `Enforce` on a Rejected prior raises `historical` to Enforced and keeps `effective` at Candidate | maturity | unaudited |
 | 4760 | `an_authority_event_requires_approval_even_at_an_unchanged_rung` | authority events need approval | (context) | unaudited |
 
-Compile-time guard: `admission.rs:4390-4397` asserts the maturity rank
+Compile-time guard: `admission.rs:4393-4400` asserts the maturity rank
 order. `commit.rs:1329` (`every_disposition_event_names_a_disposition_
 transition`) asserts each `DispositionEvent` maps to a kind with
 `requested_disposition().is_some()` and that `"approve"` does not parse.
@@ -89,9 +89,9 @@ receipt without `dispositions`.
 | Location | Guard | Records | Status |
 |---|---|---|---|
 | `admission.rs:281-297` | `evaluate_admission` refuses illegal class pairs, prior mismatch, inconsistent prior, `Enforce` without evidence, succession without predecessor | classes, maturity | unaudited |
-| `admission.rs:1616-1618` | blank reason is `AdmissionPolicy` | reason | unaudited |
+| `admission.rs:1619-1621` | blank reason is `AdmissionPolicy` | reason | unaudited |
 | `redaction.rs:72-77` | reason over 512 KiB is `InvalidInput` | reason | unaudited |
-| `admission.rs:2637-2645` | `refuse_succession_events` on `record_admission` and `preview_admission` | (context) | unaudited |
+| `admission.rs:2640-2648` | `refuse_succession_events` on `record_admission` and `preview_admission` | (context) | unaudited |
 | `schema.rs:164` | FK `evidence_id REFERENCES evidence_meta ON DELETE RESTRICT`; `foreign_keys=ON` at `schema.rs:250`, `open.rs:1035` | evidence existence | unaudited |
 | `schema.rs:26` | `commit_log` append-only triggers | commit-log row | unaudited |
 | `commit.rs:136-137`, `:108-109` | `deny_unknown_fields` on `Operation` and `CommitRequest` | no-evidence field | unaudited |
@@ -108,7 +108,7 @@ receipt without `dispositions`.
 | `kernel_routes.rs:6080` | `dispute_identities_land_replay_and_refuse_reuse_like_every_envelope` | replay | unaudited |
 | `kernel_routes.rs:6146` | `a_dispute_is_denied_against_a_more_restrictive_prior_and_lateral_from_stale` | restrictiveness (Stale to Disputed) | unaudited |
 | `kernel_routes.rs:6199` | `a_dispute_on_an_authority_bearer_copies_its_reason_onto_demoted_dependents` | authority-bearer cascade, classes, maturity | unaudited |
-| `admission.rs:4605` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | maturity, restrictiveness (dispute events) | unaudited |
+| `admission.rs:4608` | `a_dispute_with_evidence_never_raises_standing_across_the_grid` | maturity, restrictiveness (dispute events) | unaudited |
 | `memory-mark-command.test.ts:185` | the evidence rides the preview and the commit byte for byte under the user source kind | command (both bodies, `source_kind`) | unaudited |
 | `memory-mark-command.test.ts:212` | two disputes with different evidence in one session are two commits; the same evidence replays | replay | unaudited |
 | `memory-mark-command.test.ts:601` | the caller's signal reaches the preview and the commit | command (signal propagation to both requests) | unaudited |

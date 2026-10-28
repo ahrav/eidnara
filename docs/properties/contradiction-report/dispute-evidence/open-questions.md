@@ -391,7 +391,7 @@ No human input needed; record the choice in the route header.
   `docs/host-wire-protocol.md` lists no `kernel.*` method (`:767`), so the
   route doc is the module header plus the `docs/properties` catalogs.
 - KTD4 and R4: `MarkDisputed` and `Contradict` request `Deny` with a more
-  restrictive disposition (`admission.rs:4234-4235`); support is withdrawn
+  restrictive disposition (`admission.rs:4237-4238`); support is withdrawn
   to `Candidate` (`:361-367`); `has_evidence` gates only `Enforce`
   (`:291-293`).
 - Non-goal `ExplicitUser`: `derive_classes` maps every `source_kind` to

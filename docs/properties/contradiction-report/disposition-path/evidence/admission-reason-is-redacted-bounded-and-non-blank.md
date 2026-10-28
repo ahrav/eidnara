@@ -9,7 +9,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 Plan P4 OQ4-1 and OQ4-2: encode the reporter class and `evidence_ref` in a
 structured `reason` for PR A; "Confirm the `reason` byte bound at
 implementation." Scope Boundaries: "The `reason` column is redacted
-(`admission.rs:1749`) and sized for codes, not prose." Lens: resource
+(`admission.rs:1752`) and sized for codes, not prose." Lens: resource
 boundaries and data integrity. The record states what the column enforces
 before it becomes a carrier.
 
@@ -17,8 +17,8 @@ before it becomes a carrier.
 
 - Blank check: `request.event.reason.trim().is_empty()` is
   `AdmissionPolicy` in `prepare_with_facts`
-  (`crates/kernel/src/admission.rs:1616-1618`) and in
-  `revoke_approval_inner` (`:1417-1419`).
+  (`crates/kernel/src/admission.rs:1619-1621`) and in
+  `revoke_approval_inner` (`:1420-1422`).
 - Bound: `redact(value)` returns `InvalidInput` when `value.len() >
   MAX_REDACTABLE_BYTES` (`crates/kernel/src/redaction.rs:72-77`);
   `MAX_REDACTABLE_BYTES = secret_scanner::MAX_INPUT_BYTES = 512 * 1024`
@@ -26,12 +26,12 @@ before it becomes a carrier.
   `crates/secret-scanner/src/api.rs:6`).
 - Redaction: `redact_lossy` runs `redact_durable_text` and returns the
   rewritten text plus detections (`redaction.rs:41-47`); `write_admission`
-  stores `reason.text` (`admission.rs:1749`, `:1846`) and calls
+  stores `reason.text` (`admission.rs:1752`, `:1849`) and calls
   `record(tx, "admission_decision", id, "reason", &reason, commit_seq)`
   (`:1863-1870`), which inserts one `durable_text_redactions` row per
   detection (`redaction.rs:104-130`).
 - The pending change also carries `redactions: vec![("reason", reason)]`
-  (`admission.rs:1903`) into the change-event payload.
+  (`admission.rs:1906`) into the change-event payload.
 - Schema: `reason TEXT NOT NULL`, no `CHECK` on length
   (`crates/kernel/src/schema.rs:164`).
 - Route value: the constant `"kernel.commit"` (`commit.rs:100`; inserts at
