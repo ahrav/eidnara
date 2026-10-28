@@ -38,15 +38,15 @@ named function; no wrong file, no wrong claim).
 | `project.rs:106-111` `scope_term`; `:212-214` `None => false` | confirmed |
 | `slice/read.rs:126-133`, `:134`, `:139-146`, `:236-241`, `:330` | confirmed |
 | `claim_facts.rs:240-257`, `:248`, `:309`, `:313`, `:146-156`, `:90-97` | confirmed; `ClaimDecisionFacts` carries ids only (D1 holds) |
-| `source_capture.rs:3`, `:55`, `:270`, `:628-631`, `:635-638`, `:813-873` | confirmed |
-| `source_capture.rs:678-702` `CaptureJob::run` | corrected: `:679-702` |
+| `source_capture.rs:3`, `:54`, `:269`, `:616-619`, `:623-626`, `:813-873` | confirmed |
+| `source_capture.rs:666-690` `CaptureJob::run` | corrected: `:667-690` |
 | `lib.rs:9220-9237` `capture_after_response` | confirmed |
 | `lib.rs:13491`, `:13497` `settle_prepared`, `:13500-13502` | corrected: `settle_prepared` is `:13498`; others confirmed |
 | `lib.rs:4000-4008`, `:274-281`, `:413-417`, `:35531` | confirmed |
 | `local_file.rs:64-70`, `:245-247`, `:487-501` | confirmed |
 | `slice/write.rs:42-54`, `:569`, `:585`, `:606-608` Conflict | confirmed |
 | `schema.rs:136` retention comment | confirmed |
-| `kernel_routes/mod.rs:461` `ENVELOPE_KEYS` includes `kind` | confirmed (D6 holds) |
+| `kernel_routes/mod.rs:475` `ENVELOPE_KEYS` includes `kind` | confirmed (D6 holds) |
 | `wire.rs:131-139` `authority_project` | confirmed |
 | `host-wire-protocol.md:795-799`, `:819-823` | confirmed |
 | `types.ts:6`, `:24`, `:27-29`; `tools.ts:72-74`, `:125-138` | confirmed at `3a3b916b7`; at the #1164 tip the allowlist default is `tools.ts:103-106` and `isEidnaraMemoryMutation` is `types.ts:26-29` (#1161) |
@@ -56,7 +56,7 @@ named function; no wrong file, no wrong claim).
 | `tool-registry.ts:58`; `subagent-entry.ts:63` | `tool-registry.ts:58` now passes `EIDNARA_MEMORY_DEFAULT_ACTIONS` (#1161); confirmed at `packages/opencode-plugin/src/plugin/tool-registry.ts:58` and `packages/pi-plugin/src/subagent-entry.ts:63`; the catalog gives bare file names |
 | 22 test function locations (`source_capture_tests.rs:298,321,428,666,783,931,2231`; `source_capture.rs:1791`; `kernel_routes.rs:1958,2080,2112,1803`; `kernel_scope.rs:235`; `kernel_canonical_read.rs:227,448`; `kernel_claim_facts.rs:466`; `claims.rs:993`; `embedding_dispatch.rs:1102`; `search_catchup.rs:1876`; `memory_reviewer_wire.rs:15,260`; `baseline.rs:492`; `lifecycle.rs:704`; `local_file.rs:710,722,791,889`; `tools.test.ts:1185,1193`) | all confirmed |
 | `query_route.rs:1055`; `lexical/index.rs:50`; `daemon/Cargo.toml:45`; `admission.rs:4237` | confirmed |
-| `harness_sources.rs:614-618`, `:1228`; `open.rs:614` `hold_readers_for_test` | confirmed |
+| `harness_sources.rs:614-618`, `:1233`; `open.rs:614` `hold_readers_for_test` | confirmed |
 
 ## 2. Check-semantics audit against METHOD.md
 
@@ -171,7 +171,7 @@ on well-tested code (Exercised yes or partial for all six).
   function (`lib.rs:13498-13503`); the ordering is sequential code, so the
   clock-based oracle is both trivially true and not the property. The
   property is that `after.run()` cannot wait: `into_job` uses
-  `try_acquire_owned` (`source_capture.rs:628`), `spawn` is non-blocking, no
+  `try_acquire_owned` (`source_capture.rs:616`), `spawn` is non-blocking, no
   kernel call occurs. R4 restates the check as a non-waiting clause plus the
   byte-identity oracle already tested.
 - `p5dep-budget-exhaustion-stops-a-budgeted-kernel-read` depends on
@@ -207,7 +207,7 @@ on well-tested code (Exercised yes or partial for all six).
   history. Gap G6, low to medium: "sweep candidate cost under accumulated
   retained captures".
 - Sensitivity inheritance. Harness descriptors publish as `Sensitive` and
-  `LocalOnly` (context.md; `source_capture.rs:736-742`). P5 rows carry no
+  `LocalOnly` (context.md; `source_capture.rs:724-730`). P5 rows carry no
   text, but the `candidates` action tells the agent which descriptor
   overlapped which decision. No record states the egress class a derived row
   inherits from a `Sensitive` source. Gap G7, low; the new behavior is out
@@ -234,7 +234,7 @@ on well-tested code (Exercised yes or partial for all six).
 | G4 | medium | Retirement observability for a derived-row sweep | which Kernel read exposes `invalidated_commit_seq` for observations and evidence at tip; behaviour of `visible_as_of_in_scope(Some(ids))` on retired ids |
 | G5 | low | Bounded liveness of the harness sweep (L1) | `ceil(pending_ahead / 64)` passes at `SAMPLE_RETRY_INTERVAL`; fault-free window with the lifecycle loop |
 | G6 | low-medium | Sweep candidate scan cost under retained-and-cited captures (W1 x W2) | `expired_captures_sql` (`local_file.rs:558-572`) step count versus retained rows |
-| G7 | low | Sensitivity and egress class of descriptor-derived data | `publish_batch` admission classes (`source_capture.rs:736-742`); what S7/S8 reads may carry |
+| G7 | low | Sensitivity and egress class of descriptor-derived data | `publish_batch` admission classes (`source_capture.rs:724-730`); what S7/S8 reads may carry |
 
 Dispositions recorded by the unit tickets:
 
@@ -281,7 +281,7 @@ R4. `p5dep-response-never-waits-on-the-capture-job`: Guarantee: replace
 "settled (encoded) before the synchronous handoff runs; the handoff
 (`into_job` with `try_acquire_owned`, `admission.spawn`) performs no await,
 no kernel call, and no waiting lock (`lib.rs:9229-9236`,
-`source_capture.rs:628-631`); the job body runs on a spawned task". Check:
+`source_capture.rs:616-619`); the job body runs on a spawned task". Check:
 replace the `t(...) >= t(...)` clause with "the `AfterResponse` closure
 contains no blocking or kernel operation" and keep the byte-identity clause.
 Fix `:13384` to `:13385`.
@@ -310,7 +310,7 @@ R7. Line corrections from section 1: `admission.rs:3644` to `:3637` and the
 WHERE tail to `:3626-3640` (catalog and evidence for
 `p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict`, system-model S2,
 D5); `admission.rs:3550-3555` to `:3551-3556`; `read.rs:177` to `:178`,
-`:190` to `:191`; `source_capture.rs:678` to `:679`; give full paths for
+`:190` to `:191`; `source_capture.rs:666` to `:667`; give full paths for
 `tool-registry.ts` and `subagent-entry.ts`.
 
 R8. `p5dep-budget-exhaustion-stops-a-budgeted-kernel-read`: split Check into
@@ -379,7 +379,7 @@ pass found a production caller of `decision_page_within_budget` at
 by R2 rests on a claim that does not hold at HEAD), R3, R4, R5 (both S6
 records), R6 (catalog record and evidence file), R7 (catalog, system-model
 S2 and D5, system-model and catalog full paths for `tool-registry.ts` and
-`subagent-entry.ts`, scope-prefilter evidence; the `source_capture.rs:678`
+`subagent-entry.ts`, scope-prefilter evidence; the `source_capture.rs:666`
 correction had no remaining occurrence, `system-model.md` already reads
 `:665-691`), R8 (budget record and review-reads record). `fault-map.md:42`
 still names a probe at `read.rs:190`; R6 and R7 did not name the fault map,

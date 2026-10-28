@@ -14,8 +14,8 @@ today, which records need it, and the cheapest valid oracle.
 | F5 held reader pool | `test-support` only | `hold_readers_for_test` (`open.rs:614`) |
 | F6 deadline crossing inside a statement | partial | `EvalBudget` with a near deadline plus a slow statement; no injection point found for `claim_facts` statements |
 | F7 parent interrupt on a linked budget | yes | `EvalBudget::linked` then `parent.cancel()` |
-| F8 busy publication slot | yes | hold `capture.slot.try_acquire_owned()` in the test (`source_capture.rs:1592`) |
-| F9 panic inside the capture closure | `cfg(test)` hooks | `before_publish`, `between_screen_and_commit` (`source_capture.rs:783`, `:841`) |
+| F8 busy publication slot | yes | hold `capture.slot.try_acquire_owned()` in the test (`source_capture.rs:1663`) |
+| F9 panic inside the capture closure | `cfg(test)` hooks | `before_publish`, `between_screen_and_commit` (`source_capture.rs:804`, `:909`) |
 | F10 kernel unavailable or starting during a pass | yes | `KernelOpenCoordinator` state in daemon tests (`source_capture_tests.rs:473`) |
 | F11 capture budget exhausted | yes | advance past `CAPTURE_BUDGET` or cancel (`:1081`) |
 | F12 baseline text change | yes | a frozen prior baseline fixture (`baseline.rs:486-489`) |
@@ -25,7 +25,7 @@ today, which records need it, and the cheapest valid oracle.
 | F16 refused capture inside a page | yes | `local_file.rs:895` |
 | F17 project-root mismatch, unknown body field, NotModule authority | yes | `memory_reviewer_wire.rs:15`, `:238` |
 | F18 store read failure during authority lookup | not found | no seam found for `memories_authority_for_route` failure |
-| F19 observational (`cli`) route beside a participating route | yes | `lib.rs:35508` |
+| F19 observational (`cli`) route beside a participating route | yes | `lib.rs:35531` |
 | F20 disallowed action, empty allowlist, context-researcher agent | yes | `tools.test.ts:1162`; agent string in `toolContext` |
 | F21 toolchain Unicode or SQLite version change | out of tree | a different toolchain build |
 

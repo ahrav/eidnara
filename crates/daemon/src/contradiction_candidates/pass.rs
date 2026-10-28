@@ -32,7 +32,7 @@ use crate::source_capture::SettledPublication;
 
 /// Rows one pass writes across its descriptors, in publish order (M).
 pub const CANDIDATES_PER_PASS: usize = 64;
-/// Eligible decisions one pass scores; the newest are kept.
+/// Scope-matched visible decisions one pass keeps, newest first, before it judges their eligibility.
 pub const MAX_CANDIDATE_DECISIONS: usize = 4096;
 /// Summary payload bytes one pass loads.
 pub const MAX_CANDIDATE_SUMMARY_BYTES: u64 = 4 * 1024 * 1024;
@@ -294,17 +294,23 @@ fn score_descriptors(
     let mut tops = vec![TopCandidates::default(); descriptors.len()];
     let mut matched = vec![0; descriptors.len()];
     if analyzed.iter().any(Option::is_some) {
-        let mut unscorable = 0;
         for (scanned, (object_id, decision_id, summary)) in summaries.iter().enumerate() {
-            if scanned % SUMMARIES_PER_CHECK == 0
-                && let Some(end) = stop(budget)
-            {
-                return unscored(0, end);
+            if scanned % SUMMARIES_PER_CHECK == 0 {
+                #[cfg(test)]
+                {
+                    let hook = counts.before_check.lock().unwrap().clone();
+                    if let Some(hook) = hook {
+                        hook(super::Checkpoint::Scanned(scanned));
+                    }
+                }
+                if let Some(end) = stop(budget) {
+                    return unscored(0, end);
+                }
             }
             let terms = match term_set(summary, SUMMARY_BOUNDS) {
                 Ok(terms) if !terms.is_empty() => terms,
                 _ => {
-                    unscorable += 1;
+                    counts.add(Count::SummariesUnscorable, 1);
                     continue;
                 }
             };
@@ -325,7 +331,6 @@ fn score_descriptors(
                 }
             }
         }
-        counts.add(Count::SummariesUnscorable, unscorable);
     }
     let mut written = 0;
     for (index, ((descriptor, terms), top)) in
@@ -348,11 +353,18 @@ fn score_descriptors(
         if let Some(end) = stop(budget) {
             return unscored(index, end);
         }
+        // The summaries were read at `target`; an incarnation mismatch ends the pass before it publishes rows scored from that history.
+        if kernel
+            .require_incarnation(target.target.incarnation)
+            .is_err()
+        {
+            return unscored(index, Count::KernelUnavailable);
+        }
         counts.add(Count::DescriptorsAnalyzed, 1);
         let mut rows = top.into_vec();
         let room = bounds.rows_per_pass.saturating_sub(written);
         // A pass at its cap leaves the rows the descriptor already holds; an empty write would replace them.
-        if room == 0 && !rows.is_empty() {
+        if room == 0 {
             counts.add(Count::DroppedAtCap, rows.len() as u64);
             continue;
         }
@@ -479,6 +491,13 @@ fn candidate_summaries(
     counts.add(Count::SummariesCutBytes, cut);
     let mut summaries = Vec::with_capacity(load.len());
     for chunk in load.chunks(MAX_READ_OBJECT_IDS) {
+        #[cfg(test)]
+        {
+            let hook = counts.before_check.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(super::Checkpoint::Loaded(summaries.len()));
+            }
+        }
         if let Some(end) = stop(budget) {
             return Err(end);
         }
@@ -488,12 +507,13 @@ fn candidate_summaries(
             .into_iter()
             .map(|row| (row.object_id.clone(), row))
             .collect();
+        let loaded = summaries.len();
         for id in chunk {
             if let Some(row) = rows.remove(id) {
                 summaries.push((row.object_id, row.decision_id, row.payload.summary));
             }
         }
+        counts.add(Count::SummariesLoaded, (summaries.len() - loaded) as u64);
     }
-    counts.add(Count::SummariesLoaded, summaries.len() as u64);
     Ok(summaries)
 }

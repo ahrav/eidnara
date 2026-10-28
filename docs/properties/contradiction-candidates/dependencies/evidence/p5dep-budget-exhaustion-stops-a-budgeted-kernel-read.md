@@ -45,8 +45,8 @@ interrupt." Lens: failure recovery; C7, C8; D2.
   (&budget.acquire_limit())?` then a plain `reader.transaction_with_behavior`;
   no `LimitedConnection`, no progress handler, no `limit.check()` after the
   statement. `:241` `decisions_for_objects_as_of_within_budget`: same shape.
-- `source_capture.rs:611-614`: the capture job's budget is `EvalBudget::new
-  (Some(now + 5 s), interrupt)`; `run` sets the interrupt on cancel (`:664`).
+- `source_capture.rs:623-626`: the capture job's budget is `EvalBudget::new
+  (Some(now + 5 s), interrupt)`; `run` sets the interrupt on cancel (`:676`).
 - Tests: `crates/daemon/tests/embedding_dispatch.rs:1102`
   `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget`;
   `crates/retrieval/tests/claims.rs:993`;

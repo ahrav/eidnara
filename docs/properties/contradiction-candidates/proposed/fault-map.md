@@ -14,7 +14,7 @@ availability is assessed when #1165 to #1168 land the code.
 | A3 repeated decision object id | yes | two `CandidateInput` values with one id (`:320-346`); no test combines it with more than K passing summaries |
 | A4 descriptor one byte over or exactly at the byte bound | yes | `"a ".repeat(n)` (`:224-241`) |
 | A5 summary one byte over or at the byte bound | yes | padded summary (`:243-274`) |
-| A6 input over `max_atoms` within the byte bound | no | unconstructible: `max_atoms = max_input_bytes / 2 + 1` (`scorer.rs:85-96`) |
+| A6 input over `max_atoms` within the byte bound | no | unconstructible: `max_atoms = max_input_bytes / 2 + 1` (`scorer.rs:88-99`) |
 | A7 floor-emptied summary | yes | short, numeric, or stopword-only text |
 | A8 case-only, non-ASCII case, length-changing lowercase, case change across a part boundary | yes | literal strings (`:31-80`, `:131-159`, `:163-171` for `configLoader` and `configloader`) |
 | A9 diacritic-only and NFC versus NFD spellings | yes | literal strings (`:131-159`) |

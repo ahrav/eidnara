@@ -52,6 +52,16 @@ crate::source_capture::counts! {
 #[cfg(test)]
 pub(crate) type DescriptorHook = Arc<dyn Fn(usize) + Send + Sync>;
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Checkpoint {
+    Scanned(usize),
+    Loaded(usize),
+}
+
+#[cfg(test)]
+pub(crate) type CheckHook = Arc<dyn Fn(Checkpoint) + Send + Sync>;
+
 /// The daemon's candidate supervisor: the store's one pass permit and the
 /// counters reported under `contradiction_candidates` in the status block.
 /// `active`, `retained_bytes`, and `pass_ms_last` are gauges; every other
@@ -68,6 +78,8 @@ pub struct Candidates {
     /// Runs before each descriptor's scoring with its publish-order index.
     #[cfg(test)]
     pub(crate) before_descriptor: Mutex<Option<DescriptorHook>>,
+    #[cfg(test)]
+    pub(crate) before_check: Mutex<Option<CheckHook>>,
 }
 
 impl Default for Candidates {
@@ -81,6 +93,8 @@ impl Default for Candidates {
             before_pass: Mutex::new(None),
             #[cfg(test)]
             before_descriptor: Mutex::new(None),
+            #[cfg(test)]
+            before_check: Mutex::new(None),
         }
     }
 }

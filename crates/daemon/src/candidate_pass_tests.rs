@@ -12,7 +12,8 @@ use memory_store::contradiction_candidates::StoredCandidate;
 use super::*;
 use crate::contradiction_candidates::pass::{Descriptor, PassBounds, score_publication};
 use crate::contradiction_candidates::scorer::{CandidateInput, score_descriptor};
-use crate::contradiction_candidates::{Candidates, Count as CandidateCount};
+use crate::contradiction_candidates::{Candidates, Checkpoint, Count as CandidateCount};
+use crate::kernel_routes::read::MAX_READ_OBJECT_IDS;
 
 const SESSION: &str = "ses";
 const TOPIC: &str = "kernel snapshot ledger quorum lease";
@@ -533,17 +534,19 @@ fn a_pass_queued_past_its_budget_ends_at_the_deadline_it_was_admitted_under() {
 
 struct Core {
     dir: tempfile::TempDir,
-    kernel: KernelStore,
+    kernel: Arc<KernelStore>,
     store: MemoryStore,
     project: kernel_routes::ProjectBinding,
     counts: Candidates,
+    /// The interrupt of every budget `score` builds, so a hook can stop the pass between checks.
+    interrupt: Arc<AtomicBool>,
 }
 
 impl Core {
     fn open(bounds: PassBounds) -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("kernel")).unwrap();
-        let kernel = KernelStore::open(dir.path().join("kernel")).unwrap();
+        let kernel = Arc::new(KernelStore::open(dir.path().join("kernel")).unwrap());
         let store = MemoryStore::open_for_test(dir.path(), "pass");
         let project = kernel_routes::ProjectBinding::new(&dir.path().join("project"));
         kernel
@@ -560,6 +563,7 @@ impl Core {
             store,
             project,
             counts,
+            interrupt: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -596,7 +600,7 @@ impl Core {
     fn score(&self, descriptors: &[Descriptor]) -> CandidateCount {
         let budget = kernel::applicability::EvalBudget::new(
             Some(Instant::now() + self.counts.bounds().budget),
-            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&self.interrupt),
         );
         let tip = self.kernel.tip().unwrap();
         let jobs = self.store.memory_reviewer_status_facts().unwrap();
@@ -625,10 +629,19 @@ impl Core {
             .map(|row| row.decision_object_id)
             .collect()
     }
+
+    fn interrupt_at(&self, stop: Checkpoint) {
+        let interrupt = Arc::clone(&self.interrupt);
+        *self.counts.before_check.lock().unwrap() = Some(Arc::new(move |check| {
+            if check == stop {
+                interrupt.store(true, Ordering::Release);
+            }
+        }));
+    }
 }
 
 #[test]
-fn the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_counts_the_cut() {
+fn the_candidate_set_keeps_the_newest_scope_matched_decisions_of_the_project_and_counts_the_cut() {
     let core = Core::open(PassBounds {
         decisions: 4,
         ..PassBounds::default()
@@ -910,6 +923,26 @@ fn the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_
         4,
         "a descriptor past the pass cap keeps the rows it already holds"
     );
+    // A descriptor past the pass cap retains its rows even with zero candidates at this tip: an empty write would replace those rows.
+    let unmatched = Descriptor {
+        evidence_id: first.evidence_id.clone(),
+        text: "zebra giraffe hippopotamus".to_owned(),
+    };
+    seed(
+        &core.kernel,
+        &core.project,
+        &[("newer", "some other subject", EventKind::Other)],
+    );
+    assert_eq!(
+        core.score(&[full.clone(), unmatched]),
+        CandidateCount::Completed
+    );
+    assert_eq!(
+        core.rows_for(&first.evidence_id).len(),
+        4,
+        "a descriptor past the pass cap with no candidates keeps the rows it already holds"
+    );
+    assert_eq!(core.count("rows_written"), 6 + 6 + 4 + 4);
 
     let capped = Core::open(PassBounds {
         rows_per_project: 3,
@@ -1366,4 +1399,113 @@ fn a_decision_row_that_disagrees_with_its_registry_row_ends_the_pass_and_keeps_t
         held,
         "the pass writes nothing over the held rows"
     );
+}
+
+#[test]
+fn a_pass_stopped_during_the_scan_counts_the_summaries_the_analyzer_refused_before_the_stop() {
+    let core = Core::open(PassBounds::default());
+    // The first check inside the scan comes after 256 summaries; the refused ones sit before it.
+    let names: Vec<String> = (0..260).map(|index| format!("c{index:03}")).collect();
+    let decisions: Vec<(&str, &str, EventKind)> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let summary = if index % 100 == 7 {
+                "the and with from this"
+            } else {
+                TOPIC
+            };
+            (name.as_str(), summary, EventKind::Other)
+        })
+        .collect();
+    seed(&core.kernel, &core.project, &decisions);
+    let descriptor = core.descriptor("d0", TOPIC);
+    core.interrupt_at(Checkpoint::Scanned(256));
+    assert_eq!(
+        core.score(std::slice::from_ref(&descriptor)),
+        CandidateCount::BudgetExhausted
+    );
+    assert_eq!(core.count("summaries_loaded"), 260);
+    assert_eq!(
+        core.count("summaries_unscorable"),
+        3,
+        "the stopwords-only summaries at positions 7, 107, and 207 were refused before the stop at 256"
+    );
+    assert_eq!(core.count("descriptors_unscored"), 1);
+    assert!(core.rows_for(&descriptor.evidence_id).is_empty());
+}
+
+#[test]
+fn a_pass_stopped_between_payload_chunks_counts_the_summaries_already_loaded() {
+    let core = Core::open(PassBounds::default());
+    let names: Vec<String> = (0..70).map(|index| format!("c{index:03}")).collect();
+    let decisions: Vec<(&str, &str, EventKind)> = names
+        .iter()
+        .map(|name| (name.as_str(), TOPIC, EventKind::Other))
+        .collect();
+    seed(&core.kernel, &core.project, &decisions);
+    let descriptor = core.descriptor("d0", TOPIC);
+    core.interrupt_at(Checkpoint::Loaded(MAX_READ_OBJECT_IDS));
+    assert_eq!(
+        core.score(std::slice::from_ref(&descriptor)),
+        CandidateCount::BudgetExhausted
+    );
+    assert_eq!(
+        core.count("summaries_loaded"),
+        MAX_READ_OBJECT_IDS as u64,
+        "the first chunk was loaded before the stop"
+    );
+    assert_eq!(core.count("summaries_unscorable"), 0);
+    assert_eq!(core.count("descriptors_unscored"), 1);
+    assert!(core.rows_for(&descriptor.evidence_id).is_empty());
+}
+
+#[test]
+fn a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_rows() {
+    use std::os::unix::fs::PermissionsExt;
+    let core = Core::open(PassBounds::default());
+    seed(
+        &core.kernel,
+        &core.project,
+        &[
+            ("one", TOPIC, EventKind::Other),
+            ("two", TOPIC, EventKind::Other),
+        ],
+    );
+    let descriptor = core.descriptor("d0", TOPIC);
+    assert_eq!(
+        core.score(std::slice::from_ref(&descriptor)),
+        CandidateCount::Completed
+    );
+    let held = core.rows_for(&descriptor.evidence_id);
+    assert_eq!(held.len(), 2);
+    let later = core.descriptor("d1", &format!("{TOPIC} later"));
+    let destination = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = core
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    // The restore lands after every Kernel read of the pass and before its first write; it swaps in the backup of this same tip, so the incarnation changes while the tip holds.
+    let backup_path = backup.destination_path.clone();
+    let kernel = Arc::clone(&core.kernel);
+    *core.counts.before_descriptor.lock().unwrap() = Some(Arc::new(move |_| {
+        kernel.restore(&backup_path).unwrap();
+    }));
+    assert_eq!(
+        core.score(&[descriptor.clone(), later.clone()]),
+        CandidateCount::KernelUnavailable
+    );
+    assert_eq!(core.count("kernel_unavailable"), 1);
+    assert_eq!(core.count("descriptors_unscored"), 2);
+    assert_eq!(
+        core.rows_for(&descriptor.evidence_id),
+        held,
+        "the pass writes nothing computed against the replaced history"
+    );
+    assert!(core.rows_for(&later.evidence_id).is_empty());
 }

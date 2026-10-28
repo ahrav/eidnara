@@ -30,7 +30,7 @@ analyzer being a pure function. Lenses: data integrity, idempotency.
 - `analysis.rs:190-199` `splits`: pure over `Class` values.
 - No `static`, `thread_local`, `std::env`, `std::time`, or I/O import in the
   file (`:10-11` import only `NonZeroUsize` and `RangeInclusive`).
-- `mod.rs:31` `TOKENIZER = "unicode61 remove_diacritics 2 tokenchars '_'"`:
+- `mod.rs:36` `TOKENIZER = "unicode61 remove_diacritics 2 tokenchars '_'"`:
   folding happens in FTS5, consistent with the header.
 - Goldens: `tests/lexical_analysis.rs:190-195` `HTTPServer x86_64` ->
   original text `"HTTPServer x86_64"`, parts `"HTTP Server x 86 64"`; `:83`

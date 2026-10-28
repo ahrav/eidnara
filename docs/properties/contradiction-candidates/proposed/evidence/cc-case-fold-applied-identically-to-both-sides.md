@@ -14,7 +14,7 @@ analysis, no diacritic or Unicode normalization.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/scorer.rs:111-132` `terms`
+- `crates/daemon/src/contradiction_candidates/scorer.rs:114-135` `terms`
   is the one place that folds and floors atoms and parts. An ASCII term
   keeps its analyzer spelling and stands for its `to_ascii_lowercase`,
   which equals `str::to_lowercase` on ASCII; `scan_ascii` (`:221-270`)
@@ -22,8 +22,8 @@ analysis, no diacritic or Unicode normalization.
   `str::to_lowercase` (`:124`) and floored by `kept` (`:147-153`).
   Comparisons fold a spelling with `eq_ignore_ascii_case` and a lowercase
   byte order (`:134-145`).
-- `scorer.rs:432-465` `DescriptorTerms::new` takes the descriptor's terms
-  from `terms` and stores each folded; `:526-562` `score` takes the
+- `scorer.rs:443-476` `DescriptorTerms::new` takes the descriptor's terms
+  from `terms` and stores each folded; `:537-569` `score` takes the
   summary's terms from `scan_ascii` through `count_ascii` (`:483-524`) when
   every term is ASCII and at most 64 are distinct, and from `terms`
   otherwise. Both sides share the fold and the floor; only the bound
@@ -31,8 +31,8 @@ analysis, no diacritic or Unicode normalization.
 - `scorer.rs:18-25` the module header states the limits: `İ` lowers to `i`
   plus a combining dot, `ß` stays `ß`, and NFC and NFD spellings are
   different terms.
-- `scorer.rs:77` `FOLD_RULE_ID = "str-to-lowercase-per-term.v1"` enters the
-  preimage (`:648-683`).
+- `scorer.rs:80` `FOLD_RULE_ID = "str-to-lowercase-per-term.v1"` enters the
+  preimage (`:655-690`).
 - Tests: `crates/daemon/tests/contradiction_candidates_scorer.rs:131-159`
   `case_folds_identically_on_both_sides_and_diacritics_do_not_fold`;
   `:31-80` `term_sets_follow_the_documented_fold_and_floor` (`ÉCOLE École`
@@ -45,7 +45,7 @@ analysis, no diacritic or Unicode normalization.
   boundaries from the original case: at a lower-to-upper change (`:198`)
   and before the last capital of an uppercase run that two lowercase
   letters follow (`:199-201`). The analyzer runs before the fold
-  (`scorer.rs:111-132`), so a case change that adds or removes a boundary
+  (`scorer.rs:114-135`), so a case change that adds or removes a boundary
   changes the parts, and the term sets differ although the texts differ
   only in case. The fold itself is still one function on both sides.
 
@@ -83,7 +83,7 @@ None; pure computation.
 
 ### Q: What is F? (originally needs human input)
 
-- Sources examined: #1164 OQ5-5, `scorer.rs:111-132`, `:18-25`.
+- Sources examined: #1164 OQ5-5, `scorer.rs:114-135`, `:18-25`.
 - Findings: F is `str::to_lowercase` per term, matching the daemon's
   user-hint `lexical_tokens` precedent; no diacritic folding.
 - Missing evidence: none.
@@ -91,7 +91,7 @@ None; pure computation.
 
 ### Q: Is the score symmetric?
 
-- Sources examined: `scorer.rs:526-562`.
+- Sources examined: `scorer.rs:537-569`.
 - Findings: the score is containment on the decision side,
   `|A ∩ B| / |B|`, so swapping the texts changes the denominator. The fold
   is applied identically, so term-set equality under the fold is
@@ -103,7 +103,7 @@ None; pure computation.
 ### Q: Do two texts that differ only in case always have equal term sets?
 
 - Sources examined: `crates/retrieval/src/lexical/analysis.rs:4`,
-  `:193-204`, `scorer.rs:111-132`, the test at `:163-171`.
+  `:193-204`, `scorer.rs:114-135`, the test at `:166-174`.
 - Findings: no. The analyzer splits parts on the original case and the
   scorer folds afterwards, so `configLoader` yields {configloader, config,
   loader} and `configloader` yields {configloader}. Case changes that keep

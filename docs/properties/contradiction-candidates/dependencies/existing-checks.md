@@ -84,17 +84,17 @@ crossing inside a `claim_facts` statement (the progress handler path) for
 | `capture_off_memory_off_or_a_subagent_session_runs_no_adapter` | `:298` | reachability gate | unaudited |
 | `a_delete_after_the_handoff_publishes_nothing_for_the_queued_window` | `:1045` | delete epoch check | unaudited |
 | `a_refused_window_still_captures_its_documents` | `:2236` | documents batch is separate from the window batch | unaudited |
-| `a_settled_report_counts_the_job_that_released_the_slot` | `source_capture.rs:1720` | slot count after release | unaudited |
+| `a_settled_report_counts_the_job_that_released_the_slot` | `source_capture.rs:1791` | slot count after release | unaudited |
 
 Production guards: `try_acquire_owned` else `RefusedQueueFull`
-(`source_capture.rs:604-607`); `catch_unwind` around `publish_locked`
-(`:792-805`); `AfterResponse` run only on `RequestOutcome::Response`
-(`lib.rs:13479-13481`).
+(`source_capture.rs:616-619`); `catch_unwind` around `publish_locked`
+(`:813-826`); `AfterResponse` run only on `RequestOutcome::Response`
+(`lib.rs:13500-13502`).
 
 None found: no test asserts that exactly one `Count` terminal is recorded
 per job across every exit path (the tests count specific terminals per
 scenario). No post-publish hook exists outside `cfg(test)` (`before_publish`,
-`between_screen_and_commit`, `source_capture.rs:1459-1461`, `:783`, `:841`).
+`between_screen_and_commit`, `source_capture.rs:1530-1532`, `:804`, `:909`).
 
 ## S5 memory-store baseline
 
@@ -141,7 +141,7 @@ through the MemoryReviewer class only as far as this pass found.
 | `a_published_proposal_reads_from_every_root_after_a_newer_root_binds` | `:342` | | unaudited |
 | `review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record` | `:409` | `v` field is `invalid_params` (`:643-649`) | unaudited |
 | wire-doc literal test | `crates/daemon/src/memory_reviewer/wire.rs:448-463+` | the doc's `review.accept` terminal set equals the produced set | unaudited |
-| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:35900` | | unaudited |
+| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:35923` | | unaudited |
 
 None found: no test drives `store_unavailable` on `review.list`/`review.read`
 through a failing store read, as far as this pass found (the terminal is

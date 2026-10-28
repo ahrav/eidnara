@@ -79,7 +79,7 @@ ServedStanding` (`:107-115`), occurrences, exclusions, causality. `EvalBudget`
 `is_exhausted` `:203-218`, `acquire_limit` `:235-238`).
 
 S4 source capture. `crates/daemon/src/source_capture.rs:1-7` module header.
-`CAPTURE_BUDGET = 5 s` (`:35`), `CAPTURE_DOMAIN_ID = "harness-capture"`
+`CAPTURE_BUDGET = 5 s` (`:36`), `CAPTURE_DOMAIN_ID = "harness-capture"`
 (`:53`), `counts!` macro (`:57-74`) and vocabulary (`:76-114`). Supervisor
 `slot: Arc<Semaphore>` (`:234`) created with `Semaphore::new(1)` (`:266`).
 `ActiveSlot` (`:420-431`) decrements `Active` on drop. `offer` (`:434`).
@@ -91,10 +91,10 @@ kernel store, budget, units, memo, commit gate mutex (`:789`),
 `publish_locked` (`:808-900`): delete epoch, scope, budget,
 `publish_screened_between` for the window (`:832-840`), then
 `capture_documents` in its own batch (`:905-...`). `capture_after_response`
-(`crates/daemon/src/lib.rs:9245-9262`). The request owner runs the
-`AfterResponse` after `settle_prepared` (`lib.rs:13984-13998`;
+(`crates/daemon/src/lib.rs:9246-9263`). The request owner runs the
+`AfterResponse` after `settle_prepared` (`lib.rs:14005-14019`;
 `crates/daemon/src/dispatch.rs:24-35`, `:445-460`). `publish_batch`
-(`crates/daemon/src/harness_sources.rs:1228-1248`), `Published` (`:520-532`),
+(`crates/daemon/src/harness_sources.rs:1233-1253`), `Published` (`:520-532`),
 `MAX_SOURCE_UNIT_BYTES`/`MAX_SOURCE_BATCH_UNITS`/`MAX_SOURCE_BATCH_BYTES`
 (`:612-616`, resolving to 64 KiB, 32, 64 KiB through
 `crates/memory-store/src/memory_capture.rs:19` and
@@ -180,7 +180,7 @@ exclusion of the context_researcher is by registration
 
 - One publication slot per daemon (`Semaphore::new(1)`); the job runs on
   `spawn_blocking`; a `commit_gate: Mutex<()>` serializes capture commits
-  with session deletion (`source_capture.rs:791-805`, panic caught and
+  with session deletion (`source_capture.rs:812-873`, panic caught and
   resumed after the guard drops).
 - The lifecycle loop is one task; `kernel_slice` runs on `spawn_blocking`
   and checks `cancelled()` between sweeps.
@@ -271,7 +271,7 @@ bounded by `max_rows` instead. The doc comment at `:121` is accurate about
 the wait; the plan's reading of "budgeted" is broader than the code.
 
 D3 `source_capture.rs:3` says the job "publishes at most one screened batch".
-`publish_locked` publishes the window batch (`:834-842`) and then
+`publish_locked` publishes the window batch (`:902-910`) and then
 `capture_documents` publishes the pass's configured documents "in their own
 batch after the window's" (`:901-905`, `publish_screened` at `:980`). Two
 screened batches per job when documents are pending. The per-batch bounds
@@ -303,7 +303,7 @@ D7 At `3a3b916b7` the pi plugin's `eidnara_memory` tool had no
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58`), so the P4/P5
 "allowlist as rollout lever" assumption holds in both.
 
-D8 `context.md` cited `capture_after_response` at `lib.rs:9219-9238`
+D8 `context.md` cited `capture_after_response` at `lib.rs:9220-9239`
 (verified `:9219-9236`) and the plan cited `:9207-9220` (drifted). Plan cited
 `Cargo.toml:41`; `retrieval` is at `:45`.
 

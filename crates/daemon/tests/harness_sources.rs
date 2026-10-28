@@ -3904,6 +3904,52 @@ fn v1_digest(unit: &SourceUnit) -> String {
     kernel::source_identity::identity_digest(&bytes)
 }
 
+/// A descriptor receipt whose observation cites no evidence row is a canonical anomaly: every publish path writes the descriptor with its evidence, so the replay refuses instead of naming the evidence the unit would have had.
+#[test]
+fn a_replay_whose_descriptor_cites_no_evidence_row_is_refused_as_corrupt() {
+    use daemon::harness_sources::publish_batch;
+    use kernel::KernelError;
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let unit = pi_text_unit("pi-u1", "a replay without its citation");
+    let published = publisher.publish(&unit, NOW).unwrap();
+    assert!(!published.replayed);
+    let conn = Connection::open(&corpus.kernel_db).unwrap();
+    let changed = conn
+        .execute(
+            "UPDATE observations SET evidence_id=NULL WHERE object_id=?1",
+            rusqlite::params![published.object_id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    drop(conn);
+    let tip = corpus.tip();
+    let refused = publisher.publish(&unit, NOW).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            PublishError::Kernel {
+                error: KernelError::CorruptCanonicalRow,
+                evidence: None,
+            }
+        ),
+        "{refused:?}"
+    );
+    let refusal = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &unit)],
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.error, KernelError::CorruptCanonicalRow);
+    assert_eq!(refusal.unit, Some(0));
+    assert_eq!(corpus.tip(), tip, "a refused replay commits nothing");
+}
+
 /// Rewrites the stored request digest of `unit`'s `kind` receipt (`source-descriptor` or `source-evidence`) to `digest`, as a store written before the outcome record holds it.
 fn store_receipt_as(
     corpus: &Corpus,

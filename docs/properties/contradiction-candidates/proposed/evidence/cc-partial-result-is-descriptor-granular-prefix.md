@@ -16,6 +16,11 @@ per descriptor.
   descriptors in publish order and checks the budget before each write; a stop
   there returns before that descriptor's write and counts it and every later
   descriptor `descriptors_unscored`.
+- `crates/daemon/src/contradiction_candidates/pass.rs:357-362` before each
+  write the pass requires the Kernel incarnation its target was captured in;
+  a restore since then ends the pass `kernel_unavailable` with that descriptor
+  and every later one `descriptors_unscored`, so no row scored against the
+  replaced history is written.
 - `crates/daemon/src/contradiction_candidates/pass.rs:234` `score_publication`
   counts the end once (`deadline` when the deadline passed, `budget_exhausted`
   for the daemon cancel).

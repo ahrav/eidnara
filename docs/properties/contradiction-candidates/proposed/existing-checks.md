@@ -43,7 +43,7 @@ parts, `str::to_lowercase` per term, the floor on scalar values, a
 
 Production guards: the compile-time assertion that the descriptor bound is
 at least `MAX_SOURCE_UNIT_BYTES`
-(`crates/daemon/src/contradiction_candidates/scorer.rs:72-74`); the
+(`crates/daemon/src/contradiction_candidates/scorer.rs:69-71`); the
 analyzer's refusals (`crates/retrieval/src/lexical/analysis.rs:78-105`),
 which the scorer propagates.
 
@@ -112,7 +112,7 @@ refuses a store at the prior baseline untouched (`:496`).
 | `every_standing_equals_the_claim_facts_of_its_claim_at_every_snapshot`, `standing_refusals_match_the_claim_facts_refusals` | `crates/kernel/tests/kernel_claim_standing.rs:111`, `:168` | the sweep's claim standing read equals the registry row, decision row, own admission row, and served standing of claim facts at every snapshot, and refuses as claim facts does | sweep | unaudited |
 
 Also: `crates/daemon/src/config.rs:2299` and `:2320` (default, tier, and
-resolved-config freezing), `crates/daemon/src/lib.rs:21517` (bound route and
+resolved-config freezing), `crates/daemon/src/lib.rs:21494` (bound route and
 status block), `crates/host-runtime/src/control.rs:2011` (host forwarding
 allowlist against `docs/host-wire-protocol.md`), and
 `a_delete_as_read_spares_a_row_rewritten_since_the_read`
@@ -122,24 +122,27 @@ allowlist against `docs/host-wire-protocol.md`), and
 
 | Check | Location | Asserts | Records | Status |
 | --- | --- | --- | --- | --- |
-| `a_route_without_consent_offers_no_pass_and_writes_no_row` | `:251` | consent off on the offer: zero counters, no row | flag off (pass arm) | unaudited |
-| `a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate` | `:282` | no offer while the job holds the slot; slot idle and gate free at start and while scoring; memo hit offers nothing; replay rescored | trigger, row key | unaudited |
-| `a_second_offer_while_a_pass_runs_is_refused_and_a_cancel_still_ends_the_pass` | `:398` | busy refusal; cancel at the second of three descriptors leaves the first one's rows | single flight, partial result | unaudited |
-| `a_pass_queued_past_its_budget_ends_at_the_deadline_it_was_admitted_under` | `:465` | a pass queued behind a full blocking pool past its budget ends `deadline` at its first check, writes nothing, and holds the permit while queued | single flight, partial result | unaudited |
-| `the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_counts_the_cut` | `:630` | N + 2 at a reduced N; other project never scored; each cut decision counted | candidate set | unaudited |
-| `a_superseded_decision_is_never_scored_and_the_default_bounds_are_the_named_constants` | `:678` | superseded unread; production bounds pinned | candidate set | unaudited |
-| `the_summary_byte_cut_skips_payloads_before_any_load` | `:742` | byte cut before load, counted | candidate set | unaudited |
-| `an_oversize_descriptor_writes_nothing_and_an_unscorable_summary_leaves_the_others` | `:770` | descriptor one byte over refused; over-bound and floor-emptied summaries unscorable | oversize (pass arm) | unaudited |
-| `a_deadline_during_the_third_descriptor_leaves_the_first_two` | `:802` | deadline during the third of five: full top-K for the first two | partial result | unaudited |
-| `a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor` | `:834` | spent budget: no row, all unscored, one deadline | partial result | unaudited |
-| `the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows` | `:854` | K, M, a write over the project cap, newer-tip rescore, held rows past M | row key | unaudited |
-| `each_descriptor_keeps_the_top_k_that_score_descriptor_ranks_over_the_loaded_summaries` | `:925` | the pass's single scan writes, per descriptor, the rows `score_descriptor` ranks over the loaded summaries | determinism, candidate set | unaudited |
-| `a_rerun_from_the_retained_bytes_at_one_tip_rebuilds_the_rows_and_the_kernel_is_untouched` | `:1029` | retained texts equal published texts; truncate and rescore rebuild the rows; tip and jobs unchanged | rebuild, R5 | unaudited |
-| `the_route_consent_reaches_the_pass_through_a_transform` | `:1112` | the route's frozen value, not the daemon's, decides the offer | flag off (pass arm), trigger | unaudited |
-| `a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_a_parked_pass` | `:1162` | panic counted with permit and charge released; kept-text charge below the job's; shutdown waits | single flight | unaudited |
-| `publish_latency_with_candidates_on_stays_within_the_off_baseline` | `:1220` | median publication hold, with at least one publication beside a running pass, within 3x + 50 ms of the flag-off median | trigger (C1) | unaudited |
-| `equal_texts_in_one_batch_cite_one_evidence_row_and_the_pass_scores_it_once` | `:1308` | two equal-text units publish as two units citing one evidence row; the pass analyzes one descriptor and writes its rows once | row key | unaudited |
-| `a_decision_row_that_disagrees_with_its_registry_row_ends_the_pass_and_keeps_the_held_rows` | `:1333` | a decision whose typed row disagrees with its registry row ends the pass `kernel_unavailable` through the claim-facts read, with the descriptor's held rows unchanged | candidate set | unaudited |
+| `a_route_without_consent_offers_no_pass_and_writes_no_row` | `:252` | consent off on the offer: zero counters, no row | flag off (pass arm) | unaudited |
+| `a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate` | `:283` | no offer while the job holds the slot; slot idle and gate free at start and while scoring; memo hit offers nothing; replay rescored | trigger, row key | unaudited |
+| `a_second_offer_while_a_pass_runs_is_refused_and_a_cancel_still_ends_the_pass` | `:399` | busy refusal; cancel at the second of three descriptors leaves the first one's rows | single flight, partial result | unaudited |
+| `a_pass_queued_past_its_budget_ends_at_the_deadline_it_was_admitted_under` | `:466` | a pass queued behind a full blocking pool past its budget ends `deadline` at its first check, writes nothing, and holds the permit while queued | single flight, partial result | unaudited |
+| `the_candidate_set_keeps_the_newest_scope_matched_decisions_of_the_project_and_counts_the_cut` | `:643` | N + 2 at a reduced N; other project never scored; each cut decision counted | candidate set | unaudited |
+| `a_superseded_decision_is_never_scored_and_the_default_bounds_are_the_named_constants` | `:691` | superseded unread; production bounds pinned | candidate set | unaudited |
+| `the_summary_byte_cut_skips_payloads_before_any_load` | `:755` | byte cut before load, counted | candidate set | unaudited |
+| `an_oversize_descriptor_writes_nothing_and_an_unscorable_summary_leaves_the_others` | `:783` | descriptor one byte over refused; over-bound and floor-emptied summaries unscorable | oversize (pass arm) | unaudited |
+| `a_deadline_during_the_third_descriptor_leaves_the_first_two` | `:815` | deadline during the third of five: full top-K for the first two | partial result | unaudited |
+| `a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor` | `:847` | spent budget: no row, all unscored, one deadline | partial result | unaudited |
+| `the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows` | `:867` | K, M, a write over the project cap, newer-tip rescore, held rows past M with and without candidates at the tip | row key | unaudited |
+| `each_descriptor_keeps_the_top_k_that_score_descriptor_ranks_over_the_loaded_summaries` | `:958` | the pass's single scan writes, per descriptor, the rows `score_descriptor` ranks over the loaded summaries | determinism, candidate set | unaudited |
+| `a_rerun_from_the_retained_bytes_at_one_tip_rebuilds_the_rows_and_the_kernel_is_untouched` | `:1062` | retained texts equal published texts; truncate and rescore rebuild the rows; tip and jobs unchanged | rebuild, R5 | unaudited |
+| `the_route_consent_reaches_the_pass_through_a_transform` | `:1145` | the route's frozen value, not the daemon's, decides the offer | flag off (pass arm), trigger | unaudited |
+| `a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_a_parked_pass` | `:1195` | panic counted with permit and charge released; kept-text charge below the job's; shutdown waits | single flight | unaudited |
+| `publish_latency_with_candidates_on_stays_within_the_off_baseline` | `:1253` | median publication hold, with at least one publication beside a running pass, within 3x + 50 ms of the flag-off median | trigger (C1) | unaudited |
+| `equal_texts_in_one_batch_cite_one_evidence_row_and_the_pass_scores_it_once` | `:1341` | two equal-text units publish as two units citing one evidence row; the pass analyzes one descriptor and writes its rows once | row key | unaudited |
+| `a_decision_row_that_disagrees_with_its_registry_row_ends_the_pass_and_keeps_the_held_rows` | `:1366` | a decision whose typed row disagrees with its registry row ends the pass `kernel_unavailable` through the claim-facts read, with the descriptor's held rows unchanged | candidate set | unaudited |
+| `a_pass_stopped_during_the_scan_counts_the_summaries_the_analyzer_refused_before_the_stop` | `:1404` | a stop at the check after 256 summaries ends `budget_exhausted` with the three summaries the analyzer refused before it counted `summaries_unscorable` | partial result | unaudited |
+| `a_pass_stopped_between_payload_chunks_counts_the_summaries_already_loaded` | `:1438` | a stop before the second payload chunk ends `budget_exhausted` with the first chunk counted `summaries_loaded` | partial result | unaudited |
+| `a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_rows` | `:1463` | a Kernel restore after the pass's last read ends it `kernel_unavailable` before any write: every descriptor unscored, held rows in place | partial result | unaudited |
 
 ## S-F, S-H
 
@@ -161,7 +164,7 @@ branch tip; the read ticket (#1168) adds the code and the checks.
 - The scorer's `TooManyAtoms` path is unreachable by construction and has no
   test; the analyzer's own test covers the refusal.
 - The pass records `matcher_digest()` with each row
-  (`crates/daemon/src/contradiction_candidates/pass.rs:377`); no test reads
+  (`crates/daemon/src/contradiction_candidates/pass.rs:389`); no test reads
   the digest back from a pass-written row.
 - No test fails a store write inside a pass; that path counts the failed
   descriptor as analyzed and the later ones as unscored.
