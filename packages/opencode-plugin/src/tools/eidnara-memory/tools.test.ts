@@ -1692,6 +1692,30 @@ describe("eidnara_memory candidates", () => {
         );
     });
 
+    test("refuses a page above the 64-item bound and an item whose score breaks the basis-point formula", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 1, items: Array.from({ length: 65 }, () => ITEM), next: null },
+            { kind: "page", as_of: 1, items: [{ ...ITEM, score: 9999 }], next: null },
+            {
+                kind: "page",
+                as_of: 1,
+                items: [{ ...ITEM, matched_terms: 5, decision_terms: 4 }],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 1,
+                items: [{ ...ITEM, matched_terms: 0, decision_terms: 0, score: 0 }],
+                next: null,
+            },
+        ]);
+        for (const shape of ["65 items", "score 9999", "matched over decision", "zero terms"]) {
+            const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+            expect(text, shape).toMatch(/^Error: /);
+            expect(text, shape).not.toContain("candidates");
+        }
+    });
+
     test("refuses a page whose item carries any key outside the documented set", async () => {
         const h = candidatesHarness([
             { kind: "page", as_of: 1, items: [{ ...ITEM, summary: "leaked text" }], next: null },

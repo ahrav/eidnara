@@ -1651,7 +1651,7 @@ impl MemoryStore {
     ) -> Result<Option<(AuthorityRow, String, Option<MemoryReviewerReceipt>)>, MemoryStoreError>
     {
         let Some((row, (incarnation, receipt))) =
-            self.module_authority_for_route_then(route_project_root, domain, |conn, row| {
+            self.module_authority_for_route_then(route_project_root, domain, None, |conn, row| {
                 Ok((
                     store_incarnation_in_tx(conn)?,
                     load_receipt(conn, &row.project, causal_identity)?,

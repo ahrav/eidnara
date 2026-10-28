@@ -68,6 +68,8 @@ export const MEMORY_DOMAIN_ID = "memory";
  * A filtered read scopes visible rows to named objects before the daemon applies its row cap, so a targeted lookup reaches rows a capped unfiltered read drops.
  */
 export const MAX_READ_OBJECT_IDS = 64;
+/** The most items one `review.candidates` page carries (host wire protocol, section 7.8). */
+export const CANDIDATES_PAGE_MAX = 64;
 
 /** `kernel.commit` rejects an envelope carrying more operations with `invalid_params` before any kernel work. Mirrors the daemon route's `MAX_OPERATIONS`. */
 export const MAX_COMMIT_OPERATIONS = 256;
@@ -665,6 +667,14 @@ function parseCandidateItem(raw: unknown): CandidateItem | null {
     ) {
         return null;
     }
+    // A row holds `1 <= matched_terms <= decision_terms` and `score = matched_terms * 10000 / decision_terms` in integer arithmetic.
+    if (
+        matched_terms < 1 ||
+        decision_terms < matched_terms ||
+        score !== Math.floor((matched_terms * 10_000) / decision_terms)
+    ) {
+        return null;
+    }
     return {
         evidence_id,
         decision_object_id,
@@ -693,6 +703,7 @@ export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload>
         return failed();
     }
     if (raw.next !== null && typeof raw.next !== "string") return failed();
+    if (raw.items.length > CANDIDATES_PAGE_MAX) return failed();
     const items: CandidateItem[] = [];
     for (const entry of raw.items) {
         const item = parseCandidateItem(entry);

@@ -9,6 +9,7 @@
 //! what keeps the cap check and the gauge exact.
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use rusqlite::{OptionalExtension, params};
 use storage::GuardedConn;
@@ -611,6 +612,60 @@ impl MemoryStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<CandidatePage, MemoryStoreError> {
+        self.candidates_for_decision_inner(project_digest, decision_object_id, after, limit, None)
+    }
+
+    /// [`Self::module_authority_for_route`] whose connection wait ends at `deadline`.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryStoreError::Store`] with [`storage::StoreError::Deadline`] when the
+    /// connection is still held at `deadline`; otherwise as
+    /// [`Self::module_authority_for_route`].
+    pub fn module_authority_for_route_within(
+        &self,
+        route_project_root: &str,
+        domain: &str,
+        deadline: Instant,
+    ) -> Result<Option<crate::AuthorityRow>, MemoryStoreError> {
+        self.module_authority_for_route_then(route_project_root, domain, Some(deadline), |_, _| {
+            Ok(())
+        })
+        .map(|found| found.map(|(row, ())| row))
+    }
+
+    /// [`Self::candidates_for_decision`] whose connection wait ends at `deadline`.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryStoreError::Store`] with [`storage::StoreError::Deadline`] when the
+    /// connection is still held at `deadline`; otherwise as
+    /// [`Self::candidates_for_decision`].
+    pub fn candidates_for_decision_within(
+        &self,
+        project_digest: &str,
+        decision_object_id: &str,
+        after: Option<&str>,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<CandidatePage, MemoryStoreError> {
+        self.candidates_for_decision_inner(
+            project_digest,
+            decision_object_id,
+            after,
+            limit,
+            Some(deadline),
+        )
+    }
+
+    fn candidates_for_decision_inner(
+        &self,
+        project_digest: &str,
+        decision_object_id: &str,
+        after: Option<&str>,
+        limit: usize,
+        deadline: Option<Instant>,
+    ) -> Result<CandidatePage, MemoryStoreError> {
         check_hex("project_digest", project_digest, 64)?;
         if decision_object_id.is_empty() || decision_object_id.len() > MAX_CANDIDATE_ID_BYTES {
             return Err(invalid("decision_object_id is not a Kernel object id"));
@@ -638,44 +693,46 @@ impl MemoryStore {
         );
         const LOWER_SCORE: &str =
             page_range!("score_bp<?3 ORDER BY score_bp DESC, created_at_ms DESC, evidence_id ASC");
-        let mut items = self
-            .inner
-            .with_conn(|conn| {
-                let mut items = Vec::with_capacity(want);
-                let mut extend = |sql: &str, values: &[&dyn rusqlite::ToSql]| {
-                    let room = want.saturating_sub(items.len());
-                    if room == 0 {
-                        return Ok(());
-                    }
-                    for row in conn
-                        .prepare_cached(sql)?
-                        .query_map(values, candidate_from_row)?
-                        .take(room)
-                    {
-                        items.push(row?);
-                    }
-                    Ok::<_, rusqlite::Error>(())
-                };
-                let score = match &after {
-                    Ok(Some((score, created, evidence))) => {
-                        let score = i64::from(*score);
-                        let (project, decision) = (&project_digest, &decision_object_id);
-                        extend(
-                            SAME_TIME,
-                            params![project, decision, score, created, evidence],
-                        )?;
-                        extend(SAME_SCORE, params![project, decision, score, created])?;
-                        score
-                    }
-                    _ => i64::MAX,
-                };
-                extend(
-                    LOWER_SCORE,
-                    params![project_digest, decision_object_id, score],
-                )?;
-                Ok(items)
-            })
-            .map_err(MemoryStoreError::from)?;
+        let read = |conn: &GuardedConn<'_>| {
+            let mut items = Vec::with_capacity(want);
+            let mut extend = |sql: &str, values: &[&dyn rusqlite::ToSql]| {
+                let room = want.saturating_sub(items.len());
+                if room == 0 {
+                    return Ok(());
+                }
+                for row in conn
+                    .prepare_cached(sql)?
+                    .query_map(values, candidate_from_row)?
+                    .take(room)
+                {
+                    items.push(row?);
+                }
+                Ok::<_, rusqlite::Error>(())
+            };
+            let score = match &after {
+                Ok(Some((score, created, evidence))) => {
+                    let score = i64::from(*score);
+                    let (project, decision) = (&project_digest, &decision_object_id);
+                    extend(
+                        SAME_TIME,
+                        params![project, decision, score, created, evidence],
+                    )?;
+                    extend(SAME_SCORE, params![project, decision, score, created])?;
+                    score
+                }
+                _ => i64::MAX,
+            };
+            extend(
+                LOWER_SCORE,
+                params![project_digest, decision_object_id, score],
+            )?;
+            Ok(items)
+        };
+        let mut items = match deadline {
+            Some(deadline) => self.inner.with_conn_within(deadline, read),
+            None => self.inner.with_conn(read),
+        }
+        .map_err(MemoryStoreError::from)?;
         after?;
         let next = if items.len() > limit {
             items.truncate(limit);

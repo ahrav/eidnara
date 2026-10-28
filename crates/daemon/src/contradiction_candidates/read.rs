@@ -20,7 +20,7 @@ use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES;
 use crate::kernel_routes::project::{ProjectBinding, ScopeFilter};
 use crate::kernel_routes::{blocking, state_only};
-use crate::{HandlerCore, MemoriesAuthority, memories_authority_for_route};
+use crate::{HandlerCore, MemoriesAuthority, memories_authority};
 
 pub(crate) const CANDIDATES: &str = "review.candidates";
 const READ_BUDGET: Duration = Duration::from_secs(5);
@@ -196,15 +196,19 @@ impl HandlerCore {
         let cursor = Cursor::of(parsed.after);
         let root = scope.project_root.to_string_lossy().to_string();
         let read = blocking(move || -> Result<Vec<u8>, Refused> {
-            match memories_authority_for_route(&ledger, &root) {
-                Ok(MemoriesAuthority::Module(_)) => {}
-                Ok(MemoriesAuthority::NotModule { .. }) => {
-                    return Err(Refused::Terminal("disabled"));
-                }
+            // Both store reads and every Kernel read wait inside one budget, so a held store connection or Kernel reader answers at the bound.
+            let deadline = Instant::now() + READ_BUDGET;
+            match ledger.module_authority_for_route_within(&root, "memories", deadline) {
+                Ok(row) => match memories_authority(row) {
+                    MemoriesAuthority::Module(_) => {}
+                    MemoriesAuthority::NotModule { .. } => {
+                        return Err(Refused::Terminal("disabled"));
+                    }
+                },
                 Err(_) => return Err(Refused::Terminal("store_unavailable")),
             }
             let kernel = &scope.store;
-            let budget = EvalBudget::new(Some(Instant::now() + READ_BUDGET), Arc::default());
+            let budget = EvalBudget::new(Some(deadline), Arc::default());
             let target = kernel
                 .capture_identified_commit_read_target_within_budget(&budget)
                 .map_err(Refused::Kernel)?;
@@ -226,11 +230,12 @@ impl HandlerCore {
                 Cursor::Start | Cursor::Malformed => None,
             };
             let page = ledger
-                .candidates_for_decision(
+                .candidates_for_decision_within(
                     scope.project.digest(),
                     &parsed.decision_object_id,
                     after,
                     limit,
+                    deadline,
                 )
                 .map_err(|error| match error {
                     MemoryStoreError::Serde(_) if after.is_some() => Refused::InvalidCursor,

@@ -20,10 +20,10 @@ enabling state" and name the tests that construct them.
 | A9 diacritic-only and NFC versus NFD spellings | yes | literal strings (`:131-159`) |
 | A10 second thread or process | yes, unused | spawn a thread in the test; no test does |
 | A11 toolchain Unicode change | no in-tree | build under another toolchain; the digest pin fails by design |
-| R1 evidence retired between list and confirm | yes | `expire_harness_captures` past the retention (`candidate_pass_tests.rs:2144`) |
-| R2 Kernel starting or failed at read | yes | no open, or an open at a file path (`candidate_pass_tests.rs:2076`) |
-| R3 Memory Store absent | yes | a handler built without a store (`candidate_pass_tests.rs:2076`) |
-| R4 candidate table hidden | yes | `ALTER TABLE ... RENAME` on `store.db` (`candidate_pass_tests.rs:1627`, `:2268`) |
+| R1 evidence retired between list and confirm | yes | `expire_harness_captures` past the retention (`candidate_pass_tests.rs:2194`) |
+| R2 Kernel starting or failed at read | yes | no open, or an open at a file path (`candidate_pass_tests.rs:2126`) |
+| R3 Memory Store absent | yes | a handler built without a store (`candidate_pass_tests.rs:2126`) |
+| R4 candidate table hidden | yes | `ALTER TABLE ... RENAME` on `store.db` (`candidate_pass_tests.rs:1627`, `:2318`) |
 | R5 authority lookup fails | no | no seam (dependency fault F18) |
 
 ## Per-property required faults
@@ -33,10 +33,10 @@ enabling state" and name the tests that construct them.
 | `cc-scorer-output-deterministic-under-contract-version` | A1, A2, A3, A7 | A1, A2, A3, A7; A10 absent |
 | `cc-oversize-text-refused-whole-never-truncated` | A4, A5, A7 | A4, A5, A7; A6 unconstructible |
 | `cc-case-fold-applied-identically-to-both-sides` | A8, A9 | A8, A9 |
-| `cc-read-serves-only-live-decision-rows-ids-and-scores-only` | R1 | R1: a row whose evidence is retired at the read is seeded directly (`candidate_pass_tests.rs:1627`) and retired by the sweep after a listing (`:2144`) |
-| `cc-read-distinguishes-disabled-unavailable-and-empty` | R2, R3, R4, R5 | R2, R3 (`candidate_pass_tests.rs:2076`), R4 (`:1627`); R5 has no seam |
-| `cc-flag-off-no-pass-no-write-no-table-read` | R4 | R4 (`candidate_pass_tests.rs:1627`, `:2268`) |
-| `cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm` | R1 | R1 (`candidate_pass_tests.rs:2144`) |
+| `cc-read-serves-only-live-decision-rows-ids-and-scores-only` | R1 | R1: a row whose evidence is retired at the read is seeded directly (`candidate_pass_tests.rs:1627`) and retired by the sweep after a listing (`:2194`) |
+| `cc-read-distinguishes-disabled-unavailable-and-empty` | R2, R3, R4, R5 | R2, R3 (`candidate_pass_tests.rs:2126`), R4 (`:1627`); R5 has no seam |
+| `cc-flag-off-no-pass-no-write-no-table-read` | R4 | R4 (`candidate_pass_tests.rs:1627`, `:2318`) |
+| `cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm` | R1 | R1 (`candidate_pass_tests.rs:2194`) |
 
 ## Coverage checks to add
 

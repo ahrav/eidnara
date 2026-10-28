@@ -18,30 +18,33 @@ carry no descriptor or summary text.
   (`crates/kernel/src/claim_facts.rs:270` `claim_standing_at_within_budget`:
   the registry row, decision row, own admission, and served standing, each
   read as claim facts read it) and applies `ScopeFilter` over
-  `scope_terms_within_budget`, under the same read budget, and the shared
+  `scope_terms_at_within_budget`, which compares the target's incarnation
+  under the reader guard and runs under the same read budget, and the shared
   predicate (`crates/daemon/src/contradiction_candidates/eligibility.rs:7`
   `eligible`); a failure answers `not_live`
-  (`crates/daemon/src/contradiction_candidates/read.rs:221`) before the store
+  (`crates/daemon/src/contradiction_candidates/read.rs:225`) before the store
   is read.
 - `crates/daemon/src/contradiction_candidates/read.rs:229`
   `candidates_for_decision` pages at most 64 rows in reader order with a
-  keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:605`).
-- `crates/daemon/src/contradiction_candidates/read.rs:248` reads evidence
+  keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:606`).
+- `crates/daemon/src/contradiction_candidates/read.rs:253` reads evidence
   liveness for the page's ids at the same target; `is_current` (`:155`) keeps
   a row only when its evidence is live, its incarnation and matcher digest
   equal the reader's, and its `publish_tip` is at or below the target, and
-  `:260` counts the rest `read_filtered_stale`.
+  `:265` counts the rest `read_filtered_stale`.
 - `crates/daemon/src/contradiction_candidates/read.rs:79` `ItemOut` holds the
-  eight wire keys, encoded once into the page bytes; `packages/opencode-plugin/src/shared/kernel-client/wire.ts:652`
+  eight wire keys, encoded once into the page bytes; `packages/opencode-plugin/src/shared/kernel-client/wire.ts:654`
   refuses any other key set.
 - Equivalence tests: `crates/kernel/tests/kernel_claim_facts.rs:954`
   compares the standing read with claim facts field by field and refusal by
   refusal; `crates/kernel/tests/kernel_source_descriptors.rs:3188` answers
   liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:1703`
-  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2330`
+  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2380`
   shows a page body is the canonical `serde_json` encoding of its value;
   `crates/daemon/src/candidate_pass_tests.rs:1968` answers two pages inside the
-  read budget while one Kernel reader is held.
+  read budget while one Kernel reader is held;
+  `crates/daemon/src/candidate_pass_tests.rs:2008` answers the conflict state
+  when a restore lands between the claim-standing read and the scope read.
 
 ## Failure scenario
 

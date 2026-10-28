@@ -4,8 +4,10 @@ Verified at the #1168 branch tip (base `cda655423`).
 
 ## Discovery trigger
 
-The feature ships default-off (KTD4), so the default build must run no
-candidate table statement on any path.
+The feature ships default-off (KTD4), so the default build must offer no
+candidate pass, write no candidate row, and run no candidate-table read after
+the store opens; the Memory Store baseline that `MemoryStore::open` applies
+creates the table whatever the flag.
 
 ## Evidence trail
 
@@ -35,7 +37,7 @@ sweep follows the reload on its next pass.
 The candidate table renamed away under each arm, a flag-off run with every
 counter at zero, and a flag-on control that fails on the hidden table:
 `crates/daemon/tests/contradiction_candidates_sweep.rs:553` (sweep),
-`crates/daemon/src/candidate_pass_tests.rs:2268` (pass), and
+`crates/daemon/src/candidate_pass_tests.rs:2318` (pass), and
 `crates/daemon/src/candidate_pass_tests.rs:1936` (read).
 
 ## Investigation log

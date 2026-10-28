@@ -2057,6 +2057,56 @@ async fn review_candidates_refuses_a_target_whose_history_a_restore_replaced_bef
     );
 }
 
+/// The candidate store's connection is held for longer than the read budget;
+/// the read answers `store_unavailable` at its bound in place of waiting the
+/// hold out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_answers_store_unavailable_when_the_store_connection_outlasts_its_budget()
+{
+    const HOLD: Duration = Duration::from_secs(9);
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    activate_memories_authority(&store, &project);
+    let held = Arc::new(std::sync::Barrier::new(2));
+    let holder = {
+        let store = Arc::clone(&store);
+        let held = Arc::clone(&held);
+        std::thread::spawn(move || {
+            store
+                .with_conn_for_test(|_| {
+                    held.wait();
+                    std::thread::sleep(HOLD);
+                    Ok(())
+                })
+                .unwrap();
+        })
+    };
+    held.wait();
+    let started = Instant::now();
+    let answer = tokio::time::timeout(
+        HOLD,
+        route_call(
+            &handler,
+            candidates_request(&project, json!({ "decision_object_id": "object-one" })),
+        ),
+    )
+    .await
+    .expect("the read answers while the connection is held");
+    assert_eq!(
+        answer,
+        Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
+        "a connection held past the budget answers the store terminal"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(7),
+        "the read waited {:?} on the held connection",
+        started.elapsed()
+    );
+    holder.join().unwrap();
+}
+
 fn find_file(root: &Path, name: &str) -> PathBuf {
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
