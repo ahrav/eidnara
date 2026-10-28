@@ -781,7 +781,7 @@ its Kernel incarnation and matcher digest equal the reader's, and its
 other row on the page is counted `read_filtered_stale`
 (`crates/daemon/src/contradiction_candidates/read.rs:304`). The TypeScript
 parser refuses an item with any other key set
-(`packages/opencode-plugin/src/shared/kernel-client/wire.ts:654`).
+(`packages/opencode-plugin/src/shared/kernel-client/wire.ts:664`).
 Check: `always` - every answered page satisfies the key, order, bound, and
 filter predicates above, and every ineligible decision answers `not_live`; the
 semantics is `always` because every response must satisfy it.
@@ -902,7 +902,7 @@ counter at zero and no row;
 `the_route_consent_reaches_the_pass_through_a_transform` (`:1146`) binds the
 route against the opposite daemon value and shows the offer follows the
 route's frozen value; #1168 adds
-`a_publication_without_consent_runs_no_candidate_table_statement` (`:2539`),
+`a_publication_without_consent_runs_no_candidate_table_statement` (`:2554`),
 which renames the table away, publishes three consent-off windows with every
 counter at zero, and shows one consenting publication's pass fails on the
 hidden table (`store_unavailable` = 1). Read arm (#1168):
@@ -966,11 +966,11 @@ through the capture job and the pass, lists each decision's row, checks the
 listed `evidence_id` equals a published descriptor's evidence id (`:2461`),
 truncates the candidate table, and files
 `dispute {object_id, event: mark_disputed, evidence_id}` built from the row
-through `kernel.commit`, which lands `disputed` (`:2498`). After
+through `kernel.commit`, which lands `disputed` (`:2513`). After
 `expire_harness_captures` retires the evidence, the other decision's read
-leaves the row out and counts it (`:2507`), and the same dispute built from
-the earlier listing is refused `not_found` (`:2517`).
-`the_confirm_path_never_reads_the_candidate_table` (`:2521`) is a lexical
+leaves the row out and counts it (`:2522`), and the same dispute built from
+the earlier listing is refused `not_found` (`:2532`).
+`the_confirm_path_never_reads_the_candidate_table` (`:2536`) is a lexical
 check that `kernel_routes/commit.rs` and `kernel_routes/dispute.rs` name no
 candidate store method. The OpenCode tool renders each row's confirm form
 `{"action":"dispute","event":"mark_disputed","objectId":"<decision_object_id>","evidenceId":"<evidence_id>"}`

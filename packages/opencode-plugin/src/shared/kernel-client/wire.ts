@@ -651,14 +651,24 @@ const CANDIDATE_ITEM_KEYS_COVER_THE_ITEM: Exclude<
     : never = true;
 void CANDIDATE_ITEM_KEYS_COVER_THE_ITEM;
 
+/** The candidate store holds an id of 1 to 512 UTF-8 bytes with no control character, and the dispute route accepts the same shape, so an item carrying another is one no row stored. */
+const STORABLE_ID_MAX_BYTES = 512;
+const CONTROL_CHARACTER = /\p{Cc}/u;
+function isStorableId(value: unknown): value is string {
+    if (typeof value !== "string" || value.length === 0 || CONTROL_CHARACTER.test(value)) {
+        return false;
+    }
+    return new TextEncoder().encode(value).length <= STORABLE_ID_MAX_BYTES;
+}
+
 function parseCandidateItem(raw: unknown): CandidateItem | null {
     if (!isRecord(raw) || Object.keys(raw).length !== CANDIDATE_ITEM_KEYS.length) return null;
     const { evidence_id, decision_object_id, decision_id } = raw;
     const { matched_terms, decision_terms, score, publish_tip, created_at_ms } = raw;
     if (
-        typeof evidence_id !== "string" ||
-        typeof decision_object_id !== "string" ||
-        typeof decision_id !== "string" ||
+        !isStorableId(evidence_id) ||
+        !isStorableId(decision_object_id) ||
+        !isStorableId(decision_id) ||
         !isNonNegativeInteger(matched_terms) ||
         !isNonNegativeInteger(decision_terms) ||
         !isNonNegativeInteger(score) ||

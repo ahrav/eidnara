@@ -2452,13 +2452,28 @@ async fn a_listed_candidate_confirms_through_dispute_while_its_evidence_lives() 
     let listed = ask("object-confirmed").await.unwrap();
     let confirmed_row = listed["items"][0].clone();
     let expired_row = ask("object-expired").await.unwrap()["items"][0].clone();
-    let published: Vec<String> = live_messages(&kernel)
-        .into_iter()
-        .map(|descriptor| descriptor.detail.evidence_id)
-        .collect();
-    assert!(
-        published.contains(&confirmed_row["evidence_id"].as_str().unwrap().to_owned()),
-        "{confirmed_row} cites a published descriptor of {published:?}"
+    // Each row cites the descriptor of the message whose text overlaps its decision.
+    let evidence_of_message = |message: &str| {
+        live_messages(&kernel)
+            .into_iter()
+            .find(|descriptor| {
+                descriptor
+                    .detail
+                    .identity
+                    .contains(&("message_id".to_owned(), message.to_owned()))
+            })
+            .map(|descriptor| descriptor.detail.evidence_id)
+            .unwrap_or_else(|| panic!("{message} is published"))
+    };
+    assert_eq!(
+        confirmed_row["evidence_id"],
+        evidence_of_message("msg_000"),
+        "{confirmed_row} cites the first window's descriptor"
+    );
+    assert_eq!(
+        expired_row["evidence_id"],
+        evidence_of_message("msg_001"),
+        "{expired_row} cites the second window's descriptor"
     );
     let dispute = |row: &Value, key: &str| {
         crate::kernel_route_fixtures::commit_request(

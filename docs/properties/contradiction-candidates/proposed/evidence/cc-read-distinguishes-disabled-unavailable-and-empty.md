@@ -22,7 +22,13 @@ differ from an empty page.
   through `module_authority_for_route_within` and
   `candidates_for_decision_under_route_within`, which judges the route's
   MODULE authority in the connection that reads the page, under the read's
-  deadline, so a held connection answers `store_unavailable` at the bound
+  deadline, so a held connection answers `store_unavailable` at the bound.
+  The statements inside the transaction are indexed seeks over at most 65
+  rows (`crates/memory-store/baseline.sql:1294`, the page query at
+  `crates/memory-store/src/contradiction_candidates.rs:627`), below the 1000
+  VM-step interval at which `with_conn_interruptible` polls a stop
+  (`crates/storage/src/lib.rs:191`), so the connection wait is the one wait
+  the deadline ends
   (`crates/daemon/src/candidate_pass_tests.rs:2285`, asserted at `:2318-2322`).
 - `docs/host-wire-protocol.md:833` documents the three terminals, the kernel
   states, and the empty page.

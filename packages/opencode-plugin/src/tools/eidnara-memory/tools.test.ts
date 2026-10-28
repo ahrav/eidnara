@@ -1692,7 +1692,7 @@ describe("eidnara_memory candidates", () => {
         );
     });
 
-    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, and items out of reader order", async () => {
+    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, items out of reader order, and an id no row stores", async () => {
         const h = candidatesHarness([
             { kind: "page", as_of: 41, items: Array.from({ length: 65 }, () => ITEM), next: null },
             { kind: "page", as_of: 41, items: [{ ...ITEM, score: 9999 }], next: null },
@@ -1736,6 +1736,19 @@ describe("eidnara_memory candidates", () => {
                 ],
                 next: null,
             },
+            { kind: "page", as_of: 41, items: [{ ...ITEM, evidence_id: "" }], next: null },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, evidence_id: `srcev:${"x".repeat(507)}` }],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, decision_id: "dec\u0001" }],
+                next: null,
+            },
         ]);
         for (const shape of [
             "65 items",
@@ -1746,6 +1759,9 @@ describe("eidnara_memory candidates", () => {
             "score ascending",
             "created_at_ms ascending within a score",
             "evidence_id descending within a tie",
+            "empty evidence_id",
+            "evidence_id past 512 bytes",
+            "control character in decision_id",
         ]) {
             const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
             expect(text, shape).toMatch(/^Error: /);
@@ -1784,13 +1800,15 @@ describe("eidnara_memory candidates", () => {
         const h = candidatesHarness([
             {
                 kind: "page",
-                as_of: 1,
+                as_of: 41,
                 items: [{ ...ITEM, decision_object_id: "mem_other" }],
                 next: null,
             },
         ]);
         const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
-        expect(text).toStartWith("Error:");
+        expect(text).toBe(
+            "Error: the daemon answered candidates for another memory than mem_labeled; nothing was rendered.",
+        );
         expect(text).not.toContain("srcev:abc");
         expect(await h.execute({ action: "candidates", objectId: "m", limit: "5" })).toBe(
             "Error: 'limit' must be an integer from 1 to 64",
