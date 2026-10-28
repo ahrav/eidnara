@@ -1692,7 +1692,7 @@ describe("eidnara_memory candidates", () => {
         );
     });
 
-    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, items out of reader order, and an id no row stores", async () => {
+    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, items out of reader order, an id no row stores, and a next no store issues", async () => {
         const h = candidatesHarness([
             {
                 kind: "page",
@@ -1758,6 +1758,23 @@ describe("eidnara_memory candidates", () => {
                 items: [{ ...ITEM, decision_id: "dec\u0001" }],
                 next: null,
             },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [
+                    {
+                        ...ITEM,
+                        matched_terms: 9_007_199_254_740_990,
+                        decision_terms: 9_007_199_254_740_991,
+                        score: 10_000,
+                    },
+                ],
+                next: null,
+            },
+            { kind: "page", as_of: 41, items: [ITEM], next: "" },
+            { kind: "page", as_of: 41, items: [ITEM], next: "not-a-cursor" },
+            { kind: "page", as_of: 41, items: [ITEM], next: `7500.1.${"61".repeat(513)}` },
+            { kind: "page", as_of: 41, items: [ITEM], next: "10001.1.61" },
         ]);
         for (const shape of [
             "65 items",
@@ -1771,6 +1788,11 @@ describe("eidnara_memory candidates", () => {
             "empty evidence_id",
             "evidence_id past 512 bytes",
             "control character in decision_id",
+            "terms past the store's u32",
+            "empty next",
+            "next outside the cursor form",
+            "next past the longest cursor",
+            "next with a score past 10000",
         ]) {
             const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
             expect(text, shape).toMatch(/^Error: /);

@@ -661,6 +661,17 @@ function isStorableId(value: unknown): value is string {
     return new TextEncoder().encode(value).length <= STORABLE_ID_MAX_BYTES;
 }
 
+const TERMS_MAX = 4_294_967_295;
+
+/** The cursor the store issues: a score of at most 10000, a non-negative creation time, and the lower-hex bytes of a storable id, dot-separated, at most 1056 bytes. */
+const CURSOR_MAX_BYTES = 1056;
+const CURSOR_FORM = /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,18})\.((?:[0-9a-f]{2}){1,512})$/;
+function isIssuedCursor(value: unknown): value is string {
+    if (typeof value !== "string" || value.length > CURSOR_MAX_BYTES) return false;
+    const form = CURSOR_FORM.exec(value);
+    return form !== null && Number(form[1]) <= 10_000;
+}
+
 function parseCandidateItem(raw: unknown): CandidateItem | null {
     if (!isRecord(raw) || Object.keys(raw).length !== CANDIDATE_ITEM_KEYS.length) return null;
     const { evidence_id, decision_object_id, decision_id } = raw;
@@ -677,10 +688,11 @@ function parseCandidateItem(raw: unknown): CandidateItem | null {
     ) {
         return null;
     }
-    // A row holds `1 <= matched_terms <= decision_terms` and `score = matched_terms * 10000 / decision_terms` in integer arithmetic.
+    // A row holds `1 <= matched_terms <= decision_terms` in the store's u32 columns, so `matched_terms * 10000` is exact in a double, and `score = matched_terms * 10000 / decision_terms` in integer arithmetic.
     if (
         matched_terms < 1 ||
         decision_terms < matched_terms ||
+        decision_terms > TERMS_MAX ||
         score !== Math.floor((matched_terms * 10_000) / decision_terms)
     ) {
         return null;
@@ -731,7 +743,7 @@ export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload>
     if (raw.kind !== "page" || !isNonNegativeInteger(raw.as_of) || !Array.isArray(raw.items)) {
         return failed();
     }
-    if (raw.next !== null && typeof raw.next !== "string") return failed();
+    if (raw.next !== null && !isIssuedCursor(raw.next)) return failed();
     if (raw.items.length > CANDIDATES_PAGE_MAX) return failed();
     const items: CandidateItem[] = [];
     for (const entry of raw.items) {
