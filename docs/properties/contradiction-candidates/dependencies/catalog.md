@@ -866,7 +866,7 @@ joined the family after `3a3b916b7`: it reads the Kernel alone and has no
 cover it.
 Open questions:
 - D6: `kind` is stripped as an envelope key (`crates/daemon/src/kernel_routes/mod.rs:461`, `:467-470`) but the doc at
-  `host-wire-protocol.md:797` names three envelope fields. Is a body field
+  `host-wire-protocol.md:801` names three envelope fields. Is a body field
   `kind` meant to be accepted silently? (needs human input)
 
 ### p5dep-observational-routes-read-and-take-no-background-part
