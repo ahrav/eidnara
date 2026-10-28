@@ -45,13 +45,13 @@ folds case and diacritics. The daemon depends on `retrieval` at
 `crates/daemon/Cargo.toml:45` (plan cited `:41`; drifted).
 
 S2 scope-filtered Kernel read. `KernelStore::visible_domain_decisions_as_of_in_scope`
-(`crates/kernel/src/admission.rs:3168-3181`) calls `visible_selected_as_of`
-(`:3183-3211`) with `ServedSelection::DomainDecisions(domain_id)`. That reads
-one snapshot through `served_rows` (`:3460-3476`), which runs
-`served_classes_selected` (`:3669-3747`) over the SQL in `served_classes_sql`
-(`:3530-3645`). The domain/kind predicate is `o.domain_id=:domain_id AND
-o.object_kind='decision'` (`:3557-3559`). The scope prefilter is the `WHERE`
-tail at `:3625-3643`. Rows are then sorted by `object_id` (`:3203`). No row
+(`crates/kernel/src/admission.rs:3168-3200`) calls `visible_selected_as_of`
+(`:3202-3235`) with `ServedSelection::DomainDecisions(domain_id)`. That reads
+one snapshot through `served_rows` (`:3484-3500`), which runs
+`served_classes_selected` (`:3693-3771`) over the SQL in `served_classes_sql`
+(`:3554-3669`). The domain/kind predicate is `o.domain_id=:domain_id AND
+o.object_kind='decision'` (`:3581-3583`). The scope prefilter is the `WHERE`
+tail at `:3649-3667`. Rows are then sorted by `object_id` (`:3223`). No row
 limit and no budget parameter exist on this API. The daemon consumer is
 `read_visible` in `crates/daemon/src/kernel_routes/read.rs:163-258`: SQL
 prefilter with `project.scope_term()` (`:178`,
@@ -67,7 +67,7 @@ S3 budgeted Kernel reads. `decision_page_within_budget`
 examined live or invalidated, byte cut that never stops before the first live
 row (`:161-170`), `lock_reader_within(&budget.acquire_limit())` (`:134`).
 `decisions_for_objects_as_of_within_budget` (`:236-243`) is the same acquire
-plus `decisions_for_objects_on`. `decision_payload_sizes_as_of` (`:330-345`)
+plus `decisions_for_objects_on`. `decision_payload_sizes_as_of` (`:330-366`)
 reads `length(decision_payload)` only, no budget. `claim_facts_at_within_budget`
 (`crates/kernel/src/claim_facts.rs:240-257`): `limit.run(..)` then
 `claim_facts_inner` (`:301-333`), which calls `check_claim_bounds` (`:336-358`)
@@ -199,7 +199,7 @@ C2 `analysis.rs:6`: "Parts keep their original bytes; the engine folds case
 and diacritics."
 C3 `crates/retrieval/AGENTS.md`: a change to any analysis rule needs a new
 epoch and an updated pinned digest; mutations pure; every bound caller-supplied.
-C4 `admission.rs:3162-3164`: domain and kind matched in SQL before any row is
+C4 `admission.rs:3165-3167`: domain and kind matched in SQL before any row is
 read; a corrupt row outside the domain never fails this read.
 C5 `admission.rs:3138-3144`: the scope restriction is a superset of the
 algebra's verdict.
@@ -287,7 +287,7 @@ this is deliberate. A P5 consumer that pins the epoch string alone pins less
 than the identity does.
 
 D5 The Kernel scope prefilter keeps rows whose `scope_id` is NULL
-(`admission.rs:3637`), and the daemon `ScopeFilter::matches` returns `false`
+(`admission.rs:3661`), and the daemon `ScopeFilter::matches` returns `false`
 for `None` (`project.rs:212-214`). The superset claim holds; a P5 consumer
 that uses the Kernel API without the daemon filter would see unscoped rows
 the daemon never serves.

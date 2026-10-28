@@ -33,7 +33,7 @@ folding exists as a check; the goldens imply both (e.g. `HTTPServer` stays
 | `the_domain_selection_folds_the_evidence_class_of_a_decision_kind_artifact` | `:286` | sensitivity folding for decision-kind rows | unaudited |
 | `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order` | `:420` | domain read sees rows the capped unfiltered read drops | unaudited |
 | `the_domain_selection_reads_no_row_of_another_domains_payload_pressure` | `:448` | another domain's payload volume does not cost the domain read | unaudited |
-| in-module test at `crates/kernel/src/admission.rs:6240-6257` | | domain read on `memory` returns the one visible decision after a reopen | unaudited |
+| in-module test at `crates/kernel/src/admission.rs:6264-6281` | | domain read on `memory` returns the one visible decision after a reopen | unaudited |
 | `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation` | `crates/daemon/tests/kernel_routes.rs:1958` | `MAX_READ_ROWS` newest rows, `truncated: true` | unaudited |
 | `bounded_selection_matches_a_full_sort_and_truncate` | `:2080` | `NewestRows` equals sort-then-truncate | unaudited |
 | `a_read_over_the_byte_budget_serves_the_newest_rows_that_fit` | `:2112` | byte budget cut | unaudited |

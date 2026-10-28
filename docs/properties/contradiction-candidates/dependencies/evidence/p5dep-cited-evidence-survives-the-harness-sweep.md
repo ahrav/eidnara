@@ -37,7 +37,7 @@ to the evidence it cites. Lenses: data integrity; wildcard.
   owning observations because another live row still cites the evidence."
 - P4 spec (`/tmp/p5-spec/spec-p4-1159.md`, D8, C6, C7): `dispute` commits a
   `MarkDisputed` or `Contradict` event with `evidence_id` on the target
-  decision; `crates/kernel/src/admission.rs:4234`: `MarkDisputed =>
+  decision; `crates/kernel/src/admission.rs:4258`: `MarkDisputed =>
   Disposition::Disputed, Outcome::Deny`. The event row carries the evidence
   id (the `AdmissionEvent.evidence_id` field, `kernel_scope.rs:302` shows the
   shape).

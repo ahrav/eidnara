@@ -131,10 +131,18 @@ impl Candidates {
 }
 
 impl CandidatePass {
-    /// Runs the pass on the blocking pool and returns once it physically completes. The blocking closure records the pass's end, a panic included, and its timing before it releases the permit, so an idle permit means those counters are final. Cancellation raises the budget's interrupt; the pass stops at its next check. Between checks it runs one budgeted Kernel read, up to 256 scope-term reads, the unbudgeted visible-decision and payload-size reads, 256 summaries against every descriptor, or one row write.
+    /// Runs the pass on the blocking pool and returns once it physically completes. The blocking closure records the pass's end, a panic included, and its timing before it releases the permit, so an idle permit means those counters are final. Cancellation raises the budget's interrupt; the pass stops at its next check. Between checks it runs one budgeted Kernel read, up to 256 budgeted scope-term reads, 256 summaries against every descriptor, or one store write whose wait ends at the deadline.
     pub(crate) async fn run(self) -> Count {
         let counts = Arc::clone(&self.active.counts);
         counts.add(Count::Admitted, 1);
+        // The descriptors the closure would score, counted here so a closure the runtime drops unrun still reports them unscored.
+        let descriptors = self
+            .settled
+            .units
+            .iter()
+            .map(|(_, published)| published.evidence_id.as_str())
+            .collect::<HashSet<_>>()
+            .len() as u64;
         // The pass's start is fixed before the closure is queued, so a wait for a blocking thread counts against its budget and its wall time.
         let started = Instant::now();
         let interrupt = Arc::new(AtomicBool::new(false));
@@ -155,6 +163,7 @@ impl CandidatePass {
                 let end = if error.is_panic() {
                     Count::WorkerPanicked
                 } else {
+                    counts.add(Count::DescriptorsUnscored, descriptors);
                     Count::BudgetExhausted
                 };
                 counts.add(end, 1);
@@ -188,6 +197,12 @@ impl CandidatePass {
                 Some(started + counts.bounds().budget),
                 Arc::clone(interrupt),
             );
+            // A pass queued past its deadline ends there, whatever the Kernel's state when it starts.
+            if let Some(end) = stop(&budget) {
+                counts.add(Count::DescriptorsUnscored, descriptors.len() as u64);
+                counts.add(end, 1);
+                return end;
+            }
             match self.kernel.kernel_store() {
                 Ok(kernel) => score_publication(
                     &kernel,
@@ -420,12 +435,20 @@ fn candidate_summaries(
 ) -> Result<Vec<(String, String, String)>, Count> {
     let failed = |_| stop(budget).unwrap_or(Count::KernelUnavailable);
     let tip = target.target.through_commit;
+    #[cfg(test)]
+    {
+        let hook = counts.before_check.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(super::Checkpoint::Captured);
+        }
+    }
     let visible = kernel
-        .visible_domain_decisions_as_of_in_scope(
+        .visible_domain_decisions_as_of_in_scope_within_budget(
             Surface::ExplicitSearch,
             tip,
             MEMORY_DOMAIN_ID,
             Some(project.scope_term()),
+            budget,
         )
         .map_err(failed)?;
     let mut filter = ScopeFilter::new(project);
@@ -479,11 +502,18 @@ fn candidate_summaries(
                 .map(|(id, _)| id.clone()),
         );
     }
+    #[cfg(test)]
+    {
+        let hook = counts.before_check.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(super::Checkpoint::Kept(kept.len()));
+        }
+    }
     if let Some(end) = stop(budget) {
         return Err(end);
     }
     let sizes: HashMap<String, u64> = kernel
-        .decision_payload_sizes_as_of(&kept, tip)
+        .decision_payload_sizes_as_of_within_budget(&kept, tip, budget)
         .map_err(failed)?
         .into_iter()
         .collect();

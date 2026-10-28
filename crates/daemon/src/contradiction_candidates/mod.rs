@@ -55,7 +55,9 @@ pub(crate) type DescriptorHook = Arc<dyn Fn(usize) + Send + Sync>;
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Checkpoint {
+    Captured,
     Judged(usize),
+    Kept(usize),
     Scanned(usize),
     Loaded(usize),
 }

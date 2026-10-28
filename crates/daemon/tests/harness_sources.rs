@@ -4082,6 +4082,66 @@ fn a_commit_time_replay_names_the_evidence_the_stored_descriptor_cites() {
     );
 }
 
+/// A descriptor receipt whose result names another unit's descriptor is a corrupt receipt: the replay refuses instead of answering with that descriptor and its evidence.
+#[test]
+fn a_replay_whose_receipt_names_another_units_descriptor_is_refused_as_corrupt() {
+    use kernel::KernelError;
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let unit = pi_text_unit("pi-u1", "a replay through another receipt");
+    let other = pi_text_unit("pi-u2", "the other unit's text");
+    let published = publisher.publish(&unit, NOW).unwrap();
+    let other_published = publisher.publish(&other, NOW).unwrap();
+    let (key, _) = publisher.receipt_identity(&unit).unwrap();
+    // The store guards receipts with a trigger; the rewrite lifts it for this one statement and reinstalls it unchanged.
+    let conn = Connection::open(&corpus.kernel_db).unwrap();
+    let guards: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT name,sql FROM sqlite_master
+             WHERE type='trigger' AND tbl_name='operation_receipts'",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for (name, _) in &guards {
+        conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
+    }
+    let changed = conn
+        .execute(
+            "UPDATE operation_receipts SET result_payload=CAST(?1 AS BLOB)
+             WHERE producer='eidnara-daemon/harness-sources' AND operation_key=?2",
+            rusqlite::params![
+                other_published.object_id,
+                format!("source-descriptor:{key}")
+            ],
+        )
+        .unwrap();
+    for (_, sql) in &guards {
+        conn.execute_batch(sql).unwrap();
+    }
+    assert_eq!(changed, 1);
+    drop(conn);
+    let tip = corpus.tip();
+    let refused = publisher.publish(&unit, NOW).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            PublishError::Kernel {
+                error: KernelError::CorruptCanonicalRow,
+                evidence: None,
+            }
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(corpus.tip(), tip, "a refused replay commits nothing");
+    assert_ne!(published.object_id, other_published.object_id);
+    assert!(publisher.publish(&other, NOW).unwrap().replayed);
+}
+
 /// Rewrites the stored request digest of `unit`'s `kind` receipt (`source-descriptor` or `source-evidence`) to `digest`, as a store written before the outcome record holds it.
 fn store_receipt_as(
     corpus: &Corpus,

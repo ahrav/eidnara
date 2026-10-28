@@ -27,10 +27,10 @@ named function; no wrong file, no wrong claim).
 | `lexical/mod.rs:40` `ANALYSIS_CONTRACT_EPOCH` | confirmed |
 | `identity.rs:13-18` (`LazyLock`), `:36-65` (`preimage`) | confirmed |
 | `admission.rs:3165-3176` signature; `:3138-3144` superset doc | confirmed |
-| `admission.rs:3188-3200` `Vec<VisibleRow>` materialization | confirmed |
-| `admission.rs:3449-3452` `ScopeTermFilter` | confirmed |
-| `admission.rs:3550-3555` `ids_predicate` | corrected: `:3551-3556` |
-| `admission.rs:3630-3648` WHERE tail; `:3644` NULL-scope branch | corrected: tail is `:3626-3640`; `OR {scope_expr} IS NULL` is `:3637` |
+| `admission.rs:3207-3220` `Vec<VisibleRow>` materialization | confirmed |
+| `admission.rs:3473-3476` `ScopeTermFilter` | confirmed |
+| `admission.rs:3574-3579` `ids_predicate` | corrected: `:3575-3580` |
+| `admission.rs:3654-3672` WHERE tail; `:3668` NULL-scope branch | corrected: tail is `:3650-3664`; `OR {scope_expr} IS NULL` is `:3661` |
 | `read.rs:26` `MAX_READ_ROWS` | confirmed |
 | `read.rs:177` `scope_term()`; `:189` LIMIT comment; `:190`/`:191` probe point | corrected: `:178`, `:190`, and the loop over `visible.rows` is `:192` |
 | `read.rs:185` domain-decisions call (plan pattern) | confirmed |
@@ -55,7 +55,7 @@ named function; no wrong file, no wrong claim).
 | `activation.rs:174`; `lifecycle.rs:16-18`, `:327` | confirmed |
 | `tool-registry.ts:58`; `subagent-entry.ts:63` | `tool-registry.ts:58` now passes `EIDNARA_MEMORY_DEFAULT_ACTIONS` (#1161); confirmed at `packages/opencode-plugin/src/plugin/tool-registry.ts:58` and `packages/pi-plugin/src/subagent-entry.ts:63`; the catalog gives bare file names |
 | 22 test function locations (`source_capture_tests.rs:312,335,442,666,783,931,2231`; `source_capture.rs:1797`; `kernel_routes.rs:1958,2080,2112,1803`; `kernel_scope.rs:235`; `kernel_canonical_read.rs:227,448`; `kernel_claim_facts.rs:466`; `claims.rs:993`; `embedding_dispatch.rs:1102`; `search_catchup.rs:1876`; `memory_reviewer_wire.rs:15,260`; `baseline.rs:492`; `lifecycle.rs:704`; `local_file.rs:710,722,791,889`; `tools.test.ts:1185,1193`) | all confirmed |
-| `query_route.rs:1055`; `lexical/index.rs:50`; `daemon/Cargo.toml:45`; `admission.rs:4237` | confirmed |
+| `query_route.rs:1055`; `lexical/index.rs:50`; `daemon/Cargo.toml:45`; `admission.rs:4261` | confirmed |
 | `harness_sources.rs:614-618`, `:1233`; `open.rs:614` `hold_readers_for_test` | confirmed |
 
 ## 2. Check-semantics audit against METHOD.md
@@ -213,7 +213,7 @@ on well-tested code (Exercised yes or partial for all six).
   inherits from a `Sensitive` source. Gap G7, low; the new behavior is out
   of scope, but the implemented fact it depends on has no record.
 - Surface visibility. P5 reads at `Surface::ExplicitSearch`, the widest
-  surface (`admission.rs:3297`); rows `Hidden` there are excluded at `:3191`,
+  surface (`admission.rs:3321`); rows `Hidden` there are excluded at `:3211`,
   `Labeled` rows are served with `labeled: true`. No record states which
   visibility the candidate set inherits. Folded into G2 as a clause.
 - Framing check. The catalog treats "the P5 mechanism" as out of scope and
@@ -229,7 +229,7 @@ on well-tested code (Exercised yes or partial for all six).
 | Id | Priority | Gap | Discovery target |
 | --- | --- | --- | --- |
 | G1 | high | Scope soundness of the composite read | `read_visible` and `ScopeFilter::matches` (`project.rs:186-222`): every served row's scope `names_project`; `None` scope dropped; `set` operator and `Dimension::Project` exact-match semantics; link `kernel_routes.rs:1803` |
-| G2 | medium | Snapshot stability and visibility of the candidate read | `visible_domain_decisions_as_of_in_scope(requested)` set equality across later commits; `tip`/`known_as_of`; `Surface::ExplicitSearch` visibility rules (`admission.rs:3191`, `:3297`) |
+| G2 | medium | Snapshot stability and visibility of the candidate read | `visible_domain_decisions_as_of_in_scope(requested)` set equality across later commits; `tip`/`known_as_of`; `Surface::ExplicitSearch` visibility rules (`admission.rs:3211`, `:3321`) |
 | G3 | medium | Publication identity: replay and revision | `Published.replayed`, `replaced_object_id` (`harness_sources.rs:521-532`); same-commit predecessor invalidation; memo dedupe interaction (`source_capture.rs:5`) |
 | G4 | medium | Retirement observability for a derived-row sweep | which Kernel read exposes `invalidated_commit_seq` for observations and evidence at tip; behaviour of `visible_as_of_in_scope(Some(ids))` on retired ids |
 | G5 | low | Bounded liveness of the harness sweep (L1) | `ceil(pending_ahead / 64)` passes at `SAMPLE_RETRY_INTERVAL`; fault-free window with the lifecycle loop |
@@ -304,15 +304,15 @@ R6. `p5dep-kernel-domain-read-has-no-row-bound`: Guarantee: "The situation
 'the Kernel returned more rows than the daemon keeps' is reachable at HEAD:
 `visible_domain_decisions_as_of_in_scope` has no `max_rows`, `max_bytes`, or
 `EvalBudget` parameter and materializes every matching row
-(`admission.rs:3188-3200`)". Check: observe `rows.len() > MAX_READ_ROWS` on
+(`admission.rs:3207-3220`)". Check: observe `rows.len() > MAX_READ_ROWS` on
 the Kernel API's return value inside the over-cap fixture
 (`kernel_routes.rs:1958`), not at `read.rs:190`. Fix the evidence file's
 `read.rs:190-195`/`:191` to `:191-192`.
 
-R7. Line corrections from section 1: `admission.rs:3644` to `:3637` and the
-WHERE tail to `:3626-3640` (catalog and evidence for
+R7. Line corrections from section 1: `admission.rs:3668` to `:3661` and the
+WHERE tail to `:3650-3664` (catalog and evidence for
 `p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict`, system-model S2,
-D5); `admission.rs:3550-3555` to `:3551-3556`; `read.rs:177` to `:178`,
+D5); `admission.rs:3574-3579` to `:3575-3580`; `read.rs:177` to `:178`,
 `:190` to `:191`; `source_capture.rs:666` to `:667`; give full paths for
 `tool-registry.ts` and `subagent-entry.ts`.
 

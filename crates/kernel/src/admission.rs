@@ -3159,7 +3159,7 @@ impl KernelStore {
         let selection = ids
             .as_deref()
             .map_or(ServedSelection::All, ServedSelection::Named);
-        self.visible_selected_as_of(surface, requested, selection, scope)
+        self.visible_selected_as_of(surface, requested, selection, scope, None)
     }
 
     /// [`Self::visible_as_of_in_scope`] restricted to the decision objects of `domain_id`. The domain and kind are
@@ -3177,6 +3177,25 @@ impl KernelStore {
             requested,
             ServedSelection::DomainDecisions(domain_id),
             scope,
+            None,
+        )
+    }
+
+    /// [`Self::visible_domain_decisions_as_of_in_scope`] whose wait for a pooled reader ends at `budget`'s deadline or interrupt with [`KernelError::Deadline`].
+    pub fn visible_domain_decisions_as_of_in_scope_within_budget(
+        &self,
+        surface: Surface,
+        requested: i64,
+        domain_id: &str,
+        scope: Option<ScopeTermFilter<'_>>,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<VisibleAsOf, KernelError> {
+        self.visible_selected_as_of(
+            surface,
+            requested,
+            ServedSelection::DomainDecisions(domain_id),
+            scope,
+            Some(budget),
         )
     }
 
@@ -3186,8 +3205,9 @@ impl KernelStore {
         requested: i64,
         selection: ServedSelection<'_>,
         scope: Option<ScopeTermFilter<'_>>,
+        budget: Option<&crate::applicability::EvalBudget>,
     ) -> Result<VisibleAsOf, KernelError> {
-        let (tip, rows) = self.read_snapshot(requested, |tx, _| {
+        let read = |tx: &Transaction<'_>, _: i64| {
             let mut rows: Vec<VisibleRow> = served_rows(tx, surface, requested, selection, scope)?
                 .into_iter()
                 .filter_map(|(object, visibility, scope_id)| match visibility {
@@ -3202,7 +3222,11 @@ impl KernelStore {
                 .collect();
             rows.sort_unstable_by(|left, right| left.object.object_id.cmp(&right.object.object_id));
             Ok(rows)
-        })?;
+        };
+        let (tip, rows) = match budget {
+            Some(budget) => self.read_snapshot_within_budget(requested, budget, read)?,
+            None => self.read_snapshot(requested, read)?,
+        };
         Ok(VisibleAsOf {
             known_as_of: requested,
             tip,

@@ -14,15 +14,15 @@ D5.
 
 ## Evidence trail
 
-- `admission.rs:3449-3452` `ScopeTermFilter<'a> { dimension: Dimension,
+- `admission.rs:3473-3476` `ScopeTermFilter<'a> { dimension: Dimension,
   value: &'a str }`.
-- `admission.rs:3541-3550`: redaction placeholders. `exact_redacted` on
+- `admission.rs:3565-3574`: redaction placeholders. `exact_redacted` on
   `t.exact_value`, `set_redacted` on each `json_each(t.set_values)` value,
-  `filter_redacted` on `:scope_value`. Comments at `:3543-3549`: a redacted
+  `filter_redacted` on `:scope_value`. Comments at `:3567-3573`: a redacted
   stored value "decodes to `MatchOutcome::Uncertain`" and a redacted filter
   value "decodes to `Uncertain` against every exact or set term", so both
   are kept.
-- `admission.rs:3626-3640` the `WHERE` tail:
+- `admission.rs:3650-3664` the `WHERE` tail:
   `(:scope_dimension IS NULL OR scope_expr IN (SELECT t.scope_id FROM
   scope_term t WHERE t.dimension=:scope_dimension AND (t.operator NOT IN
   ('exact','set') OR filter_redacted OR t.exact_value=:scope_value OR
@@ -34,7 +34,7 @@ D5.
   redacted, or a set contains the value; when the scope is NULL; or when the
   scope has no term on the dimension. A row is dropped only when every term
   on the dimension is a decodable `exact`/`set` that excludes the value.
-- `admission.rs:3558-3569`: for `DomainDecisions`, `scope_expr` is
+- `admission.rs:3582-3593`: for `DomainDecisions`, `scope_expr` is
   `dec.scope_id`.
 - Daemon side: `crates/daemon/src/kernel_routes/project.rs:106-111`
   `scope_term()` = `{ Project, &self.digest }`; `:186-213` `ScopeFilter`

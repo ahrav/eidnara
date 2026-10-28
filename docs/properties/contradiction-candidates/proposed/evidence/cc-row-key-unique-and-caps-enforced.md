@@ -12,17 +12,19 @@ one row per key and bounded counts.
 - `crates/memory-store/src/contradiction_candidates.rs:482`
   `replace_candidates_for_descriptor` enforces K, upserts on the key, keeps the
   higher tip, and evicts past the project cap in one transaction.
-- `crates/daemon/src/contradiction_candidates/pass.rs:248` the pass cuts at M in
+- `crates/daemon/src/contradiction_candidates/pass.rs:263` the pass cuts at M in
   publish order, counts the cut `dropped_at_cap`, and skips the write for a
   descriptor that reaches the pass with no room, so its held rows stay.
-- `crates/daemon/src/harness_sources.rs:2151-2165` `stored_descriptor`: a
+- `crates/daemon/src/harness_sources.rs:2151-2170` `stored_descriptor`: a
   replay takes the evidence row the stored descriptor cites, and a receipt
   whose observation cites no row, or a row other than the one its detail
-  names, is `CorruptCanonicalRow`
+  names, or a receipt whose result names another unit's descriptor, is `CorruptCanonicalRow`
   (`crates/kernel/src/source_descriptor.rs:911-943`;
-  `a_replay_whose_descriptor_cites_no_evidence_row_is_refused_as_corrupt`
-  and `a_replay_whose_descriptor_cites_another_units_evidence_is_refused_as_corrupt`,
-  `crates/daemon/tests/harness_sources.rs:3909`, `:3955`).
+  `a_replay_whose_descriptor_cites_no_evidence_row_is_refused_as_corrupt`,
+  `a_replay_whose_descriptor_cites_another_units_evidence_is_refused_as_corrupt`,
+  `a_replay_whose_receipt_names_another_units_descriptor_is_refused_as_corrupt`,
+  and `a_commit_time_replay_names_the_evidence_the_stored_descriptor_cites`,
+  `crates/daemon/tests/harness_sources.rs:3909`, `:3955`, `:4087`, `:4027`).
 - `crates/daemon/src/harness_sources.rs:559` `Published.replayed`: a replayed
   unit is scored again (G3); a revision's predecessor descriptor is retired in
   the publishing commit, while its evidence stays live, so the predecessor's
