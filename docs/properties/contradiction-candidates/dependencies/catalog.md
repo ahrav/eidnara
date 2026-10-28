@@ -865,7 +865,7 @@ joined the family after `3a3b916b7`: it reads the Kernel alone and has no
 `disabled` terminal (`host-wire-protocol.md:827`); this record does not
 cover it.
 Open questions:
-- D6: `kind` is stripped as an envelope key (`mod.rs:476`) but the doc at
+- D6: `kind` is stripped as an envelope key (`crates/daemon/src/kernel_routes/mod.rs:461`, `:467-470`) but the doc at
   `host-wire-protocol.md:797` names three envelope fields. Is a body field
   `kind` meant to be accepted silently? (needs human input)
 

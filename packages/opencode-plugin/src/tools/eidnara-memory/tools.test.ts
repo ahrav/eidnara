@@ -1694,17 +1694,17 @@ describe("eidnara_memory candidates", () => {
 
     test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, and items out of reader order", async () => {
         const h = candidatesHarness([
-            { kind: "page", as_of: 1, items: Array.from({ length: 65 }, () => ITEM), next: null },
-            { kind: "page", as_of: 1, items: [{ ...ITEM, score: 9999 }], next: null },
+            { kind: "page", as_of: 41, items: Array.from({ length: 65 }, () => ITEM), next: null },
+            { kind: "page", as_of: 41, items: [{ ...ITEM, score: 9999 }], next: null },
             {
                 kind: "page",
-                as_of: 1,
+                as_of: 41,
                 items: [{ ...ITEM, matched_terms: 5, decision_terms: 4 }],
                 next: null,
             },
             {
                 kind: "page",
-                as_of: 1,
+                as_of: 41,
                 items: [{ ...ITEM, matched_terms: 0, decision_terms: 0, score: 0 }],
                 next: null,
             },

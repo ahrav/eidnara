@@ -82,7 +82,7 @@ there is `store_unavailable`.
 
 ### Q: D6. Is `kind` an intended envelope key?
 
-- Sources examined: `mod.rs:529`, `host-wire-protocol.md:768`, `:860`.
+- Sources examined: `crates/daemon/src/kernel_routes/mod.rs:461-473`, `host-wire-protocol.md:768`, `:860`.
 - Findings: the code strips `kind` with the three documented keys; the doc
   does not name it. A body with a `kind` field is accepted silently.
 - Missing evidence: author intent; whether the transport ever adds `kind`.

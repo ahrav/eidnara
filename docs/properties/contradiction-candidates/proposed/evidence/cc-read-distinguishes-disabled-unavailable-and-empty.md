@@ -20,8 +20,9 @@ differ from an empty page.
   `items` key.
 - The authority lookup and the page read wait for the store connection
   through `module_authority_for_route_within` and
-  `candidates_for_decision_within` under the read's deadline, so a held
-  connection answers `store_unavailable` at the bound
+  `candidates_for_decision_under_route_within`, which judges the route's
+  MODULE authority in the connection that reads the page, under the read's
+  deadline, so a held connection answers `store_unavailable` at the bound
   (`crates/daemon/src/candidate_pass_tests.rs:2285`, asserted at `:2318-2322`).
 - `docs/host-wire-protocol.md:833` documents the three terminals, the kernel
   states, and the empty page.
