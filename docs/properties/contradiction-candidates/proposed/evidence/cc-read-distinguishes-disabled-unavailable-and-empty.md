@@ -24,8 +24,9 @@ differ from an empty page.
   MODULE authority in the connection that reads the page, under the read's
   deadline, so a held connection answers `store_unavailable` at the bound.
   The statements inside the transaction are indexed seeks over at most 65
-  rows (`crates/memory-store/baseline.sql:1294`, the page query at
-  `crates/memory-store/src/contradiction_candidates.rs:627`), below the 1000
+  rows (`crates/memory-store/baseline.sql:1294`; `PageQuery::read` holds the
+  keyset statements and the `limit + 1` bound,
+  `crates/memory-store/src/contradiction_candidates.rs:907`), below the 1000
   VM-step interval at which `with_conn_interruptible` polls a stop
   (`crates/storage/src/lib.rs:191`), so the connection wait is the one wait
   the deadline ends

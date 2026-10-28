@@ -676,21 +676,37 @@ const CURSOR_FORM = /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,18})\.((?:[0-9a-f]{2}){1,51
 const I64_MAX = 9_223_372_036_854_775_807n;
 // The decoder keeps a leading U+FEFF, a character an id may begin with.
 const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-function isIssuedCursor(value: unknown): value is string {
-    if (typeof value !== "string" || value.length > CURSOR_MAX_BYTES) return false;
+type CursorKey = Pick<CandidateItem, "score" | "created_at_ms" | "evidence_id">;
+/** The key a cursor names, or `null` for a spelling the store never issues. */
+function issuedCursorKey(value: unknown): CursorKey | null {
+    if (typeof value !== "string" || value.length > CURSOR_MAX_BYTES) return null;
     const form = CURSOR_FORM.exec(value);
     if (form === null || Number(form[1]) > 10_000 || BigInt(form[2] as string) > I64_MAX) {
-        return false;
+        return null;
     }
     const hex = form[3] as string;
     const bytes = Uint8Array.from({ length: hex.length / 2 }, (_, i) =>
         Number.parseInt(hex.slice(2 * i, 2 * i + 2), 16),
     );
+    let evidence_id: string;
     try {
-        return isStorableId(UTF8.decode(bytes));
+        evidence_id = UTF8.decode(bytes);
     } catch {
-        return false;
+        return null;
     }
+    if (!isStorableId(evidence_id)) return null;
+    return { score: Number(form[1]), created_at_ms: Number(form[2]), evidence_id };
+}
+
+/** `next` names the page's last stored row, so it is the last rendered item's key or a key after it in reader order. */
+function cursorFollows(items: readonly CandidateItem[], key: CursorKey): boolean {
+    const last = items.at(-1);
+    if (!last) return true;
+    const same =
+        last.score === key.score &&
+        last.created_at_ms === key.created_at_ms &&
+        last.evidence_id === key.evidence_id;
+    return same || inReaderOrder(last, key);
 }
 
 function parseCandidateItem(raw: unknown): CandidateItem | null {
@@ -732,7 +748,7 @@ function parseCandidateItem(raw: unknown): CandidateItem | null {
 
 /** A `review.candidates` answer: a kernel state, a closed terminal, or a page whose items carry exactly the documented keys. */
 /** `later` follows `earlier` in a page: a lower score, the same score at an earlier creation time, or the same score and time at a greater evidence id in UTF-8 byte order, the order the store's `evidence_id>?` comparison uses. */
-function inReaderOrder(earlier: CandidateItem, later: CandidateItem): boolean {
+function inReaderOrder(earlier: CursorKey, later: CursorKey): boolean {
     if (earlier.score !== later.score) return later.score < earlier.score;
     if (earlier.created_at_ms !== later.created_at_ms) {
         return later.created_at_ms < earlier.created_at_ms;
@@ -766,7 +782,9 @@ export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload>
     if (raw.kind !== "page" || !isNonNegativeInteger(raw.as_of) || !Array.isArray(raw.items)) {
         return failed();
     }
-    if (raw.next !== null && !isIssuedCursor(raw.next)) return failed();
+    const next = raw.next === null ? null : issuedCursorKey(raw.next);
+    if (next === null && raw.next !== null) return failed();
+    const nextCursor = typeof raw.next === "string" ? raw.next : null;
     if (raw.items.length > CANDIDATES_PAGE_MAX) return failed();
     const items: CandidateItem[] = [];
     for (const entry of raw.items) {
@@ -777,8 +795,9 @@ export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload>
         if (previous && !inReaderOrder(previous, item)) return failed();
         items.push(item);
     }
+    if (next !== null && !cursorFollows(items, next)) return failed();
     return {
         state: available(),
-        payload: { kind: "page", as_of: raw.as_of, items, next: raw.next },
+        payload: { kind: "page", as_of: raw.as_of, items, next: nextCursor },
     };
 }

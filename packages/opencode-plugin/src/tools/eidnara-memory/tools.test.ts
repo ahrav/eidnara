@@ -1778,6 +1778,8 @@ describe("eidnara_memory candidates", () => {
             { kind: "page", as_of: 41, items: [ITEM], next: "1.1.ff" },
             { kind: "page", as_of: 41, items: [ITEM], next: "1.1.01" },
             { kind: "page", as_of: 41, items: [ITEM], next: "1.9999999999999999999.61" },
+            { kind: "page", as_of: 41, items: [ITEM], next: "9000.2.62" },
+            { kind: "page", as_of: 41, items: [ITEM], next: "7500.1700000000001.62" },
             {
                 kind: "page",
                 as_of: 41,
@@ -1812,6 +1814,8 @@ describe("eidnara_memory candidates", () => {
             "next whose id bytes are not UTF-8",
             "next whose id holds a control character",
             "next whose time is past i64",
+            "next with a higher score than the last item",
+            "next with a later time than the last item at its score",
             "a lone surrogate in evidence_id",
             "a state beside a page",
         ]) {
