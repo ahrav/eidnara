@@ -3503,7 +3503,7 @@ evaluation of this area and its disposition are recorded in
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L11744-L11748
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6325
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L97-L98
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38750
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38770
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20682
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21058
 [sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L327

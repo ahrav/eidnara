@@ -128,11 +128,12 @@ passing summaries, ties on score and `matched_terms` past position K, an
 unscorable summary, a repeated decision object id, and at least two input
 orders.
 Confidence: high - [evidence](evidence/cc-scorer-output-deterministic-under-contract-version.md).
-Read `crates/daemon/src/contradiction_candidates/scorer.rs:102-110` (terms are a
-`BTreeSet`, so no
-hash iteration order reaches the output), `:139-148` (`rank`, a total order
-ending at both ids), `:217-250` (`record`, `offer`), `:271-288`
-(`score_descriptor` sorts `unscorable`), `:292-327` (the preimage names the
+Read `crates/daemon/src/contradiction_candidates/scorer.rs:424-465` (the
+descriptor table is sorted by hash, then folded text, and a summary
+contributes only its `matched_terms` and `decision_terms` counts, so no
+iteration order reaches the output), `:386-395` (`rank`, a total order
+ending at both ids), `:573-606` (`record`, `offer`), `:627-644`
+(`score_descriptor` sorts `unscorable`), `:648-683` (the preimage names the
 order rule).
 Existing check: the two tests above and `the_matcher_digest_pins_every_rule`
 (`:348-400`), which pins the order rule id in the preimage. Status
@@ -183,7 +184,7 @@ Guarantee: a descriptor over `DESCRIPTOR_BOUNDS` is refused whole:
 no term left after the floor, is `SummaryScore::Unscorable` and its decision
 object id is listed in `unscorable`, while the other summaries score;
 `unscorable` lists decision object ids, not decision ids
-(`crates/daemon/src/contradiction_candidates/scorer.rs:280`), so with a
+(`crates/daemon/src/contradiction_candidates/scorer.rs:636`), so with a
 repeated object id one id can appear twice in `unscorable`, or in both
 `unscorable` and `candidates` when another entry with that id scores; no
 analysis of a prefix of either text contributes to any score; a refusal is
@@ -201,14 +202,14 @@ Required faults and enabling state: a descriptor one byte over the bound and
 one at it with the maximum atom count; a summary one byte over its bound and
 one at it; a floor-emptied summary next to scorable ones. The atom bounds are
 `max_input_bytes / 2 + 1`
-(`crates/daemon/src/contradiction_candidates/scorer.rs:84-95`), one past the
+(`crates/daemon/src/contradiction_candidates/scorer.rs:85-96`), one past the
 most atoms the byte bound admits, because n atoms need at least 2n - 1
 bytes; an input with `max_atoms` atoms exceeds the byte bound first, so
 `TooManyAtoms` is unreachable through the scorer and no test constructs it.
 Confidence: high - [evidence](evidence/cc-oversize-text-refused-whole-never-truncated.md).
-Read `crates/daemon/src/contradiction_candidates/scorer.rs:63-69`, `:84-95`,
-`:102-110`, `:175-207`,
-`:271-288`; the compile-time assertion at `:65-67` holds the descriptor
+Read `crates/daemon/src/contradiction_candidates/scorer.rs:64-70`, `:85-96`,
+`:103-109`, `:432-465`, `:526-562`,
+`:627-644`; the compile-time assertion at `:66-68` holds the descriptor
 bound at or above `MAX_SOURCE_UNIT_BYTES`
 (`crates/daemon/src/harness_sources.rs:612`).
 Existing check: the three tests above; the analyzer's own refusal tests
@@ -253,9 +254,12 @@ gives `configLoader` the terms {configloader, config, loader} and both
 `CONFIGLOADER` and `configloader` the term {configloader}.
 Guarantee: one fold, `str::to_lowercase` per term, is applied to the
 analyzer's output on both sides: every term of the descriptor and of every
-summary passes through the one function `term_set`; no diacritic removal or
-Unicode normalization is applied. The analyzer splits parts on the original
-case before the fold (`crates/retrieval/src/lexical/analysis.rs:193-205`:
+summary is folded by the same rule in `terms` and `scan_ascii`, which fold
+an ASCII term by its ASCII lowercase (equal to `str::to_lowercase` on
+ASCII) and any other term by `str::to_lowercase`, and `term_set` returns
+those folded terms; no diacritic removal or Unicode normalization is
+applied. The analyzer splits parts on the original
+case before the fold (`crates/retrieval/src/lexical/analysis.rs:193-204`:
 at a lower-to-upper change and before the last capital of an uppercase run
 that two lowercase letters follow), so two texts that differ only in case
 have equal term sets and score as the text against itself when the case
@@ -276,12 +280,16 @@ a non-ASCII pair; a pair whose lowercase mapping changes length (`İ`); a
 case-only pair whose case change crosses a part boundary (`configLoader`
 and `configloader`); a diacritic-only pair and an NFC and NFD pair.
 Confidence: high - [evidence](evidence/cc-case-fold-applied-identically-to-both-sides.md).
-Read `crates/daemon/src/contradiction_candidates/scorer.rs:102-110` (the one fold
-site), `:175-181`
-(`DescriptorTerms::new` calls `term_set`), `:182-207` (`score` calls
-`term_set` on the summary), `:18-25` (the module header states the fold is
-not full case folding), `:76` (`FOLD_RULE_ID` enters the preimage);
-`crates/retrieval/src/lexical/analysis.rs:193-205` (`splits`, the
+Read `crates/daemon/src/contradiction_candidates/scorer.rs:111-132` (`terms`:
+an ASCII term folds as its `to_ascii_lowercase`, which equals
+`str::to_lowercase` on ASCII, and any other term through `str::to_lowercase`
+at `:124`), `:221-270` (`scan_ascii` floors and hashes the ASCII lowercase),
+`:432-465` (`DescriptorTerms::new` takes the descriptor's terms from
+`terms`), `:483-562` (`score` takes the summary's terms from `scan_ascii`
+through `count_ascii`, or from `terms` when a term is not ASCII or more than
+64 are distinct), `:18-25` (the module header states the fold is not full
+case folding), `:77` (`FOLD_RULE_ID` enters the preimage);
+`crates/retrieval/src/lexical/analysis.rs:193-204` (`splits`, the
 case-driven part boundaries).
 Existing check: the three tests above; `the_matcher_digest_pins_every_rule`
 (`:348-400`) pins the fold rule id. Status unaudited.
@@ -445,24 +453,24 @@ Exercised: partial - direct-write store arm (#1165): `crates/memory-store/tests/
 `each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` (`:72`) shows one
 row per key, a lower-tip rewrite that keeps the higher tip and replaces the
 other values, and a newer write that removes keys it no longer names;
-`a_late_write_replaces_held_keys_and_adds_none` (`:454`) shows a write below
+`a_late_write_replaces_held_keys_and_adds_none` (`:442`) shows a write below
 the held tip adds no key, so a descriptor never exceeds K;
 `a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` (`:114`)
-and `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` (`:560`)
+and `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` (`:549`)
 show K accepted, K + 1 refused with the held rows unchanged, and a project
 at `per_project` evicting the lowest `score_bp`, then oldest, then smallest
 key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest`
 (`:187`) shows another project's rows are untouched;
-`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1349`)
+`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1338`)
 shows a new row below the cap's floor counted written and dropped with the
 held rows and rowids unchanged; and
-`random_write_and_delete_sequences_match_the_reference_model` (`:1079`)
+`random_write_and_delete_sequences_match_the_reference_model` (`:1068`)
 compares 24 seeded sequences of writes, late writes, incarnation changes,
 evictions at caps of 2 to 4096, and as-read deletes against a reference model
 of the rules, checking every row, the returned counts, rowid stability, and
 the gauge after each step, and pages, cursors across writes, and the sweep
 every seventh step. The store
-(`crates/memory-store/src/contradiction_candidates.rs:477`) enforces K and the
+(`crates/memory-store/src/contradiction_candidates.rs:480`) enforces K and the
 project cap in the write transaction; the daemon owns the values. The pass
 arm (M per pass, `rows_written`, replayed units) lands with #1167.
 Guarantee: The table key is (project digest, descriptor evidence object id,
@@ -504,7 +512,7 @@ Reachability: explicit-config-only
 Status: active - PROPOSED
 Exercised: partial - store arm (#1165):
 `truncating_and_replaying_the_writes_rebuilds_the_same_rows`
-(`crates/memory-store/tests/contradiction_candidates.rs:372`) truncates through the test-support
+(`crates/memory-store/tests/contradiction_candidates.rs:360`) truncates through the test-support
 `truncate_contradiction_candidates_for_test` and replays a write sequence,
 reproducing the same rows excluding `created_at_ms`. The pass arm, which
 re-scores retained evidence bytes at one tip, lands with #1167.
@@ -526,7 +534,7 @@ Confidence: low - proposed; `truncating_and_replaying_the_writes_rebuilds_the_sa
 exercises truncate and replay of a recorded write sequence at the #1165 tip;
 the rebuild from evidence bytes lands with #1167
 Existing check: `truncating_and_replaying_the_writes_rebuilds_the_same_rows`
-(`crates/memory-store/tests/contradiction_candidates.rs:372`), `unaudited`;
+(`crates/memory-store/tests/contradiction_candidates.rs:360`), `unaudited`;
 none for the pass arm
 Impact: without this the table is a log, not a derivation, and the derived
 classification (index D6) is false.
@@ -687,10 +695,10 @@ Open questions:
   needs a policy decision. #1165 fixes the facts the decision rests on: a row
   holds ids, integers, and times only (the table's columns are pinned by
   `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
-  `crates/memory-store/tests/contradiction_candidates.rs:411`), so a derived
+  `crates/memory-store/tests/contradiction_candidates.rs:399`), so a derived
   row carries none of the captured text, and the store has no sensitivity
   column. The descriptor it derives from publishes as `Sensitive` with
-  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:715-716`);
+  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:844-845`);
   whether the term counts, the score, and the evidence-to-decision link
   inherit that class is the open question, and a column set does not answer
   it. The egress half waits on #1168: the store's `candidates_for_decision`

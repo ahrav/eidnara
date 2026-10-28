@@ -7,7 +7,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 ## Discovery trigger
 
 Plan P4 Problem Frame: "the event is recorded under the subject's prior
-source class (`:587-588`)". Lens: claimed safety guarantees, then data
+source class (`:593-594`)". Lens: claimed safety guarantees, then data
 integrity. The `commit.rs` header (`:7-10`) says every written row is
 "admitted under the derived classes", which disagrees with the plan's
 reading; code resolves which describes the disposition path.
@@ -18,20 +18,20 @@ reading; code resolves which describes the disposition path.
   Some(prior.source_class)` and `taint_class: Some(prior.taint_class)`
   (`crates/daemon/src/kernel_routes/commit.rs:732-733`). `prior` is the
   `PriorDecision` from `envelope.subject_admission(object_id)`
-  (`:710-712`), which reads `load_prior_for_key(AdmissionKey::Object)`
-  (`crates/kernel/src/admission.rs:1052-1059`).
+  (`:717-719`), which reads `load_prior_for_key(AdmissionKey::Object)`
+  (`crates/kernel/src/admission.rs:1055-1062`).
 - `CommitPlan.classes` (the caller's derived pair from `resolve_classes`,
-  `commit.rs:413-446`) is read only by `admit` (`:579-598`) for inserts
+  `commit.rs:413-446`) is read only by `admit` (`:585-604`) for inserts
   and supersedes. The `Operation::Disposition` arm in `apply`
-  (`:1000-1006`) never touches it.
+  (`:1016-1025`) never touches it.
 - `evaluate_admission` refuses when the request's classes differ from the
   prior's (`admission.rs:284-289`), so the copy is also what makes the
   route's dispositions pass that gate for every subject class.
 - `write_admission` binds `prepared.source_class.as_str()` and
-  `prepared.taint_class.as_str()` into the row (`admission.rs:1836-1837`);
+  `prepared.taint_class.as_str()` into the row (`admission.rs:1839-1840`);
   `prepared.source_class` is the request's (`prepare_with_facts`,
-  `:1563-1564`, `:1666-1667`).
-- Route test `:5493` quarantines `approval-1`, an `ExplicitUser`/
+  `:1617-1618`, `:1720-1721`).
+- Route test `:5569` quarantines `approval-1`, an `ExplicitUser`/
   `UserExplicit` subject seeded by `seed_approval`
   (`kernel_routes.rs:4362-4393`), through a route whose caller derives
   (`ModelInference`, `AssistantInference`); the commit is `available`, so
@@ -49,7 +49,7 @@ relabel the subject's lineage as model inference, and the subject's next
 ## Timing windows and dependencies
 
 None in time. Depends on `subject_admission` returning the object-scoped
-latest row, not the lineage row (`admission.rs:2245-2254` doc).
+latest row, not the lineage row (`admission.rs:2248-2257` doc).
 
 ## What a test must construct
 
@@ -68,7 +68,7 @@ latest row, not the lineage row (`admission.rs:2245-2254` doc).
 
 ### Q: Which wording is the contract, the header's "derived classes" or the plan's "prior source class"?
 
-- Sources examined: `commit.rs:1-10`, `:579-598`, `:694-736`,
+- Sources examined: `commit.rs:1-10`, `:585-604`, `:700-742`,
   `admission.rs:280-289`, plan P4 Problem Frame and R4.
 - Findings: the header describes inserts; the disposition arm copies the
   prior. Both statements are true of their own paths; the header's

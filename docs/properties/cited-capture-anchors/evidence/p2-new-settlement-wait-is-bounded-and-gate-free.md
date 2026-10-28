@@ -1,0 +1,44 @@
+# p2-new-settlement-wait-is-bounded-and-gate-free
+
+## Discovery trigger
+
+Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), obligation for constraint C7, mechanism D4 and OQ2-2. Activated by the U4 ticket [#1136](https://github.com/ahrav/eidnara/issues/1136).
+
+## Evidence trail
+
+`into_job` (`crates/daemon/src/source_capture.rs:708`) takes the publication slot, reads one `tokio::time::Instant` as `accepted_at`, seeds the job's `EvalBudget` with `accepted_at.into_std() + CAPTURE_BUDGET` (`:41`, 5 s), and records `Settlement::Running { accepted_at }` for the job's `SessionIdentity` under the supervisor's std mutex. Without the tokio `test-util` feature, which only dev-dependencies enable, the two readings are the same clock, so the wait deadline and the job budget share one origin. Under a paused test clock the std budget starts later by the virtual time already advanced, so a paused test asserts only the waiter's deadline.
+
+The submit handler (`crates/daemon/src/memory_capture/native.rs:394`) awaits `capture_settlements` (`:124`) after the lease and capture-enabled checks and before `kernel_routes::blocking`, the hop whose closure calls `CaptureWork::publish`, which takes the capture commit gate (`crates/daemon/src/memory_capture.rs:1006`). It collects the distinct sessions of the plan's joinable jobs (`settlement_key`, `crates/daemon/src/memory_capture/cite.rs:123`), and `SourceCapture::observe_settlements` (`crates/daemon/src/source_capture.rs:580`) reads every entry's state under one acquisition of the mutex, released before any await; for a `Running` entry it subscribes to the entry's `watch` channel, which the first waiting submit creates and the entry's next write sends on and drops. Each observation then settles inside `tokio::select! { biased; cancel; settle }`. `settle` returns at once for an observed state other than `Running`, and for an observed `Running` entry wraps `changed()` in `timeout_at(accepted_at + CAPTURE_BUDGET)`, so the wait returns by its deadline whatever the job does. One publication slot means at most one observed entry is `Running`, so the waits of one submit end by that entry's deadline; a pass accepted after the observation is no part of it. The `watch` version check means a write between the observation and the await is seen.
+
+No lock is held across any await of the wait: the settlement mutex guard lives only inside `observe_settlements`, and the commit gate is taken only on the blocking pool after the wait returns. The job records its end after it releases the gate (`crates/daemon/src/source_capture.rs:933`), so a woken submit does not queue on the gate behind it.
+
+## Failure scenario
+
+A wait inside the gate critical section deadlocks the source job, which needs the gate to commit; a wait without a deadline lets a stalled job hold every submit of its session.
+
+## Timing windows and dependencies
+
+A source job stalled past its budget; a submit that arrives while the job runs.
+
+## What a test must construct
+
+- `a_running_entry_waits_for_its_end_or_its_budget_deadline` (`crates/daemon/src/source_capture/settlement.rs:340`): under `start_paused`, a waiter on a `Running` entry is pending at `accepted_at + 5 s - 1 ms` and returns `BudgetExpired` at exactly `accepted_at + 5 s`; a waiter whose job ends after 1 s returns `Settled` at 1 s.
+- `every_submit_waiting_on_one_running_entry_reads_its_next_write` (`crates/daemon/src/source_capture/settlement.rs:556`): two waiters on one `Running` entry share its channel and both read the job's `Ended { Deadline }` as `BudgetExpired`; a later observation of the ended entry arms no wait.
+- `a_waiter_reads_the_first_write_after_its_observation` (`crates/daemon/src/source_capture/settlement.rs:586`): when the job ends on its deadline and a newer pass of the session takes the slot before the waiter runs, the waiter returns `BudgetExpired` from the end, with no virtual time elapsed.
+- `on_the_paused_clock_the_wait_is_zero_when_settled_and_ends_exactly_at_the_deadline` (`crates/daemon/src/source_capture_tests.rs:4008`): through the handler on a paused current-thread runtime, a submit after the publish ended advances no virtual time, and a submit against a parked publish is pending 1 ms before the deadline with no lookup, then returns `publish_budget_expired` with the clock exactly at the deadline.
+- `a_publish_past_its_budget_releases_the_submit_at_the_deadline` (`crates/daemon/src/source_capture_tests.rs:4205`): the publish hook parks a real source job; the submit returns between 5 s and 7 s after the entry's `accepted_at`, and the parked job later ends as `Deadline` on its own budget.
+- `a_submit_during_the_publish_waits_outside_the_gate_and_then_cites` (`crates/daemon/src/source_capture_tests.rs:4093`): while the submit is parked in the wait, the test acquires `capture_commit_gate` with `try_lock`. The hook parks the job before it takes the gate, so a free gate shows the submit holds none at its await point.
+
+## Investigation log
+
+### Q: Does the wait return by the deadline under a paused clock?
+
+- Sources examined: `settle`, the paused-clock unit test and handler test.
+- Findings: yes; the deadline is `accepted_at + CAPTURE_BUDGET` on the tokio clock, and both tests advance exactly to it.
+- Conclusion: resolved.
+
+### Q: Is the gate free while a waiter is parked?
+
+- Sources examined: `capture_settlements`, `CaptureWork::publish`, the gate assertion in `crates/daemon/src/source_capture_tests.rs:4093`.
+- Findings: the gate is taken only inside the blocking hop, which starts after the wait; the test takes the gate while the submit waits.
+- Conclusion: resolved.

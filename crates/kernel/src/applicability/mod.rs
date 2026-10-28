@@ -24,6 +24,7 @@ pub use checkout::{
 pub use checks::{
     CheckCache, CheckOutcome, MAX_CHECK_CACHE_BYTES, MAX_CONFIG_BYTES, run_cheap_check,
 };
+pub(crate) use engine::anchor_row_exceeds_bounds;
 pub use engine::{
     ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityState, BatchEvaluation,
     ClassificationToken, EvaluationStats, FailedCheck, MAX_OBJECT_ID_BYTES,

@@ -1044,7 +1044,7 @@ None.
 ### Corrections to the evaluation text
 
 - "Ten call sites" for `kernel_routes::blocking` (Coverage balance (a) and
-  Wildcard 1) is eight through `blocking` (`commit.rs:1013`, `:1038`,
+  Wildcard 1) is eight through `blocking` (`commit.rs:1034`, `:1059`,
   `egress.rs:201`, `eligibility.rs:419`, `ingest.rs:722`, `:797`,
   `read.rs:291`, `:311`) plus two direct `spawn_blocking` calls in
   `kernel_routes` (`health.rs:224`, `mod.rs:358`). The evaluation body is

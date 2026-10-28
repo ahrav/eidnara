@@ -9,7 +9,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::time::Instant;
 
@@ -181,18 +181,6 @@ pub struct ObjectState {
     pub latest_change_commit_seq: Option<i64>,
 }
 
-/// One evidence row as a writer transaction sees it: whether it is live, and
-/// the non-null scope ids of the live rows that cite it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvidenceCitations {
-    /// True when the row's `invalidated_commit_seq` is NULL at the transaction's snapshot.
-    pub live: bool,
-    /// The distinct non-null scope ids of the live decisions, observations,
-    /// and asserted edges whose `evidence_id` is this row, and of the live
-    /// decisions whose events cite it, in scope-id order.
-    pub citing_scopes: Vec<String>,
-}
-
 /// Filters observations by dependency edge, observation kind, and writer identity: the registry source kind, domain, and exact scope (`None` selects unscoped rows). Kinds are free-form literals any producer may reuse, so the writer identity is what keeps another producer's rows out of the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DependentObservationQuery<'a> {
@@ -265,6 +253,24 @@ pub(super) const MAX_STAGING_LEASE_MS: i64 = 3_600_000;
 /// stays small against the lease cap so a future timestamp cannot extend the
 /// reaper boundary.
 pub(super) const MAX_STAGING_CLOCK_SKEW_MS: i64 = 60_000;
+
+/// `INDEXED BY` requires each seek to use its table's partial index of live,
+/// scoped citing rows. SQLite fails statement preparation when that index is
+/// unusable.
+const LIVE_CITING_SCOPE_SEEKS: [&str; 3] = [
+    "SELECT scope_id FROM decisions INDEXED BY idx_decisions_live_evidence_scope
+      WHERE evidence_id=?1 AND scope_id>=?2 AND scope_id IS NOT NULL
+        AND invalidated_commit_seq IS NULL
+      ORDER BY scope_id LIMIT 1",
+    "SELECT scope_id FROM observations INDEXED BY idx_observations_live_evidence_scope
+      WHERE evidence_id=?1 AND scope_id>=?2 AND scope_id IS NOT NULL
+        AND invalidated_commit_seq IS NULL
+      ORDER BY scope_id LIMIT 1",
+    "SELECT scope_id FROM asserted_edges INDEXED BY idx_edges_live_evidence_scope
+      WHERE evidence_id=?1 AND scope_id>=?2 AND scope_id IS NOT NULL
+        AND invalidated_commit_seq IS NULL
+      ORDER BY scope_id LIMIT 1",
+];
 
 pub const OPERATOR_REDACTION_PLACEHOLDER: &str = super::schema::operator_redaction_placeholder!();
 
@@ -529,15 +535,22 @@ impl Envelope<'_> {
         load_object_state(self.tx, object_id)
     }
 
-    /// The liveness and citing scopes of the evidence row `evidence_id`, or
-    /// `None` when no row carries it. Reads inside the envelope's transaction,
-    /// so a check against the answer and a write citing the row observe one
-    /// state.
-    pub fn evidence_citations(
+    /// Whether the evidence row `evidence_id` is live and cited by a live row
+    /// whose scope `accepts` takes. The citers are the live decisions,
+    /// observations, and asserted edges whose `evidence_id` is this row, and the
+    /// live decisions whose events cite it; an unscoped citer offers no scope.
+    /// `accepts` sees each distinct scope id at most once.
+    ///
+    /// The seeks in `LIVE_CITING_SCOPE_SEEKS` visit each distinct citing
+    /// scope in each table, with one additional seek when the table is
+    /// exhausted. An accepted direct citer ends the check before the
+    /// decision-event scan. All reads use the envelope's transaction.
+    pub fn evidence_cited_in(
         &self,
         evidence_id: &str,
-    ) -> Result<Option<EvidenceCitations>, KernelError> {
-        let Some(live) = self
+        mut accepts: impl FnMut(&str) -> Result<bool, KernelError>,
+    ) -> Result<bool, KernelError> {
+        let live = self
             .tx
             .query_row_cached(
                 "SELECT invalidated_commit_seq IS NULL FROM evidence_meta WHERE evidence_id=?1",
@@ -545,35 +558,88 @@ impl Envelope<'_> {
                 |row| row.get::<_, bool>(0),
             )
             .optional()
-            .map_err(map_sqlite)?
-        else {
-            return Ok(None);
+            .map_err(map_sqlite)?;
+        if live != Some(true) {
+            return Ok(false);
+        }
+        let mut refused: HashSet<String> = HashSet::new();
+        let mut judge = |scope_id: &str| -> Result<bool, KernelError> {
+            if refused.contains(scope_id) {
+                return Ok(false);
+            }
+            if accepts(scope_id)? {
+                return Ok(true);
+            }
+            refused.insert(scope_id.to_string());
+            Ok(false)
         };
+        for sql in LIVE_CITING_SCOPE_SEEKS {
+            let mut statement = self.tx.prepare_cached(sql).map_err(map_sqlite)?;
+            // Under BINARY collation the smallest string after `scope_id` is
+            // `scope_id` followed by NUL, so seeking from it skips every row
+            // of the scope just judged.
+            let mut from = String::new();
+            while let Some(scope_id) = statement
+                .query_row(params![evidence_id, from], |row| row.get::<_, String>(0))
+                .optional()
+                .map_err(map_sqlite)?
+            {
+                if judge(&scope_id)? {
+                    return Ok(true);
+                }
+                from = scope_id;
+                from.push('\0');
+            }
+        }
         let mut statement = self
             .tx
             .prepare_cached(
-                "SELECT scope_id FROM decisions
-                  WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL AND scope_id IS NOT NULL
-                 UNION SELECT scope_id FROM observations
-                  WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL AND scope_id IS NOT NULL
-                 UNION SELECT d.scope_id FROM decision_events e
+                "SELECT d.scope_id FROM decision_events e
                    JOIN decisions d ON d.decision_id=e.decision_id
-                  WHERE e.evidence_id=?1 AND d.invalidated_commit_seq IS NULL
-                    AND d.scope_id IS NOT NULL
-                 UNION SELECT scope_id FROM asserted_edges
-                  WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL AND scope_id IS NOT NULL
-                 ORDER BY 1",
+                  WHERE e.evidence_id=?1 AND d.scope_id IS NOT NULL
+                    AND d.invalidated_commit_seq IS NULL",
             )
             .map_err(map_sqlite)?;
-        let citing_scopes = statement
-            .query_map([evidence_id], |row| row.get::<_, String>(0))
-            .map_err(map_sqlite)?
-            .collect::<rusqlite::Result<Vec<_>>>()
+        let mut rows = statement.query([evidence_id]).map_err(map_sqlite)?;
+        while let Some(row) = rows.next().map_err(map_sqlite)? {
+            let scope_id = row
+                .get_ref(0)
+                .map_err(map_sqlite)?
+                .as_str()
+                .map_err(|_| KernelError::Io)?;
+            if judge(scope_id)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Counts the SQLite virtual-machine instructions `read` executes on this
+    /// envelope's connection. The one-instruction progress handler replaces
+    /// any existing handler and is removed after `read` returns.
+    #[cfg(feature = "test-support")]
+    pub fn sqlite_steps_for_test<T>(
+        &self,
+        read: impl FnOnce(&Self) -> Result<T, KernelError>,
+    ) -> Result<(u64, T), KernelError> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let steps = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&steps);
+        self.tx
+            .progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
             .map_err(map_sqlite)?;
-        Ok(Some(EvidenceCitations {
-            live,
-            citing_scopes,
-        }))
+        let result = read(self);
+        self.tx
+            .progress_handler(0, None::<fn() -> bool>)
+            .map_err(map_sqlite)?;
+        Ok((steps.load(Ordering::Relaxed), result?))
     }
 
     pub fn commit_seq(&self) -> i64 {
@@ -629,7 +695,7 @@ impl Envelope<'_> {
     ///
     /// # Errors
     ///
-    /// Returns `Conflict` when the key is already recorded, and `InvalidInput` for a reserved producer or a malformed intent.
+    /// `record_receipt` returns `InvalidInput` for a reserved producer, a malformed intent, or a `result` above `MAX_REDACTABLE_BYTES`, and `Conflict` when the key is already recorded.
     pub fn record_receipt(
         &mut self,
         intent: CommitIntent,
@@ -663,10 +729,8 @@ impl Envelope<'_> {
         self.insert_receipt(&RedactedIntent::new(intent)?, result)
     }
 
+    /// A recorded key, under this digest or another, fails the insert on the `(producer, operation_key)` uniqueness constraint, which maps to `Conflict`.
     fn insert_receipt(&mut self, intent: &RedactedIntent, result: &str) -> Result<(), KernelError> {
-        if stored_receipt(self.tx, intent)?.is_some() {
-            return Err(KernelError::Conflict);
-        }
         let receipt_id = operation_identity(intent);
         let redacted = redact(result)?;
         self.tx
@@ -1334,6 +1398,26 @@ pub(crate) struct PreparedIntent(RedactedIntent);
 impl PreparedIntent {
     pub(crate) fn new(intent: CommitIntent) -> Result<Self, KernelError> {
         RedactedIntent::new(intent).map(Self)
+    }
+
+    /// This intent under `operation_key` and `request_digest`, checked as [`Self::new`] checks them; the producer, actor, and cause keep their redaction, so a caller keying many receipts under one producer scans those fields once.
+    pub(crate) fn rekeyed(
+        &self,
+        operation_key: &str,
+        request_digest: String,
+    ) -> Result<Self, KernelError> {
+        if !context_core::canonical_json::is_lower_hex(&request_digest, 64)
+            || operation_key.trim().is_empty()
+        {
+            return Err(KernelError::InvalidInput);
+        }
+        Ok(Self(RedactedIntent {
+            producer: self.0.producer.clone(),
+            operation_key: identity(operation_key)?,
+            request_digest,
+            actor: self.0.actor.clone(),
+            cause: self.0.cause.clone(),
+        }))
     }
 }
 
@@ -2408,6 +2492,51 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(detections, 2, "{key}");
+        }
+    }
+
+    /// A rekeyed intent names the operation identity, producer, actor, and cause of the intent built with that key and digest, and refuses what [`PreparedIntent::new`] refuses in those two fields.
+    #[test]
+    fn a_rekeyed_intent_is_the_intent_built_with_its_key() {
+        let template = PreparedIntent::new(intent("eidnara-kernel/test", "first")).unwrap();
+        let rekeyed = template.rekeyed("second", "b".repeat(64)).unwrap();
+        let built = PreparedIntent::new(CommitIntent {
+            request_digest: "b".repeat(64),
+            ..intent("eidnara-kernel/test", "second")
+        })
+        .unwrap();
+        assert_eq!(
+            super::operation_identity(&rekeyed.0),
+            super::operation_identity(&built.0)
+        );
+        assert_eq!(
+            (
+                &rekeyed.0.producer,
+                &rekeyed.0.operation_key,
+                &rekeyed.0.request_digest,
+                &rekeyed.0.actor.text,
+                &rekeyed.0.cause.text
+            ),
+            (
+                &built.0.producer,
+                &built.0.operation_key,
+                &built.0.request_digest,
+                &built.0.actor.text,
+                &built.0.cause.text
+            )
+        );
+        for (key, digest) in [
+            ("", "b".repeat(64)),
+            (" \t", "b".repeat(64)),
+            (SECRET, "b".repeat(64)),
+            ("key", "B".repeat(64)),
+            ("key", "b".repeat(63)),
+        ] {
+            assert_eq!(
+                template.rekeyed(key, digest.clone()).err(),
+                Some(crate::KernelError::InvalidInput),
+                "{key:?} {digest}"
+            );
         }
     }
 

@@ -10,7 +10,9 @@ published on branch `spec/contradiction-candidates-property-catalog`
 #1164 lands the part: every `file:line` reference is re-verified at the
 #1164 branch tip (base `979fb814e`, scorer commits `05acd0107` and
 `446c7363f`, the review round; references into the scorer module and
-its test file are verified at `446c7363f`). References were remapped through the git diff from `3a3b916b7`; references to lines that
+its test file are verified at `446c7363f`, and re-verified after the
+scorer's term pipeline moved to hashed spellings, which also added the
+differential test file). References were remapped through the git diff from `3a3b916b7`; references to lines that
 changed since then were rewritten by hand. Those changes come from #1161
 (the `eidnara_memory` `dispute` action, `EIDNARA_MEMORY_DEFAULT_ACTIONS`,
 per-allowlist schemas, and the pi `allowedActions`, which resolves lead D7)

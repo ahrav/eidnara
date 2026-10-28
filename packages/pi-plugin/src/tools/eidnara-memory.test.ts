@@ -430,6 +430,22 @@ describe("Pi eidnara_memory dispute", () => {
         expect(h.transport.calls).toHaveLength(0);
     });
 
+    it("refuses an action outside the canonical set even when a caller's allowlist names it", async () => {
+        // An untyped caller can hand the factory any strings; only canonical actions may dispatch.
+        const h = seeded(["typo", "merge"] as unknown as readonly EidnaraMemoryAction[]);
+        const refused = await h.execute(
+            {
+                action: "typo",
+                objectIds: ["mem_rule", "mem_other"],
+                content: "x",
+                category: "PROJECT_RULES",
+            },
+            "call-typo",
+        );
+        expect(textOf(refused)).toBe("Error: Action 'typo' is not allowed in this context.");
+        expect(h.transport.calls).toHaveLength(0);
+    });
+
     it("files a dispute under agent:pi and the assistant source kind when allowed", async () => {
         const h = seeded(EIDNARA_MEMORY_ACTIONS);
         expect(h.tool.parameters.properties.action).toMatchObject({
@@ -439,22 +455,33 @@ describe("Pi eidnara_memory dispute", () => {
             await h.execute(disputeArgs, "call-dispute"),
         );
         expect(filed).toMatchObject({ outcome: "applied", disposition: "contradicted" });
-        const commit = h.transport.calls.at(-1)?.body as {
-            intent: { actor: string; cause: string };
-            source_kind: string;
-            operations: unknown[];
-        };
-        expect(commit.intent.actor).toBe("agent:pi");
-        expect(commit.intent.cause).toBe("eidnara_memory dispute call-dispute");
-        expect(commit.source_kind).toBe("assistant");
-        expect(commit.operations).toEqual([
-            {
-                op: "disposition",
-                object_id: "mem_rule",
-                event: "contradict",
-                evidence_ref: { path: "src/a.rs", git_object_id: disputeArgs.gitObjectId },
-            },
-        ]);
+        const bodies = h.transport.calls.map(
+            (call) =>
+                call.body as {
+                    preview?: boolean;
+                    intent: { actor: string; cause: string };
+                    source_kind: string;
+                    asserted_source_class?: string;
+                    asserted_taint_class?: string;
+                    operations: unknown[];
+                },
+        );
+        expect(bodies.map((body) => body.preview === true)).toEqual([true, false]);
+        for (const body of bodies) {
+            expect(body.intent.actor).toBe("agent:pi");
+            expect(body.intent.cause).toBe("eidnara_memory dispute call-dispute");
+            expect(body.source_kind).toBe("assistant");
+            expect(body.asserted_source_class).toBeUndefined();
+            expect(body.asserted_taint_class).toBeUndefined();
+            expect(body.operations).toEqual([
+                {
+                    op: "disposition",
+                    object_id: "mem_rule",
+                    event: "contradict",
+                    evidence_ref: { path: "src/a.rs", git_object_id: disputeArgs.gitObjectId },
+                },
+            ]);
+        }
     });
 
     it("needs a stable tool-call identity and sends an evidence id as evidence_id", async () => {
@@ -481,12 +508,23 @@ describe("Pi eidnara_memory dispute", () => {
 
     it("refuses a dispute without evidence before sending anything", async () => {
         const h = seeded(EIDNARA_MEMORY_ACTIONS);
-        const result = await h.execute(
+        for (const args of [
             { action: "dispute", objectId: "mem_rule", event: "contradict" },
-            "call-x",
-        );
-        expect(textOf(result)).toStartWith("Error: dispute needs objectId");
-        expect(result.isError).toBeTrue();
+            { action: "dispute", objectId: "mem_rule", event: "contradict", evidenceId: "" },
+            {
+                action: "dispute",
+                objectId: "mem_rule",
+                event: "contradict",
+                path: "",
+                gitObjectId: "",
+            },
+            { action: "dispute", objectId: "mem_rule", event: "contradict", path: "src/a.rs" },
+            { action: "dispute", event: "contradict", evidenceId: "ev-1" },
+        ]) {
+            const result = await h.execute(args, "call-x");
+            expect(textOf(result)).toStartWith("Error: dispute needs objectId");
+            expect(result.isError).toBeTrue();
+        }
         expect(h.transport.calls).toHaveLength(0);
     });
 });

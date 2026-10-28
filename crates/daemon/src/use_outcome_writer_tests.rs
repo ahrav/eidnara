@@ -1,10 +1,16 @@
 use super::*;
-use crate::use_outcome_writer::{PassWriteBudget, Serve, UseOutcomeWrite, record_serve};
+use crate::kernel_routes::KernelOpenCoordinator;
+use crate::use_outcome_writer::{Serve, UseOutcomeWrite, WRITE_BUDGET};
 use kernel::KernelError;
 use kernel_route_fixtures::{MEMORY_DOMAIN, commit_verified_memory, ensure_domain, intent};
 
 pub(super) fn bound(project: &Path) -> SessionBinding {
     binding(project.to_str().unwrap(), "ses")
+}
+
+/// The production writer wait, as the handler hands it off.
+fn record_serve(kernel: &KernelOpenCoordinator, serve: &Serve<'_>) -> Option<UseOutcomeWrite> {
+    crate::use_outcome_writer::record_serve(kernel, serve, WRITE_BUDGET)
 }
 
 /// Commits the project's scope and one verified memory decision per `(object_id, summary)`.
@@ -50,7 +56,7 @@ pub(super) fn served(handler: &Handler, project: &Path) -> Vec<kernel::UseOutcom
 fn counts(handler: &Handler) -> Vec<(&'static str, u64)> {
     UseOutcomeWrite::ALL
         .iter()
-        .map(|outcome| (outcome.name(), handler.use_outcome_counts.get(*outcome)))
+        .map(|outcome| (outcome.name(), handler.use_outcome_writes.get(*outcome)))
         .filter(|(_, count)| *count > 0)
         .collect()
 }
@@ -138,46 +144,31 @@ async fn an_equal_digest_replays_and_another_harness_or_role_conflicts() {
         }],
     );
     let binding = bound(&project);
+    let set = snapshot.served_set();
     let serve = |harness: &'static str, is_subagent: bool| Serve {
         project: &binding.kernel_project,
         harness,
         session_id: "ses",
         is_subagent,
-        snapshot: &snapshot,
+        served: &set,
         recorded_at: 1,
     };
     assert_eq!(
-        record_serve(
-            &handler.kernel,
-            &PassWriteBudget::default(),
-            &serve("daemon-test", false)
-        ),
+        record_serve(&handler.kernel, &serve("daemon-test", false)),
         Some(UseOutcomeWrite::Written)
     );
     let tip = kernel_commits(&handler);
     assert_eq!(
-        record_serve(
-            &handler.kernel,
-            &PassWriteBudget::default(),
-            &serve("daemon-test", false)
-        ),
+        record_serve(&handler.kernel, &serve("daemon-test", false)),
         Some(UseOutcomeWrite::Replayed)
     );
     assert_eq!(kernel_commits(&handler), tip, "a replay commits nothing");
     assert_eq!(
-        record_serve(
-            &handler.kernel,
-            &PassWriteBudget::default(),
-            &serve("other-harness", false)
-        ),
+        record_serve(&handler.kernel, &serve("other-harness", false)),
         Some(UseOutcomeWrite::Conflict)
     );
     assert_eq!(
-        record_serve(
-            &handler.kernel,
-            &PassWriteBudget::default(),
-            &serve("daemon-test", true)
-        ),
+        record_serve(&handler.kernel, &serve("daemon-test", true)),
         Some(UseOutcomeWrite::Conflict)
     );
     let records = served(&handler, &project);
@@ -215,14 +206,42 @@ async fn only_an_available_composition_is_recorded() {
                 ..bound(&disabled_project)
             },
         );
-        seed_memories(
-            &disabled.kernel.kernel_store().unwrap(),
-            &disabled_project,
-            &[("mem-a", "Rule a.")],
+        let kernel = disabled.kernel.kernel_store().unwrap();
+        seed_memories(&kernel, &disabled_project, &[("mem-a", "Rule a.")]);
+        // A live record with a null `last_transform_at` is stale for any pass, so a touch on the disabled route would count.
+        let stale = canonical_memory::CanonicalMemorySnapshot::new(
+            kernel.tip().unwrap(),
+            false,
+            vec![canonical_memory::CanonicalMemory {
+                object_id: "mem-a".to_string(),
+                category: "PROJECT_RULES".to_string(),
+                content: "Rule a.".to_string(),
+            }],
+        );
+        let binding = bound(&disabled_project);
+        let stale = stale.served_set();
+        assert_eq!(
+            record_serve(
+                &disabled.kernel,
+                &Serve {
+                    project: &binding.kernel_project,
+                    harness: &binding.harness,
+                    session_id: "ses",
+                    is_subagent: false,
+                    served: &stale,
+                    recorded_at: 1,
+                },
+            ),
+            Some(UseOutcomeWrite::Written)
         );
         let response = call_transform(&disabled, vec![ck("m1", 1, "hello")]).await;
         assert_eq!(response["action"], "HARD", "{response}");
-        assert!(served(&disabled, &disabled_project).is_empty());
+        let records = served(&disabled, &disabled_project);
+        assert_eq!(records.len(), 1, "the disabled pass recorded no serve");
+        assert_eq!(
+            records[0].serve.last_transform_at, None,
+            "the disabled pass touched no record"
+        );
         assert!(
             counts(&disabled).is_empty(),
             "a disabled route attempts no write"
@@ -337,20 +356,26 @@ async fn a_discarded_attempt_leaves_no_serve_and_the_retry_records_one() {
     let rival = Arc::clone(&store);
     let raced = Arc::new(Mutex::new(None));
     let fired = Arc::clone(&raced);
+    let writes = Arc::clone(&handler.use_outcome_writes);
+    // The hook runs just before the attempt's CAS, so a write handed off ahead of that commit would hold a slot here.
     crate::transform::install_transform_attempt_hook(session, move || {
         let loaded = rival.load(session).unwrap();
         rival
             .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
-        *fired.lock().unwrap() = Some(loaded.meta.project_memory);
+        *fired.lock().unwrap() = Some((
+            loaded.meta.project_memory,
+            writes.writes_in_flight(),
+            writes.get(UseOutcomeWrite::Written),
+        ));
     });
     let mut raced_request = request(vec![ck("m1", 1, "hello")]);
     raced_request["session_id"] = json!(session);
     let response = call_transform_request_on_channel(&handler, 9, raced_request).await;
     assert_eq!(
         *raced.lock().unwrap(),
-        Some(None),
-        "the rival committed before the attempt's commit, while no composition was stored"
+        Some((None, 0, 0)),
+        "the rival committed before the attempt's commit, while no composition was stored and no write was handed off"
     );
     assert_eq!(response["action"], "HARD", "{response}");
     let after = store.load(session).unwrap();
@@ -371,10 +396,26 @@ async fn a_discarded_attempt_leaves_no_serve_and_the_retry_records_one() {
         .unwrap()
         .unwrap_or_default();
     assert_eq!(records.len(), 1);
+    let composition = &response["project_memory"];
+    assert_eq!(composition["kind"], "canonical", "{response}");
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+    assert_eq!(
+        records[0].serve.served_commit_seq,
+        composition["known_as_of"].as_i64().unwrap()
+    );
+    assert_eq!(
+        records[0].serve.composition_revision,
+        composition["revision"].as_u64().unwrap()
+    );
+    assert_eq!(
+        after.meta.project_memory,
+        serde_json::from_value(composition.clone()).ok(),
+        "the retry's persisted composition is the one the record names"
+    );
     assert_eq!(counts(&handler), [("written", 1)]);
 }
 
-/// On the additive engine a subagent pass that freezes a Canonical composition records the `subagent` role; on the `eidnara_folds` engine the same request freezes no composition and records nothing.
+/// On the additive engine a subagent pass that freezes a Canonical composition records the `subagent` role; on the `eidnara_folds` engine the same request plans no HARD, is served no block and no composition, and records nothing. A primary pass records `primary` on each engine.
 #[tokio::test(flavor = "current_thread")]
 async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
     for (config, is_subagent, expected) in [
@@ -389,6 +430,11 @@ async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
             Some(kernel::SessionRole::Primary),
         ),
         (default_test_config(), true, None),
+        (
+            default_test_config(),
+            false,
+            Some(kernel::SessionRole::Primary),
+        ),
     ] {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, project) =
@@ -410,8 +456,20 @@ async fn the_session_role_follows_the_pass_subagent_flag_on_each_engine() {
         let response = call_transform_request(&handler, subagent).await;
         assert_eq!(response["status"], "ok", "{response}");
         if expected.is_none() {
-            assert_ne!(response["action"], "HARD", "{response}");
+            // The folding engine plans Soft or Defer for a subagent pass; `SOFT+` is the wire name of Defer.
+            assert!(
+                response["action"] == "SOFT" || response["action"] == "SOFT+",
+                "{response}"
+            );
+            assert!(response["project_memory"].is_null(), "{response}");
         }
+        assert_eq!(
+            serde_json::to_string(&response)
+                .unwrap()
+                .contains("<project-memory>"),
+            expected.is_some(),
+            "{response}"
+        );
         let roles: Vec<_> = served(&handler, &project)
             .iter()
             .map(|record| record.serve.session_role)
@@ -454,6 +512,11 @@ async fn an_equal_served_set_at_a_later_known_as_of_replays() {
     assert_eq!(later["action"], "HARD", "{later}");
     let first_seq = first["project_memory"]["known_as_of"].as_i64().unwrap();
     assert!(later["project_memory"]["known_as_of"].as_i64().unwrap() > first_seq);
+    // An equal revision digests equal rendered rows, so the later fold served the same set.
+    assert_eq!(
+        later["project_memory"]["revision"], first["project_memory"]["revision"],
+        "{later}"
+    );
     let records = served(&handler, &project);
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].serve.served_commit_seq, first_seq);
@@ -473,7 +536,8 @@ async fn a_dispute_between_folds_records_the_next_served_set_without_it() {
         &project,
         &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
     );
-    let _ = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
+    let first = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(first["action"], "HARD", "{first}");
     kernel
         .commit(intent("dispute"), |envelope| {
             envelope.record_admission(kernel_route_fixtures::admission(
@@ -570,6 +634,115 @@ async fn a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve(
     assert!(counts(&handler).is_empty());
 }
 
+/// Commits one verified memory decision per id, with short source and observation identities, so an object id longer
+/// than the Kernel's identity-value bound still enters the memory domain the way a wire client could insert it.
+fn seed_long_id_memories(kernel: &kernel::KernelStore, project: &Path, ids: &[String]) {
+    use kernel::{
+        AdmissionEvent, AdmissionRequest, EventKind, ObservationPayload, ObservationSpec,
+        SourceClass, TaintClass,
+    };
+    let binding = bound(project);
+    let scope_id = binding.kernel_project.scope_id();
+    kernel
+        .commit(intent("scope-long-ids"), |envelope| {
+            ensure_domain(envelope, MEMORY_DOMAIN)?;
+            if envelope.object_state(&scope_id)?.is_none() {
+                envelope.insert_scope(binding.kernel_project.scope_spec(MEMORY_DOMAIN))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    for (index, object_id) in ids.iter().enumerate() {
+        kernel
+            .commit(intent(&format!("long-id-{index}")), |envelope| {
+                let mut spec = kernel_route_fixtures::memory_decision_spec(
+                    object_id,
+                    &scope_id,
+                    "PROJECT_RULES",
+                    "Rule.",
+                );
+                spec.decision_id = format!("long-decision-{index}");
+                spec.source_id = format!("long-source-{index}");
+                envelope.insert_decision(spec)?;
+                let observation = format!("long-observed-{index}");
+                envelope.insert_observation(ObservationSpec {
+                    observation_id: observation.clone(),
+                    object_id: observation.clone(),
+                    domain_id: MEMORY_DOMAIN.to_string(),
+                    proposition_id: None,
+                    scope_id: None,
+                    anchor_id: None,
+                    evidence_id: None,
+                    observation_kind: "code_present".to_string(),
+                    payload: ObservationPayload {
+                        summary: "code present".to_string(),
+                        classification: "code_present".to_string(),
+                        detail: None,
+                    },
+                    observed_at: 1,
+                    dependencies: Vec::new(),
+                    source_kind: "repo".to_string(),
+                    source_id: format!("long-source-{index}"),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                envelope.record_admission(AdmissionRequest {
+                    candidate_id: None,
+                    subject_object_id: Some(object_id.clone()),
+                    source_class: Some(SourceClass::TrustedLocalCode),
+                    taint_class: Some(TaintClass::CurrentCode),
+                    event: AdmissionEvent {
+                        kind: EventKind::CodeObserved,
+                        trigger_object_id: Some(observation),
+                        approval_object_id: None,
+                        evidence_id: None,
+                        reason: "CodeObserved".to_string(),
+                    },
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+}
+
+/// A composition whose rendered block outgrows the Memory Store's durable-text bound fails its commit, so the pass hands
+/// off no serve: the bound that `RETAINED_SERVED_SET_BYTES_BOUND` declares per write holds because only a committed
+/// block, which renders every served id in full, reaches the hand-off.
+#[tokio::test(flavor = "current_thread")]
+async fn a_block_past_the_durable_text_bound_commits_nothing_and_hands_off_no_serve() {
+    let producer = Arc::new(ProducerState::default());
+    let config = DaemonConfig {
+        memory_budget_tokens: 50_000_000.0,
+        ..default_test_config()
+    };
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, config.clone()).await;
+    handler.bind_route(
+        test_route(7),
+        SessionBinding {
+            config,
+            ..bound(&project)
+        },
+    );
+    // One id at the Kernel's identity bound renders a block past the Memory Store's durable-text bound.
+    let id = format!(
+        "0{}",
+        "m".repeat(context_core::redaction::MAX_REDACTABLE_BYTES - 1)
+    );
+    assert!(id.len() >= memory_store::MAX_DURABLE_TEXT_BYTES);
+    seed_long_id_memories(&handler.kernel.kernel_store().unwrap(), &project, &[id]);
+    let outcome = call_transform_outcome(&handler, request(vec![ck("m1", 1, "hello")])).await;
+    match outcome {
+        PreparedOutcome::Error { code, message } => {
+            assert_eq!(code, "transform_failed", "{message}");
+            assert!(message.contains("InputLimit"), "{message}");
+        }
+        other => panic!("the oversized block committed: {other:?}"),
+    }
+    assert!(counts(&handler).is_empty(), "{:?}", counts(&handler));
+    assert!(served(&handler, &project).is_empty());
+}
+
 /// The outcome vocabulary is closed: the counters and the log line carry these names and nothing else.
 #[test]
 fn the_write_outcomes_are_a_closed_vocabulary() {
@@ -595,16 +768,17 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     starting.kernel.set_expected(true);
     let snapshot = canonical_memory::CanonicalMemorySnapshot::new(3, false, Vec::new());
     let binding = bound(&project);
+    let set = snapshot.served_set();
     let serve = Serve {
         project: &binding.kernel_project,
         harness: "daemon-test",
         session_id: "ses",
         is_subagent: false,
-        snapshot: &snapshot,
+        served: &set,
         recorded_at: 1,
     };
     assert_eq!(
-        record_serve(&starting.kernel, &PassWriteBudget::default(), &serve),
+        record_serve(&starting.kernel, &serve),
         None,
         "a Kernel that is not Ready attempts no write"
     );
@@ -616,12 +790,13 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     let snapshot =
         canonical_memory::CanonicalMemorySnapshot::new(kernel.tip().unwrap(), false, Vec::new());
     let binding = bound(&project);
+    let set = snapshot.served_set();
     let serve = Serve {
         project: &binding.kernel_project,
         harness: "daemon-test",
         session_id: "ses",
         is_subagent: false,
-        snapshot: &snapshot,
+        served: &set,
         recorded_at: 1,
     };
     let (holding, release) = std::sync::mpsc::channel::<()>();
@@ -640,7 +815,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     };
     writer_held.recv().unwrap();
     let started = std::time::Instant::now();
-    let outcome = record_serve(&held.kernel, &PassWriteBudget::default(), &serve);
+    let outcome = record_serve(&held.kernel, &serve);
     let waited = started.elapsed();
     holding.send(()).unwrap();
     holder.join().unwrap();
@@ -653,7 +828,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     );
     assert!(served(&held, &project).is_empty());
     assert_eq!(
-        record_serve(&held.kernel, &PassWriteBudget::default(), &serve),
+        record_serve(&held.kernel, &serve),
         Some(UseOutcomeWrite::Written)
     );
     let as_subagent = Serve {
@@ -662,7 +837,7 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
     };
     for _ in 0..2 {
         assert_eq!(
-            record_serve(&held.kernel, &PassWriteBudget::default(), &as_subagent),
+            record_serve(&held.kernel, &as_subagent),
             Some(UseOutcomeWrite::Conflict),
             "a conflict is not repaired by a later fold"
         );
@@ -682,6 +857,134 @@ async fn the_real_failure_paths_count_their_outcomes_and_bound_the_wait() {
         "a read at sequence 0 names no commit, so no write is attempted"
     );
     assert!(served(&fresh, &fresh_project).is_empty());
+}
+
+/// A recorded served set replays from a reader while another writer holds the Kernel writer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recorded_served_set_replays_while_another_writer_holds_the_writer() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    seed_memories(
+        &kernel,
+        &project,
+        &[("mem-a", "Rule a."), ("mem-b", "Rule b.")],
+    );
+    let snapshot = canonical_memory::CanonicalMemorySnapshot::new(
+        kernel.tip().unwrap(),
+        false,
+        ["mem-a", "mem-b"]
+            .map(|object_id| canonical_memory::CanonicalMemory {
+                object_id: object_id.to_string(),
+                category: "PROJECT_RULES".to_string(),
+                content: format!("Rule {object_id}."),
+            })
+            .to_vec(),
+    );
+    let binding = bound(&project);
+    let set = snapshot.served_set();
+    let serve = Serve {
+        project: &binding.kernel_project,
+        harness: "daemon-test",
+        session_id: "ses",
+        is_subagent: false,
+        served: &set,
+        recorded_at: 1,
+    };
+    assert_eq!(
+        record_serve(&handler.kernel, &serve),
+        Some(UseOutcomeWrite::Written)
+    );
+    let (holding, release) = std::sync::mpsc::channel::<()>();
+    let (entered, writer_held) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(intent("hold-writer"), |_| {
+                    entered.send(()).unwrap();
+                    release.recv().unwrap();
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    writer_held.recv().unwrap();
+    let started = std::time::Instant::now();
+    let replayed = record_serve(&handler.kernel, &serve);
+    let waited = started.elapsed();
+    let conflict = record_serve(
+        &handler.kernel,
+        &Serve {
+            is_subagent: true,
+            ..serve
+        },
+    );
+    let other_session = Serve {
+        session_id: "other",
+        ..serve
+    };
+    let deadline = record_serve(&handler.kernel, &other_session);
+    holding.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(replayed, Some(UseOutcomeWrite::Replayed));
+    // The writer stays held past the budget, so `Replayed` can only come from the pooled reader; the measured wait is diagnostic.
+    eprintln!("use-outcome replay under a held writer: {waited:?}");
+    assert_eq!(conflict, Some(UseOutcomeWrite::Conflict));
+    assert_eq!(deadline, Some(UseOutcomeWrite::Deadline));
+    let served_in = |session_id: &str| {
+        kernel
+            .served_set(binding.kernel_project.digest(), "daemon-test", session_id)
+            .unwrap()
+            .unwrap_or_default()
+    };
+    let records = served_in("ses");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a", "mem-b"]);
+    assert_eq!(records[0].serve.session_role, kernel::SessionRole::Primary);
+    assert!(served_in("other").is_empty());
+    assert_eq!(
+        record_serve(&handler.kernel, &other_session),
+        Some(UseOutcomeWrite::Written)
+    );
+
+    let (entered, writer_held) = std::sync::mpsc::channel::<()>();
+    let brief = {
+        let kernel = Arc::clone(&kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(intent("hold-writer-briefly"), |_| {
+                    entered.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    writer_held.recv().unwrap();
+    let started = std::time::Instant::now();
+    // The claim is that a new served set waits for the writer's release rather than answering from the reader; a
+    // generous budget tolerates a stalled host. The measured wait is diagnostic.
+    let written = crate::use_outcome_writer::record_serve(
+        &handler.kernel,
+        &Serve {
+            session_id: "third",
+            ..serve
+        },
+        std::time::Duration::from_secs(30),
+    );
+    let waited = started.elapsed();
+    brief.join().unwrap();
+    eprintln!("use-outcome write after a brief hold: {waited:?}");
+    assert_eq!(
+        written,
+        Some(UseOutcomeWrite::Written),
+        "a new served set waits for the writer's release"
+    );
+    let third = served_in("third");
+    assert_eq!(third.len(), 1);
+    assert_eq!(third[0].decision_object_ids, ["mem-a", "mem-b"]);
 }
 
 /// The outcome vocabulary indexes its counters in order, and the Kernel errors the writer meets map to their closed names.
@@ -760,6 +1063,129 @@ async fn only_an_unready_kernel_leaves_the_pass_to_retry_its_serve() {
     }
 }
 
+/// Holds the Kernel writer on its own thread until the returned sender is sent to or dropped.
+fn hold_kernel_writer(
+    kernel: &Arc<kernel::KernelStore>,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (entered, writer_held) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let kernel = Arc::clone(kernel);
+        std::thread::spawn(move || {
+            kernel
+                .commit(intent("hold-writer-across-a-pass"), |_| {
+                    entered.send(()).unwrap();
+                    let _ = released.recv();
+                    Ok(String::new())
+                })
+                .unwrap();
+        })
+    };
+    writer_held.recv().unwrap();
+    (release, holder)
+}
+
+/// The response can return while a serve write the pass handed off remains pending.
+pub(super) async fn transform_leaving_serves_pending(
+    handler: &Handler,
+    messages: Vec<IngressMessage>,
+) -> Value {
+    transform_request_leaving_serves_pending(handler, request(messages)).await
+}
+
+/// [`transform_leaving_serves_pending`] for a request carrying usage, so a pass under context pressure refolds.
+pub(super) async fn transform_with_usage_leaving_serves_pending(
+    handler: &Handler,
+    messages: Vec<IngressMessage>,
+    current_total_input_tokens: u64,
+    context_limit_tokens: u64,
+) -> Value {
+    transform_request_leaving_serves_pending(
+        handler,
+        request_with_usage(messages, current_total_input_tokens, context_limit_tokens),
+    )
+    .await
+}
+
+async fn transform_request_leaving_serves_pending(handler: &Handler, request: Value) -> Value {
+    let request = handler.test_client_prepare_request(request);
+    let outcome = handler
+        .handle_transform_with_runner(
+            test_route(7),
+            request.clone(),
+            &transform_unit::DetachedRunner::default(),
+        )
+        .await;
+    match handler.test_client_apply(&request, outcome) {
+        PreparedOutcome::Response(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        other => panic!("unexpected handler outcome: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hard_fold_answers_while_another_writer_holds_the_kernel_writer() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    seed_memories(&kernel, &project, &[("mem-a", "Rule a.")]);
+    // A writer wait far past the pass means an inline write would hold the response until the release below, which
+    // this test never sends before the response arrives; a detached job keeps waiting while the pass answers.
+    handler
+        .use_outcome_writes
+        .set_write_budget(std::time::Duration::from_secs(30));
+    let (release, holder) = hold_kernel_writer(&kernel);
+
+    let response = transform_leaving_serves_pending(&handler, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(response["action"], "HARD", "{response}");
+    assert_eq!(
+        response["project_memory"]["kind"], "canonical",
+        "{response}"
+    );
+    assert!(
+        counts(&handler).is_empty(),
+        "the response arrives while the serve write is pending: {:?}",
+        counts(&handler)
+    );
+    assert!(served(&handler, &project).is_empty());
+
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    handler.use_outcome_writes.settled().await;
+    assert_eq!(counts(&handler), [("written", 1)]);
+    let records = served(&handler, &project);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fold_past_the_writes_in_flight_counts_a_deadline_and_a_later_fold_repairs_it() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, project) =
+        handler_with_store_and_kernel(producer, default_test_config()).await;
+    seed_memories(
+        &handler.kernel.kernel_store().unwrap(),
+        &project,
+        &[("mem-a", "Rule a.")],
+    );
+    let occupied = handler.use_outcome_writes.occupy_every_slot();
+    let first = transform_leaving_serves_pending(&handler, vec![ck("m1", 1, "hello")]).await;
+    assert_eq!(first["action"], "HARD", "{first}");
+    assert_eq!(counts(&handler), [("deadline", 1)]);
+    assert!(served(&handler, &project).is_empty());
+    drop(occupied);
+
+    let repaired = call_transform_with_usage(&handler, big_messages(), 48_000, 50_000).await;
+    assert_eq!(
+        repaired["project_memory"], first["project_memory"],
+        "{repaired}"
+    );
+    let records = served(&handler, &project);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision_object_ids, ["mem-a"]);
+    assert_eq!(counts(&handler), [("written", 1), ("deadline", 1)]);
+}
+
 /// A committed HARD fold whose boundary read then fails answers an error, and the composition its commit froze is still recorded once.
 #[tokio::test(flavor = "current_thread")]
 async fn a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve() {
@@ -810,4 +1236,9 @@ async fn a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].decision_object_ids, ["mem-a"]);
     assert_eq!(counts(&handler), [("written", 1)]);
+    assert_eq!(
+        records[0].serve.last_transform_at,
+        Some(records[0].serve.recorded_at),
+        "the serve job's touch carries the committing pass's time"
+    );
 }

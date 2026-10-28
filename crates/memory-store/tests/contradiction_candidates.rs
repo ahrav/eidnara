@@ -347,25 +347,13 @@ fn the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys() {
             .any(|row| row.evidence_id == "ev-0" && row.decision_object_id == "d1")
     );
 
-    let (rows, bytes) = store.candidate_rows_and_bytes(Some(PROJECT)).unwrap();
-    let expected: u64 = raw(&dir)
-        .prepare(
-            "SELECT project_digest,evidence_id,decision_object_id,decision_id,
-                    kernel_incarnation_id,matcher_digest FROM contradiction_candidates",
-        )
-        .unwrap()
-        .query_map([], |row| {
-            let mut total = 5 * 8;
-            for column in 0..6 {
-                total += row.get::<_, String>(column)?.len();
-            }
-            Ok(total as u64)
-        })
-        .unwrap()
-        .map(Result::unwrap)
-        .sum();
-    assert_eq!((rows, bytes), (9, expected));
-    assert_eq!(store.candidate_rows_and_bytes(None).unwrap(), (9, expected));
+    let (rows, bytes) = gauge_from_rows(&dir, PROJECT);
+    assert_eq!(rows, 9);
+    assert_eq!(
+        store.candidate_rows_and_bytes(Some(PROJECT)).unwrap(),
+        (9, bytes)
+    );
+    assert_eq!(store.candidate_rows_and_bytes(None).unwrap(), (9, bytes));
 }
 
 #[test]
@@ -462,9 +450,9 @@ fn a_late_write_replaces_held_keys_and_adds_none() {
         .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 7, 2, &late), CAPS)
         .unwrap();
     assert_eq!(
-        (outcome.written, outcome.replaced_away),
-        (1, 0),
-        "only d2 is replaced"
+        (outcome.written, outcome.replaced_away, outcome.late),
+        (1, 0, true),
+        "only d2 is replaced, and the write reports itself late"
     );
     let rows = all_rows(&store);
     let ids: Vec<&str> = rows
@@ -479,7 +467,8 @@ fn a_late_write_replaces_held_keys_and_adds_none() {
         .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 10, 3, &equal), CAPS)
         .unwrap();
     assert_eq!(
-        outcome.replaced_away, 2,
+        (outcome.replaced_away, outcome.late),
+        (2, false),
         "a write at the held tip replaces the set"
     );
 }
@@ -1495,24 +1484,43 @@ fn only_the_candidate_module_writes_the_candidate_tables() {
             }
         }
     }
-    let mut checked = 0;
-    for path in files {
-        if path
-            .file_name()
-            .is_some_and(|name| name == "contradiction_candidates.rs")
-        {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)
-            .unwrap()
-            .to_lowercase()
+    let normalize = |text: &str| {
+        text.to_lowercase()
             .split_whitespace()
             .collect::<Vec<_>>()
-            .join(" ");
+            .join(" ")
+    };
+    let owner = normalize(include_str!("../src/contradiction_candidates.rs"));
+    for write in writes {
+        assert!(
+            owner.contains(write),
+            "the scan's pattern `{write}` matches the owning module's own statements"
+        );
+    }
+    let names = [
+        "\"contradiction_candidates\"",
+        "\"contradiction_candidate_totals\"",
+    ];
+    let mut checked = 0;
+    for path in files {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name == "contradiction_candidates.rs" {
+            continue;
+        }
+        let text = normalize(&std::fs::read_to_string(&path).unwrap());
         for write in writes {
             assert!(
                 !text.contains(write),
                 "{} runs `{write}`; the totals would drift",
+                path.display()
+            );
+        }
+        for literal in names {
+            let allowed = usize::from(name == "lib.rs" && literal == names[0]);
+            assert_eq!(
+                text.matches(literal).count(),
+                allowed,
+                "{} names {literal} outside the write family's name, so a table list there could reach the candidate tables",
                 path.display()
             );
         }

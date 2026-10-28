@@ -2960,7 +2960,7 @@ fn a_writer_reads_one_identity_value_past_its_decoys() {
         .unwrap();
 }
 
-/// The lineage read: `live_source_descriptor_of_lineage` returns the one live revision of exactly the named lineage among neighboring lineages of the class, the revision that supersedes it, and `None` once the commit retires it or for a lineage with no descriptor.
+/// The lineage read: `live_source_descriptor_of_lineage` returns the one live revision of exactly the named lineage among neighboring lineages of the class, the revision that supersedes it, and `None` once the commit retires it or for a lineage with no descriptor; `live_source_descriptors_of_lineages` returns the same row for each lineage it names, in input order, a repeated lineage included, and refuses a corrupt row as the single read does.
 #[test]
 fn a_writer_reads_the_live_revision_of_one_lineage() {
     let fixture = Fixture::open();
@@ -3003,9 +3003,46 @@ fn a_writer_reads_the_live_revision_of_one_lineage() {
     }
     let lineage = |tool_call_id: &str| published[tool_call_id].lineage_id.clone();
     let unknown = "0".repeat(64);
+    let lineages = vec![
+        lineage("call-c"),
+        unknown.clone(),
+        lineage("call-a"),
+        lineage("call-b"),
+    ];
+    let one_by_one = |envelope: &kernel::Envelope<'_>| -> Result<Vec<_>, kernel::KernelError> {
+        lineages
+            .iter()
+            .map(|id| envelope.live_source_descriptor_of_lineage(OccurrenceClass::RawToolSpans, id))
+            .collect()
+    };
     fixture
         .store
         .commit(intent("read lineage"), |envelope| {
+            let batch = envelope
+                .live_source_descriptors_of_lineages(OccurrenceClass::RawToolSpans, &lineages)?;
+            assert_eq!(batch, one_by_one(envelope)?);
+            assert_eq!(batch.iter().filter(|row| row.is_some()).count(), 3);
+            let repeated = envelope.live_source_descriptors_of_lineages(
+                OccurrenceClass::RawToolSpans,
+                &[lineage("call-a"), lineage("call-a")],
+            )?;
+            assert!(repeated[0].is_some());
+            assert_eq!(
+                repeated[0], repeated[1],
+                "a repeated lineage reads its row twice"
+            );
+            assert_eq!(
+                envelope.live_source_descriptors_of_lineages(OccurrenceClass::RawToolSpans, &[])?,
+                Vec::new()
+            );
+            assert_eq!(
+                envelope.live_source_descriptors_of_lineages(
+                    OccurrenceClass::RepositoryDocuments,
+                    &lineages
+                )?,
+                vec![None; 4],
+                "the batch read is per class"
+            );
             for tool_call_id in ["call-a", "call-b", "call-c"] {
                 let row = envelope
                     .live_source_descriptor_of_lineage(
@@ -3047,6 +3084,10 @@ fn a_writer_reads_the_live_revision_of_one_lineage() {
                     .is_some(),
                 "a neighbor's retirement leaves the lineage live"
             );
+            let batch = envelope
+                .live_source_descriptors_of_lineages(OccurrenceClass::RawToolSpans, &lineages)?;
+            assert_eq!(batch, one_by_one(envelope)?);
+            assert_eq!(batch[3], None, "the batch sees the commit's own retirement");
             Ok(String::new())
         })
         .unwrap();
@@ -3084,4 +3125,57 @@ fn a_writer_reads_the_live_revision_of_one_lineage() {
         Some(second.object_id),
         "a superseding revision is the live one"
     );
+    let connection = rusqlite::Connection::open_with_flags(
+        fixture.root.path().join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap();
+    let payload: Vec<u8> = connection
+        .query_row(
+            "SELECT observation_payload FROM observations WHERE object_id=?1",
+            [&published["call-c"].object_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut stored: Value = serde_json::from_slice(&payload).unwrap();
+    let mut detail: SourceDescriptorDetail =
+        serde_json::from_str(stored["detail"].as_str().unwrap()).unwrap();
+    detail.evidence_id = "other-evidence".to_string();
+    stored["detail"] = Value::String(serde_json::to_string(&detail).unwrap());
+    connection
+        .execute(
+            "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
+            rusqlite::params![
+                serde_json::to_vec(&stored).unwrap(),
+                published["call-c"].object_id
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    fixture
+        .store
+        .commit(intent("read corrupt lineage"), |envelope| {
+            assert_eq!(
+                envelope.live_source_descriptor_of_lineage(
+                    OccurrenceClass::RawToolSpans,
+                    &lineage("call-c")
+                ),
+                Err(kernel::KernelError::CorruptCanonicalRow)
+            );
+            assert_eq!(
+                envelope
+                    .live_source_descriptors_of_lineages(OccurrenceClass::RawToolSpans, &lineages),
+                Err(kernel::KernelError::CorruptCanonicalRow)
+            );
+            assert!(
+                envelope.live_source_descriptors_of_lineages(
+                    OccurrenceClass::RawToolSpans,
+                    &[lineage("call-a")]
+                )?[0]
+                    .is_some(),
+                "a corrupt neighbor leaves another lineage readable"
+            );
+            Ok(String::new())
+        })
+        .unwrap();
 }

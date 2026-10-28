@@ -28,6 +28,7 @@ pub(crate) const USE_OUTCOME: &str = "review.use_outcome";
 const MAX_OPERATION_KEY_BYTES: usize = 128;
 /// How long the acceptance gate may wait for a Kernel reader to learn the live incarnation.
 const GATE_READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+const USE_OUTCOME_READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The list page a caller asks for; `limit` is capped at [`MAX_RECEIPT_PAGE`].
 #[derive(Debug, Deserialize)]
@@ -319,10 +320,14 @@ impl HandlerCore {
                 "{USE_OUTCOME} requires an object_id of 1 to {MAX_OBJECT_ID_BYTES} bytes"
             ));
         }
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + USE_OUTCOME_READ_BUDGET),
+            Arc::default(),
+        );
         let counts = blocking(move || {
             scope
                 .store
-                .served_counts_for(scope.project.digest(), &parsed.object_id)
+                .served_counts_for(&budget, scope.project.digest(), &parsed.object_id)
                 .map(|counts| (parsed.object_id, counts))
         })
         .await;
