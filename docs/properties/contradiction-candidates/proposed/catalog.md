@@ -854,7 +854,10 @@ answers `disabled` (`crates/daemon/src/contradiction_candidates/read.rs:211`,
 `:231`), and the page read judges the route's authority again in the
 connection that reads the page, so an authority that drains or moves after
 the entry check answers `disabled` (`:270`, `:287`;
-`crates/daemon/src/candidate_pass_tests.rs:2268`); an uninstalled Memory
+`crates/daemon/src/candidate_pass_tests.rs:2268`), and a decision that is
+not live answers after the authority is judged once more, so a drain during
+the judgment answers `disabled` before `not_live` (`:254-257`;
+`crates/daemon/src/candidate_pass_tests.rs:2309`); an uninstalled Memory
 Store, or one that fails the authority lookup or the page read, answers
 `store_unavailable` (`crates/daemon/src/contradiction_candidates/read.rs:214`);
 the read's budget runs from its admission, so a read queued behind a saturated
@@ -972,7 +975,7 @@ Exercised: yes - #1168,
 (`crates/daemon/src/candidate_pass_tests.rs:2556`) publishes two windows
 through the capture job and the pass, lists each decision's row, checks the
 listed `evidence_id` of each decision equals the evidence id of the
-descriptor of the window whose text overlaps it (`:2674-2683`),
+descriptor of the window whose text overlaps it (`:2609-2618`),
 truncates the candidate table, and files
 `dispute {object_id, event: mark_disputed, evidence_id}` built from the row
 through `kernel.commit`, which lands `disputed` (`:2654`). After
