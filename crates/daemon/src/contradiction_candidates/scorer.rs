@@ -2,7 +2,7 @@
 //! decision summaries by the share of each summary's terms the descriptor
 //! contains.
 //!
-//! Both texts follow the retrieval analyzer's rules, `analyze_segments`, under
+//! Both texts pass through the retrieval analyzer, `analyze_segments`, under
 //! explicit bounds. A text's terms are the set of its atoms and parts, each
 //! folded with `str::to_lowercase`, keeping terms of at least
 //! [`MIN_TERM_SCALARS`] scalar values that hold an alphanumeric scalar, are not
@@ -23,9 +23,6 @@
 //! terms, and their scalar counts can differ at the floor. A decision object
 //! id appears at most once in a result: the better-ranked entry wins, with
 //! `decision_id` as the last key.
-//!
-//! [`term_set`] applies those rules to all-ASCII words itself and hands every
-//! other word to the analyzer.
 //!
 //! A descriptor over its bound is refused whole. A summary over its bound, or
 //! with no term left after the floor, is reported unscorable and excluded; the

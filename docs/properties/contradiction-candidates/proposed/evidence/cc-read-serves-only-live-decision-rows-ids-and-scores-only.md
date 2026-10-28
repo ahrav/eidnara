@@ -41,11 +41,11 @@ carry no descriptor or summary text.
   compares the standing read with claim facts field by field and refusal by
   refusal; `crates/kernel/tests/kernel_source_descriptors.rs:3188` answers
   liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:1798`
-  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2616`
+  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2692`
   shows a page body is the canonical `serde_json` encoding of its value;
-  `crates/daemon/src/candidate_pass_tests.rs:2096` answers two pages inside the
+  `crates/daemon/src/candidate_pass_tests.rs:2172` answers two pages inside the
   read budget while one Kernel reader is held;
-  `crates/daemon/src/candidate_pass_tests.rs:2136` answers the conflict state
+  `crates/daemon/src/candidate_pass_tests.rs:2212` answers the conflict state
   when a restore lands between the claim-standing read and the scope read.
 
 ## Failure scenario
@@ -66,7 +66,7 @@ past `as_of` and it is filtered.
 A MODULE-authority root with the flag on; 70 live rows and one row each with
 retired evidence, a foreign incarnation, a stale matcher digest, and a
 future tip; a superseded decision with rows; a second root. All in
-`crates/daemon/src/candidate_pass_tests.rs:1738`.
+`crates/daemon/src/candidate_pass_tests.rs:1814`.
 
 ## Investigation log
 
@@ -81,7 +81,7 @@ future tip; a superseded decision with rows; a second root. All in
 ### Q: Can a foreign root reach the body parser?
 
 - Sources examined: `crates/daemon/src/contradiction_candidates/read.rs:195-207`,
-  `crates/daemon/src/candidate_pass_tests.rs:2034`.
+  `crates/daemon/src/candidate_pass_tests.rs:2110`.
 - Findings: `kernel_request` answers `project_mismatch` before parsing; a
   foreign root with an unknown field answers the scope refusal.
 - Missing evidence: none.

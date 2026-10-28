@@ -773,8 +773,9 @@ pub(crate) struct CaptureJob {
     kernel: Arc<KernelOpenCoordinator>,
     commit_gate: Arc<Mutex<()>>,
     cancel: CancellationToken,
-    slot: ActiveSlot,
     _retained: RetainedCharge,
+    /// Declared after the charge, so an unwinding job releases its charge before the slot it holds frees.
+    slot: ActiveSlot,
     window: Vec<Arc<Value>>,
     project: ProjectBinding,
     epoch: u64,
@@ -830,6 +831,7 @@ impl CaptureJob {
             capture,
             project,
             _retained,
+            slot,
             kept_for_pass,
             ..
         } = self;
@@ -838,6 +840,9 @@ impl CaptureJob {
             .unwrap_or_default();
         // A kept unit's commit landed and the memo holds it, whatever ended the job after that commit, so the pass sees it now or never.
         if units.is_empty() {
+            // The charge drops before the slot frees, so an offer that takes the slot meets the budget this job released.
+            drop(_retained);
+            drop(slot);
             return (end, None);
         }
         let kept: usize = units
@@ -852,6 +857,7 @@ impl CaptureJob {
             })
             .sum();
         let retained = RetainedCharge::take(&capture, kept).unwrap_or(_retained);
+        drop(slot);
         (
             end,
             Some(SettledPublication {

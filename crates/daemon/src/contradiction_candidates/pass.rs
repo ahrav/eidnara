@@ -26,7 +26,7 @@ use super::scorer::{
 use super::{Candidates, Count};
 use crate::canonical_memory::MEMORY_DOMAIN_ID;
 use crate::kernel_routes::KernelOpenCoordinator;
-use crate::kernel_routes::project::{ProjectBinding, ScopeFilter, stored_terms};
+use crate::kernel_routes::project::{ProjectBinding, ScopeFilter};
 use crate::kernel_routes::read::{MAX_READ_OBJECT_IDS, NewestRows};
 use crate::source_capture::SettledPublication;
 
@@ -368,10 +368,9 @@ fn score_descriptors(
             counts.add(Count::DroppedAtCap, rows.len() as u64);
             continue;
         }
-        if rows.len() > room {
-            counts.add(Count::DroppedAtCap, (rows.len() - room) as u64);
-            rows.truncate(room);
-        }
+        // The cut at M counts once the write that holds the kept rows lands.
+        let cut = rows.len().saturating_sub(room);
+        rows.truncate(room);
         let scores: Vec<CandidateScore<'_>> = rows
             .iter()
             .map(|row| CandidateScore {
@@ -395,7 +394,7 @@ fn score_descriptors(
             Ok(outcome) => {
                 written += outcome.written;
                 counts.add(Count::RowsWritten, outcome.written as u64);
-                counts.add(Count::DroppedAtCap, outcome.dropped_at_cap as u64);
+                counts.add(Count::DroppedAtCap, (cut + outcome.dropped_at_cap) as u64);
             }
             // The descriptor was scored; the write that did not land is named by the end count, as for a failed write.
             Err(MemoryStoreError::Store(storage::StoreError::Deadline)) => {
@@ -430,14 +429,22 @@ fn candidate_summaries(
         )
         .map_err(failed)?;
     let mut filter = ScopeFilter::new(project);
-    let mut terms = stored_terms(kernel);
+    // The scope-term read polls the reader pool under the budget, as the sweep's does.
+    let mut terms = |scope: &str| kernel.scope_terms_within_budget(scope, budget);
     let mut newest = NewestRows::new(bounds.decisions);
     let mut matched = 0_u64;
     for (judged, row) in visible.rows.into_iter().enumerate() {
-        if judged % ROWS_PER_CHECK == 0
-            && let Some(end) = stop(budget)
-        {
-            return Err(end);
+        if judged % ROWS_PER_CHECK == 0 {
+            #[cfg(test)]
+            {
+                let hook = counts.before_check.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    hook(super::Checkpoint::Judged(judged));
+                }
+            }
+            if let Some(end) = stop(budget) {
+                return Err(end);
+            }
         }
         if filter
             .matches(row.scope_id.as_deref(), &mut terms)

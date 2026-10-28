@@ -1298,20 +1298,27 @@ async fn publish_latency_with_candidates_on_stays_within_the_off_baseline() {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             }
-            samples.push(
-                capture_report(&handler)["publish_ms_last"]
-                    .as_u64()
-                    .unwrap(),
-            );
+            // The flag-on arm measures only the publications that committed beside a running pass; the first publication of a run precedes its pass.
+            if !enabled {
+                samples.push(
+                    capture_report(&handler)["publish_ms_last"]
+                        .as_u64()
+                        .unwrap(),
+                );
+            }
+            let overlaps_before = overlapped.load(std::sync::atomic::Ordering::Relaxed);
             publish(&handler, &project, &batch(10_000, "beside"), enabled);
             while !handler.source_capture.is_idle() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            samples.push(
-                capture_report(&handler)["publish_ms_last"]
-                    .as_u64()
-                    .unwrap(),
-            );
+            let beside = overlapped.load(std::sync::atomic::Ordering::Relaxed) > overlaps_before;
+            if !enabled || beside {
+                samples.push(
+                    capture_report(&handler)["publish_ms_last"]
+                        .as_u64()
+                        .unwrap(),
+                );
+            }
             settle(&handler).await;
         }
         samples.sort_unstable();
@@ -1328,11 +1335,16 @@ async fn publish_latency_with_candidates_on_stays_within_the_off_baseline() {
         medians.push(median);
         if enabled {
             assert!(overlaps > 0, "no publication committed while a pass ran");
+            assert_eq!(
+                samples.len() as u64,
+                overlaps,
+                "the flag-on samples are the publications beside a running pass"
+            );
         }
     }
     assert!(
         medians[1] <= medians[0].saturating_mul(3) + 50,
-        "median publication hold with candidates on {} ms, off {} ms",
+        "median publication hold beside a running pass {} ms, with candidates off {} ms",
         medians[1],
         medians[0]
     );
@@ -1514,12 +1526,18 @@ fn a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_ro
 fn a_write_behind_a_held_store_connection_ends_at_the_pass_deadline() {
     let core = Core::open(PassBounds {
         budget: Duration::from_millis(500),
+        rows_per_pass: 2,
         ..PassBounds::default()
     });
     seed(
         &core.kernel,
         &core.project,
-        &[("one", TOPIC, EventKind::Other)],
+        &[
+            ("one", TOPIC, EventKind::Other),
+            ("two", TOPIC, EventKind::Other),
+            ("three", TOPIC, EventKind::Other),
+            ("four", TOPIC, EventKind::Other),
+        ],
     );
     let descriptor = core.descriptor("d0", TOPIC);
     // Another store user holds the sole connection for well past the budget.
@@ -1565,6 +1583,11 @@ fn a_write_behind_a_held_store_connection_ends_at_the_pass_deadline() {
         core.count("descriptors_unscored"),
         0,
         "the descriptor was scored; the deadline names the write that did not land"
+    );
+    assert_eq!(
+        core.count("dropped_at_cap"),
+        0,
+        "the two rows cut at M belong to a write that never landed"
     );
     assert!(core.rows_for(&descriptor.evidence_id).is_empty());
 }
@@ -1619,6 +1642,59 @@ async fn a_job_whose_document_capture_ends_in_deadline_still_offers_its_publishe
     assert_eq!(report["offered"], 1, "{report}");
     assert_eq!(report["completed"], 1, "{report}");
     assert_eq!(rows(&store).len(), 1, "the published unit was scored");
+}
+
+#[test]
+fn a_scope_term_read_behind_held_kernel_readers_ends_at_the_pass_deadline() {
+    let core = Core::open(PassBounds {
+        budget: Duration::from_millis(500),
+        ..PassBounds::default()
+    });
+    seed(
+        &core.kernel,
+        &core.project,
+        &[("one", TOPIC, EventKind::Other)],
+    );
+    let descriptor = core.descriptor("d0", TOPIC);
+    // Every Kernel reader is held from the first scope-filter check until well past the budget.
+    let held = Arc::new(std::sync::Barrier::new(2));
+    let kernel = Arc::clone(&core.kernel);
+    let holder = Arc::new(std::sync::Mutex::new(None));
+    let (holder_slot, barrier) = (Arc::clone(&holder), Arc::clone(&held));
+    *core.counts.before_check.lock().unwrap() = Some(Arc::new(move |check| {
+        if check == Checkpoint::Judged(0) {
+            let (kernel, barrier) = (Arc::clone(&kernel), Arc::clone(&barrier));
+            *holder_slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                kernel.hold_readers_for_test(&barrier, Duration::from_secs(3));
+            }));
+            held.wait();
+        }
+    }));
+    // `Core::score` reads the Kernel tip around the pass, so the pass runs directly here while the readers are held.
+    let budget = kernel::applicability::EvalBudget::new(
+        Some(Instant::now() + core.counts.bounds().budget),
+        Arc::clone(&core.interrupt),
+    );
+    let started = Instant::now();
+    let end = score_publication(
+        &core.kernel,
+        &core.store,
+        &core.project,
+        std::slice::from_ref(&descriptor),
+        &core.counts,
+        &budget,
+        now_ms(),
+    );
+    let waited = started.elapsed();
+    holder.lock().unwrap().take().unwrap().join().unwrap();
+    assert_eq!(end, CandidateCount::Deadline);
+    assert!(
+        waited < Duration::from_secs(2),
+        "the scope-term read waited {waited:?} behind held readers"
+    );
+    assert_eq!(core.count("deadline"), 1);
+    assert_eq!(core.count("descriptors_unscored"), 1);
+    assert!(core.rows_for(&descriptor.evidence_id).is_empty());
 }
 
 fn activate_memories_authority(store: &MemoryStore, root: &Path) {

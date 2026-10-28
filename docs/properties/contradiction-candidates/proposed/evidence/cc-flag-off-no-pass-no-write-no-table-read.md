@@ -37,8 +37,8 @@ sweep follows the reload on its next pass.
 The candidate table renamed away under each arm, a flag-off run with every
 counter at zero, and a flag-on control that fails on the hidden table:
 `crates/daemon/tests/contradiction_candidates_sweep.rs:553` (sweep),
-`crates/daemon/src/candidate_pass_tests.rs:2554` (pass), and
-`crates/daemon/src/candidate_pass_tests.rs:2064` (read).
+`crates/daemon/src/candidate_pass_tests.rs:2630` (pass), and
+`crates/daemon/src/candidate_pass_tests.rs:2140` (read).
 
 ## Investigation log
 

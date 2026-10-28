@@ -13,30 +13,30 @@ iteration. #1163 D1 and C4 fix the total order; #1164 implements it.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/scorer.rs:114-135` `terms`
-  yields each kept term with its hash. `DescriptorTerms::new` (`:443-476`)
+- `crates/daemon/src/contradiction_candidates/scorer.rs:111-132` `terms`
+  yields each kept term with its hash. `DescriptorTerms::new` (`:440-473`)
   sorts the descriptor's terms by hash, then folded bytes, and drops
-  repeats, so equal term sets build equal tables; `score` (`:483-562`)
+  repeats, so equal term sets build equal tables; `score` (`:491-566`)
   reduces a summary to its distinct `matched_terms` and `decision_terms`
   counts. Only those counts leave the term pipeline, so no container
   iteration order reaches the output. `term_set` (`:103-109`) still returns
   a `BTreeSet<String>`.
-- `scorer.rs:389-398` `ScoredCandidate::rank`: score descending by
+- `scorer.rs:386-395` `ScoredCandidate::rank`: score descending by
   cross-multiplying `matched_terms` and `decision_terms` (no floating point),
   then `matched_terms` descending, `decision_terms` ascending, decision
   object id ascending, decision id ascending. `String` comparison is byte
   order, so `rank` is a total order over distinct (object id, decision id)
   pairs.
-- `scorer.rs:580-595` `TopCandidates::record` scores one summary and offers
-  a passing one; `:597-613` `offer` replaces a kept entry with the same
+- `scorer.rs:577-592` `TopCandidates::record` scores one summary and offers
+  a passing one; `:594-610` `offer` replaces a kept entry with the same
   decision object id only when the new one ranks better, inserts at
   `partition_point`, and truncates to `CANDIDATES_PER_DESCRIPTOR` (`:63`,
   K = 4).
-- `scorer.rs:634-651` `score_descriptor` feeds every candidate through
+- `scorer.rs:631-648` `score_descriptor` feeds every candidate through
   `record`, collects unscorable ids, and sorts them (`sort_unstable` on
   `String`, a total order, so equal ids are indistinguishable).
-- `scorer.rs:655-690` `matcher_preimage` names `ORDER_RULE_ID` (`:83-84`);
-  `:701-708` the digest is the SHA-256 of the preimage, held in a
+- `scorer.rs:652-687` `matcher_preimage` names `ORDER_RULE_ID` (`:80-81`);
+  `:698-705` the digest is the SHA-256 of the preimage, held in a
   `LazyLock`.
 - Tests: `crates/daemon/tests/contradiction_candidates_scorer.rs:276-318`
   `the_top_k_is_the_same_under_every_input_order`;
@@ -78,8 +78,8 @@ None. The function is pure: it reads only its arguments and the constant
 
 ### Q: Does the order depend on anything outside the inputs?
 
-- Sources examined: `scorer.rs:114-135`, `:389-398`, `:443-613`,
-  `:634-651`.
+- Sources examined: `scorer.rs:111-132`, `:386-395`, `:440-610`,
+  `:631-648`.
 - Findings: no hash container, clock, global, or I/O reaches the result.
   `rank` ignores the summary and ends at the decision id, so two entries
   tie only when their ids and counts are equal, and such entries give
@@ -91,7 +91,7 @@ None. The function is pure: it reads only its arguments and the constant
 
 ### Q: Which tie-break order applies? (originally needs human input)
 
-- Sources examined: #1163 D1 and C4, #1164 Scope, `scorer.rs:389-398`.
+- Sources examined: #1163 D1 and C4, #1164 Scope, `scorer.rs:386-395`.
 - Findings: the specification fixes score desc, `matched_terms` desc,
   `decision_terms` asc, object id asc; the code adds decision id asc and
   one entry per object id, both named in the order rule id.

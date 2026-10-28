@@ -43,7 +43,7 @@ parts, `str::to_lowercase` per term, the floor on scalar values, a
 
 Production guards: the compile-time assertion that the descriptor bound is
 at least `MAX_SOURCE_UNIT_BYTES`
-(`crates/daemon/src/contradiction_candidates/scorer.rs:69-71`); the
+(`crates/daemon/src/contradiction_candidates/scorer.rs:66-68`); the
 analyzer's refusals (`crates/retrieval/src/lexical/analysis.rs:78-105`),
 which the scorer propagates.
 
@@ -139,13 +139,13 @@ allowlist against `docs/host-wire-protocol.md`), and
 | `the_route_consent_reaches_the_pass_through_a_transform` | `:1145` | the route's frozen value, not the daemon's, decides the offer | flag off (pass arm), trigger | unaudited |
 | `a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_a_parked_pass` | `:1195` | panic counted with permit and charge released; kept-text charge below the job's; shutdown waits | single flight | unaudited |
 | `publish_latency_with_candidates_on_stays_within_the_off_baseline` | `:1253` | median publication hold, with at least one publication beside a running pass, within 3x + 50 ms of the flag-off median | trigger (C1) | unaudited |
-| `equal_texts_in_one_batch_cite_one_evidence_row_and_the_pass_scores_it_once` | `:1341` | two equal-text units publish as two units citing one evidence row; the pass analyzes one descriptor and writes its rows once | row key | unaudited |
-| `a_decision_row_that_disagrees_with_its_registry_row_ends_the_pass_and_keeps_the_held_rows` | `:1366` | a decision whose typed row disagrees with its registry row ends the pass `kernel_unavailable` through the claim-facts read, with the descriptor's held rows unchanged | candidate set | unaudited |
-| `a_pass_stopped_during_the_scan_counts_the_summaries_the_analyzer_refused_before_the_stop` | `:1404` | a stop at the check after 256 summaries ends `budget_exhausted` with the three summaries the analyzer refused before it counted `summaries_unscorable` | partial result | unaudited |
-| `a_pass_stopped_between_payload_chunks_counts_the_summaries_already_loaded` | `:1438` | a stop before the second payload chunk ends `budget_exhausted` with the first chunk counted `summaries_loaded` | partial result | unaudited |
-| `a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_rows` | `:1463` | a Kernel restore after the pass's last read ends it `kernel_unavailable` before any write: every descriptor unscored, held rows in place | partial result | unaudited |
-| `a_write_behind_a_held_store_connection_ends_at_the_pass_deadline` | `:1513` | a store connection another user holds past the budget ends the pass `deadline` at the write, in under five seconds, with no row; the scored descriptor is analyzed, and the end count names its unwritten rows | partial result | unaudited |
-| `a_job_whose_document_capture_ends_in_deadline_still_offers_its_published_units` | `:1573` | a window batch that committed before the document batch ended the job `deadline` is offered to a pass: one pass, one row | trigger | unaudited |
+| `equal_texts_in_one_batch_cite_one_evidence_row_and_the_pass_scores_it_once` | `:1353` | two equal-text units publish as two units citing one evidence row; the pass analyzes one descriptor and writes its rows once | row key | unaudited |
+| `a_decision_row_that_disagrees_with_its_registry_row_ends_the_pass_and_keeps_the_held_rows` | `:1378` | a decision whose typed row disagrees with its registry row ends the pass `kernel_unavailable` through the claim-facts read, with the descriptor's held rows unchanged | candidate set | unaudited |
+| `a_pass_stopped_during_the_scan_counts_the_summaries_the_analyzer_refused_before_the_stop` | `:1416` | a stop at the check after 256 summaries ends `budget_exhausted` with the three summaries the analyzer refused before it counted `summaries_unscorable` | partial result | unaudited |
+| `a_pass_stopped_between_payload_chunks_counts_the_summaries_already_loaded` | `:1450` | a stop before the second payload chunk ends `budget_exhausted` with the first chunk counted `summaries_loaded` | partial result | unaudited |
+| `a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_rows` | `:1475` | a Kernel restore after the pass's last read ends it `kernel_unavailable` before any write: every descriptor unscored, held rows in place | partial result | unaudited |
+| `a_write_behind_a_held_store_connection_ends_at_the_pass_deadline` | `:1525` | a store connection another user holds past the budget ends the pass `deadline` at the write, in under five seconds, with no row; the scored descriptor is analyzed, and the end count names its unwritten rows | partial result | unaudited |
+| `a_job_whose_document_capture_ends_in_deadline_still_offers_its_published_units` | `:1596` | a window batch that committed before the document batch ended the job `deadline` is offered to a pass: one pass, one row | trigger | unaudited |
 
 ## S-F read, S-G read and pass arms, S-H confirm (#1168)
 
@@ -154,16 +154,16 @@ checks are named with their files.
 
 | Check | Location | Asserts | Records | Status |
 | --- | --- | --- | --- | --- |
-| `review_candidates_pages_live_rows_and_answers_each_terminal` | `:1738` | 8-key items; clamps at 65, 0, a number past the machine word, and an integral float; order and disjoint two-page walk; four stale rows filtered and counted; `not_live` for superseded and unknown; empty page, including for a live decision whose id holds a control character; `invalid_params` bodies; scope refusal before the body; observational read; flag off with the table hidden and a flag-on control; `disabled` and `store_unavailable` before a malformed or non-string cursor; tip, jobs, and rows unchanged | read serves, read terminals, flag off (read arm) | unaudited |
-| `review_candidates_answers_the_store_and_kernel_states_before_any_page` | `:2347` | Kernel starting, Kernel open failed, and no Memory Store answer their states without `items` | read terminals | unaudited |
-| `review_candidates_reads_scope_terms_inside_its_budget_beside_a_held_reader` | `:2096` | with one Kernel reader held for the whole request, two reads answer pages inside the read budget: the scope-term read takes the free reader | read serves | unaudited |
-| `review_candidates_refuses_a_target_whose_history_a_restore_replaced_before_the_scope_read` | `:2136` | a restore between the claim-standing read and the scope-terms read answers the Kernel's conflict state, never `not_live` | read serves, read terminals | unaudited |
-| `review_candidates_answers_store_unavailable_when_the_store_connection_outlasts_its_budget` | `:2285` | a store connection held for 9 s answers `store_unavailable` inside the read budget | read terminals | unaudited |
-| `review_candidates_answers_disabled_when_authority_drains_before_the_page_read` | `:2192` | memories authority begins draining between the entry check and the page read; the read answers `disabled` | read terminals | unaudited |
-| `review_candidates_queued_past_its_budget_answers_at_the_deadline_it_was_admitted_under` | `:2233` | a read queued behind a saturated blocking pool for three budgets answers `store_unavailable` when it runs | read terminals | unaudited |
-| `a_listed_candidate_confirms_through_dispute_while_its_evidence_lives` | `:2415` | listed evidence id is a published descriptor's; confirm lands `disputed` with the table truncated; after retention the row is filtered and the earlier form is `not_found` | confirm linkage | unaudited |
-| `the_confirm_path_never_reads_the_candidate_table` | `:2536` | `commit.rs` and `dispute.rs` name no candidate store method (lexical) | confirm linkage | unaudited |
-| `a_publication_without_consent_runs_no_candidate_table_statement` | `:2554` | consent-off publications succeed with the table hidden and every counter zero; a consenting publication's pass fails on it | flag off (pass arm) | unaudited |
+| `review_candidates_pages_live_rows_and_answers_each_terminal` | `:1814` | 8-key items; clamps at 65, 0, a number past the machine word, and an integral float; order and disjoint two-page walk; four stale rows filtered and counted; `not_live` for superseded and unknown; empty page, including for a live decision whose id holds a control character; `invalid_params` bodies; scope refusal before the body; observational read; flag off with the table hidden and a flag-on control; `disabled` and `store_unavailable` before a malformed or non-string cursor; tip, jobs, and rows unchanged | read serves, read terminals, flag off (read arm) | unaudited |
+| `review_candidates_answers_the_store_and_kernel_states_before_any_page` | `:2423` | Kernel starting, Kernel open failed, and no Memory Store answer their states without `items` | read terminals | unaudited |
+| `review_candidates_reads_scope_terms_inside_its_budget_beside_a_held_reader` | `:2172` | with one Kernel reader held for the whole request, two reads answer pages inside the read budget: the scope-term read takes the free reader | read serves | unaudited |
+| `review_candidates_refuses_a_target_whose_history_a_restore_replaced_before_the_scope_read` | `:2212` | a restore between the claim-standing read and the scope-terms read answers the Kernel's conflict state, never `not_live` | read serves, read terminals | unaudited |
+| `review_candidates_answers_store_unavailable_when_the_store_connection_outlasts_its_budget` | `:2361` | a store connection held for 9 s answers `store_unavailable` inside the read budget | read terminals | unaudited |
+| `review_candidates_answers_disabled_when_authority_drains_before_the_page_read` | `:2268` | memories authority begins draining between the entry check and the page read; the read answers `disabled` | read terminals | unaudited |
+| `review_candidates_queued_past_its_budget_answers_at_the_deadline_it_was_admitted_under` | `:2309` | a read queued behind a saturated blocking pool for three budgets answers `store_unavailable` when it runs | read terminals | unaudited |
+| `a_listed_candidate_confirms_through_dispute_while_its_evidence_lives` | `:2491` | listed evidence id is a published descriptor's; confirm lands `disputed` with the table truncated; after retention the row is filtered and the earlier form is `not_found` | confirm linkage | unaudited |
+| `the_confirm_path_never_reads_the_candidate_table` | `:2612` | `commit.rs` and `dispute.rs` name no candidate store method (lexical) | confirm linkage | unaudited |
+| `a_publication_without_consent_runs_no_candidate_table_statement` | `:2630` | consent-off publications succeed with the table hidden and every counter zero; a consenting publication's pass fails on it | flag off (pass arm) | unaudited |
 | `eidnara_memory candidates` | `packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1582` | default read without a tool-call id; request body; confirm form; terminals by name; extra-key refusal; dispute-admission note; foreign-decision and paging refusals | read serves (client), confirm linkage | unaudited |
 | `Pi eidnara_memory candidates` | `packages/pi-plugin/src/tools/eidnara-memory.test.ts:532` | default schema with paging fields; `disabled` rendered; dispute-admission note from the Pi allowlist | read terminals, flag off (read arm) | unaudited |
 | `review.candidates is a listed method whose items and terminals are the ones the parser admits` | `packages/cli/src/commands/review-wire.contract.test.ts:120` | section 7.8 lists the method; its item keys and terminals equal the parser's | read serves (wire) | unaudited |
@@ -183,7 +183,7 @@ checks are named with their files.
 - The scorer's `TooManyAtoms` path is unreachable by construction and has no
   test; the analyzer's own test covers the refusal.
 - The pass records `matcher_digest()` with each row
-  (`crates/daemon/src/contradiction_candidates/pass.rs:389`); no test reads
+  (`crates/daemon/src/contradiction_candidates/pass.rs:388`); no test reads
   the digest back from a pass-written row.
 - No test fails a store write inside a pass; that path counts the failed
   descriptor as analyzed and the later ones as unscored.

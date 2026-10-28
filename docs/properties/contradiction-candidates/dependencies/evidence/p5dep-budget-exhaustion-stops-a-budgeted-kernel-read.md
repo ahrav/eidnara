@@ -47,7 +47,7 @@ interrupt." Lens: failure recovery; C7, C8; D2.
   statement. `:241` `decisions_for_objects_as_of_within_budget`: same shape.
 - `source_capture.rs:742-745`: the capture job's budget is `EvalBudget::new
   (Some(accepted_at + 5 s), interrupt)`; `run_settled` sets the interrupt on
-  cancel (`:807-812`).
+  cancel (`:808-813`).
 - Tests: `crates/daemon/tests/embedding_dispatch.rs:1102`
   `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget`;
   `crates/retrieval/tests/claims.rs:993`;

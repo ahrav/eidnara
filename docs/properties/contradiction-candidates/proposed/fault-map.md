@@ -14,16 +14,16 @@ enabling state" and name the tests that construct them.
 | A3 repeated decision object id | yes | two `CandidateInput` values with one id (`:320-346`); no test combines it with more than K passing summaries |
 | A4 descriptor one byte over or exactly at the byte bound | yes | `"a ".repeat(n)` (`:224-241`) |
 | A5 summary one byte over or at the byte bound | yes | padded summary (`:243-274`) |
-| A6 input over `max_atoms` within the byte bound | no | unconstructible: `max_atoms = max_input_bytes / 2 + 1` (`scorer.rs:88-99`) |
+| A6 input over `max_atoms` within the byte bound | no | unconstructible: `max_atoms = max_input_bytes / 2 + 1` (`scorer.rs:85-96`) |
 | A7 floor-emptied summary | yes | short, numeric, or stopword-only text |
 | A8 case-only, non-ASCII case, length-changing lowercase, case change across a part boundary | yes | literal strings (`:31-80`, `:131-159`, `:163-171` for `configLoader` and `configloader`) |
 | A9 diacritic-only and NFC versus NFD spellings | yes | literal strings (`:131-159`) |
 | A10 second thread or process | yes, unused | spawn a thread in the test; no test does |
 | A11 toolchain Unicode change | no in-tree | build under another toolchain; the digest pin fails by design |
-| R1 evidence retired between list and confirm | yes | `expire_harness_captures` past the retention (`candidate_pass_tests.rs:2415`) |
-| R2 Kernel starting or failed at read | yes | no open, or an open at a file path (`candidate_pass_tests.rs:2347`) |
-| R3 Memory Store absent | yes | a handler built without a store (`candidate_pass_tests.rs:2347`) |
-| R4 candidate table hidden | yes | `ALTER TABLE ... RENAME` on `store.db` (`candidate_pass_tests.rs:1738`, `:2554`) |
+| R1 evidence retired between list and confirm | yes | `expire_harness_captures` past the retention (`candidate_pass_tests.rs:2491`) |
+| R2 Kernel starting or failed at read | yes | no open, or an open at a file path (`candidate_pass_tests.rs:2423`) |
+| R3 Memory Store absent | yes | a handler built without a store (`candidate_pass_tests.rs:2423`) |
+| R4 candidate table hidden | yes | `ALTER TABLE ... RENAME` on `store.db` (`candidate_pass_tests.rs:1814`, `:2630`) |
 | R5 authority lookup fails | no | no seam (dependency fault F18) |
 
 ## Per-property required faults
@@ -33,10 +33,10 @@ enabling state" and name the tests that construct them.
 | `cc-scorer-output-deterministic-under-contract-version` | A1, A2, A3, A7 | A1, A2, A3, A7; A10 absent |
 | `cc-oversize-text-refused-whole-never-truncated` | A4, A5, A7 | A4, A5, A7; A6 unconstructible |
 | `cc-case-fold-applied-identically-to-both-sides` | A8, A9 | A8, A9 |
-| `cc-read-serves-only-live-decision-rows-ids-and-scores-only` | R1 | R1: a row whose evidence is retired at the read is seeded directly (`candidate_pass_tests.rs:1738`) and retired by the sweep after a listing (`:2415`) |
-| `cc-read-distinguishes-disabled-unavailable-and-empty` | R2, R3, R4, R5 | R2, R3 (`candidate_pass_tests.rs:2347`), R4 (`:1738`); R5 has no seam |
-| `cc-flag-off-no-pass-no-write-no-table-read` | R4 | R4 (`candidate_pass_tests.rs:1738`, `:2554`) |
-| `cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm` | R1 | R1 (`candidate_pass_tests.rs:2415`) |
+| `cc-read-serves-only-live-decision-rows-ids-and-scores-only` | R1 | R1: a row whose evidence is retired at the read is seeded directly (`candidate_pass_tests.rs:1814`) and retired by the sweep after a listing (`:2491`) |
+| `cc-read-distinguishes-disabled-unavailable-and-empty` | R2, R3, R4, R5 | R2, R3 (`candidate_pass_tests.rs:2423`), R4 (`:1814`); R5 has no seam |
+| `cc-flag-off-no-pass-no-write-no-table-read` | R4 | R4 (`candidate_pass_tests.rs:1814`, `:2630`) |
+| `cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm` | R1 | R1 (`candidate_pass_tests.rs:2491`) |
 
 ## Coverage checks to add
 

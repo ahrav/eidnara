@@ -84,17 +84,17 @@ crossing inside a `claim_facts` statement (the progress handler path) for
 | `capture_off_memory_off_or_a_subagent_session_runs_no_adapter` | `:298` | reachability gate | unaudited |
 | `a_delete_after_the_handoff_publishes_nothing_for_the_queued_window` | `:1045` | delete epoch check | unaudited |
 | `a_refused_window_still_captures_its_documents` | `:2236` | documents batch is separate from the window batch | unaudited |
-| `a_settled_report_counts_the_job_that_released_the_slot` | `source_capture.rs:1791` | slot count after release | unaudited |
+| `a_settled_report_counts_the_job_that_released_the_slot` | `source_capture.rs:1797` | slot count after release | unaudited |
 
 Production guards: `try_acquire_owned` else `RefusedQueueFull`
-(`source_capture.rs:616-619`); `catch_unwind` around `publish_locked`
-(`:813-826`); `AfterResponse` run only on `RequestOutcome::Response`
-(`lib.rs:13500-13502`).
+(`source_capture.rs:728-731`); `catch_unwind` around `publish_locked`
+(`:996-1006`); `AfterResponse` run only on `RequestOutcome::Response`
+(`lib.rs:13662-13664`).
 
 None found: no test asserts that exactly one `Count` terminal is recorded
 per job across every exit path (the tests count specific terminals per
 scenario). No post-publish hook exists outside `cfg(test)` (`before_publish`,
-`between_screen_and_commit`, `source_capture.rs:1530-1532`, `:804`, `:909`).
+`between_screen_and_commit`, `source_capture.rs:1536-1538`, `:805`, `:915`).
 
 ## S5 memory-store baseline
 

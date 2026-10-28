@@ -96,7 +96,7 @@ publication it scores, and the pass runs only under the route's frozen
 `contradiction_candidates.enabled` (#1167).
 Status: active
 Exercised: yes - `the_top_k_is_the_same_under_every_input_order`
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:277-318`) scores one
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:276-318`) scores one
 descriptor against nine summaries
 (five 4-of-4 ties, a 6-of-6, a 4-of-5, a 5-of-6, and one unscorable
 summary), so K + 1 ties compete for the last slots, and asserts an equal
@@ -125,15 +125,15 @@ passing summaries, ties on score and `matched_terms` past position K, an
 unscorable summary, a repeated decision object id, and at least two input
 orders.
 Confidence: high - [evidence](evidence/cc-scorer-output-deterministic-under-contract-version.md).
-Read `crates/daemon/src/contradiction_candidates/scorer.rs:435-476` (the
+Read `crates/daemon/src/contradiction_candidates/scorer.rs:432-473` (the
 descriptor table is sorted by hash, then folded text, and a summary
 contributes only its `matched_terms` and `decision_terms` counts, so no
-iteration order reaches the output), `:389-398` (`rank`, a total order
-ending at both ids), `:580-613` (`record`, `offer`), `:634-651`
-(`score_descriptor` sorts `unscorable`), `:655-690` (the preimage names the
+iteration order reaches the output), `:386-395` (`rank`, a total order
+ending at both ids), `:577-610` (`record`, `offer`), `:631-648`
+(`score_descriptor` sorts `unscorable`), `:652-687` (the preimage names the
 order rule).
 Existing check: the two tests above and `the_matcher_digest_pins_every_rule`
-(`:615-667`), which pins the order rule id in the preimage;
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:348-400`), which pins the order rule id in the preimage;
 `each_descriptor_keeps_the_top_k_that_score_descriptor_ranks_over_the_loaded_summaries`
 (`crates/daemon/src/candidate_pass_tests.rs:959`) shows the pass's single scan
 keeps, per descriptor, the top K `score_descriptor` ranks. Status
@@ -144,7 +144,7 @@ the top K a function of SQL row order.
 Open questions:
 - No test runs the scorer on a second thread or process. The module holds
   no shared mutable state other than the `LazyLock` matcher digest
-  (`:435-436`), so this pass judges a second-thread test low value; the
+  (`crates/daemon/src/contradiction_candidates/scorer.rs:698-699`), so this pass judges a second-thread test low value; the
   rebuild record exercises a second run once the store lands (#1165).
 
 ### cc-oversize-text-refused-whole-never-truncated
@@ -158,7 +158,7 @@ publication it scores, and the pass runs only under the route's frozen
 Status: active
 Exercised: partial - scorer and pass arms, one Check clause unasserted.
 `an_oversize_descriptor_is_refused_whole_and_an_exact_fit_is_analyzed`
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:225-241`) asserts
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:224-241`) asserts
 `DESCRIPTOR_BOUNDS` is 65536 bytes
 and 32769 atoms, analyzes a 65536-byte descriptor of 32768 one-letter atoms,
 and gets `Err(InputTooLong { bytes: 65537, bound: 65536 })` from
@@ -185,7 +185,7 @@ Guarantee: a descriptor over `DESCRIPTOR_BOUNDS` is refused whole:
 no term left after the floor, is `SummaryScore::Unscorable` and its decision
 object id is listed in `unscorable`, while the other summaries score;
 `unscorable` lists decision object ids, not decision ids
-(`crates/daemon/src/contradiction_candidates/scorer.rs:643`), so with a
+(`crates/daemon/src/contradiction_candidates/scorer.rs:640`), so with a
 repeated object id one id can appear twice in `unscorable`, or in both
 `unscorable` and `candidates` when another entry with that id scores; no
 analysis of a prefix of either text contributes to any score; a refusal is
@@ -203,14 +203,14 @@ Required faults and enabling state: a descriptor one byte over the bound and
 one at it with the maximum atom count; a summary one byte over its bound and
 one at it; a floor-emptied summary next to scorable ones. The atom bounds are
 `max_input_bytes / 2 + 1`
-(`crates/daemon/src/contradiction_candidates/scorer.rs:88-99`), one past the
+(`crates/daemon/src/contradiction_candidates/scorer.rs:85-96`), one past the
 most atoms the byte bound admits, because n atoms need at least 2n - 1
 bytes; an input with `max_atoms` atoms exceeds the byte bound first, so
 `TooManyAtoms` is unreachable through the scorer and no test constructs it.
 Confidence: high - [evidence](evidence/cc-oversize-text-refused-whole-never-truncated.md).
-Read `crates/daemon/src/contradiction_candidates/scorer.rs:67-73`, `:88-99`,
-`:106-112`, `:443-476`, `:537-569`,
-`:634-651`; the compile-time assertion at `:69-71` holds the descriptor
+Read `crates/daemon/src/contradiction_candidates/scorer.rs:64-70`, `:85-96`,
+`:103-109`, `:440-473`, `:534-566`,
+`:631-648`; the compile-time assertion at `:66-68` holds the descriptor
 bound at or above `MAX_SOURCE_UNIT_BYTES`
 (`crates/daemon/src/harness_sources.rs:614`).
 Existing check: the three tests above; the analyzer's own refusal tests
@@ -237,7 +237,7 @@ publication it scores, and the pass runs only under the route's frozen
 Status: active
 Exercised: yes - the case-fold test
 `case_folds_identically_on_both_sides_and_diacritics_do_not_fold`
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:132-159`) scores the
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:131-159`) scores the
 uppercase descriptor
 `"ÉCOLES CACHE EVERY KERNEL WRITER"` against the summary
 `"Écoles cache every Kernel writer"` as `Candidate { matched_terms: 5,
@@ -278,15 +278,15 @@ a non-ASCII pair; a pair whose lowercase mapping changes length (`İ`); a
 case-only pair whose case change crosses a part boundary (`configLoader`
 and `configloader`); a diacritic-only pair and an NFC and NFD pair.
 Confidence: high - [evidence](evidence/cc-case-fold-applied-identically-to-both-sides.md).
-Read `crates/daemon/src/contradiction_candidates/scorer.rs:114-135` (`terms`:
+Read `crates/daemon/src/contradiction_candidates/scorer.rs:111-132` (`terms`:
 an ASCII term folds as its `to_ascii_lowercase`, which equals
 `str::to_lowercase` on ASCII, and any other term through `str::to_lowercase`
-at `:127`), `:224-273` (`scan_ascii` floors and hashes the ASCII lowercase),
-`:443-476` (`DescriptorTerms::new` takes the descriptor's terms from
-`terms`), `:494-569` (`score` takes the summary's terms from `scan_ascii`
+at `:124`), `:221-270` (`scan_ascii` floors and hashes the ASCII lowercase),
+`:440-473` (`DescriptorTerms::new` takes the descriptor's terms from
+`terms`), `:491-566` (`score` takes the summary's terms from `scan_ascii`
 through `count_ascii`, or from `terms` when a term is not ASCII or more than
 64 are distinct), `:18-25` (the module header states the fold is not full
-case folding), `:80` (`FOLD_RULE_ID` enters the preimage);
+case folding), `:77` (`FOLD_RULE_ID` enters the preimage);
 `crates/retrieval/src/lexical/analysis.rs:193-204` (`splits`, the
 case-driven part boundaries).
 Existing check: the three tests above; `the_matcher_digest_pins_every_rule`
@@ -329,24 +329,24 @@ above the earlier one. `publish_latency_with_candidates_on_stays_within_the_off_
 (`:1254`) commits at least one publication beside a running pass and keeps
 the median publication hold within three times the flag-off median plus
 50 ms. `a_job_whose_document_capture_ends_in_deadline_still_offers_its_published_units`
-(`:1574`) commits a window batch and then ends the job `deadline` in its
+(`:1597`) commits a window batch and then ends the job `deadline` in its
 document batch, and observes one offered pass and one row: a kept unit's
 commit landed and the memo holds it, so the pass is offered whatever count
 ended the job after that commit. The job hands its kept texts out through `CaptureJob::run_settled`
-(`crates/daemon/src/source_capture.rs:800`) after the blocking closure has
+(`crates/daemon/src/source_capture.rs:801`) after the blocking closure has
 dropped the slot permit, and the pass runs under its own `EvalBudget`
 (`crates/daemon/src/contradiction_candidates/pass.rs:166`), a fact read from
 the code. Not constructed: the `between_screen_and_commit` hook held, a
 cancel while the job waits in a hook, and the `refused_shutting_down`
 branch.
 Guarantee: The candidate pass starts only after `CaptureJob::run_settled`
-(`source_capture.rs:800-824`) has produced its terminal `Count` and the
-capture commit gate guard has been dropped (`source_capture.rs:999`); it runs
+(`source_capture.rs:801-825`) has produced its terminal `Count` and the
+capture commit gate guard has been dropped (`source_capture.rs:1006`); it runs
 under an `EvalBudget` whose origin is the pass start and whose interrupt is the
 daemon cancel, never the job's budget; the response bytes were handed to the
-wire writer before the `AfterResponse` closure ran (`lib.rs:9275-9319`).
+wire writer before the `AfterResponse` closure ran (`lib.rs:9275-9324`).
 Check: `always` - with the `before_publish` or `between_screen_and_commit`
-test hook (`source_capture.rs:980, 1040`) blocked, the candidate table has
+test hook (`source_capture.rs:986, 1040`) blocked, the candidate table has
 zero rows and no pass is offered; after the hook releases and the job
 returns, the pass runs; the semantics is `always` because every publication
 must respect the ordering.
@@ -385,7 +385,7 @@ observes `deadline` = 1, `descriptors_unscored` = 1, `pass_ms_last` >= 600,
 and no row once it runs.
 P = 1 per store through a non-waiting permit
 (`crates/daemon/src/contradiction_candidates/pass.rs:111`); the pass's start
-is fixed in `run` before `spawn_blocking` (`pass.rs:139`) and is the origin
+is fixed in `run` before `spawn_blocking` (`pass.rs:139-143`) and is the origin
 of both its deadline (`:187-190`) and `pass_ms_last`, so a queued pass holds
 the permit for its queue wait plus one budget check and reports that wait.
 Guarantee: At most P = 1 candidate pass exists at once per store; an offer
@@ -426,7 +426,7 @@ decision unread; `the_summary_byte_cut_skips_payloads_before_any_load`
 (`:756`) cuts payloads before any load and counts their bytes. Not
 constructed at the production N: the tests cut at a reduced cap. No test
 shows the pass's `eligible` filter
-(`crates/daemon/src/contradiction_candidates/pass.rs:409`) as the reason a
+(`crates/daemon/src/contradiction_candidates/pass.rs:408`) as the reason a
 decision is dropped.
 Guarantee: The pass's candidate set is built by the project scope term
 prefilter (`admission.rs:3138-3144`, `project.rs:106-111`) and the
@@ -472,22 +472,22 @@ of descriptors 1 and 2, none for 3 to 5, `descriptors_unscored` = 3, and
 (`:400`) cover the empty prefix and a cancel at the second of three
 descriptors;
 `a_pass_stopped_during_the_scan_counts_the_summaries_the_analyzer_refused_before_the_stop`
-(`:1405`) and `a_pass_stopped_between_payload_chunks_counts_the_summaries_already_loaded`
-(`:1439`) stop the pass at a check inside the scan and between two payload
+(`:1417`) and `a_pass_stopped_between_payload_chunks_counts_the_summaries_already_loaded`
+(`:1451`) stop the pass at a check inside the scan and between two payload
 chunks and observe `summaries_unscorable` and `summaries_loaded` holding the
 counts reached before the stop;
 `a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_rows`
-(`:1464`) restores the Kernel after the pass's last read and observes the pass
+(`:1476`) restores the Kernel after the pass's last read and observes the pass
 end `kernel_unavailable` with every descriptor unscored and the held rows in
 place; `a_write_behind_a_held_store_connection_ends_at_the_pass_deadline`
-(`:1514`) holds the store's connection from another thread past the budget
+(`:1526`) holds the store's connection from another thread past the budget
 and observes the pass end `deadline` at its write with no row. The pass
 scores every descriptor in one scan of the loaded summaries, then writes each
 descriptor's rows in publish order, one store write per descriptor; a stop
 during the scan writes no row (`crates/daemon/src/contradiction_candidates/pass.rs:248`),
 and before each write the pass checks the Kernel incarnation it read at
 (`pass.rs:357-362`); the write's wait for the store connection ends at the
-pass deadline (`pass.rs:394`,
+pass deadline (`pass.rs:393`,
 `crates/memory-store/src/contradiction_candidates.rs:509`).
 Guarantee: When the pass's budget is exhausted or interrupted, the rows
 written equal exactly the rows a complete pass would have written for a
@@ -500,7 +500,15 @@ increments by one; the semantics is `always` because every interrupted pass
 must leave this shape.
 Fault/timing angle: deadline or cancel between two descriptors; deadline
 inside the summary read or the scoring loop of one descriptor; crash between
-two descriptor writes.
+two descriptor writes; a Kernel restore between the incarnation check and the
+store write of one descriptor (the check runs without a Kernel guard, so this
+window is the write itself): the rows written cite decisions of the replaced
+history under the incarnation id, which a restore keeps, the sweep drops the
+ones the restored tip judges ineligible, and the descriptor's next
+publication replaces the rest. Holding one of the Kernel's two pooled readers
+through the store write would close the window at the price of that reader
+held through a store wait bounded by the pass deadline; the pass leaves the
+window open.
 Required faults and enabling state: flag on; a batch of several `Published`
 units; a budget that expires mid-pass (test clock or interrupt flag).
 Confidence: high - [evidence](evidence/cc-partial-result-is-descriptor-granular-prefix.md)
@@ -549,7 +557,7 @@ each key with a higher `publish_tip`, and a descriptor past M keeps the rows
 it already holds; the handler test at `:284` republishes a replayed unit
 through the job and keeps the same keys;
 `equal_texts_in_one_batch_cite_one_evidence_row_and_the_pass_scores_it_once`
-(`:1342`) publishes two equal-text units, which cite one evidence row, and
+(`:1354`) publishes two equal-text units, which cite one evidence row, and
 observes one analyzed descriptor, `rows_written` = 1, and one row, since the
 pass scores each evidence id once (`pass.rs:170-173`). The over-M count is
 `dropped_at_cap`; the C13 vocabulary has no `pass_cap_reached`.
@@ -747,19 +755,19 @@ whose frozen `contradiction_candidates.enabled` is true
 Status: active
 Exercised: yes - #1168,
 `review_candidates_pages_live_rows_and_answers_each_terminal`
-(`crates/daemon/src/candidate_pass_tests.rs:1738`) writes 70 live rows and
+(`crates/daemon/src/candidate_pass_tests.rs:1814`) writes 70 live rows and
 four stale rows for one decision through the store and reads them back through
 `Handler` dispatch: the first item's key set is exactly the eight wire names
-(`:1852`), a limit of 65 clamps to 64 rows listed or filtered (`:1869`) and a
-limit of 0 to one (`:1935`), the two-page walk follows (score desc, created
-desc, evidence asc) and covers the 70 live rows once each (`:1914`, `:1923`),
+(`:1928`), a limit of 65 clamps to 64 rows listed or filtered (`:1945`) and a
+limit of 0 to one (`:2011`), the two-page walk follows (score desc, created
+desc, evidence asc) and covers the 70 live rows once each (`:1990`, `:1999`),
 the retired-evidence, foreign-incarnation, stale-digest, and future-tip rows
-are left out and counted `read_filtered_stale` = 4 (`:1894`), a superseded
-decision with rows present answers `not_live` (`:1984`), an unknown decision
-answers `not_live` (`:2000`), and a foreign root answers `project_mismatch`
-(`:2025`), also with a bad body (`:2034`). The tip, the reviewer job facts,
-and the tip and job facts are unchanged after the first read (`:1841`,
-`:1842`) and the table's rows after the walk (`:1896`). Not constructed: the
+are left out and counted `read_filtered_stale` = 4 (`:1970`), a superseded
+decision with rows present answers `not_live` (`:2060`), an unknown decision
+answers `not_live` (`:2076`), and a foreign root answers `project_mismatch`
+(`:2101`), also with a bad body (`:2110`). The tip, the reviewer job facts,
+and the tip and job facts are unchanged after the first read (`:1917`,
+`:1918`) and the table's rows after the walk (`:1972`). Not constructed: the
 other `eligible` refusals (another domain, a foreign scope, hidden, or a
 contradicted, rejected, or quarantined disposition) through the read; the
 eligibility predicate's own test covers them
@@ -813,7 +821,7 @@ Open questions:
   harness, and the `candidates` action returns it to the model as a tool
   result, so the evidence id, the decision id, the score, the term counts,
   and the times of a descriptor that published as `Sensitive` with
-  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:915-916`) are
+  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:921-922`) are
   provider-visible. No repository policy states whether metadata derived from
   such a descriptor inherits its class, and the read consults neither
   classification; whether that disclosure is admitted is the open policy
@@ -826,17 +834,17 @@ Reachability: default-production - the `disabled` branch answers at the flag's
 default, and the other branches need the flag on.
 Status: active
 Exercised: yes - #1168: a root without MODULE memories authority answers
-`disabled` (`crates/daemon/src/candidate_pass_tests.rs:1756`); a flag-off
+`disabled` (`crates/daemon/src/candidate_pass_tests.rs:1832`); a flag-off
 route answers `disabled` while the table is renamed away, and the same route
 with the flag on answers `store_unavailable`
-(`crates/daemon/src/candidate_pass_tests.rs:2064`, `:2076`); an eligible
+(`crates/daemon/src/candidate_pass_tests.rs:2140`, `:2152`); an eligible
 decision with no rows answers
-`{"kind":"page","as_of":tip,"items":[],"next":null}` (`:1992`).
+`{"kind":"page","as_of":tip,"items":[],"next":null}` (`:2068`).
 `review_candidates_answers_the_store_and_kernel_states_before_any_page`
-(`:2347`) answers the kernel route's `unavailable`/`store_starting` state for
-a Kernel not yet open (`:2362`), `unavailable`/`store_unavailable` for a
-Kernel whose open failed (`:2379`), and `store_unavailable` for a daemon with
-no Memory Store (`:2410`), each without `items`. The OpenCode tool renders
+(`:2423`) answers the kernel route's `unavailable`/`store_starting` state for
+a Kernel not yet open (`:2438`), `unavailable`/`store_unavailable` for a
+Kernel whose open failed (`:2455`), and `store_unavailable` for a daemon with
+no Memory Store (`:2486`), each without `items`. The OpenCode tool renders
 each terminal by name and `disabled` as a plain statement
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1665`). Not
 constructed: a failing authority lookup (dependency fault F18 has no seam).
@@ -846,12 +854,12 @@ answers `disabled` (`crates/daemon/src/contradiction_candidates/read.rs:211`,
 `:231`), and the page read judges the route's authority again in the
 connection that reads the page, so an authority that drains or moves after
 the entry check answers `disabled` (`:261`, `:278`;
-`crates/daemon/src/candidate_pass_tests.rs:2192`); an uninstalled Memory
+`crates/daemon/src/candidate_pass_tests.rs:2268`); an uninstalled Memory
 Store, or one that fails the authority lookup or the page read, answers
 `store_unavailable` (`crates/daemon/src/contradiction_candidates/read.rs:214`);
 the read's budget runs from its admission, so a read queued behind a saturated
 blocking pool past its budget answers `store_unavailable` as soon as it runs
-(`:226`; `crates/daemon/src/candidate_pass_tests.rs:2233`); an unready Kernel
+(`:226`; `crates/daemon/src/candidate_pass_tests.rs:2309`); an unready Kernel
 or a failed Kernel read answers the kernel routes' state; an eligible decision
 with no rows answers an empty page; no terminal or state renders as a page.
 Check: `always` - the four conditions answer four distinct shapes; the
@@ -902,15 +910,15 @@ counter at zero and no row;
 `the_route_consent_reaches_the_pass_through_a_transform` (`:1146`) binds the
 route against the opposite daemon value and shows the offer follows the
 route's frozen value; #1168 adds
-`a_publication_without_consent_runs_no_candidate_table_statement` (`:2554`),
+`a_publication_without_consent_runs_no_candidate_table_statement` (`:2630`),
 which renames the table away, publishes three consent-off windows with every
 counter at zero, and shows one consenting publication's pass fails on the
 hidden table (`store_unavailable` = 1). Read arm (#1168):
 `review_candidates_pages_live_rows_and_answers_each_terminal`
-(`crates/daemon/src/candidate_pass_tests.rs:1738`, assertions `:2061-2076`)
+(`crates/daemon/src/candidate_pass_tests.rs:1814`, assertions `:2137-2152`)
 renames the table away, answers `disabled` on a flag-off route with
 `read_filtered_stale` unchanged, and shows the same route with the flag on
-answers `store_unavailable` (`:2076`), so the flag-off read runs no table
+answers `store_unavailable` (`:2152`), so the flag-off read runs no table
 statement; the handler answers `disabled` before it reaches the store
 (`crates/daemon/src/contradiction_candidates/read.rs:211`). The `candidates`
 action renders the terminal as a plain statement in both harnesses
@@ -961,16 +969,16 @@ Reachability: explicit-config-only - as
 Status: active
 Exercised: yes - #1168,
 `a_listed_candidate_confirms_through_dispute_while_its_evidence_lives`
-(`crates/daemon/src/candidate_pass_tests.rs:2415`) publishes two windows
+(`crates/daemon/src/candidate_pass_tests.rs:2491`) publishes two windows
 through the capture job and the pass, lists each decision's row, checks the
-listed `evidence_id` equals a published descriptor's evidence id (`:2461`),
+listed `evidence_id` equals a published descriptor's evidence id (`:2537`),
 truncates the candidate table, and files
 `dispute {object_id, event: mark_disputed, evidence_id}` built from the row
-through `kernel.commit`, which lands `disputed` (`:2513`). After
+through `kernel.commit`, which lands `disputed` (`:2589`). After
 `expire_harness_captures` retires the evidence, the other decision's read
-leaves the row out and counts it (`:2522`), and the same dispute built from
-the earlier listing is refused `not_found` (`:2532`).
-`the_confirm_path_never_reads_the_candidate_table` (`:2536`) is a lexical
+leaves the row out and counts it (`:2598`), and the same dispute built from
+the earlier listing is refused `not_found` (`:2608`).
+`the_confirm_path_never_reads_the_candidate_table` (`:2612`) is a lexical
 check that `kernel_routes/commit.rs` and `kernel_routes/dispute.rs` name no
 candidate store method. The OpenCode tool renders each row's confirm form
 `{"action":"dispute","event":"mark_disputed","objectId":"<decision_object_id>","evidenceId":"<evidence_id>"}`

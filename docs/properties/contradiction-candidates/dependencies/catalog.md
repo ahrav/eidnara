@@ -134,13 +134,13 @@ Existing check: `byte_bound_is_checked_before_analysis_at_exact_and_over_bound_s
 `atom_bound_refuses_the_next_atom_at_exact_and_over_bound_counts` (`:279`).
 Status unaudited. Re-exercised by #1164 through the scorer:
 `an_oversize_descriptor_is_refused_whole_and_an_exact_fit_is_analyzed`
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:227-244`) gets
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:224-241`) gets
 `InputTooLong` for a 65537-byte descriptor and an analysis for a
 65536-byte one with 32768 atoms;
 `an_unscorable_summary_is_reported_and_the_others_still_score`
 (`:243-274`) covers the 8192-byte summary bound. The scorer's atom bounds
 sit one past the most atoms the byte bounds admit
-(`crates/daemon/src/contradiction_candidates/scorer.rs:88-99`), so `TooManyAtoms` is
+(`crates/daemon/src/contradiction_candidates/scorer.rs:85-96`), so `TooManyAtoms` is
 unreachable through it.
 Impact: a P5 pass that analyzes a 64 KiB descriptor and a project's decision
 summaries does unbounded work or allocation per pass if the bound truncates
@@ -173,14 +173,14 @@ Read `analysis.rs:107-199`: only `char` classification, slicing, and
 `String::push`; no I/O, statics, or folding.
 Existing check: the goldens (`tests/lexical_analysis.rs:24-36` harness,
 `:51-218` cases). Status unaudited. Re-exercised by #1164: the scorer folds
-after analysis (`crates/daemon/src/contradiction_candidates/scorer.rs:114-135`),
+after analysis (`crates/daemon/src/contradiction_candidates/scorer.rs:111-132`),
 and its hand-written term sets
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:34-83`, `:131-159`) show
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:31-80`, `:131-159`) show
 case-boundary parts (`HTTPServer` to `http`, `server`), kept diacritics,
 and distinct NFC and NFD terms, which hold only if the analyzer returns
 original bytes; `:276-318` shows equal output under 18 input orders.
 Impact: the P5 scorer must fold case itself (plan R3); if the analyzer folded,
-the fold would be double and the FTS5 contract at `mod.rs:37` would no longer
+the fold would be double and the FTS5 contract at `crates/retrieval/src/lexical/mod.rs:30` would no longer
 describe the probe.
 Open questions: None.
 
@@ -213,9 +213,9 @@ Read `identity.rs:36-65` and the test.
 Existing check: `identity_pins_the_manifest`. Status unaudited.
 Re-exercised by #1164: the matcher preimage names `ANALYSIS_CONTRACT_EPOCH`
 and the Unicode version
-(`crates/daemon/src/contradiction_candidates/scorer.rs:664-666`), and
+(`crates/daemon/src/contradiction_candidates/scorer.rs:661-663`), and
 `the_matcher_digest_pins_every_rule`
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:351-403`) asserts the whole
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:348-400`) asserts the whole
 preimage, including both fields, and the digest literal. `identity_pins_the_manifest` and the retrieval crate are unchanged
 since `3a3b916b7`.
 Impact: a P5 consumer that records only the epoch string with its derived
@@ -537,14 +537,14 @@ Reachability: explicit-config-only - `source_capture_enabled` defaults
 (`source_capture.rs:3`, test `source_capture_tests.rs:312`).
 Status: active
 Exercised: yes - `the_response_is_identical_whatever_capture_and_the_kernel_are_doing`
-(`source_capture_tests.rs:344`) and `capture_latency_measurement` (`:940`).
+(`source_capture_tests.rs:344`) and `capture_latency_measurement` (`:955`).
 Guarantee: the transform response is settled (encoded) before the
 synchronous handoff runs; the handoff (`into_job` with `try_acquire_owned`,
 `admission.spawn`) performs no await, no kernel call, and no waiting lock
-(`lib.rs:9229-9236`, `source_capture.rs:616-619`); the job body runs on a
-spawned task. `AfterResponse` is detached from the outcome (`lib.rs:13491`),
-`settle_prepared` runs (`:13498`), and only on a `RequestOutcome::Response`
-is `after.run()` called (`:13500-13502`), which takes the slot and spawns the
+(`lib.rs:9297-9320`, `source_capture.rs:728-731`); the job body runs on a
+spawned task. `AfterResponse` is detached from the outcome (`lib.rs:13653`),
+`settle_prepared` runs (`:13660`), and only on a `RequestOutcome::Response`
+is `after.run()` called (`:13662-13664`), which takes the slot and spawns the
 job; a non-response outcome drops the work unrun and releases its charges.
 Check: `always` - for every pass, the `AfterResponse` closure contains no
 blocking or kernel operation, and the encoded response bytes are
@@ -556,7 +556,7 @@ job that panics.
 Required faults and enabling state: capture on; a kernel held unavailable or
 starting during the pass; a prior job holding the slot.
 Confidence: high - [evidence](evidence/p5dep-response-never-waits-on-the-capture-job.md).
-Read `lib.rs:9220-9237`, `:13470-13481`, `dispatch.rs:24-35`, `:445-460`.
+Read `lib.rs:9279-9325`, `:13652-13665`, `dispatch.rs:24-35`, `:445-460`.
 Existing check: the two tests above. Status unaudited.
 Re-exercised by #1167: the pass is offered from the capture job's tracked task
 after `run_settled` returns, so `AfterResponse` still only spawns;
@@ -575,7 +575,7 @@ Reachability: explicit-config-only - as above.
 Status: active
 Exercised: yes - `shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slot`
 (`source_capture_tests.rs:675`), `a_settled_report_counts_the_job_that_released_the_slot`
-(`source_capture.rs:1791`).
+(`source_capture.rs:1798`).
 Guarantee: the daemon holds one publication slot (`Semaphore::new(1)`,
 `source_capture.rs:269`); `into_job` takes it with `try_acquire_owned` or
 refuses as `RefusedQueueFull` without waiting (`:616-619`); the permit lives
@@ -587,7 +587,7 @@ Check: `always` - `slot.available_permits() <= 1` and at most one
 discarded, panicked) `available_permits() == 1` and `Active == 0`. `always`
 because a leaked permit stops every later capture.
 Fault/timing angle: a panic inside `publish` or `publish_locked` (the latter
-caught and resumed after the commit gate drops, `:811-871`); shutdown
+caught and resumed after the commit gate drops, `:812-878`); shutdown
 cancellation mid-job.
 Required faults and enabling state: a second pass handed off while a job
 holds the slot; an injected panic in the blocking closure; cancellation.
@@ -626,9 +626,9 @@ text sums past 64 KiB; a 64 KiB + 1 unit; a pass with both a window and
 pending document reads.
 Confidence: high - [evidence](evidence/p5dep-capture-batch-is-bounded-per-batch.md).
 Read `harness_sources.rs:614-618`, `:1565`, `:1610-1611`;
-`source_capture.rs:902-910`, `:974-1050`.
+`source_capture.rs:908-916`, `:980-1056`.
 Existing check: the 33-unit test; `a_refused_window_still_captures_its_documents`
-(`:2298`) shows the documents batch is independent. Status unaudited.
+(`:2305`) shows the documents batch is independent. Status unaudited.
 Relied on by #1167: the pass scores the units one job published, so its
 descriptor count is bounded by the window batch plus the documents batch.
 Impact: the P5 trigger's per-pass input is at most 32 window descriptors plus
@@ -665,7 +665,7 @@ start, kernel unavailable, budget exhausted, delete epoch moved, panic in
 closure, publish refusal.
 Confidence: medium - [evidence](evidence/p5dep-capture-job-ends-in-one-closed-vocabulary-count.md).
 Every `return self.end(..)` in `publish`/`publish_locked` was read; the
-`publish_locked` `Ok(end) => end` at `:821` returns a value already counted
+`publish_locked` `Ok(end) => end` at `:822` returns a value already counted
 by `end()` inside, and `run` counts join failures at `:684-687`. Exactly-once
 is argued from code structure, not observed.
 Existing check: `the_capture_report_carries_no_unit_text`,
@@ -676,7 +676,7 @@ Re-exercised by #1167: the job's `Count` vocabulary is unchanged, and
 `completed` counts with consent on.
 Impact: the P5 trigger waits for the job's terminal: the capture task runs
 `job.run_settled()` and offers the pass after it returns
-(`lib.rs:9275-9319`).
+(`lib.rs:9275-9324`).
 Open questions: None.
 
 ### p5dep-baseline-digest-change-closes-the-activation-gate
@@ -847,17 +847,17 @@ Required faults and enabling state: a route bound to another root; a body
 with an unknown field; a root without MODULE authority; an injected store
 read failure.
 Confidence: high - [evidence](evidence/p5dep-review-reads-parse-strict-bodies-after-the-envelope.md).
-Read `wire.rs:32-51`, `:145-153`, `:217-234`; `kernel_routes/mod.rs:429-488`.
+Read `wire.rs:32-51`, `:145-153`, `:217-234`; `kernel_routes/mod.rs:415-474`.
 Existing check: the wire tests above; the literal-set test at
 `wire.rs:448-463+`. Status unaudited.
 Re-exercised by #1168: `review.candidates` joins the family through
 `kernel_request` with a `deny_unknown_fields` body
 (`crates/daemon/src/contradiction_candidates/read.rs:30`);
 `review_candidates_pages_live_rows_and_answers_each_terminal`
-(`crates/daemon/src/candidate_pass_tests.rs:1738`) answers `invalid_params`
+(`crates/daemon/src/candidate_pass_tests.rs:1814`) answers `invalid_params`
 for an unknown field and a malformed cursor, `project_mismatch` for a foreign
-root before the body is read (`:2034`), and `disabled` for a root without
-MODULE authority (`:1756`).
+root before the body is read (`:2110`), and `disabled` for a root without
+MODULE authority (`:1832`).
 Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
 fields, would break the family's stated order. `review.use_outcome` (#1157)
@@ -895,7 +895,7 @@ Confidence: high - [evidence](evidence/p5dep-observational-routes-read-and-take-
 Read `lib.rs:274-281`, `:382-386`, `:413-417`.
 Existing check: the two tests above. Status unaudited.
 Re-exercised by #1168: a route bound with `OBSERVATIONAL_HARNESS` reads a
-`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:2046`).
+`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:2122`).
 Impact: P5 U4's owner read is an observational read; it must be callable on a
 `cli` route and must not enroll the project in any background work.
 Open questions: None.

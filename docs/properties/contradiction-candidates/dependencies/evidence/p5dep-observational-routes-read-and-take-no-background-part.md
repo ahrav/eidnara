@@ -37,7 +37,7 @@ boundaries; lifecycle.
   `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`;
   `crates/daemon/src/lib.rs:35931`
   `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`
-  (doc at `:35929`: alone on a dormant MODULE project it enrolls the project in
+  (doc at `:35537`: alone on a dormant MODULE project it enrolls the project in
   no worker, scheduler, or maintenance view; beside a live harness it neither
   replaces nor changes the views, whichever closes first).
 

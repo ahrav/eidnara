@@ -42,7 +42,7 @@ C13; D6.
   `management_binding` (session/route authorization), `project_root` required
   (`:422-426`), `project.accepts(requested_root)` else `project_mismatch`
   (`:428-432`), `kernel_store()` else its state.
-- `mod.rs:446-455` `kernel_request`: scope first, then `parse_request_body`.
+- `kernel_routes/mod.rs:446-455` `kernel_request`: scope first, then `parse_request_body`.
 - `mod.rs:461-473`: `ENVELOPE_KEYS = ["method", "kind", "session_id",
   "project_root"]` removed before `serde_json::from_value::<T>`; a failure is
   `invalid_params_error("invalid {operation}: {error}")`.
