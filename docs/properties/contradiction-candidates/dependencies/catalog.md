@@ -189,7 +189,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - `AnalysisIdentity::current()` is computed
 once per process (`identity.rs:13-18`) and `ANALYSIS_CONTRACT_EPOCH` is a
-public constant (`mod.rs:47`).
+public constant (`crates/retrieval/src/lexical/mod.rs:40`).
 Status: active
 Exercised: yes - `identity_pins_the_manifest`
 (`tests/lexical_analysis.rs:389-412`) asserts the epoch string and the

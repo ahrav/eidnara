@@ -24,9 +24,11 @@ carry no descriptor or summary text.
   `eligible`); a failure answers `not_live`
   (`crates/daemon/src/contradiction_candidates/read.rs:251`) before the store
   is read.
-- `crates/daemon/src/contradiction_candidates/read.rs:255`
-  `candidates_for_decision` pages at most 64 rows in reader order with a
-  keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:627`).
+- `crates/daemon/src/contradiction_candidates/read.rs:260`
+  `candidates_for_decision_under_route_within` pages at most 64 rows in reader
+  order with a keyset cursor, in the connection that reads the route's MODULE
+  authority row (`crates/memory-store/src/contradiction_candidates.rs:691`;
+  the page query at `:627`, `candidates_for_decision`).
 - `crates/daemon/src/contradiction_candidates/read.rs:291` reads evidence
   liveness for the page's ids at the same target; `is_current` (`:177`) keeps
   a row only when its evidence is live, its incarnation and matcher digest
@@ -38,7 +40,7 @@ carry no descriptor or summary text.
 - Equivalence tests: `crates/kernel/tests/kernel_claim_facts.rs:954`
   compares the standing read with claim facts field by field and refusal by
   refusal; `crates/kernel/tests/kernel_source_descriptors.rs:3188` answers
-  liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:1788`
+  liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:1798`
   walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2592`
   shows a page body is the canonical `serde_json` encoding of its value;
   `crates/daemon/src/candidate_pass_tests.rs:2087` answers two pages inside the
