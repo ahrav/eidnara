@@ -789,7 +789,7 @@ its Kernel incarnation and matcher digest equal the reader's, and its
 other row on the page is counted `read_filtered_stale`
 (`crates/daemon/src/contradiction_candidates/read.rs:304`). The TypeScript
 parser refuses an item with any other key set
-(`packages/opencode-plugin/src/shared/kernel-client/wire.ts:675`).
+(`packages/opencode-plugin/src/shared/kernel-client/wire.ts:685`).
 Check: `always` - every answered page satisfies the key, order, bound, and
 filter predicates above, and every ineligible decision answers `not_live`; the
 semantics is `always` because every response must satisfy it.

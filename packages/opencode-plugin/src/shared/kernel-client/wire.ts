@@ -663,13 +663,23 @@ function isStorableId(value: unknown): value is string {
 
 const TERMS_MAX = 4_294_967_295;
 
-/** The cursor the store issues: a score of at most 10000, a non-negative creation time, and the lower-hex bytes of a storable id, dot-separated, at most 1056 bytes. */
+/** The cursor the store issues: a score of at most 10000, a non-negative creation time, and the lower-hex UTF-8 bytes of a storable id, dot-separated, at most 1056 bytes. */
 const CURSOR_MAX_BYTES = 1056;
 const CURSOR_FORM = /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,18})\.((?:[0-9a-f]{2}){1,512})$/;
+const UTF8 = new TextDecoder("utf-8", { fatal: true });
 function isIssuedCursor(value: unknown): value is string {
     if (typeof value !== "string" || value.length > CURSOR_MAX_BYTES) return false;
     const form = CURSOR_FORM.exec(value);
-    return form !== null && Number(form[1]) <= 10_000;
+    if (form === null || Number(form[1]) > 10_000) return false;
+    const hex = form[3] as string;
+    const bytes = Uint8Array.from({ length: hex.length / 2 }, (_, i) =>
+        Number.parseInt(hex.slice(2 * i, 2 * i + 2), 16),
+    );
+    try {
+        return isStorableId(UTF8.decode(bytes));
+    } catch {
+        return false;
+    }
 }
 
 function parseCandidateItem(raw: unknown): CandidateItem | null {

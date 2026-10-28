@@ -1775,6 +1775,8 @@ describe("eidnara_memory candidates", () => {
             { kind: "page", as_of: 41, items: [ITEM], next: "not-a-cursor" },
             { kind: "page", as_of: 41, items: [ITEM], next: `7500.1.${"61".repeat(513)}` },
             { kind: "page", as_of: 41, items: [ITEM], next: "10001.1.61" },
+            { kind: "page", as_of: 41, items: [ITEM], next: "1.1.ff" },
+            { kind: "page", as_of: 41, items: [ITEM], next: "1.1.01" },
             {
                 kind: "page",
                 as_of: 41,
@@ -1800,6 +1802,8 @@ describe("eidnara_memory candidates", () => {
             "next outside the cursor form",
             "next past the longest cursor",
             "next with a score past 10000",
+            "next whose id bytes are not UTF-8",
+            "next whose id holds a control character",
             "a state beside a page",
         ]) {
             const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
