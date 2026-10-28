@@ -231,7 +231,7 @@ approval, both store-API only in tests) followed by any of the five events
 from the route.
 Confidence: high - [evidence](evidence/disposition-never-raises-maturity-and-withdraws-effective-support.md).
 Read `evaluate_admission` lines `:280-404` and `event_can_raise_support`
-(`:4262-4272`), which lists no disposition event.
+(`:4265-4275`), which lists no disposition event.
 Existing check: `admission.rs:5829`
 (`non_active_dispositions_withdraw_effective_support`), `:5410`
 (`an_event_that_names_a_disposition_keeps_its_own_outcome`),

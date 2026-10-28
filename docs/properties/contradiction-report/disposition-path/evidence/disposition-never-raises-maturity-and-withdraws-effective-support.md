@@ -17,7 +17,7 @@ claim: "never a maturity promotion".
 - `event_effect` returns `(current, Some(<disposition>), <outcome>)` for
   all five events (`crates/kernel/src/admission.rs:4233-4236`), so
   `requested == current`.
-- `event_can_raise_support` lists no disposition event (`:4262-4272`), so
+- `event_can_raise_support` lists no disposition event (`:4265-4275`), so
   `raises_support` is false (`:334-335`).
 - `target = if denied { current } else { requested }` and `historical =
   current.max(target)` (`:352-353`): `historical == current` for every
@@ -27,14 +27,14 @@ claim: "never a maturity promotion".
   forces `Maturity::Candidate` when `disposition != Active`
   (`:361-366`); `effective = historical.min(supported)` (`:367`).
 - `write_admission` stores `historical_maturity` as `maturity` and
-  `effective_maturity.get()` as `effective_maturity` (`:1839-1840`).
+  `effective_maturity.get()` as `effective_maturity` (`:1842-1843`).
 - A denied relaxation keeps `current_disposition` (`:347-350`); if that
   disposition is non-Active the forcing still applies, so a denied
   `mark_stale` on a Quarantined `Approved` subject writes
   `effective_maturity = candidate`.
 - Unit tests: `non_active_dispositions_withdraw_effective_support`
-  (`:5805`) uses `Enforce` on a Rejected prior, not a disposition event;
-  `an_event_that_names_a_disposition_keeps_its_own_outcome` (`:5386`)
+  (`:5808`) uses `Enforce` on a Rejected prior, not a disposition event;
+  `an_event_that_names_a_disposition_keeps_its_own_outcome` (`:5389`)
   checks outcome, not maturity. Integration:
   `dispositions_and_sensitivity_only_reduce_visibility`
   (`crates/kernel/tests/kernel_admission.rs:2735`) reads visibility.

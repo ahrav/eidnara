@@ -57,7 +57,7 @@ Checks at HEAD:
   unchanged.
 - `session_wrapup_no_models_is_terminal_and_retains_command` (`:37597`).
 - `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix`
-  (`crates/daemon/src/fold_authority_handler_tests.rs:1036`).
+  (`crates/daemon/src/fold_authority_handler_tests.rs:1062`).
 
 Citation corrections from `265df096` to HEAD: callers `lib.rs:9014`, `:9150`
 are now `:9011`, `:9077`; `:9538-9555` (the preparation entry) is

@@ -25,12 +25,12 @@ subject, and an `adr_accepted` approval is one.
   (`crates/kernel/src/admission.rs:1087-1102`); the bearer list is
   `[subject]` when `subject_grants_authority(subject)` (`:1118-1120`);
   after the write, `demote_dependents_if_authority_lost(bearer, reason)`
-  runs (`:1126-1128`).
+  runs (`:1129-1131`).
 - `subject_grants_authority` is `subject_is_accepted_decision &&
-  validate_approval(subject)` (`:1156-1167`).
+  validate_approval(subject)` (`:1159-1170`).
 - `demote_dependents_if_authority_lost` returns `(0, 0)` while
   `validate_approval(subject)` still holds, else runs
-  `demote_authority_dependents` (`:1172-1186`).
+  `demote_authority_dependents` (`:1175-1189`).
 - `validate_approval` walks `authority_chain_cte` and requires
   `approval_qualifies_predicate` on each member, whose `approval_row_
   fields` demand `disposition='active'`, `effective_maturity IN
@@ -40,11 +40,11 @@ subject, and an `adr_accepted` approval is one.
   fails both.
 - `demote_authority_dependents` walks the frontier, writes one
   `ApprovalRevoked` per dependent via `demote_one_dependent`, and defers
-  past `MAX_AUTHORITY_DEMOTIONS = 4_096` (`:681-686`, `:1500-1538`). The
-  doc at `:1493-1499` says a deferred dependent "already grants nothing"
+  past `MAX_AUTHORITY_DEMOTIONS = 4_096` (`:681-686`, `:1503-1541`). The
+  doc at `:1496-1502` says a deferred dependent "already grants nothing"
   because validity is read from the chain.
 - `ApprovalRevoked` lowers `effective_maturity` to `min(prior.effective,
-  automatic_ceiling)` (`remaining_support`, `:1671-1676`; evaluator
+  automatic_ceiling)` (`remaining_support`, `:1674-1679`; evaluator
   `:309-318`).
 - Kernel test `quarantining_an_approval_demotes_its_dependents_and_ends_
   its_authority` (`kernel_admission.rs:1503`) asserts the dependent's

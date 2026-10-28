@@ -506,7 +506,7 @@ Read at HEAD. Corrections: callers `lib.rs:9014`, `:9150` are now `:9011`,
 Existing check: `crates/daemon/src/lib.rs:41234`
 `no_fire_reason_is_durable_change_gated_and_cleared_by_fire`; `:37597`
 `session_wrapup_no_models_is_terminal_and_retains_command`;
-`crates/daemon/src/fold_authority_handler_tests.rs:1036`
+`crates/daemon/src/fold_authority_handler_tests.rs:1062`
 `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix`.
 Replacement: FA-N05.
 Impact: High at `265df096`: an empty-chain session paid for preparation on

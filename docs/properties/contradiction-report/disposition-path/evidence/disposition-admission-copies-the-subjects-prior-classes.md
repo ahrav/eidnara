@@ -30,8 +30,8 @@ reading; code resolves which describes the disposition path.
 - `write_admission` binds `prepared.source_class.as_str()` and
   `prepared.taint_class.as_str()` into the row (`admission.rs:1836-1837`);
   `prepared.source_class` is the request's (`prepare_with_facts`,
-  `:1614-1615`, `:1717-1718`).
-- Route test `:5566` quarantines `approval-1`, an `ExplicitUser`/
+  `:1617-1618`, `:1720-1721`).
+- Route test `:5569` quarantines `approval-1`, an `ExplicitUser`/
   `UserExplicit` subject seeded by `seed_approval`
   (`kernel_routes.rs:4362-4393`), through a route whose caller derives
   (`ModelInference`, `AssistantInference`); the commit is `available`, so

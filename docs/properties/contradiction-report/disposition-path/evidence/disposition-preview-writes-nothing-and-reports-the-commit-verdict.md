@@ -30,8 +30,8 @@ contracts and idempotency.
   `admission_latest` and returns the evaluation without writing
   (`crates/kernel/src/admission.rs:1932-1943`). `record_admission_inner`
   runs `refuse_succession_events` then `with_authority_cascade(apply_
-  admission)` (`:1087-1102`); `apply_admission` is `prepare_admission`
-  then `write_reported_admission` (`:1191-1198`). The evaluation both paths return
+  admission)` (`:1090-1105`); `apply_admission` is `prepare_admission`
+  then `write_reported_admission` (`:1194-1201`). The evaluation both paths return
   is `prepare_admission`'s.
 - The preview's `current` and `projected` surfaces come from
   `served_rows_for` plus the evaluation (`:853-863`); `visibility_changes`

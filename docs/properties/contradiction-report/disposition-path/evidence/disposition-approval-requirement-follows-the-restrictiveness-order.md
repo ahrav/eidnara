@@ -23,11 +23,11 @@ lifecycle transitions.
   `denied = requires_approval && !input.approval_valid` (`:346`); the
   disposition is `requested` when not denied, else `current` (`:347-350`).
 - Equal rank is not a relaxation: Stale to Disputed, Disputed to Stale,
-  and any X to X land without approval. Route test `:4624-4636` covers
+  and any X to X land without approval. Route test `:4627-4639` covers
   Stale to Stale ("admitted, not denied"); no test covers Stale to
   Disputed.
 - `approval_valid` comes from `validate_approval` over the cited or
-  back-filled stored approval (`:1625-1642`); the route scopes the same
+  back-filled stored approval (`:1628-1645`); the route scopes the same
   approval (`commit.rs:720-723`) so an out-of-scope approval is
   `not_found` before evaluation (`kernel_routes.rs:4508-4519`).
 - The route derives `denied` as `requested_disposition() != disposition`
