@@ -92,7 +92,7 @@ Type: safety
 Reachability: test-only - the scorer
 (`crates/daemon/src/contradiction_candidates/scorer.rs`) is the public module
 `daemon::contradiction_candidates::scorer` (`crates/daemon/src/lib.rs:17`,
-`crates/daemon/src/contradiction_candidates/mod.rs:4`) and nothing in the
+`crates/daemon/src/contradiction_candidates/mod.rs:13`) and nothing in the
 daemon calls it; its only callers are the tests in
 `crates/daemon/tests/contradiction_candidates_scorer.rs`. The intended class is
 `explicit-config-only` once the pass (#1167) calls it behind
@@ -153,7 +153,7 @@ Type: safety
 Reachability: test-only - the scorer
 (`crates/daemon/src/contradiction_candidates/scorer.rs`) is the public module
 `daemon::contradiction_candidates::scorer` (`crates/daemon/src/lib.rs:17`,
-`crates/daemon/src/contradiction_candidates/mod.rs:4`) and nothing in the
+`crates/daemon/src/contradiction_candidates/mod.rs:13`) and nothing in the
 daemon calls it; its only callers are the tests in
 `crates/daemon/tests/contradiction_candidates_scorer.rs`. The intended class is
 `explicit-config-only` once the pass (#1167) calls it behind
@@ -231,7 +231,7 @@ Type: safety
 Reachability: test-only - the scorer
 (`crates/daemon/src/contradiction_candidates/scorer.rs`) is the public module
 `daemon::contradiction_candidates::scorer` (`crates/daemon/src/lib.rs:17`,
-`crates/daemon/src/contradiction_candidates/mod.rs:4`) and nothing in the
+`crates/daemon/src/contradiction_candidates/mod.rs:13`) and nothing in the
 daemon calls it; its only callers are the tests in
 `crates/daemon/tests/contradiction_candidates_scorer.rs`. The intended class is
 `explicit-config-only` once the pass (#1167) calls it behind
@@ -316,13 +316,13 @@ Reachability: explicit-config-only
 Status: active - PROPOSED
 Exercised: not yet - U2 trigger does not exist
 Guarantee: The candidate pass starts only after `CaptureJob::run`
-(`source_capture.rs:653-676`) has produced its terminal `Count` and the
-capture commit gate guard has been dropped (`source_capture.rs:800`); it runs
+(`source_capture.rs:655-678`) has produced its terminal `Count` and the
+capture commit gate guard has been dropped (`source_capture.rs:802`); it runs
 under an `EvalBudget` whose origin is the pass start and whose interrupt is the
 daemon cancel, never the job's budget; the response bytes were handed to the
 wire writer before the `AfterResponse` closure ran (`lib.rs:9219-9238`).
 Check: `always` - with the `before_publish` and `between_screen_and_commit`
-test hooks (`source_capture.rs:781, 839`) blocked, the candidate table has
+test hooks (`source_capture.rs:783, 839`) blocked, the candidate table has
 zero rows and the pass counter `admitted` is zero; after the hooks release and
 the job returns, the pass runs; the pass's budget object is not the job's; the
 semantics is `always` because every publication must respect the ordering.
@@ -683,10 +683,10 @@ Required faults and enabling state: flag on; rows for an active and a
 superseded decision; more rows than the page bound; two project bindings.
 Confidence: low - proposed; no implementation evidence
 Existing check: none; proposed (`review.list` paging contract at
-`docs/host-wire-protocol.md:792` is the model)
+`docs/host-wire-protocol.md:821` is the model)
 Impact: rows for a dead decision invite a dispute the Kernel will refuse;
 text in the answer is a new disclosure path for Sensitive harness capture
-(`source_capture.rs:710-716`) to the model.
+(`source_capture.rs:712-718`) to the model.
 Open questions:
 - Terminal name and the section 7.8 method literal (API handoff); whether
   `matched_atoms` as a count is acceptable where the atom list is not (yes
@@ -698,7 +698,7 @@ Open questions:
   `crates/memory-store/tests/contradiction_candidates.rs:399`), so a derived
   row carries none of the captured text, and the store has no sensitivity
   column. The descriptor it derives from publishes as `Sensitive` with
-  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:844-845`);
+  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:846-847`);
   whether the term counts, the score, and the evidence-to-decision link
   inherit that class is the open question, and a column set does not answer
   it. The egress half waits on #1168: the store's `candidates_for_decision`
@@ -732,7 +732,7 @@ the flag on and the store removed; a Kernel in Starting; an eligible decision
 with zero rows.
 Confidence: low - proposed; no implementation evidence
 Existing check: none; proposed (`review.list` terminal vocabulary at
-`docs/host-wire-protocol.md:790`)
+`docs/host-wire-protocol.md:819`)
 Impact: an agent reading an empty page as "no contradiction" when the store
 was unavailable.
 Open questions: None.

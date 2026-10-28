@@ -24,8 +24,8 @@ issues, no incident history, no git-history lens.
 
 Assumption (inferred): "default build" means the daemon built without the
 `test-support` feature and run with `DaemonConfig::default()`
-(`crates/daemon/src/config.rs:150-158`): `memory_enabled: true`,
-`source_capture_enabled: false`.
+(`crates/daemon/src/config.rs:150-178`): `memory_enabled: true`,
+`source_capture_enabled: false`, `contradiction_candidates_enabled: false`.
 
 Every documented guarantee below is a claim under test. Every `file:line`
 was read at HEAD by this pass; drift from `context.md` or the plan is noted in
@@ -287,7 +287,7 @@ must keep them (`admission.rs:3543-3550`).
 Required faults and enabling state: scopes with no term, with a non-exact
 operator, with a redacted value; a redacted filter value; a NULL scope row.
 Confidence: high - [evidence](evidence/p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict.md).
-Read `admission.rs:3626-3640` (the `WHERE` tail) and `project.rs:199-212`.
+Read `admission.rs:3626-3640` (the `WHERE` tail) and `project.rs:207-220`.
 Existing check: `a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain`.
 Status unaudited.
 Impact: a P5 pass that trusts the Kernel prefilter alone (without the daemon
@@ -296,7 +296,7 @@ and rows with no scope (D5); a prefilter that dropped uncertain rows would
 hide same-project decisions from the candidate set.
 Open questions:
 - D5: the daemon `ScopeFilter::matches` returns `false` for a `None` scope
-  (`project.rs:204-206`) while the SQL keeps NULL scopes (`:3559`). Is a
+  (`project.rs:212-214`) while the SQL keeps NULL scopes (`admission.rs:3640`). Is a
   decision with no scope ever written in the `memory` domain at HEAD?
   (partial: `ProjectBinding::scope_spec` always attaches a scope for
   route-written rows; other writers not audited)
@@ -525,7 +525,7 @@ Exercised: yes - `the_response_is_identical_whatever_capture_and_the_kernel_are_
 Guarantee: the transform response is settled (encoded) before the
 synchronous handoff runs; the handoff (`into_job` with `try_acquire_owned`,
 `admission.spawn`) performs no await, no kernel call, and no waiting lock
-(`lib.rs:9228-9235`, `source_capture.rs:602-605`); the job body runs on a
+(`lib.rs:9228-9235`, `source_capture.rs:604-607`); the job body runs on a
 spawned task. `AfterResponse` is detached from the outcome (`lib.rs:13470`),
 `settle_prepared` runs (`:13477`), and only on a `RequestOutcome::Response`
 is `after.run()` called (`:13479-13481`), which takes the slot and spawns the
@@ -554,10 +554,10 @@ Reachability: explicit-config-only - as above.
 Status: active
 Exercised: yes - `shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slot`
 (`source_capture_tests.rs:674`), `a_settled_report_counts_the_job_that_released_the_slot`
-(`source_capture.rs:1588`).
+(`source_capture.rs:1590`).
 Guarantee: the daemon holds one publication slot (`Semaphore::new(1)`,
-`source_capture.rs:266`); `into_job` takes it with `try_acquire_owned` or
-refuses as `RefusedQueueFull` without waiting (`:602-605`); the permit lives
+`source_capture.rs:268`); `into_job` takes it with `try_acquire_owned` or
+refuses as `RefusedQueueFull` without waiting (`:604-607`); the permit lives
 in `ActiveSlot` inside the job and is released, with the `Active` gauge
 decremented, when the job's closure returns or unwinds (`:420-431`,
 `:667`).
@@ -601,7 +601,7 @@ text sums past 64 KiB; a 64 KiB + 1 unit; a pass with both a window and
 pending document reads.
 Confidence: high - [evidence](evidence/p5dep-capture-batch-is-bounded-per-batch.md).
 Read `harness_sources.rs:612-616`, `:1557`, `:1602-1603`;
-`source_capture.rs:832-840`, `:904-980`.
+`source_capture.rs:834-842`, `:906-982`.
 Existing check: the 33-unit test; `a_refused_window_still_captures_its_documents`
 (`:2227`) shows the documents batch is independent. Status unaudited.
 Impact: the P5 trigger's per-pass input is at most 32 window descriptors plus
@@ -624,7 +624,7 @@ Guarantee: every `CaptureJob::run` returns exactly one terminal `Count`
 (`Completed`, `Deadline`, `Discarded`, `SessionInvalidated`,
 `KernelUnavailable`, `KernelError`, `WorkerPanicked`, `RefusedResidentShort`)
 and increments exactly that counter once; the counter and log vocabulary is
-the closed `counts!` list (`source_capture.rs:76-114`) and carries no unit
+the closed `counts!` list (`source_capture.rs:85-129`) and carries no unit
 text, path, identity, or digest. No hook runs after publish outside
 `cfg(test)`; the returned `Count` is the only completion signal.
 Check: `always` - for every job, `sum(terminal counters after) -
@@ -823,11 +823,11 @@ Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
 fields, would break the family's stated order. `review.use_outcome` (#1157)
 joined the family after `3a3b916b7`: it reads the Kernel alone and has no
-`disabled` terminal (`host-wire-protocol.md:798`); this record does not
+`disabled` terminal (`host-wire-protocol.md:827`); this record does not
 cover it.
 Open questions:
 - D6: `kind` is stripped as an envelope key (`mod.rs:461`) but the doc at
-  `host-wire-protocol.md:768` names three envelope fields. Is a body field
+  `host-wire-protocol.md:797` names three envelope fields. Is a body field
   `kind` meant to be accepted silently? (needs human input)
 
 ### p5dep-observational-routes-read-and-take-no-background-part

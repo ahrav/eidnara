@@ -56,7 +56,7 @@ limit and no budget parameter exist on this API. The daemon consumer is
 `read_visible` in `crates/daemon/src/kernel_routes/read.rs:163-249`: SQL
 prefilter with `project.scope_term()` (`:177`,
 `crates/daemon/src/kernel_routes/project.rs:106-111`), then `ScopeFilter`
-(`project.rs:186-213`) judges each kept row, then `NewestRows` heap of
+(`project.rs:186-222`) judges each kept row, then `NewestRows` heap of
 `MAX_READ_ROWS = 8192` (`read.rs:26`, `:127-161`, `:190-195`), then payload
 sizes before payloads (`:197-230`), then `decisions_for_objects_as_of` for the
 retained ids (`:231-242`).
@@ -91,7 +91,7 @@ kernel store, budget, units, memo, commit gate mutex (`:789`),
 `publish_locked` (`:808-900`): delete epoch, scope, budget,
 `publish_screened_between` for the window (`:832-840`), then
 `capture_documents` in its own batch (`:905-...`). `capture_after_response`
-(`crates/daemon/src/lib.rs:9219-9236`). The request owner runs the
+(`crates/daemon/src/lib.rs:9245-9262`). The request owner runs the
 `AfterResponse` after `settle_prepared` (`lib.rs:13470-13481`;
 `crates/daemon/src/dispatch.rs:24-35`, `:445-460`). `publish_batch`
 (`crates/daemon/src/harness_sources.rs:1228-1248`), `Published` (`:520-532`),
@@ -127,12 +127,12 @@ edges). Descriptor retirement is `retire_capture_observation`
 (`write.rs:569-577`) -> `retire_slice_object` (`:627-666`) which sets
 `invalidated_commit_seq`. Caller: `kernel_slice` in
 `crates/daemon/src/memory_reviewer/lifecycle.rs:313-338`, from
-`sweep_and_sample` (`:363`), from `run` (`:441-497`), spawned once the store
+`sweep_and_sample` (`:363`), from `run` (`:471-539`), spawned once the store
 is installed (`lib.rs:4000-4008`), with `SAMPLE_INTERVAL = 30 s` and
 `SAMPLE_RETRY_INTERVAL = 5 s` (`lifecycle.rs:16-18`).
 
-S7 routed reads. `docs/host-wire-protocol.md:766-770` and `:790-798`
-(`:798` is `review.use_outcome`, added by #1157).
+S7 routed reads. `docs/host-wire-protocol.md:795-799` and `:819-827`
+(`:827` is `review.use_outcome`, added by #1157).
 `crates/daemon/src/memory_reviewer/wire.rs:1-26`; strict request structs
 (`:33-60`, `deny_unknown_fields`); `bind_review` (`:203-220`) calls
 `kernel_request` (`crates/daemon/src/kernel_routes/mod.rs:446-455`) which
@@ -180,7 +180,7 @@ exclusion of the context_researcher is by registration
 
 - One publication slot per daemon (`Semaphore::new(1)`); the job runs on
   `spawn_blocking`; a `commit_gate: Mutex<()>` serializes capture commits
-  with session deletion (`source_capture.rs:789-803`, panic caught and
+  with session deletion (`source_capture.rs:791-805`, panic caught and
   resumed after the guard drops).
 - The lifecycle loop is one task; `kernel_slice` runs on `spawn_blocking`
   and checks `cancelled()` between sweeps.
@@ -217,7 +217,7 @@ C11 `storage/AGENTS.md`: single baseline; reject mismatches.
 baseline refuses to open; the activation gate binds `memstore_baseline_digest`.
 C12 `local_file.rs:240`: owners first, evidence second; cited evidence kept;
 descriptors retired.
-C13 `host-wire-protocol.md:770`, `:790`: strict bodies, project checked before
+C13 `host-wire-protocol.md:799`, `:819`: strict bodies, project checked before
 the body is read, `disabled`/`store_unavailable` terminals.
 C14 `types.ts:6-29`, `tools.ts:103-106`: closed action list; `get` is the
 only read; an omitted allowlist admits the default actions (all but
@@ -271,7 +271,7 @@ bounded by `max_rows` instead. The doc comment at `:121` is accurate about
 the wait; the plan's reading of "budgeted" is broader than the code.
 
 D3 `source_capture.rs:3` says the job "publishes at most one screened batch".
-`publish_locked` publishes the window batch (`:832-840`) and then
+`publish_locked` publishes the window batch (`:834-842`) and then
 `capture_documents` publishes the pass's configured documents "in their own
 batch after the window's" (`:901-905`, `publish_screened` at `:980`). Two
 screened batches per job when documents are pending. The per-batch bounds
@@ -288,11 +288,11 @@ than the identity does.
 
 D5 The Kernel scope prefilter keeps rows whose `scope_id` is NULL
 (`admission.rs:3637`), and the daemon `ScopeFilter::matches` returns `false`
-for `None` (`project.rs:204-206`). The superset claim holds; a P5 consumer
+for `None` (`project.rs:212-214`). The superset claim holds; a P5 consumer
 that uses the Kernel API without the daemon filter would see unscoped rows
 the daemon never serves.
 
-D6 `host-wire-protocol.md:768` names the envelope as `method`, `session_id`,
+D6 `host-wire-protocol.md:797` names the envelope as `method`, `session_id`,
 `project_root`; `ENVELOPE_KEYS` (`kernel_routes/mod.rs:461`) also strips
 `kind`. A body field named `kind` is therefore not `invalid_params`. The doc
 is silent on `kind`; recorded as a lead, not a defect.
