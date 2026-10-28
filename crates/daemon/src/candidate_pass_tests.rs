@@ -461,6 +461,72 @@ async fn a_second_offer_while_a_pass_runs_is_refused_and_a_cancel_still_ends_the
     );
 }
 
+/// The pass budget runs from admission, so a pass queued behind a saturated blocking pool for longer than its budget ends `deadline` as soon as it runs, writes nothing, and releases the permit it held while queued.
+#[test]
+fn a_pass_queued_past_its_budget_ends_at_the_deadline_it_was_admitted_under() {
+    const BLOCKING_THREADS: usize = 8;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .max_blocking_threads(BLOCKING_THREADS)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+        let binding = kernel_routes::ProjectBinding::new(&project);
+        seed(
+            &kernel_of(&handler),
+            &binding,
+            &[("one", TOPIC, EventKind::Other)],
+        );
+        *handler.contradiction_candidates.test_bounds.lock().unwrap() = Some(PassBounds {
+            budget: Duration::from_millis(200),
+            ..PassBounds::default()
+        });
+        // `before_publish` enqueues `BLOCKING_THREADS` occupiers from the job's closure, ahead of the pass the job settles.
+        let released = Arc::new(AtomicBool::new(false));
+        let occupiers = Arc::clone(&released);
+        let runtime = tokio::runtime::Handle::current();
+        *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+            for _ in 0..BLOCKING_THREADS {
+                let released = Arc::clone(&occupiers);
+                runtime.spawn_blocking(move || {
+                    while !released.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                });
+            }
+        }));
+        publish(
+            &handler,
+            &project,
+            &window(0, &format!("{TOPIC} first")),
+            true,
+        );
+        until(&handler, "admitted", 1).await;
+        *handler.source_capture.before_publish.lock().unwrap() = None;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            counts(&handler)["active"],
+            1,
+            "the queued pass holds the permit"
+        );
+        assert!(rows(&store).is_empty(), "the pass has not run");
+        released.store(true, std::sync::atomic::Ordering::Relaxed);
+        settle(&handler).await;
+        let counts = counts(&handler);
+        assert_eq!(counts["deadline"], 1, "{counts}");
+        assert_eq!(counts["completed"], 0, "{counts}");
+        assert_eq!(counts["descriptors_unscored"], 1, "{counts}");
+        assert_eq!(counts["active"], 0, "{counts}");
+        assert!(
+            rows(&store).is_empty(),
+            "a pass past its budget writes nothing"
+        );
+        drop(handler);
+    });
+}
+
 struct Core {
     dir: tempfile::TempDir,
     kernel: KernelStore,

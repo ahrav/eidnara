@@ -38,7 +38,7 @@ pub const MAX_CANDIDATE_DECISIONS: usize = 4096;
 pub const MAX_CANDIDATE_SUMMARY_BYTES: u64 = 4 * 1024 * 1024;
 /// Rows the memory store keeps for one project.
 pub const MAX_CANDIDATE_ROWS_PER_PROJECT: usize = 4096;
-/// The pass's deadline from its start.
+/// The pass's deadline from its admission; a pass queued on the blocking pool spends its budget there.
 pub const CANDIDATE_PASS_BUDGET: Duration = Duration::from_secs(10);
 /// Summaries one descriptor scores between budget checks.
 const SUMMARIES_PER_CHECK: usize = 256;
@@ -136,10 +136,12 @@ impl CandidatePass {
     pub(crate) async fn run(self) -> Count {
         let counts = Arc::clone(&self.active.counts);
         counts.add(Count::Admitted, 1);
+        // The deadline is fixed before the closure is queued, so a wait for a blocking thread counts against the budget.
+        let deadline = Instant::now() + counts.bounds().budget;
         let interrupt = Arc::new(AtomicBool::new(false));
         let raised = Arc::clone(&interrupt);
         let cancel = self.cancel.clone();
-        let mut join = tokio::task::spawn_blocking(move || self.finish(&interrupt));
+        let mut join = tokio::task::spawn_blocking(move || self.finish(deadline, &interrupt));
         let joined = tokio::select! {
             joined = &mut join => joined,
             () = cancel.cancelled() => {
@@ -162,7 +164,7 @@ impl CandidatePass {
         }
     }
 
-    fn finish(mut self, interrupt: &Arc<AtomicBool>) -> Count {
+    fn finish(mut self, deadline: Instant, interrupt: &Arc<AtomicBool>) -> Count {
         let started = Instant::now();
         let counts = Arc::clone(&self.active.counts);
         // The texts move out; the charge stays with `settled` until the pass ends.
@@ -181,7 +183,6 @@ impl CandidatePass {
                     hook();
                 }
             }
-            let deadline = Instant::now() + counts.bounds().budget;
             let budget = EvalBudget::new(Some(deadline), Arc::clone(interrupt));
             match self.kernel.kernel_store() {
                 Ok(kernel) => score_publication(
