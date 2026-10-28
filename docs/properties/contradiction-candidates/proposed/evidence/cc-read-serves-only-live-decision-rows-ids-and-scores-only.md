@@ -26,7 +26,7 @@ carry no descriptor or summary text.
   is read.
 - `crates/daemon/src/contradiction_candidates/read.rs:229`
   `candidates_for_decision` pages at most 64 rows in reader order with a
-  keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:626`).
+  keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:628`).
 - `crates/daemon/src/contradiction_candidates/read.rs:253` reads evidence
   liveness for the page's ids at the same target; `is_current` (`:155`) keeps
   a row only when its evidence is live, its incarnation and matcher digest

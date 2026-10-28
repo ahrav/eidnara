@@ -1692,7 +1692,7 @@ describe("eidnara_memory candidates", () => {
         );
     });
 
-    test("refuses a page above the 64-item bound and an item whose score breaks the basis-point formula", async () => {
+    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, and an item past as_of", async () => {
         const h = candidatesHarness([
             { kind: "page", as_of: 1, items: Array.from({ length: 65 }, () => ITEM), next: null },
             { kind: "page", as_of: 1, items: [{ ...ITEM, score: 9999 }], next: null },
@@ -1708,8 +1708,15 @@ describe("eidnara_memory candidates", () => {
                 items: [{ ...ITEM, matched_terms: 0, decision_terms: 0, score: 0 }],
                 next: null,
             },
+            { kind: "page", as_of: 40, items: [ITEM], next: null },
         ]);
-        for (const shape of ["65 items", "score 9999", "matched over decision", "zero terms"]) {
+        for (const shape of [
+            "65 items",
+            "score 9999",
+            "matched over decision",
+            "zero terms",
+            "publish_tip past as_of",
+        ]) {
             const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
             expect(text, shape).toMatch(/^Error: /);
             expect(text, shape).not.toContain("candidates");

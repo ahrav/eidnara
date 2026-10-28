@@ -200,7 +200,9 @@ fn decode_cursor(cursor: &str) -> Result<(u32, i64, String), MemoryStoreError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| refused())?;
     let evidence = String::from_utf8(bytes).map_err(|_| refused())?;
-    if format_cursor(score, created, &evidence) != cursor {
+    // A stored id carries no control character, so a cursor naming one was never issued.
+    if evidence.chars().any(char::is_control) || format_cursor(score, created, &evidence) != cursor
+    {
         return Err(refused());
     }
     Ok((score, created, evidence))

@@ -570,12 +570,12 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
             .is_err(),
         "one byte past the byte bound is refused before any component is parsed"
     );
-    for outside in ["10001.5.61", "7500.-1.61"] {
+    for outside in ["10001.5.61", "7500.-1.61", "7500.5.01", "7500.5.617f"] {
         assert!(
             store
                 .candidates_for_decision(PROJECT, "decision", Some(outside), 4)
                 .is_err(),
-            "{outside}: a score over 10000 or a negative time names a row no table holds"
+            "{outside}: a score over 10000, a negative time, or a control character in the id names a row no table holds"
         );
     }
 }

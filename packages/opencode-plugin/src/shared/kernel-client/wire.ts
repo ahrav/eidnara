@@ -707,7 +707,8 @@ export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload>
     const items: CandidateItem[] = [];
     for (const entry of raw.items) {
         const item = parseCandidateItem(entry);
-        if (!item) return failed();
+        // The daemon leaves out a row whose publish_tip is past as_of, so a page carrying one is not its answer.
+        if (!item || item.publish_tip > raw.as_of) return failed();
         items.push(item);
     }
     return {

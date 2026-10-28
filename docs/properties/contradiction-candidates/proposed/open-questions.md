@@ -7,10 +7,11 @@ until the specification resolves it on its own evidence; the dependency
 catalog does not resolve any of them (see bias B3 in
 `../dependencies/portfolio-evaluation.md`).
 
-## Unknowns OQ-D
+## Unknowns OQ-D and OQ-F
 
 | Id | Question | Owner |
 | --- | --- | --- |
+| OQ-F | Candidate rows after a completed Kernel restore: a restore keeps `database_incarnation_id` (`crates/kernel/src/backup.rs:424`), so a row written before the restore passes the read's incarnation, matcher-digest, and `publish_tip <= as_of` filters once the restored history advances past its tip, and its evidence-liveness check reads the restored history; a descriptor the restored history republishes under the same deterministic evidence id would then serve the pre-restore score. The read's incarnation fences catch a restore during a request only. Remedies are a restore-sensitive token in the row or truncating the table on restore; `KernelStore::restore` has no production caller at this tip, so the decision is design-time (needs human input). | specification owner |
 | OQ-D | The candidate-set bound N, and whether a budgeted Kernel id read is needed given the unbounded `visible_domain_decisions_as_of_in_scope` (plan OQ5-1; certificate conflict 2). | specification owner |
 
 Plan open questions OQ5-2 and OQ5-3 are carried by the certificate
