@@ -51,8 +51,8 @@ Every location was read at the #1157 branch tip.
 | `last_transform_at_advances_live_records_without_a_commit` | `crates/kernel/tests/kernel_use_outcome.rs:1119` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 | `a_held_writer_bounds_the_advance_and_an_idle_session_skips_it` | `crates/kernel/tests/kernel_use_outcome.rs:1204` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 | `a_held_reader_pool_bounds_the_count_read` | `crates/kernel/tests/kernel_use_outcome.rs:1792` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
-| `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing` | `crates/kernel/tests/kernel_use_outcome.rs:1815` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
-| `the_advance_takes_no_pooled_reader` | `crates/kernel/tests/kernel_use_outcome.rs:1847` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing` | `crates/kernel/tests/kernel_use_outcome.rs:1816` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
+| `the_advance_takes_no_pooled_reader` | `crates/kernel/tests/kernel_use_outcome.rs:1848` | `uo-p-last-transform-at-monotone-per-committing-pass` | unaudited |
 
 ## Daemon
 

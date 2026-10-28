@@ -12,8 +12,8 @@ References were first verified at the #1157 branch tip (the commit that adds
 this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
 tip.
 
-- Components: `crates/kernel/src/schema.rs:193` and
-  `crates/kernel/src/schema.rs:197`, with the `use_outcome_sessions`
+- Components: `crates/kernel/src/schema.rs:194` and
+  `crates/kernel/src/schema.rs:198`, with the `use_outcome_sessions`
   component #1162 adds (`crates/kernel/src/schema.rs:189`); the admission
   citing column and
   `idx_admission_use_outcome_fk` in the `admission_decisions` component

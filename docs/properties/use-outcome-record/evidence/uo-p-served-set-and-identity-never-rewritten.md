@@ -17,7 +17,7 @@ tip.
   `use_outcomes_deleted_at_set_once`,
   `use_outcomes_last_transform_at_monotonic`, `use_outcomes_retire_once`,
   `use_outcomes_no_delete` in the `use_outcomes` component
-  (`crates/kernel/src/schema.rs:193`); decision-row triggers
+  (`crates/kernel/src/schema.rs:194`); decision-row triggers
   `use_outcome_decisions_written_with_record` (refuses a row once the record's
   `decision_count` rows exist or once a later commit exists: a Kernel-written
   set is complete at its commit, and any record's set is sealed by the next
@@ -27,7 +27,7 @@ tip.
   retired at or before the record's `served_commit_seq`; the Kernel reports it
   as `InvalidInput`),
   `use_outcome_decisions_no_update`, and `use_outcome_decisions_no_delete` in
-  the `use_outcome_decisions` component (`crates/kernel/src/schema.rs:197`).
+  the `use_outcome_decisions` component (`crates/kernel/src/schema.rs:198`).
   #1162 adds `session_seq` to the immutable record columns, makes
   `use_outcome_decisions_written_with_record` also require a decision row's
   `session_seq` and `served_commit_seq` to equal its record's, and adds

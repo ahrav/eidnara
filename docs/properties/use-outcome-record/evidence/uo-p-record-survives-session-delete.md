@@ -13,7 +13,7 @@ References were first verified at the #1157 branch tip (the commit that adds
 this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
 tip.
 
-- Delete triggers: `crates/kernel/src/schema.rs:193`.
+- Delete triggers: `crates/kernel/src/schema.rs:194`.
 - Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:536`) answers
   retired records.
 

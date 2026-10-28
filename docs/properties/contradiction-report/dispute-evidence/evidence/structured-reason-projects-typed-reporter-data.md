@@ -28,9 +28,9 @@ grammar).
   second time, a path without an oid or the reverse, and any input whose
   re-rendering differs (`dispute.rs:103-148`).
 - `validated` refuses a rendering over `MAX_REASON_BYTES` (4096,
-  `dispute.rs:14`) or holding a detection (`dispute.rs:77-79`). Since
+  `dispute.rs:14`) or holding a detection (`dispute.rs:75-77`). Since
   `511cd6d73` it also refuses a raw `evidence_id` holding a detection
-  before rendering (`dispute.rs:58-64`); the scan of the composed reason
+  before rendering (`dispute.rs:58-62`); the scan of the composed reason
   alone could miss a secret the percent-encoding breaks up.
 - The Kernel stores `redact(reason)` (`crates/kernel/src/admission.rs:1749`);
   `redact_lossy` calls the same `redact_durable_text`
@@ -83,8 +83,8 @@ None in time. The reason depends on the scanner's rule set, as in
   (`crates/daemon/tests/kernel_routes.rs:6651`) asserts the reporter
   columns read `(model_inference, user_inferred)` for a command-shaped
   dispute and `(model_inference, assistant_inference)` for a tool-shaped
-  one, that `event_payload` holds the sent `evidence_ref` serialized byte
-  for byte and is null when none was sent, and that `DisputeReason`
+  one, that `event_payload` equals the canonical `EvidenceRef` serialization
+  of the sent reference (`dispute.rs:152`) and is null when none was sent, and that `DisputeReason`
   rendered from the typed columns and the row's `evidence_id` equals the
   stored `reason`; `reporter_columns_are_dispute_only_and_checked_by_the_schema`
   (`crates/kernel/tests/kernel_use_outcome.rs:1456`) asserts every other

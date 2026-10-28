@@ -12,7 +12,7 @@ References were first verified at the #1157 branch tip (the commit that adds
 this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
 tip.
 
-- DDL CHECKs: `crates/kernel/src/schema.rs:193`; the `use_outcome_sessions`
+- DDL CHECKs: `crates/kernel/src/schema.rs:194`; the `use_outcome_sessions`
   row each record names carries the same `sensitive` and `local_only` CHECKs
   (`crates/kernel/src/schema.rs:189`, added by #1162).
 - Insert: `insert_use_outcome` (`crates/kernel/src/use_outcome.rs:330`), whose

@@ -849,9 +849,9 @@ Required faults and enabling state: Inserts with `normal` and `remote_allowed`;
 a serve through the envelope.
 Confidence: high -
 [evidence](evidence/uo-p-classification-sensitive-local-only-no-remote-egress.md).
-CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:193`); the insert
+CHECKs in the `use_outcomes` DDL (`crates/kernel/src/schema.rs:194`); the insert
 names the classes as literals in its `INSERT` statement
-(`crates/kernel/src/use_outcome.rs:180`).
+(`crates/kernel/src/use_outcome.rs:345-352`).
 Existing check: `use_outcome_classification_and_identity_shapes_are_checked`
 (`crates/kernel/tests/kernel_schema.rs:2427`);
 `a_serve_creates_no_registry_or_evidence_row_and_its_class_denies_remote`
@@ -1235,7 +1235,7 @@ runs inside the capture gate after the descriptor retirement and before the
 memory delete (`delete_kernel_step` (`crates/daemon/src/lib.rs:6883`)); the
 envelope selects the session's live records under the writer
 (`mark_use_outcomes_deleted` (`crates/kernel/src/use_outcome.rs:426`)), and the
-set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:193`).
+set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:194`).
 Existing check:
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`);
@@ -1329,9 +1329,9 @@ Existing check: `last_transform_at_moves_forward_only_on_committing_passes`
 `an_outside_file_lock_bounds_the_advance_at_begin`
 (`crates/kernel/tests/kernel_use_outcome.rs:1245`),
 `the_staleness_check_answers_for_null_or_earlier_values_and_writes_nothing`
-(`crates/kernel/tests/kernel_use_outcome.rs:1815`),
+(`crates/kernel/tests/kernel_use_outcome.rs:1816`),
 `the_advance_takes_no_pooled_reader`
-(`crates/kernel/tests/kernel_use_outcome.rs:1847`). Status: unaudited.
+(`crates/kernel/tests/kernel_use_outcome.rs:1848`). Status: unaudited.
 Impact: A wrong last-activity attribution.
 Open questions:
 - OQ3-6 resolved at #1156 ticketing: a fenced, receipt-free monotone update.

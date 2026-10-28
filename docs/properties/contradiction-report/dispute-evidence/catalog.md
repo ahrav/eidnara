@@ -362,13 +362,13 @@ carrying both `evidence_id` and `evidence_ref` and parses both back from
 the reason, and refuses an uppercase-oid reference beside an id that
 would answer `not_found` with `invalid_input`, so the form check runs
 first. Unit tests in `dispute.rs`:
-`malformed_references_are_invalid_input` (`:323`),
-`a_path_the_secret_scanner_detects_is_invalid_input` (`:365`),
-`git_object_ids_and_ordinary_paths_carry_no_detection` (`:377`),
-`render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes` (`:255`),
-`reserved_and_multi_byte_values_encode_to_uppercase_escapes` (`:289`, a
+`malformed_references_are_invalid_input` (`:327`),
+`a_path_the_secret_scanner_detects_is_invalid_input` (`:373`),
+`git_object_ids_and_ordinary_paths_carry_no_detection` (`:385`),
+`render_and_parse_are_inverse_over_reserved_and_non_ascii_bytes` (`:259`),
+`reserved_and_multi_byte_values_encode_to_uppercase_escapes` (`:293`, a
 fixed witness for `encode` and `decode`), and the proptest
-`every_accepted_reference_parses_back_to_its_inputs` (`:301`), which
+`every_accepted_reference_parses_back_to_its_inputs` (`:305`), which
 asserts every accepted path and optional id renders an ASCII reason
 within the cap that parses back to the inputs.
 Guarantee: A stored `evidence_ref` has a `git_object_id` of exactly 40 or
@@ -705,8 +705,8 @@ within the cap that parses back to its inputs. Typed form (#1162):
 (`kernel_routes.rs:6651`) asserts the reporter columns read
 `(model_inference, user_inferred)` for a command-shaped dispute and
 `(model_inference, assistant_inference)` for a tool-shaped one, that
-`event_payload` holds the sent `evidence_ref` serialized byte for byte and
-is null when none was sent, and that `DisputeReason` rendered from the
+`event_payload` equals the canonical `EvidenceRef` serialization of the
+sent reference and is null when none was sent, and that `DisputeReason` rendered from the
 typed columns and the row's `evidence_id` equals the stored `reason`;
 `reporter_columns_are_dispute_only_and_checked_by_the_schema`
 (`crates/kernel/tests/kernel_use_outcome.rs:1456`) asserts other writers
