@@ -723,9 +723,13 @@ Check: `always` - for every row whose reason starts with `v=1;`:
 `parse(reason)` is `Some`, `render(parse(reason)) == reason`, `reason` is
 ASCII, `len(reason) <= MAX_REASON_BYTES` (`dispute.rs:14`), and
 `redact_durable_text(reason).detections` is empty
-(`dispute.rs:72-76`); for a row with a non-null `reporter_source_class`,
+(`dispute.rs:72-76`); for a route-written dispute row,
 `render(event_kind, reporter_taint_class, evidence_id, event_payload)`
-equals `reason`. The Kernel stores `redact_lossy(reason)`
+equals `reason`. The route is the production writer of the reporter
+columns (`commit.rs:797-805`); the Kernel API `record_dispute_admission`
+stores the reason and payload a caller supplies, so a row an in-process
+caller writes carries that caller's values and is outside this check.
+The Kernel stores `redact_lossy(reason)`
 (`crates/kernel/src/redaction.rs:41-42` calls the same
 `redact_durable_text`), so no `durable_text_redactions` row exists for a
 route-written reason. Holds on every write, so `always`.
