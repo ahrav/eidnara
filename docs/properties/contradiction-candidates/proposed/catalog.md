@@ -505,7 +505,15 @@ increments by one; the semantics is `always` because every interrupted pass
 must leave this shape.
 Fault/timing angle: deadline or cancel between two descriptors; deadline
 inside the summary read or the scoring loop of one descriptor; crash between
-two descriptor writes.
+two descriptor writes; a Kernel restore between the incarnation check and the
+store write of one descriptor (the check runs without a Kernel guard, so this
+window is the write itself): the rows written cite decisions of the replaced
+history under the incarnation id, which a restore keeps, the sweep drops the
+ones the restored tip judges ineligible, and the descriptor's next
+publication replaces the rest. Holding one of the Kernel's two pooled readers
+through the store write would close the window at the price of that reader
+held through a store wait bounded by the pass deadline; the pass leaves the
+window open.
 Required faults and enabling state: flag on; a batch of several `Published`
 units; a budget that expires mid-pass (test clock or interrupt flag).
 Confidence: high - [evidence](evidence/cc-partial-result-is-descriptor-granular-prefix.md)
