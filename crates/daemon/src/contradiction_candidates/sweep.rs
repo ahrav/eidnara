@@ -5,24 +5,23 @@
 //! across a restart. The sweep reads the Kernel and writes only the memory
 //! store.
 
-use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
 use kernel::{
-    ClaimFactBounds, ClaimFacts, EvidenceLiveness, IdentifiedCommitReadTarget, KernelError,
-    KernelStore,
+    ClaimFactsError, ClaimStanding, EvidenceLiveness, EvidenceLivenessError,
+    IdentifiedCommitReadTarget, KernelStore,
 };
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::StoredCandidate;
 
 use super::eligibility::eligible;
 use super::scorer::matcher_digest;
-use super::{CLAIM_CAUSAL_PAYLOAD_BYTES, Candidates, Count};
-use crate::kernel_routes::project::{ScopeFilter, stored_terms};
+use super::{Candidates, Count};
+use crate::kernel_routes::project::ScopeFilter;
 
 /// Rows one sweep run examines.
 pub const CANDIDATE_SWEEP_PAGE: usize = 256;
@@ -31,7 +30,7 @@ pub const CANDIDATE_SWEEP_PAGE: usize = 256;
 pub const MAX_CANDIDATE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// The Kernel reads of one run stop at this deadline.
 const SWEEP_BUDGET: Duration = Duration::from_secs(2);
-/// Decisions per claim-facts read.
+/// Decisions per claim-standing read.
 const CLAIM_CHUNK: NonZeroUsize = NonZeroUsize::new(64).expect("nonzero");
 
 // A page's distinct evidence ids fit one liveness read.
@@ -114,12 +113,22 @@ impl CandidateSweep {
             })
             .collect();
         let budget = EvalBudget::new(Some(Instant::now() + SWEEP_BUDGET), Arc::default());
-        let judged = match kernel.capture_identified_commit_read_target_within_budget(&budget) {
-            Ok(target) => judge(kernel, &target, &rows, standing, &budget, cancelled),
-            Err(_) => Judged {
+        let judged = if rows.is_empty() {
+            Judged {
                 standing,
-                read_failed: true,
-            },
+                read_failed: false,
+            }
+        } else {
+            if cancelled() {
+                return;
+            }
+            match kernel.capture_identified_commit_read_target_within_budget(&budget) {
+                Ok(target) => judge(kernel, &target, &rows, standing, &budget, cancelled),
+                Err(_) => Judged {
+                    standing,
+                    read_failed: true,
+                },
+            }
         };
         if judged.read_failed {
             counts.add(Count::SweepSkippedKernelUnavailable, 1);
@@ -153,19 +162,31 @@ struct Judged {
     read_failed: bool,
 }
 
-/// The distinct values `key` takes over the rows still [`Standing::Kept`].
-fn kept_unique<'a, T: Eq + Hash>(
+/// How one claim-standing read ended.
+enum ClaimRead {
+    Read,
+    /// The Kernel refused the ids or the budget ran out; the rows stay kept.
+    Refused,
+    /// The Kernel was restored since the target was captured.
+    HistoryChanged,
+}
+
+/// The distinct values `key` takes over the rows still [`Standing::Kept`], in
+/// ascending order, so each Kernel read walks its indexes in key order.
+fn kept_unique<'a, T: Ord>(
     rows: &'a [StoredCandidate],
     standing: &[Standing],
     key: impl Fn(&'a StoredCandidate) -> T,
 ) -> Vec<T> {
-    rows.iter()
+    let mut values: Vec<T> = rows
+        .iter()
         .zip(standing)
         .filter(|(_, standing)| **standing == Standing::Kept)
         .map(|(row, _)| key(row))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect()
+        .collect();
+    values.sort_unstable();
+    values.dedup();
+    values
 }
 
 /// Each row's standing at `target`, from the standing judged without the
@@ -185,13 +206,18 @@ fn judge(
             *standing = Standing::Dead;
         }
     }
-    let mut read_failed = false;
-    let bounds = ClaimFactBounds {
-        max_claims: CLAIM_CHUNK,
-        max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
+    // A restore during the run replaces the history `target` was captured
+    // from, so the rows judged against it are kept for a later run: the
+    // database identity persists across a restore while the commit
+    // sequences do not.
+    let before_kernel = standing.clone();
+    let restored = Judged {
+        standing: before_kernel,
+        read_failed: true,
     };
+    let mut read_failed = false;
     let decisions = kept_unique(rows, &standing, |row| row.decision_object_id.clone());
-    let mut facts: HashMap<String, Option<ClaimFacts>> = HashMap::new();
+    let mut facts: HashMap<String, Option<ClaimStanding>> = HashMap::new();
     for chunk in decisions.chunks(CLAIM_CHUNK.get()) {
         if cancelled() {
             return Judged {
@@ -199,46 +225,49 @@ fn judge(
                 read_failed,
             };
         }
-        let mut read = |ids: &[String]| match kernel.claim_facts_at_within_budget(
+        let mut read = |ids: &[String]| match kernel.claim_standing_at_within_budget(
             ids,
             target.target,
-            bounds,
+            CLAIM_CHUNK,
             budget,
         ) {
-            Ok(read) => {
-                facts.extend(ids.iter().map(|id| (id.clone(), None)));
-                facts.extend(
-                    read.claims
-                        .into_iter()
-                        .map(|claim| (claim.object.object_id.clone(), Some(claim))),
-                );
-                true
+            Ok(standings) => {
+                facts.extend(ids.iter().cloned().zip(standings));
+                ClaimRead::Read
             }
-            Err(_) => false,
+            Err(ClaimFactsError::IncarnationMismatch) => ClaimRead::HistoryChanged,
+            Err(_) => ClaimRead::Refused,
         };
-        if !read(chunk) {
-            for id in chunk {
-                read_failed |= !read(std::slice::from_ref(id));
+        match read(chunk) {
+            ClaimRead::Read => {}
+            ClaimRead::HistoryChanged => return restored,
+            ClaimRead::Refused => {
+                for id in chunk {
+                    if cancelled() {
+                        return Judged {
+                            standing,
+                            read_failed,
+                        };
+                    }
+                    match read(std::slice::from_ref(id)) {
+                        ClaimRead::Read => {}
+                        ClaimRead::HistoryChanged => return restored,
+                        ClaimRead::Refused => read_failed = true,
+                    }
+                }
             }
         }
     }
     let mut filters: HashMap<&str, Option<ScopeFilter>> = HashMap::new();
-    let mut stored = stored_terms(kernel);
-    let mut terms = |scope: &str| {
-        if budget.is_exhausted() {
-            Err(KernelError::Deadline)
-        } else {
-            stored(scope)
-        }
-    };
-    for (row, standing) in rows.iter().zip(standing.iter_mut()) {
-        if *standing == Standing::Dead || row.publish_tip > target.target.through_commit {
+    let mut terms = |scope: &str| kernel.scope_terms_within_budget(scope, budget);
+    for (row, row_standing) in rows.iter().zip(standing.iter_mut()) {
+        if *row_standing == Standing::Dead || row.publish_tip > target.target.through_commit {
             continue;
         }
         let claim = match facts.get(&row.decision_object_id) {
             Some(Some(claim)) => claim,
             Some(None) => {
-                *standing = Standing::Dead;
+                *row_standing = Standing::Dead;
                 continue;
             }
             None => continue,
@@ -246,6 +275,12 @@ fn judge(
         let filter = filters
             .entry(&row.project_digest)
             .or_insert_with(|| ScopeFilter::for_digest(&row.project_digest));
+        if cancelled() {
+            return Judged {
+                standing,
+                read_failed,
+            };
+        }
         let names_project = match filter {
             Some(filter) => match filter.matches(claim.decision.scope_id.as_deref(), &mut terms) {
                 Ok(verdict) => verdict,
@@ -257,7 +292,7 @@ fn judge(
             None => false,
         };
         if !eligible(claim, names_project) {
-            *standing = Standing::Dead;
+            *row_standing = Standing::Dead;
         }
     }
     let evidence = kept_unique(rows, &standing, |row| row.evidence_id.as_str());
@@ -270,6 +305,7 @@ fn judge(
     let liveness = match kernel.evidence_liveness_at_within_budget(&evidence, target.target, budget)
     {
         Ok(liveness) => liveness,
+        Err(EvidenceLivenessError::IncarnationMismatch) => return restored,
         Err(_) => {
             return Judged {
                 standing,

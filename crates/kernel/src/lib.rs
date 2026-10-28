@@ -8,6 +8,7 @@ pub mod sqlite_runtime;
 
 mod admission;
 mod anchor;
+mod anchor_write;
 pub mod applicability;
 mod backup;
 mod cas;
@@ -52,6 +53,10 @@ pub use anchor::{
     ANCHOR_CAPTURE_SCHEMA, AnchorCapture, AnchorCondition, AnchorDecodeError, AnchorEvaluation,
     AnchorKind, AnchorRowSpec, ContextDependency, GitCondition, PatchIdCapture, QueryContext,
     encode_anchor_captures, evaluate_non_git,
+};
+pub use anchor_write::{
+    ANCHOR_INSERT_KIND, AnchorSpec, AnchorValidationError, AnchorValue, AnchorWriteOutcome,
+    validate_anchor, validate_anchor_row,
 };
 #[cfg(all(target_os = "linux", feature = "test-support"))]
 pub use backup::filesystem_is_unsafe_for_test;
@@ -104,8 +109,8 @@ pub use eligibility::{
 };
 pub use envelope::{
     AlignmentProjectionSpec, CommitIntent, CommitReceipt, DependentObservationQuery, DomainSpec,
-    Envelope, EvidenceCitations, KnownAsOf, OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState,
-    Preview, RemediationTarget, RepositoryProvenance, Sensitivity, StagingCandidateRow,
+    Envelope, KnownAsOf, OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState, Preview,
+    RemediationTarget, RepositoryProvenance, Sensitivity, StagingCandidateRow,
     StagingCandidateSpec, TokenCheck, TokenConflict,
 };
 pub use evidence_liveness::{EvidenceLiveness, EvidenceLivenessError, MAX_EVIDENCE_LIVENESS_IDS};

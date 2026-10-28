@@ -5,7 +5,7 @@
 //! term per dimension. Unknown graph relations and unresolvable values fail closed for matching
 //! and subsumption, while overlap intentionally over-approximates unknown pairs.
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 
 use super::envelope::{Envelope, ObjectRow, PendingChange};
@@ -1560,6 +1560,31 @@ pub fn scope_equivalent(a: &CanonicalScope, b: &CanonicalScope, oracle: &dyn Gra
         return true;
     }
     scope_subsumes(a, b, oracle) && scope_subsumes(b, a, oracle)
+}
+
+impl super::KernelStore {
+    /// [`Self::scope_terms`] bounded by `budget`, or `None` when no scope row
+    /// exists.
+    ///
+    /// # Errors
+    ///
+    /// An exhausted budget produces `Deadline`; a failed read produces the
+    /// SQLite error classification.
+    pub fn scope_terms_within_budget(
+        &self,
+        scope_id: &str,
+        budget: &super::applicability::EvalBudget,
+    ) -> Result<Option<Vec<ScopeTermSpec>>, KernelError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            let mut reader = self.reader_with_limit(&limit)?;
+            let tx = reader.transaction(TransactionBehavior::Deferred)?;
+            let terms = load_scope_terms(&tx, scope_id)?;
+            tx.commit()?;
+            limit.check()?;
+            Ok(terms)
+        })
+    }
 }
 
 #[cfg(test)]

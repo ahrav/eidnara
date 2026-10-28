@@ -25,7 +25,7 @@ use super::admission::{
 use super::applicability::EvalBudget;
 use super::claim_causality::{CausalClass, CausalRecord, causal_class_at, registry_row_at};
 use super::commit_read::{CommitReadIncarnation, CommitReadTarget, tip};
-use super::envelope::{ObjectRow, Sensitivity};
+use super::envelope::{ObjectRow, Sensitivity, object_row_from};
 use super::open::AcquireLimit;
 use super::source_descriptor::{
     OCCURRENCE_ID_PREFIX, SOURCE_DESCRIPTOR_KIND, descriptor_object_id, reencoded_identity,
@@ -155,10 +155,8 @@ pub struct ClaimFacts {
     pub causal_record: Option<CausalRecord>,
 }
 
-/// The facts of one claim decision that judge its standing: the registry row,
-/// the typed decision row, the own admission row, and the served
-/// interpretation, each equal to the same field of [`ClaimFacts`] at the same
-/// snapshot.
+/// The registry row, decision row, own admission row, and served standing of a
+/// claim decision: the [`ClaimFacts`] fields that decide whether it stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimStanding {
     pub object: ObjectRow,
@@ -258,60 +256,45 @@ impl KernelStore {
         })
     }
 
-    /// The [`ClaimStanding`] of `object_id` at `target.through_commit` under
-    /// `budget`, from one snapshot; `None` when no registry row was created by
-    /// the snapshot. Each field is read as [`Self::claim_facts_at_within_budget`]
-    /// reads it.
+    /// The standing of each claim in `object_ids` at `target.through_commit`,
+    /// in request order, `None` for an id with no registry row by the snapshot.
+    /// Each standing equals the matching fields of
+    /// [`Self::claim_facts_at_within_budget`] at the same target; the lineage
+    /// admission, occurrence inventory, and causal class are not read.
     ///
     /// # Errors
     ///
-    /// `Kernel(Deadline)` from an exhausted budget; `Kernel(InvalidInput)` for
-    /// an empty or oversized id or a negative target; `FutureSnapshot`,
-    /// `IncarnationMismatch`, `NotADecision`, `MalformedRequiredField`, and the
-    /// reader's errors as [`Self::claim_facts_at_within_budget`] answers them.
+    /// The refusals of [`Self::claim_facts_at_within_budget`], with
+    /// `max_claims` as the claim bound, except those only the lineage
+    /// admission, occurrence, and causal reads raise.
     pub fn claim_standing_at_within_budget(
         &self,
-        object_id: &str,
+        object_ids: &[String],
         target: CommitReadTarget,
+        max_claims: NonZeroUsize,
         budget: &EvalBudget,
-    ) -> Result<Option<ClaimStanding>, ClaimFactsError> {
+    ) -> Result<Vec<Option<ClaimStanding>>, ClaimFactsError> {
         let limit = budget.acquire_limit();
         limit.run(|| {
-            if object_id.is_empty()
-                || object_id.len() > MAX_CLAIM_OBJECT_ID_BYTES
-                || target.through_commit < 0
-            {
+            check_claim_ids(object_ids, max_claims)?;
+            let requested = target.through_commit;
+            if requested < 0 {
                 return Err(KernelError::InvalidInput.into());
             }
             let mut reader = self.reader_with_limit(&limit)?;
             let tx = reader.transaction(TransactionBehavior::Deferred)?;
-            if target.through_commit > tip(&tx).map_err(map_sqlite)? {
+            if requested > tip(&tx).map_err(map_sqlite)? {
                 return Err(KernelError::FutureSnapshot.into());
             }
+            // The reader guard is held, so a restore cannot land between this
+            // comparison and the rows read below.
             if target.incarnation != self.incarnation() {
                 return Err(ClaimFactsError::IncarnationMismatch);
             }
-            let requested = target.through_commit;
-            let standing = match registry_row_at(&tx, requested, object_id)? {
-                None => None,
-                Some(object) => {
-                    let ids = [object.object_id.clone()];
-                    let served = load_served(&tx, requested, &ids)?.remove(object_id);
-                    let mut own = tx.prepare_cached(&OWN_SQL).map_err(map_sqlite)?;
-                    let (decision, own_admission, served) =
-                        load_standing(&tx, requested, &object, served, &mut own)?;
-                    drop(own);
-                    Some(ClaimStanding {
-                        object,
-                        decision,
-                        own_admission,
-                        served,
-                    })
-                }
-            };
+            let standings = load_standings_in_tx(&tx, requested, object_ids, &limit)?;
             tx.commit()?;
             limit.check()?;
-            Ok(standing)
+            Ok(standings)
         })
     }
 
@@ -354,7 +337,11 @@ pub(crate) fn check_claim_bounds(
     object_ids: &[String],
     bounds: ClaimFactBounds,
 ) -> Result<(), ClaimFactsError> {
-    if object_ids.len() > bounds.max_claims.get() {
+    check_claim_ids(object_ids, bounds.max_claims)
+}
+
+fn check_claim_ids(object_ids: &[String], max_claims: NonZeroUsize) -> Result<(), ClaimFactsError> {
+    if object_ids.len() > max_claims.get() {
         return Err(ClaimFactsError::TooManyClaims);
     }
     if object_ids
@@ -399,6 +386,145 @@ pub(crate) type KnownServed<'a> = HashMap<&'a str, Option<ServedFacts>>;
 
 /// The occurrences to read for each object, by object id.
 pub(crate) type WantedOccurrences<'a> = HashMap<&'a str, Vec<(OccurrenceClass, &'a str)>>;
+
+/// One row per id of `:ids`, in request order: the registry row created by
+/// `:governing_as_of`, the decision row with its lifecycle agreement, and the
+/// own admission row the serving view selects, with the columns of
+/// [`admission_sql`].
+fn standing_sql() -> String {
+    let selection = served_own_decision_sql("a");
+    let approval_valid = supporting_approval_valid_sql("d.approval_object_id");
+    format!(
+        "SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
+                o.source_revision,o.created_commit_seq,o.invalidated_commit_seq,
+                o.superseded_by,o.sensitivity_class,
+                j.value,dec.object_id IS NOT NULL,{agrees},
+                dec.decision_id,dec.decision_kind,dec.proposition_id,dec.scope_id,
+                dec.anchor_id,dec.evidence_id,
+                d.admission_decision_id,d.commit_seq,d.event_kind,d.maturity,
+                d.effective_maturity,d.disposition,d.visibility,d.outcome,d.source_class,
+                d.taint_class,d.policy_revision,d.sensitivity_class,d.evidence_id,
+                d.approval_object_id,{approval_valid},d.trigger_object_id,d.elevated_support
+         FROM json_each(:ids) j
+         LEFT JOIN object_registry o
+           ON o.object_id=j.value AND o.created_commit_seq<=:governing_as_of
+         LEFT JOIN decisions dec ON dec.object_id=o.object_id
+         LEFT JOIN admission_decisions d
+           ON o.object_id IS NOT NULL AND d.admission_decision_id={selection}
+         ORDER BY j.key",
+        agrees = lifecycle_agrees_sql("dec", "o"),
+    )
+}
+
+/// The standings of [`KernelStore::claim_standing_at_within_budget`] from one
+/// statement, with the refusals [`load_claim`] makes before its lineage read;
+/// `limit` is polled before each claim.
+fn load_standings_in_tx(
+    tx: &Transaction<'_>,
+    requested: i64,
+    object_ids: &[String],
+    limit: &AcquireLimit,
+) -> Result<Vec<Option<ClaimStanding>>, ClaimFactsError> {
+    let mut served = load_served(tx, requested, object_ids)?;
+    let mut standings = Vec::with_capacity(object_ids.len());
+    if object_ids.is_empty() {
+        return Ok(standings);
+    }
+    limit.check()?;
+    static SQL: LazyLock<String> = LazyLock::new(standing_sql);
+    let ids = serde_json::to_string(object_ids).map_err(|_| KernelError::InvalidInput)?;
+    let mut statement = tx.prepare_cached(&SQL).map_err(map_sqlite)?;
+    let mut rows = statement
+        .query(rusqlite::named_params! { ":ids": ids, ":governing_as_of": requested })
+        .map_err(map_sqlite)?;
+    while let Some(row) = rows.next().map_err(map_sqlite)? {
+        limit.check()?;
+        let id = row.get_ref(10).and_then(|id| Ok(id.as_str()?));
+        if object_ids.get(standings.len()).map(String::as_str) != Some(id.map_err(map_sqlite)?) {
+            return Err(KernelError::CorruptCanonicalRow.into());
+        }
+        standings.push(standing_from(row, requested, &mut served)?);
+    }
+    if standings.len() != object_ids.len() {
+        return Err(KernelError::CorruptCanonicalRow.into());
+    }
+    Ok(standings)
+}
+
+fn column<T: rusqlite::types::FromSql>(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> Result<T, ClaimFactsError> {
+    row.get(index).map_err(|error| map_sqlite(error).into())
+}
+
+/// One row of [`standing_sql`], judged as [`registry_row_at`], [`load_claim`],
+/// [`load_decision`], and [`load_admission`] judge the same rows.
+fn standing_from(
+    row: &rusqlite::Row<'_>,
+    requested: i64,
+    served: &mut HashMap<String, ServedFacts>,
+) -> Result<Option<ClaimStanding>, ClaimFactsError> {
+    if column::<Option<String>>(row, 0)?.is_none() {
+        return Ok(None);
+    }
+    let mut object = object_row_from(row).map_err(map_sqlite)?;
+    if object
+        .invalidated_commit_seq
+        .is_some_and(|seq| seq > requested)
+    {
+        object.invalidated_commit_seq = None;
+        object.superseded_by = None;
+    }
+    if object.object_kind != "decision" {
+        return Err(ClaimFactsError::NotADecision);
+    }
+    if !column::<bool>(row, 11)? || column::<Option<bool>>(row, 12)? != Some(true) {
+        return Err(KernelError::CorruptCanonicalRow.into());
+    }
+    sensitivity_field(&column::<String>(row, 9)?)?;
+    let decision = ClaimDecisionFacts {
+        decision_id: column(row, 13)?,
+        decision_kind: column(row, 14)?,
+        proposition_id: column(row, 15)?,
+        scope_id: column(row, 16)?,
+        anchor_id: column(row, 17)?,
+        evidence_id: column(row, 18)?,
+    };
+    let own_admission = match column::<Option<String>>(row, 19)? {
+        None => None,
+        Some(admission_decision_id) => Some(interpret_admission(RawAdmission {
+            admission_decision_id,
+            commit_seq: column(row, 20)?,
+            event_kind: column(row, 21)?,
+            maturity: column(row, 22)?,
+            effective_maturity: column(row, 23)?,
+            disposition: column(row, 24)?,
+            visibility: column(row, 25)?,
+            outcome: column(row, 26)?,
+            source_class: column(row, 27)?,
+            taint_class: column(row, 28)?,
+            policy_revision: column(row, 29)?,
+            sensitivity: column(row, 30)?,
+            evidence_id: column(row, 31)?,
+            approval_object_id: column(row, 32)?,
+            approval_valid: column(row, 33)?,
+            trigger_object_id: column(row, 34)?,
+            elevated_support: column(row, 35)?,
+        })?),
+    };
+    let served = match served.remove(&object.object_id) {
+        Some(facts) => ServedStanding::Served(facts),
+        None if object.invalidated_commit_seq.is_some() => ServedStanding::NotLiveAtSnapshot,
+        None => ServedStanding::NeverAdmitted,
+    };
+    Ok(Some(ClaimStanding {
+        object,
+        decision,
+        own_admission,
+        served,
+    }))
+}
 
 /// `known` supplies serving facts from `tx` at `requested`; `None` records an object with no serving admission. `load_claims_served_in_tx` queries the serving view only for objects absent from `known`.
 pub(crate) fn load_claims_served_in_tx(

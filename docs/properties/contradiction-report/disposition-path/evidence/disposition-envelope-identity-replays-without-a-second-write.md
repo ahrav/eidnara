@@ -8,7 +8,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 
 Lens: idempotency and replay. The command's identity is
 `(sessionId, event, objectId)` at `3a3b916b7`; PR A appends the evidence
-flags (`memoryMarkOperationId`, `memory-mark-command.ts:189-194`), so a
+flags (`memoryMarkOperationId`, `memory-mark-command.ts:210-215`), so a
 user repeating a command with the same evidence in one session hits the
 replay path by design;
 P3 plans to join dispute events by `commit_seq`, which assumes one row set
@@ -22,20 +22,20 @@ per report.
   daemon prefixes the key with the project and `RECEIPT_FAMILY = "commit"`
   (`project.rs:78-83`, `:152-163`; `commit.rs:87`).
 - `commit_prepared_with_writer` opens the writer transaction, checks the
-  fence, then `stored_receipt` (`crates/kernel/src/envelope.rs:1383-1396`):
+  fence, then `stored_receipt` (`crates/kernel/src/envelope.rs:1472-1481`):
   a `Some` returns the stored receipt without running the operation;
-  `Conflict` when the digest differs (`:1342-1372`).
+  `Conflict` when the digest differs (`:1426-1456`).
 - `operation_receipts` is `UNIQUE(producer, operation_key)` with no-delete
   and identity-immutable triggers (`schema.rs:42`); `commit_log` has
   `idx_commit_operation UNIQUE(producer, operation_key)` (`:26`).
 - The route maps a `Conflict` before entering the operation to
-  `OperationKeyReused` (`commit.rs:1086-1091`) and reports
-  `invalid/operation_key_reused` (`:483`).
+  `OperationKeyReused` (`commit.rs:1084-1089`) and reports
+  `invalid/operation_key_reused` (`:489`).
 - The replayed receipt's `result` is the original `CommitResult` JSON;
   the route re-derives `tokens` from `touched` with `known_as_of =
-  receipt.commit_seq` and copies `dispositions` (`:1190-1206`), so a
+  receipt.commit_seq` and copies `dispositions` (`:1224-1240`), so a
   replay reports the original verdict even if the subject has since moved.
-- Preview honors the same identity (`:874-876`).
+- Preview honors the same identity (`:890-892`).
 - Reissue: the client reissues a write once under the same identity after
   an ambiguous send (`client.ts:300-301`, `:462-468`), relying on this
   property.

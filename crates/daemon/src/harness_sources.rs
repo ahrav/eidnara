@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Harness {
     OpenCode,
     Pi,
@@ -39,10 +39,17 @@ impl Harness {
             Self::Pi => "pi",
         }
     }
+
+    /// The harness whose `as_str` is `value`.
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::OpenCode, Self::Pi]
+            .into_iter()
+            .find(|harness| harness.as_str() == value)
+    }
 }
 
 /// The route-bound identity every unit of a session is published under. `project_id` is the bound project's digest, the scope term's exact value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionIdentity {
     pub project_id: String,
     pub harness: Harness,
@@ -185,6 +192,24 @@ fn revision(value: Option<&Value>, name: &'static str) -> Result<String, Adapter
     }
 }
 
+/// The identity of one `messages` unit in the class's field order. Memory
+/// capture rebuilds it from a capture job to read the unit's descriptor.
+pub(crate) fn message_identity(
+    project_id: &str,
+    harness: &str,
+    session_id: &str,
+    message_id: &str,
+    block_index: usize,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("project_id", project_id.to_owned()),
+        ("harness", harness.to_owned()),
+        ("session_id", session_id.to_owned()),
+        ("message_id", message_id.to_owned()),
+        ("block_index", block_index.to_string()),
+    ]
+}
+
 impl SessionIdentity {
     fn message_unit(
         &self,
@@ -196,13 +221,13 @@ impl SessionIdentity {
     ) -> SourceUnit {
         SourceUnit {
             class: OccurrenceClass::Messages,
-            identity: vec![
-                ("project_id", self.project_id.clone()),
-                ("harness", self.harness.as_str().to_owned()),
-                ("session_id", self.session_id.clone()),
-                ("message_id", message_id.to_owned()),
-                ("block_index", block_index.to_string()),
-            ],
+            identity: message_identity(
+                &self.project_id,
+                self.harness.as_str(),
+                &self.session_id,
+                message_id,
+                block_index,
+            ),
             revision: revision.to_owned(),
             representation: Representation::Text,
             text: text.to_owned(),
@@ -249,9 +274,9 @@ struct ToolBlock<'a> {
     is_error: bool,
 }
 
-/// Units of one OpenCode `MessageV2` record: user text at `time.created`, assistant text at `time.completed`, and settled tool parts at `state.time.end`. Text block indices are part positions; a tool's output block index is 0, its one exact output or error string. Ignored text and other part kinds contribute nothing.
+/// Units of one OpenCode `MessageV2` record: user text at `time.created`, assistant text at `time.completed`, and settled tool parts at `state.time.end`. Text block indices are part positions; a tool's output block index is 0, its one exact output or error string. Ignored text, synthetic text, and other part kinds contribute nothing.
 ///
-/// Assistant text without a completion timestamp is deferred. A valid completion timestamp makes non-ignored text eligible even when `info.error` is present. Settled tools contribute independently, except a call the turn's abort interrupted (`state.metadata.interrupted`), which waits for the completion timestamp so its outcome reads the abort's final error. The adapter uses no separate edit revision for user text or completed assistant text; changing bytes at the same native identity and timestamp conflicts at publication.
+/// Assistant text without a completion timestamp is deferred. A valid completion timestamp makes non-ignored, non-synthetic text eligible even when `info.error` is present. Settled tools contribute independently, except a call the turn's abort interrupted (`state.metadata.interrupted`), which waits for the completion timestamp so its outcome reads the abort's final error. The adapter uses no separate edit revision for user text or completed assistant text; changing bytes at the same native identity and timestamp conflicts at publication.
 ///
 /// # Errors
 ///
@@ -303,8 +328,11 @@ pub fn opencode_units_within(
     let mut kept = Kept::new(admit);
     for (index, part) in parts.iter().enumerate() {
         match part.get("type").and_then(Value::as_str) {
-            // An ignored text part is not conversation text.
-            Some("text") if part.get("ignored").and_then(Value::as_bool) == Some(true) => {}
+            // Conversation text is a text part with `ignored` and `synthetic`
+            // both absent or false; a synthetic part is injected context.
+            Some("text")
+                if part.get("ignored").and_then(Value::as_bool) == Some(true)
+                    || part.get("synthetic").and_then(Value::as_bool) == Some(true) => {}
             Some("text") if role == "assistant" && completed.is_none() => {}
             Some("text") => {
                 let text = part
@@ -674,8 +702,7 @@ impl SourcePublisher<'_> {
                     stored_receipt(preview, self.evidence_intent(&unit), &unit, self)?
                         .map_or_else(|| unit.request_digest.clone(), |(_, digest)| digest);
                 Ok((
-                    stored_receipt(preview, descriptor_intent.clone(), &unit, self)?
-                        .map(|(receipt, _)| receipt),
+                    stored_descriptor(preview, descriptor_intent.clone(), &unit, self)?,
                     unit.rule.resolve(preview)?,
                     evidence_digest,
                 ))
@@ -690,12 +717,14 @@ impl SourcePublisher<'_> {
                     evidence: None,
                 },
             })?;
-        if let Some(receipt) = stored {
+        if let Some((receipt, cited)) = stored {
+            let (evidence_id, evidence_object_id) =
+                cited.unwrap_or((evidence_id, evidence_object_id));
             return Ok(Published {
                 object_id: receipt.result,
                 occurrence_id: unit.occurrence_id,
                 evidence_object_id,
-                evidence_id: evidence_id.clone(),
+                evidence_id,
                 replaced_object_id: None,
                 replayed: true,
                 admission,
@@ -1289,13 +1318,12 @@ fn publish_prepared(
                 let mut step = || {
                     publisher.check_scope_once(unit, preview, &mut scopes)?;
                     Ok((
-                        stored_receipt(
+                        stored_descriptor(
                             preview,
                             publisher.descriptor_intent(unit),
                             unit,
                             publisher,
-                        )?
-                        .map(|(receipt, _)| receipt),
+                        )?,
                         unit.rule.resolve(preview)?,
                         stored_receipt(preview, publisher.evidence_intent(unit), unit, publisher)?
                             .map(|(receipt, _)| receipt),
@@ -1331,15 +1359,19 @@ fn publish_prepared(
             );
         }
         match stored {
-            Some(receipt) => outcomes.push(Some(Published {
-                object_id: receipt.result,
-                occurrence_id: unit.occurrence_id.clone(),
-                evidence_object_id: unit.evidence_object_id(),
-                evidence_id: unit.evidence_id(),
-                replaced_object_id: None,
-                replayed: true,
-                admission,
-            })),
+            Some((receipt, cited)) => {
+                let (evidence_id, evidence_object_id) =
+                    cited.unwrap_or_else(|| (unit.evidence_id(), unit.evidence_object_id()));
+                outcomes.push(Some(Published {
+                    object_id: receipt.result,
+                    occurrence_id: unit.occurrence_id.clone(),
+                    evidence_object_id,
+                    evidence_id,
+                    replaced_object_id: None,
+                    replayed: true,
+                    admission,
+                }));
+            }
             None => {
                 outcomes.push(None);
                 pending.push(index);
@@ -2084,6 +2116,22 @@ impl Prepared<'_> {
         (self.unit.class == OccurrenceClass::RepositoryDocuments && self.revision > 1)
             .then(|| self.revision - 1)
     }
+}
+
+/// The `(evidence_id, evidence object id)` a stored descriptor cites.
+type CitedEvidence = Option<(String, String)>;
+
+fn stored_descriptor(
+    preview: &kernel::Envelope<'_>,
+    intent: CommitIntent,
+    unit: &Prepared<'_>,
+    publisher: &SourcePublisher<'_>,
+) -> Result<Option<(kernel::CommitReceipt, CitedEvidence)>, KernelError> {
+    let Some((receipt, _)) = stored_receipt(preview, intent, unit, publisher)? else {
+        return Ok(None);
+    };
+    let cited = preview.source_descriptor_evidence(&receipt.result)?;
+    Ok(Some((receipt, cited)))
 }
 
 /// Where a unit's admission classes come from.

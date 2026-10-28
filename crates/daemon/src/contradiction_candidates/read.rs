@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::Count;
-use super::eligibility::standing_is_eligible;
+use super::eligibility::eligible;
 use super::scorer::matcher_digest;
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES;
@@ -22,6 +23,7 @@ use crate::{HandlerCore, MemoriesAuthority, memories_authority_for_route};
 
 pub(crate) const CANDIDATES: &str = "review.candidates";
 const READ_BUDGET: Duration = Duration::from_secs(5);
+const ONE_CLAIM: NonZeroUsize = NonZeroUsize::new(1).expect("nonzero");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -90,16 +92,20 @@ fn decision_is_live(
     decision_object_id: &str,
     budget: &EvalBudget,
 ) -> Result<bool, Refused> {
-    let facts =
-        match kernel.claim_standing_at_within_budget(decision_object_id, target.target, budget) {
-            Ok(standing) => standing,
-            Err(ClaimFactsError::NotADecision) => None,
-            Err(ClaimFactsError::Kernel(error)) => return Err(Refused::Kernel(error)),
-            Err(ClaimFactsError::IncarnationMismatch) => {
-                return Err(Refused::Kernel(KernelError::Conflict));
-            }
-            Err(_) => return Err(Refused::Kernel(KernelError::CorruptCanonicalRow)),
-        };
+    let facts = match kernel.claim_standing_at_within_budget(
+        &[decision_object_id.to_string()],
+        target.target,
+        ONE_CLAIM,
+        budget,
+    ) {
+        Ok(mut standings) => standings.pop().flatten(),
+        Err(ClaimFactsError::NotADecision) => None,
+        Err(ClaimFactsError::Kernel(error)) => return Err(Refused::Kernel(error)),
+        Err(ClaimFactsError::IncarnationMismatch) => {
+            return Err(Refused::Kernel(KernelError::Conflict));
+        }
+        Err(_) => return Err(Refused::Kernel(KernelError::CorruptCanonicalRow)),
+    };
     let Some(facts) = facts else {
         return Ok(false);
     };
@@ -109,7 +115,7 @@ fn decision_is_live(
             &mut stored_terms(kernel),
         )
         .map_err(Refused::Kernel)?;
-    Ok(standing_is_eligible(&facts, names_project))
+    Ok(eligible(&facts, names_project))
 }
 
 fn is_current(

@@ -19,7 +19,7 @@ behavior.
 ## 1. Harness fit
 
 Routing for `/testing:test-strategy`. No record needs a simulator: the
-single `Immediate` writer transaction (`envelope.rs:1383-1386`) turns every
+single `Immediate` writer transaction (`envelope.rs:1459-1469`) turns every
 "retired between read and commit" window into two sequential requests, and
 all 14 `always` checks hold over per-request state.
 
@@ -27,7 +27,7 @@ all 14 `always` checks hold over per-request state.
 |---|---|---|
 | classes | route-level daemon test | reads the written row; store helpers exist (`kernel_routes.rs:4340`) |
 | maturity | kernel unit (evaluator) plus one route row read | `evaluate_admission` is pure (`admission.rs:280-367`) |
-| restrictiveness | kernel unit (7x5 grid) plus route cases for lateral moves | table at `admission.rs:4241-4248` |
+| restrictiveness | kernel unit (7x5 grid) plus route cases for lateral moves | table at `admission.rs:4244-4251` |
 | no-evidence | route-level, raw JSON body | parse refusal at `mod.rs:463-471` |
 | evidence-existence | kernel integration (store API) | the route set `None` at `3a3b916b7`; PR A sets a checked id (`commit.rs:738`) |
 | slice-liveness | kernel integration; one route case for the `not_found` mapping | helpers private to `write.rs` |
@@ -73,7 +73,7 @@ are an open question. Situation coverage lives in 21 `sometimes` markers in
 Observability: every column check is readable through the test store
 connection at route level. Two checks name kernel-internal functions a
 daemon test cannot call: evidence-scope cites `load_object_state`
-(`pub(super)`, `envelope.rs:1905`) and cascade cites `validate_approval`;
+(`pub(super)`, `envelope.rs:1989`) and cascade cites `validate_approval`;
 the route-visible proxies are `not_found` and a later relaxation denied.
 
 Constructibility: F1 to F11 and F13 to F16 are available as the fault map
@@ -103,13 +103,13 @@ differ, prior above Candidate, retired id cited); none negates a check.
 - Baseline pins: no-evidence, commit-log, evidence-scope, and the
   accept-retired branch of evidence-existence assert behavior P4 intends to
   change; a test written from them fails on the intended change (B1).
-- Replay after move: `memory-mark-command.test.ts:351` pins that a repeat
+- Replay after move: `memory-mark-command.test.ts:435` pins that a repeat
   reports `applied` with the original verdict while the stored disposition
-  differs (`commit.rs:1226-1242`). Safe for the store, possibly misleading
+  differs (`commit.rs:1224-1240`). Safe for the store, possibly misleading
   for the user; no record asks (R5).
 - Preview shows the subject's visibility only; a dispute on an approval
-  demotes dependents the confirmation never names (`commit.rs:830-841`,
-  `changes_to` at `:537-542`). Gap G2.
+  demotes dependents the confirmation never names (`commit.rs:828-839`,
+  `changes_to` at `:543-548`). Gap G2.
 - Superseded to Disputed is lateral at rank 1 and lands without approval;
   the restrictiveness open question names Stale only (R8).
 - Thirteen of fourteen discovery triggers cite a P4 statement; both gaps
@@ -128,7 +128,7 @@ differ, prior above Candidate, retired id cited); none negates a check.
 | R3 | refinement | evidence-scope: split observation into route `not_found` and a kernel-crate `scope_id == None` assertion |
 | R4 | refinement | subject: evidence says the retired-stored-approval outcome "was not traced"; record says `Open questions: None`. Add it |
 | R5 | refinement | replay: add open question on reporting the original verdict after a move (needs human input) |
-| R6 | refinement | command: preview null verdict is `refused/preview invalid(internal)` (`memory-mark-command.ts:227-229`), commit null is `outcome_unknown` (`:240-242`); fix the check; add marker `command_preview_visibility_changes` |
+| R6 | refinement | command: preview null verdict is `refused/preview invalid(internal)` (`memory-mark-command.ts:271-273`), commit null is `outcome_unknown` (`:298-300`); fix the check; add marker `command_preview_visibility_changes` |
 | R7 | refinement | cascade: mark the `deferred` branch `Exercised: not yet - 4,096 dependents` |
 | R8 | refinement | restrictiveness: extend the lateral-move question to Superseded to Disputed |
 | R9 | refinement | no-evidence: add a row-existence floor to the second clause |
@@ -142,7 +142,7 @@ differ, prior above Candidate, retired id cited); none negates a check.
 - G1: read `kernel_route_scope` (`mod.rs:415-441`), `IntentRequest`
   (`project.rs:138-146`), `resolve_classes`; one record on what the daemon
   verifies about the intent and `source_kind`.
-- G2: read `PreviewRun` (`commit.rs:824-883`); owner decides whether
+- G2: read `PreviewRun` (`commit.rs:822-881`); owner decides whether
   cascade visibility is part of the preview contract; at most one record.
 - G3: read the `crates/secret-scanner` detectors; name one detected token
   and the result for a path and a hex oid. G4: grep callers of

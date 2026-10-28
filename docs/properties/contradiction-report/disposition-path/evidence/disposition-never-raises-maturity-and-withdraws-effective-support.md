@@ -15,26 +15,26 @@ claim: "never a maturity promotion".
 ## Evidence trail
 
 - `event_effect` returns `(current, Some(<disposition>), <outcome>)` for
-  all five events (`crates/kernel/src/admission.rs:4233-4236`), so
+  all five events (`crates/kernel/src/admission.rs:4236-4239`), so
   `requested == current`.
-- `event_can_raise_support` lists no disposition event (`:4189-4199`), so
-  `raises_support` is false (`:318-319`).
+- `event_can_raise_support` lists no disposition event (`:4265-4275`), so
+  `raises_support` is false (`:334-335`).
 - `target = if denied { current } else { requested }` and `historical =
-  current.max(target)` (`:336-337`): `historical == current` for every
+  current.max(target)` (`:352-353`): `historical == current` for every
   disposition event.
-- `supported` starts as `carried_effective` (`:338-344`), then "A
+- `supported` starts as `carried_effective` (`:354-360`), then "A
   non-active disposition withdraws support; history stays monotonic"
   forces `Maturity::Candidate` when `disposition != Active`
-  (`:345-350`); `effective = historical.min(supported)` (`:351`).
+  (`:361-366`); `effective = historical.min(supported)` (`:367`).
 - `write_admission` stores `historical_maturity` as `maturity` and
-  `effective_maturity.get()` as `effective_maturity` (`:1770-1771`).
-- A denied relaxation keeps `current_disposition` (`:331-334`); if that
+  `effective_maturity.get()` as `effective_maturity` (`:1842-1843`).
+- A denied relaxation keeps `current_disposition` (`:347-350`); if that
   disposition is non-Active the forcing still applies, so a denied
   `mark_stale` on a Quarantined `Approved` subject writes
   `effective_maturity = candidate`.
 - Unit tests: `non_active_dispositions_withdraw_effective_support`
-  (`:5732`) uses `Enforce` on a Rejected prior, not a disposition event;
-  `an_event_that_names_a_disposition_keeps_its_own_outcome` (`:5313`)
+  (`:5808`) uses `Enforce` on a Rejected prior, not a disposition event;
+  `an_event_that_names_a_disposition_keeps_its_own_outcome` (`:5389`)
   checks outcome, not maturity. Integration:
   `dispositions_and_sensitivity_only_reduce_visibility`
   (`crates/kernel/tests/kernel_admission.rs:2735`) reads visibility.
@@ -44,15 +44,15 @@ claim: "never a maturity promotion".
 An `EventKind` added to `event_can_raise_support`, or a route-reachable
 event with a non-`current` first tuple member, would let a plugin raise
 `historical` or `effective` maturity through `kernel.commit`. Separately,
-removing the `:345-350` forcing would keep a disputed `Verified` decision
-at `VisibilityRow::Automatic` (`visibility_row`, `:4248-4260`) on the
+removing the `:361-366` forcing would keep a disputed `Verified` decision
+at `VisibilityRow::Automatic` (`visibility_row`, `:4321-4333`) on the
 `auto_inject` surface.
 
 ## Timing windows and dependencies
 
 None in time. Depends on the prior read being the object's own row
-(`load_prior_decision`, `:2181`). Within one envelope, a later disposition
-sees the earlier one's row as prior (`admission_latest`, `:1835-1843`).
+(`load_prior_decision`, `:2254`). Within one envelope, a later disposition
+sees the earlier one's row as prior (`admission_latest`, `:1908-1916`).
 
 ## What a test must construct
 
@@ -74,7 +74,7 @@ sees the earlier one's row as prior (`admission_latest`, `:1835-1843`).
 
 ### Q: Is the preserved `maturity` history intended to be visible to P3/P4 readers?
 
-- Sources examined: `admission.rs:352-367`, `:1770-1771`; P4 Problem
+- Sources examined: `admission.rs:352-367`, `:1842-1843`; P4 Problem
   Frame; P3 plan R3 ("whether a `MarkDisputed` or `Contradict` event
   landed after the served commit sequence").
 - Findings: the row keeps `maturity` (historical) at its prior value and

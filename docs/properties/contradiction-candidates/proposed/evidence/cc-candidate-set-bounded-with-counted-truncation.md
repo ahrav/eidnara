@@ -9,9 +9,10 @@ once per descriptor.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/pass.rs:362` `candidate_summaries`
+- `crates/daemon/src/contradiction_candidates/pass.rs:397` `candidate_summaries`
   reads explicit-search ids with the project scope term, judges each scope with
-  `ScopeFilter`, keeps the newest `bounds.decisions` with `NewestRows`, filters
+  `ScopeFilter`, keeps the newest `bounds.decisions` with `NewestRows`, adds
+  the number of scope-matched decisions it cut to `candidates_truncated`, filters
   by `eligible` through claim facts in chunks of 64, cuts payloads by
   `decision_payload_sizes_as_of` before any load, and loads the rest in 64-id
   chunks.
@@ -37,7 +38,8 @@ and secret rows at `crates/kernel/src/admission.rs:4194`.
 
 ## What a test must construct
 
-N + 1 visible decisions at a reduced N, another project's decision, a summary
+N + 2 visible decisions at a reduced N, so the count of cut decisions differs
+from the count of truncating passes, another project's decision, a summary
 cut, a superseded decision; all in `crates/daemon/src/candidate_pass_tests.rs`.
 The production N is pinned by value, not constructed.
 

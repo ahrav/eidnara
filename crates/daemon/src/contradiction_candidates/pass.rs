@@ -5,14 +5,14 @@
 //! per pass. One pass runs per store; an offer while one runs is refused. The
 //! pass reads the Kernel and writes only the memory store.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
-use kernel::{ClaimFactBounds, KernelStore, Surface};
+use kernel::{KernelStore, Surface};
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::{CandidateCaps, CandidateScore, DescriptorCandidates};
 use tokio::sync::OwnedSemaphorePermit;
@@ -20,10 +20,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::eligibility::eligible;
 use super::scorer::{
-    CANDIDATES_PER_DESCRIPTOR, CandidateInput, DescriptorTerms, SummaryScore, TopCandidates,
-    matcher_digest,
+    CANDIDATES_PER_DESCRIPTOR, DESCRIPTOR_BOUNDS, SUMMARY_BOUNDS, ScoredCandidate, TopCandidates,
+    matcher_digest, passes_gates, term_set,
 };
-use super::{CLAIM_CAUSAL_PAYLOAD_BYTES, Candidates, Count};
+use super::{Candidates, Count};
 use crate::canonical_memory::MEMORY_DOMAIN_ID;
 use crate::kernel_routes::KernelOpenCoordinator;
 use crate::kernel_routes::project::{ProjectBinding, ScopeFilter, stored_terms};
@@ -38,7 +38,7 @@ pub const MAX_CANDIDATE_DECISIONS: usize = 4096;
 pub const MAX_CANDIDATE_SUMMARY_BYTES: u64 = 4 * 1024 * 1024;
 /// Rows the memory store keeps for one project.
 pub const MAX_CANDIDATE_ROWS_PER_PROJECT: usize = 4096;
-/// The pass's deadline from its start.
+/// The pass's deadline from its admission; a pass queued on the blocking pool spends its budget there.
 pub const CANDIDATE_PASS_BUDGET: Duration = Duration::from_secs(10);
 /// Summaries one descriptor scores between budget checks.
 const SUMMARIES_PER_CHECK: usize = 256;
@@ -131,14 +131,16 @@ impl Candidates {
 }
 
 impl CandidatePass {
-    /// Runs the pass on the blocking pool and returns once it physically completes. The blocking closure records the pass's end, a panic included, and its timing before it releases the permit, so an idle permit means those counters are final. Cancellation raises the budget's interrupt; the pass stops at its next check. Between checks it runs one budgeted Kernel read, up to 256 scope-term reads, the unbudgeted visible-decision and payload-size reads, 256 summaries of one descriptor, or one row write.
+    /// Runs the pass on the blocking pool and returns once it physically completes. The blocking closure records the pass's end, a panic included, and its timing before it releases the permit, so an idle permit means those counters are final. Cancellation raises the budget's interrupt; the pass stops at its next check. Between checks it runs one budgeted Kernel read, up to 256 scope-term reads, the unbudgeted visible-decision and payload-size reads, 256 summaries against every descriptor, or one row write.
     pub(crate) async fn run(self) -> Count {
         let counts = Arc::clone(&self.active.counts);
         counts.add(Count::Admitted, 1);
+        // The pass's start is fixed before the closure is queued, so a wait for a blocking thread counts against its budget and its wall time.
+        let started = Instant::now();
         let interrupt = Arc::new(AtomicBool::new(false));
         let raised = Arc::clone(&interrupt);
         let cancel = self.cancel.clone();
-        let mut join = tokio::task::spawn_blocking(move || self.finish(&interrupt));
+        let mut join = tokio::task::spawn_blocking(move || self.finish(started, &interrupt));
         let joined = tokio::select! {
             joined = &mut join => joined,
             () = cancel.cancelled() => {
@@ -161,12 +163,14 @@ impl CandidatePass {
         }
     }
 
-    fn finish(mut self, interrupt: &Arc<AtomicBool>) -> Count {
-        let started = Instant::now();
+    fn finish(mut self, started: Instant, interrupt: &Arc<AtomicBool>) -> Count {
         let counts = Arc::clone(&self.active.counts);
         // The texts move out; the charge stays with `settled` until the pass ends.
+        // Equal texts in one batch cite the same evidence row, so the pass scores each `evidence_id` once.
+        let mut cited = HashSet::new();
         let descriptors: Vec<Descriptor> = std::mem::take(&mut self.settled.units)
             .into_iter()
+            .filter(|(_, published)| cited.insert(published.evidence_id.clone()))
             .map(|(text, published)| Descriptor {
                 evidence_id: published.evidence_id,
                 text,
@@ -180,8 +184,10 @@ impl CandidatePass {
                     hook();
                 }
             }
-            let deadline = Instant::now() + counts.bounds().budget;
-            let budget = EvalBudget::new(Some(deadline), Arc::clone(interrupt));
+            let budget = EvalBudget::new(
+                Some(started + counts.bounds().budget),
+                Arc::clone(interrupt),
+            );
             match self.kernel.kernel_store() {
                 Ok(kernel) => score_publication(
                     &kernel,
@@ -224,7 +230,7 @@ fn stop(budget: &EvalBudget) -> Option<Count> {
     })
 }
 
-/// Scores `descriptors` in publish order against the eligible decisions of `project` at one Kernel tip and writes each descriptor's rows. A stopped budget leaves the rows of a publish-order prefix: a descriptor not fully scored writes nothing and counts `descriptors_unscored` with every later one.
+/// Scores `descriptors` against the eligible decisions of `project` at one Kernel tip in one scan of the summaries, then writes each descriptor's rows in publish order. A stopped budget leaves the rows of a publish-order prefix: a descriptor not fully scored writes nothing and counts `descriptors_unscored` with every later one.
 pub(crate) fn score_publication(
     kernel: &KernelStore,
     store: &MemoryStore,
@@ -271,9 +277,60 @@ fn score_descriptors(
         per_descriptor: CANDIDATES_PER_DESCRIPTOR,
         per_project: bounds.rows_per_project,
     };
+    if let Some(end) = stop(budget) {
+        return unscored(0, end);
+    }
+    let analyzed: Vec<Option<BTreeSet<String>>> = descriptors
+        .iter()
+        .map(|descriptor| term_set(&descriptor.text, DESCRIPTOR_BOUNDS).ok())
+        .collect();
+    // Each term maps to the publish-order positions of the descriptors that hold it, so one pass over a summary's terms counts its overlap with every descriptor.
+    let mut postings: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (position, terms) in analyzed.iter().enumerate() {
+        for term in terms.iter().flatten() {
+            postings.entry(term).or_default().push(position);
+        }
+    }
+    let mut tops = vec![TopCandidates::default(); descriptors.len()];
+    let mut matched = vec![0; descriptors.len()];
+    if analyzed.iter().any(Option::is_some) {
+        let mut unscorable = 0;
+        for (scanned, (object_id, decision_id, summary)) in summaries.iter().enumerate() {
+            if scanned % SUMMARIES_PER_CHECK == 0
+                && let Some(end) = stop(budget)
+            {
+                return unscored(0, end);
+            }
+            let terms = match term_set(summary, SUMMARY_BOUNDS) {
+                Ok(terms) if !terms.is_empty() => terms,
+                _ => {
+                    unscorable += 1;
+                    continue;
+                }
+            };
+            for term in &terms {
+                for &position in postings.get(term.as_str()).into_iter().flatten() {
+                    matched[position] += 1;
+                }
+            }
+            for (top, matched) in tops.iter_mut().zip(&mut matched) {
+                let matched_terms = std::mem::take(matched);
+                if passes_gates(matched_terms, terms.len()) {
+                    top.offer(ScoredCandidate {
+                        decision_object_id: object_id.clone(),
+                        decision_id: decision_id.clone(),
+                        matched_terms,
+                        decision_terms: terms.len(),
+                    });
+                }
+            }
+        }
+        counts.add(Count::SummariesUnscorable, unscorable);
+    }
     let mut written = 0;
-    let mut unscorable_counted = false;
-    for (index, descriptor) in descriptors.iter().enumerate() {
+    for (index, ((descriptor, terms), top)) in
+        descriptors.iter().zip(&analyzed).zip(tops).enumerate()
+    {
         if let Some(end) = stop(budget) {
             return unscored(index, end);
         }
@@ -284,31 +341,9 @@ fn score_descriptors(
                 hook(index);
             }
         }
-        let Ok(terms) = DescriptorTerms::new(&descriptor.text) else {
+        if terms.is_none() {
             counts.add(Count::DescriptorsRefusedOversize, 1);
             continue;
-        };
-        let mut top = TopCandidates::default();
-        let mut unscorable = 0;
-        for (scanned, (object_id, decision_id, summary)) in summaries.iter().enumerate() {
-            if scanned % SUMMARIES_PER_CHECK == 0
-                && let Some(end) = stop(budget)
-            {
-                return unscored(index, end);
-            }
-            let input = CandidateInput {
-                decision_object_id: object_id,
-                decision_id,
-                summary,
-            };
-            if top.record(&terms, input) == SummaryScore::Unscorable {
-                unscorable += 1;
-            }
-        }
-        // Whether a summary is unscorable depends on the summary alone, so the first scored descriptor counts each one once.
-        if !unscorable_counted {
-            counts.add(Count::SummariesUnscorable, unscorable);
-            unscorable_counted = true;
         }
         if let Some(end) = stop(budget) {
             return unscored(index, end);
@@ -380,6 +415,7 @@ fn candidate_summaries(
     let mut filter = ScopeFilter::new(project);
     let mut terms = stored_terms(kernel);
     let mut newest = NewestRows::new(bounds.decisions);
+    let mut matched = 0_u64;
     for (judged, row) in visible.rows.into_iter().enumerate() {
         if judged % ROWS_PER_CHECK == 0
             && let Some(end) = stop(budget)
@@ -390,37 +426,33 @@ fn candidate_summaries(
             .matches(row.scope_id.as_deref(), &mut terms)
             .map_err(failed)?
         {
+            matched += 1;
             newest.push(row);
         }
     }
-    let (rows, truncated) = newest.finish();
-    if truncated {
-        counts.add(Count::CandidatesTruncated, 1);
-    }
+    let (rows, _) = newest.finish();
+    counts.add(
+        Count::CandidatesTruncated,
+        matched.saturating_sub(rows.len() as u64),
+    );
     let ids: Vec<String> = rows.into_iter().map(|row| row.object.object_id).collect();
-    let claims = ClaimFactBounds {
-        max_claims: CLAIM_CHUNK,
-        max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
-    };
     let mut kept = Vec::with_capacity(ids.len());
     for chunk in ids.chunks(CLAIM_CHUNK.get()) {
         if let Some(end) = stop(budget) {
             return Err(end);
         }
-        let read = kernel
-            .claim_facts_at_within_budget(chunk, target.target, claims, budget)
+        let standings = kernel
+            .claim_standing_at_within_budget(chunk, target.target, CLAIM_CHUNK, budget)
             .map_err(|_| stop(budget).unwrap_or(Count::KernelUnavailable))?;
         // The scope filter above already kept only rows whose scope names the project.
-        let standing: HashMap<&str, bool> = read
-            .claims
-            .iter()
-            .map(|facts| (facts.object.object_id.as_str(), eligible(facts, true)))
-            .collect();
         kept.extend(
             chunk
                 .iter()
-                .filter(|id| standing.get(id.as_str()).copied().unwrap_or(false))
-                .cloned(),
+                .zip(&standings)
+                .filter(|(_, standing)| {
+                    standing.as_ref().is_some_and(|claim| eligible(claim, true))
+                })
+                .map(|(id, _)| id.clone()),
         );
     }
     if let Some(end) = stop(budget) {

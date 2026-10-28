@@ -59,7 +59,7 @@ cover that path through `kernel.read`.
 | `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget` | `crates/daemon/tests/embedding_dispatch.rs:1102` | a held reader pool ends a budgeted read at its bound | unaudited |
 | `exhausted_budget_is_refused_before_kernel_readers_are_taken` | `crates/daemon/tests/search_catchup.rs:1876` | | unaudited |
 
-Production guards: `check_claim_bounds` (`claim_facts.rs:353-371`);
+Production guards: `check_claim_bounds` (`claim_facts.rs:336-358`);
 `AcquireLimit::check` (`open.rs:1535-1541`); progress handler installed by
 `LimitedConnection::new` (`:1712-1720`).
 
@@ -84,23 +84,23 @@ crossing inside a `claim_facts` statement (the progress handler path) for
 | `capture_off_memory_off_or_a_subagent_session_runs_no_adapter` | `:298` | reachability gate | unaudited |
 | `a_delete_after_the_handoff_publishes_nothing_for_the_queued_window` | `:1045` | delete epoch check | unaudited |
 | `a_refused_window_still_captures_its_documents` | `:2236` | documents batch is separate from the window batch | unaudited |
-| `a_settled_report_counts_the_job_that_released_the_slot` | `source_capture.rs:1588` | slot count after release | unaudited |
+| `a_settled_report_counts_the_job_that_released_the_slot` | `source_capture.rs:1720` | slot count after release | unaudited |
 
 Production guards: `try_acquire_owned` else `RefusedQueueFull`
-(`source_capture.rs:602-605`); `catch_unwind` around `publish_locked`
-(`:790-803`); `AfterResponse` run only on `RequestOutcome::Response`
+(`source_capture.rs:604-607`); `catch_unwind` around `publish_locked`
+(`:792-805`); `AfterResponse` run only on `RequestOutcome::Response`
 (`lib.rs:13479-13481`).
 
 None found: no test asserts that exactly one `Count` terminal is recorded
 per job across every exit path (the tests count specific terminals per
 scenario). No post-publish hook exists outside `cfg(test)` (`before_publish`,
-`between_screen_and_commit`, `source_capture.rs:1457-1459`, `:781`, `:839`).
+`between_screen_and_commit`, `source_capture.rs:1459-1461`, `:783`, `:841`).
 
 ## S5 memory-store baseline
 
 | Check | Location | Asserts | Status |
 | --- | --- | --- | --- |
-| `the_published_baseline_digest_is_the_one_every_open_checks` | `crates/memory-store/tests/baseline.rs:250-262` | `baseline_digest()` equals the stored `format_marker` | unaudited |
+| `the_published_baseline_digest_is_the_one_every_open_checks` | `crates/memory-store/tests/baseline.rs:254-265` | `baseline_digest()` equals the stored `format_marker` | unaudited |
 | `a_file_with_a_different_baseline_is_refused_as_a_baseline_mismatch` | `:458` | refusal message | unaudited |
 | `a_store_created_under_the_prior_baseline_refuses_to_open_untouched` | `:492-514` | prior-baseline fixture refuses with `StoreError::Baseline`, bytes unchanged | unaudited |
 | `fresh_open_creates_memory_sqlite_with_the_eidnara_identity_and_the_whole_baseline` | `:199` | inventory | unaudited |
@@ -122,7 +122,7 @@ invalidated migration records; they document that no migration path exists.
 | `a_caller_cannot_seat_a_receipt_the_expiry_would_replay` | `:710` | reserved producer | unaudited |
 | `a_replayed_expiry_receipt_is_not_counted_as_a_retirement` | `:728` | | unaudited |
 | `expiry_candidate_cost_does_not_grow_with_retired_history` | `:1138` | SQL steps flat over retired history | unaudited |
-| `the_maintenance_slice_expires_harness_captures_and_reports_progress` | `crates/daemon/src/memory_reviewer/lifecycle.rs:704` | an expired row is retired by one pass; `harness_expiry` reported | unaudited |
+| `the_maintenance_slice_expires_harness_captures_and_reports_progress` | `crates/daemon/src/memory_reviewer/lifecycle.rs:745` | an expired row is retired by one pass; `harness_expiry` reported | unaudited |
 
 Production guards: `still_expired` recheck under the writer
 (`local_file.rs:467-484`); `retire_evidence` refuses `Conflict` while cited
@@ -141,7 +141,7 @@ through the MemoryReviewer class only as far as this pass found.
 | `a_published_proposal_reads_from_every_root_after_a_newer_root_binds` | `:342` | | unaudited |
 | `review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record` | `:409` | `v` field is `invalid_params` (`:643-649`) | unaudited |
 | wire-doc literal test | `crates/daemon/src/memory_reviewer/wire.rs:448-463+` | the doc's `review.accept` terminal set equals the produced set | unaudited |
-| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:35511` | | unaudited |
+| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:35926` | | unaudited |
 
 None found: no test drives `store_unavailable` on `review.list`/`review.read`
 through a failing store read, as far as this pass found (the terminal is

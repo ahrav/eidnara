@@ -985,7 +985,14 @@ fn claim_standing_matches_the_claim_facts_it_shares_at_each_target() {
             let facts = full(id, target).unwrap();
             let standing = fixture
                 .store
-                .claim_standing_at_within_budget(id, target, &budget)
+                .claim_standing_at_within_budget(
+                    &[id.to_string()],
+                    target,
+                    NonZeroUsize::new(1).unwrap(),
+                    &budget,
+                )
+                .unwrap()
+                .pop()
                 .unwrap();
             match (facts.claims.first(), standing) {
                 (Some(facts), Some(standing)) => {
@@ -1049,7 +1056,12 @@ fn claim_standing_matches_the_claim_facts_it_shares_at_each_target() {
         assert_eq!(
             fixture
                 .store
-                .claim_standing_at_within_budget(id, target, &budget)
+                .claim_standing_at_within_budget(
+                    &[id.to_string()],
+                    target,
+                    NonZeroUsize::new(1).unwrap(),
+                    &budget,
+                )
                 .unwrap_err(),
             refusal,
             "{id}"

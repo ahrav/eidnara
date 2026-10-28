@@ -50,7 +50,7 @@ schemas, and the pi `allowedActions` since `3a3b916b7`.
 - `packages/opencode-plugin/src/plugin/tool-registry.ts:58`: `allowedActions:
   [...EIDNARA_MEMORY_DEFAULT_ACTIONS]` at registration, so `dispute` is off by
   default.
-- `packages/pi-plugin/src/tools/eidnara-memory.ts:113-125` `paramsSchema`: the
+- `packages/pi-plugin/src/tools/eidnara-memory.ts:114-126` `paramsSchema`: the
   `action` enum lists the admitted actions and the dispute fields appear only
   when `dispute` is admitted; `:129-134` `allowedActions` defaults to
   `EIDNARA_MEMORY_DEFAULT_ACTIONS`; `:157-169` approve/enforce and allowlist
@@ -106,7 +106,7 @@ None; synchronous guards before any network call.
 
 ### Q: D7. Should the pi tool gain `allowedActions`?
 
-- Sources examined: `eidnara-memory.ts:142-186`, `index.ts:30-32`, `:69-75`,
+- Sources examined: `eidnara-memory.ts:143-189`, `index.ts:30-32`, `:69-75`,
   `types.ts:18-20`.
 - Findings: at `3a3b916b7` pi gated by registration only. #1161 added
   `allowedActions` to the pi tool with the opencode default

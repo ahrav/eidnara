@@ -25,10 +25,10 @@ support through decision events and records the admission, whose
 `crates/kernel/src/admission.rs` - `visibility_row` maps an active candidate to
 `ExplicitLabeled`; `Automatic` needs `Verified` or above.
 
-`crates/kernel/src/admission.rs:3433` - `strictest_support_evidence_sql` picks
+`crates/kernel/src/admission.rs:3509` - `strictest_support_evidence_sql` picks
 the strictest evidence row the decision's `memory_reviewer_support` events cite
 at the snapshot. The served query joins that row ahead of the own-history
-`CROSS JOIN`, and `LatestRow::read` (`admission.rs:3760`) folds its live class
+`CROSS JOIN`, and `LatestRow::read` (`admission.rs:3836`) folds its live class
 into the shared sensitivity beside the directly cited evidence.
 
 `crates/kernel/src/cas/ingest.rs:1330` - a classification merge writes the

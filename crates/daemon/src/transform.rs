@@ -20890,7 +20890,7 @@ pub(crate) mod tests {
         assert_eq!(outcome(None).0, "SOFT");
     }
 
-    /// The pressure refold assigns the pass's composition at its own freeze site, and the committed pass reports that it froze one, so the use-outcome writer records the refold's serve.
+    /// The pressure refold assigns the pass's composition at its own freeze site: the committed pass reports that it froze one, so the use-outcome writer records the refold's serve, and the reloaded session meta holds the pinned read's composition.
     #[test]
     fn a_pressure_refold_reports_its_frozen_composition() {
         let dir = tempfile::tempdir().unwrap();
@@ -20924,6 +20924,9 @@ pub(crate) mod tests {
             Some("pressure_refold")
         );
         assert!(pass.froze_composition && pass.response.committed);
+        let frozen = ctx.project_memory_composition();
+        assert!(frozen.is_some());
+        assert_eq!(s.load("ses").unwrap().meta.project_memory, frozen);
     }
 
     /// Overlay rows keyed by blocks outside the projection are not read, and they change

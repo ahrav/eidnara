@@ -244,8 +244,8 @@ K3 needs more than 8192 admitted visible candidates; K4 needs more than 8 MiB
 of stored payload before a target. Both are seed-size questions, not
 mechanism questions. K1's owner gate is real: `visible_as_of_in_scope`
 decodes every candidate row inside `query_map` before the caller applies
-domain and kind selection (`crates/kernel/src/admission.rs:3215-3221`,
-`:3276-3277`), so a pushdown removes the error path for excluded corrupt
+domain and kind selection (`crates/kernel/src/admission.rs:3291-3297`,
+`:3352-3353`), so a pushdown removes the error path for excluded corrupt
 rows. The catalog states this correctly (`catalog.md:129-132`).
 
 **History (H1 to H4).** The four goldens exist under
@@ -292,8 +292,8 @@ were read at HEAD.
 | `crates/daemon/src/lib.rs:15408-15454` (footprint) | verified | Doc at 15408, `VALUE_ENVELOPE_BYTES` at 15454. |
 | `crates/daemon/src/canonical_memory.rs:141-212` | verified | `read_project_memory` 141-175, `injectable_snapshot` 184-212. |
 | `crates/daemon/src/kernel_routes/read.rs:23-26`, `:159-248` | verified | Caps at 23 and 26; `read_visible` 159-248; cutoff loop 208-224. |
-| `crates/kernel/src/admission.rs:3113-3279` | verified | SQL 3113-3204, `ORDER BY o.object_id` at 3202, decode 3215-3277. |
-| `crates/kernel/src/admission.rs:2880-2910` | verified | `visible_as_of_in_scope`. |
+| `crates/kernel/src/admission.rs:3189-3355` | verified | SQL 3113-3204, `ORDER BY o.object_id` at 3202, decode 3215-3277. |
+| `crates/kernel/src/admission.rs:2956-2986` | verified | `visible_as_of_in_scope`. |
 | `crates/kernel/src/slice/read.rs:140-158` | verified | Payload-size query doc and return. |
 | `crates/daemon/src/config.rs:122` | verified | `memory_enabled: true`. |
 | `crates/host-runtime/src/dispatch.rs:823-855`, `:857-934`, `:937-954`, `:1226-1268` | verified | Permits, tracked spawn, cancel arm, close gate. |

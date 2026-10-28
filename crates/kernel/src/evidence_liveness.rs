@@ -56,6 +56,9 @@ impl KernelStore {
         if evidence_ids.len() > MAX_EVIDENCE_LIVENESS_IDS {
             return Err(EvidenceLivenessError::TooManyIds);
         }
+        if target.through_commit < 0 {
+            return Err(KernelError::InvalidInput.into());
+        }
         let limit = budget.acquire_limit();
         limit.run(|| {
             let mut reader = self.reader_with_limit(&limit)?;
@@ -79,6 +82,7 @@ impl KernelStore {
                     .map_err(map_sqlite)?;
                 let mut rows = statement.query([ids]).map_err(map_sqlite)?;
                 while let Some(row) = rows.next().map_err(map_sqlite)? {
+                    limit.check()?;
                     let index: i64 = row.get(0).map_err(map_sqlite)?;
                     let created: i64 = row.get(1).map_err(map_sqlite)?;
                     let invalidated: Option<i64> = row.get(2).map_err(map_sqlite)?;

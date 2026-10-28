@@ -751,18 +751,16 @@ fn require_visible_evidence(
     filter: &mut ScopeFilter,
     evidence_id: &str,
 ) -> Result<(), KernelError> {
-    let citations = envelope
-        .evidence_citations(evidence_id)?
-        .filter(|citations| citations.live)
-        .ok_or(KernelError::NotFound)?;
-    for scope_id in &citations.citing_scopes {
-        if filter.matches(Some(scope_id), &mut |scope_id| {
+    let visible = envelope.evidence_cited_in(evidence_id, |scope_id| {
+        filter.matches(Some(scope_id), &mut |scope_id| {
             envelope.scope_terms(scope_id)
-        })? {
-            return Ok(());
-        }
+        })
+    })?;
+    if visible {
+        Ok(())
+    } else {
+        Err(KernelError::NotFound)
     }
-    Err(KernelError::NotFound)
 }
 
 impl DispositionResult {
@@ -1015,7 +1013,7 @@ fn apply(
                 envelope.retire_decision(object_id)?;
                 result.touched.push(object_id.clone());
             }
-            Operation::Disposition { object_id, .. } => {
+            Operation::Disposition { .. } => {
                 let args = operation.disposition().expect("a disposition operation");
                 result.dispositions.push(record_disposition(
                     envelope,
@@ -1023,7 +1021,7 @@ fn apply(
                     args,
                     &plan.reporter,
                 )?);
-                result.touched.push(object_id.clone());
+                result.touched.push(args.object_id.to_string());
             }
             Operation::InsertObservation { spec } => {
                 ensure_domain(

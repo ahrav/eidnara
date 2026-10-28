@@ -24,8 +24,8 @@ issues, no incident history, no git-history lens.
 
 Assumption (inferred): "default build" means the daemon built without the
 `test-support` feature and run with `DaemonConfig::default()`
-(`crates/daemon/src/config.rs:150-158`): `memory_enabled: true`,
-`source_capture_enabled: false`.
+(`crates/daemon/src/config.rs:150-178`): `memory_enabled: true`,
+`source_capture_enabled: false`, `contradiction_candidates_enabled: false`.
 
 Every documented guarantee below is a claim under test. Every `file:line`
 was read at HEAD by this pass; drift from `context.md` or the plan is noted in
@@ -134,13 +134,13 @@ Existing check: `byte_bound_is_checked_before_analysis_at_exact_and_over_bound_s
 `atom_bound_refuses_the_next_atom_at_exact_and_over_bound_counts` (`:279`).
 Status unaudited. Re-exercised by #1164 through the scorer:
 `an_oversize_descriptor_is_refused_whole_and_an_exact_fit_is_analyzed`
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:224-241`) gets
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:227-244`) gets
 `InputTooLong` for a 65537-byte descriptor and an analysis for a
 65536-byte one with 32768 atoms;
 `an_unscorable_summary_is_reported_and_the_others_still_score`
 (`:243-274`) covers the 8192-byte summary bound. The scorer's atom bounds
 sit one past the most atoms the byte bounds admit
-(`crates/daemon/src/contradiction_candidates/scorer.rs:84-95`), so `TooManyAtoms` is
+(`crates/daemon/src/contradiction_candidates/scorer.rs:91-102`), so `TooManyAtoms` is
 unreachable through it.
 Impact: a P5 pass that analyzes a 64 KiB descriptor and a project's decision
 summaries does unbounded work or allocation per pass if the bound truncates
@@ -173,9 +173,9 @@ Read `analysis.rs:107-199`: only `char` classification, slicing, and
 `String::push`; no I/O, statics, or folding.
 Existing check: the goldens (`tests/lexical_analysis.rs:24-36` harness,
 `:51-218` cases). Status unaudited. Re-exercised by #1164: the scorer folds
-after analysis (`crates/daemon/src/contradiction_candidates/scorer.rs:102-110`),
+after analysis (`crates/daemon/src/contradiction_candidates/scorer.rs:117-138`),
 and its hand-written term sets
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:31-80`, `:131-159`) show
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:34-83`, `:131-159`) show
 case-boundary parts (`HTTPServer` to `http`, `server`), kept diacritics,
 and distinct NFC and NFD terms, which hold only if the analyzer returns
 original bytes; `:276-318` shows equal output under 18 input orders.
@@ -213,9 +213,9 @@ Read `identity.rs:36-65` and the test.
 Existing check: `identity_pins_the_manifest`. Status unaudited.
 Re-exercised by #1164: the matcher preimage names `ANALYSIS_CONTRACT_EPOCH`
 and the Unicode version
-(`crates/daemon/src/contradiction_candidates/scorer.rs:301-303`), and
+(`crates/daemon/src/contradiction_candidates/scorer.rs:671-673`), and
 `the_matcher_digest_pins_every_rule`
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:348-400`) asserts the whole
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:351-403`) asserts the whole
 preimage, including both fields, and the digest literal. `identity_pins_the_manifest` and the retrieval crate are unchanged
 since `3a3b916b7`.
 Impact: a P5 consumer that records only the epoch string with its derived
@@ -287,13 +287,13 @@ must keep them (`admission.rs:3543-3550`).
 Required faults and enabling state: scopes with no term, with a non-exact
 operator, with a redacted value; a redacted filter value; a NULL scope row.
 Confidence: high - [evidence](evidence/p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict.md).
-Read `admission.rs:3626-3640` (the `WHERE` tail) and `project.rs:199-212`.
+Read `admission.rs:3626-3640` (the `WHERE` tail) and `project.rs:207-220`.
 Existing check: `a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain`.
 Status unaudited.
 Re-exercised by #1167: the pass applies the SQL prefilter and then
 `ScopeFilter`, as `read_visible` does;
 `the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_counts_the_cut`
-(`crates/daemon/src/candidate_pass_tests.rs:560`) keeps another project's
+(`crates/daemon/src/candidate_pass_tests.rs:631`) keeps another project's
 decision out.
 Impact: a P5 pass that trusts the Kernel prefilter alone (without the daemon
 `ScopeFilter`) would see rows of other projects whose scopes are uncertain,
@@ -301,7 +301,7 @@ and rows with no scope (D5); a prefilter that dropped uncertain rows would
 hide same-project decisions from the candidate set.
 Open questions:
 - D5: the daemon `ScopeFilter::matches` returns `false` for a `None` scope
-  (`project.rs:204-206`) while the SQL keeps NULL scopes (`:3559`). Is a
+  (`project.rs:212-214`) while the SQL keeps NULL scopes (`admission.rs:3640`). Is a
   decision with no scope ever written in the `memory` domain at HEAD?
   (partial: `ProjectBinding::scope_spec` always attaches a scope for
   route-written rows; other writers not audited)
@@ -342,8 +342,8 @@ Existing check: `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_trunca
 unaudited.
 Re-exercised by #1167: the pass bounds its candidate set with `NewestRows`
 after the scope filter; the test at
-`crates/daemon/src/candidate_pass_tests.rs:560` cuts the oldest at a reduced
-cap.
+`crates/daemon/src/candidate_pass_tests.rs:631` cuts the two oldest at a
+reduced cap.
 Impact: a P5 pass that copies this pattern (plan U1 "patterns to follow"
 `read.rs:185`) inherits a bound that is applied after full materialization of
 the Kernel rows; see the next record.
@@ -412,14 +412,17 @@ Fault/timing angle: none.
 Required faults and enabling state: `max_claims + 1` ids; a budget already
 exhausted at call time; an id of 513 bytes.
 Confidence: high - [evidence](evidence/p5dep-claim-fact-bounds-are-refused-before-any-row-is-read.md).
-Read `claim_facts.rs:242-371`: `limit.run` checks first (`:250`),
-`check_claim_bounds` (`:326`) precedes `reader_with_limit` (`:330`).
+Read `claim_facts.rs:240-360`: `limit.run` checks first (`:248`),
+`check_claim_bounds` (`:309`) precedes `reader_with_limit` (`:313`).
 Existing check: `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`,
 `an_exhausted_budget_is_refused_before_the_projection_is_read`. Status
-unaudited. Re-exercised by #1166: the candidate sweep reads claim facts in
-chunks of 64 under `max_claims` = 64, so `TooManyClaims` cannot arise from
-it; `every_claim_chunk_of_a_page_is_read`
-(`crates/daemon/tests/contradiction_candidates_sweep.rs:854`) reads 66
+unaudited. Re-exercised by #1166: the candidate sweep reads claim standing
+through `claim_standing_at_within_budget` (`claim_facts.rs:270`), which
+applies the same id checks (`check_claim_ids`, `:343`) inside `limit.run`
+before its reader acquisition (`:284`), in chunks of 64 under
+`max_claims` = 64, so `TooManyClaims` cannot arise from it;
+`every_claim_chunk_of_a_page_is_read`
+(`crates/daemon/tests/contradiction_candidates_sweep.rs:985`) reads 66
 decisions in two chunks, and
 `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land`
 (`:764`) shows a chunk refused as `NotADecision` keeps that chunk's rows.
@@ -472,7 +475,7 @@ Required faults and enabling state: a held reader pool
 inside the statement; a parent interrupt raised mid-read.
 Confidence: medium - [evidence](evidence/p5dep-budget-exhaustion-stops-a-budgeted-kernel-read.md).
 Read `slice/read.rs:134`, `:241`, `open.rs:565-593`, `:1654-1664`,
-`:1693-1722`, `claim_facts.rs:250`, `:330`, `:343`, `:422`, `:426`. The
+`:1693-1722`, `claim_facts.rs:248`, `:313`, `:326`, `:548`, `:552`. The
 statement-interrupt path for claim facts is read in code but not observed by
 a test this pass found.
 Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget`,
@@ -481,7 +484,7 @@ Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_bud
 (`search_catchup.rs:1876`). Status unaudited.
 Re-exercised by #1167:
 `a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor`
-(`crates/daemon/src/candidate_pass_tests.rs:759`) passes a spent budget and
+(`crates/daemon/src/candidate_pass_tests.rs:835`) passes a spent budget and
 observes `deadline` before any Kernel read.
 Impact: plan R1/KTD2 give the P5 pass its own deadline; if it uses the
 decision-page API it gets a bounded wait plus a row-bounded scan, not a
@@ -534,14 +537,14 @@ Reachability: explicit-config-only - `source_capture_enabled` defaults
 (`source_capture.rs:3`, test `source_capture_tests.rs:298`).
 Status: active
 Exercised: yes - `the_response_is_identical_whatever_capture_and_the_kernel_are_doing`
-(`source_capture_tests.rs:330`) and `capture_latency_measurement` (`:938`).
+(`source_capture_tests.rs:330`) and `capture_latency_measurement` (`:942`).
 Guarantee: the transform response is settled (encoded) before the
 synchronous handoff runs; the handoff (`into_job` with `try_acquire_owned`,
 `admission.spawn`) performs no await, no kernel call, and no waiting lock
-(`lib.rs:9228-9235`, `source_capture.rs:602-605`); the job body runs on a
-spawned task. `AfterResponse` is detached from the outcome (`lib.rs:13470`),
-`settle_prepared` runs (`:13477`), and only on a `RequestOutcome::Response`
-is `after.run()` called (`:13479-13481`), which takes the slot and spawns the
+(`lib.rs:9229-9236`, `source_capture.rs:628-631`); the job body runs on a
+spawned task. `AfterResponse` is detached from the outcome (`lib.rs:13491`),
+`settle_prepared` runs (`:13498`), and only on a `RequestOutcome::Response`
+is `after.run()` called (`:13500-13502`), which takes the slot and spawns the
 job; a non-response outcome drops the work unrun and releases its charges.
 Check: `always` - for every pass, the `AfterResponse` closure contains no
 blocking or kernel operation, and the encoded response bytes are
@@ -553,12 +556,12 @@ job that panics.
 Required faults and enabling state: capture on; a kernel held unavailable or
 starting during the pass; a prior job holding the slot.
 Confidence: high - [evidence](evidence/p5dep-response-never-waits-on-the-capture-job.md).
-Read `lib.rs:9219-9236`, `:13470-13481`, `dispatch.rs:24-35`, `:445-460`.
+Read `lib.rs:9220-9237`, `:13470-13481`, `dispatch.rs:24-35`, `:445-460`.
 Existing check: the two tests above. Status unaudited.
 Re-exercised by #1167: the pass is offered from the capture job's tracked task
 after `run_settled` returns, so `AfterResponse` still only spawns;
 `the_route_consent_reaches_the_pass_through_a_transform`
-(`crates/daemon/src/candidate_pass_tests.rs:933`) runs the transform and its
+(`crates/daemon/src/candidate_pass_tests.rs:1113`) runs the transform and its
 after-response work with consent on and off.
 Impact: a P5 trigger that ran inside `AfterResponse` before `job.run()` or
 awaited the job would re-couple response latency to the kernel; a trigger
@@ -571,20 +574,20 @@ Type: safety
 Reachability: explicit-config-only - as above.
 Status: active
 Exercised: yes - `shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slot`
-(`source_capture_tests.rs:674`), `a_settled_report_counts_the_job_that_released_the_slot`
-(`source_capture.rs:1588`).
+(`source_capture_tests.rs:676`), `a_settled_report_counts_the_job_that_released_the_slot`
+(`source_capture.rs:1791`).
 Guarantee: the daemon holds one publication slot (`Semaphore::new(1)`,
-`source_capture.rs:266`); `into_job` takes it with `try_acquire_owned` or
-refuses as `RefusedQueueFull` without waiting (`:602-605`); the permit lives
+`source_capture.rs:270`); `into_job` takes it with `try_acquire_owned` or
+refuses as `RefusedQueueFull` without waiting (`:628-631`); the permit lives
 in `ActiveSlot` inside the job and is released, with the `Active` gauge
-decremented, when the job's closure returns or unwinds (`:420-431`,
-`:667`).
+decremented, when the job's closure returns or unwinds (`:431-442`,
+`:679`).
 Check: `always` - `slot.available_permits() <= 1` and at most one
 `CaptureJob` exists at a time; after any job end (completed, deadline,
 discarded, panicked) `available_permits() == 1` and `Active == 0`. `always`
 because a leaked permit stops every later capture.
 Fault/timing angle: a panic inside `publish` or `publish_locked` (the latter
-caught and resumed after the commit gate drops, `:790-803`); shutdown
+caught and resumed after the commit gate drops, `:811-871`); shutdown
 cancellation mid-job.
 Required faults and enabling state: a second pass handed off while a job
 holds the slot; an injected panic in the blocking closure; cancellation.
@@ -592,7 +595,7 @@ Confidence: high - [evidence](evidence/p5dep-capture-slot-is-single-and-released
 Existing check: the two tests above. Status unaudited.
 Re-exercised by #1167:
 `a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate`
-(`crates/daemon/src/candidate_pass_tests.rs:282`) observes the slot idle and
+(`crates/daemon/src/candidate_pass_tests.rs:283`) observes the slot idle and
 the commit gate free when the pass starts and while it scores.
 Impact: a P5 pass that ran inside the job's closure would extend slot
 occupancy and raise `RefusedQueueFull` for the next pass; a pass outside the
@@ -622,10 +625,10 @@ Required faults and enabling state: a window of 33 units; a window whose
 text sums past 64 KiB; a 64 KiB + 1 unit; a pass with both a window and
 pending document reads.
 Confidence: high - [evidence](evidence/p5dep-capture-batch-is-bounded-per-batch.md).
-Read `harness_sources.rs:612-616`, `:1557`, `:1602-1603`;
-`source_capture.rs:832-840`, `:904-980`.
+Read `harness_sources.rs:614-618`, `:1569`, `:1614-1615`;
+`source_capture.rs:970-978`, `:1042-1120`.
 Existing check: the 33-unit test; `a_refused_window_still_captures_its_documents`
-(`:2227`) shows the documents batch is independent. Status unaudited.
+(`:2298`) shows the documents batch is independent. Status unaudited.
 Relied on by #1167: the pass scores the units one job published, so its
 descriptor count is bounded by the window batch plus the documents batch.
 Impact: the P5 trigger's per-pass input is at most 32 window descriptors plus
@@ -648,32 +651,32 @@ Guarantee: every `CaptureJob::run` returns exactly one terminal `Count`
 (`Completed`, `Deadline`, `Discarded`, `SessionInvalidated`,
 `KernelUnavailable`, `KernelError`, `WorkerPanicked`, `RefusedResidentShort`)
 and increments exactly that counter once; the counter and log vocabulary is
-the closed `counts!` list (`source_capture.rs:76-114`) and carries no unit
+the closed `counts!` list (`source_capture.rs:87-131`) and carries no unit
 text, path, identity, or digest. No hook runs after publish outside
 `cfg(test)`; the returned `Count` is the only completion signal.
 Check: `always` - for every job, `sum(terminal counters after) -
 sum(terminal counters before) == 1`, the returned `Count` is in the terminal
 subset, and every log line's reason is in `Count::ALL`. `always` because the
 P5 trigger must key off this signal on every job.
-Fault/timing angle: join error vs panic (`:668-676`); `end()` called once per
+Fault/timing angle: join error vs panic (`:680-688`); `end()` called once per
 return path.
 Required faults and enabling state: each exit path forced: cancel before
 start, kernel unavailable, budget exhausted, delete epoch moved, panic in
 closure, publish refusal.
 Confidence: medium - [evidence](evidence/p5dep-capture-job-ends-in-one-closed-vocabulary-count.md).
 Every `return self.end(..)` in `publish`/`publish_locked` was read; the
-`publish_locked` `Ok(end) => end` at `:800` returns a value already counted
-by `end()` inside, and `run` counts join failures at `:672-675`. Exactly-once
+`publish_locked` `Ok(end) => end` at `:821` returns a value already counted
+by `end()` inside, and `run` counts join failures at `:684-687`. Exactly-once
 is argued from code structure, not observed.
 Existing check: `the_capture_report_carries_no_unit_text`,
 `the_capture_report_reaches_host_status_field_for_field`. Status unaudited.
 Re-exercised by #1167: the job's `Count` vocabulary is unchanged, and
 `a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate`
-(`crates/daemon/src/candidate_pass_tests.rs:282`) checks two jobs end in two
+(`crates/daemon/src/candidate_pass_tests.rs:283`) checks two jobs end in two
 `completed` counts with consent on.
 Impact: the P5 trigger waits for the job's terminal: the capture task runs
 `job.run_settled()` and offers the pass after it returns
-(`lib.rs:9242-9283`).
+(`lib.rs:9275-9319`).
 Open questions: None.
 
 ### p5dep-baseline-digest-change-closes-the-activation-gate
@@ -683,7 +686,7 @@ Reachability: default-production - `MemoryStore::open` runs on every daemon
 start; `evaluate` runs on every MemoryReviewer pass and before every job
 (`memory-reviewer-operations.md:44`).
 Status: active
-Exercised: yes - `crates/memory-store/tests/baseline.rs:495-517` opens a
+Exercised: yes - `crates/memory-store/tests/baseline.rs:496-518` opens a
 prior-baseline file and observes refusal with unchanged bytes; #1165
 re-exercises it with the fixture frozen at the baseline before
 `contradiction_candidates` (`crates/memory-store/tests/fixtures/prior_baseline.sql`);
@@ -705,7 +708,7 @@ Required faults and enabling state: a store created under the current
 baseline, then a binary with a changed `baseline.sql`; an activation record
 naming the old digest.
 Confidence: high - [evidence](evidence/p5dep-baseline-digest-change-closes-the-activation-gate.md).
-Read `memory-store/src/lib.rs:335-340`, `storage/src/lib.rs:2631`,
+Read `memory-store/src/lib.rs:336-341`, `storage/src/lib.rs:2631`,
 `activation.rs:174-240`, `worker.rs:167`.
 Existing check: the tests above and
 `docs/properties/shared-primitives/catalog.md:676`
@@ -753,7 +756,7 @@ Read `local_file.rs:64-70`, `:245-310`, `:453-501`, `:514-565`;
 `slice/write.rs:569-577`, `:627-666`.
 Existing check: the three tests above. Status unaudited. Re-exercised by
 #1166: `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it`
-(`crates/daemon/tests/harness_sources.rs:3338`) passes at the #1166 tip and
+(`crates/daemon/tests/harness_sources.rs:3370`) passes at the #1166 tip and
 observes the descriptor and evidence retired in one commit, descriptor
 first; the candidate sweep keys a descriptor's liveness on that evidence
 row, so it drops the rows of a swept, uncited capture.
@@ -813,7 +816,7 @@ Open questions:
   as the row is younger than `MAX_CANDIDATE_AGE` (30 days); past that age
   the sweep drops it whatever its evidence says.
   `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
-  (`crates/daemon/tests/harness_sources.rs:3482`) re-exercises the kept
+  (`crates/daemon/tests/harness_sources.rs:3514`) re-exercises the kept
   evidence with an observation citation at the #1166 tip; a decision-event
   citation is still unexercised.
 
@@ -849,9 +852,9 @@ Existing check: the wire tests above; the literal-set test at
 `wire.rs:448-463+`. Status unaudited.
 Re-exercised by #1168: `review.candidates` joins the family through
 `kernel_request` with a `deny_unknown_fields` body
-(`crates/daemon/src/contradiction_candidates/read.rs:27`);
+(`crates/daemon/src/contradiction_candidates/read.rs:29`);
 `review_candidates_pages_live_rows_and_answers_each_terminal`
-(`crates/daemon/src/candidate_pass_tests.rs:1242`) answers `invalid_params`
+(`crates/daemon/src/candidate_pass_tests.rs:1485`) answers `invalid_params`
 for an unknown field and a malformed cursor, `project_mismatch` for a foreign
 root before the body is read (`:1520`), and `disabled` for a root without
 MODULE authority (`:1260`).
@@ -859,11 +862,11 @@ Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
 fields, would break the family's stated order. `review.use_outcome` (#1157)
 joined the family after `3a3b916b7`: it reads the Kernel alone and has no
-`disabled` terminal (`host-wire-protocol.md:798`); this record does not
+`disabled` terminal (`host-wire-protocol.md:827`); this record does not
 cover it.
 Open questions:
 - D6: `kind` is stripped as an envelope key (`mod.rs:461`) but the doc at
-  `host-wire-protocol.md:768` names three envelope fields. Is a body field
+  `host-wire-protocol.md:797` names three envelope fields. Is a body field
   `kind` meant to be accepted silently? (needs human input)
 
 ### p5dep-observational-routes-read-and-take-no-background-part
@@ -873,7 +876,7 @@ Reachability: default-production - any route opened with harness `cli`.
 Status: active
 Exercised: yes - `memory_reviewer_wire.rs:260`
 `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`;
-`lib.rs:35511` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
+`lib.rs:35926` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
 Guarantee: a binding whose harness is `OBSERVATIONAL_HARNESS` (`"cli"`)
 authorizes and resolves its project like any route and can call the routed
 read family with the same answers, and is excluded from
@@ -892,7 +895,7 @@ Confidence: high - [evidence](evidence/p5dep-observational-routes-read-and-take-
 Read `lib.rs:274-281`, `:382-386`, `:413-417`.
 Existing check: the two tests above. Status unaudited.
 Re-exercised by #1168: a route bound with `OBSERVATIONAL_HARNESS` reads a
-`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:1532`).
+`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:1775`).
 Impact: P5 U4's owner read is an observational read; it must be callable on a
 `cli` route and must not enroll the project in any background work.
 Open questions: None.
@@ -912,9 +915,10 @@ approve/enforce/delete refusals; the dispute test (`:1338-1354`) covers the
 missing tool-call identity, the context-researcher agent, and a narrowed
 allowlist with zero transport calls; the pi tests cover a disallowed action
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:303-326`), the default
-allowlist refusing `dispute` (`:422-431`), and the registration omission
+schema listing `candidates` and the default allowlist refusing `dispute`
+(`:422-431`), and the registration omission
 (`packages/pi-plugin/src/tools/index.test.ts:40-70`). The #1168
-`candidates` test (`tools.test.ts:1550`) runs a read without a tool-call
+`candidates` test (`tools.test.ts:1626`) runs a read without a tool-call
 id.
 Guarantee: the action vocabulary is the closed list
 `["create","get","revise","archive","merge","dispute","candidates"]`; `get`
@@ -940,7 +944,7 @@ registration with `memoryToolEnabled: false`.
 Confidence: high - [evidence](evidence/p5dep-memory-tool-actions-are-closed-and-allowlisted.md).
 Read `types.ts:6-33`, `tools.ts:48-58`, `:118-158`, `:172-174`,
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58`,
-`packages/pi-plugin/src/tools/eidnara-memory.ts:113-125`, `:142-202`,
+`packages/pi-plugin/src/tools/eidnara-memory.ts:114-126`, `:143-205`,
 `packages/pi-plugin/src/tools/index.ts:30-32`, `:69-75`,
 `packages/pi-plugin/src/subagent-entry.ts:63`.
 Existing check: the tests above. Status unaudited.
@@ -948,16 +952,16 @@ Re-exercised by #1168: the closed list gains `candidates`
 (`packages/opencode-plugin/src/tools/eidnara-memory/types.ts:6-14`), a read
 in `EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:25`) that both default lists
 admit; `eidnara_memory candidates`
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1550`) runs
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1626`) runs
 it without a tool-call id, and `Pi eidnara_memory candidates`
-(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:495`) shows it and its
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:533`) shows it and its
 paging fields in Pi's default schema.
 Impact: P5 R6 adds `candidates` as a read; it must enter the closed list and
 `EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:25`), and its default-allowlist
 membership is a rollout decision in both plugins.
 Open questions:
 - D7 is resolved since `3a3b916b7`: #1161 gave the pi tool `allowedActions`
-  with the same default as opencode (`eidnara-memory.ts:146-151`).
+  with the same default as opencode (`eidnara-memory.ts:147-152`).
 - Resolved by #1168: `candidates` is in the default list in both plugins
   (`types.ts:19-20`).
 

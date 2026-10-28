@@ -11,6 +11,7 @@ use memory_store::contradiction_candidates::StoredCandidate;
 
 use super::*;
 use crate::contradiction_candidates::pass::{Descriptor, PassBounds, score_publication};
+use crate::contradiction_candidates::scorer::{CandidateInput, score_descriptor};
 use crate::contradiction_candidates::{Candidates, Count as CandidateCount};
 
 const SESSION: &str = "ses";
@@ -460,6 +461,76 @@ async fn a_second_offer_while_a_pass_runs_is_refused_and_a_cancel_still_ends_the
     );
 }
 
+/// The pass budget runs from admission, so a pass queued behind a saturated blocking pool for longer than its budget ends `deadline` as soon as it runs, writes nothing, and releases the permit it held while queued.
+#[test]
+fn a_pass_queued_past_its_budget_ends_at_the_deadline_it_was_admitted_under() {
+    const BLOCKING_THREADS: usize = 8;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .max_blocking_threads(BLOCKING_THREADS)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+        let binding = kernel_routes::ProjectBinding::new(&project);
+        seed(
+            &kernel_of(&handler),
+            &binding,
+            &[("one", TOPIC, EventKind::Other)],
+        );
+        *handler.contradiction_candidates.test_bounds.lock().unwrap() = Some(PassBounds {
+            budget: Duration::from_millis(200),
+            ..PassBounds::default()
+        });
+        // `before_publish` enqueues `BLOCKING_THREADS` occupiers from the job's closure, ahead of the pass the job settles.
+        let released = Arc::new(AtomicBool::new(false));
+        let occupiers = Arc::clone(&released);
+        let runtime = tokio::runtime::Handle::current();
+        *handler.source_capture.before_publish.lock().unwrap() = Some(Arc::new(move || {
+            for _ in 0..BLOCKING_THREADS {
+                let released = Arc::clone(&occupiers);
+                runtime.spawn_blocking(move || {
+                    while !released.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                });
+            }
+        }));
+        publish(
+            &handler,
+            &project,
+            &window(0, &format!("{TOPIC} first")),
+            true,
+        );
+        until(&handler, "admitted", 1).await;
+        *handler.source_capture.before_publish.lock().unwrap() = None;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            counts(&handler)["active"],
+            1,
+            "the queued pass holds the permit"
+        );
+        assert!(rows(&store).is_empty(), "the pass has not run");
+        released.store(true, std::sync::atomic::Ordering::Relaxed);
+        settle(&handler).await;
+        let counts = counts(&handler);
+        assert_eq!(counts["deadline"], 1, "{counts}");
+        assert_eq!(counts["completed"], 0, "{counts}");
+        assert_eq!(counts["descriptors_unscored"], 1, "{counts}");
+        assert_eq!(counts["active"], 0, "{counts}");
+        assert!(
+            counts["pass_ms_last"].as_u64().unwrap() >= 600,
+            "the pass's wall time runs from its admission: {counts}"
+        );
+        assert!(
+            rows(&store).is_empty(),
+            "a pass past its budget writes nothing"
+        );
+        drop(handler);
+    });
+}
+
 struct Core {
     dir: tempfile::TempDir,
     kernel: KernelStore,
@@ -564,6 +635,7 @@ fn the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_coun
     });
     for decision in [
         ("oldest", TOPIC, EventKind::Other),
+        ("older", TOPIC, EventKind::Other),
         ("stale", TOPIC, EventKind::MarkStale),
         ("disputed", TOPIC, EventKind::MarkDisputed),
         ("contradicted", TOPIC, EventKind::Contradict),
@@ -583,7 +655,11 @@ fn the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_coun
         core.score(std::slice::from_ref(&descriptor)),
         CandidateCount::Completed
     );
-    assert_eq!(core.count("candidates_truncated"), 1);
+    assert_eq!(
+        core.count("candidates_truncated"),
+        2,
+        "the count is the decisions cut, not the passes that cut"
+    );
     let mut kept = core.rows_for(&descriptor.evidence_id);
     kept.sort();
     assert_eq!(
@@ -594,7 +670,7 @@ fn the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_coun
             "object-newest",
             "object-stale"
         ],
-        "explicit search hides the contradicted one, the oldest is cut, and the other project's is never read"
+        "explicit search hides the contradicted one, the two oldest are cut, and the other project's is never read"
     );
     assert_eq!(core.count("summaries_loaded"), 4);
 }
@@ -844,6 +920,110 @@ fn the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_
     capped.score(std::slice::from_ref(&descriptor));
     assert_eq!(rows(&capped.store).len(), 3);
     assert_eq!(capped.count("dropped_at_cap"), 1);
+}
+
+#[test]
+fn each_descriptor_keeps_the_top_k_that_score_descriptor_ranks_over_the_loaded_summaries() {
+    let core = Core::open(PassBounds::default());
+    let words = [
+        "kernel",
+        "snapshot",
+        "ledger",
+        "quorum",
+        "lease",
+        "writer",
+        "HTTPServer",
+        "config_loader",
+        "École",
+        "cache",
+        "eviction",
+        "replica",
+        "fsync",
+        "journal",
+        "the",
+        "and",
+    ];
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    let mut next = |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % bound as u64) as usize
+    };
+    let summaries: Vec<(String, String)> = (0..60)
+        .map(|index| {
+            let length = 3 + next(6);
+            let text: Vec<&str> = (0..length).map(|_| words[next(words.len())]).collect();
+            (format!("s{index:02}"), text.join(" "))
+        })
+        .collect();
+    let seeded: Vec<(&str, &str, EventKind)> = summaries
+        .iter()
+        .map(|(name, summary)| (name.as_str(), summary.as_str(), EventKind::Other))
+        .collect();
+    seed(&core.kernel, &core.project, &seeded);
+    let texts: Vec<String> = (0..6)
+        .map(|index| {
+            let length = 4 + next(10);
+            let text: Vec<&str> = (0..length).map(|_| words[next(words.len())]).collect();
+            format!("{} {index}", text.join(" "))
+        })
+        .chain(["x".repeat(65_537), String::new()])
+        .collect();
+    let descriptors: Vec<Descriptor> = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| core.descriptor(&format!("d{index}"), text))
+        .collect();
+    assert_eq!(core.score(&descriptors), CandidateCount::Completed);
+    let ids: Vec<(String, String)> = summaries
+        .iter()
+        .map(|(name, _)| (format!("object-{name}"), format!("decision-{name}")))
+        .collect();
+    let inputs: Vec<CandidateInput<'_>> = ids
+        .iter()
+        .zip(&summaries)
+        .map(|((object, decision), (_, summary))| CandidateInput {
+            decision_object_id: object,
+            decision_id: decision,
+            summary,
+        })
+        .collect();
+    let mut written = 0;
+    for descriptor in &descriptors {
+        let expected: Vec<(String, u32, u32)> = score_descriptor(&descriptor.text, &inputs)
+            .map(|scored| scored.candidates)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|kept| {
+                (
+                    kept.decision_object_id,
+                    u32::try_from(kept.matched_terms).unwrap(),
+                    u32::try_from(kept.decision_terms).unwrap(),
+                )
+            })
+            .collect();
+        let mut held: Vec<(String, u32, u32)> = rows(&core.store)
+            .into_iter()
+            .filter(|row| row.evidence_id == descriptor.evidence_id)
+            .map(|row| {
+                (
+                    row.decision_object_id,
+                    row.matched_terms,
+                    row.decision_terms,
+                )
+            })
+            .collect();
+        let mut sorted = expected.clone();
+        sorted.sort();
+        held.sort();
+        assert_eq!(held, sorted, "{}", descriptor.text);
+        written += expected.len();
+    }
+    assert!(written > 8, "the fixture produces candidates: {written}");
+    assert_eq!(core.count("rows_written"), written as u64);
+    assert_eq!(core.count("descriptors_analyzed"), 7);
+    assert_eq!(core.count("descriptors_refused_oversize"), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1122,6 +1302,69 @@ async fn publish_latency_with_candidates_on_stays_within_the_off_baseline() {
         "median publication hold with candidates on {} ms, off {} ms",
         medians[1],
         medians[0]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn equal_texts_in_one_batch_cite_one_evidence_row_and_the_pass_scores_it_once() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    seed(
+        &kernel_of(&handler),
+        &binding,
+        &[("one", TOPIC, EventKind::Other)],
+    );
+    let text = format!("{TOPIC} repeated");
+    let mut native = window(0, &text);
+    native.extend(window(1, &text));
+    publish(&handler, &project, &native, true);
+    settle(&handler).await;
+    assert_eq!(
+        capture_report(&handler)["units_published"],
+        2,
+        "both units published"
+    );
+    let counts = counts(&handler);
+    assert_eq!(counts["descriptors_analyzed"], 1, "{counts}");
+    assert_eq!(counts["rows_written"], 1, "{counts}");
+    assert_eq!(rows(&store).len(), 1);
+}
+
+#[test]
+fn a_decision_row_that_disagrees_with_its_registry_row_ends_the_pass_and_keeps_the_held_rows() {
+    let core = Core::open(PassBounds::default());
+    seed(
+        &core.kernel,
+        &core.project,
+        &[
+            ("one", TOPIC, EventKind::Other),
+            ("two", TOPIC, EventKind::Other),
+        ],
+    );
+    let descriptor = core.descriptor("d0", TOPIC);
+    assert_eq!(
+        core.score(std::slice::from_ref(&descriptor)),
+        CandidateCount::Completed
+    );
+    let held = core.rows_for(&descriptor.evidence_id);
+    assert_eq!(held.len(), 2);
+    rusqlite::Connection::open(core.dir.path().join("kernel").join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE decisions SET invalidated_commit_seq=created_commit_seq+1 WHERE object_id='object-two'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        core.score(std::slice::from_ref(&descriptor)),
+        CandidateCount::KernelUnavailable
+    );
+    assert_eq!(core.count("kernel_unavailable"), 1);
+    assert_eq!(core.count("descriptors_unscored"), 1);
+    assert_eq!(
+        core.rows_for(&descriptor.evidence_id),
+        held,
+        "the pass writes nothing over the held rows"
     );
 }
 

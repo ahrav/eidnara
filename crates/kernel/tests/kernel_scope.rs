@@ -455,3 +455,56 @@ fn insert_scope_refuses_terms_the_scope_algebra_cannot_canonicalize() {
     let stored = store.scope_terms("scope").unwrap();
     assert!(CanonicalScope::from_term_specs(&stored).is_ok());
 }
+
+#[test]
+fn the_budgeted_scope_read_answers_as_the_unbudgeted_one_and_stops_at_its_deadline() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("scope", '6'), |envelope| {
+            envelope.insert_scope(scope(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let unbounded = kernel::applicability::EvalBudget::unbounded();
+    assert_eq!(
+        store
+            .scope_terms_within_budget("scope", &unbounded)
+            .unwrap(),
+        Some(store.scope_terms("scope").unwrap())
+    );
+    assert_eq!(
+        store
+            .scope_terms_within_budget("missing", &unbounded)
+            .unwrap(),
+        None
+    );
+    let expired = kernel::applicability::EvalBudget::new(
+        Some(std::time::Instant::now()),
+        std::sync::Arc::default(),
+    );
+    assert_eq!(
+        store.scope_terms_within_budget("scope", &expired),
+        Err(KernelError::Deadline)
+    );
+
+    let held = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        scope.spawn(|| store.hold_readers_for_test(&held, std::time::Duration::from_secs(3)));
+        held.wait();
+        let started = std::time::Instant::now();
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(started + std::time::Duration::from_millis(200)),
+            std::sync::Arc::default(),
+        );
+        assert_eq!(
+            store.scope_terms_within_budget("scope", &budget),
+            Err(KernelError::Deadline)
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "a full reader pool holds the read past its deadline"
+        );
+    });
+}

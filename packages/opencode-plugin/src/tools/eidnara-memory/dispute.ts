@@ -22,7 +22,6 @@ export interface ExecuteDisputeArgs {
     operationId: string;
     toolCallId: string;
     actor: string;
-    /** The host tool call's abort signal; once aborted, nothing is committed. */
     signal?: AbortSignal;
 }
 
@@ -33,9 +32,10 @@ function isDisputeEvent(value: unknown): value is (typeof EIDNARA_MEMORY_DISPUTE
 export async function executeDispute(input: ExecuteDisputeArgs): Promise<string> {
     const { args } = input;
     const objectId = args.objectId?.trim();
-    const evidenceId = args.evidenceId ?? undefined;
-    const path = args.path ?? undefined;
-    const gitObjectId = args.gitObjectId ?? undefined;
+    // An empty evidence value is absent: the route refuses it as invalid_input, so the usage check answers first.
+    const evidenceId = args.evidenceId || undefined;
+    const path = args.path || undefined;
+    const gitObjectId = args.gitObjectId || undefined;
     if (!objectId) return DISPUTE_USAGE;
     if (!isDisputeEvent(args.event)) {
         return `Error: dispute event '${String(args.event)}' is not supported; use mark_disputed or contradict.`;
@@ -52,7 +52,7 @@ export async function executeDispute(input: ExecuteDisputeArgs): Promise<string>
         actor: input.actor,
         cause: `eidnara_memory dispute ${input.toolCallId}`,
         sourceKind: "assistant",
-        isCancelled: () => input.signal?.aborted === true,
+        ...(input.signal ? { signal: input.signal } : {}),
         args: {
             event: args.event,
             objectId,

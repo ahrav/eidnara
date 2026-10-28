@@ -30,5 +30,5 @@ STRUCTURE INPUTS: visibility predicate and reason grammar as hidden
 VARIATION / ASSEMBLY: closed two-kind evidence value; no assembly change.
 FALSIFIERS: section 5 table; bounds in section 13.
 HANDOFF: section 14; open conflicts C1-C6 and questions in
-  conflicts-and-questions.md.
+  open-questions.md.
 ```

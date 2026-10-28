@@ -15,7 +15,7 @@ would grow with the publication rate.
 - `crates/daemon/src/contradiction_candidates/pass.rs:135` `run` raises the
   budget interrupt on cancel and awaits the blocking closure, so shutdown's
   tracker wait covers the pass.
-- `crates/daemon/src/contradiction_candidates/pass.rs:164` `finish` catches a
+- `crates/daemon/src/contradiction_candidates/pass.rs:166` `finish` catches a
   panic, counts `worker_panicked`, and records the end before `ActivePass`
   releases the permit and `active`.
 

@@ -9,25 +9,28 @@ Record kind: new obligation activated by #1154.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References were first verified at the #1157 branch tip (the commit that adds
+this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
+tip.
 
-- Delete triggers: `crates/kernel/src/schema.rs:188`.
-- Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:450`) answers
+- Delete triggers: `crates/kernel/src/schema.rs:194`.
+- Retained read: `served_set` (`crates/kernel/src/use_outcome.rs:536`) answers
   retired records.
 
-- Guarantee under test: After `session.delete` answers `ok`, the session's
-  serving records and decision rows are readable, equal in count and ids to
-  before.
+- Guarantee under test: After `session.delete` answers `ok`, every serving
+  record and decision row of the session that was readable before it is
+  readable after it, with the same ids. A serve whose write lands beside the
+  delete may add a record, for a served set the session has no record of, and
+  removes none (OQ3-10).
 - Existing check: `use_outcome_identity_and_served_set_are_never_rewritten`
-  (`crates/kernel/tests/kernel_schema.rs:2175`);
+  (`crates/kernel/tests/kernel_schema.rs:2210`);
   `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
-  (`crates/kernel/tests/kernel_use_outcome.rs:341`) (a retired record stays
+  (`crates/kernel/tests/kernel_use_outcome.rs:401`) (a retired record stays
   readable);
   `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:39`);
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`);
   `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry`
-  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:84`). Status: unaudited.
+  (`crates/daemon/src/use_outcome_lifecycle_tests.rs:90`). Status: unaudited.
 
 ## Failure scenario
 
@@ -47,9 +50,15 @@ Required faults and enabling state: A session with records, then a delete
 
 ## Investigation log
 
-### Q: Does any open question remain for this record?
+### Q: Can the record count after a delete differ from the count before?
 
 - Sources examined: the specification catalog entry, the code and tests cited above.
-- Findings: the cited code and tests agree with the guarantee at this tip.
+- Findings: Yes, upward. The serve write takes no capture gate, so a pass that
+  committed before the delete can insert its record while the delete runs or
+  after its Kernel step (OQ3-10, an accepted loss, gap G2). No path removes a
+  row: the DDL refuses deletes and the step sets only `deleted_at`. The
+  guarantee is preservation of the rows read before the delete; the cited tests
+  compare before and after with no serve in flight.
 - Missing evidence: none for the guarantee as stated.
-- Conclusion: resolved with answer - no open question.
+- Conclusion: resolved with answer - the guarantee names preservation, not
+  count equality.

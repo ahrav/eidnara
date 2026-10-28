@@ -30,7 +30,7 @@ a performance claim. No query-plan experiment runs here.
 
 [pass]: ../../../../crates/daemon/src/lib.rs#L8191-L8271
 [retry]: ../../../../crates/daemon/src/lib.rs#L8338-L8442
-[sql]: ../../../../crates/kernel/src/admission.rs#L3132-L3298
+[sql]: ../../../../crates/kernel/src/admission.rs#L3208-L3374
 [read]: ../../../../crates/daemon/src/kernel_routes/read.rs#L159-L248
 [convert]: ../../../../crates/daemon/src/canonical_memory.rs#L184-L212
 [indexes]: ../../../../crates/kernel/src/schema.rs#L93

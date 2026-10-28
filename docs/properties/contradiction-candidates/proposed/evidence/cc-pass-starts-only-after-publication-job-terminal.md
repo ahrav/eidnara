@@ -10,18 +10,20 @@ publication wait on them.
 
 ## Evidence trail
 
-- `crates/daemon/src/source_capture.rs:700` `publish_settled` runs inside the
+- `crates/daemon/src/source_capture.rs:827` `publish_settled` runs inside the
   job's blocking closure; it destructures the job, so the slot permit
   (`ActivePass` of the capture) drops before the closure returns, and the commit
   gate guard was dropped at the end of `publish`.
-- `crates/daemon/src/source_capture.rs:675` `run_settled` returns the settled
+- `crates/daemon/src/source_capture.rs:800` `run_settled` returns the settled
   publication only after the join, so the pass is offered from the async side
   after physical completion.
-- `crates/daemon/src/lib.rs:9246` `capture_after_response` offers the pass from
+- `crates/daemon/src/lib.rs:9279` `capture_after_response` offers the pass from
   the same tracked task after `run_settled` returns, and only when the route's
   frozen flag and a memory store are present.
-- `crates/daemon/src/contradiction_candidates/pass.rs:164` `finish` builds the
-  pass's own `EvalBudget` from its own start and the daemon cancel.
+- `crates/daemon/src/contradiction_candidates/pass.rs:139` `run` fixes the
+  pass's start at its admission, before `spawn_blocking`, and `finish`
+  (`:166`) builds the pass's own `EvalBudget` from that start plus the budget
+  (`:187-190`) and the daemon cancel.
 
 ## Failure scenario
 

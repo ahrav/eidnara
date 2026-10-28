@@ -10,7 +10,9 @@ published on branch `spec/contradiction-candidates-property-catalog`
 #1164 lands the part: every `file:line` reference is re-verified at the
 #1164 branch tip (base `979fb814e`, scorer commits `05acd0107` and
 `446c7363f`, the review round; references into the scorer module and
-its test file are verified at `446c7363f`). References were remapped through the git diff from `3a3b916b7`; references to lines that
+its test file are verified at `446c7363f`, and re-verified after the
+scorer's term pipeline moved to hashed spellings, which also added the
+differential test file). References were remapped through the git diff from `3a3b916b7`; references to lines that
 changed since then were rewritten by hand. Those changes come from #1161
 (the `eidnara_memory` `dispute` action, `EIDNARA_MEMORY_DEFAULT_ACTIONS`,
 per-allowlist schemas, and the pi `allowedActions`, which resolves lead D7)
@@ -41,10 +43,10 @@ Slug prefix `cc-`. #1164 builds the scorer and converts the three S-A
 records to `Status: active` (oversize `Exercised: partial`, the other two
 `yes`), with evidence files, `existing-checks.md`, `fault-map.md`, and
 `portfolio-evaluation.md` (the fresh-context evaluation, with refinements
-applied, two gaps queued, and two biases for a human). The other 12 records
+applied, two gaps queued, and two biases for a human). #1166 builds the
+sweep and converts the sweep record to `Status: active`. The other 11 records
 stay `Status: active - PROPOSED` with no implementation evidence; the store
-(#1165), sweep (#1166), pass (#1167), and read (#1168) tickets make them
-checkable.
+(#1165), pass (#1167), and read (#1168) tickets make them checkable.
 
 `dependencies/` records re-exercised by #1164:
 `p5dep-analyzer-refuses-oversize-input-before-retention`,

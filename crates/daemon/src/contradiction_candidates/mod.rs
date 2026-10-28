@@ -13,10 +13,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-/// The causal payload one claim-facts read may carry, shared by the pass, the sweep, and the read.
-const CLAIM_CAUSAL_PAYLOAD_BYTES: std::num::NonZeroU64 =
-    std::num::NonZeroU64::new(1024 * 1024).expect("nonzero");
-
 pub mod eligibility;
 pub mod pass;
 pub(crate) mod read;

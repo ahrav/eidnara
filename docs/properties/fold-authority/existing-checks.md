@@ -19,9 +19,9 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `state_sync_metadata_scan_failure_rolls_back_earlier_writes` | `crates/memory-store/src/lib.rs:32030` | FA-E03 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `budget_stop_and_tool_only_ranges_are_recorded` | `crates/daemon/src/history_summarizer_chunk.rs:2814` | FA-E04 (range only) | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `history_summarizer_boundary_construction_matches_owned_reference` | `crates/daemon/src/lib.rs:18618` | FA-E04 (missing identity) | #859 PR A (run at `fd0b52aa5`); fingerprint assertions changed by #859 PR C | unaudited |
-| `no_fire_reason_is_durable_change_gated_and_cleared_by_fire` | `crates/daemon/src/lib.rs:41214` | FA-E05 (surviving stall clause), FA-E06 (live versus captured chain) | #903 (#855); #859 PR A | unaudited |
+| `no_fire_reason_is_durable_change_gated_and_cleared_by_fire` | `crates/daemon/src/lib.rs:41234` | FA-E05 (surviving stall clause), FA-E06 (live versus captured chain) | #903 (#855); #859 PR A | unaudited |
 | `session_wrapup_no_models_is_terminal_and_retains_command` | `crates/daemon/src/lib.rs:37597` | FA-E05 (wrapup late check) | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix` | `crates/daemon/src/fold_authority_handler_tests.rs:1037` | FA-E05 | #904 (#856); #859 PR A | unaudited |
+| `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix` | `crates/daemon/src/fold_authority_handler_tests.rs:1062` | FA-E05 | #904 (#856); #859 PR A | unaudited |
 | `defer_delta_and_boundary_advance_are_additive` | `crates/daemon/src/tail_hygiene.rs:2148` | FA-E07 | #906 | unaudited |
 | `non_append_mutation_invalidates_until_a_bust` | `crates/daemon/src/tail_hygiene.rs:2210` | FA-E07, FA-N11 | #906 | unaudited |
 | `first_divergence_classifies_each_boundary_kind_and_ignores_appends` | `crates/daemon/src/divergence.rs:124` | FA-E08 | #906 | unaudited |
@@ -49,7 +49,7 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `a_fold_artifact_written_after_the_plan_replans_the_adoption` | `crates/daemon/src/fold_authority_handler_tests.rs:742` | FA-N02 | #903 (#855); #859 PR A | unaudited |
 | `the_transition_table_follows_the_session_authority_rules` | `crates/daemon/src/fold_authority.rs:200` | FA-N02, FA-N03 | #903 (#855); #859 PR A | unaudited |
 | `a_non_boolean_fold_authority_is_a_serde_error_on_every_read` | `crates/memory-store/src/lib.rs:29736` | FA-N02 | #903 (#855); #859 PR A | unaudited |
-| `bounded_operation_histories_follow_the_authority_model` | `crates/daemon/src/fold_authority_handler_tests.rs:1030` | FA-N02, FA-N03, FA-N04, FA-N06 | #903 (#855); #859 PR A | unaudited |
+| `bounded_operation_histories_follow_the_authority_model` | `crates/daemon/src/fold_authority_handler_tests.rs:1055` | FA-N02, FA-N03, FA-N04, FA-N06 | #903 (#855); #859 PR A | unaudited |
 | `a_quiescent_bind_changes_authority_in_both_directions_through_the_reset` | `crates/daemon/src/fold_authority_handler_tests.rs:219` | FA-N03, FA-N04, FA-N06 | #903 (#855); #859 PR A | unaudited |
 | `a_sibling_binding_keeps_the_change_pending_until_a_quiescent_bind` | `crates/daemon/src/fold_authority_handler_tests.rs:245` | FA-N03, FA-N05, FA-E06 | #903 (#855); #859 PR A | unaudited |
 | `a_busy_summarizer_keeps_the_change_pending_across_a_restart` | `crates/daemon/src/fold_authority_handler_tests.rs:289` | FA-N03 | #903 (#855); #859 PR A | unaudited |

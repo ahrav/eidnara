@@ -45,21 +45,21 @@ folds case and diacritics. The daemon depends on `retrieval` at
 `crates/daemon/Cargo.toml:45` (plan cited `:41`; drifted).
 
 S2 scope-filtered Kernel read. `KernelStore::visible_domain_decisions_as_of_in_scope`
-(`crates/kernel/src/admission.rs:3162-3176`) calls `visible_selected_as_of`
-(`:3178-3207`) with `ServedSelection::DomainDecisions(domain_id)`. That reads
-one snapshot through `served_rows` (`:3458-3475`), which runs
-`served_classes_selected` (`:3666-...`) over the SQL in `served_classes_sql`
-(`:3511-3649`). The domain/kind predicate is `o.domain_id=:domain_id AND
-o.object_kind='decision'` (`:3552-3554`). The scope prefilter is the `WHERE`
-tail at `:3626-3640`. Rows are then sorted by `object_id` (`:3200`). No row
+(`crates/kernel/src/admission.rs:3168-3181`) calls `visible_selected_as_of`
+(`:3183-3211`) with `ServedSelection::DomainDecisions(domain_id)`. That reads
+one snapshot through `served_rows` (`:3460-3476`), which runs
+`served_classes_selected` (`:3669-3747`) over the SQL in `served_classes_sql`
+(`:3530-3645`). The domain/kind predicate is `o.domain_id=:domain_id AND
+o.object_kind='decision'` (`:3557-3559`). The scope prefilter is the `WHERE`
+tail at `:3625-3643`. Rows are then sorted by `object_id` (`:3203`). No row
 limit and no budget parameter exist on this API. The daemon consumer is
-`read_visible` in `crates/daemon/src/kernel_routes/read.rs:163-249`: SQL
-prefilter with `project.scope_term()` (`:177`,
+`read_visible` in `crates/daemon/src/kernel_routes/read.rs:163-258`: SQL
+prefilter with `project.scope_term()` (`:178`,
 `crates/daemon/src/kernel_routes/project.rs:106-111`), then `ScopeFilter`
-(`project.rs:186-213`) judges each kept row, then `NewestRows` heap of
-`MAX_READ_ROWS = 8192` (`read.rs:26`, `:127-161`, `:190-195`), then payload
-sizes before payloads (`:197-230`), then `decisions_for_objects_as_of` for the
-retained ids (`:231-242`).
+(`project.rs:186-222`) judges each kept row, then `NewestRows` heap of
+`MAX_READ_ROWS = 8192` (`read.rs:26`, `:128-161`, `:191-196`), then payload
+sizes before payloads (`:198-234`), then `decisions_for_objects_as_of` for the
+retained ids (`:235-250`).
 
 S3 budgeted Kernel reads. `decision_page_within_budget`
 (`crates/kernel/src/slice/read.rs:126-220`): keyset page over the whole
@@ -69,8 +69,8 @@ row (`:161-170`), `lock_reader_within(&budget.acquire_limit())` (`:134`).
 `decisions_for_objects_as_of_within_budget` (`:236-243`) is the same acquire
 plus `decisions_for_objects_on`. `decision_payload_sizes_as_of` (`:330-345`)
 reads `length(decision_payload)` only, no budget. `claim_facts_at_within_budget`
-(`crates/kernel/src/claim_facts.rs:242-259`): `limit.run(..)` then
-`claim_facts_inner` (`:318-350`), which calls `check_claim_bounds` (`:353-371`)
+(`crates/kernel/src/claim_facts.rs:240-257`): `limit.run(..)` then
+`claim_facts_inner` (`:301-333`), which calls `check_claim_bounds` (`:336-358`)
 before `reader_with_limit`. `ClaimFactBounds` (`:41-44`), `TooManyClaims`
 (`:49`). `ClaimFacts` (`:146-156`) carries `object`, `decision:
 ClaimDecisionFacts` (`:90-97`, ids only), admission facts, `served:
@@ -91,8 +91,8 @@ kernel store, budget, units, memo, commit gate mutex (`:789`),
 `publish_locked` (`:808-900`): delete epoch, scope, budget,
 `publish_screened_between` for the window (`:832-840`), then
 `capture_documents` in its own batch (`:905-...`). `capture_after_response`
-(`crates/daemon/src/lib.rs:9219-9236`). The request owner runs the
-`AfterResponse` after `settle_prepared` (`lib.rs:13470-13481`;
+(`crates/daemon/src/lib.rs:9245-9262`). The request owner runs the
+`AfterResponse` after `settle_prepared` (`lib.rs:13984-13998`;
 `crates/daemon/src/dispatch.rs:24-35`, `:445-460`). `publish_batch`
 (`crates/daemon/src/harness_sources.rs:1228-1248`), `Published` (`:520-532`),
 `MAX_SOURCE_UNIT_BYTES`/`MAX_SOURCE_BATCH_UNITS`/`MAX_SOURCE_BATCH_BYTES`
@@ -127,12 +127,12 @@ edges). Descriptor retirement is `retire_capture_observation`
 (`write.rs:569-577`) -> `retire_slice_object` (`:627-666`) which sets
 `invalidated_commit_seq`. Caller: `kernel_slice` in
 `crates/daemon/src/memory_reviewer/lifecycle.rs:313-338`, from
-`sweep_and_sample` (`:363`), from `run` (`:441-497`), spawned once the store
+`sweep_and_sample` (`:363`), from `run` (`:471-539`), spawned once the store
 is installed (`lib.rs:4000-4008`), with `SAMPLE_INTERVAL = 30 s` and
 `SAMPLE_RETRY_INTERVAL = 5 s` (`lifecycle.rs:16-18`).
 
-S7 routed reads. `docs/host-wire-protocol.md:766-770` and `:790-798`
-(`:798` is `review.use_outcome`, added by #1157).
+S7 routed reads. `docs/host-wire-protocol.md:795-799` and `:819-827`
+(`:827` is `review.use_outcome`, added by #1157).
 `crates/daemon/src/memory_reviewer/wire.rs:1-26`; strict request structs
 (`:33-60`, `deny_unknown_fields`); `bind_review` (`:203-220`) calls
 `kernel_request` (`crates/daemon/src/kernel_routes/mod.rs:446-455`) which
@@ -156,7 +156,7 @@ added `candidates`);
 `:152-154` mutation needs a tool-call id.
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58` passes
 `EIDNARA_MEMORY_DEFAULT_ACTIONS`. Pi plugin
-`packages/pi-plugin/src/tools/eidnara-memory.ts:142-202` has the same
+`packages/pi-plugin/src/tools/eidnara-memory.ts:143-205` has the same
 allowlist default, the allowlist check, and the mutation identity check;
 exclusion of the context_researcher is by registration
 (`packages/pi-plugin/src/tools/index.ts:30-32`, `:69`;
@@ -181,7 +181,7 @@ exclusion of the context_researcher is by registration
 
 - One publication slot per daemon (`Semaphore::new(1)`); the job runs on
   `spawn_blocking`; a `commit_gate: Mutex<()>` serializes capture commits
-  with session deletion (`source_capture.rs:789-803`, panic caught and
+  with session deletion (`source_capture.rs:791-805`, panic caught and
   resumed after the guard drops).
 - The lifecycle loop is one task; `kernel_slice` runs on `spawn_blocking`
   and checks `cancelled()` between sweeps.
@@ -208,7 +208,7 @@ C6 `read.rs:26`, `:189`: the row bound applies after the filter; `:197`:
 payload sizes read before any payload.
 C7 `slice/read.rs:121`: a single decision larger than the bound is returned
 alone; the wait for a pooled reader stops at the budget.
-C8 `claim_facts.rs:242-245`: reader acquisition and every statement stop at
+C8 `claim_facts.rs:232-234`: reader acquisition and every statement stop at
 the deadline or on cancellation.
 C9 `source_capture.rs:3`: "The response bytes never wait on the kernel or the
 job"; single publication slot; at most one screened batch under a 5 s budget.
@@ -218,7 +218,7 @@ C11 `storage/AGENTS.md`: single baseline; reject mismatches.
 baseline refuses to open; the activation gate binds `memstore_baseline_digest`.
 C12 `local_file.rs:240`: owners first, evidence second; cited evidence kept;
 descriptors retired.
-C13 `host-wire-protocol.md:770`, `:790`: strict bodies, project checked before
+C13 `host-wire-protocol.md:799`, `:819`: strict bodies, project checked before
 the body is read, `disabled`/`store_unavailable` terminals.
 C14 `types.ts:6-33`, `tools.ts:122-125`: closed action list; `get` and
 `candidates` are the reads; an omitted allowlist admits the default actions (all but
@@ -267,12 +267,12 @@ no domain or scope predicate (`slice/read.rs:139-146`), so for P5 it would
 examine every project's and every domain's decisions. Its budget bounds only
 the reader acquisition wait (`:134`, `lock_reader_within`), not the statement:
 `LimitedConnection` and its progress handler are used by `claim_facts`
-(`reader_with_limit`, `claim_facts.rs:330`) but not here. The row scan is
+(`reader_with_limit`, `claim_facts.rs:313`) but not here. The row scan is
 bounded by `max_rows` instead. The doc comment at `:121` is accurate about
 the wait; the plan's reading of "budgeted" is broader than the code.
 
 D3 `source_capture.rs:3` says the job "publishes at most one screened batch".
-`publish_locked` publishes the window batch (`:832-840`) and then
+`publish_locked` publishes the window batch (`:834-842`) and then
 `capture_documents` publishes the pass's configured documents "in their own
 batch after the window's" (`:901-905`, `publish_screened` at `:980`). Two
 screened batches per job when documents are pending. The per-batch bounds
@@ -289,18 +289,18 @@ than the identity does.
 
 D5 The Kernel scope prefilter keeps rows whose `scope_id` is NULL
 (`admission.rs:3637`), and the daemon `ScopeFilter::matches` returns `false`
-for `None` (`project.rs:204-206`). The superset claim holds; a P5 consumer
+for `None` (`project.rs:212-214`). The superset claim holds; a P5 consumer
 that uses the Kernel API without the daemon filter would see unscoped rows
 the daemon never serves.
 
-D6 `host-wire-protocol.md:768` names the envelope as `method`, `session_id`,
+D6 `host-wire-protocol.md:797` names the envelope as `method`, `session_id`,
 `project_root`; `ENVELOPE_KEYS` (`kernel_routes/mod.rs:461`) also strips
 `kind`. A body field named `kind` is therefore not `invalid_params`. The doc
 is silent on `kind`; recorded as a lead, not a defect.
 
 D7 At `3a3b916b7` the pi plugin's `eidnara_memory` tool had no
 `allowedActions`. #1161 resolved this: both plugins default to
-`EIDNARA_MEMORY_DEFAULT_ACTIONS` (pi `eidnara-memory.ts:146-151`, opencode
+`EIDNARA_MEMORY_DEFAULT_ACTIONS` (pi `eidnara-memory.ts:147-152`, opencode
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58`), so the P4/P5
 "allowlist as rollout lever" assumption holds in both.
 

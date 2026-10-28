@@ -628,6 +628,24 @@ fn adapters_bind_native_identity_exactly_and_refuse_missing_identity() {
         opencode_units(&opencode_session(), &ignored).unwrap(),
         vec![]
     );
+    // A synthetic OpenCode text part is injected context. Checkpoint messages
+    // carry user and assistant conversation text, so the adapter publishes the
+    // typed part alone, at its part position.
+    let synthetic = json!({
+        "info": { "id": "msg_s", "sessionID": SESSION, "role": "user", "time": { "created": 1 } },
+        "parts": [
+            { "type": "text", "text": "injected context", "synthetic": true },
+            { "type": "text", "text": "the typed words" }
+        ]
+    });
+    let units = opencode_units(&opencode_session(), &synthetic).unwrap();
+    assert_eq!(
+        units
+            .iter()
+            .map(|unit| (unit.identity[4].1.as_str(), unit.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("1", "the typed words")]
+    );
     // Debug output of a unit names identities and sizes, never text.
     let debug = format!(
         "{:?}",
@@ -4369,4 +4387,49 @@ fn rerun_lookup_cost_at_ten_thousand_live_tool_descriptors() {
             )
             .unwrap();
     assert_eq!(live, 1);
+}
+
+fn cited_evidence_id(corpus: &Corpus, descriptor_object_id: &str) -> String {
+    Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT evidence_id FROM observations WHERE object_id=?1",
+            [descriptor_object_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// A descriptor can cite an evidence row shared by equal-text batch siblings; a replay through either publication path preserves that reference.
+#[test]
+fn a_replay_reports_the_evidence_row_its_descriptor_cites() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let units = [
+        pi_text_unit("pi-first", "repeated words"),
+        pi_text_unit("pi-second", "repeated words"),
+    ];
+    let fresh = publish_screened(&publisher, &units, NOW, None).unwrap();
+    let cited: Vec<String> = fresh
+        .iter()
+        .map(|disposition| cited_evidence_id(&corpus, &published(disposition).object_id))
+        .collect();
+    assert_eq!(cited[0], cited[1], "equal text in one batch cites one row");
+    let replayed = publish_screened(&publisher, &units, NOW + 1, None).unwrap();
+    for (index, unit) in units.iter().enumerate() {
+        let fresh = published(&fresh[index]);
+        let batch = published(&replayed[index]);
+        let single = publisher.publish(unit, NOW + 2).unwrap();
+        assert!(!fresh.replayed && batch.replayed && single.replayed);
+        for reported in [fresh, batch, &single] {
+            assert_eq!(reported.evidence_id, cited[index], "unit {index}");
+            assert_eq!(
+                evidence_id_of(&corpus, &reported.evidence_object_id),
+                cited[index],
+                "unit {index}: the evidence object is the cited row's"
+            );
+        }
+    }
 }
