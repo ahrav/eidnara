@@ -65,7 +65,7 @@ Analyzer checks the scorer relies on:
 | `truncating_and_replaying_the_writes_rebuilds_the_same_rows` | `:364` | truncate then replay reproduces the rows | rebuildable (store arm) | unaudited |
 | `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:403` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
 | `a_late_write_replaces_held_keys_and_adds_none` | `:446` | a write below the held tip adds no key | row key and caps | unaudited |
-| `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:481` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
+| `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:481` | a new incarnation's write carries its own tip | sweep (incarnation filter) | unaudited |
 | `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:506` | rows added before or removed from page one move nothing after the cursor; non-canonical cursors refused | read (paging) | unaudited |
 | `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:559` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
 | `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:623` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
