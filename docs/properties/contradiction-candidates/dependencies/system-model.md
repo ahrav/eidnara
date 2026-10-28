@@ -45,21 +45,21 @@ folds case and diacritics. The daemon depends on `retrieval` at
 `crates/daemon/Cargo.toml:45` (plan cited `:41`; drifted).
 
 S2 scope-filtered Kernel read. `KernelStore::visible_domain_decisions_as_of_in_scope`
-(`crates/kernel/src/admission.rs:3162-3176`) calls `visible_selected_as_of`
-(`:3178-3207`) with `ServedSelection::DomainDecisions(domain_id)`. That reads
-one snapshot through `served_rows` (`:3458-3475`), which runs
-`served_classes_selected` (`:3666-...`) over the SQL in `served_classes_sql`
-(`:3511-3649`). The domain/kind predicate is `o.domain_id=:domain_id AND
-o.object_kind='decision'` (`:3552-3554`). The scope prefilter is the `WHERE`
-tail at `:3626-3640`. Rows are then sorted by `object_id` (`:3200`). No row
+(`crates/kernel/src/admission.rs:3168-3181`) calls `visible_selected_as_of`
+(`:3183-3211`) with `ServedSelection::DomainDecisions(domain_id)`. That reads
+one snapshot through `served_rows` (`:3460-3476`), which runs
+`served_classes_selected` (`:3669-3747`) over the SQL in `served_classes_sql`
+(`:3530-3645`). The domain/kind predicate is `o.domain_id=:domain_id AND
+o.object_kind='decision'` (`:3557-3559`). The scope prefilter is the `WHERE`
+tail at `:3625-3643`. Rows are then sorted by `object_id` (`:3203`). No row
 limit and no budget parameter exist on this API. The daemon consumer is
-`read_visible` in `crates/daemon/src/kernel_routes/read.rs:163-249`: SQL
-prefilter with `project.scope_term()` (`:177`,
+`read_visible` in `crates/daemon/src/kernel_routes/read.rs:163-258`: SQL
+prefilter with `project.scope_term()` (`:178`,
 `crates/daemon/src/kernel_routes/project.rs:106-111`), then `ScopeFilter`
 (`project.rs:186-222`) judges each kept row, then `NewestRows` heap of
-`MAX_READ_ROWS = 8192` (`read.rs:26`, `:127-161`, `:190-195`), then payload
-sizes before payloads (`:197-230`), then `decisions_for_objects_as_of` for the
-retained ids (`:231-242`).
+`MAX_READ_ROWS = 8192` (`read.rs:26`, `:128-161`, `:191-196`), then payload
+sizes before payloads (`:198-234`), then `decisions_for_objects_as_of` for the
+retained ids (`:235-250`).
 
 S3 budgeted Kernel reads. `decision_page_within_budget`
 (`crates/kernel/src/slice/read.rs:126-220`): keyset page over the whole

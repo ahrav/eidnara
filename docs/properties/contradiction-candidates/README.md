@@ -43,10 +43,10 @@ Slug prefix `cc-`. #1164 builds the scorer and converts the three S-A
 records to `Status: active` (oversize `Exercised: partial`, the other two
 `yes`), with evidence files, `existing-checks.md`, `fault-map.md`, and
 `portfolio-evaluation.md` (the fresh-context evaluation, with refinements
-applied, two gaps queued, and two biases for a human). The other 12 records
+applied, two gaps queued, and two biases for a human). #1166 builds the
+sweep and converts the sweep record to `Status: active`. The other 11 records
 stay `Status: active - PROPOSED` with no implementation evidence; the store
-(#1165), sweep (#1166), pass (#1167), and read (#1168) tickets make them
-checkable.
+(#1165), pass (#1167), and read (#1168) tickets make them checkable.
 
 `dependencies/` records re-exercised by #1164:
 `p5dep-analyzer-refuses-oversize-input-before-retention`,
