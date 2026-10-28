@@ -27,7 +27,9 @@ use super::aws_helper::{self, HelperFailure, HelperReport, HelperRequest, Renewa
 use super::aws_profile::{self, AdmissionError, CapturedProfileInput, GraphIdentity, RootIdentity};
 use super::aws_source::AwsProfileSource;
 use super::subprocess::group_registry::StateRoot;
-use super::subprocess::{self, PrivateDir, SubprocessEnd, SubprocessLimits, SubprocessSpec};
+use super::subprocess::{
+    self, PrivateDir, StdoutFilter, SubprocessEnd, SubprocessLimits, SubprocessSpec,
+};
 use crate::instance::{
     HARDENED_DIR_FLAGS, S_IFMT, S_IFREG, hex, is_owner_only_dir, is_safe_ancestor, mode_bits,
     normal_components, open_safe_anchor, owner_uid,
@@ -385,9 +387,10 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
                     termination_grace: GRACE,
                     drain_grace: GRACE,
                     max_stdout_bytes: aws_helper::MAX_REPORT_BYTES,
+                    max_streamed_stdout_bytes: aws_helper::MAX_REPORT_BYTES as u64,
                     max_stderr_bytes: MAX_STDERR_BYTES,
                 };
-                match subprocess::run(spec, &run_limits, cancel, None).await {
+                match subprocess::run(spec, &run_limits, cancel, StdoutFilter::default()).await {
                     Ok(result) => Launch::Ran(result),
                     Err(error) => Launch::Failed(subprocess::spawn_error_residue(&error)),
                 }

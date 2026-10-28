@@ -1,8 +1,8 @@
 # Existing checks: P5 proposed obligations
 
 The S-A rows are verified at the #1164 branch tip (base `979fb814e`, scorer
-commits `05acd0107` and `446c7363f`); the S-B and S-C rows at the #1167
-branch tip. Every status is
+commits `05acd0107` and `446c7363f`); S-D at the #1165 branch tip; the S-B and
+S-C rows at the #1167 branch tip. Every status is
 `unaudited`: this file records that a check exists and what it asserts;
 adequacy belongs to `/testing:invariant-test-review` (tests) and
 `/low-level-systems:defensive-assertions-and-invariant-guards` (production
@@ -24,10 +24,26 @@ guards). An existing check never removes a record from the catalog.
 | `the_top_k_is_the_same_under_every_input_order` | `:276-318` | K + 1 ties, a lower-score wider match, and an unscorable summary give an equal result over 18 input orders | determinism | unaudited |
 | `a_decision_object_id_appears_once_and_the_better_entry_wins_in_any_order` | `:320-346` | one entry per object id, the better-ranked one, in both orders | determinism | unaudited |
 | `the_matcher_digest_pins_every_rule` | `:348-400` | the full preimage, `ANALYSIS_CONTRACT_EPOCH`, the matcher epoch, and the digest literal | determinism, case fold (pins the rules) | unaudited |
+| `a_non_ascii_spelling_that_folds_to_ascii_matches_the_ascii_spelling` | `:404-425` | the Kelvin sign spelling `\u{212A}elvin` folds to {kelvin} and matches `Kelvin` and `kelvin` across the two sides, 3 of 4 | case fold | unaudited |
+| `a_summary_with_more_than_64_distinct_terms_scores_every_term` | `:429-452` | 70 `termNN` atoms hold 71 terms and score 41 of 71 against 40 of them; the uppercase spelling plus `École` scores 41 of 72 | none directly | unaudited |
+
+## S-A scorer, differential (`crates/daemon/tests/contradiction_candidates_scorer_differential.rs`)
+
+`reference` (`:16-65`) applies the documented rules directly: atoms and
+parts, `str::to_lowercase` per term, the floor on scalar values, a
+`BTreeSet`, and containment with the three gates.
+
+| Check | Location | Asserts | Records | Status |
+| --- | --- | --- | --- | --- |
+| `term_sets_match_the_documented_rules` | `:179-189` | `term_set` equals the reference under both bounds for generated mixed ASCII and non-ASCII text | case fold | unaudited |
+| `summary_scores_match_the_documented_rules` | `:191-205` | `DescriptorTerms::score` equals the reference for generated descriptors and summaries | case fold, oversize (unscorable versus score 0) | unaudited |
+| `summaries_drawn_from_the_descriptor_score_as_the_rules_say` | `:207-230` | summaries built from the descriptor's own words, some uppercased, score as the reference | case fold | unaudited |
+| `ascii_summaries_with_many_distinct_terms_score_as_the_rules_say` | `:235-245` | ASCII summaries of up to 160 numbered words, past 64 distinct terms, score as the reference | none directly | unaudited |
+| `score_descriptor_keeps_the_reference_top_k` | `:247-284` | `score_descriptor` keeps the reference's top K in rank order and lists the reference's unscorable ids | determinism | unaudited |
 
 Production guards: the compile-time assertion that the descriptor bound is
 at least `MAX_SOURCE_UNIT_BYTES`
-(`crates/daemon/src/contradiction_candidates/scorer.rs:68-70`); the
+(`crates/daemon/src/contradiction_candidates/scorer.rs:72-74`); the
 analyzer's refusals (`crates/retrieval/src/lexical/analysis.rs:78-105`),
 which the scorer propagates.
 
@@ -46,45 +62,61 @@ Analyzer checks the scorer relies on:
 | `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest` | `:187` | eviction order and count; another project untouched | row key and caps | unaudited |
 | `a_decision_pages_in_reader_order_with_a_stable_cursor` | `:235` | reader order; 70 rows at limit 64 page as 64, 6, none; clamp | read serves only live rows (store arm) | unaudited |
 | `the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys` | `:308` | sweep page by rowid; keyed delete; row and byte gauge | sweep (store arm) | unaudited |
-| `truncating_and_replaying_the_writes_rebuilds_the_same_rows` | `:372` | truncate then replay reproduces the rows | rebuildable (store arm) | unaudited |
-| `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:411` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
-| `a_late_write_replaces_held_keys_and_adds_none` | `:454` | a write below the held tip adds no key | row key and caps | unaudited |
-| `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:488` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
-| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:513` | rows added before or removed from page one move nothing after the cursor; non-canonical cursors refused | read (paging) | unaudited |
-| `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:560` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
-| `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:624` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
+| `truncating_and_replaying_the_writes_rebuilds_the_same_rows` | `:360` | truncate then replay reproduces the rows | rebuildable (store arm) | unaudited |
+| `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:399` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
+| `a_late_write_replaces_held_keys_and_adds_none` | `:442` | a write below the held tip adds no key | row key and caps | unaudited |
+| `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:477` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
+| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:502` | rows added before or removed from page one move nothing after the cursor; non-canonical cursors refused | read (paging) | unaudited |
+| `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:549` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
+| `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:613` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
+| `random_write_and_delete_sequences_match_the_reference_model` | `:1068` | seeded write and as-read delete sequences match a reference model: rows, counts, rowid stability, and the gauge each step; pages, cursors across writes, and the sweep every seventh step | row key and caps; read (paging); sweep (store arm) | unaudited |
+| `the_hex_checks_refuse_uppercase_non_hex_and_misfit_lengths` | `:1219` | the hex-shape CHECKs refuse uppercase, non-hex, and wrong-length digests | read keys (no text) | unaudited |
+| `the_totals_follow_replaced_ids_late_writes_deletes_and_truncation` | `:1285` | the gauge equals a sum over the rows through replaced ids, late writes, deletes, and truncation | sweep (store arm) | unaudited |
+| `a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` | `:1338` | a new row below the cap's floor is counted written and dropped; held rows and rowids stay; a landing row takes a fresh rowid | row key and caps | unaudited |
+| `only_the_candidate_module_writes_the_candidate_tables` | `:1468` | no other memory-store source, trigger, or session purge writes either candidate table, so the totals the cap and gauge read stay exact | row key and caps; sweep (store arm) | unaudited |
+| `every_candidate_statement_reuses_its_cached_plan` | `:1393` | 12 rounds of writes, late writes, pages, sweep pages, keyed deletes, and gauge reads run 16 distinct candidate statements; the statement cache re-creates and re-plans none | row key and caps; read (paging); sweep (store arm) (the cost of the checks, not a record directly) | unaudited |
+| `the_page_sweep_and_eviction_scans_stop_at_their_bound` | `:1556` | over a 300-row project, a two-row page, a three-row sweep page, and a one-row eviction each run under 500 VM steps | read (paging); sweep (store arm); row key and caps (bounded scans) | unaudited |
+| `a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores` | `:1600` | 256 rows into a run of equal scores, with and without equal `created_at_ms`, the continuation page returns the next two rows under 500 VM steps | read (paging) | unaudited |
+| `a_read_with_a_secret_shaped_id_answers_an_empty_page` | `:1651` | a page read for a secret-shaped decision id answers an empty page; an empty id is still refused by the shape check | read keys (no text); read (paging) | unaudited |
 
-Baseline: `crates/memory-store/tests/baseline.rs` pins the table and its two
-indexes in `EXPECTED_OBJECTS` and refuses a store at the prior baseline
-untouched (`:495`).
+Baseline: `crates/memory-store/tests/baseline.rs` pins the table, its two
+indexes, and `contradiction_candidate_totals` in `EXPECTED_OBJECTS` and
+refuses a store at the prior baseline untouched (`:496`).
 
 ## S-E sweep, S-G flag, and R5 (`crates/daemon/tests/contradiction_candidates_sweep.rs`, #1166)
 
 | Check | Location | Asserts | Records | Status |
 | --- | --- | --- | --- | --- |
-| `the_eligibility_rule_admits_exactly_active_stale_and_disputed_decisions_of_the_project` | `:377` | dispositions read back through claim facts; the predicate admits active, sensitive, stale, disputed of the bound project only | sweep | unaudited |
-| `one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_none` | `:432` | each drop reason on its own row; repeat drops zero; tip and job facts unchanged; gauge | sweep, R5 | unaudited |
-| `a_row_at_the_age_bound_stays_and_one_past_it_drops` | `:485` | age boundary | sweep | unaudited |
-| `a_closed_kernel_drops_nothing_and_counts_the_skip` | `:501` | no Kernel: no read, one skip | sweep | unaudited |
-| `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over` | `:516` | page bound and wrap | sweep | unaudited |
-| `a_false_flag_runs_no_table_statement_and_moves_no_counter` | `:552` | hidden table, false flag: no statement, zero counters | flag off (sweep arm) | unaudited |
-| `the_counter_block_holds_exactly_the_closed_vocabulary_as_integers` | `:600` | the 27 names, integers only | flag off (status arm) | unaudited |
-| `the_evidence_read_answers_liveness_at_its_snapshot_in_request_order` | `:640` | Live, Retired, Unknown; bound; deadline | sweep | unaudited |
-| `the_candidate_modules_name_no_kernel_write_path` | `:694` | no Kernel write entry point named in the module's files (lexical) | R5 | unaudited |
-| `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:718` | every `CausalInputs {` literal under `crates/daemon/src` has empty `signals` (lexical) | R5 | unaudited |
+| `the_eligibility_rule_admits_exactly_active_stale_and_disputed_decisions_of_the_project` | `:378` | dispositions read back through claim standing; the predicate admits active, sensitive, stale, disputed of the bound project only | sweep | unaudited |
+| `one_sweep_drops_every_dead_row_keeps_the_eligible_ones_and_a_repeat_drops_none` | `:433` | each drop reason on its own row; repeat drops zero; tip and job facts unchanged; gauge | sweep, R5 | unaudited |
+| `a_row_at_the_age_bound_stays_and_one_past_it_drops` | `:486` | age boundary | sweep | unaudited |
+| `a_closed_kernel_drops_nothing_and_counts_the_skip` | `:502` | no Kernel: no read, one skip | sweep | unaudited |
+| `the_watermark_covers_three_pages_in_three_runs_and_the_fourth_starts_over` | `:517` | page bound and wrap | sweep | unaudited |
+| `a_false_flag_runs_no_table_statement_and_moves_no_counter` | `:553` | hidden table, false flag: no statement, zero counters | flag off (sweep arm) | unaudited |
+| `the_counter_block_holds_exactly_the_closed_vocabulary_as_integers` | `:601` | the 27 names, integers only | flag off (status arm) | unaudited |
+| `the_evidence_read_answers_liveness_at_its_snapshot_in_request_order` | `:641` | Live, Retired, Unknown; bound; deadline | sweep | unaudited |
+| `the_candidate_modules_name_no_kernel_write_path` | `:695` | no Kernel write entry point named in the module's files (lexical) | R5 | unaudited |
+| `every_reviewer_job_the_daemon_builds_carries_no_signal` | `:719` | every `CausalInputs {` literal under `crates/daemon/src` has empty `signals` (lexical) | R5 | unaudited |
 | `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land` | `:765` | a refused chunk keeps its rows; Kernel-free drops land | sweep | unaudited |
-| `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:816` | rows above the tip are not judged | sweep | unaudited |
-| `a_cancelled_sweep_deletes_nothing` | `:842` | cancellation | sweep | unaudited |
-| `every_claim_chunk_of_a_page_is_read` | `:855` | two claim chunks | sweep | unaudited |
-| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:900` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
-| `the_evidence_read_refuses_another_incarnation_and_a_future_snapshot` | `:969` | incarnation and snapshot refusals | sweep | unaudited |
+| `a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it` | `:994` | rows above the tip are not judged | sweep | unaudited |
+| `a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row` | `:1018` | cancellation before the first Kernel read: no reader taken, nothing deleted | sweep | unaudited |
+| `a_sweep_cancelled_during_the_single_decision_reads_reads_no_further_and_deletes_nothing` | `:816` | cancellation inside the single-decision fallback: the tip capture and the refused chunk are the only Kernel reads; nothing deleted | sweep | unaudited |
+| `a_sweep_cancelled_before_the_scope_reads_reads_no_scope_and_deletes_nothing` | `:934` | cancellation before the scope-term reads: the tip capture and the chunk read are the only Kernel reads; nothing deleted | sweep | unaudited |
+| `a_restore_between_the_claim_read_and_the_evidence_read_deletes_nothing` | `:872` | a restore between the claim read and the evidence read keeps the row the claim read had marked dead and counts one skip | sweep | unaudited |
+| `an_empty_page_reads_no_kernel_row_and_still_refreshes_the_gauge` | `:970` | an empty page takes no Kernel reader, counts no skip, and refreshes `retained_bytes` | sweep | unaudited |
+| `every_claim_chunk_of_a_page_is_read` | `:1047` | two claim chunks | sweep | unaudited |
+| `the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass` | `:1092` | lifecycle wiring, flag per pass, cancel | sweep, flag off | unaudited |
+| `the_evidence_read_refuses_another_incarnation_a_future_snapshot_and_a_negative_one` | `:1161` | incarnation, future-snapshot, and negative-snapshot refusals | sweep | unaudited |
+| `a_busy_reader_does_not_hold_the_sweep_past_its_budget` | `:1203` | one held reader: the sweep's scope reads take the free reader and the run stays inside its budget | sweep | unaudited |
+| `the_budgeted_scope_read_answers_as_the_unbudgeted_one_and_stops_at_its_deadline` | `crates/kernel/tests/kernel_scope.rs:460` | `scope_terms_within_budget` equals `scope_terms`, answers `None` for a missing scope, and returns `Deadline` on an expired budget and on a fully held reader pool | sweep | unaudited |
+| `every_standing_equals_the_claim_facts_of_its_claim_at_every_snapshot`, `standing_refusals_match_the_claim_facts_refusals` | `crates/kernel/tests/kernel_claim_standing.rs:111`, `:168` | the sweep's claim standing read equals the registry row, decision row, own admission row, and served standing of claim facts at every snapshot, and refuses as claim facts does | sweep | unaudited |
 
 Also: `crates/daemon/src/config.rs:2299` and `:2320` (default, tier, and
-resolved-config freezing), `crates/daemon/src/lib.rs:21340` (bound route and
-status block), `crates/host-runtime/src/control.rs:2004` (host forwarding
+resolved-config freezing), `crates/daemon/src/lib.rs:21517` (bound route and
+status block), `crates/host-runtime/src/control.rs:2011` (host forwarding
 allowlist against `docs/host-wire-protocol.md`), and
-`crates/memory-store/tests/contradiction_candidates.rs:663` (a delete as
-read spares a rewritten row).
+`a_delete_as_read_spares_a_row_rewritten_since_the_read`
+(`crates/memory-store/tests/contradiction_candidates.rs:640`).
 
 ## S-B trigger and S-C candidate set (`crates/daemon/src/candidate_pass_tests.rs`, #1167)
 
@@ -129,7 +161,7 @@ branch tip; the read ticket (#1168) adds the code and the checks.
 - The scorer's `TooManyAtoms` path is unreachable by construction and has no
   test; the analyzer's own test covers the refusal.
 - The pass records `matcher_digest()` with each row
-  (`crates/daemon/src/contradiction_candidates/pass.rs:378`); no test reads
+  (`crates/daemon/src/contradiction_candidates/pass.rs:377`); no test reads
   the digest back from a pass-written row.
 - No test fails a store write inside a pass; that path counts the failed
   descriptor as analyzed and the later ones as unscored.

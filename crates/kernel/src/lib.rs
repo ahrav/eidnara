@@ -8,6 +8,7 @@ pub mod sqlite_runtime;
 
 mod admission;
 mod anchor;
+mod anchor_write;
 pub mod applicability;
 mod backup;
 mod cas;
@@ -53,6 +54,10 @@ pub use anchor::{
     AnchorKind, AnchorRowSpec, ContextDependency, GitCondition, PatchIdCapture, QueryContext,
     encode_anchor_captures, evaluate_non_git,
 };
+pub use anchor_write::{
+    ANCHOR_INSERT_KIND, AnchorSpec, AnchorValidationError, AnchorValue, AnchorWriteOutcome,
+    validate_anchor, validate_anchor_row,
+};
 #[cfg(all(target_os = "linux", feature = "test-support"))]
 pub use backup::filesystem_is_unsafe_for_test;
 #[cfg(all(target_os = "macos", feature = "test-support"))]
@@ -84,8 +89,9 @@ pub use claim_causality::{
 };
 pub use claim_facts::{
     AdmissionFacts, ClaimDecisionFacts, ClaimFactBounds, ClaimFacts, ClaimFactsError,
-    ClaimFactsSnapshot, ClaimOccurrence, ExcludedRepresentation, MAX_CLAIM_OBJECT_ID_BYTES,
-    RepresentationExclusion, ServedFacts, ServedStanding, SupportingApproval,
+    ClaimFactsSnapshot, ClaimOccurrence, ClaimStanding, ExcludedRepresentation,
+    MAX_CLAIM_OBJECT_ID_BYTES, RepresentationExclusion, ServedFacts, ServedStanding,
+    SupportingApproval,
 };
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
@@ -103,8 +109,8 @@ pub use eligibility::{
 };
 pub use envelope::{
     AlignmentProjectionSpec, CommitIntent, CommitReceipt, DependentObservationQuery, DomainSpec,
-    Envelope, EvidenceCitations, KnownAsOf, OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState,
-    Preview, RemediationTarget, RepositoryProvenance, Sensitivity, StagingCandidateRow,
+    Envelope, KnownAsOf, OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState, Preview,
+    RemediationTarget, RepositoryProvenance, Sensitivity, StagingCandidateRow,
     StagingCandidateSpec, TokenCheck, TokenConflict,
 };
 pub use evidence_liveness::{EvidenceLiveness, EvidenceLivenessError, MAX_EVIDENCE_LIVENESS_IDS};

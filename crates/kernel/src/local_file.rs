@@ -441,13 +441,22 @@ pub(crate) fn reserved_expiry_intent(
     now: i64,
     id: &str,
 ) -> CommitIntent {
+    let (operation_key, request_digest) = reserved_expiry_key(now, id);
     CommitIntent {
         producer: format!("{}{producer}", CommitIntent::RESERVED_PRODUCER_PREFIX),
-        operation_key: format!("{now}:{id}"),
-        request_digest: format!("{:x}", sha2::Sha256::digest(id.as_bytes())),
+        operation_key,
+        request_digest,
         actor: producer.to_string(),
         cause: cause.to_string(),
     }
+}
+
+/// The operation key and request digest [`reserved_expiry_intent`] gives the row `id` at the cutoff `now`.
+pub(crate) fn reserved_expiry_key(now: i64, id: &str) -> (String, String) {
+    (
+        format!("{now}:{id}"),
+        format!("{:x}", sha2::Sha256::digest(id.as_bytes())),
+    )
 }
 
 fn retire_expired_capture(

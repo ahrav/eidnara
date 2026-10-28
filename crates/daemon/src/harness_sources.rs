@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Harness {
     OpenCode,
     Pi,
@@ -39,10 +39,17 @@ impl Harness {
             Self::Pi => "pi",
         }
     }
+
+    /// The harness whose `as_str` is `value`.
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::OpenCode, Self::Pi]
+            .into_iter()
+            .find(|harness| harness.as_str() == value)
+    }
 }
 
 /// The route-bound identity every unit of a session is published under. `project_id` is the bound project's digest, the scope term's exact value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionIdentity {
     pub project_id: String,
     pub harness: Harness,
@@ -185,6 +192,24 @@ fn revision(value: Option<&Value>, name: &'static str) -> Result<String, Adapter
     }
 }
 
+/// The identity of one `messages` unit in the class's field order. Memory
+/// capture rebuilds it from a capture job to read the unit's descriptor.
+pub(crate) fn message_identity(
+    project_id: &str,
+    harness: &str,
+    session_id: &str,
+    message_id: &str,
+    block_index: usize,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("project_id", project_id.to_owned()),
+        ("harness", harness.to_owned()),
+        ("session_id", session_id.to_owned()),
+        ("message_id", message_id.to_owned()),
+        ("block_index", block_index.to_string()),
+    ]
+}
+
 impl SessionIdentity {
     fn message_unit(
         &self,
@@ -196,13 +221,13 @@ impl SessionIdentity {
     ) -> SourceUnit {
         SourceUnit {
             class: OccurrenceClass::Messages,
-            identity: vec![
-                ("project_id", self.project_id.clone()),
-                ("harness", self.harness.as_str().to_owned()),
-                ("session_id", self.session_id.clone()),
-                ("message_id", message_id.to_owned()),
-                ("block_index", block_index.to_string()),
-            ],
+            identity: message_identity(
+                &self.project_id,
+                self.harness.as_str(),
+                &self.session_id,
+                message_id,
+                block_index,
+            ),
             revision: revision.to_owned(),
             representation: Representation::Text,
             text: text.to_owned(),
@@ -249,9 +274,9 @@ struct ToolBlock<'a> {
     is_error: bool,
 }
 
-/// Units of one OpenCode `MessageV2` record: user text at `time.created`, assistant text at `time.completed`, and settled tool parts at `state.time.end`. Text block indices are part positions; a tool's output block index is 0, its one exact output or error string. Ignored text and other part kinds contribute nothing.
+/// Units of one OpenCode `MessageV2` record: user text at `time.created`, assistant text at `time.completed`, and settled tool parts at `state.time.end`. Text block indices are part positions; a tool's output block index is 0, its one exact output or error string. Ignored text, synthetic text, and other part kinds contribute nothing.
 ///
-/// Assistant text without a completion timestamp is deferred. A valid completion timestamp makes non-ignored text eligible even when `info.error` is present. Settled tools contribute independently, except a call the turn's abort interrupted (`state.metadata.interrupted`), which waits for the completion timestamp so its outcome reads the abort's final error. The adapter uses no separate edit revision for user text or completed assistant text; changing bytes at the same native identity and timestamp conflicts at publication.
+/// Assistant text without a completion timestamp is deferred. A valid completion timestamp makes non-ignored, non-synthetic text eligible even when `info.error` is present. Settled tools contribute independently, except a call the turn's abort interrupted (`state.metadata.interrupted`), which waits for the completion timestamp so its outcome reads the abort's final error. The adapter uses no separate edit revision for user text or completed assistant text; changing bytes at the same native identity and timestamp conflicts at publication.
 ///
 /// # Errors
 ///
@@ -303,8 +328,11 @@ pub fn opencode_units_within(
     let mut kept = Kept::new(admit);
     for (index, part) in parts.iter().enumerate() {
         match part.get("type").and_then(Value::as_str) {
-            // An ignored text part is not conversation text.
-            Some("text") if part.get("ignored").and_then(Value::as_bool) == Some(true) => {}
+            // Conversation text is a text part with `ignored` and `synthetic`
+            // both absent or false; a synthetic part is injected context.
+            Some("text")
+                if part.get("ignored").and_then(Value::as_bool) == Some(true)
+                    || part.get("synthetic").and_then(Value::as_bool) == Some(true) => {}
             Some("text") if role == "assistant" && completed.is_none() => {}
             Some("text") => {
                 let text = part

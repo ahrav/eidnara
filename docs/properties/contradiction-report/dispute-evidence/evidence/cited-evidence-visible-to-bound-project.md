@@ -13,17 +13,21 @@ definition.
 
 ## Evidence trail
 
-- `EvidenceCitations.citing_scopes` holds the distinct non-null scope ids
-  of the live decisions, observations, and asserted edges whose
-  `evidence_id` is the row, and of the live decisions whose events cite
-  it (`crates/kernel/src/envelope.rs:187-194`).
-- The SQL is a `UNION` of four selects, each filtering
+- `Envelope::evidence_cited_in` offers its predicate the scope ids of the
+  live decisions, observations, and asserted edges whose `evidence_id` is
+  the row, and of the live decisions whose events cite it, each distinct
+  scope at most once, and stops at the first scope the predicate accepts
+  (`crates/kernel/src/envelope.rs:520-598`).
+- The SQL is a `UNION ALL` of four selects, each filtering
   `invalidated_commit_seq IS NULL` on the citer (the decision for the
-  event branch) and `scope_id IS NOT NULL`, ordered by scope id
-  (`envelope.rs:555-565`).
-- `require_visible_evidence` accepts the first citing scope that
-  `ScopeFilter::matches` accepts for the bound project and answers
-  `NotFound` otherwise (`crates/daemon/src/kernel_routes/commit.rs:758-765`).
+  event branch) and `scope_id IS NOT NULL`, read in storage order
+  (`envelope.rs:548-565`). After the first refused scope the walk reruns
+  the query with that scope excluded (`scope_id IS NOT ?2`), so its rows
+  stay inside SQLite; later refused scopes are skipped as their rows
+  arrive (`envelope.rs:566-597`).
+- `require_visible_evidence` passes `ScopeFilter::matches` for the bound
+  project as the predicate and answers `NotFound` when no offered scope
+  passes (`crates/daemon/src/kernel_routes/commit.rs:749-764`).
   `ScopeFilter` is the same algebra `kernel.read` serves rows with
   (`commit.rs:677-681`).
 - Every refusal case (unknown, retired, uncited, unscoped-only,
@@ -31,11 +35,12 @@ definition.
   `commit.rs:745-748`; header at `:48-49`). Since `511cd6d73` the doc
   comment states that the check answers the same for another project's
   evidence as for an unknown id.
-- The scope loop tries every citing scope until one passes
-  (`commit.rs:758-764`), so the order scopes sort in does not decide the
-  answer.
+- The walk offers every citing scope until one passes, so neither the
+  order scope ids sort in nor the order citers were written in decides the
+  answer; the seeded model test checks this over interleaved citers
+  (`crates/kernel/tests/kernel_slice.rs:2252`).
 - `apply` runs an envelope's operations in order in one transaction
-  (`commit.rs:919-1062`), so a citer inserted earlier in the envelope is
+  (`commit.rs:917-1060`), so a citer inserted earlier in the envelope is
   visible to the dispute's read.
 - Decision events reach the citing set through the review acceptance
   path: `append_decision_citations`
@@ -61,12 +66,12 @@ versus `not_found`) would reveal that E exists.
   `cited-evidence-live-at-dispute-commit`, so the commit sees the
   retirement.
 - The scope verdict depends on stored scope terms read through
-  `envelope.scope_terms` inside the same transaction (`commit.rs:759-761`).
+  `envelope.scope_terms` inside the same transaction (`commit.rs:755-757`).
 - The sequential form (preview answers `available`, the only project
   citer retires, the commit answers `not_found` with nothing written) is
   constructed by
   `a_dispute_previewed_while_its_evidence_was_visible_is_judged_again_at_commit`
-  (`crates/daemon/tests/kernel_routes.rs:6381`).
+  (`crates/daemon/tests/kernel_routes.rs:6422`).
 
 ## What a test must construct
 
@@ -78,22 +83,29 @@ versus `not_found`) would reveal that E exists.
   `not_found`. Constructed in the same test.
 - Evidence cited by a decision of the bound project: lands. Constructed by
   `project_evidence` in `kernel_routes.rs:5723`.
-- Kernel read: an unscoped citer and a retired citer add no scope; an
-  observation and a decision event (through a live decision) add theirs;
-  scopes appear once each in order. Constructed by
-  `evidence_citations_name_the_scopes_of_live_citers_and_the_rows_liveness`
-  (`crates/kernel/tests/kernel_slice.rs:2159`).
+- Kernel read: an unscoped citer and a retired citer offer no scope; an
+  observation and a decision event (through a live decision) offer theirs;
+  each scope is offered once and the walk stops at the first accepted one.
+  Constructed by
+  `evidence_cited_in_offers_each_live_citing_scope_once_and_stops_at_the_first_accepted`
+  (`crates/kernel/tests/kernel_slice.rs:2160`). The same answers over
+  seeded interleavings of all three citer kinds, live and retired, for
+  every accepted scope set: constructed by
+  `evidence_cited_in_matches_the_citation_model_under_seeded_citers`
+  (`:2252`).
 - Evidence cited by the bound project and by a foreign scope that sorts
-  first: lands; evidence cited only by the foreign scope: `not_found`.
+  first: lands; evidence cited by two foreign decisions written before
+  the bound project's decision: lands; evidence cited only by the foreign
+  scope: `not_found`.
   Constructed by
   `a_dispute_judges_every_citer_and_both_evidence_fields_together`
-  (`kernel_routes.rs:6290`).
+  (`kernel_routes.rs:6291`).
 - An `insert_decision` citing uncited evidence earlier in the dispute's
   envelope: lands; the same dispute alone: `not_found`. Constructed by
   `an_insert_citing_evidence_makes_it_citable_later_in_the_same_commit`
-  (`kernel_routes.rs:6481`).
+  (`kernel_routes.rs:6522`).
 - Not constructed: an asserted-edge citer. The `asserted_edges` branch of
-  the SQL (`crates/kernel/src/envelope.rs:563-564`) is read, not
+  the SQL (`crates/kernel/src/envelope.rs:561-563`) is read, not
   exercised, and no Rust code under `crates/` writes `asserted_edges`, so
   the arm has no production writer either.
 
@@ -102,7 +114,7 @@ versus `not_found`) would reveal that E exists.
 ### Q: Is evidence cited only by unscoped rows ever citable?
 
 - Sources examined: the SQL filter `scope_id IS NOT NULL`
-  (`envelope.rs:556-564`); the route test's unscoped case.
+  (`envelope.rs:551-563`); the route test's unscoped case.
 - Findings: no; it answers `not_found`.
 - Missing evidence: an owner decision on whether that is intended.
 - Conclusion: needs human input.
@@ -120,9 +132,9 @@ versus `not_found`) would reveal that E exists.
 ### Q: Can a client make evidence citable through the route's own inserts (portfolio G1)?
 
 - Sources examined: `insert_decision` and `insert_observation` wire
-  fields (`commit.rs:276`, `:314`); `require_parents`
+  fields (`commit.rs:276`, `:316`); `require_parents`
   (`crates/kernel/src/slice/write.rs:1095-1107`); `apply`
-  (`commit.rs:919-1062`); `kernel_routes.rs:6481`.
+  (`commit.rs:917-1060`); `kernel_routes.rs:6522`.
 - Findings: yes. The inserts accept any live evidence id; the Kernel
   checks liveness only. The test refuses a dispute citing uncited live
   evidence with `not_found`, then lands one envelope holding an
@@ -139,13 +151,22 @@ versus `not_found`) would reveal that E exists.
 
 ### Q: Is the citing-row read bounded?
 
-- Sources examined: `Envelope::evidence_citations`
-  (`envelope.rs:536-577`); [`../open-questions.md`](../open-questions.md)
+- Sources examined: `Envelope::evidence_cited_in`
+  (`envelope.rs:520-598`); the citing tables' indexes in
+  `crates/kernel/src/schema.rs`; [`../open-questions.md`](../open-questions.md)
   Q1, which recommends a bounded scan.
-- Findings: no. The `UNION` reads every live scoped row citing the id,
-  inside the writer transaction. Review disposition: the owner defers
-  this; each citing row was paid for by a write, and a bounded read is a
-  follow-up.
-- Missing evidence: none for the behavior.
-- Conclusion: resolved with answer: unbounded at `511cd6d73`; follow-up
-  deferred by the owner.
+- Findings: at `511cd6d73` a sorted `UNION` read every live scoped row
+  citing the id inside the writer transaction. The walk now stops at the
+  first scope the filter accepts, so an accepted dispute whose project
+  citer is read first reads one citing row however many rows cite the id.
+  A refused dispute, and one whose project citer follows refused citers,
+  still visit every live citer: decisions, observations, decision events,
+  and asserted edges index `evidence_id` alone, so each citer costs a
+  table seek to read its scope and liveness. Rows under the first refused
+  scope are skipped inside SQLite.
+- Missing evidence: an owner decision on an index over
+  `(evidence_id, scope_id)` for live rows, which would bound the walk by
+  the number of distinct citing scopes.
+- Conclusion: resolved with answer: the walk stops at the first accepted
+  scope and a refusal is linear in live citers; a tighter bound is a
+  Kernel schema decision. (needs human input)

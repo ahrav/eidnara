@@ -1,12 +1,13 @@
 # p5dep-budget-exhaustion-stops-a-budgeted-kernel-read
 
-HEAD `3a3b916b7`. Surface S3.
+HEAD `3a3b916b7`; the `claim_facts.rs` references are re-verified at the
+#1166 branch tip. Surface S3.
 
 ## Discovery trigger
 
 Plan R1/KTD2: the P5 pass runs "under its own deadline and byte budget" and
 "stop[s] at budget exhaustion". The task names the claim "deadline/interrupt
-stop the read". `claim_facts.rs:230-233` claims "reader acquisition and every
+stop the read". `claim_facts.rs:232-234` claims "reader acquisition and every
 statement stop at the deadline or on cancellation"; `slice/read.rs:121`
 claims "The wait for a pooled reader stops at `budget`'s deadline or
 interrupt." Lens: failure recovery; C7, C8; D2.
@@ -36,16 +37,16 @@ interrupt." Lens: failure recovery; C7, C8; D2.
   `LimitedConnection::new` (`:1693-1722`): `limit.check()`, zero busy timeout,
   `set_progress_handler(.., SQL_BUDGET_PROGRESS_STEPS)` when the limit has
   control.
-- `claim_facts.rs:238` `limit.run`; `:261` `reader_with_limit(limit)`;
-  `:274` `limit.check()`; `:350`, `:357` `limit.check()` per claim inside
+- `claim_facts.rs:248` `limit.run`; `:313` `reader_with_limit(limit)`;
+  `:326` `limit.check()`; `:545`, `:552` `limit.check()` per claim inside
   `load_claims_served_in_tx`. So claim facts have acquisition, per-claim, and
   in-statement (progress handler) poll points.
 - `slice/read.rs:134` `decision_page_within_budget`: `self.lock_reader_within
   (&budget.acquire_limit())?` then a plain `reader.transaction_with_behavior`;
   no `LimitedConnection`, no progress handler, no `limit.check()` after the
   statement. `:241` `decisions_for_objects_as_of_within_budget`: same shape.
-- `source_capture.rs:609-612`: the capture job's budget is `EvalBudget::new
-  (Some(now + 5 s), interrupt)`; `run` sets the interrupt on cancel (`:662`).
+- `source_capture.rs:611-614`: the capture job's budget is `EvalBudget::new
+  (Some(now + 5 s), interrupt)`; `run` sets the interrupt on cancel (`:664`).
 - Tests: `crates/daemon/tests/embedding_dispatch.rs:1102`
   `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget`;
   `crates/retrieval/tests/claims.rs:993`;

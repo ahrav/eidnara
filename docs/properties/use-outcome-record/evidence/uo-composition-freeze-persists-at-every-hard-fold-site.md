@@ -10,8 +10,8 @@ re-verified at this branch tip.
 
 ## Evidence trail
 
-References are verified at the #1157 branch tip (the commit that adds this file;
-its parent is `d85de937b`).
+References are verified at the #1157 branch tip, the commit that carries this
+revision.
 
 - Additive engine: `crates/daemon/src/transform.rs:3122` inside
   `apply_additive_only` (`apply_additive_only`
@@ -20,7 +20,7 @@ its parent is `d85de937b`).
   `crates/daemon/src/transform.rs:4898` (`MaterializeReason::PressureRefold`).
 - All three call `ctx.project_memory_composition()`, which returns the
   composition of the read pinned for that pass.
-- Correction: the spec cited `transform.rs:13972, 20836, 21245`; at this tip
+- Correction: the spec cited `transform.rs` lines 13972, 20836, and 21245; at this tip
   13972 is inside a test, and the production sites are the three lines above.
 
 - Guarantee under test: Every pass whose plan is `Hard` or `MigrateHard` assigns
@@ -32,7 +32,7 @@ its parent is `d85de937b`).
   `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
   (`crates/daemon/tests/transform_canonical_memory.rs:46`);
   `a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it`
-  (`crates/daemon/src/use_outcome_writer_tests.rs:263`);
+  (`crates/daemon/src/use_outcome_writer_tests.rs:282`);
   `a_pressure_refold_reports_its_frozen_composition`
   (`crates/daemon/src/transform.rs:20895`). Status: unaudited.
 
@@ -50,7 +50,8 @@ the same pinned read.
 
 A pressure refold on the folding engine with a Canonical read, asserting
 `meta.project_memory` equals the read; a fault point after the memory-store
-commit (the #1155 seam).
+commit (the #1155 seam). The seam injects a handled Kernel failure in a live
+process; a stop and restart between the two stores is not constructed.
 
 Required faults and enabling state: A HARD fold on each engine, a pressure
 refold on the folding engine, and a CAS conflict inside one pass.
@@ -60,8 +61,17 @@ refold on the folding engine, and a CAS conflict inside one pass.
 ### Q: Gap G1
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
-- Findings: Gap G1: does a CAS-discarded attempt leave any durable effect
-  outside the Memory Store? Owner #1155 (AC7); the writer runs only after the
-  attempt's memory-store commit succeeded.
-- Missing evidence: none beyond what the question names.
-- Conclusion: resolved with answer - see the question text.
+- Findings: Gap G1: does a CAS-discarded attempt leave a use-outcome serve?
+  Owner #1155 (AC7); the writer runs only after the attempt's memory-store
+  commit succeeded, and
+  `a_discarded_attempt_leaves_no_serve_and_the_retry_records_one`
+  (`crates/daemon/src/use_outcome_writer_tests.rs:343`) asserts that a rival
+  commit lands while no composition is stored, no write slot is held, and no
+  write is counted, and that one record results.
+  The test inspects the Memory Store row version, the frozen composition, the
+  Kernel served-set count, and the `written` counter; other durable state is
+  outside its scope.
+- Missing evidence: none for the serve; other durable effects of a discarded
+  attempt are not this record's question.
+- Conclusion: resolved with answer for the use-outcome serve - a discarded
+  attempt writes none.

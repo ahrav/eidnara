@@ -97,8 +97,9 @@ export function usage(): string {
         "directory, one page or one selected proposal per invocation. Nothing here changes",
         "canonical memory, accepts a proposal, or starts review work; retain and no_change",
         "proposals do not change, extend, or corroborate the memory they name.",
-        "Outcome prints how many sessions a decision was served to and how many of those serves",
-        "a dispute or contradiction followed, or unavailable when the Kernel cannot answer.",
+        "Outcome prints how many unretired serves a decision has, one per harness, session, and",
+        "served set, and how many of those serves a dispute or contradiction followed, or",
+        "unavailable when the Kernel cannot answer.",
         "Status is host-wide and names no project. An open activation state means the",
         "deployment owner admits model disclosure; it is not compaction status and applies",
         "nothing. The daemon connection is a bearer key, not an OS sandbox.",
@@ -470,11 +471,20 @@ async function renderOutcome(
             { exactIntegers: true },
         );
     } catch (error) {
-        if (!isHostCallError(error) || error.code !== "unrecognized_request_shape") throw error;
-        return unavailable(
-            { kind: "error", code: error.code },
-            "the daemon does not answer review.use_outcome",
-        );
+        if (!isHostCallError(error)) throw error;
+        if (error.code === "unrecognized_request_shape") {
+            return unavailable(
+                { kind: "error", code: error.code },
+                "the daemon does not answer review.use_outcome",
+            );
+        }
+        if (error.code === "invalid_response_body") {
+            return unavailable(
+                { kind: "error", code: error.code },
+                "the daemon's answer could not be decoded",
+            );
+        }
+        throw error;
     }
     const answer = decodeUseOutcome(raw, parsed.objectId);
     if (answer.kind === "state")
@@ -491,9 +501,9 @@ async function renderOutcome(
         text: [
             `Project: ${printableLine(projectRoot, MAX_PATH_LINE)}`,
             `Decision: ${printableLine(counts.object_id, MAX_IDENTITY_BYTES)}`,
-            `Served sessions: ${counts.served_sessions}`,
+            `Unretired serves: ${counts.served_sessions}`,
             `Disputed after serve: ${counts.disputed_after_serve}`,
-            "Counts cover the project's unretired serves in the retention window; a serve is counted disputed when a dispute or contradiction committed after it.",
+            "Counts cover the project's unretired serves; a serve is counted disputed when a dispute or contradiction committed after it.",
         ].join("\n"),
     };
 }

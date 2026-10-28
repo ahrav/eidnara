@@ -6,13 +6,13 @@
 //! pass reads the Kernel and writes only the memory store.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
-use kernel::{ClaimFactBounds, KernelStore, Surface};
+use kernel::{KernelStore, Surface};
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::{CandidateCaps, CandidateScore, DescriptorCandidates};
 use tokio::sync::OwnedSemaphorePermit;
@@ -45,7 +45,6 @@ const SUMMARIES_PER_CHECK: usize = 256;
 /// Visible rows the scope filter judges between budget checks.
 const ROWS_PER_CHECK: usize = 256;
 const CLAIM_CHUNK: NonZeroUsize = NonZeroUsize::new(64).expect("nonzero");
-const CLAIM_CAUSAL_PAYLOAD_BYTES: NonZeroU64 = NonZeroU64::new(1024 * 1024).expect("nonzero");
 
 /// The pass's bounds; production uses [`PassBounds::default`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -437,29 +436,23 @@ fn candidate_summaries(
         matched.saturating_sub(rows.len() as u64),
     );
     let ids: Vec<String> = rows.into_iter().map(|row| row.object.object_id).collect();
-    let claims = ClaimFactBounds {
-        max_claims: CLAIM_CHUNK,
-        max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
-    };
     let mut kept = Vec::with_capacity(ids.len());
     for chunk in ids.chunks(CLAIM_CHUNK.get()) {
         if let Some(end) = stop(budget) {
             return Err(end);
         }
-        let read = kernel
-            .claim_facts_at_within_budget(chunk, target.target, claims, budget)
+        let standings = kernel
+            .claim_standing_at_within_budget(chunk, target.target, CLAIM_CHUNK, budget)
             .map_err(|_| stop(budget).unwrap_or(Count::KernelUnavailable))?;
         // The scope filter above already kept only rows whose scope names the project.
-        let standing: HashMap<&str, bool> = read
-            .claims
-            .iter()
-            .map(|facts| (facts.object.object_id.as_str(), eligible(facts, true)))
-            .collect();
         kept.extend(
             chunk
                 .iter()
-                .filter(|id| standing.get(id.as_str()).copied().unwrap_or(false))
-                .cloned(),
+                .zip(&standings)
+                .filter(|(_, standing)| {
+                    standing.as_ref().is_some_and(|claim| eligible(claim, true))
+                })
+                .map(|(id, _)| id.clone()),
         );
     }
     if let Some(end) = stop(budget) {

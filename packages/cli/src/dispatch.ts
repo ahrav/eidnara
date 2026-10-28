@@ -50,7 +50,7 @@ export function usageText(): string {
         "    daemon doctor    Run read-only lifecycle diagnostics",
         "    review list      List completed MemoryReviewer outcomes for a project",
         "    review show      Show the proposal a completed outcome selected",
-        "    review outcome   Show how many sessions a decision was served to and later disputed in",
+        "    review outcome   Show a decision's unretired serves and the serves disputed after",
         "    review status    Show host-wide MemoryReviewer counters",
         "",
         "  Daemon output:",

@@ -9,13 +9,13 @@ would grow with the publication rate.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/pass.rs:112` `Candidates::offer`
+- `crates/daemon/src/contradiction_candidates/pass.rs:111` `Candidates::offer`
   takes the store's one permit with `try_acquire_owned`; a busy permit counts
   `refused_pass_busy` and drops the publication, releasing its charge.
-- `crates/daemon/src/contradiction_candidates/pass.rs:136` `run` raises the
+- `crates/daemon/src/contradiction_candidates/pass.rs:135` `run` raises the
   budget interrupt on cancel and awaits the blocking closure, so shutdown's
   tracker wait covers the pass.
-- `crates/daemon/src/contradiction_candidates/pass.rs:167` `finish` catches a
+- `crates/daemon/src/contradiction_candidates/pass.rs:166` `finish` catches a
   panic, counts `worker_panicked`, and records the end before `ActivePass`
   releases the permit and `active`.
 

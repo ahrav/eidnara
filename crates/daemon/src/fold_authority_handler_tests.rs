@@ -850,8 +850,7 @@ async fn a_sibling_bound_during_the_change_keeps_it_pending() {
 
 fn restarted(dir: &tempfile::TempDir) -> (Handler, Arc<MemoryStore>) {
     let data_home = dir.path().join("data");
-    let store =
-        Arc::new(MemoryStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap());
+    let store = Arc::new(reopen_store_after_restart(data_home.to_str().unwrap()));
     let handler = Handler::with_producer_factory_and_config(
         Arc::new(TestProducerFactory {
             state: Arc::new(ProducerState::default()),

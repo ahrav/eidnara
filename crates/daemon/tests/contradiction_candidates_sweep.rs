@@ -1,4 +1,4 @@
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use daemon::contradiction_candidates::Candidates;
@@ -9,10 +9,10 @@ use daemon::contradiction_candidates::sweep::{
 };
 use kernel::applicability::EvalBudget;
 use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, ClaimFactBounds, ClaimFacts,
-    CommitIntent, DecisionPayload, DecisionSpec, Disposition, DomainSpec, EventKind,
-    EvidenceLiveness, EvidenceLivenessError, KernelStore, MAX_EVIDENCE_LIVENESS_IDS, ProjectScope,
-    ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
+    AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, ClaimStanding, CommitIntent,
+    DecisionPayload, DecisionSpec, Disposition, DomainSpec, EventKind, EvidenceLiveness,
+    EvidenceLivenessError, KernelStore, MAX_EVIDENCE_LIVENESS_IDS, ProjectScope, ProviderEgress,
+    ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
 };
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::{
@@ -224,20 +224,21 @@ impl Fixture {
             .database_incarnation_id
     }
 
-    fn facts(&self, name: &str) -> ClaimFacts {
+    fn facts(&self, name: &str) -> ClaimStanding {
         let target = self
             .kernel
             .capture_commit_read_target_within_budget(&EvalBudget::unbounded())
             .unwrap();
-        let bounds = ClaimFactBounds {
-            max_claims: NonZeroUsize::new(1).unwrap(),
-            max_causal_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
-        };
         self.kernel
-            .claim_facts_at(&[format!("object-{name}")], target, bounds)
+            .claim_standing_at_within_budget(
+                &[format!("object-{name}")],
+                target,
+                NonZeroUsize::new(1).unwrap(),
+                &EvalBudget::unbounded(),
+            )
             .unwrap()
-            .claims
             .remove(0)
+            .unwrap()
     }
 
     fn write(&self, project: &str, evidence: &str, decisions: &[&str], tweak: impl Fn(&mut Row)) {
@@ -812,6 +813,184 @@ fn a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land() {
 }
 
 #[test]
+fn a_sweep_cancelled_during_the_single_decision_reads_reads_no_further_and_deletes_nothing() {
+    let fixture = Fixture::open();
+    let live = fixture.live_evidence.clone();
+    let retired = fixture.retired_evidence.clone();
+    fixture.write(PROJECT, &live, &["active", "stale"], |_| {});
+    fixture
+        .store
+        .replace_candidates_for_descriptor(
+            &DescriptorCandidates {
+                project_digest: PROJECT,
+                evidence_id: &retired,
+                publish_tip: 1,
+                kernel_incarnation_id: &fixture.incarnation(),
+                matcher_digest: matcher_digest(),
+                created_at_ms: NOW_MS,
+                rows: &[CandidateScore {
+                    decision_object_id: "evidence-object-live",
+                    decision_id: "not-a-decision",
+                    matched_terms: 3,
+                    decision_terms: 4,
+                }],
+            },
+            CAPS,
+        )
+        .unwrap();
+    let before = untouched(&fixture);
+    let rows = fixture.rows();
+    let acquisitions = fixture.kernel.controlled_acquisitions_for_test();
+    let polls = std::cell::Cell::new(0_u32);
+    // The poll before the tip capture and the poll before the chunk read
+    // return false; `cancelled` returns true once the refused chunk falls
+    // back to single-decision reads.
+    let cancelled = || {
+        polls.set(polls.get() + 1);
+        polls.get() > 2
+    };
+    let counts = Candidates::default();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &cancelled,
+    );
+    assert_eq!(
+        fixture.kernel.controlled_acquisitions_for_test(),
+        acquisitions + 2,
+        "the tip capture and the refused chunk read are the only Kernel reads"
+    );
+    assert_eq!(untouched(&fixture), before);
+    assert_eq!(fixture.rows(), rows);
+    assert_eq!(report(&counts)["sweep_dropped"], 0);
+}
+
+#[test]
+fn a_restore_between_the_claim_read_and_the_evidence_read_deletes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::open();
+    let destination = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = fixture
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    fixture
+        .kernel
+        .commit(intent("reject-active"), |envelope| {
+            envelope.record_admission(request(
+                "object-active",
+                EventKind::ExplicitReject,
+                TRUSTED,
+            ))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let live = fixture.live_evidence.clone();
+    fixture.write(PROJECT, &live, &["active"], |_| {});
+    let rows = fixture.rows();
+    let polls = std::cell::Cell::new(0_u32);
+    // The claim read at the rejected tip marks the row dead; the restore before
+    // the evidence read returns the Kernel to the backup, where the decision is
+    // active, so the evidence read refuses the stale target.
+    let cancelled = || {
+        polls.set(polls.get() + 1);
+        if polls.get() == 4 {
+            fixture.kernel.restore(&backup.destination_path).unwrap();
+        }
+        false
+    };
+    let counts = Candidates::default();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &cancelled,
+    );
+    assert_eq!(
+        fixture.rows(),
+        rows,
+        "a judgment that spans a restore deletes nothing"
+    );
+    let block = report(&counts);
+    assert_eq!(block["sweep_dropped"], 0);
+    assert_eq!(block["sweep_skipped_kernel_unavailable"], 1);
+    assert_eq!(
+        fixture.facts("active").own_admission.unwrap().disposition,
+        Disposition::Active
+    );
+}
+
+#[test]
+fn a_sweep_cancelled_before_the_scope_reads_reads_no_scope_and_deletes_nothing() {
+    let fixture = Fixture::open();
+    let live = fixture.live_evidence.clone();
+    fixture.write(PROJECT, &live, &["active", "other-project"], |_| {});
+    let before = untouched(&fixture);
+    let rows = fixture.rows();
+    let acquisitions = fixture.kernel.controlled_acquisitions_for_test();
+    let polls = std::cell::Cell::new(0_u32);
+    // The poll before the tip capture and the poll before the chunk read
+    // return false; `cancelled` returns true from the poll before the first
+    // scope-term read onward.
+    let cancelled = || {
+        polls.set(polls.get() + 1);
+        polls.get() > 2
+    };
+    let counts = Candidates::default();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &cancelled,
+    );
+    assert_eq!(
+        fixture.kernel.controlled_acquisitions_for_test(),
+        acquisitions + 2,
+        "the tip capture and the chunk read are the only Kernel reads"
+    );
+    assert_eq!(untouched(&fixture), before);
+    assert_eq!(fixture.rows(), rows);
+    assert_eq!(report(&counts)["sweep_dropped"], 0);
+    assert_eq!(report(&counts)["sweep_skipped_kernel_unavailable"], 0);
+}
+
+#[test]
+fn an_empty_page_reads_no_kernel_row_and_still_refreshes_the_gauge() {
+    let fixture = Fixture::open();
+    let counts = Candidates::default();
+    let acquisitions = fixture.kernel.controlled_acquisitions_for_test();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| false,
+    );
+    assert_eq!(
+        fixture.kernel.controlled_acquisitions_for_test(),
+        acquisitions,
+        "an empty page gives the Kernel nothing to judge"
+    );
+    let block = report(&counts);
+    assert_eq!(block["sweep_examined"], 0);
+    assert_eq!(block["sweep_skipped_kernel_unavailable"], 0);
+    assert_eq!(block["retained_bytes"], 0);
+}
+
+#[test]
 fn a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it() {
     let fixture = Fixture::open();
     let tip = fixture.tip();
@@ -835,19 +1014,33 @@ fn a_row_written_after_the_sweep_tip_stays_until_a_later_sweep_judges_it() {
     );
 }
 
-/// Cancellation before the delete is observable here; the checks before each Kernel read have no
-/// effect a test can observe without a Kernel read counter.
 #[test]
-fn a_cancelled_sweep_deletes_nothing() {
+fn a_cancelled_sweep_deletes_nothing_and_reads_no_kernel_row() {
     let fixture = Fixture::open();
     let retired = fixture.retired_evidence.clone();
     fixture.write(PROJECT, &retired, &["active"], |row| {
         row.incarnation = "0".repeat(32);
     });
     let counts = Candidates::default();
-    fixture.sweep(&mut CandidateSweep::default(), &counts, NOW_MS, &|| true);
+    let before = untouched(&fixture);
+    let acquisitions = fixture.kernel.controlled_acquisitions_for_test();
+    CandidateSweep::default().run(
+        &fixture.store,
+        Some(&fixture.kernel),
+        true,
+        &counts,
+        NOW_MS,
+        &|| true,
+    );
+    assert_eq!(
+        fixture.kernel.controlled_acquisitions_for_test(),
+        acquisitions,
+        "a sweep cancelled before its first Kernel read takes no reader"
+    );
+    assert_eq!(untouched(&fixture), before);
     assert_eq!(fixture.rows().len(), 1);
     assert_eq!(report(&counts)["sweep_dropped"], 0);
+    assert_eq!(report(&counts)["sweep_skipped_kernel_unavailable"], 0);
 }
 
 #[test]
@@ -965,7 +1158,7 @@ fn the_cleanup_pass_carries_the_watermark_and_reads_the_flag_each_pass() {
 }
 
 #[test]
-fn the_evidence_read_refuses_another_incarnation_and_a_future_snapshot() {
+fn the_evidence_read_refuses_another_incarnation_a_future_snapshot_and_a_negative_one() {
     let fixture = Fixture::open();
     let other = Fixture::open();
     let budget = EvalBudget::unbounded();
@@ -993,4 +1186,41 @@ fn the_evidence_read_refuses_another_incarnation_and_a_future_snapshot() {
             kernel::KernelError::FutureSnapshot
         ))
     );
+    let mut negative = future;
+    negative.through_commit = -1;
+    assert_eq!(
+        fixture
+            .kernel
+            .evidence_liveness_at_within_budget(&ids, negative, &budget),
+        Err(EvidenceLivenessError::Kernel(
+            kernel::KernelError::InvalidInput
+        )),
+        "a negative snapshot is refused as claim standing refuses it"
+    );
+}
+
+#[test]
+fn a_busy_reader_does_not_hold_the_sweep_past_its_budget() {
+    const HOLD: std::time::Duration = std::time::Duration::from_secs(6);
+    let fixture = Fixture::open();
+    let live = fixture.live_evidence.clone();
+    fixture.write(PROJECT, &live, &["active", "other-project"], |_| {});
+    let counts = Candidates::default();
+    let held = std::sync::Barrier::new(2);
+    let elapsed = std::thread::scope(|scope| {
+        scope.spawn(|| fixture.kernel.hold_first_reader_for_test(&held, HOLD));
+        held.wait();
+        let started = std::time::Instant::now();
+        fixture.sweep(&mut CandidateSweep::default(), &counts, NOW_MS, &|| false);
+        started.elapsed()
+    });
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "the sweep waited {elapsed:?} on the held reader"
+    );
+    assert_eq!(
+        kept(&fixture),
+        [(PROJECT.to_string(), live, "object-active".to_string())]
+    );
+    assert_eq!(report(&counts)["sweep_skipped_kernel_unavailable"], 0);
 }

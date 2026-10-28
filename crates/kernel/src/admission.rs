@@ -1022,8 +1022,11 @@ impl Envelope<'_> {
                 request.event.kind,
                 EventKind::MarkDisputed | EventKind::Contradict
             );
+            // The length check runs first, so the parse and the later secret scan read a bounded input.
             let payload_is_object = reporter.event_payload.as_deref().is_none_or(|payload| {
-                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(payload).is_ok()
+                payload.len() <= context_core::redaction::MAX_REDACTABLE_BYTES
+                    && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(payload)
+                        .is_ok()
             });
             if !is_dispute || request.subject_object_id.is_none() || !payload_is_object {
                 return Err(KernelError::InvalidInput);
@@ -4603,6 +4606,29 @@ mod tests {
     /// none of this.
     #[test]
     fn a_dispute_with_evidence_never_raises_standing_across_the_grid() {
+        let landed = |prior: Disposition, event: EventKind| match (prior, event) {
+            (
+                Disposition::Active
+                | Disposition::Stale
+                | Disposition::Disputed
+                | Disposition::Superseded,
+                EventKind::MarkDisputed,
+            ) => Disposition::Disputed,
+            (
+                Disposition::Active
+                | Disposition::Stale
+                | Disposition::Disputed
+                | Disposition::Superseded
+                | Disposition::Rejected
+                | Disposition::Contradicted
+                | Disposition::Quarantined,
+                EventKind::Contradict,
+            ) => Disposition::Contradicted,
+            (Disposition::Rejected, EventKind::MarkDisputed) => Disposition::Rejected,
+            (Disposition::Contradicted, EventKind::MarkDisputed) => Disposition::Contradicted,
+            (Disposition::Quarantined, EventKind::MarkDisputed) => Disposition::Quarantined,
+            (prior, event) => unreachable!("{prior:?} {event:?}"),
+        };
         let mut judged = 0;
         for historical in Maturity::ALL {
             for effective in Maturity::ALL {
@@ -4656,6 +4682,7 @@ mod tests {
                             } else {
                                 assert_eq!(result.disposition, requested, "{case}");
                             }
+                            assert_eq!(result.disposition, landed(*disposition, event), "{case}");
                             judged += 1;
                         }
                     }

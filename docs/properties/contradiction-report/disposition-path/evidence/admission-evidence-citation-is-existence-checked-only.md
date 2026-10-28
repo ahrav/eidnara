@@ -7,7 +7,7 @@ tip of #1160 (code commit `6c4d445e3`), with PR A changes noted inline.
 ## Discovery trigger
 
 Plan P4 KTD2: "The Kernel persists `evidence_id` on `admission_decisions`
-(`admission.rs:1817-1852`) but the disposition path does not check
+(`admission.rs:1820-1855`) but the disposition path does not check
 liveness." Shared-facts: "No evidence liveness check exists on this path."
 Lens: data integrity, then failure recovery (what a retired citation does
 to later readers). The record pins what the Kernel enforces so the P4
@@ -16,24 +16,25 @@ daemon check is specified against it.
 ## Evidence trail
 
 - `write_admission` derives `evidence_id` by `identity()` only
-  (`crates/kernel/src/admission.rs:1750-1755`); `identity` rejects a
+  (`crates/kernel/src/admission.rs:1753-1758`); `identity` rejects a
   value with a detected secret (`crates/kernel/src/redaction.rs:81-88`).
-- Between `:1695` and the INSERT (`:1748-1786`) the only reads are the
-  bearer and dependent caps (`:1727-1739`); none touches `evidence_meta`.
+- Between `admission.rs:1758` and the INSERT (`admission.rs:1819-1862`)
+  the only reads are the bearer and dependent caps (`:1798-1810`); none
+  touches `evidence_meta`.
 - `prepare_with_facts` passes `has_evidence: request.event.evidence_id.
-  is_some()` (`:1650`), a request-shape test; it matters only for
-  `Enforce` (`:275-277`).
+  is_some()` (`:1704`), a request-shape test; it matters only for
+  `Enforce` (`:291-293`).
 - Schema: `evidence_id TEXT REFERENCES evidence_meta(evidence_id) ON
   DELETE RESTRICT` (`crates/kernel/src/schema.rs:164`); `PRAGMA
-  foreign_keys=ON` at `schema.rs:245` and `crates/kernel/src/open.rs:1035`;
+  foreign_keys=ON` at `schema.rs:250` and `crates/kernel/src/open.rs:1035`;
   `sqlite_runtime.rs:127-129` reports a disabled pragma as a violation.
 - `map_sqlite`: `ConstraintViolation => KernelError::Conflict`
-  (`crates/kernel/src/lib.rs:213-225`). The route's `run` turns a
+  (`crates/kernel/src/lib.rs:218-230`). The route's `run` turns a
   `Conflict` raised after entering the operation, with no recorded refusal,
   into `CommitFailure::StorageConstraint`, reported as
-  `invalid/already_exists` (`commit.rs:1086-1094`, `:484`).
+  `invalid/already_exists` (`commit.rs:1084-1092`, `:490`).
 - Production writers that set `Some(evidence_id)`:
-  `crates/daemon/src/harness_sources.rs:976` (`EventKind::Other`) only.
+  `crates/daemon/src/harness_sources.rs:1004` (`EventKind::Other`) only.
   `crates/daemon/src/memory_reviewer/lifecycle.rs:649` was first listed
   here; the portfolio evaluation found it inside `#[cfg(test)]` (module at
   `:500`) and an `ObservationSpec`, so it is not a writer of this path
@@ -41,14 +42,14 @@ daemon check is specified against it.
   route set `None`. At the PR A tip it sets the cited id for a dispute
   (`commit.rs:738`) only after `require_visible_evidence` found the row
   live and cited by the bound project in the same transaction
-  (`commit.rs:726-728`, `:742-759`), so the route never reaches this
+  (`commit.rs:726-728`, `:749-764`), so the route never reaches this
   record's accept-retired or dangling-id branch.
 - Contrast: `validate_trigger` requires the trigger's backing evidence to
-  be live (`admission.rs:2841-2847`) and
+  be live (`admission.rs:2844-2850`) and
   `approval_qualifies_predicate` requires cited evidence live
-  (`:884-893`); the event's own `evidence_id` has no such predicate.
+  (`:900-909`); the event's own `evidence_id` has no such predicate.
 - Served folding reads `decision_events` with
-  `event_kind='memory_reviewer_support'` (`:3434-3450`), not
+  `event_kind='memory_reviewer_support'` (`:3510-3526`), not
   `admission_decisions.evidence_id`, so a retired citation on an admission
   row changes nothing served today.
 
@@ -84,7 +85,7 @@ to notice.
 
 ### Q: Should the Kernel refuse a retired `evidence_id` on `write_admission`, or is the daemon the only intended gate?
 
-- Sources examined: P4 KTD2, D5 in the index, `admission.rs:1750-1859`,
+- Sources examined: P4 KTD2, D5 in the index, `admission.rs:1753-1862`,
   `slice/write.rs:1138-1178`.
 - Findings: the slice write path enforces liveness; the admission path
   does not. KTD2 places the check in the daemon. Nothing in the plan says
@@ -97,6 +98,9 @@ to notice.
 - Sources examined: `state.rs:61-99` (`InvalidReason` set), `commit.rs:
   484`, P4 R2 ("refused by name").
 - Findings: today's names that fit are `not_found` (the slice path's
-  answer) and `already_exists` (the FK's). Neither says "evidence".
-- Missing evidence: the P4 implementation's choice.
-- Conclusion: needs human input.
+  answer) and `already_exists` (the FK's). Neither says "evidence". PR A
+  chose `not_found`: `require_visible_evidence` maps every failing case to
+  `KernelError::NotFound` (`commit.rs:754-763`) before the Kernel's FK
+  path could answer `already_exists`.
+- Missing evidence: none.
+- Conclusion: resolved with answer: `not_found`.
