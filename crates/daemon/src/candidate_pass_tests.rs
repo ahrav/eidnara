@@ -1934,6 +1934,14 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
         1,
         "a limit of zero clamps to one row"
     );
+    let past_the_word: Value =
+        serde_json::from_str(r#"{"decision_object_id":"object-one","limit":18446744073709551616}"#)
+            .unwrap();
+    assert_eq!(
+        ask(past_the_word).await.unwrap(),
+        first,
+        "a limit past the machine word clamps to the page bound"
+    );
 
     kernel
         .commit(intent("supersede-replaced"), |envelope| {

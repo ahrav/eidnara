@@ -498,6 +498,91 @@ fn a_write_under_another_kernel_incarnation_takes_its_own_tip() {
     );
 }
 
+/// The under-route page read judges the route's authority first: a route with
+/// no MODULE row reads no page and judges no cursor, so a malformed cursor
+/// under a drained authority answers the route's `disabled`; a route with a
+/// MODULE row reads the page the plain read returns.
+#[test]
+fn the_under_route_page_read_answers_the_authority_before_the_cursor() {
+    use std::time::{Duration, Instant};
+    let (_dir, store) = open();
+    let rows = [score("decision", 3, 4)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 1, 1, &rows), CAPS)
+        .unwrap();
+    let deadline = || Instant::now() + Duration::from_secs(5);
+    let unbound = store
+        .candidates_for_decision_under_route_within(
+            "/repo",
+            "memories",
+            PROJECT,
+            "decision",
+            Some("not a cursor"),
+            4,
+            deadline(),
+        )
+        .unwrap();
+    assert!(
+        unbound.is_none(),
+        "a route without MODULE authority reads no page and judges no cursor"
+    );
+    let project = "git:candidates";
+    let preparing = store
+        .authority_begin_prepare("ctx", project, "memories")
+        .unwrap();
+    let checksum = store
+        .authority_seed_checksum("ctx", project, "memories")
+        .unwrap();
+    store
+        .authority_verify_prepare(
+            "ctx",
+            project,
+            "memories",
+            preparing.generation,
+            &checksum,
+            &checksum,
+        )
+        .unwrap();
+    store
+        .authority_ack_prepare("ctx", project, "memories", preparing.generation)
+        .unwrap();
+    store.bind_authority_route("ctx", project, "/repo").unwrap();
+    let (row, page) = store
+        .candidates_for_decision_under_route_within(
+            "/repo",
+            "memories",
+            PROJECT,
+            "decision",
+            None,
+            4,
+            deadline(),
+        )
+        .unwrap()
+        .expect("the bound route reads the page");
+    assert_eq!(row.project, project);
+    assert_eq!(
+        page.items,
+        store
+            .candidates_for_decision(PROJECT, "decision", None, 4)
+            .unwrap()
+            .items
+    );
+    assert!(
+        store
+            .candidates_for_decision_under_route_within(
+                "/repo",
+                "memories",
+                PROJECT,
+                "decision",
+                Some("not a cursor"),
+                4,
+                deadline(),
+            )
+            .is_err(),
+        "under a MODULE row a malformed cursor is judged after the page ran"
+    );
+}
+
 #[test]
 fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
     let (_dir, store) = open();

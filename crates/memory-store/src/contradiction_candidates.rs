@@ -680,8 +680,8 @@ impl MemoryStore {
     /// [`Self::candidates_for_decision_within`] read in the connection that
     /// reads the MODULE authority row serving `route_project_root` for `domain`
     /// ([`Self::module_authority_for_route`]). `None` when the route has no
-    /// MODULE or DRAINING binding or its project has no MODULE row; the page is
-    /// read only under a found row.
+    /// MODULE or DRAINING binding or its project has no MODULE row, with the
+    /// cursor unjudged; the page is read only under a found row.
     ///
     /// # Errors
     ///
@@ -705,8 +705,8 @@ impl MemoryStore {
             Some(deadline),
             |conn, _| query.read(conn),
         )?;
+        // Cursor validity is judged after the route's terminals, so a route without a MODULE row answers before the cursor is read.
         let Some((row, items)) = found else {
-            query.cursor()?;
             return Ok(None);
         };
         Ok(Some((row, query.page(items)?)))

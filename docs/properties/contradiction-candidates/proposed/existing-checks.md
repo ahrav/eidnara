@@ -66,7 +66,8 @@ Analyzer checks the scorer relies on:
 | `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:399` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
 | `a_late_write_replaces_held_keys_and_adds_none` | `:442` | a write below the held tip adds no key | row key and caps | unaudited |
 | `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:477` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
-| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:502` | rows added before or removed from page one move nothing after the cursor; non-canonical and oversized cursors refused; the longest issued cursor parses and one byte longer is refused | read (paging) | unaudited |
+| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:587` | rows added before or removed from page one move nothing after the cursor; non-canonical, oversized, and unstorable-id cursors refused; the longest issued cursor parses and one byte longer is refused | read (paging) | unaudited |
+| `the_under_route_page_read_answers_the_authority_before_the_cursor` | `:506` | a route without a MODULE row reads no page and judges no cursor; a bound route reads the plain read's page and judges a malformed cursor after it | read (terminals) | unaudited |
 | `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:584` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
 | `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:648` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
 | `random_write_and_delete_sequences_match_the_reference_model` | `:1103` | seeded write and as-read delete sequences match a reference model: rows, counts, rowid stability, and the gauge each step; pages, cursors across writes, and the sweep every seventh step | row key and caps; read (paging); sweep (store arm) | unaudited |
@@ -116,7 +117,7 @@ resolved-config freezing), `crates/daemon/src/lib.rs:21502` (bound route and
 status block), `crates/host-runtime/src/control.rs:2011` (host forwarding
 allowlist against `docs/host-wire-protocol.md`), and
 `a_delete_as_read_spares_a_row_rewritten_since_the_read`
-(`crates/memory-store/tests/contradiction_candidates.rs:675`).
+(`crates/memory-store/tests/contradiction_candidates.rs:760`).
 
 ## S-B trigger and S-C candidate set (`crates/daemon/src/candidate_pass_tests.rs`, #1167)
 
@@ -153,7 +154,7 @@ checks are named with their files.
 
 | Check | Location | Asserts | Records | Status |
 | --- | --- | --- | --- | --- |
-| `review_candidates_pages_live_rows_and_answers_each_terminal` | `:1738` | 8-key items; clamps at 65 and 0; order and disjoint two-page walk; four stale rows filtered and counted; `not_live` for superseded and unknown; empty page, including for a live decision whose id holds a control character; `invalid_params` bodies; scope refusal before the body; observational read; flag off with the table hidden and a flag-on control; `disabled` and `store_unavailable` before a malformed or non-string cursor; tip, jobs, and rows unchanged | read serves, read terminals, flag off (read arm) | unaudited |
+| `review_candidates_pages_live_rows_and_answers_each_terminal` | `:1738` | 8-key items; clamps at 65, 0, and a number past the machine word; order and disjoint two-page walk; four stale rows filtered and counted; `not_live` for superseded and unknown; empty page, including for a live decision whose id holds a control character; `invalid_params` bodies; scope refusal before the body; observational read; flag off with the table hidden and a flag-on control; `disabled` and `store_unavailable` before a malformed or non-string cursor; tip, jobs, and rows unchanged | read serves, read terminals, flag off (read arm) | unaudited |
 | `review_candidates_answers_the_store_and_kernel_states_before_any_page` | `:2237` | Kernel starting, Kernel open failed, and no Memory Store answer their states without `items` | read terminals | unaudited |
 | `review_candidates_reads_scope_terms_inside_its_budget_beside_a_held_reader` | `:2079` | with one Kernel reader held for the whole request, two reads answer pages inside the read budget: the scope-term read takes the free reader | read serves | unaudited |
 | `review_candidates_refuses_a_target_whose_history_a_restore_replaced_before_the_scope_read` | `:2119` | a restore between the claim-standing read and the scope-terms read answers the Kernel's conflict state, never `not_live` | read serves, read terminals | unaudited |

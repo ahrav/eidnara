@@ -19,7 +19,7 @@ creates the table whatever the flag.
   daemon-level value on each cleanup pass.
 - The pass is offered only when the route's frozen value consents; the
   capture job's offer carries it.
-- `crates/daemon/src/contradiction_candidates/read.rs:188` the read answers
+- `crates/daemon/src/contradiction_candidates/read.rs:210` the read answers
   `disabled` before reaching the store.
 
 ## Failure scenario
@@ -37,8 +37,8 @@ sweep follows the reload on its next pass.
 The candidate table renamed away under each arm, a flag-off run with every
 counter at zero, and a flag-on control that fails on the hidden table:
 `crates/daemon/tests/contradiction_candidates_sweep.rs:553` (sweep),
-`crates/daemon/src/candidate_pass_tests.rs:2522` (pass), and
-`crates/daemon/src/candidate_pass_tests.rs:2047` (read).
+`crates/daemon/src/candidate_pass_tests.rs:2530` (pass), and
+`crates/daemon/src/candidate_pass_tests.rs:2055` (read).
 
 ## Investigation log
 

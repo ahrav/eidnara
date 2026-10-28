@@ -856,7 +856,7 @@ Re-exercised by #1168: `review.candidates` joins the family through
 `review_candidates_pages_live_rows_and_answers_each_terminal`
 (`crates/daemon/src/candidate_pass_tests.rs:1738`) answers `invalid_params`
 for an unknown field and a malformed cursor, `project_mismatch` for a foreign
-root before the body is read (`:2017`), and `disabled` for a root without
+root before the body is read (`:2025`), and `disabled` for a root without
 MODULE authority (`:1756`).
 Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
@@ -895,7 +895,7 @@ Confidence: high - [evidence](evidence/p5dep-observational-routes-read-and-take-
 Read `lib.rs:274-281`, `:382-386`, `:413-417`.
 Existing check: the two tests above. Status unaudited.
 Re-exercised by #1168: a route bound with `OBSERVATIONAL_HARNESS` reads a
-`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:2029`).
+`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:2037`).
 Impact: P5 U4's owner read is an observational read; it must be callable on a
 `cli` route and must not enroll the project in any background work.
 Open questions: None.
