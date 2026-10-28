@@ -15,8 +15,9 @@ creates the table whatever the flag.
   key `UserOnly` and `:520-523` pins that class at compile time;
   `contradiction_candidates_default_off_and_only_the_user_tier_enables_them`
   (`:2299`) checks both.
-- `crates/daemon/src/memory_reviewer/lifecycle.rs:448` the sweep reads the
-  daemon-level value on each cleanup pass.
+- `crates/daemon/src/memory_reviewer/lifecycle.rs:458` the sweep reads the
+  daemon-level value on each cleanup pass (`(step.enabled)()`) and hands it to
+  the sweep (`:460-461`).
 - The pass is offered only when the route's frozen value consents; the
   capture job's offer carries it.
 - `crates/daemon/src/contradiction_candidates/read.rs:211` the read answers
@@ -37,8 +38,8 @@ sweep follows the reload on its next pass.
 The candidate table renamed away under each arm, a flag-off run with every
 counter at zero, and a flag-on control that fails on the hidden table:
 `crates/daemon/tests/contradiction_candidates_sweep.rs:553` (sweep),
-`crates/daemon/src/candidate_pass_tests.rs:2730` (pass), and
-`crates/daemon/src/candidate_pass_tests.rs:2175` (read).
+`crates/daemon/src/candidate_pass_tests.rs:2774` (pass), and
+`crates/daemon/src/candidate_pass_tests.rs:2177` (read).
 
 ## Investigation log
 

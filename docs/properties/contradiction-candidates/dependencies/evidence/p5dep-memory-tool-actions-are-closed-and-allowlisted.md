@@ -52,7 +52,7 @@ schemas, and the pi `allowedActions` since `3a3b916b7`.
   default.
 - `packages/pi-plugin/src/tools/eidnara-memory.ts:114-126` `paramsSchema`: the
   `action` enum lists the admitted actions and the dispute fields appear only
-  when `dispute` is admitted; `:146-151` `allowedActions` defaults to
+  when `dispute` is admitted; `:146-152` `allowedActions` defaults to
   `EIDNARA_MEMORY_DEFAULT_ACTIONS`; `:174-186` approve/enforce and allowlist
   checks; `:198-202` mutation identity check. No agent check: pi excludes the
   context_researcher by registration.

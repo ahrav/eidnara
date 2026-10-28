@@ -29,7 +29,8 @@ carry no descriptor or summary text.
   `candidates_for_decision_under_route_within` pages at most 64 rows in reader
   order with a keyset cursor, in the connection that reads the route's MODULE
   authority row (`crates/memory-store/src/contradiction_candidates.rs:691`;
-  the page query at `:627`, `candidates_for_decision`).
+  the public read at `:627`, `candidates_for_decision`, and the keyset
+  statements with the `limit + 1` bound in `PageQuery::read`, `:907`).
 - `crates/daemon/src/contradiction_candidates/read.rs:301` reads evidence
   liveness for the page's ids at the same target; `is_current` (`:178`) keeps
   a row only when its evidence is live, its incarnation and matcher digest
@@ -42,11 +43,11 @@ carry no descriptor or summary text.
   compares the standing read with claim facts field by field and refusal by
   refusal; `crates/kernel/tests/kernel_source_descriptors.rs:3188` answers
   liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:1798`
-  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2792`
+  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2863`
   shows a page body is the canonical `serde_json` encoding of its value;
-  `crates/daemon/src/candidate_pass_tests.rs:2207` answers two pages inside the
+  `crates/daemon/src/candidate_pass_tests.rs:2232` answers two pages inside the
   read budget while one Kernel reader is held;
-  `crates/daemon/src/candidate_pass_tests.rs:2247` answers the conflict state
+  `crates/daemon/src/candidate_pass_tests.rs:2272` answers the conflict state
   when a restore lands between the claim-standing read and the scope read.
 
 ## Failure scenario

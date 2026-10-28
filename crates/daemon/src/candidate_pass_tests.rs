@@ -2169,6 +2169,8 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
     );
     rebind("opencode", false);
     let filtered = counts(&handler)["read_filtered_stale"].clone();
+    // The statement ledger records every statement the store runs, so a flag-off read's statement on either candidate table shows in it.
+    store.start_statement_work_ledger();
     assert_eq!(
         ask(json!({ "decision_object_id": "object-one" })).await,
         Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
@@ -2178,6 +2180,17 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
         ask(json!({ "decision_object_id": "object-one", "after": 42 })).await,
         Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
         "a false flag answers before a non-string cursor is judged"
+    );
+    let candidate_statements = |work: Vec<storage::StatementWork>| {
+        work.into_iter()
+            .map(|statement| statement.sql)
+            .filter(|sql| sql.contains("contradiction_candidate"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        candidate_statements(store.take_statement_work()),
+        Vec::<String>::new(),
+        "two flag-off reads run no statement on a candidate table"
     );
     assert_eq!(counts(&handler)["read_filtered_stale"], filtered);
     rebind("opencode", true);
@@ -2196,6 +2209,18 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
     rename(
         "contradiction_candidates_hidden",
         "contradiction_candidates",
+    );
+    // The control: with the table in place, a flag-on read runs a statement the ledger sees on it.
+    store.start_statement_work_ledger();
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" }))
+            .await
+            .unwrap()["kind"],
+        "page"
+    );
+    assert!(
+        !candidate_statements(store.take_statement_work()).is_empty(),
+        "a flag-on read runs a candidate-table statement"
     );
 }
 
@@ -2625,9 +2650,21 @@ async fn a_listed_candidate_confirms_through_dispute_while_its_evidence_lives() 
             candidates_request(&project, json!({ "decision_object_id": decision })),
         )
     };
+    // The control for the ledger below: the listings run statements on the candidate table.
+    store.start_statement_work_ledger();
     let listed = ask("object-confirmed").await.unwrap();
     let confirmed_row = listed["items"][0].clone();
     let expired_row = ask("object-expired").await.unwrap()["items"][0].clone();
+    let candidate_statements = |work: Vec<storage::StatementWork>| {
+        work.into_iter()
+            .map(|statement| statement.sql)
+            .filter(|sql| sql.contains("contradiction_candidate"))
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        !candidate_statements(store.take_statement_work()).is_empty(),
+        "the listings run candidate-table statements"
+    );
     // Each row cites the descriptor of the message whose text overlaps its decision.
     let evidence_of_message = |message: &str| {
         live_messages(&kernel)
@@ -2670,9 +2707,16 @@ async fn a_listed_candidate_confirms_through_dispute_while_its_evidence_lives() 
         .find(|row| row.decision_object_id == "object-expired")
         .unwrap();
     store.truncate_contradiction_candidates_for_test().unwrap();
+    // The statement ledger records every statement the store runs, so a confirm that read a candidate table would show in it.
+    store.start_statement_work_ledger();
     let applied = route_call(&handler, dispute(&confirmed_row, "confirm-1"))
         .await
         .unwrap();
+    assert_eq!(
+        candidate_statements(store.take_statement_work()),
+        Vec::<String>::new(),
+        "the confirm runs no statement on a candidate table"
+    );
     write_row(
         &store,
         &binding,
@@ -2746,6 +2790,8 @@ async fn a_publication_without_consent_runs_no_candidate_table_statement() {
         "contradiction_candidates",
         "contradiction_candidates_hidden",
     );
+    // The statement ledger records every statement the store runs, so a statement on either candidate table shows in it whatever its outcome.
+    store.start_statement_work_ledger();
     for index in 0..3 {
         publish(
             &handler,
@@ -2755,6 +2801,17 @@ async fn a_publication_without_consent_runs_no_candidate_table_statement() {
         );
         settle(&handler).await;
     }
+    let candidate_statements = |work: Vec<storage::StatementWork>| {
+        work.into_iter()
+            .map(|statement| statement.sql)
+            .filter(|sql| sql.contains("contradiction_candidate"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        candidate_statements(store.take_statement_work()),
+        Vec::<String>::new(),
+        "three consent-off publications run no statement on a candidate table"
+    );
     assert_eq!(capture_report(&handler)["units_published"], 3);
     assert!(
         counts(&handler)
@@ -2783,6 +2840,20 @@ async fn a_publication_without_consent_runs_no_candidate_table_statement() {
         "contradiction_candidates",
     );
     assert!(rows(&store).is_empty());
+    // The control: with the table in place, a consenting publication's pass runs statements the ledger sees on it.
+    store.start_statement_work_ledger();
+    publish(
+        &handler,
+        &project,
+        &window(4, &format!("{TOPIC} note 4")),
+        true,
+    );
+    settle(&handler).await;
+    assert!(
+        !candidate_statements(store.take_statement_work()).is_empty(),
+        "the consenting publication's pass runs a candidate-table statement"
+    );
+    assert_eq!(rows(&store).len(), 1);
 }
 
 /// A page body is the canonical `serde_json` encoding of its own value, keys in
