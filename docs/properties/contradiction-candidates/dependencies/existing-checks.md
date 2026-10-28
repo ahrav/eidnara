@@ -84,7 +84,7 @@ crossing inside a `claim_facts` statement (the progress handler path) for
 | `capture_off_memory_off_or_a_subagent_session_runs_no_adapter` | `:298` | reachability gate | unaudited |
 | `a_delete_after_the_handoff_publishes_nothing_for_the_queued_window` | `:1045` | delete epoch check | unaudited |
 | `a_refused_window_still_captures_its_documents` | `:2236` | documents batch is separate from the window batch | unaudited |
-| `a_settled_report_counts_the_job_that_released_the_slot` | `source_capture.rs:1590` | slot count after release | unaudited |
+| `a_settled_report_counts_the_job_that_released_the_slot` | `source_capture.rs:1720` | slot count after release | unaudited |
 
 Production guards: `try_acquire_owned` else `RefusedQueueFull`
 (`source_capture.rs:604-607`); `catch_unwind` around `publish_locked`
@@ -100,7 +100,7 @@ scenario). No post-publish hook exists outside `cfg(test)` (`before_publish`,
 
 | Check | Location | Asserts | Status |
 | --- | --- | --- | --- |
-| `the_published_baseline_digest_is_the_one_every_open_checks` | `crates/memory-store/tests/baseline.rs:250-262` | `baseline_digest()` equals the stored `format_marker` | unaudited |
+| `the_published_baseline_digest_is_the_one_every_open_checks` | `crates/memory-store/tests/baseline.rs:254-265` | `baseline_digest()` equals the stored `format_marker` | unaudited |
 | `a_file_with_a_different_baseline_is_refused_as_a_baseline_mismatch` | `:458` | refusal message | unaudited |
 | `a_store_created_under_the_prior_baseline_refuses_to_open_untouched` | `:492-514` | prior-baseline fixture refuses with `StoreError::Baseline`, bytes unchanged | unaudited |
 | `fresh_open_creates_memory_sqlite_with_the_eidnara_identity_and_the_whole_baseline` | `:199` | inventory | unaudited |
@@ -141,7 +141,7 @@ through the MemoryReviewer class only as far as this pass found.
 | `a_published_proposal_reads_from_every_root_after_a_newer_root_binds` | `:342` | | unaudited |
 | `review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record` | `:409` | `v` field is `invalid_params` (`:643-649`) | unaudited |
 | wire-doc literal test | `crates/daemon/src/memory_reviewer/wire.rs:448-463+` | the doc's `review.accept` terminal set equals the produced set | unaudited |
-| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:35588` | | unaudited |
+| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:35900` | | unaudited |
 
 None found: no test drives `store_unavailable` on `review.list`/`review.read`
 through a failing store read, as far as this pass found (the terminal is

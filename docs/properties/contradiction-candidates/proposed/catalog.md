@@ -9,7 +9,7 @@ for unbuilt behavior. #1164 builds the scorer
 `crates/daemon/src/contradiction_candidates/scorer.rs`) and converts the
 three S-A records to `Status: active` with `Exercised: yes`; their tests are
 in `crates/daemon/tests/contradiction_candidates_scorer.rs`, and their
-references are verified at the #1164 branch tip. The other 12 records keep
+references are verified at the #1164 branch tip. The other 11 records keep
 `Status: active - PROPOSED`: each is a specification input and a test target
 for the unit that builds its behavior, and no claim is made that the
 implementation exists. The store (#1165), sweep (#1166), pass (#1167), and
@@ -23,8 +23,9 @@ substance.
 
 Reachability labels on proposed records name the intended class once the
 unit lands, per the preamble reproduced below, and are re-verified at
-implementation time. The three active records carry the class verified at
-the branch tip, `test-only`, because nothing in the daemon calls the scorer.
+implementation time. The three S-A records carry the class verified at
+the branch tip, `test-only`, because nothing in the daemon calls the scorer;
+the sweep record carries `explicit-config-only`, the flag that starts it.
 
 Companion files: [existing-checks.md](existing-checks.md),
 [fault-map.md](fault-map.md),
@@ -52,7 +53,7 @@ for the active records, [certificate.md](certificate.md),
 | cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm | S-H | safety | always | intended explicit-config-only | proposed (#1168) |
 | cc-pass-and-sweep-write-no-kernel-event-and-no-signal | R5 | safety | always(!X) | intended explicit-config-only | proposed, exercised partial (sweep arm #1166; #1167) |
 
-15 records: 3 active, 12 proposed. Semantics distribution: 15 `always`
+15 records: 4 active, 11 proposed. Semantics distribution: 15 `always`
 (13 plain and 2 written `always(!X)` for forbidden states), 0
 `always-or-unreached`, 0 `sometimes`, 0 `reachable`, 0 `unreachable`; all 15
 are safety. Reachability: 3 `test-only` at the branch tip; intended classes
@@ -605,8 +606,12 @@ written at or below the sweep's Kernel tip it drops exactly those with a
 stale matcher digest, an age past `MAX_CANDIDATE_AGE`, a foreign Kernel
 incarnation, a decision with no registry row in its claim standing or failing
 `eligible` at the tip, or descriptor evidence that is `Retired` or `Unknown`
-at the tip; every other row is kept, and so is every row written above the
-tip; a repeat at the same tip drops zero; the sweep writes no Kernel row.
+at the tip; every other row is kept. A row written above the tip is spared
+the Kernel judgments (standing, eligibility, evidence); the Kernel-free
+drops (stale digest, over-age, foreign incarnation) apply to it as to any
+row. A repeat over the same page at the same tip drops zero, and a cycle of
+`n` runs over an `n`-page table reaches a fixed point: the next cycle at the
+same tip drops zero. The sweep writes no Kernel row.
 With no Kernel the sweep reads nothing, drops nothing, and counts one skip. A
 Kernel read that fails keeps the rows it would have judged and counts one
 skip; the drops that need no Kernel read still land.
@@ -762,7 +767,7 @@ then on. The key is `/contradiction_candidates/enabled`
 `config.rs:2299`); a configuration resolved before a user-tier rewrite keeps
 its value (`config.rs:2320`), and a bound route keeps the value it was bound
 with (`a_route_keeps_the_candidate_flag_it_was_bound_with_and_health_reports_the_block`,
-`crates/daemon/src/lib.rs:21340`), which also shows the status block
+`crates/daemon/src/lib.rs:21471`), which also shows the status block
 carrying the key with every counter zero. The pass and read arms land with
 #1167 and #1168.
 Guarantee: With the route's frozen `contradiction_candidates.enabled` false

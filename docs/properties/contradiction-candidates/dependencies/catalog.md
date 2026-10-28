@@ -554,7 +554,7 @@ Reachability: explicit-config-only - as above.
 Status: active
 Exercised: yes - `shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slot`
 (`source_capture_tests.rs:674`), `a_settled_report_counts_the_job_that_released_the_slot`
-(`source_capture.rs:1590`).
+(`source_capture.rs:1720`).
 Guarantee: the daemon holds one publication slot (`Semaphore::new(1)`,
 `source_capture.rs:268`); `into_job` takes it with `try_acquire_owned` or
 refuses as `RefusedQueueFull` without waiting (`:604-607`); the permit lives
@@ -837,7 +837,7 @@ Reachability: default-production - any route opened with harness `cli`.
 Status: active
 Exercised: yes - `memory_reviewer_wire.rs:260`
 `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`;
-`lib.rs:35508` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
+`lib.rs:35900` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
 Guarantee: a binding whose harness is `OBSERVATIONAL_HARNESS` (`"cli"`)
 authorizes and resolves its project like any route and can call the routed
 read family with the same answers, and is excluded from

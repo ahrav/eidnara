@@ -92,7 +92,7 @@ kernel store, budget, units, memo, commit gate mutex (`:789`),
 `publish_screened_between` for the window (`:832-840`), then
 `capture_documents` in its own batch (`:905-...`). `capture_after_response`
 (`crates/daemon/src/lib.rs:9245-9262`). The request owner runs the
-`AfterResponse` after `settle_prepared` (`lib.rs:13470-13481`;
+`AfterResponse` after `settle_prepared` (`lib.rs:13984-13998`;
 `crates/daemon/src/dispatch.rs:24-35`, `:445-460`). `publish_batch`
 (`crates/daemon/src/harness_sources.rs:1228-1248`), `Published` (`:520-532`),
 `MAX_SOURCE_UNIT_BYTES`/`MAX_SOURCE_BATCH_UNITS`/`MAX_SOURCE_BATCH_BYTES`

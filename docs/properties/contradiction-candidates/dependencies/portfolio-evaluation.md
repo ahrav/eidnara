@@ -54,7 +54,7 @@ named function; no wrong file, no wrong claim).
 | `config.rs:154`; `memory-store/src/lib.rs:335-340`; `storage/src/lib.rs:2631` | confirmed |
 | `activation.rs:174`; `lifecycle.rs:16-18`, `:327` | confirmed |
 | `tool-registry.ts:58`; `subagent-entry.ts:63` | `tool-registry.ts:58` now passes `EIDNARA_MEMORY_DEFAULT_ACTIONS` (#1161); confirmed at `packages/opencode-plugin/src/plugin/tool-registry.ts:58` and `packages/pi-plugin/src/subagent-entry.ts:63`; the catalog gives bare file names |
-| 22 test function locations (`source_capture_tests.rs:298,321,428,665,782,929,2227`; `source_capture.rs:1590`; `kernel_routes.rs:1958,2080,2112,1803`; `kernel_scope.rs:235`; `kernel_canonical_read.rs:227,448`; `kernel_claim_facts.rs:466`; `claims.rs:993`; `embedding_dispatch.rs:1102`; `search_catchup.rs:1876`; `memory_reviewer_wire.rs:15,260`; `baseline.rs:492`; `lifecycle.rs:704`; `local_file.rs:710,722,791,889`; `tools.test.ts:1185,1193`) | all confirmed |
+| 22 test function locations (`source_capture_tests.rs:298,321,428,665,782,929,2227`; `source_capture.rs:1720`; `kernel_routes.rs:1958,2080,2112,1803`; `kernel_scope.rs:235`; `kernel_canonical_read.rs:227,448`; `kernel_claim_facts.rs:466`; `claims.rs:993`; `embedding_dispatch.rs:1102`; `search_catchup.rs:1876`; `memory_reviewer_wire.rs:15,260`; `baseline.rs:492`; `lifecycle.rs:704`; `local_file.rs:710,722,791,889`; `tools.test.ts:1185,1193`) | all confirmed |
 | `query_route.rs:1055`; `lexical/index.rs:50`; `daemon/Cargo.toml:45`; `admission.rs:4237` | confirmed |
 | `harness_sources.rs:612-616`, `:1228`; `open.rs:614` `hold_readers_for_test` | confirmed |
 
@@ -233,7 +233,7 @@ on well-tested code (Exercised yes or partial for all six).
 | G3 | medium | Publication identity: replay and revision | `Published.replayed`, `replaced_object_id` (`harness_sources.rs:521-532`); same-commit predecessor invalidation; memo dedupe interaction (`source_capture.rs:5`) |
 | G4 | medium | Retirement observability for a derived-row sweep | which Kernel read exposes `invalidated_commit_seq` for observations and evidence at tip; behaviour of `visible_as_of_in_scope(Some(ids))` on retired ids |
 | G5 | low | Bounded liveness of the harness sweep (L1) | `ceil(pending_ahead / 64)` passes at `SAMPLE_RETRY_INTERVAL`; fault-free window with the lifecycle loop |
-| G6 | low-medium | Sweep candidate scan cost under retained-and-cited captures (W1 x W2) | `expired_captures_sql` (`local_file.rs:551-562`) step count versus retained rows |
+| G6 | low-medium | Sweep candidate scan cost under retained-and-cited captures (W1 x W2) | `expired_captures_sql` (`local_file.rs:558-572`) step count versus retained rows |
 | G7 | low | Sensitivity and egress class of descriptor-derived data | `publish_batch` admission classes (`source_capture.rs:712-718`); what S7/S8 reads may carry |
 
 ### Refinements (apply directly)
