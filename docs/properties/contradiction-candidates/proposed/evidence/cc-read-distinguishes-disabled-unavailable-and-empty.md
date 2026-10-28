@@ -30,7 +30,7 @@ differ from an empty page.
   VM-step interval at which `with_conn_interruptible` polls a stop
   (`crates/storage/src/lib.rs:191`), so the connection wait is the one wait
   the deadline ends
-  (`crates/daemon/src/candidate_pass_tests.rs:2426`, asserted at `:2459-2463`).
+  (`crates/daemon/src/candidate_pass_tests.rs:2461`, asserted at `:2494-2498`).
 - `docs/host-wire-protocol.md:833` documents the three terminals, the kernel
   states, and the empty page.
 
@@ -49,13 +49,13 @@ does not change the route's answer.
 A flag-off route with the table renamed away and a flag-on control; a root
 without MODULE authority; a daemon with no Memory Store; a Kernel not yet
 open and one whose open failed; an eligible decision with zero rows. All in
-`crates/daemon/src/candidate_pass_tests.rs:1814` and `:2488`.
+`crates/daemon/src/candidate_pass_tests.rs:1849` and `:2523`.
 
 ## Investigation log
 
 ### Q: Does a failed Kernel open answer differently from a starting one?
 
-- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:2503`, `:2520`.
+- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:2538`, `:2555`.
 - Findings: a Kernel not yet open answers `unavailable`/`store_starting`;
   opening at a file path answers `unavailable`/`store_unavailable`.
 - Missing evidence: none.

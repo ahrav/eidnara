@@ -465,6 +465,33 @@ async fn a_second_offer_while_a_pass_runs_is_refused_and_a_cancel_still_ends_the
 /// The pass budget runs from admission, so a pass queued behind a saturated blocking pool for longer than its budget ends `deadline` as soon as it runs, writes nothing, and releases the permit it held while queued.
 #[test]
 fn a_pass_queued_past_its_budget_ends_at_the_deadline_it_was_admitted_under() {
+    let counts = a_pass_queued_past_its_budget(|_| {});
+    assert_eq!(counts["deadline"], 1, "{counts}");
+    assert_eq!(counts["completed"], 0, "{counts}");
+    assert_eq!(counts["descriptors_unscored"], 1, "{counts}");
+    assert_eq!(counts["active"], 0, "{counts}");
+    assert!(
+        counts["pass_ms_last"].as_u64().unwrap() >= 600,
+        "the pass's wall time runs from its admission: {counts}"
+    );
+}
+
+/// The deadline a queued pass was admitted under names its end whatever the Kernel's state when the pass starts.
+#[test]
+fn a_pass_queued_past_its_budget_ends_at_the_deadline_when_the_kernel_is_gone_too() {
+    let counts = a_pass_queued_past_its_budget(|handler| {
+        handler
+            .kernel
+            .mark_unavailable(kernel_routes::UnavailableKind::Store);
+    });
+    assert_eq!(counts["deadline"], 1, "{counts}");
+    assert_eq!(counts["kernel_unavailable"], 0, "{counts}");
+    assert_eq!(counts["descriptors_unscored"], 1, "{counts}");
+    assert_eq!(counts["active"], 0, "{counts}");
+}
+
+/// Queues one admitted pass behind a full blocking pool for 600 ms under a 200 ms budget, runs `before_release` while it waits, releases the pool, and returns the candidate counts once the pass settles.
+fn a_pass_queued_past_its_budget(before_release: impl Fn(&Handler)) -> Value {
     const BLOCKING_THREADS: usize = 8;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -513,23 +540,17 @@ fn a_pass_queued_past_its_budget_ends_at_the_deadline_it_was_admitted_under() {
             "the queued pass holds the permit"
         );
         assert!(rows(&store).is_empty(), "the pass has not run");
+        before_release(&handler);
         released.store(true, std::sync::atomic::Ordering::Relaxed);
         settle(&handler).await;
         let counts = counts(&handler);
-        assert_eq!(counts["deadline"], 1, "{counts}");
-        assert_eq!(counts["completed"], 0, "{counts}");
-        assert_eq!(counts["descriptors_unscored"], 1, "{counts}");
-        assert_eq!(counts["active"], 0, "{counts}");
-        assert!(
-            counts["pass_ms_last"].as_u64().unwrap() >= 600,
-            "the pass's wall time runs from its admission: {counts}"
-        );
         assert!(
             rows(&store).is_empty(),
             "a pass past its budget writes nothing"
         );
         drop(handler);
-    });
+        counts
+    })
 }
 
 struct Core {
@@ -1644,8 +1665,8 @@ async fn a_job_whose_document_capture_ends_in_deadline_still_offers_its_publishe
     assert_eq!(rows(&store).len(), 1, "the published unit was scored");
 }
 
-#[test]
-fn a_scope_term_read_behind_held_kernel_readers_ends_at_the_pass_deadline() {
+/// Holds every Kernel reader from the pass's `stop` checkpoint until well past a 500 ms budget and runs one pass; the Kernel read that follows the checkpoint must end at the budget.
+fn a_kernel_read_behind_held_readers_ends_at_the_pass_deadline(stop: Checkpoint) {
     let core = Core::open(PassBounds {
         budget: Duration::from_millis(500),
         ..PassBounds::default()
@@ -1656,13 +1677,12 @@ fn a_scope_term_read_behind_held_kernel_readers_ends_at_the_pass_deadline() {
         &[("one", TOPIC, EventKind::Other)],
     );
     let descriptor = core.descriptor("d0", TOPIC);
-    // Every Kernel reader is held from the first scope-filter check until well past the budget.
     let held = Arc::new(std::sync::Barrier::new(2));
     let kernel = Arc::clone(&core.kernel);
     let holder = Arc::new(std::sync::Mutex::new(None));
     let (holder_slot, barrier) = (Arc::clone(&holder), Arc::clone(&held));
     *core.counts.before_check.lock().unwrap() = Some(Arc::new(move |check| {
-        if check == Checkpoint::Judged(0) {
+        if check == stop {
             let (kernel, barrier) = (Arc::clone(&kernel), Arc::clone(&barrier));
             *holder_slot.lock().unwrap() = Some(std::thread::spawn(move || {
                 kernel.hold_readers_for_test(&barrier, Duration::from_secs(3));
@@ -1687,14 +1707,29 @@ fn a_scope_term_read_behind_held_kernel_readers_ends_at_the_pass_deadline() {
     );
     let waited = started.elapsed();
     holder.lock().unwrap().take().unwrap().join().unwrap();
-    assert_eq!(end, CandidateCount::Deadline);
+    assert_eq!(end, CandidateCount::Deadline, "{stop:?}");
     assert!(
         waited < Duration::from_secs(2),
-        "the scope-term read waited {waited:?} behind held readers"
+        "the read after {stop:?} waited {waited:?} behind held readers"
     );
     assert_eq!(core.count("deadline"), 1);
     assert_eq!(core.count("descriptors_unscored"), 1);
     assert!(core.rows_for(&descriptor.evidence_id).is_empty());
+}
+
+#[test]
+fn a_visible_decision_read_behind_held_kernel_readers_ends_at_the_pass_deadline() {
+    a_kernel_read_behind_held_readers_ends_at_the_pass_deadline(Checkpoint::Captured);
+}
+
+#[test]
+fn a_scope_term_read_behind_held_kernel_readers_ends_at_the_pass_deadline() {
+    a_kernel_read_behind_held_readers_ends_at_the_pass_deadline(Checkpoint::Judged(0));
+}
+
+#[test]
+fn a_payload_size_read_behind_held_kernel_readers_ends_at_the_pass_deadline() {
+    a_kernel_read_behind_held_readers_ends_at_the_pass_deadline(Checkpoint::Kept(1));
 }
 
 fn activate_memories_authority(store: &MemoryStore, root: &Path) {

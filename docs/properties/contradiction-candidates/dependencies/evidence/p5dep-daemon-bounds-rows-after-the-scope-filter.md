@@ -35,7 +35,7 @@ consumer of the unbounded Kernel API. Lens: resource boundaries; C6.
   - `:235-243` `decisions_for_objects_as_of` for the retained ids; a missing
     row is `CorruptCanonicalRow`.
 - `read.rs:66-76` `ReadResponse.truncated` doc: byte-budget truncation also
-  happens at serialization (`:456-477`), so the wire flag can be `true` while
+  happens at serialization (`:477-498`), so the wire flag can be `true` while
   this one is `false`.
 - Tests: `crates/daemon/tests/kernel_routes.rs:1958`
   `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`;

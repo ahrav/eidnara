@@ -9,7 +9,7 @@ once per descriptor.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/pass.rs:413` `candidate_summaries`
+- `crates/daemon/src/contradiction_candidates/pass.rs:428` `candidate_summaries`
   reads explicit-search ids with the project scope term, judges each scope with
   `ScopeFilter`, keeps the newest `bounds.decisions` with `NewestRows`, adds
   the number of scope-matched decisions it cut to `candidates_truncated`, filters
@@ -34,8 +34,8 @@ Without the heap and the byte cut a project with 100,000 decisions would load
 Every read uses the tip captured at the pass start (G2: ids, claim facts, sizes,
 and payloads share one snapshot, so a later commit cannot mix two states into
 one candidate set). Explicit search hides rejected, contradicted, quarantined,
-and secret rows: `surface_visibility` (`crates/kernel/src/admission.rs:4197-4218`)
-and `visibility_row` (`:4324-4336`).
+and secret rows: `surface_visibility` (`crates/kernel/src/admission.rs:4221-4242`)
+and `visibility_row` (`:4348-4360`).
 
 ## What a test must construct
 

@@ -251,10 +251,10 @@ Fault/timing angle: none; single snapshot.
 Required faults and enabling state: decisions in two domains at one snapshot;
 a corrupt or oversize payload in the other domain.
 Confidence: high - [evidence](evidence/p5dep-domain-decision-read-matches-domain-and-kind-in-sql.md).
-Read `admission.rs:3551-3556` (`ids_predicate`) and `:3178-3207`.
+Read `admission.rs:3575-3580` (`ids_predicate`) and `:3178-3231`.
 Existing check: `the_domain_selection_equals_the_filtered_full_read`,
 `the_domain_selection_reads_no_row_of_another_domains_payload_pressure`,
-in-module `admission.rs:6240-6257`. Status unaudited.
+in-module `admission.rs:6264-6281`. Status unaudited.
 Impact: the P5 candidate set would include non-memory decisions or fail on
 another domain's corruption.
 Open questions: None.
@@ -283,17 +283,17 @@ the filtered read; equivalently the filtered set is a superset of the
 algebra's match set. `always` because a dropped matching row is a silent
 cross-project omission on every read.
 Fault/timing angle: redaction placeholders decode to `Uncertain`; the filter
-must keep them (`admission.rs:3543-3550`).
+must keep them (`admission.rs:3567-3574`).
 Required faults and enabling state: scopes with no term, with a non-exact
 operator, with a redacted value; a redacted filter value; a NULL scope row.
 Confidence: high - [evidence](evidence/p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict.md).
-Read `admission.rs:3626-3640` (the `WHERE` tail) and `project.rs:207-220`.
+Read `admission.rs:3650-3664` (the `WHERE` tail) and `project.rs:207-220`.
 Existing check: `a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain`.
 Status unaudited.
 Re-exercised by #1167: the pass applies the SQL prefilter and then
 `ScopeFilter`, as `read_visible` does;
 `the_candidate_set_keeps_the_newest_scope_matched_decisions_of_the_project_and_counts_the_cut`
-(`crates/daemon/src/candidate_pass_tests.rs:644`) keeps another project's
+(`crates/daemon/src/candidate_pass_tests.rs:665`) keeps another project's
 decision out.
 Impact: a P5 pass that trusts the Kernel prefilter alone (without the daemon
 `ScopeFilter`) would see rows of other projects whose scopes are uncertain,
@@ -301,7 +301,7 @@ and rows with no scope (D5); a prefilter that dropped uncertain rows would
 hide same-project decisions from the candidate set.
 Open questions:
 - D5: the daemon `ScopeFilter::matches` returns `false` for a `None` scope
-  (`project.rs:212-214`) while the SQL keeps NULL scopes (`admission.rs:3640`). Is a
+  (`project.rs:212-214`) while the SQL keeps NULL scopes (`admission.rs:3664`). Is a
   decision with no scope ever written in the `memory` domain at HEAD?
   (partial: `ProjectBinding::scope_spec` always attaches a scope for
   route-written rows; other writers not audited)
@@ -342,7 +342,7 @@ Existing check: `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_trunca
 unaudited.
 Re-exercised by #1167: the pass bounds its candidate set with `NewestRows`
 after the scope filter; the test at
-`crates/daemon/src/candidate_pass_tests.rs:644` cuts the two oldest at a
+`crates/daemon/src/candidate_pass_tests.rs:665` cuts the two oldest at a
 reduced cap.
 Impact: a P5 pass that copies this pattern (plan U1 "patterns to follow"
 `read.rs:185`) inherits a bound that is applied after full materialization of
@@ -361,7 +361,7 @@ materialization before the daemon heap.
 Guarantee: the situation "the Kernel returned more rows than the daemon
 keeps" is reachable at HEAD: `visible_domain_decisions_as_of_in_scope` has
 no `max_rows`, `max_bytes`, or `EvalBudget` parameter and materializes every
-matching row (`admission.rs:3188-3200`); the only bounds are the daemon's,
+matching row (`admission.rs:3207-3220`); the only bounds are the daemon's,
 applied afterwards.
 Check: `sometimes` - a campaign must produce at least one history in which
 `rows.len() > MAX_READ_ROWS` is observed on the Kernel API's return value
@@ -484,7 +484,7 @@ Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_bud
 (`search_catchup.rs:1876`). Status unaudited.
 Re-exercised by #1167:
 `a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor`
-(`crates/daemon/src/candidate_pass_tests.rs:848`) passes a spent budget and
+(`crates/daemon/src/candidate_pass_tests.rs:869`) passes a spent budget and
 observes `deadline` before any Kernel read.
 Impact: plan R1/KTD2 give the P5 pass its own deadline; if it uses the
 decision-page API it gets a bounded wait plus a row-bounded scan, not a
@@ -561,7 +561,7 @@ Existing check: the two tests above. Status unaudited.
 Re-exercised by #1167: the pass is offered from the capture job's tracked task
 after `run_settled` returns, so `AfterResponse` still only spawns;
 `the_route_consent_reaches_the_pass_through_a_transform`
-(`crates/daemon/src/candidate_pass_tests.rs:1146`) runs the transform and its
+(`crates/daemon/src/candidate_pass_tests.rs:1167`) runs the transform and its
 after-response work with consent on and off.
 Impact: a P5 trigger that ran inside `AfterResponse` before `job.run()` or
 awaited the job would re-couple response latency to the kernel; a trigger
@@ -854,10 +854,10 @@ Re-exercised by #1168: `review.candidates` joins the family through
 `kernel_request` with a `deny_unknown_fields` body
 (`crates/daemon/src/contradiction_candidates/read.rs:30`);
 `review_candidates_pages_live_rows_and_answers_each_terminal`
-(`crates/daemon/src/candidate_pass_tests.rs:1814`) answers `invalid_params`
+(`crates/daemon/src/candidate_pass_tests.rs:1849`) answers `invalid_params`
 for an unknown field and a malformed cursor, `project_mismatch` for a foreign
-root before the body is read (`:2110`), and `disabled` for a root without
-MODULE authority (`:1832`).
+root before the body is read (`:2145`), and `disabled` for a root without
+MODULE authority (`:1867`).
 Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
 fields, would break the family's stated order. `review.use_outcome` (#1157)
@@ -895,7 +895,7 @@ Confidence: high - [evidence](evidence/p5dep-observational-routes-read-and-take-
 Read `lib.rs:274-281`, `:382-386`, `:413-417`.
 Existing check: the two tests above. Status unaudited.
 Re-exercised by #1168: a route bound with `OBSERVATIONAL_HARNESS` reads a
-`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:2122`).
+`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:2157`).
 Impact: P5 U4's owner read is an observational read; it must be callable on a
 `cli` route and must not enroll the project in any background work.
 Open questions: None.

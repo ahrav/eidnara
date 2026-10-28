@@ -22,10 +22,10 @@ publication wait on them.
 - `crates/daemon/src/lib.rs:9279` `capture_after_response` offers the pass from
   the same tracked task after `run_settled` returns, and only when the route's
   frozen flag and a memory store are present.
-- `crates/daemon/src/contradiction_candidates/pass.rs:135-143` `run` fixes the
+- `crates/daemon/src/contradiction_candidates/pass.rs:135-151` `run` fixes the
   pass's start at its admission, before `spawn_blocking`, and `finish`
-  (`:166`) builds the pass's own `EvalBudget` from that start plus the budget
-  (`:187-190`) and the daemon cancel.
+  (`:175`) builds the pass's own `EvalBudget` from that start plus the budget
+  (`:196-199`) and the daemon cancel.
 
 ## Failure scenario
 

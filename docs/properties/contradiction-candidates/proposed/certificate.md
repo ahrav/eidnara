@@ -190,7 +190,7 @@ text-source obligation added.
 
 R-E1 Sweep drops only dead targets. A row is dropped when, at the sweep's
 Kernel snapshot, its decision object is invalidated, or its current disposition
-is `Superseded` or `Contradicted` (`admission.rs:4224-4225, 4157`), or its
+is `Superseded` or `Contradicted` (`admission.rs:4248-4249, 4157`), or its
 descriptor object or evidence row is invalidated; every other row is kept.
 Kind: transition safety (what a sweep step may remove). Observation: derived
 observation of the Kernel at a snapshot. Validity: sweep commit. Settled (R4)

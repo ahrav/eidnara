@@ -2157,6 +2157,11 @@ fn stored_descriptor(
     let Some((receipt, _)) = stored_receipt(preview, intent, unit, publisher)? else {
         return Ok(None);
     };
+    // The receipt's result is the descriptor this unit's lineage and revision name; a receipt naming another descriptor is a corrupt receipt.
+    if receipt.result != kernel::descriptor_object_id(&unit.lineage_id, &unit.revision.to_string())
+    {
+        return Err(KernelError::CorruptCanonicalRow);
+    }
     // Every publish path writes the descriptor with its evidence, so a stored descriptor without a citation is a corrupt row, and the replay refuses instead of naming the evidence the unit would have had.
     let cited = preview
         .source_descriptor_evidence(&receipt.result)?

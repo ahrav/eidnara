@@ -14,21 +14,21 @@ outside the domain never fails this read." Lens: protocol contracts; C4.
 
 ## Evidence trail
 
-- `admission.rs:3168-3181`: the public method passes
+- `admission.rs:3168-3200`: the public method passes
   `ServedSelection::DomainDecisions(domain_id)` to `visible_selected_as_of`.
-- `admission.rs:3481-3488` `ServedSelection` variants: `All`, `Named(&str)`
+- `admission.rs:3505-3512` `ServedSelection` variants: `All`, `Named(&str)`
   (JSON array bound as `:ids`), `DomainDecisions(&str)` (bound as
   `:domain_id`). "Each variant is its own prepared statement, so its
   predicate is one the planner can serve from an index."
-- `admission.rs:3554-3560` `ids_predicate`: for `DomainDecisions`,
+- `admission.rs:3578-3584` `ids_predicate`: for `DomainDecisions`,
   `"o.domain_id=:domain_id AND o.object_kind='decision' AND"`, prepended to
-  the `WHERE` clause at `:3625`.
-- `admission.rs:3561-3573`: for `DomainDecisions` the joins omit
+  the `WHERE` clause at `:3649`.
+- `admission.rs:3585-3597`: for `DomainDecisions` the joins omit
   `observations` and use `dec.scope_id` / `dec.evidence_id` directly, so the
   statement reads only decision rows.
-- `admission.rs:3677-3681`: three `LazyLock<String>` statement texts, one per
+- `admission.rs:3701-3705`: three `LazyLock<String>` statement texts, one per
   shape, so `prepare_cached` reuses them.
-- `admission.rs:3183-3211` `visible_selected_as_of`: reads in one
+- `admission.rs:3202-3235` `visible_selected_as_of`: reads in one
   `read_snapshot`, filters `Hidden`, sorts by `object_id`.
 - Daemon re-check: `crates/daemon/src/kernel_routes/read.rs:89-97`
   `RowSelection::keeps` re-checks `object_kind == "decision" && domain_id ==
@@ -38,7 +38,7 @@ outside the domain never fails this read." Lens: protocol contracts; C4.
   `the_domain_selection_equals_the_filtered_full_read`; `:448`
   `the_domain_selection_reads_no_row_of_another_domains_payload_pressure`;
   `:420` `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order`;
-  in-module `admission.rs:6267-6275` reads `"memory"` after a reopen.
+  in-module `admission.rs:6291-6299` reads `"memory"` after a reopen.
 
 ## Failure scenario
 
