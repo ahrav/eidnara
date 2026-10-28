@@ -92,13 +92,13 @@ read spares a rewritten row).
 | `a_route_without_consent_offers_no_pass_and_writes_no_row` | `:251` | consent off on the offer: zero counters, no row | flag off (pass arm) | unaudited |
 | `a_pass_starts_only_after_the_job_releases_the_slot_and_the_gate` | `:282` | no offer while the job holds the slot; slot idle and gate free at start and while scoring; memo hit offers nothing; replay rescored | trigger, row key | unaudited |
 | `a_second_offer_while_a_pass_runs_is_refused_and_a_cancel_still_ends_the_pass` | `:398` | busy refusal; cancel at the second of three descriptors leaves the first one's rows | single flight, partial result | unaudited |
-| `the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_counts_the_cut` | `:560` | N + 1 at a reduced N; other project never scored; truncation counted | candidate set | unaudited |
-| `a_superseded_decision_is_never_scored_and_the_default_bounds_are_the_named_constants` | `:603` | superseded unread; production bounds pinned | candidate set | unaudited |
-| `the_summary_byte_cut_skips_payloads_before_any_load` | `:667` | byte cut before load, counted | candidate set | unaudited |
-| `an_oversize_descriptor_writes_nothing_and_an_unscorable_summary_leaves_the_others` | `:695` | descriptor one byte over refused; over-bound and floor-emptied summaries unscorable | oversize (pass arm) | unaudited |
-| `a_deadline_during_the_third_descriptor_leaves_the_first_two` | `:727` | deadline during the third of five: full top-K for the first two | partial result | unaudited |
-| `a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor` | `:759` | spent budget: no row, all unscored, one deadline | partial result | unaudited |
-| `the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows` | `:779` | K, M, a write over the project cap, newer-tip rescore, held rows past M | row key | unaudited |
+| `the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_counts_the_cut` | `:560` | N + 2 at a reduced N; other project never scored; each cut decision counted | candidate set | unaudited |
+| `a_superseded_decision_is_never_scored_and_the_default_bounds_are_the_named_constants` | `:608` | superseded unread; production bounds pinned | candidate set | unaudited |
+| `the_summary_byte_cut_skips_payloads_before_any_load` | `:672` | byte cut before load, counted | candidate set | unaudited |
+| `an_oversize_descriptor_writes_nothing_and_an_unscorable_summary_leaves_the_others` | `:700` | descriptor one byte over refused; over-bound and floor-emptied summaries unscorable | oversize (pass arm) | unaudited |
+| `a_deadline_during_the_third_descriptor_leaves_the_first_two` | `:732` | deadline during the third of five: full top-K for the first two | partial result | unaudited |
+| `a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor` | `:764` | spent budget: no row, all unscored, one deadline | partial result | unaudited |
+| `the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows` | `:784` | K, M, a write over the project cap, newer-tip rescore, held rows past M | row key | unaudited |
 | `a_rerun_from_the_retained_bytes_at_one_tip_rebuilds_the_rows_and_the_kernel_is_untouched` | `:850` | retained texts equal published texts; truncate and rescore rebuild the rows; tip and jobs unchanged | rebuild, R5 | unaudited |
 | `the_route_consent_reaches_the_pass_through_a_transform` | `:933` | the route's frozen value, not the daemon's, decides the offer | flag off (pass arm), trigger | unaudited |
 | `a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_a_parked_pass` | `:983` | panic counted with permit and charge released; kept-text charge below the job's; shutdown waits | single flight | unaudited |

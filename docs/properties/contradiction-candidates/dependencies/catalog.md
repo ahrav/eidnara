@@ -342,8 +342,8 @@ Existing check: `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_trunca
 unaudited.
 Re-exercised by #1167: the pass bounds its candidate set with `NewestRows`
 after the scope filter; the test at
-`crates/daemon/src/candidate_pass_tests.rs:561` cuts the oldest at a reduced
-cap.
+`crates/daemon/src/candidate_pass_tests.rs:561` cuts the two oldest at a
+reduced cap.
 Impact: a P5 pass that copies this pattern (plan U1 "patterns to follow"
 `read.rs:185`) inherits a bound that is applied after full materialization of
 the Kernel rows; see the next record.
@@ -481,7 +481,7 @@ Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_bud
 (`search_catchup.rs:1876`). Status unaudited.
 Re-exercised by #1167:
 `a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor`
-(`crates/daemon/src/candidate_pass_tests.rs:760`) passes a spent budget and
+(`crates/daemon/src/candidate_pass_tests.rs:765`) passes a spent budget and
 observes `deadline` before any Kernel read.
 Impact: plan R1/KTD2 give the P5 pass its own deadline; if it uses the
 decision-page API it gets a bounded wait plus a row-bounded scan, not a
@@ -558,7 +558,7 @@ Existing check: the two tests above. Status unaudited.
 Re-exercised by #1167: the pass is offered from the capture job's tracked task
 after `run_settled` returns, so `AfterResponse` still only spawns;
 `the_route_consent_reaches_the_pass_through_a_transform`
-(`crates/daemon/src/candidate_pass_tests.rs:1038`) runs the transform and its
+(`crates/daemon/src/candidate_pass_tests.rs:1043`) runs the transform and its
 after-response work with consent on and off.
 Impact: a P5 trigger that ran inside `AfterResponse` before `job.run()` or
 awaited the job would re-couple response latency to the kernel; a trigger

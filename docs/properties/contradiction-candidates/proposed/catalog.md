@@ -137,7 +137,7 @@ order rule).
 Existing check: the two tests above and `the_matcher_digest_pins_every_rule`
 (`:348-400`), which pins the order rule id in the preimage;
 `each_descriptor_keeps_the_top_k_that_score_descriptor_ranks_over_the_loaded_summaries`
-(`crates/daemon/src/candidate_pass_tests.rs:851`) shows the pass's single scan
+(`crates/daemon/src/candidate_pass_tests.rs:856`) shows the pass's single scan
 keeps, per descriptor, the top K `score_descriptor` ranks. Status
 unaudited.
 Impact: a nondeterministic order defeats the rebuild obligation
@@ -317,7 +317,7 @@ and score every descriptor with the gate free, one `completed` pass, and one
 row; a memo-hit job that publishes nothing offers no pass; each job ends in
 one terminal count; a replayed unit is scored again with its rows' tip at or
 above the earlier one. `publish_latency_with_candidates_on_stays_within_the_off_baseline`
-(`:1146`) commits at least one publication beside a running pass and keeps
+(`:1151`) commits at least one publication beside a running pass and keeps
 the median publication hold within three times the flag-off median plus
 50 ms. The job hands its kept texts out through `CaptureJob::run_settled`
 (`crates/daemon/src/source_capture.rs:675`) after the blocking closure has
@@ -363,7 +363,7 @@ with `active` = 1 and no row for the refused publication; a cancel during
 descriptor 1 of 3 ends the pass with `budget_exhausted`, the first
 descriptor's rows, `descriptors_unscored` = 2, and `active` back at 0;
 `a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_a_parked_pass`
-(`:1088`) shows a panicking pass counted with its permit and charge released
+(`:1093`) shows a panicking pass counted with its permit and charge released
 and shutdown waiting for a parked pass. P = 1 per store through a
 non-waiting permit (`crates/daemon/src/contradiction_candidates/pass.rs:112`).
 Guarantee: At most P = 1 candidate pass exists at once per store; an offer
@@ -395,13 +395,13 @@ Reachability: explicit-config-only - as `cc-pass-starts-only-after-publication-j
 Status: active
 Exercised: partial - #1167, `crates/daemon/src/candidate_pass_tests.rs`:
 `the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_counts_the_cut`
-(`:561`) seeds N + 1 visible decisions with the cap at N = 4: the oldest is
-cut, `candidates_truncated` = 1, the other project's decision is never scored,
+(`:561`) seeds N + 2 visible decisions with the cap at N = 4: the two oldest
+are cut, `candidates_truncated` = 2, the other project's decision is never scored,
 and stale and disputed decisions are scored while the contradicted one is
 hidden by explicit search; `a_superseded_decision_is_never_scored_and_the_default_bounds_are_the_named_constants`
-(`:604`) pins the production values (N = 4096) and shows a superseded
+(`:609`) pins the production values (N = 4096) and shows a superseded
 decision unread; `the_summary_byte_cut_skips_payloads_before_any_load`
-(`:668`) cuts payloads before any load and counts their bytes. Not
+(`:673`) cuts payloads before any load and counts their bytes. Not
 constructed at the production N: the tests cut at a reduced cap. The
 no test shows the pass's `eligible` filter
 (`crates/daemon/src/contradiction_candidates/pass.rs:392`) as the reason a
@@ -409,12 +409,12 @@ decision is dropped.
 Guarantee: The pass's candidate set is built by the project scope term
 prefilter (`admission.rs:3138-3144`, `project.rs:106-111`) and the
 `ScopeFilter` judge, then cut to at most N visible, scope-matched decisions
-in a deterministic newest-first order with a counted truncation when more
+in a deterministic newest-first order, counting each decision cut when more
 were visible, before the eligibility filter; summary bytes are bounded before
 any payload is loaded (`decision_payload_sizes_as_of`, `slice/read.rs:330`);
 the pass never loads more than N summaries or more than the byte bound.
-Check: `always` - with N + 1 eligible decisions the pass scores exactly N, the
-oldest is the one omitted, and `candidates_truncated` increments by one; a
+Check: `always` - with N + k eligible decisions the pass scores exactly N, the
+k oldest are the ones omitted, and `candidates_truncated` increments by k; a
 decision with an oversize payload is skipped before load and counted; the
 semantics is `always` because every pass must stay inside the bound.
 Fault/timing angle: a project whose `memory` decisions exceed N; a decision
@@ -439,11 +439,11 @@ Type: safety
 Reachability: explicit-config-only - as `cc-pass-starts-only-after-publication-job-terminal`.
 Status: active
 Exercised: yes - #1167, `crates/daemon/src/candidate_pass_tests.rs`:
-`a_deadline_during_the_third_descriptor_leaves_the_first_two` (`:728`)
+`a_deadline_during_the_third_descriptor_leaves_the_first_two` (`:733`)
 expires the budget during descriptor 3 of 5 and observes four rows for each
 of descriptors 1 and 2, none for 3 to 5, `descriptors_unscored` = 3, and
 `deadline` = 1; `a_budget_spent_before_the_pass_writes_nothing_and_counts_every_descriptor`
-(`:760`) and the cancel case of
+(`:765`) and the cancel case of
 `a_second_offer_while_a_pass_runs_is_refused_and_a_cancel_still_ends_the_pass`
 (`:399`) cover the empty prefix and a cancel at the second of three
 descriptors. The pass
@@ -493,7 +493,7 @@ key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_
 (`crates/memory-store/src/contradiction_candidates.rs:230`) enforces K and the
 project cap in the write transaction; the daemon owns the values. Pass arm
 (#1167): `the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows`
-(`crates/daemon/src/candidate_pass_tests.rs:780`) scores K + 1 overlaps into K rows, cuts a pass at M in publish
+(`crates/daemon/src/candidate_pass_tests.rs:785`) scores K + 1 overlaps into K rows, cuts a pass at M in publish
 order with `rows_written` = M and the rest counted `dropped_at_cap`, counts
 the rows one write drops at the project cap (the store tests cover evicting
 held rows), rescoring at a newer tip keeps
@@ -536,7 +536,7 @@ Exercised: yes - store arm (#1165):
 `truncate_contradiction_candidates_for_test` and replays a write sequence,
 reproducing the same rows excluding `created_at_ms`. Pass arm (#1167):
 `a_rerun_from_the_retained_bytes_at_one_tip_rebuilds_the_rows_and_the_kernel_is_untouched`
-(`crates/daemon/src/candidate_pass_tests.rs:955`) publishes through the handler, checks that the Kernel retained
+(`crates/daemon/src/candidate_pass_tests.rs:960`) publishes through the handler, checks that the Kernel retained
 exactly the published texts, truncates, rescores the live descriptors' evidence
 bytes at the same tip, and reproduces the pass's rows excluding
 `created_at_ms`.
@@ -766,7 +766,7 @@ carrying the key with every counter zero. Pass arm (#1167):
 sets the offer's consent off directly, publishes three windows with source
 capture on, and observes
 every counter at zero and no row; `the_route_consent_reaches_the_pass_through_a_transform`
-(`:1038`) binds the route against the opposite daemon value and shows the
+(`:1043`) binds the route against the opposite daemon value and shows the
 offer follows the route's frozen value. No statement trace exists, so the
 pass arm's "no table statement" clause rests on zero offers. The read arm
 lands with #1168.

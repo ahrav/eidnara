@@ -565,6 +565,7 @@ fn the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_coun
     });
     for decision in [
         ("oldest", TOPIC, EventKind::Other),
+        ("older", TOPIC, EventKind::Other),
         ("stale", TOPIC, EventKind::MarkStale),
         ("disputed", TOPIC, EventKind::MarkDisputed),
         ("contradicted", TOPIC, EventKind::Contradict),
@@ -584,7 +585,11 @@ fn the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_coun
         core.score(std::slice::from_ref(&descriptor)),
         CandidateCount::Completed
     );
-    assert_eq!(core.count("candidates_truncated"), 1);
+    assert_eq!(
+        core.count("candidates_truncated"),
+        2,
+        "the count is the decisions cut, not the passes that cut"
+    );
     let mut kept = core.rows_for(&descriptor.evidence_id);
     kept.sort();
     assert_eq!(
@@ -595,7 +600,7 @@ fn the_candidate_set_keeps_the_newest_eligible_decisions_of_the_project_and_coun
             "object-newest",
             "object-stale"
         ],
-        "explicit search hides the contradicted one, the oldest is cut, and the other project's is never read"
+        "explicit search hides the contradicted one, the two oldest are cut, and the other project's is never read"
     );
     assert_eq!(core.count("summaries_loaded"), 4);
 }

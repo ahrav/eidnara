@@ -410,6 +410,7 @@ fn candidate_summaries(
     let mut filter = ScopeFilter::new(project);
     let mut terms = stored_terms(kernel);
     let mut newest = NewestRows::new(bounds.decisions);
+    let mut matched = 0_u64;
     for (judged, row) in visible.rows.into_iter().enumerate() {
         if judged % ROWS_PER_CHECK == 0
             && let Some(end) = stop(budget)
@@ -420,13 +421,15 @@ fn candidate_summaries(
             .matches(row.scope_id.as_deref(), &mut terms)
             .map_err(failed)?
         {
+            matched += 1;
             newest.push(row);
         }
     }
-    let (rows, truncated) = newest.finish();
-    if truncated {
-        counts.add(Count::CandidatesTruncated, 1);
-    }
+    let (rows, _) = newest.finish();
+    counts.add(
+        Count::CandidatesTruncated,
+        matched.saturating_sub(rows.len() as u64),
+    );
     let ids: Vec<String> = rows.into_iter().map(|row| row.object.object_id).collect();
     let claims = ClaimFactBounds {
         max_claims: CLAIM_CHUNK,
