@@ -631,7 +631,7 @@ Open questions:
   `crates/memory-store/tests/contradiction_candidates.rs:403`), so a derived
   row carries none of the captured text, and the store has no sensitivity
   column. The descriptor it derives from publishes as `Sensitive` with
-  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:715-716`);
+  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:844-845`);
   whether the term counts, the score, and the evidence-to-decision link
   inherit that class is the open question, and a column set does not answer
   it. The egress half waits on #1168: the store's `candidates_for_decision`
