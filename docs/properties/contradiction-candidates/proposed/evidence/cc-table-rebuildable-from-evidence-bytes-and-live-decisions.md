@@ -12,7 +12,7 @@ bytes.
 - `crates/daemon/src/source_capture.rs:738` `keep_published` keeps the unit text
   the batch published; the Kernel retains exactly that text (exact retention
   refuses a text it would rewrite).
-- `crates/daemon/src/contradiction_candidates/pass.rs:229` `score_publication`
+- `crates/daemon/src/contradiction_candidates/pass.rs:233` `score_publication`
   is a pure function of the descriptors, the tip's candidate set, and the
   matcher digest, apart from `created_at_ms`.
 

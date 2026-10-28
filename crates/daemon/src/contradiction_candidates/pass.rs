@@ -5,7 +5,7 @@
 //! per pass. One pass runs per store; an offer while one runs is refused. The
 //! pass reads the Kernel and writes only the memory store.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -168,8 +168,11 @@ impl CandidatePass {
         let started = Instant::now();
         let counts = Arc::clone(&self.active.counts);
         // The texts move out; the charge stays with `settled` until the pass ends.
+        // Equal texts in one batch cite the same evidence row, so the pass scores each `evidence_id` once.
+        let mut cited = HashSet::new();
         let descriptors: Vec<Descriptor> = std::mem::take(&mut self.settled.units)
             .into_iter()
+            .filter(|(_, published)| cited.insert(published.evidence_id.clone()))
             .map(|(text, published)| Descriptor {
                 evidence_id: published.evidence_id,
                 text,

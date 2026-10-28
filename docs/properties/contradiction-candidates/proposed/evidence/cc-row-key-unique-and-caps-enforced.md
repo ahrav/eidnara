@@ -12,7 +12,7 @@ one row per key and bounded counts.
 - `crates/memory-store/src/contradiction_candidates.rs:230`
   `replace_candidates_for_descriptor` enforces K, upserts on the key, keeps the
   higher tip, and evicts past the project cap in one transaction.
-- `crates/daemon/src/contradiction_candidates/pass.rs:243` the pass cuts at M in
+- `crates/daemon/src/contradiction_candidates/pass.rs:247` the pass cuts at M in
   publish order, counts the cut `dropped_at_cap`, and skips the write for a
   descriptor that reaches the pass with no room, so its held rows stay.
 - `crates/daemon/src/harness_sources.rs:529` `Published.replayed`: a replayed

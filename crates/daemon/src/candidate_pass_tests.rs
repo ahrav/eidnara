@@ -1300,3 +1300,28 @@ async fn publish_latency_with_candidates_on_stays_within_the_off_baseline() {
         medians[0]
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn equal_texts_in_one_batch_cite_one_evidence_row_and_the_pass_scores_it_once() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    seed(
+        &kernel_of(&handler),
+        &binding,
+        &[("one", TOPIC, EventKind::Other)],
+    );
+    let text = format!("{TOPIC} repeated");
+    let mut native = window(0, &text);
+    native.extend(window(1, &text));
+    publish(&handler, &project, &native, true);
+    settle(&handler).await;
+    assert_eq!(
+        capture_report(&handler)["units_published"],
+        2,
+        "both units published"
+    );
+    let counts = counts(&handler);
+    assert_eq!(counts["descriptors_analyzed"], 1, "{counts}");
+    assert_eq!(counts["rows_written"], 1, "{counts}");
+    assert_eq!(rows(&store).len(), 1);
+}
