@@ -136,12 +136,12 @@ impl CandidatePass {
     pub(crate) async fn run(self) -> Count {
         let counts = Arc::clone(&self.active.counts);
         counts.add(Count::Admitted, 1);
-        // The deadline is fixed before the closure is queued, so a wait for a blocking thread counts against the budget.
-        let deadline = Instant::now() + counts.bounds().budget;
+        // The pass's start is fixed before the closure is queued, so a wait for a blocking thread counts against its budget and its wall time.
+        let started = Instant::now();
         let interrupt = Arc::new(AtomicBool::new(false));
         let raised = Arc::clone(&interrupt);
         let cancel = self.cancel.clone();
-        let mut join = tokio::task::spawn_blocking(move || self.finish(deadline, &interrupt));
+        let mut join = tokio::task::spawn_blocking(move || self.finish(started, &interrupt));
         let joined = tokio::select! {
             joined = &mut join => joined,
             () = cancel.cancelled() => {
@@ -164,8 +164,7 @@ impl CandidatePass {
         }
     }
 
-    fn finish(mut self, deadline: Instant, interrupt: &Arc<AtomicBool>) -> Count {
-        let started = Instant::now();
+    fn finish(mut self, started: Instant, interrupt: &Arc<AtomicBool>) -> Count {
         let counts = Arc::clone(&self.active.counts);
         // The texts move out; the charge stays with `settled` until the pass ends.
         // Equal texts in one batch cite the same evidence row, so the pass scores each `evidence_id` once.
@@ -186,7 +185,10 @@ impl CandidatePass {
                     hook();
                 }
             }
-            let budget = EvalBudget::new(Some(deadline), Arc::clone(interrupt));
+            let budget = EvalBudget::new(
+                Some(started + counts.bounds().budget),
+                Arc::clone(interrupt),
+            );
             match self.kernel.kernel_store() {
                 Ok(kernel) => score_publication(
                     &kernel,

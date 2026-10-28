@@ -708,7 +708,7 @@ drops the block whole, unknown fields are dropped, and fields are additive.
 | --- | --- | --- |
 | `offered`, `admitted`, `refused_pass_busy`, `refused_shutting_down` | unsigned integer | candidate passes offered after a publication, started, and refused by reason |
 | `store_unavailable`, `kernel_unavailable` | unsigned integer | passes or sweeps that could not read or write the memory store, and passes that could not read the Kernel |
-| `descriptors_analyzed`, `descriptors_refused_oversize`, `descriptors_unscored` | unsigned integer | descriptors scored, refused whole past the analyzer bound, and left unscored by a deadline |
+| `descriptors_analyzed`, `descriptors_refused_oversize`, `descriptors_unscored` | unsigned integer | descriptors scored, refused whole past the analyzer bound, and left unscored because the pass ended before scoring them; the pass's end counter (`deadline`, `budget_exhausted`, `kernel_unavailable`, `store_unavailable`) names the reason |
 | `candidates_truncated`, `summaries_loaded`, `summaries_cut_bytes`, `summaries_unscorable` | unsigned integer | candidate decisions dropped at the set bound, decision summaries loaded, summary bytes cut by the load budget, and summaries the analyzer refused |
 | `budget_exhausted`, `rows_written`, `dropped_at_cap` | unsigned integer | passes the daemon's cancellation stopped, rows written, and rows evicted at the per-project cap or cut at the per-pass cap |
 | `sweep_examined`, `sweep_dropped`, `sweep_skipped_kernel_unavailable` | unsigned integer | rows the sweep read, rows it deleted as no longer servable, and sweep runs skipped because the Kernel was not ready or a Kernel read failed |

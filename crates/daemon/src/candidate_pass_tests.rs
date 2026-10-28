@@ -520,6 +520,10 @@ fn a_pass_queued_past_its_budget_ends_at_the_deadline_it_was_admitted_under() {
         assert_eq!(counts["descriptors_unscored"], 1, "{counts}");
         assert_eq!(counts["active"], 0, "{counts}");
         assert!(
+            counts["pass_ms_last"].as_u64().unwrap() >= 600,
+            "the pass's wall time runs from its admission: {counts}"
+        );
+        assert!(
             rows(&store).is_empty(),
             "a pass past its budget writes nothing"
         );
@@ -1324,4 +1328,42 @@ async fn equal_texts_in_one_batch_cite_one_evidence_row_and_the_pass_scores_it_o
     assert_eq!(counts["descriptors_analyzed"], 1, "{counts}");
     assert_eq!(counts["rows_written"], 1, "{counts}");
     assert_eq!(rows(&store).len(), 1);
+}
+
+#[test]
+fn a_decision_row_that_disagrees_with_its_registry_row_ends_the_pass_and_keeps_the_held_rows() {
+    let core = Core::open(PassBounds::default());
+    seed(
+        &core.kernel,
+        &core.project,
+        &[
+            ("one", TOPIC, EventKind::Other),
+            ("two", TOPIC, EventKind::Other),
+        ],
+    );
+    let descriptor = core.descriptor("d0", TOPIC);
+    assert_eq!(
+        core.score(std::slice::from_ref(&descriptor)),
+        CandidateCount::Completed
+    );
+    let held = core.rows_for(&descriptor.evidence_id);
+    assert_eq!(held.len(), 2);
+    rusqlite::Connection::open(core.dir.path().join("kernel").join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE decisions SET invalidated_commit_seq=created_commit_seq+1 WHERE object_id='object-two'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        core.score(std::slice::from_ref(&descriptor)),
+        CandidateCount::KernelUnavailable
+    );
+    assert_eq!(core.count("kernel_unavailable"), 1);
+    assert_eq!(core.count("descriptors_unscored"), 1);
+    assert_eq!(
+        core.rows_for(&descriptor.evidence_id),
+        held,
+        "the pass writes nothing over the held rows"
+    );
 }

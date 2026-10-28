@@ -21,9 +21,9 @@ publication wait on them.
   the same tracked task after `run_settled` returns, and only when the route's
   frozen flag and a memory store are present.
 - `crates/daemon/src/contradiction_candidates/pass.rs:140` `run` fixes the
-  pass's deadline from its admission, before `spawn_blocking`, and `finish`
-  (`:167`) builds the pass's own `EvalBudget` from that deadline and the
-  daemon cancel.
+  pass's start at its admission, before `spawn_blocking`, and `finish`
+  (`:167`) builds the pass's own `EvalBudget` from that start plus the budget
+  (`:188-191`) and the daemon cancel.
 
 ## Failure scenario
 
