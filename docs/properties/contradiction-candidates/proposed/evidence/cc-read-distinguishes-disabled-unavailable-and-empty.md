@@ -22,7 +22,7 @@ differ from an empty page.
   through `module_authority_for_route_within` and
   `candidates_for_decision_within` under the read's deadline, so a held
   connection answers `store_unavailable` at the bound
-  (`crates/daemon/src/candidate_pass_tests.rs:2318`).
+  (`crates/daemon/src/candidate_pass_tests.rs:2268`, asserted at `:2301-2305`).
 - `docs/host-wire-protocol.md:833` documents the three terminals, the kernel
   states, and the empty page.
 

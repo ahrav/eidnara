@@ -6,7 +6,7 @@ HEAD `3a3b916b7`. Surface S7.
 
 Plan R6: "An owner observational read lists candidates per decision." P3
 #1145 U4 uses the observational route family. The doc's
-search-lifecycle paragraph (`host-wire-protocol.md:808`, "sends them
+search-lifecycle paragraph (`host-wire-protocol.md:837`, "sends them
 over a route bound with harness `cli`") and the `review.*` tests describe
 routes bound with harness `cli`. Lens: security
 boundaries; lifecycle.

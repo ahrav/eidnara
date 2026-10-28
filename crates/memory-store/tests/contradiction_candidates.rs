@@ -570,12 +570,22 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
             .is_err(),
         "one byte past the byte bound is refused before any component is parsed"
     );
-    for outside in ["10001.5.61", "7500.-1.61", "7500.5.01", "7500.5.617f"] {
+    let secret_hex = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678"
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    for outside in [
+        "10001.5.61",
+        "7500.-1.61",
+        "7500.5.01",
+        "7500.5.617f",
+        &format!("7500.5.{secret_hex}"),
+    ] {
         assert!(
             store
                 .candidates_for_decision(PROJECT, "decision", Some(outside), 4)
                 .is_err(),
-            "{outside}: a score over 10000, a negative time, or a control character in the id names a row no table holds"
+            "{outside}: a score over 10000, a negative time, a control character in the id, or an id the scanner detects names a row no table holds"
         );
     }
 }

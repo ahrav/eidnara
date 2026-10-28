@@ -488,7 +488,7 @@ during the scan writes no row (`crates/daemon/src/contradiction_candidates/pass.
 and before each write the pass checks the Kernel incarnation it read at
 (`pass.rs:357-362`); the write's wait for the store connection ends at the
 pass deadline (`pass.rs:394`,
-`crates/memory-store/src/contradiction_candidates.rs:510`).
+`crates/memory-store/src/contradiction_candidates.rs:509`).
 Guarantee: When the pass's budget is exhausted or interrupted, the rows
 written equal exactly the rows a complete pass would have written for a
 prefix of the publication's descriptors in publish order; a descriptor whose
@@ -538,7 +538,7 @@ evictions at caps of 2 to 4096, and as-read deletes against a reference model
 of the rules, checking every row, the returned counts, rowid stability, and
 the gauge after each step, and pages, cursors across writes, and the sweep
 every seventh step. The store
-(`crates/memory-store/src/contradiction_candidates.rs:494`) enforces K and the
+(`crates/memory-store/src/contradiction_candidates.rs:493`) enforces K and the
 project cap in the write transaction; the daemon owns the values. Pass arm
 (#1167): `the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows`
 (`crates/daemon/src/candidate_pass_tests.rs:868`) scores K + 1 overlaps into K rows, cuts a pass at M in publish
@@ -843,7 +843,7 @@ constructed: a failing authority lookup (dependency fault F18 has no seam).
 Guarantee: after the scope, Kernel-readiness, and body checks, a route whose
 frozen flag is false, or a root whose memories authority is not MODULE,
 answers `disabled` (`crates/daemon/src/contradiction_candidates/read.rs:188`,
-`:184`), and the page read judges the route's authority again in the
+`:208`), and the page read judges the route's authority again in the
 connection that reads the page, so an authority that drains or moves after
 the entry check answers `disabled` (`:238`, `:255`;
 `crates/daemon/src/candidate_pass_tests.rs:2175`); an uninstalled Memory
