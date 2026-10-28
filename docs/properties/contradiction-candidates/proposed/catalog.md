@@ -39,7 +39,7 @@ for the active records, [certificate.md](certificate.md),
 | Slug | Surface | Type | Semantics | Reachability | Status |
 | --- | --- | --- | --- | --- | --- |
 | cc-scorer-output-deterministic-under-contract-version | S-A | safety | always | explicit-config-only | active, exercised yes |
-| cc-oversize-text-refused-whole-never-truncated | S-A | safety | always | explicit-config-only | active, exercised partial (scorer arm) |
+| cc-oversize-text-refused-whole-never-truncated | S-A | safety | always | explicit-config-only | active, exercised partial (result-equivalence clause unasserted) |
 | cc-case-fold-applied-identically-to-both-sides | S-A | safety | always | explicit-config-only | active, exercised yes |
 | cc-pass-starts-only-after-publication-job-terminal | S-B | safety | always | explicit-config-only | active, exercised partial (#1167) |
 | cc-passes-in-flight-bounded-and-overflow-counted | S-B | safety | always | explicit-config-only | active, exercised yes (#1167) |
@@ -161,7 +161,7 @@ Reachability: explicit-config-only - the candidate pass calls the scorer
 publication it scores, and the pass runs only under the route's frozen
 `contradiction_candidates.enabled` (#1167).
 Status: active
-Exercised: partial - scorer arm only, and one Check clause unasserted.
+Exercised: partial - scorer and pass arms, one Check clause unasserted.
 `an_oversize_descriptor_is_refused_whole_and_an_exact_fit_is_analyzed`
 (`crates/daemon/tests/contradiction_candidates_scorer.rs:227-244`) asserts
 `DESCRIPTOR_BOUNDS` is 65536 bytes
@@ -177,9 +177,13 @@ unscorable while an 8192-byte summary and a plain one still score;
 .. }`, distinct from a refusal. The clause that every other summary's
 result equals its result without the unscorable summary present has no
 assertion: `:243-274` checks the kept ids only, and no test compares the
-result against a run without that summary. The pass arm, zero rows and a
-counted `descriptors_refused_oversize` for a refused descriptor, lands with
-#1167.
+result against a run without that summary. Pass arm (#1167):
+`an_oversize_descriptor_writes_nothing_and_an_unscorable_summary_leaves_the_others`
+(`crates/daemon/src/candidate_pass_tests.rs:784`) runs `score_publication`
+with a 65537-byte descriptor beside a scorable one and observes zero rows for
+it, `descriptors_refused_oversize` = 1, and `summaries_unscorable` = 2 for an
+over-bound and a floor-emptied summary while the scorable descriptor keeps
+its row.
 Guarantee: a descriptor over `DESCRIPTOR_BOUNDS` is refused whole:
 `DescriptorTerms::new` and `score_descriptor` return the analyzer's
 `LexicalRefusal` and no candidate; a summary over `SUMMARY_BOUNDS`, or with
@@ -343,7 +347,7 @@ under an `EvalBudget` whose origin is the pass start and whose interrupt is the
 daemon cancel, never the job's budget; the response bytes were handed to the
 wire writer before the `AfterResponse` closure ran (`lib.rs:9275-9319`).
 Check: `always` - with the `before_publish` or `between_screen_and_commit`
-test hook (`source_capture.rs:980, 908`) blocked, the candidate table has
+test hook (`source_capture.rs:980, 1040`) blocked, the candidate table has
 zero rows and no pass is offered; after the hook releases and the job
 returns, the pass runs; the semantics is `always` because every publication
 must respect the ordering.
@@ -474,12 +478,16 @@ counts reached before the stop;
 `a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_rows`
 (`:1464`) restores the Kernel after the pass's last read and observes the pass
 end `kernel_unavailable` with every descriptor unscored and the held rows in
-place. The pass
+place; `a_write_behind_a_held_store_connection_ends_at_the_pass_deadline`
+(`:1514`) holds the store's connection from another thread past the budget
+and observes the pass end `deadline` at its write with no row. The pass
 scores every descriptor in one scan of the loaded summaries, then writes each
 descriptor's rows in publish order, one store write per descriptor; a stop
 during the scan writes no row (`crates/daemon/src/contradiction_candidates/pass.rs:248`),
 and before each write the pass checks the Kernel incarnation it read at
-(`pass.rs:357-362`).
+(`pass.rs:357-362`); the write's wait for the store connection ends at the
+pass deadline (`pass.rs:394`,
+`crates/memory-store/src/contradiction_candidates.rs:498`).
 Guarantee: When the pass's budget is exhausted or interrupted, the rows
 written equal exactly the rows a complete pass would have written for a
 prefix of the publication's descriptors in publish order; a descriptor whose
@@ -529,7 +537,7 @@ evictions at caps of 2 to 4096, and as-read deletes against a reference model
 of the rules, checking every row, the returned counts, rowid stability, and
 the gauge after each step, and pages, cursors across writes, and the sweep
 every seventh step. The store
-(`crates/memory-store/src/contradiction_candidates.rs:480`) enforces K and the
+(`crates/memory-store/src/contradiction_candidates.rs:482`) enforces K and the
 project cap in the write transaction; the daemon owns the values. Pass arm
 (#1167): `the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows`
 (`crates/daemon/src/candidate_pass_tests.rs:868`) scores K + 1 overlaps into K rows, cuts a pass at M in publish

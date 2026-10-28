@@ -143,6 +143,7 @@ allowlist against `docs/host-wire-protocol.md`), and
 | `a_pass_stopped_during_the_scan_counts_the_summaries_the_analyzer_refused_before_the_stop` | `:1404` | a stop at the check after 256 summaries ends `budget_exhausted` with the three summaries the analyzer refused before it counted `summaries_unscorable` | partial result | unaudited |
 | `a_pass_stopped_between_payload_chunks_counts_the_summaries_already_loaded` | `:1438` | a stop before the second payload chunk ends `budget_exhausted` with the first chunk counted `summaries_loaded` | partial result | unaudited |
 | `a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_rows` | `:1463` | a Kernel restore after the pass's last read ends it `kernel_unavailable` before any write: every descriptor unscored, held rows in place | partial result | unaudited |
+| `a_write_behind_a_held_store_connection_ends_at_the_pass_deadline` | `:1513` | a store connection another user holds past the budget ends the pass `deadline` at the write, in under five seconds, with no row | partial result | unaudited |
 
 ## S-F, S-H
 

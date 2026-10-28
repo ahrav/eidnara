@@ -3950,6 +3950,55 @@ fn a_replay_whose_descriptor_cites_no_evidence_row_is_refused_as_corrupt() {
     assert_eq!(corpus.tip(), tip, "a refused replay commits nothing");
 }
 
+/// A descriptor receipt whose observation cites an evidence row other than the one its stored detail names is the same anomaly: the replay refuses instead of scoring the text under the other evidence key.
+#[test]
+fn a_replay_whose_descriptor_cites_another_units_evidence_is_refused_as_corrupt() {
+    use daemon::harness_sources::publish_batch;
+    use kernel::KernelError;
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let unit = pi_text_unit("pi-u1", "a replay under another citation");
+    let other = pi_text_unit("pi-u2", "the other unit's text");
+    let published = publisher.publish(&unit, NOW).unwrap();
+    let other_published = publisher.publish(&other, NOW).unwrap();
+    assert_ne!(published.evidence_id, other_published.evidence_id);
+    let conn = Connection::open(&corpus.kernel_db).unwrap();
+    let changed = conn
+        .execute(
+            "UPDATE observations SET evidence_id=?1 WHERE object_id=?2",
+            rusqlite::params![other_published.evidence_id, published.object_id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    drop(conn);
+    let tip = corpus.tip();
+    let refused = publisher.publish(&unit, NOW).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            PublishError::Kernel {
+                error: KernelError::CorruptCanonicalRow,
+                evidence: None,
+            }
+        ),
+        "{refused:?}"
+    );
+    let refusal = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &unit)],
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.error, KernelError::CorruptCanonicalRow);
+    assert_eq!(refusal.unit, Some(0));
+    assert_eq!(corpus.tip(), tip, "a refused replay commits nothing");
+    assert!(publisher.publish(&other, NOW).unwrap().replayed);
+}
+
 /// Rewrites the stored request digest of `unit`'s `kind` receipt (`source-descriptor` or `source-evidence`) to `digest`, as a store written before the outcome record holds it.
 fn store_receipt_as(
     corpus: &Corpus,

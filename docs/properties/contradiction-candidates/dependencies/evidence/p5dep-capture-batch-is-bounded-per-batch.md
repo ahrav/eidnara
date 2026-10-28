@@ -44,7 +44,7 @@ descriptors a job publishes. Lens: resource boundaries; C9; D3.
   `publish_screened(publisher, &units, now, Some(&self.budget))`.
 - `source_capture.rs:3` header: "publishes at most one screened batch under a
   5 s budget" (D3: the documents batch is a second `publish_screened` call).
-- Tests: `source_capture_tests.rs:437` (33 units -> 32 then 1); `:2240`
+- Tests: `source_capture_tests.rs:451` (33 units -> 32 then 1); `:2240`
   `a_refused_window_still_captures_its_documents`; `:2259`
   `a_documents_text_is_charged_with_its_window`.
 

@@ -38,7 +38,7 @@ never wait on the kernel or the job." Lens: concurrency; C9.
 - `source_capture.rs:665-691` `run`: `spawn_blocking(self.publish())`; the
   handler's task is not awaited by the request path (spawned through
   `admission.spawn`).
-- Tests: `source_capture_tests.rs:330`
+- Tests: `source_capture_tests.rs:344`
   `the_response_is_identical_whatever_capture_and_the_kernel_are_doing`;
   `:938` `capture_latency_measurement`; `:298`
   `capture_off_memory_off_or_a_subagent_session_runs_no_adapter`.

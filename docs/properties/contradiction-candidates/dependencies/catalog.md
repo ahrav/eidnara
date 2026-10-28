@@ -534,10 +534,10 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - `source_capture_enabled` defaults
 `false` (`config.rs:154`); with it off, `offer` is never reached
-(`source_capture.rs:3`, test `source_capture_tests.rs:298`).
+(`source_capture.rs:3`, test `source_capture_tests.rs:312`).
 Status: active
 Exercised: yes - `the_response_is_identical_whatever_capture_and_the_kernel_are_doing`
-(`source_capture_tests.rs:330`) and `capture_latency_measurement` (`:940`).
+(`source_capture_tests.rs:344`) and `capture_latency_measurement` (`:940`).
 Guarantee: the transform response is settled (encoded) before the
 synchronous handoff runs; the handoff (`into_job` with `try_acquire_owned`,
 `admission.spawn`) performs no await, no kernel call, and no waiting lock
@@ -608,7 +608,7 @@ Type: safety
 Reachability: explicit-config-only - as above.
 Status: active
 Exercised: partial - `a_33_unit_window_publishes_32_and_the_next_pass_publishes_the_deferred_one`
-(`source_capture_tests.rs:437`) for the unit count; byte-bound deferral and
+(`source_capture_tests.rs:451`) for the unit count; byte-bound deferral and
 the two-batch shape per job are not asserted together.
 Guarantee: each screened batch admits at most `MAX_SOURCE_BATCH_UNITS` (32)
 units and `MAX_SOURCE_BATCH_BYTES` (64 KiB) of text; a unit over

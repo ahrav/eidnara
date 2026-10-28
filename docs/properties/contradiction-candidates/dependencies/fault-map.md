@@ -16,7 +16,7 @@ today, which records need it, and the cheapest valid oracle.
 | F7 parent interrupt on a linked budget | yes | `EvalBudget::linked` then `parent.cancel()` |
 | F8 busy publication slot | yes | hold `capture.slot.try_acquire_owned()` in the test (`source_capture.rs:1663`) |
 | F9 panic inside the capture closure | `cfg(test)` hooks | `before_publish`, `between_screen_and_commit` (`source_capture.rs:804`, `:909`) |
-| F10 kernel unavailable or starting during a pass | yes | `KernelOpenCoordinator` state in daemon tests (`source_capture_tests.rs:473`) |
+| F10 kernel unavailable or starting during a pass | yes | `KernelOpenCoordinator` state in daemon tests (`source_capture_tests.rs:487`) |
 | F11 capture budget exhausted | yes | advance past `CAPTURE_BUDGET` or cancel (`:1081`) |
 | F12 baseline text change | yes | a frozen prior baseline fixture (`baseline.rs:486-489`) |
 | F13 clock advanced past `retain_until` | yes | `expire_harness_captures(now)` takes `now` as an argument |
