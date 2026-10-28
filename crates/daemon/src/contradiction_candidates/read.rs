@@ -39,9 +39,9 @@ struct CandidatesRequest {
     limit: Option<usize>,
 }
 
-/// An absent or `null` limit is `None`; a non-negative integer, including one
-/// serde reads as a float past `u64`, saturates into `usize`; any other
-/// spelling is the deserializer's error.
+/// An absent or `null` limit is `None`; a non-negative integer, including an
+/// integral float spelling such as `2.0` or one past `u64`, is its value
+/// saturated into `usize`; any other spelling is the deserializer's error.
 fn saturating_limit<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<usize>, D::Error> {
@@ -55,7 +55,8 @@ fn saturating_limit<'de, D: serde::Deserializer<'de>>(
         return Ok(Some(usize::try_from(limit).unwrap_or(usize::MAX)));
     }
     match number.as_f64() {
-        Some(limit) if limit.is_sign_positive() && limit.fract() == 0.0 => Ok(Some(usize::MAX)),
+        // `as` saturates a float past the machine word at `usize::MAX`.
+        Some(limit) if limit >= 0.0 && limit.fract() == 0.0 => Ok(Some(limit as usize)),
         _ => Err(serde::de::Error::custom("limit is not an unsigned integer")),
     }
 }

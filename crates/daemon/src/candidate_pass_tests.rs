@@ -1942,6 +1942,15 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
         first,
         "a limit past the machine word clamps to the page bound"
     );
+    let two_as_float: Value =
+        serde_json::from_str(r#"{"decision_object_id":"object-one","limit":2.0}"#).unwrap();
+    assert_eq!(
+        ask(two_as_float).await.unwrap(),
+        ask(json!({ "decision_object_id": "object-one", "limit": 2 }))
+            .await
+            .unwrap(),
+        "an integral float spelling is the integer it names"
+    );
 
     kernel
         .commit(intent("supersede-replaced"), |envelope| {
