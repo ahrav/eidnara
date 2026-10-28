@@ -1,0 +1,24 @@
+use kernel::{ClaimStanding, Disposition, ServedStanding, SurfaceVisibility};
+
+use crate::canonical_memory::MEMORY_DOMAIN_ID;
+
+/// `scope_names_project` is the caller's
+/// [`kernel::ProjectScope::names_project`] verdict on the decision's scope.
+pub fn eligible(standing: &ClaimStanding, scope_names_project: bool) -> bool {
+    let ServedStanding::Served(served) = &standing.served else {
+        return false;
+    };
+    standing.object.domain_id == MEMORY_DOMAIN_ID
+        && scope_names_project
+        && served.explicit_search != SurfaceVisibility::Hidden
+        && standing.object.superseded_by.is_none()
+        && standing.own_admission.as_ref().is_some_and(|own| {
+            !matches!(
+                own.disposition,
+                Disposition::Superseded
+                    | Disposition::Contradicted
+                    | Disposition::Rejected
+                    | Disposition::Quarantined
+            )
+        })
+}

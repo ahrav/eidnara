@@ -24,8 +24,8 @@ issues, no incident history, no git-history lens.
 
 Assumption (inferred): "default build" means the daemon built without the
 `test-support` feature and run with `DaemonConfig::default()`
-(`crates/daemon/src/config.rs:150-158`): `memory_enabled: true`,
-`source_capture_enabled: false`.
+(`crates/daemon/src/config.rs:150-178`): `memory_enabled: true`,
+`source_capture_enabled: false`, `contradiction_candidates_enabled: false`.
 
 Every documented guarantee below is a claim under test. Every `file:line`
 was read at HEAD by this pass; drift from `context.md` or the plan is noted in
@@ -287,7 +287,7 @@ must keep them (`admission.rs:3543-3550`).
 Required faults and enabling state: scopes with no term, with a non-exact
 operator, with a redacted value; a redacted filter value; a NULL scope row.
 Confidence: high - [evidence](evidence/p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict.md).
-Read `admission.rs:3626-3640` (the `WHERE` tail) and `project.rs:199-212`.
+Read `admission.rs:3626-3640` (the `WHERE` tail) and `project.rs:207-220`.
 Existing check: `a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain`.
 Status unaudited.
 Impact: a P5 pass that trusts the Kernel prefilter alone (without the daemon
@@ -296,7 +296,7 @@ and rows with no scope (D5); a prefilter that dropped uncertain rows would
 hide same-project decisions from the candidate set.
 Open questions:
 - D5: the daemon `ScopeFilter::matches` returns `false` for a `None` scope
-  (`project.rs:204-206`) while the SQL keeps NULL scopes (`:3559`). Is a
+  (`project.rs:212-214`) while the SQL keeps NULL scopes (`admission.rs:3640`). Is a
   decision with no scope ever written in the `memory` domain at HEAD?
   (partial: `ProjectBinding::scope_spec` always attaches a scope for
   route-written rows; other writers not audited)
@@ -400,11 +400,20 @@ Fault/timing angle: none.
 Required faults and enabling state: `max_claims + 1` ids; a budget already
 exhausted at call time; an id of 513 bytes.
 Confidence: high - [evidence](evidence/p5dep-claim-fact-bounds-are-refused-before-any-row-is-read.md).
-Read `claim_facts.rs:230-304`: `limit.run` checks first (`:238`),
-`check_claim_bounds` (`:258`) precedes `reader_with_limit` (`:261`).
+Read `claim_facts.rs:240-360`: `limit.run` checks first (`:248`),
+`check_claim_bounds` (`:309`) precedes `reader_with_limit` (`:313`).
 Existing check: `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`,
 `an_exhausted_budget_is_refused_before_the_projection_is_read`. Status
-unaudited.
+unaudited. Re-exercised by #1166: the candidate sweep reads claim standing
+through `claim_standing_at_within_budget` (`claim_facts.rs:270`), which
+applies the same id checks (`check_claim_ids`, `:343`) inside `limit.run`
+before its reader acquisition (`:284`), in chunks of 64 under
+`max_claims` = 64, so `TooManyClaims` cannot arise from it;
+`every_claim_chunk_of_a_page_is_read`
+(`crates/daemon/tests/contradiction_candidates_sweep.rs:985`) reads 66
+decisions in two chunks, and
+`a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land`
+(`:765`) shows a chunk refused as `NotADecision` keeps that chunk's rows.
 Impact: for P5 R2 this bound caps the ids per call but, per D1, the call
 returns no summary text; the plan's data path through this API does not
 exist at HEAD.
@@ -454,7 +463,7 @@ Required faults and enabling state: a held reader pool
 inside the statement; a parent interrupt raised mid-read.
 Confidence: medium - [evidence](evidence/p5dep-budget-exhaustion-stops-a-budgeted-kernel-read.md).
 Read `slice/read.rs:134`, `:241`, `open.rs:565-593`, `:1654-1664`,
-`:1693-1722`, `claim_facts.rs:238`, `:261`, `:274`, `:350`, `:357`. The
+`:1693-1722`, `claim_facts.rs:248`, `:313`, `:326`, `:545`, `:552`. The
 statement-interrupt path for claim facts is read in code but not observed by
 a test this pass found.
 Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget`,
@@ -516,7 +525,7 @@ Exercised: yes - `the_response_is_identical_whatever_capture_and_the_kernel_are_
 Guarantee: the transform response is settled (encoded) before the
 synchronous handoff runs; the handoff (`into_job` with `try_acquire_owned`,
 `admission.spawn`) performs no await, no kernel call, and no waiting lock
-(`lib.rs:9228-9235`, `source_capture.rs:602-605`); the job body runs on a
+(`lib.rs:9228-9235`, `source_capture.rs:604-607`); the job body runs on a
 spawned task. `AfterResponse` is detached from the outcome (`lib.rs:13470`),
 `settle_prepared` runs (`:13477`), and only on a `RequestOutcome::Response`
 is `after.run()` called (`:13479-13481`), which takes the slot and spawns the
@@ -545,10 +554,10 @@ Reachability: explicit-config-only - as above.
 Status: active
 Exercised: yes - `shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slot`
 (`source_capture_tests.rs:674`), `a_settled_report_counts_the_job_that_released_the_slot`
-(`source_capture.rs:1588`).
+(`source_capture.rs:1720`).
 Guarantee: the daemon holds one publication slot (`Semaphore::new(1)`,
-`source_capture.rs:266`); `into_job` takes it with `try_acquire_owned` or
-refuses as `RefusedQueueFull` without waiting (`:602-605`); the permit lives
+`source_capture.rs:268`); `into_job` takes it with `try_acquire_owned` or
+refuses as `RefusedQueueFull` without waiting (`:604-607`); the permit lives
 in `ActiveSlot` inside the job and is released, with the `Active` gauge
 decremented, when the job's closure returns or unwinds (`:420-431`,
 `:667`).
@@ -592,7 +601,7 @@ text sums past 64 KiB; a 64 KiB + 1 unit; a pass with both a window and
 pending document reads.
 Confidence: high - [evidence](evidence/p5dep-capture-batch-is-bounded-per-batch.md).
 Read `harness_sources.rs:612-616`, `:1557`, `:1602-1603`;
-`source_capture.rs:832-840`, `:904-980`.
+`source_capture.rs:834-842`, `:906-982`.
 Existing check: the 33-unit test; `a_refused_window_still_captures_its_documents`
 (`:2227`) shows the documents batch is independent. Status unaudited.
 Impact: the P5 trigger's per-pass input is at most 32 window descriptors plus
@@ -615,7 +624,7 @@ Guarantee: every `CaptureJob::run` returns exactly one terminal `Count`
 (`Completed`, `Deadline`, `Discarded`, `SessionInvalidated`,
 `KernelUnavailable`, `KernelError`, `WorkerPanicked`, `RefusedResidentShort`)
 and increments exactly that counter once; the counter and log vocabulary is
-the closed `counts!` list (`source_capture.rs:76-114`) and carries no unit
+the closed `counts!` list (`source_capture.rs:85-129`) and carries no unit
 text, path, identity, or digest. No hook runs after publish outside
 `cfg(test)`; the returned `Count` is the only completion signal.
 Check: `always` - for every job, `sum(terminal counters after) -
@@ -714,7 +723,12 @@ refusal on one capture of a multi-capture page.
 Confidence: high - [evidence](evidence/p5dep-harness-sweep-retires-owners-before-evidence.md).
 Read `local_file.rs:64-70`, `:245-310`, `:453-501`, `:514-565`;
 `slice/write.rs:569-577`, `:627-666`.
-Existing check: the three tests above. Status unaudited.
+Existing check: the three tests above. Status unaudited. Re-exercised by
+#1166: `harness_capture_evidence_expires_at_its_deadline_and_replay_never_renews_it`
+(`crates/daemon/tests/harness_sources.rs:3338`) passes at the #1166 tip and
+observes the descriptor and evidence retired in one commit, descriptor
+first; the candidate sweep keys a descriptor's liveness on that evidence
+row, so it drops the rows of a swept, uncited capture.
 Impact: P5 R4's sweep drops rows "whose descriptor is retired"; P4 C6 refuses
 a `dispute` whose evidence is not live as `not_found`. A candidate older than
 30 days cannot be confirmed once its evidence is retired.
@@ -765,9 +779,15 @@ retired, so P5 R4's "descriptor retired" sweep rule and P4's "evidence live"
 confirm rule diverge for a confirmed candidate. The P5 design must decide
 which row its sweep keys on.
 Open questions:
-- Does P5 R4 intend to drop a candidate whose descriptor is retired even when
-  its evidence is live because the candidate was confirmed? (needs human
-  input)
+- Resolved by #1166: the candidate sweep keys on the evidence row, so a
+  confirmed candidate whose evidence a dispute citation keeps live is kept
+  while its descriptor is retired, matching P4's confirm check, for as long
+  as the row is younger than `MAX_CANDIDATE_AGE` (30 days); past that age
+  the sweep drops it whatever its evidence says.
+  `harness_capture_expiry_keeps_held_and_cited_evidence_and_drains_in_pages`
+  (`crates/daemon/tests/harness_sources.rs:3482`) re-exercises the kept
+  evidence with an observation citation at the #1166 tip; a decision-event
+  citation is still unexercised.
 
 ### p5dep-review-reads-parse-strict-bodies-after-the-envelope
 
@@ -803,11 +823,11 @@ Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
 fields, would break the family's stated order. `review.use_outcome` (#1157)
 joined the family after `3a3b916b7`: it reads the Kernel alone and has no
-`disabled` terminal (`host-wire-protocol.md:798`); this record does not
+`disabled` terminal (`host-wire-protocol.md:827`); this record does not
 cover it.
 Open questions:
 - D6: `kind` is stripped as an envelope key (`mod.rs:461`) but the doc at
-  `host-wire-protocol.md:768` names three envelope fields. Is a body field
+  `host-wire-protocol.md:797` names three envelope fields. Is a body field
   `kind` meant to be accepted silently? (needs human input)
 
 ### p5dep-observational-routes-read-and-take-no-background-part
@@ -817,7 +837,7 @@ Reachability: default-production - any route opened with harness `cli`.
 Status: active
 Exercised: yes - `memory_reviewer_wire.rs:260`
 `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`;
-`lib.rs:35508` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
+`lib.rs:35900` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
 Guarantee: a binding whose harness is `OBSERVATIONAL_HARNESS` (`"cli"`)
 authorizes and resolves its project like any route and can call the routed
 read family with the same answers, and is excluded from

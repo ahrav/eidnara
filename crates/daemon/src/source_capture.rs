@@ -80,6 +80,8 @@ macro_rules! counts {
     };
 }
 
+pub(crate) use counts;
+
 counts! {
     Admitted => "admitted",
     RefusedQueueFull => "refused_queue_full",

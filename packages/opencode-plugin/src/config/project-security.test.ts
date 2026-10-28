@@ -96,6 +96,27 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
+    it("strips contradiction_candidates from project config in either direction", () => {
+        for (const enabled of [true, false]) {
+            const raw: Record<string, unknown> = {
+                protected_tags: 3,
+                contradiction_candidates: { enabled },
+            };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw).toEqual({ protected_tags: 3 });
+            expect(warnings).toEqual([
+                expect.stringContaining("Ignoring contradiction_candidates from project config"),
+            ]);
+        }
+        for (const candidates of [{}, true, null]) {
+            const raw: Record<string, unknown> = { contradiction_candidates: candidates };
+            expect(stripUnsafeProjectConfigFields(raw)).toEqual([]);
+            expect(raw).toEqual({});
+        }
+    });
+
     it("strips sqlite.* from project config (resource-exhaustion vector)", () => {
         const raw: Record<string, unknown> = {
             sqlite: { cache_size_mb: 999_999, mmap_size_mb: 999_999 },

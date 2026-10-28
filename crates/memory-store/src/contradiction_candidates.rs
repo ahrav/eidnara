@@ -103,14 +103,6 @@ pub struct CandidatePage {
     pub next: Option<String>,
 }
 
-/// A row's key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CandidateKey<'a> {
-    pub project_digest: &'a str,
-    pub evidence_id: &'a str,
-    pub decision_object_id: &'a str,
-}
-
 fn invalid(message: &str) -> MemoryStoreError {
     MemoryStoreError::Serde(format!("contradiction candidate: {message}"))
 }
@@ -710,15 +702,18 @@ impl MemoryStore {
             .map_err(MemoryStoreError::from)
     }
 
-    /// Deletes the rows `keys` name in one transaction and answers how many existed.
-    /// Each named key's row is deleted whatever values it holds now, so a caller
-    /// that judged a row before a rewrite of its key deletes the rewritten row.
+    /// Deletes each of `rows` whose stored row still holds the values the
+    /// caller read: a row rewritten since then keeps its newer values and
+    /// stays. Answers how many rows were deleted.
     ///
     /// # Errors
     ///
     /// Storage errors.
-    pub fn delete_candidates(&self, keys: &[CandidateKey<'_>]) -> Result<usize, MemoryStoreError> {
-        if keys.is_empty() {
+    pub fn delete_candidates_as_read(
+        &self,
+        rows: &[&StoredCandidate],
+    ) -> Result<usize, MemoryStoreError> {
+        if rows.is_empty() {
             return Ok(0);
         }
         PreparedWrite::new(DurableWriteFamily::ContradictionCandidates).execute(&self.inner, |tx| {
@@ -728,29 +723,44 @@ impl MemoryStore {
                 "SELECT rowid, ",
                 row_bytes!(),
                 " FROM contradiction_candidates
-                  WHERE project_digest=?1 AND evidence_id=?2 AND decision_object_id=?3"
+                  WHERE project_digest=?1 AND evidence_id=?2 AND decision_object_id=?3
+                    AND created_at_ms=?4 AND publish_tip=?5 AND kernel_incarnation_id=?6
+                    AND matcher_digest=?7 AND decision_id=?8 AND matched_terms=?9
+                    AND decision_terms=?10 AND score_bp=?11"
             ))?;
             let mut delete = tx.prepare_cached(DELETE_ROWID)?;
-            for key in keys {
+            for row in rows {
                 let found = find
                     .query_row(
-                        params![key.project_digest, key.evidence_id, key.decision_object_id],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                        params![
+                            row.project_digest,
+                            row.evidence_id,
+                            row.decision_object_id,
+                            row.created_at_ms,
+                            row.publish_tip,
+                            row.kernel_incarnation_id,
+                            row.matcher_digest,
+                            row.decision_id,
+                            row.matched_terms,
+                            row.decision_terms,
+                            row.score_bp,
+                        ],
+                        |found| Ok((found.get::<_, i64>(0)?, found.get::<_, i64>(1)?)),
                     )
                     .optional()?;
                 if let Some((rowid, bytes)) = found
                     && delete.execute([rowid])? == 1
                 {
-                    let (rows, total) = freed.entry(key.project_digest).or_default();
-                    *rows += 1;
+                    let (count, total) = freed.entry(row.project_digest.as_str()).or_default();
+                    *count += 1;
                     *total += bytes;
                 }
             }
             let mut deleted = 0;
-            for (project, (rows, bytes)) in freed {
+            for (project, (count, bytes)) in freed {
                 let (held_rows, held_bytes) = project_totals(tx, project)?;
-                set_project_totals(tx, project, held_rows - rows, held_bytes - bytes)?;
-                deleted += usize::try_from(rows).unwrap_or(usize::MAX);
+                set_project_totals(tx, project, held_rows - count, held_bytes - bytes)?;
+                deleted += usize::try_from(count).unwrap_or(usize::MAX);
             }
             Ok(WriteDisposition::Applied(deleted))
         })

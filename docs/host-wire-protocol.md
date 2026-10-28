@@ -695,6 +695,35 @@ than 2^53; a larger, negative, non-integer, or `null` value is dropped to
 absent, except `oldest_deferred_age_ms`, where `null` is a declared value;
 unknown fields are dropped; fields are additive.
 
+The `context` component MAY also carry a sanitized
+`metrics.contradiction_candidates` object describing write-time
+contradiction candidates: derived rows naming a live memory decision a
+published source descriptor overlaps lexically, written and reclaimed only
+while the user-only `contradiction_candidates.enabled` (default false) is on;
+the daemon ignores a project-tier value with a warning, and each plugin strips
+it from the project tier before merging. The counters are process-local, start
+at zero when the daemon starts, and stay at zero until the flag is first on;
+turning the flag off pauses the sweep and leaves the held rows and the counts
+reached so far in place. Every field is a count, a byte total, or
+milliseconds; no field carries descriptor text, an id, a digest, or a per-row
+score. The block
+is sanitized field by field under the `kernel` integer rules: a non-object
+drops the block whole, unknown fields are dropped, and fields are additive.
+
+| field | type | rule |
+| --- | --- | --- |
+| `offered`, `admitted`, `refused_pass_busy`, `refused_shutting_down` | unsigned integer | candidate passes offered after a publication, started, and refused by reason |
+| `store_unavailable`, `kernel_unavailable` | unsigned integer | passes or sweeps that could not read or write the memory store, and passes that could not read the Kernel |
+| `descriptors_analyzed`, `descriptors_refused_oversize`, `descriptors_unscored` | unsigned integer | descriptors scored, refused whole past the analyzer bound, and left unscored by a deadline |
+| `candidates_truncated`, `summaries_loaded`, `summaries_cut_bytes`, `summaries_unscorable` | unsigned integer | candidate decisions dropped at the set bound, decision summaries loaded, summary bytes cut by the load budget, and summaries the analyzer refused |
+| `budget_exhausted`, `rows_written`, `dropped_at_cap` | unsigned integer | passes stopped by their budget, rows written, and rows evicted at the per-project cap |
+| `sweep_examined`, `sweep_dropped`, `sweep_skipped_kernel_unavailable` | unsigned integer | rows the sweep read, rows it deleted as no longer servable, and sweep runs skipped because the Kernel was not ready or a Kernel read failed |
+| `read_filtered_stale` | unsigned integer | rows a read filtered because their decision or evidence was no longer live |
+| `completed`, `deadline`, `worker_panicked` | unsigned integer | pass ends by reason |
+| `active` | unsigned integer | passes running now |
+| `retained_bytes` | unsigned integer | stored bytes of the candidate rows when the sweep last finished a full cycle of the table |
+| `pass_ms_last`, `pass_ms_max` | unsigned integer | wall time of the last and the longest pass |
+
 The `model_execution` component MAY also carry a sanitized
 `metrics.aws_credentials` object: the host's cached observation of the
 selected AWS credential source, read from a shared cell with no credential

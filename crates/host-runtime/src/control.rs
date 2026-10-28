@@ -540,7 +540,6 @@ pub(crate) fn components(
 /// `unavailable_reason` is permitted only when `kernel_state` is `unavailable`.
 fn sanitize_kernel_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
     // 2^53 is the largest N such that every integer in [0, N] is exactly representable as an IEEE 754 double.
-    const MAX_COUNTER: u64 = 1 << 53;
     let raw = raw.as_object()?;
     let state = raw
         .get(KERNEL_STATE_KEY)
@@ -658,7 +657,6 @@ const MEMORY_REVIEWER_COUNTERS: [&str; 36] = [
 
 /// Retains only MemoryReviewer counters with declared types and ranges, field by field, the way the kernel block is kept. A block without a recognized `memory_reviewer_state` is dropped whole; every counter is an unsigned integer no greater than 2^53 or it is dropped to absent; `sampled_at_ms` alone may be `null`.
 fn sanitize_memory_reviewer_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
-    const MAX_COUNTER: u64 = 1 << 53;
     let raw = raw.as_object()?;
     let state = raw
         .get(MEMORY_REVIEWER_STATE_KEY)
@@ -703,6 +701,9 @@ fn sanitize_memory_reviewer_block(raw: &serde_json::Value) -> Option<serde_json:
     }
     Some(serde_json::Value::Object(block))
 }
+
+/// The largest integer a forwarded counter may hold: the exact-integer range of a JSON double.
+const MAX_COUNTER: u64 = 1 << 53;
 
 pub(crate) const SOURCE_CAPTURE_KEY: &str = "source_capture";
 /// `SOURCE_CAPTURE_COUNTERS` defines the counter allowlist for `metrics.source_capture` in `docs/host-wire-protocol.md`.
@@ -754,19 +755,60 @@ const SOURCE_CAPTURE_COUNTERS: [&str; 44] = [
 ];
 const SOURCE_CAPTURE_OLDEST_DEFERRED_KEY: &str = "oldest_deferred_age_ms";
 
-fn sanitize_source_capture_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
-    const MAX_COUNTER: u64 = 1 << 53;
+pub(crate) const CONTRADICTION_CANDIDATES_KEY: &str = "contradiction_candidates";
+/// `CONTRADICTION_CANDIDATES_COUNTERS` defines the counter allowlist for `metrics.contradiction_candidates` in `docs/host-wire-protocol.md`.
+const CONTRADICTION_CANDIDATES_COUNTERS: [&str; 27] = [
+    "offered",
+    "admitted",
+    "refused_pass_busy",
+    "refused_shutting_down",
+    "store_unavailable",
+    "kernel_unavailable",
+    "descriptors_analyzed",
+    "descriptors_refused_oversize",
+    "descriptors_unscored",
+    "candidates_truncated",
+    "summaries_loaded",
+    "summaries_cut_bytes",
+    "summaries_unscorable",
+    "budget_exhausted",
+    "rows_written",
+    "dropped_at_cap",
+    "sweep_examined",
+    "sweep_dropped",
+    "sweep_skipped_kernel_unavailable",
+    "read_filtered_stale",
+    "completed",
+    "deadline",
+    "worker_panicked",
+    "active",
+    "retained_bytes",
+    "pass_ms_last",
+    "pass_ms_max",
+];
+
+/// Keeps each of `names` whose value is an integer no greater than 2^53 and drops every other field; `None` when `raw` is not an object.
+fn sanitize_counters(
+    raw: &serde_json::Value,
+    names: &[&str],
+) -> Option<serde_json::Map<String, serde_json::Value>> {
     let raw = raw.as_object()?;
-    let mut block = serde_json::Map::new();
-    for name in SOURCE_CAPTURE_COUNTERS {
-        if let Some(value) = raw
-            .get(name)
-            .and_then(serde_json::Value::as_u64)
-            .filter(|value| *value <= MAX_COUNTER)
-        {
-            block.insert(name.to_owned(), serde_json::Value::from(value));
-        }
-    }
+    Some(
+        names
+            .iter()
+            .filter_map(|name| {
+                let value = raw
+                    .get(*name)
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|value| *value <= MAX_COUNTER)?;
+                Some(((*name).to_owned(), serde_json::Value::from(value)))
+            })
+            .collect(),
+    )
+}
+
+fn sanitize_source_capture_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
+    let mut block = sanitize_counters(raw, &SOURCE_CAPTURE_COUNTERS)?;
     match raw.get(SOURCE_CAPTURE_OLDEST_DEFERRED_KEY) {
         Some(serde_json::Value::Null) => {
             block.insert(
@@ -840,6 +882,15 @@ fn sanitize_context_metrics(
         .and_then(sanitize_source_capture_block)
     {
         sanitized_metrics.insert(SOURCE_CAPTURE_KEY.to_owned(), source_capture);
+    }
+    if let Some(candidates) = metrics
+        .and_then(|metrics| metrics.get(CONTRADICTION_CANDIDATES_KEY))
+        .and_then(|raw| sanitize_counters(raw, &CONTRADICTION_CANDIDATES_COUNTERS))
+    {
+        sanitized_metrics.insert(
+            CONTRADICTION_CANDIDATES_KEY.to_owned(),
+            serde_json::Value::Object(candidates),
+        );
     }
 }
 
@@ -1954,6 +2005,70 @@ mod source_capture_block_tests {
             }))
         );
         assert!(source_capture_of(serde_json::json!("ready")).is_none());
+    }
+
+    #[test]
+    fn the_candidate_block_is_sanitized_field_by_field_and_documented() {
+        let block_of = |block: serde_json::Value| {
+            let report = crate::handler::HealthReport {
+                status: crate::handler::HealthStatus::Ok,
+                detail: None,
+                metrics: Some(serde_json::json!({
+                    "components": { "context": { "status": "ok",
+                        "metrics": { "storage_state": "ready", "contradiction_candidates": block } } }
+                })),
+            };
+            let response: serde_json::Value = serde_json::from_slice(&host_status_response_json(
+                &report,
+                serde_json::json!({"state": "healthy"}),
+            ))
+            .expect("status JSON");
+            response["metrics"]["components"]["context"]["metrics"]
+                .get(CONTRADICTION_CANDIDATES_KEY)
+                .cloned()
+        };
+        let mut full = serde_json::Map::new();
+        for (index, name) in CONTRADICTION_CANDIDATES_COUNTERS.iter().enumerate() {
+            full.insert((*name).to_owned(), (index as u64).into());
+        }
+        full.insert("evidence_ids".into(), serde_json::json!(["a"]));
+        let kept = block_of(serde_json::Value::Object(full)).expect("kept");
+        let kept = kept.as_object().unwrap();
+        assert_eq!(kept.len(), CONTRADICTION_CANDIDATES_COUNTERS.len());
+        for (index, name) in CONTRADICTION_CANDIDATES_COUNTERS.iter().enumerate() {
+            assert_eq!(kept[*name], serde_json::Value::from(index as u64), "{name}");
+        }
+        assert_eq!(
+            block_of(serde_json::json!({
+                "offered": -1, "completed": "many", "rows_written": 1_u64 << 60,
+                "retained_bytes": 1_u64 << 53,
+            })),
+            Some(serde_json::json!({ "retained_bytes": 1_u64 << 53 }))
+        );
+        assert!(block_of(serde_json::json!("ready")).is_none());
+
+        let doc = include_str!("../../../docs/host-wire-protocol.md");
+        let lines: Vec<&str> = doc.lines().collect();
+        let first = lines
+            .iter()
+            .position(|line| line.starts_with("| `offered`"))
+            .expect("the contradiction_candidates table");
+        let documented: std::collections::BTreeSet<&str> = lines[first..]
+            .iter()
+            .take_while(|line| line.starts_with('|'))
+            .flat_map(|line| {
+                line.split(" | ")
+                    .next()
+                    .unwrap_or_default()
+                    .split('`')
+                    .skip(1)
+                    .step_by(2)
+            })
+            .collect();
+        assert_eq!(
+            documented,
+            CONTRADICTION_CANDIDATES_COUNTERS.into_iter().collect()
+        );
     }
 
     #[test]

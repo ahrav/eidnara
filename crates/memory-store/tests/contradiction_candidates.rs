@@ -1,7 +1,6 @@
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::{
-    CandidateCaps, CandidateKey, CandidateScore, DescriptorCandidates, MAX_CANDIDATE_PAGE,
-    StoredCandidate,
+    CandidateCaps, CandidateScore, DescriptorCandidates, MAX_CANDIDATE_PAGE, StoredCandidate,
 };
 use rusqlite::Connection;
 
@@ -328,21 +327,18 @@ fn the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys() {
         .unwrap();
     assert_eq!(tail.len(), 2);
 
+    let mut named = all_rows(&store)
+        .into_iter()
+        .find(|row| row.evidence_id == "ev-0" && row.decision_object_id == "d1")
+        .unwrap();
+    let mut missing = named.clone();
+    missing.evidence_id = "ev-missing".to_string();
     let deleted = store
-        .delete_candidates(&[
-            CandidateKey {
-                project_digest: PROJECT,
-                evidence_id: "ev-0",
-                decision_object_id: "d1",
-            },
-            CandidateKey {
-                project_digest: PROJECT,
-                evidence_id: "ev-missing",
-                decision_object_id: "d1",
-            },
-        ])
+        .delete_candidates_as_read(&[&named, &missing])
         .unwrap();
     assert_eq!(deleted, 1);
+    named.created_at_ms += 1;
+    assert_eq!(store.delete_candidates_as_read(&[&named]).unwrap(), 0);
     let remaining = all_rows(&store);
     assert_eq!(remaining.len(), 9);
     assert!(
@@ -523,13 +519,7 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
     store
         .replace_candidates_for_descriptor(&write(PROJECT, "ev-top", 1, 99, &before), CAPS)
         .unwrap();
-    store
-        .delete_candidates(&[CandidateKey {
-            project_digest: PROJECT,
-            evidence_id: &first.items[0].evidence_id,
-            decision_object_id: "decision",
-        }])
-        .unwrap();
+    store.delete_candidates_as_read(&[&first.items[0]]).unwrap();
     let second = store
         .candidates_for_decision(PROJECT, "decision", first.next.as_deref(), 4)
         .unwrap();
@@ -629,13 +619,11 @@ fn a_keyed_delete_names_its_project_and_the_gauge_counts_bytes() {
     store
         .replace_candidates_for_descriptor(&write(OTHER_PROJECT, "ev-é", 1, 1, &rows), CAPS)
         .unwrap();
-    let deleted = store
-        .delete_candidates(&[CandidateKey {
-            project_digest: PROJECT,
-            evidence_id: "ev-é",
-            decision_object_id: "décision-ü",
-        }])
+    let named = all_rows(&store)
+        .into_iter()
+        .find(|row| row.project_digest == PROJECT)
         .unwrap();
+    let deleted = store.delete_candidates_as_read(&[&named]).unwrap();
     assert_eq!(deleted, 1);
     let bytes = 64 + "ev-é".len() + 2 * "décision-ü".len() + 32 + 64 + 40;
     assert_eq!(
@@ -646,6 +634,52 @@ fn a_keyed_delete_names_its_project_and_the_gauge_counts_bytes() {
         store.candidate_rows_and_bytes(Some(PROJECT)).unwrap(),
         (0, 0)
     );
+}
+
+#[test]
+fn a_delete_as_read_spares_a_row_rewritten_since_the_read() {
+    let (_dir, store) = open();
+    let rows = [score("d1", 3, 4), score("d2", 3, 4)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 1, 1, &rows), CAPS)
+        .unwrap();
+    let read = all_rows(&store);
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 2, 5, &rows), CAPS)
+        .unwrap();
+    let rewritten = all_rows(&store);
+    let deleted = store
+        .delete_candidates_as_read(&[&read[0], &rewritten[1]])
+        .unwrap();
+    assert_eq!(
+        deleted, 1,
+        "only the row still holding the values read goes"
+    );
+    let left = all_rows(&store);
+    assert_eq!(left, [rewritten[0].clone()]);
+    assert_eq!(store.delete_candidates_as_read(&[]).unwrap(), 0);
+    let mut other_incarnation = left[0].clone();
+    other_incarnation.kernel_incarnation_id = "fedcba9876543210fedcba9876543210".to_string();
+    let mut other_digest = left[0].clone();
+    other_digest.matcher_digest = "1".repeat(64);
+    assert_eq!(
+        store
+            .delete_candidates_as_read(&[&other_incarnation, &other_digest])
+            .unwrap(),
+        0,
+        "a row whose incarnation or digest differs from the one read stays"
+    );
+    let read = all_rows(&store);
+    let rescored = [score("d1", 1, 2)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 2, 5, &rescored), CAPS)
+        .unwrap();
+    assert_eq!(
+        store.delete_candidates_as_read(&[&read[0]]).unwrap(),
+        0,
+        "a same-tip rewrite in the same millisecond that changes only the score stays"
+    );
+    assert_eq!(all_rows(&store).len(), 1);
 }
 
 /// A deterministic generator for the operation-sequence test, so a failing seed replays.
@@ -832,17 +866,13 @@ impl Model {
         Some([written, replaced_away, dropped_at_cap])
     }
 
-    fn delete(&mut self, keys: &[CandidateKey<'_>]) -> usize {
+    fn delete(&mut self, reads: &[&StoredCandidate]) -> usize {
         let before = self.rows.len();
         let held: Vec<bool> = [PROJECT, OTHER_PROJECT]
             .iter()
             .map(|project| self.rows.iter().any(|row| row.project_digest == *project))
             .collect();
-        self.rows.retain(|row| {
-            !keys.iter().any(|key| {
-                key_of(row) == (key.project_digest, key.evidence_id, key.decision_object_id)
-            })
-        });
+        self.rows.retain(|row| !reads.contains(&row));
         for (project, held) in [PROJECT, OTHER_PROJECT].iter().zip(held) {
             if held && !self.rows.iter().any(|row| row.project_digest == *project) {
                 self.deletes_that_emptied_a_project += 1;
@@ -1048,16 +1078,39 @@ fn random_write_and_delete_sequences_match_the_reference_model() {
         for step in 0..220 {
             let context = format!("seed {seed} step {step}");
             if rng.below(8) == 0 {
-                let mut keys = Vec::new();
+                let mut reads = Vec::new();
                 for _ in 0..rng.below(5) {
-                    keys.push(CandidateKey {
-                        project_digest: rng.pick(&[PROJECT, OTHER_PROJECT]),
-                        evidence_id: rng.pick(&MODEL_EVIDENCE),
-                        decision_object_id: rng.pick(&MODEL_DECISIONS),
-                    });
+                    let key = (
+                        rng.pick(&[PROJECT, OTHER_PROJECT]),
+                        rng.pick(&MODEL_EVIDENCE),
+                        rng.pick(&MODEL_DECISIONS),
+                    );
+                    let mut read = model
+                        .rows
+                        .iter()
+                        .find(|row| key_of(row) == key)
+                        .cloned()
+                        .unwrap_or_else(|| StoredCandidate {
+                            project_digest: key.0.to_string(),
+                            evidence_id: key.1.to_string(),
+                            decision_object_id: key.2.to_string(),
+                            decision_id: "gone".to_string(),
+                            matched_terms: 1,
+                            decision_terms: 1,
+                            score_bp: 1,
+                            publish_tip: 0,
+                            kernel_incarnation_id: INCARNATION.to_string(),
+                            matcher_digest: MATCHER.to_string(),
+                            created_at_ms: 0,
+                        });
+                    if rng.below(4) == 0 {
+                        read.publish_tip += 1;
+                    }
+                    reads.push(read);
                 }
-                let deleted = store.delete_candidates(&keys).unwrap();
-                assert_eq!(deleted, model.delete(&keys), "{context}: delete count");
+                let reads: Vec<&StoredCandidate> = reads.iter().collect();
+                let deleted = store.delete_candidates_as_read(&reads).unwrap();
+                assert_eq!(deleted, model.delete(&reads), "{context}: delete count");
             } else {
                 let (write, caps) = model_write_op(&mut rng, &mut rows);
                 let expected = model.write(&write, caps);
@@ -1260,13 +1313,11 @@ fn the_totals_follow_replaced_ids_late_writes_deletes_and_truncation() {
             );
         }
     }
-    store
-        .delete_candidates(&[CandidateKey {
-            project_digest: PROJECT,
-            evidence_id: "ev-2",
-            decision_object_id: "d1",
-        }])
+    let named = all_rows(&store)
+        .into_iter()
+        .find(|row| key_of(row) == (PROJECT, "ev-2", "d1"))
         .unwrap();
+    store.delete_candidates_as_read(&[&named]).unwrap();
     assert_eq!(
         store.candidate_rows_and_bytes(Some(PROJECT)).unwrap(),
         gauge_from_rows(&dir, PROJECT)
@@ -1365,12 +1416,13 @@ fn every_candidate_statement_reuses_its_cached_plan() {
         store
             .candidate_sweep_page(i64::from(index % 4), 2 + index as usize % 3)
             .unwrap();
+        let evidence = format!("ev-{}", index / 2);
+        let reads: Vec<StoredCandidate> = all_rows(&store)
+            .into_iter()
+            .filter(|row| key_of(row) == (PROJECT, &evidence, "d1"))
+            .collect();
         store
-            .delete_candidates(&[CandidateKey {
-                project_digest: PROJECT,
-                evidence_id: &format!("ev-{}", index / 2),
-                decision_object_id: "d1",
-            }])
+            .delete_candidates_as_read(&reads.iter().collect::<Vec<_>>())
             .unwrap();
         store.candidate_rows_and_bytes(Some(PROJECT)).unwrap();
         let rewrite = [score("d1", 1 + index % 2, 2)];
@@ -1386,13 +1438,11 @@ fn every_candidate_statement_reuses_its_cached_plan() {
                 caps,
             )
             .unwrap();
-        store
-            .delete_candidates(&[CandidateKey {
-                project_digest: OTHER_PROJECT,
-                evidence_id: "ev-alone",
-                decision_object_id: "d1",
-            }])
+        let alone = all_rows(&store)
+            .into_iter()
+            .find(|row| key_of(row) == (OTHER_PROJECT, "ev-alone", "d1"))
             .unwrap();
+        store.delete_candidates_as_read(&[&alone]).unwrap();
         store.candidate_rows_and_bytes(None).unwrap();
     }
     let reuse = store.statement_evictions();

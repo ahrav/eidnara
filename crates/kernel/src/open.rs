@@ -1828,6 +1828,22 @@ impl Drop for LimitedConnection<'_> {
     }
 }
 
+#[cfg(feature = "test-support")]
+impl KernelStore {
+    pub fn hold_first_reader_for_test(
+        &self,
+        held: &std::sync::Barrier,
+        duration: std::time::Duration,
+    ) {
+        let guard = self.readers[0]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        held.wait();
+        std::thread::sleep(duration);
+        drop(guard);
+    }
+}
+
 #[cfg(test)]
 #[path = "budget_tests.rs"]
 mod budget_tests;

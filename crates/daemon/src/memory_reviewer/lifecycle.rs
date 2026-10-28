@@ -437,12 +437,43 @@ pub fn sweep_and_sample(
     })
 }
 
-/// Blocking work runs off the runtime thread and is joined before the task ends, so shutdown observes physical completion. The blocking pass checks the token between steps, so the join waits for at most one in-flight step.
+/// The daemon's contradiction-candidate sweep as one cleanup pass runs it: the counters, the daemon-level flag reader, and the watermark carried from pass to pass.
+pub struct CandidateStep {
+    pub counts: Arc<crate::contradiction_candidates::Candidates>,
+    pub enabled: Arc<dyn Fn() -> bool + Send + Sync>,
+    pub sweep: crate::contradiction_candidates::sweep::CandidateSweep,
+}
+
+/// [`sweep_and_sample`], then, when it was not cancelled, one candidate sweep under the flag `step.enabled` reads now. A panic inside the sweep is logged and keeps the pass; the watermark already stands past the page that panicked.
+pub fn pass_then_sweep(
+    store: &MemoryStore,
+    kernel: Option<&kernel::KernelStore>,
+    now_ms: i64,
+    last_sampled_at_ms: Option<i64>,
+    cancelled: &dyn Fn() -> bool,
+    step: &mut CandidateStep,
+) -> Option<Pass> {
+    let pass = sweep_and_sample(store, kernel, now_ms, last_sampled_at_ms, cancelled)?;
+    if !cancelled() {
+        let enabled = (step.enabled)();
+        let swept = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            step.sweep
+                .run(store, kernel, enabled, &step.counts, now_ms, cancelled);
+        }));
+        if swept.is_err() {
+            eprintln!("daemon: contradiction candidate sweep panicked");
+        }
+    }
+    Some(pass)
+}
+
+/// Blocking work runs off the runtime thread and is joined before the task ends, so shutdown observes physical completion. The blocking pass checks the token between steps, so the join waits for at most one in-flight step. Each pass runs through [`pass_then_sweep`]; the loop carries `step` from pass to pass, and a worker that fails restarts its watermark at the first row.
 pub(crate) async fn run(
     status: Arc<MemoryReviewerStatus>,
     store: Arc<MemoryStore>,
     kernel: Arc<KernelOpenCoordinator>,
     capture: Arc<crate::source_capture::SourceCapture>,
+    mut step: CandidateStep,
     cancel: CancellationToken,
 ) {
     loop {
@@ -454,14 +485,21 @@ pub(crate) async fn run(
         let last_sampled_at_ms = status.last_sampled_at_ms();
         let store = Arc::clone(&store);
         let probe = cancel.clone();
+        let mut carried = CandidateStep {
+            counts: Arc::clone(&step.counts),
+            enabled: Arc::clone(&step.enabled),
+            sweep: std::mem::take(&mut step.sweep),
+        };
         let mut worker = tokio::task::spawn_blocking(move || {
-            sweep_and_sample(
+            let pass = pass_then_sweep(
                 &store,
                 kernel_store.as_deref(),
                 now_ms,
                 last_sampled_at_ms,
                 &|| probe.is_cancelled(),
-            )
+                &mut carried,
+            );
+            (pass, carried.sweep)
         });
         let pass = tokio::select! {
             _ = cancel.cancelled() => {
@@ -470,8 +508,11 @@ pub(crate) async fn run(
                 return;
             }
             joined = &mut worker => match joined {
-                Ok(Some(pass)) => pass,
-                Ok(None) => return,
+                Ok((Some(pass), sweep)) => {
+                    step.sweep = sweep;
+                    pass
+                }
+                Ok((None, _)) => return,
                 Err(error) => {
                     eprintln!("daemon: memory_reviewer sampler worker failed: {error}");
                     Pass {
