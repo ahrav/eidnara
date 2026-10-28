@@ -56,6 +56,6 @@ truncation. K3 supplies pressure; existing generic cap checks remain
 
 [keeps]: ../../../../crates/daemon/src/kernel_routes/read.rs#L84-L92
 [filter]: ../../../../crates/daemon/src/kernel_routes/read.rs#L174-L187
-[sql]: ../../../../crates/kernel/src/admission.rs#L3258-L3294
-[visible]: ../../../../crates/kernel/src/admission.rs#L2953-L2983
+[sql]: ../../../../crates/kernel/src/admission.rs#L3261-L3297
+[visible]: ../../../../crates/kernel/src/admission.rs#L2956-L2986
 [late]: ../../../../crates/daemon/src/canonical_memory.rs#L195-L210

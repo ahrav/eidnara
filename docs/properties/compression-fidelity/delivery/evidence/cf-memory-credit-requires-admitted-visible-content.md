@@ -21,7 +21,7 @@ evidence. Inspected 2026-09-19 at
   filters by the bound project and scope before applying row limits.
 - [canonical_memory.rs:195-211](../../../../../crates/daemon/src/canonical_memory.rs#L195-L211)
   keeps visible positive decisions, then trims to the memory budget.
-- [admission.rs:3743-3753](../../../../../crates/kernel/src/admission.rs#L3740-L3750)
+- [admission.rs:3743-3753](../../../../../crates/kernel/src/admission.rs#L3743-L3753)
   distinguishes verified active automatic visibility from candidate/labeled,
   rejected review-only, and quarantined audit-only states.
 - [m0_compose.rs:71-109,234-237](../../../../../crates/daemon/src/m0_compose.rs#L71-L109)

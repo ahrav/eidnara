@@ -70,7 +70,7 @@ baseline commit's rendered bytes does not run yet.
 [pass]: ../../../../crates/daemon/src/lib.rs#L8190-L8270
 [reruns]: ../../../../crates/daemon/src/lib.rs#L8337-L8441
 [entry]: ../../../../crates/daemon/src/canonical_memory.rs#L141-L174
-[query]: ../../../../crates/kernel/src/admission.rs#L3482-L3696
+[query]: ../../../../crates/kernel/src/admission.rs#L3485-L3699
 [order]: ../../../../crates/kernel/src/admission.rs#L3193
 [selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L163-L258
 [conversion]: ../../../../crates/daemon/src/canonical_memory.rs#L184-L212
