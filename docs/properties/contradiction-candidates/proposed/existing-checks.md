@@ -43,7 +43,7 @@ parts, `str::to_lowercase` per term, the floor on scalar values, a
 
 Production guards: the compile-time assertion that the descriptor bound is
 at least `MAX_SOURCE_UNIT_BYTES`
-(`crates/daemon/src/contradiction_candidates/scorer.rs:69-71`); the
+(`crates/daemon/src/contradiction_candidates/scorer.rs:66-68`); the
 analyzer's refusals (`crates/retrieval/src/lexical/analysis.rs:78-105`),
 which the scorer propagates.
 
@@ -138,13 +138,13 @@ allowlist against `docs/host-wire-protocol.md`), and
 | `the_route_consent_reaches_the_pass_through_a_transform` | `:1145` | the route's frozen value, not the daemon's, decides the offer | flag off (pass arm), trigger | unaudited |
 | `a_panicking_pass_releases_its_permit_and_charge_and_shutdown_waits_for_a_parked_pass` | `:1195` | panic counted with permit and charge released; kept-text charge below the job's; shutdown waits | single flight | unaudited |
 | `publish_latency_with_candidates_on_stays_within_the_off_baseline` | `:1253` | median publication hold, with at least one publication beside a running pass, within 3x + 50 ms of the flag-off median | trigger (C1) | unaudited |
-| `equal_texts_in_one_batch_cite_one_evidence_row_and_the_pass_scores_it_once` | `:1341` | two equal-text units publish as two units citing one evidence row; the pass analyzes one descriptor and writes its rows once | row key | unaudited |
-| `a_decision_row_that_disagrees_with_its_registry_row_ends_the_pass_and_keeps_the_held_rows` | `:1366` | a decision whose typed row disagrees with its registry row ends the pass `kernel_unavailable` through the claim-facts read, with the descriptor's held rows unchanged | candidate set | unaudited |
-| `a_pass_stopped_during_the_scan_counts_the_summaries_the_analyzer_refused_before_the_stop` | `:1404` | a stop at the check after 256 summaries ends `budget_exhausted` with the three summaries the analyzer refused before it counted `summaries_unscorable` | partial result | unaudited |
-| `a_pass_stopped_between_payload_chunks_counts_the_summaries_already_loaded` | `:1438` | a stop before the second payload chunk ends `budget_exhausted` with the first chunk counted `summaries_loaded` | partial result | unaudited |
-| `a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_rows` | `:1463` | a Kernel restore after the pass's last read ends it `kernel_unavailable` before any write: every descriptor unscored, held rows in place | partial result | unaudited |
-| `a_write_behind_a_held_store_connection_ends_at_the_pass_deadline` | `:1513` | a store connection another user holds past the budget ends the pass `deadline` at the write, in under five seconds, with no row; the scored descriptor is analyzed, and the end count names its unwritten rows | partial result | unaudited |
-| `a_job_whose_document_capture_ends_in_deadline_still_offers_its_published_units` | `:1573` | a window batch that committed before the document batch ended the job `deadline` is offered to a pass: one pass, one row | trigger | unaudited |
+| `equal_texts_in_one_batch_cite_one_evidence_row_and_the_pass_scores_it_once` | `:1353` | two equal-text units publish as two units citing one evidence row; the pass analyzes one descriptor and writes its rows once | row key | unaudited |
+| `a_decision_row_that_disagrees_with_its_registry_row_ends_the_pass_and_keeps_the_held_rows` | `:1378` | a decision whose typed row disagrees with its registry row ends the pass `kernel_unavailable` through the claim-facts read, with the descriptor's held rows unchanged | candidate set | unaudited |
+| `a_pass_stopped_during_the_scan_counts_the_summaries_the_analyzer_refused_before_the_stop` | `:1416` | a stop at the check after 256 summaries ends `budget_exhausted` with the three summaries the analyzer refused before it counted `summaries_unscorable` | partial result | unaudited |
+| `a_pass_stopped_between_payload_chunks_counts_the_summaries_already_loaded` | `:1450` | a stop before the second payload chunk ends `budget_exhausted` with the first chunk counted `summaries_loaded` | partial result | unaudited |
+| `a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_rows` | `:1475` | a Kernel restore after the pass's last read ends it `kernel_unavailable` before any write: every descriptor unscored, held rows in place | partial result | unaudited |
+| `a_write_behind_a_held_store_connection_ends_at_the_pass_deadline` | `:1525` | a store connection another user holds past the budget ends the pass `deadline` at the write, in under five seconds, with no row; the scored descriptor is analyzed, and the end count names its unwritten rows | partial result | unaudited |
+| `a_job_whose_document_capture_ends_in_deadline_still_offers_its_published_units` | `:1596` | a window batch that committed before the document batch ended the job `deadline` is offered to a pass: one pass, one row | trigger | unaudited |
 
 ## S-F, S-H
 
@@ -166,7 +166,7 @@ branch tip; the read ticket (#1168) adds the code and the checks.
 - The scorer's `TooManyAtoms` path is unreachable by construction and has no
   test; the analyzer's own test covers the refusal.
 - The pass records `matcher_digest()` with each row
-  (`crates/daemon/src/contradiction_candidates/pass.rs:389`); no test reads
+  (`crates/daemon/src/contradiction_candidates/pass.rs:388`); no test reads
   the digest back from a pass-written row.
 - No test fails a store write inside a pass; that path counts the failed
   descriptor as analyzed and the later ones as unscored.

@@ -9,7 +9,7 @@ bytes.
 
 ## Evidence trail
 
-- `crates/daemon/src/source_capture.rs:865` `keep_published` keeps the unit text
+- `crates/daemon/src/source_capture.rs:872` `keep_published` keeps the unit text
   the batch published; the Kernel retains exactly that text (exact retention
   refuses a text it would rewrite).
 - `crates/daemon/src/contradiction_candidates/pass.rs:234` `score_publication`

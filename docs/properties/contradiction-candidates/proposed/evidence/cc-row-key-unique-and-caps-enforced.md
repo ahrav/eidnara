@@ -15,11 +15,11 @@ one row per key and bounded counts.
 - `crates/daemon/src/contradiction_candidates/pass.rs:248` the pass cuts at M in
   publish order, counts the cut `dropped_at_cap`, and skips the write for a
   descriptor that reaches the pass with no room, so its held rows stay.
-- `crates/daemon/src/harness_sources.rs:2120-2134` `stored_descriptor`: a
+- `crates/daemon/src/harness_sources.rs:2151-2165` `stored_descriptor`: a
   replay takes the evidence row the stored descriptor cites, and a receipt
   whose observation cites no row, or a row other than the one its detail
   names, is `CorruptCanonicalRow`
-  (`crates/kernel/src/source_descriptor.rs:911-940`;
+  (`crates/kernel/src/source_descriptor.rs:911-943`;
   `a_replay_whose_descriptor_cites_no_evidence_row_is_refused_as_corrupt`
   and `a_replay_whose_descriptor_cites_another_units_evidence_is_refused_as_corrupt`,
   `crates/daemon/tests/harness_sources.rs:3909`, `:3955`).

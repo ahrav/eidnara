@@ -20,26 +20,26 @@ no unit text. Lenses: lifecycle transitions; protocol contracts; C10.
   `kernel_unavailable`, `deadline`, `kernel_error`, `worker_panicked`,
   `adapter_refused`, `units_*`, `active`, `retained_bytes`, `publish_ms_*`,
   `documents_*`, `expiry_retired`, `expiry_retained`.
-- `source_capture.rs:800-824` `run_settled() -> (Count, Option<SettledPublication>)`:
+- `source_capture.rs:801-825` `run_settled() -> (Count, Option<SettledPublication>)`:
   join -> `Ok(settled) => return settled` (already counted inside `publish`
   via `end()`); `Err(panic) => WorkerPanicked`, `Err(_) => Discarded`, each
-  counted once at `:820` and logged.
-- `source_capture.rs:873-881` `end(&self, end) -> Count`: `counters.add(end,
+  counted once at `:821` and logged.
+- `source_capture.rs:879-887` `end(&self, end) -> Count`: `counters.add(end,
   1)`; logs unless `Completed`.
-- `source_capture.rs:827-871` `publish_settled`: calls `publish` once and
+- `source_capture.rs:828-877` `publish_settled`: calls `publish` once and
   hands its `Count` out with the kept texts.
-- `source_capture.rs:884-1006` `publish`: every exit is `return self.end(..)`
-  (`Discarded` `:886`, `KernelUnavailable` `:889`, `Deadline` `:892`,
-  `RefusedResidentShort` `:900`, `:930`, `Completed` `:903`, `:977`,
-  `kernel_end(error)` `:907`, `Discarded` `:982`) or the result of
-  `publish_locked` returned through `catch_unwind` (`:989-1005`).
-- `source_capture.rs:1009-1094` `publish_locked`: `SessionInvalidated`
-  `:1019`, `kernel_end` `:1022`, `Deadline` `:1025`, the document-only end
-  `:1029`. Each path returns one `Count` that `publish` passes to `end()`
+- `source_capture.rs:890-1012` `publish`: every exit is `return self.end(..)`
+  (`Discarded` `:892`, `KernelUnavailable` `:895`, `Deadline` `:898`,
+  `RefusedResidentShort` `:906`, `:936`, `Completed` `:909`, `:983`,
+  `kernel_end(error)` `:913`, `Discarded` `:988`) or the result of
+  `publish_locked` returned through `catch_unwind` (`:995-1011`).
+- `source_capture.rs:1015-1100` `publish_locked`: `SessionInvalidated`
+  `:1025`, `kernel_end` `:1028`, `Deadline` `:1031`, the document-only end
+  `:1035`. Each path returns one `Count` that `publish` passes to `end()`
   once.
-- `source_capture.rs:1660-1665` `run_hook` and the `cfg(test)` hooks at
-  `:980` (`before_publish`), `:1040` (`between_screen_and_commit`), `:1154`,
-  `:1239`, `:1270`. No non-test hook after publish.
+- `source_capture.rs:1666-1671` `run_hook` and the `cfg(test)` hooks at
+  `:986` (`before_publish`), `:1046` (`between_screen_and_commit`), `:1160`,
+  `:1245`, `:1276`. No non-test hook after publish.
 - `lib.rs:9303-9320`: the `AfterResponse` task awaits `job.run_settled()` and
   discards its `Count`; `admission.try_spawn(task)` refused counts
   `RefusedShuttingDown` through `refuse_handoff`.
@@ -76,10 +76,10 @@ the terminal `Count` and the kernel commit already durable.
 
 ### Q: Where would a P5 trigger attach?
 
-- Sources examined: `lib.rs:9229-9236`, `source_capture.rs:665-691`,
+- Sources examined: `lib.rs:9303-9320`, `source_capture.rs:801-825`,
   `publish_locked` return values.
 - Findings: `Published` values (object ids, `evidence_object_id`) are
-  consumed inside `publish_locked` to classify dispositions (`:852-858`) and
+  consumed inside `publish_locked` to classify dispositions (`:927-933`) and
   are not returned from `run`. A trigger needing descriptor ids would have to
   be threaded out of `publish_locked` or re-read from the Kernel by
   `observed_at`/scope.

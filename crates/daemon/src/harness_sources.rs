@@ -648,6 +648,17 @@ pub const MAX_SOURCE_BATCH_BYTES: usize = crate::memory_capture::MAX_CAPTURE_INP
 /// How long `publish` waits for a kernel reader to consult the stored receipt before offering bytes to the store.
 const RECEIPT_WAIT: Duration = Duration::from_secs(30);
 
+/// Runs in [`SourcePublisher::publish_within`] after the artifact is retained and before the descriptor commit, where a test lets another writer commit the descriptor first.
+#[cfg(feature = "test-support")]
+static BEFORE_DESCRIPTOR_COMMIT: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
+/// Installs or clears the hook `publish_within` runs before its descriptor commit.
+#[cfg(feature = "test-support")]
+pub fn set_before_descriptor_commit_for_test(hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
+    *BEFORE_DESCRIPTOR_COMMIT.lock().expect("hook mutex") = hook;
+}
+
 /// The deadline a batch's receipt preview waits until: the receipt wait, or `budget`'s deadline when that is sooner.
 fn preview_deadline(budget: Option<&kernel::applicability::EvalBudget>) -> Instant {
     let receipt_wait = Instant::now() + RECEIPT_WAIT;
@@ -761,6 +772,13 @@ impl SourcePublisher<'_> {
             outcome = Some((published, admission));
             Ok(result)
         };
+        #[cfg(feature = "test-support")]
+        {
+            let hook = BEFORE_DESCRIPTOR_COMMIT.lock().expect("hook mutex").clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let receipt = match budget {
             Some(budget) => self
                 .kernel
@@ -777,16 +795,29 @@ impl SourcePublisher<'_> {
                 replayed: receipt.replayed,
                 admission: committed_admission,
             }),
-            // A receipt committed between the preview and this commit replays here; it ran no operation, and its result is the object id the first publication returned.
-            (Ok(receipt), None) => Ok(Published {
-                object_id: receipt.result,
-                occurrence_id: unit.occurrence_id,
-                evidence_object_id,
-                evidence_id: evidence_id.clone(),
-                replaced_object_id: None,
-                replayed: true,
-                admission,
-            }),
+            // A receipt committed between the preview and this commit replays here; it ran no operation, and its result is the object id the first publication returned, whose stored descriptor names the evidence it cites.
+            (Ok(receipt), None) => {
+                let (_, (evidence_id, evidence_object_id)) = self
+                    .kernel
+                    .preview(preview_deadline(budget), |preview| {
+                        preview
+                            .source_descriptor_evidence(&receipt.result)?
+                            .ok_or(KernelError::CorruptCanonicalRow)
+                    })
+                    .map_err(|error| PublishError::Kernel {
+                        error,
+                        evidence: None,
+                    })?;
+                Ok(Published {
+                    object_id: receipt.result,
+                    occurrence_id: unit.occurrence_id,
+                    evidence_object_id,
+                    evidence_id,
+                    replaced_object_id: None,
+                    replayed: true,
+                    admission,
+                })
+            }
             (Err(error), _) => {
                 let error = match refusal {
                     Some(Err(SourceDescriptorError::Kernel(error))) => error,

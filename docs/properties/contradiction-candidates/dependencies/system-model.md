@@ -80,23 +80,23 @@ ServedStanding` (`:107-115`), occurrences, exclusions, causality. `EvalBudget`
 
 S4 source capture. `crates/daemon/src/source_capture.rs:1-7` module header.
 `CAPTURE_BUDGET = 5 s` (`:36`), `CAPTURE_DOMAIN_ID = "harness-capture"`
-(`:53`), `counts!` macro (`:57-74`) and vocabulary (`:76-114`). Supervisor
-`slot: Arc<Semaphore>` (`:234`) created with `Semaphore::new(1)` (`:266`).
-`ActiveSlot` (`:420-431`) decrements `Active` on drop. `offer` (`:434`).
-`into_job` (`:596-630`): `try_acquire_owned` or `RefusedQueueFull`; budget
-origin `Instant::now() + CAPTURE_BUDGET` at acceptance (`:609-612`).
-`CaptureJob::run` (`:653-679`): `spawn_blocking(self.publish())`, cancel sets
-the interrupt and awaits the join. `publish` (`:685-805`): cancel check,
-kernel store, budget, units, memo, commit gate mutex (`:789`),
-`publish_locked` (`:808-900`): delete epoch, scope, budget,
-`publish_screened_between` for the window (`:832-840`), then
+(`:54`), `counts!` macro (`:58-75`) and vocabulary (`:77-115`). Supervisor
+`slot: Arc<Semaphore>` (`:235`) created with `Semaphore::new(1)` (`:267`).
+`ActiveSlot` (`:473-478`) decrements `Active` on drop. `offer` (`:493`).
+`into_job` (`:722-765`): `try_acquire_owned` or `RefusedQueueFull`; budget
+origin `Instant::now() + CAPTURE_BUDGET` at acceptance (`:621-624`).
+`CaptureJob::run` (`:665-691`): `spawn_blocking(self.publish())`, cancel sets
+the interrupt and awaits the join. `publish` (`:697-880`): cancel check,
+kernel store, budget, units, memo, commit gate mutex (`:811`),
+`publish_locked` (`:883-975`): delete epoch, scope, budget,
+`publish_screened_between` for the window (`:907-915`), then
 `capture_documents` in its own batch (`:905-...`). `capture_after_response`
 (`crates/daemon/src/lib.rs:9246-9263`). The request owner runs the
-`AfterResponse` after `settle_prepared` (`lib.rs:14005-14019`;
+`AfterResponse` after `settle_prepared` (`lib.rs:13660-13664`;
 `crates/daemon/src/dispatch.rs:24-35`, `:445-460`). `publish_batch`
-(`crates/daemon/src/harness_sources.rs:1233-1253`), `Published` (`:520-532`),
+(`crates/daemon/src/harness_sources.rs:1292-1298`), `Published` (`:549-562`),
 `MAX_SOURCE_UNIT_BYTES`/`MAX_SOURCE_BATCH_UNITS`/`MAX_SOURCE_BATCH_BYTES`
-(`:612-616`, resolving to 64 KiB, 32, 64 KiB through
+(`:614-618`, resolving to 64 KiB, 32, 64 KiB through
 `crates/memory-store/src/memory_capture.rs:19` and
 `crates/daemon/src/memory_capture.rs:36-37`). Screening bounds applied at
 `harness_sources.rs:1557`, `:1602-1603`.
@@ -180,7 +180,7 @@ exclusion of the context_researcher is by registration
 
 - One publication slot per daemon (`Semaphore::new(1)`); the job runs on
   `spawn_blocking`; a `commit_gate: Mutex<()>` serializes capture commits
-  with session deletion (`source_capture.rs:812-873`, panic caught and
+  with session deletion (`source_capture.rs:813-879`, panic caught and
   resumed after the guard drops).
 - The lifecycle loop is one task; `kernel_slice` runs on `spawn_blocking`
   and checks `cancelled()` between sweeps.
@@ -213,7 +213,7 @@ C9 `source_capture.rs:3`: "The response bytes never wait on the kernel or the
 job"; single publication slot; at most one screened batch under a 5 s budget.
 C10 `source_capture.rs:7`: counters carry a closed vocabulary, never unit text.
 C11 `storage/AGENTS.md`: single baseline; reject mismatches.
-`memory-reviewer-operations.md:86-88`, `:234-240`: a store at another
+`memory-reviewer-operations.md:86-88`, `:235-241`: a store at another
 baseline refuses to open; the activation gate binds `memstore_baseline_digest`.
 C12 `local_file.rs:240`: owners first, evidence second; cited evidence kept;
 descriptors retired.
@@ -271,9 +271,9 @@ bounded by `max_rows` instead. The doc comment at `:121` is accurate about
 the wait; the plan's reading of "budgeted" is broader than the code.
 
 D3 `source_capture.rs:3` says the job "publishes at most one screened batch".
-`publish_locked` publishes the window batch (`:902-910`) and then
+`publish_locked` publishes the window batch (`:908-916`) and then
 `capture_documents` publishes the pass's configured documents "in their own
-batch after the window's" (`:901-905`, `publish_screened` at `:980`). Two
+batch after the window's" (`:976-980`, `publish_screened` at `:1055`). Two
 screened batches per job when documents are pending. The per-batch bounds
 (32 units, 64 KiB) hold for each.
 
@@ -304,7 +304,7 @@ D7 At `3a3b916b7` the pi plugin's `eidnara_memory` tool had no
 "allowlist as rollout lever" assumption holds in both.
 
 D8 `context.md` cited `capture_after_response` at `lib.rs:9220-9239`
-(verified `:9219-9236`) and the plan cited `:9207-9220` (drifted). Plan cited
+(verified `:9220-9237`) and the plan cited `:9207-9221` (drifted). Plan cited
 `Cargo.toml:41`; `retrieval` is at `:45`.
 
 ## Lens: wildcard

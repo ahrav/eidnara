@@ -11,10 +11,11 @@ reviewer work.
 
 - `crates/daemon/src/contradiction_candidates/pass.rs` reads through
   `capture_identified_commit_read_target_within_budget`,
-  `visible_domain_decisions_as_of_in_scope`, `claim_facts_at_within_budget`,
-  `decision_payload_sizes_as_of`, and
-  `decisions_for_objects_as_of_within_budget`, and writes only
-  `replace_candidates_for_descriptor`.
+  `visible_domain_decisions_as_of_in_scope`, `scope_terms_within_budget`,
+  `claim_standing_at_within_budget`, `decision_payload_sizes_as_of`, and
+  `decisions_for_objects_as_of_within_budget`, checks `require_incarnation`
+  before each write, and writes only
+  `replace_candidates_for_descriptor_bounded` on the memory store.
 - `crates/daemon/src/contradiction_candidates/sweep.rs` reads and deletes
   through `delete_candidates_as_read` only.
 

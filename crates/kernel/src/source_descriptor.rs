@@ -912,7 +912,7 @@ impl Envelope<'_> {
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::CorruptCanonicalRow`] when the descriptor's stored detail names an evidence id or artifact digest other than the cited row's, the disagreement [`KernelStore::live_source_descriptors`] refuses.
+    /// Returns [`KernelError::CorruptCanonicalRow`] when the descriptor's stored detail names an evidence id or artifact digest other than the cited row's, or fails [`SourceDescriptorDetail::is_consistent_with`] for `object_id`, the disagreements [`KernelStore::live_source_descriptors`] refuses.
     pub fn source_descriptor_evidence(
         &self,
         object_id: &str,
@@ -923,8 +923,8 @@ impl Envelope<'_> {
                 "SELECT e.evidence_id,e.object_id,e.artifact_digest,o.observation_payload
                  FROM observations o
                  JOIN evidence_meta e ON e.evidence_id=o.evidence_id
-                 WHERE o.object_id=?1",
-                [object_id],
+                 WHERE o.object_id=?1 AND o.observation_kind=?2",
+                [object_id, SOURCE_DESCRIPTOR_KIND],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
@@ -933,7 +933,10 @@ impl Envelope<'_> {
             return Ok(None);
         };
         let detail = stored_detail(&payload)?;
-        if detail.evidence_id != evidence_id || detail.artifact_digest != artifact_digest {
+        if detail.evidence_id != evidence_id
+            || detail.artifact_digest != artifact_digest
+            || !detail.is_consistent_with(object_id)
+        {
             return Err(KernelError::CorruptCanonicalRow);
         }
         Ok(Some((evidence_id, evidence_object_id)))

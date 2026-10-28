@@ -38,15 +38,15 @@ named function; no wrong file, no wrong claim).
 | `project.rs:106-111` `scope_term`; `:212-214` `None => false` | confirmed |
 | `slice/read.rs:126-133`, `:134`, `:139-146`, `:236-241`, `:330` | confirmed |
 | `claim_facts.rs:240-257`, `:248`, `:309`, `:313`, `:146-156`, `:90-97` | confirmed; `ClaimDecisionFacts` carries ids only (D1 holds) |
-| `source_capture.rs:3`, `:54`, `:269`, `:616-619`, `:623-626`, `:813-873` | confirmed |
-| `source_capture.rs:666-690` `CaptureJob::run` | corrected: `:667-690` |
-| `lib.rs:9220-9237` `capture_after_response` | confirmed |
-| `lib.rs:13491`, `:13497` `settle_prepared`, `:13500-13502` | corrected: `settle_prepared` is `:13498`; others confirmed |
-| `lib.rs:4000-4008`, `:274-281`, `:413-417`, `:35531` | confirmed |
+| `source_capture.rs:3`, `:54`, `:269`, `:616-619`, `:623-626`, `:814-879` | confirmed |
+| `source_capture.rs:796-825` `CaptureJob::run`, `run_settled` | confirmed at this tip |
+| `lib.rs:9279-9325` `capture_after_response` | confirmed |
+| `lib.rs:13653`, `:13660` `settle_prepared`, `:13662-13664` | confirmed at this tip |
+| `lib.rs:4000-4008`, `:274-281`, `:413-417`, `:35536` | confirmed |
 | `local_file.rs:64-70`, `:245-247`, `:487-501` | confirmed |
 | `slice/write.rs:42-54`, `:569`, `:585`, `:606-608` Conflict | confirmed |
 | `schema.rs:136` retention comment | confirmed |
-| `kernel_routes/mod.rs:475` `ENVELOPE_KEYS` includes `kind` | confirmed (D6 holds) |
+| `kernel_routes/mod.rs:461` `ENVELOPE_KEYS` includes `kind` | confirmed (D6 holds) |
 | `wire.rs:131-139` `authority_project` | confirmed |
 | `host-wire-protocol.md:795-799`, `:819-823` | confirmed |
 | `types.ts:6`, `:24`, `:27-29`; `tools.ts:72-74`, `:125-138` | confirmed at `3a3b916b7`; at the #1164 tip the allowlist default is `tools.ts:103-106` and `isEidnaraMemoryMutation` is `types.ts:26-29` (#1161) |
@@ -54,7 +54,7 @@ named function; no wrong file, no wrong claim).
 | `config.rs:154`; `memory-store/src/lib.rs:335-340`; `storage/src/lib.rs:2631` | confirmed |
 | `activation.rs:174`; `lifecycle.rs:16-18`, `:327` | confirmed |
 | `tool-registry.ts:58`; `subagent-entry.ts:63` | `tool-registry.ts:58` now passes `EIDNARA_MEMORY_DEFAULT_ACTIONS` (#1161); confirmed at `packages/opencode-plugin/src/plugin/tool-registry.ts:58` and `packages/pi-plugin/src/subagent-entry.ts:63`; the catalog gives bare file names |
-| 22 test function locations (`source_capture_tests.rs:312,335,442,666,783,931,2231`; `source_capture.rs:1791`; `kernel_routes.rs:1958,2080,2112,1803`; `kernel_scope.rs:235`; `kernel_canonical_read.rs:227,448`; `kernel_claim_facts.rs:466`; `claims.rs:993`; `embedding_dispatch.rs:1102`; `search_catchup.rs:1876`; `memory_reviewer_wire.rs:15,260`; `baseline.rs:492`; `lifecycle.rs:704`; `local_file.rs:710,722,791,889`; `tools.test.ts:1185,1193`) | all confirmed |
+| 22 test function locations (`source_capture_tests.rs:312,335,442,666,783,931,2231`; `source_capture.rs:1797`; `kernel_routes.rs:1958,2080,2112,1803`; `kernel_scope.rs:235`; `kernel_canonical_read.rs:227,448`; `kernel_claim_facts.rs:466`; `claims.rs:993`; `embedding_dispatch.rs:1102`; `search_catchup.rs:1876`; `memory_reviewer_wire.rs:15,260`; `baseline.rs:492`; `lifecycle.rs:704`; `local_file.rs:710,722,791,889`; `tools.test.ts:1185,1193`) | all confirmed |
 | `query_route.rs:1055`; `lexical/index.rs:50`; `daemon/Cargo.toml:45`; `admission.rs:4237` | confirmed |
 | `harness_sources.rs:614-618`, `:1233`; `open.rs:614` `hold_readers_for_test` | confirmed |
 
@@ -168,10 +168,10 @@ on well-tested code (Exercised yes or partial for all six).
   needs no production change. R6.
 - `p5dep-response-never-waits-on-the-capture-job` asserts
   `t(after.run()) >= t(settle_prepared returned)`. Both are inside one async
-  function (`lib.rs:13498-13503`); the ordering is sequential code, so the
+  function (`lib.rs:13652-13665`); the ordering is sequential code, so the
   clock-based oracle is both trivially true and not the property. The
   property is that `after.run()` cannot wait: `into_job` uses
-  `try_acquire_owned` (`source_capture.rs:616`), `spawn` is non-blocking, no
+  `try_acquire_owned` (`source_capture.rs:728`), `spawn` is non-blocking, no
   kernel call occurs. R4 restates the check as a non-waiting clause plus the
   byte-identity oracle already tested.
 - `p5dep-budget-exhaustion-stops-a-budgeted-kernel-read` depends on
@@ -283,11 +283,11 @@ R4. `p5dep-response-never-waits-on-the-capture-job`: Guarantee: replace
 "encoded and handed to the wire writer before the capture job starts" with
 "settled (encoded) before the synchronous handoff runs; the handoff
 (`into_job` with `try_acquire_owned`, `admission.spawn`) performs no await,
-no kernel call, and no waiting lock (`lib.rs:9229-9236`,
+no kernel call, and no waiting lock (`lib.rs:9297-9320`,
 `source_capture.rs:616-619`); the job body runs on a spawned task". Check:
 replace the `t(...) >= t(...)` clause with "the `AfterResponse` closure
 contains no blocking or kernel operation" and keep the byte-identity clause.
-Fix `:13384` to `:13385`.
+Fix `:13391` to `:13392`.
 
 R5. `p5dep-cited-evidence-survives-the-harness-sweep`: remove "and
 `retire_evidence` on a cited row returns `Conflict`" from Check; add to
