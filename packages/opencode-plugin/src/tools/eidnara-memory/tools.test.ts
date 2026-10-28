@@ -1694,7 +1694,16 @@ describe("eidnara_memory candidates", () => {
 
     test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, items out of reader order, and an id no row stores", async () => {
         const h = candidatesHarness([
-            { kind: "page", as_of: 41, items: Array.from({ length: 65 }, () => ITEM), next: null },
+            {
+                kind: "page",
+                as_of: 41,
+                // Distinct ascending ids keep the page in reader order, so the bound is the check that refuses it.
+                items: Array.from({ length: 65 }, (_, index) => ({
+                    ...ITEM,
+                    evidence_id: `srcev:${String(index).padStart(3, "0")}`,
+                })),
+                next: null,
+            },
             { kind: "page", as_of: 41, items: [{ ...ITEM, score: 9999 }], next: null },
             {
                 kind: "page",
