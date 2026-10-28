@@ -37,7 +37,7 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
   checks the claim bound inside the budget, then the target against the tip
   and the incarnation under the reader guard, and reads the served view plus
   one statement for the registry row, decision row, and own admission row of
-  every id (`standing_sql`, `:391`). Each standing equals those fields of
+  every id (`standing_sql`, `:394`). Each standing equals those fields of
   claim facts at the same target
   (`crates/kernel/tests/kernel_claim_standing.rs:111`, at every snapshot).
 - `crates/kernel/src/evidence_liveness.rs:50`

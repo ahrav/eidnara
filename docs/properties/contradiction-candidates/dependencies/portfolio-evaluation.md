@@ -42,7 +42,7 @@ named function; no wrong file, no wrong claim).
 | `source_capture.rs:678-702` `CaptureJob::run` | corrected: `:679-702` |
 | `lib.rs:9220-9237` `capture_after_response` | confirmed |
 | `lib.rs:13491`, `:13497` `settle_prepared`, `:13500-13502` | corrected: `settle_prepared` is `:13498`; others confirmed |
-| `lib.rs:4000-4008`, `:274-281`, `:413-417`, `:35534` | confirmed |
+| `lib.rs:4000-4008`, `:274-281`, `:413-417`, `:35926` | confirmed |
 | `local_file.rs:64-70`, `:245-247`, `:487-501` | confirmed |
 | `slice/write.rs:42-54`, `:569`, `:585`, `:606-608` Conflict | confirmed |
 | `schema.rs:136` retention comment | confirmed |

@@ -11,7 +11,7 @@ differ from an empty page.
 ## Evidence trail
 
 - `crates/daemon/src/contradiction_candidates/read.rs:154` answers
-  `disabled` for a false frozen flag before the store is reached; `:141`
+  `disabled` for a false frozen flag before the store is reached; `:157`
   answers `store_unavailable` for a daemon with no Memory Store.
 - `crates/daemon/src/contradiction_candidates/read.rs:166` answers
   `disabled` for a root whose memories authority is not MODULE, and a failed

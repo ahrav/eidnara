@@ -33,6 +33,10 @@ enabling state" and name the tests that construct them.
 | `cc-scorer-output-deterministic-under-contract-version` | A1, A2, A3, A7 | A1, A2, A3, A7; A10 absent |
 | `cc-oversize-text-refused-whole-never-truncated` | A4, A5, A7 | A4, A5, A7; A6 unconstructible |
 | `cc-case-fold-applied-identically-to-both-sides` | A8, A9 | A8, A9 |
+| `cc-read-serves-only-live-decision-rows-ids-and-scores-only` | R1 | R1: a row whose evidence is retired at the read is seeded directly (`candidate_pass_tests.rs:1485`) and retired by the sweep after a listing (`:1897`) |
+| `cc-read-distinguishes-disabled-unavailable-and-empty` | R2, R3, R4, R5 | R2, R3 (`candidate_pass_tests.rs:1829`), R4 (`:1485`); R5 has no seam |
+| `cc-flag-off-no-pass-no-write-no-table-read` | R4 | R4 (`candidate_pass_tests.rs:1485`, `:2021`) |
+| `cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm` | R1 | R1 (`candidate_pass_tests.rs:1897`) |
 
 ## Coverage checks to add
 

@@ -589,7 +589,9 @@ impl MemoryStore {
     /// # Errors
     ///
     /// [`MemoryStoreError::Serde`] for a malformed digest or id, or for a cursor
-    /// outside the canonical form a page's `next` carries.
+    /// outside the canonical form a page's `next` carries. Storage errors
+    /// otherwise; the page query runs before the cursor is judged, so a storage
+    /// error takes precedence over a malformed cursor.
     pub fn candidates_for_decision(
         &self,
         project_digest: &str,

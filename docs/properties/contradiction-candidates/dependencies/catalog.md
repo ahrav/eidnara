@@ -180,7 +180,7 @@ case-boundary parts (`HTTPServer` to `http`, `server`), kept diacritics,
 and distinct NFC and NFD terms, which hold only if the analyzer returns
 original bytes; `:276-318` shows equal output under 18 input orders.
 Impact: the P5 scorer must fold case itself (plan R3); if the analyzer folded,
-the fold would be double and the FTS5 contract at `mod.rs:31` would no longer
+the fold would be double and the FTS5 contract at `mod.rs:32` would no longer
 describe the probe.
 Open questions: None.
 
@@ -189,7 +189,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - `AnalysisIdentity::current()` is computed
 once per process (`identity.rs:13-18`) and `ANALYSIS_CONTRACT_EPOCH` is a
-public constant (`mod.rs:41`).
+public constant (`mod.rs:42`).
 Status: active
 Exercised: yes - `identity_pins_the_manifest`
 (`tests/lexical_analysis.rs:389-412`) asserts the epoch string and the
@@ -425,7 +425,7 @@ before its reader acquisition (`:284`), in chunks of 64 under
 (`crates/daemon/tests/contradiction_candidates_sweep.rs:985`) reads 66
 decisions in two chunks, and
 `a_failed_claim_read_keeps_its_rows_and_the_kernel_free_drops_still_land`
-(`:764`) shows a chunk refused as `NotADecision` keeps that chunk's rows.
+(`:765`) shows a chunk refused as `NotADecision` keeps that chunk's rows.
 Impact: for P5 R2 this bound caps the ids per call but, per D1, the call
 returns no summary text; the plan's data path through this API does not
 exist at HEAD.
@@ -856,8 +856,8 @@ Re-exercised by #1168: `review.candidates` joins the family through
 `review_candidates_pages_live_rows_and_answers_each_terminal`
 (`crates/daemon/src/candidate_pass_tests.rs:1485`) answers `invalid_params`
 for an unknown field and a malformed cursor, `project_mismatch` for a foreign
-root before the body is read (`:1520`), and `disabled` for a root without
-MODULE authority (`:1260`).
+root before the body is read (`:1763`), and `disabled` for a root without
+MODULE authority (`:1503`).
 Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
 fields, would break the family's stated order. `review.use_outcome` (#1157)
@@ -865,7 +865,7 @@ joined the family after `3a3b916b7`: it reads the Kernel alone and has no
 `disabled` terminal (`host-wire-protocol.md:827`); this record does not
 cover it.
 Open questions:
-- D6: `kind` is stripped as an envelope key (`mod.rs:461`) but the doc at
+- D6: `kind` is stripped as an envelope key (`mod.rs:462`) but the doc at
   `host-wire-protocol.md:797` names three envelope fields. Is a body field
   `kind` meant to be accepted silently? (needs human input)
 

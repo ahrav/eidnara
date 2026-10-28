@@ -52,9 +52,9 @@ schemas, and the pi `allowedActions` since `3a3b916b7`.
   default.
 - `packages/pi-plugin/src/tools/eidnara-memory.ts:114-126` `paramsSchema`: the
   `action` enum lists the admitted actions and the dispute fields appear only
-  when `dispute` is admitted; `:129-134` `allowedActions` defaults to
-  `EIDNARA_MEMORY_DEFAULT_ACTIONS`; `:157-169` approve/enforce and allowlist
-  checks; `:181-185` mutation identity check. No agent check: pi excludes the
+  when `dispute` is admitted; `:146-151` `allowedActions` defaults to
+  `EIDNARA_MEMORY_DEFAULT_ACTIONS`; `:174-186` approve/enforce and allowlist
+  checks; `:198-202` mutation identity check. No agent check: pi excludes the
   context_researcher by registration.
 - `packages/pi-plugin/src/tools/index.ts:30-32` `memoryToolEnabled` doc: "The
   context_researcher needs read-only `eidnara_search`; the main agent keeps
@@ -112,6 +112,9 @@ None; synchronous guards before any network call.
   `allowedActions` to the pi tool with the opencode default
   (`EIDNARA_MEMORY_DEFAULT_ACTIONS`, which excludes `dispute`), so the P4
   rollout lever exists in both plugins.
-- Missing evidence: none for D7. Whether `candidates` joins the default list
-  is open for #1168.
-- Conclusion: resolved with answer: both plugins carry the allowlist.
+- Missing evidence: none for D7. At the #1164 tip the default list's
+  `candidates` membership was undecided; #1168 places `candidates` in
+  `EIDNARA_MEMORY_DEFAULT_ACTIONS`, so `dispute` is the one action an
+  omitted allowlist withholds (`types.ts:18-20`).
+- Conclusion: resolved with answer: both plugins carry the allowlist, and
+  `candidates` is in the default list of both.

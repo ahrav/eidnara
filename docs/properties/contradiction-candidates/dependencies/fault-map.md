@@ -25,7 +25,7 @@ today, which records need it, and the cheapest valid oracle.
 | F16 refused capture inside a page | yes | `local_file.rs:895` |
 | F17 project-root mismatch, unknown body field, NotModule authority | yes | `memory_reviewer_wire.rs:15`, `:238` |
 | F18 store read failure during authority lookup | not found | no seam found for `memories_authority_for_route` failure |
-| F19 observational (`cli`) route beside a participating route | yes | `lib.rs:35511` |
+| F19 observational (`cli`) route beside a participating route | yes | `lib.rs:35926` |
 | F20 disallowed action, empty allowlist, context-researcher agent | yes | `tools.test.ts:1162`; agent string in `toolContext` |
 | F21 toolchain Unicode or SQLite version change | out of tree | a different toolchain build |
 

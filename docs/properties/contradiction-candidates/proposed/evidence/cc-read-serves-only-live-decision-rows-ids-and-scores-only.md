@@ -12,15 +12,16 @@ carry no descriptor or summary text.
 
 - `crates/daemon/src/contradiction_candidates/read.rs:138-150` binds the
   route through `management_binding` (the frozen flag) and `kernel_request`
-  (scope first, then the strict body with `deny_unknown_fields`, `:27`).
+  (scope first, then the strict body with `deny_unknown_fields`, `:29`).
 - `crates/daemon/src/contradiction_candidates/read.rs:88` `decision_is_live`
   reads the one decision's claim standing at the identified tip
   (`crates/kernel/src/claim_facts.rs:270` `claim_standing_at_within_budget`:
   the registry row, decision row, own admission, and served standing, each
   read as claim facts read it) and applies `ScopeFilter` and the shared
   predicate (`crates/daemon/src/contradiction_candidates/eligibility.rs:7`
-  `eligible`); a failure answers
-  `not_live` (`:178`) before the store is read.
+  `eligible`); a failure answers `not_live`
+  (`crates/daemon/src/contradiction_candidates/read.rs:184`) before the store
+  is read.
 - `crates/daemon/src/contradiction_candidates/read.rs:187`
   `candidates_for_decision` pages at most 64 rows in reader order with a
   keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:593`).
@@ -28,7 +29,7 @@ carry no descriptor or summary text.
   liveness for the page's ids at the same target; `is_current` (`:121`) keeps
   a row only when its evidence is live, its incarnation and matcher digest
   equal the reader's, and its `publish_tip` is at or below the target, and
-  `:209` counts the rest `read_filtered_stale`.
+  `:215` counts the rest `read_filtered_stale`.
 - `crates/daemon/src/contradiction_candidates/read.rs:58` `ItemOut` holds the
   eight wire keys, encoded once into the page bytes; `packages/opencode-plugin/src/shared/kernel-client/wire.ts:652`
   refuses any other key set.

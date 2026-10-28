@@ -153,7 +153,7 @@ added `candidates`);
 `{get, candidates}` (`:25-28`); `isEidnaraMemoryMutation` (`:31-33`);
 `allowedActions?` (`:60-66`). `tools.ts:122-125` allowlist default; `:145-157` execute guards
 (approve/enforce, context-researcher agent, closed list and allowlist);
-`:152-154` mutation needs a tool-call id.
+`:171-174` mutation needs a tool-call id.
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58` passes
 `EIDNARA_MEMORY_DEFAULT_ACTIONS`. Pi plugin
 `packages/pi-plugin/src/tools/eidnara-memory.ts:143-205` has the same
