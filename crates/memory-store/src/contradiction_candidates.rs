@@ -163,10 +163,18 @@ fn format_cursor(score_bp: u32, created_at_ms: i64, evidence_id: &str) -> String
     format!("{score_bp}.{created_at_ms}.{evidence}")
 }
 
+/// The longest cursor [`format_cursor`] produces: a ten-digit score, a signed
+/// twenty-character time, two dots, and the hex of a longest id.
+const MAX_CURSOR_BYTES: usize = 10 + 1 + 20 + 1 + 2 * MAX_CANDIDATE_ID_BYTES;
+
 /// The position `cursor` names; only a cursor [`format_cursor`] produces is accepted.
-/// The hex scan examines at most `2 * MAX_CANDIDATE_ID_BYTES` bytes.
+/// The length check runs first, so the split and the parses examine at most
+/// `MAX_CURSOR_BYTES` bytes.
 fn decode_cursor(cursor: &str) -> Result<(u32, i64, String), MemoryStoreError> {
     let refused = || invalid("the page cursor is not one this store issued");
+    if cursor.len() > MAX_CURSOR_BYTES {
+        return Err(refused());
+    }
     let mut parts = cursor.splitn(3, '.');
     let (Some(score), Some(created), Some(evidence)) = (parts.next(), parts.next(), parts.next())
     else {

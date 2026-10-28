@@ -45,7 +45,7 @@ export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<s
         ...pagingOf(input.args),
         ...(input.signal ? { signal: input.signal } : {}),
     });
-    if (!isAvailable(result)) return renderToolStateText(result.state);
+    if (!isAvailable(result)) return `Error: ${renderToolStateText(result.state)}`;
     if (result.kind === "terminal") {
         switch (result.terminal) {
             case "disabled":

@@ -1733,6 +1733,7 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
     for body in [
         json!({ "decision_object_id": "object-one", "extra": 1 }),
         json!({ "decision_object_id": "object-one", "after": "not-a-cursor" }),
+        json!({ "decision_object_id": "object-one", "after": 42 }),
         json!({ "decision_object_id": "" }),
         json!({}),
     ] {
@@ -1792,6 +1793,11 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
         Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
         "a false flag answers before any table statement"
     );
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one", "after": 42 })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
+        "a false flag answers before a non-string cursor is judged"
+    );
     assert_eq!(counts(&handler)["read_filtered_stale"], filtered);
     rebind("opencode", true);
     assert_eq!(
@@ -1799,15 +1805,57 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
         Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
         "the hidden table fails the read a true flag runs"
     );
-    assert_eq!(
-        ask(json!({ "decision_object_id": "object-one", "after": "not-a-cursor" })).await,
-        Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
-        "the store terminal is judged before the cursor form"
-    );
+    for after in [json!("not-a-cursor"), json!(42)] {
+        assert_eq!(
+            ask(json!({ "decision_object_id": "object-one", "after": after })).await,
+            Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
+            "the store terminal is judged before the cursor spelling {after}"
+        );
+    }
     rename(
         "contradiction_candidates_hidden",
         "contradiction_candidates",
     );
+}
+
+/// With one of the two Kernel readers held for the whole request, every Kernel
+/// read the route makes takes the free reader inside the read budget: two
+/// requests, which start their reader rotation on opposite readers, both
+/// answer while the hold lasts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_reads_scope_terms_inside_its_budget_beside_a_held_reader() {
+    const HOLD: Duration = Duration::from_secs(8);
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    activate_memories_authority(&store, &project);
+    let held = Arc::new(std::sync::Barrier::new(2));
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        let held = Arc::clone(&held);
+        std::thread::spawn(move || kernel.hold_first_reader_for_test(&held, HOLD))
+    };
+    held.wait();
+    let started = Instant::now();
+    for _ in 0..2 {
+        let answer = tokio::time::timeout(
+            HOLD,
+            route_call(
+                &handler,
+                candidates_request(&project, json!({ "decision_object_id": "object-one" })),
+            ),
+        )
+        .await
+        .expect("the read answers while the reader is held");
+        assert_eq!(answer.unwrap()["kind"], "page");
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "two reads waited {:?} beside the held reader",
+        started.elapsed()
+    );
+    holder.join().unwrap();
 }
 
 fn find_file(root: &Path, name: &str) -> PathBuf {

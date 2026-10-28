@@ -550,6 +550,20 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
             .is_err(),
         "a cursor naming an evidence id longer than any stored id was never issued"
     );
+    let longest = format!("{}.{}.{}", u32::MAX, i64::MIN, "61".repeat(512));
+    assert_eq!(longest.len(), 1056);
+    assert!(
+        store
+            .candidates_for_decision(PROJECT, "decision", Some(&longest), 4)
+            .is_ok(),
+        "the longest cursor the store can issue parses"
+    );
+    assert!(
+        store
+            .candidates_for_decision(PROJECT, "decision", Some(&format!("0{longest}")), 4)
+            .is_err(),
+        "one byte past the longest issued cursor is refused before any component is parsed"
+    );
 }
 
 #[test]

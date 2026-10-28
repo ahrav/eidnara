@@ -17,7 +17,7 @@ use super::eligibility::eligible;
 use super::scorer::matcher_digest;
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES;
-use crate::kernel_routes::project::{ProjectBinding, ScopeFilter, stored_terms};
+use crate::kernel_routes::project::{ProjectBinding, ScopeFilter};
 use crate::kernel_routes::{blocking, state_only};
 use crate::{HandlerCore, MemoriesAuthority, memories_authority_for_route};
 
@@ -29,10 +29,30 @@ const ONE_CLAIM: NonZeroUsize = NonZeroUsize::new(1).expect("nonzero");
 #[serde(deny_unknown_fields)]
 struct CandidatesRequest {
     decision_object_id: String,
+    /// Kept as a JSON value so a spelling other than a string or `null` is judged
+    /// with the cursor form, after the terminals.
     #[serde(default)]
-    after: Option<String>,
+    after: Option<Value>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+/// The `after` field's reading: the page start, an issued cursor to decode, or a
+/// spelling the store never issued.
+enum Cursor {
+    Start,
+    Issued(String),
+    Malformed,
+}
+
+impl Cursor {
+    fn of(after: Option<Value>) -> Self {
+        match after {
+            None | Some(Value::Null) => Self::Start,
+            Some(Value::String(cursor)) => Self::Issued(cursor),
+            Some(_) => Self::Malformed,
+        }
+    }
 }
 
 fn response(body: Value) -> PreparedOutcome {
@@ -110,10 +130,9 @@ fn decision_is_live(
         return Ok(false);
     };
     let names_project = ScopeFilter::new(project)
-        .matches(
-            facts.decision.scope_id.as_deref(),
-            &mut stored_terms(kernel),
-        )
+        .matches(facts.decision.scope_id.as_deref(), &mut |scope: &str| {
+            kernel.scope_terms_within_budget(scope, budget)
+        })
         .map_err(Refused::Kernel)?;
     Ok(eligible(&facts, names_project))
 }
@@ -159,6 +178,7 @@ impl HandlerCore {
         };
         let counts = Arc::clone(&self.contradiction_candidates);
         let limit = parsed.limit.unwrap_or(MAX_CANDIDATE_PAGE);
+        let cursor = Cursor::of(parsed.after);
         let root = scope.project_root.to_string_lossy().to_string();
         let read = blocking(move || -> Result<Vec<u8>, Refused> {
             match memories_authority_for_route(&ledger, &root) {
@@ -183,17 +203,25 @@ impl HandlerCore {
             if !live {
                 return Err(Refused::Terminal("not_live"));
             }
+            // A malformed spelling runs the first-page query so a storage failure still answers its terminal.
+            let after = match &cursor {
+                Cursor::Issued(cursor) => Some(cursor.as_str()),
+                Cursor::Start | Cursor::Malformed => None,
+            };
             let page = ledger
                 .candidates_for_decision(
                     scope.project.digest(),
                     &parsed.decision_object_id,
-                    parsed.after.as_deref(),
+                    after,
                     limit,
                 )
                 .map_err(|error| match error {
-                    MemoryStoreError::Serde(_) if parsed.after.is_some() => Refused::InvalidCursor,
+                    MemoryStoreError::Serde(_) if after.is_some() => Refused::InvalidCursor,
                     _ => Refused::Terminal("store_unavailable"),
                 })?;
+            if matches!(cursor, Cursor::Malformed) {
+                return Err(Refused::InvalidCursor);
+            }
             let evidence: Vec<&str> = page
                 .items
                 .iter()

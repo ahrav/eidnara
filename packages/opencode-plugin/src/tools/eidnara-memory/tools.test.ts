@@ -1684,9 +1684,9 @@ describe("eidnara_memory candidates", () => {
         expect(await h.execute({ action: "candidates", objectId: "m" })).toContain(
             "store_unavailable",
         );
-        expect(await h.execute({ action: "candidates", objectId: "m" })).toContain(
-            "while the store opens",
-        );
+        const starting = await h.execute({ action: "candidates", objectId: "m" });
+        expect(starting).toMatch(/^Error: /);
+        expect(starting).toContain("while the store opens");
         expect(await h.execute({ action: "candidates" })).toBe(
             "Error: 'objectId' is required when action is 'candidates'.",
         );

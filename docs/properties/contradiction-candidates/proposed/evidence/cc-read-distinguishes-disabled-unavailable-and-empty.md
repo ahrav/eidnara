@@ -10,10 +10,10 @@ differ from an empty page.
 
 ## Evidence trail
 
-- `crates/daemon/src/contradiction_candidates/read.rs:154` answers
-  `disabled` for a false frozen flag before the store is reached; `:157`
+- `crates/daemon/src/contradiction_candidates/read.rs:173` answers
+  `disabled` for a false frozen flag before the store is reached; `:176`
   answers `store_unavailable` for a daemon with no Memory Store.
-- `crates/daemon/src/contradiction_candidates/read.rs:166` answers
+- `crates/daemon/src/contradiction_candidates/read.rs:186` answers
   `disabled` for a root whose memories authority is not MODULE, and a failed
   authority lookup or page read answers `store_unavailable`.
 - Kernel states come from `kernel_request` and `state_only` and carry no
@@ -36,13 +36,13 @@ does not change the route's answer.
 A flag-off route with the table renamed away and a flag-on control; a root
 without MODULE authority; a daemon with no Memory Store; a Kernel not yet
 open and one whose open failed; an eligible decision with zero rows. All in
-`crates/daemon/src/candidate_pass_tests.rs:1485` and `:1829`.
+`crates/daemon/src/candidate_pass_tests.rs:1485` and `:1877`.
 
 ## Investigation log
 
 ### Q: Does a failed Kernel open answer differently from a starting one?
 
-- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:1844`, `:1861`.
+- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:1892`, `:1909`.
 - Findings: a Kernel not yet open answers `unavailable`/`store_starting`;
   opening at a file path answers `unavailable`/`store_unavailable`.
 - Missing evidence: none.

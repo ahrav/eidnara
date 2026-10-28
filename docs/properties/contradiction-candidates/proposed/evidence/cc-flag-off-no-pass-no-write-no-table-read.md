@@ -9,12 +9,15 @@ candidate table statement on any path.
 
 ## Evidence trail
 
-- `crates/daemon/src/config.rs:1024` the key is user-only and default false.
+- `crates/daemon/src/config.rs:158` the default is false; `:1107` classes the
+  key `UserOnly` and `:520-523` pins that class at compile time;
+  `contradiction_candidates_default_off_and_only_the_user_tier_enables_them`
+  (`:2299`) checks both.
 - `crates/daemon/src/memory_reviewer/lifecycle.rs:448` the sweep reads the
   daemon-level value on each cleanup pass.
 - The pass is offered only when the route's frozen value consents; the
   capture job's offer carries it.
-- `crates/daemon/src/contradiction_candidates/read.rs:154` the read answers
+- `crates/daemon/src/contradiction_candidates/read.rs:173` the read answers
   `disabled` before reaching the store.
 
 ## Failure scenario
@@ -32,8 +35,8 @@ sweep follows the reload on its next pass.
 The candidate table renamed away under each arm, a flag-off run with every
 counter at zero, and a flag-on control that fails on the hidden table:
 `crates/daemon/tests/contradiction_candidates_sweep.rs:553` (sweep),
-`crates/daemon/src/candidate_pass_tests.rs:2021` (pass), and
-`crates/daemon/src/candidate_pass_tests.rs:1793` (read).
+`crates/daemon/src/candidate_pass_tests.rs:2069` (pass), and
+`crates/daemon/src/candidate_pass_tests.rs:1794` (read).
 
 ## Investigation log
 
