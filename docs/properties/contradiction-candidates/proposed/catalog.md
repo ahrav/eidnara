@@ -628,7 +628,7 @@ Open questions:
   needs a policy decision. #1165 fixes the facts the decision rests on: a row
   holds ids, integers, and times only (the table's columns are pinned by
   `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
-  `crates/memory-store/tests/contradiction_candidates.rs:415`), so a derived
+  `crates/memory-store/tests/contradiction_candidates.rs:403`), so a derived
   row carries none of the captured text, and the store has no sensitivity
   column. The descriptor it derives from publishes as `Sensitive` with
   `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:715-716`);
