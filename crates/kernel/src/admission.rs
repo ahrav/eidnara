@@ -1022,8 +1022,11 @@ impl Envelope<'_> {
                 request.event.kind,
                 EventKind::MarkDisputed | EventKind::Contradict
             );
+            // The length check runs first, so the parse and the later secret scan read a bounded input.
             let payload_is_object = reporter.event_payload.as_deref().is_none_or(|payload| {
-                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(payload).is_ok()
+                payload.len() <= context_core::redaction::MAX_REDACTABLE_BYTES
+                    && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(payload)
+                        .is_ok()
             });
             if !is_dispute || request.subject_object_id.is_none() || !payload_is_object {
                 return Err(KernelError::InvalidInput);

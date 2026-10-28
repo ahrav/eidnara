@@ -1479,18 +1479,27 @@ fn reporter_columns_are_dispute_only_and_checked_by_the_schema() {
                 subject_object_id: None,
                 ..request("d1", EventKind::MarkDisputed)
             },
-            None,
+            None::<String>,
         ),
         (
             "array-payload",
             request("d1", EventKind::MarkDisputed),
-            Some("[1]"),
+            Some("[1]".to_string()),
+        ),
+        // Pins the refusal; the length check runs before the parse, and the secret scan refuses the same input.
+        (
+            "oversized-payload",
+            request("d1", EventKind::MarkDisputed),
+            Some(format!(
+                "{{\"path\":\"{}\"}}",
+                "a".repeat(context_core::redaction::MAX_REDACTABLE_BYTES)
+            )),
         ),
     ] {
         let refused = store.commit(intent(key), |envelope| {
             envelope.record_dispute_admission(
                 request,
-                &reporter("s1", TaintClass::UserInferred, payload),
+                &reporter("s1", TaintClass::UserInferred, payload.as_deref()),
             )?;
             Ok(String::new())
         });
