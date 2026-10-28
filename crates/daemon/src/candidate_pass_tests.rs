@@ -2302,6 +2302,71 @@ async fn review_candidates_answers_disabled_when_authority_drains_before_the_pag
     );
 }
 
+/// The route's memories authority begins draining after the read's entry
+/// check while the decision is judged; a decision that is not live answers
+/// `disabled`, the terminal the contract puts before `not_live`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_answers_disabled_when_authority_drains_before_a_not_live_judgment() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(&kernel, &binding, &[("replaced", TOPIC, EventKind::Other)]);
+    kernel
+        .commit(intent("supersede-replaced"), |envelope| {
+            envelope.correct_decision(
+                "object-replaced",
+                DecisionSpec {
+                    decision_id: "decision-successor".to_owned(),
+                    object_id: "object-successor".to_owned(),
+                    domain_id: crate::canonical_memory::MEMORY_DOMAIN_ID.to_owned(),
+                    proposition_id: None,
+                    scope_id: Some(binding.scope_id()),
+                    anchor_id: None,
+                    evidence_id: None,
+                    decision_kind: "architecture".to_owned(),
+                    payload: DecisionPayload {
+                        summary: "a successor".to_owned(),
+                        rationale: "fixture".to_owned(),
+                    },
+                    source_kind: "fixture".to_owned(),
+                    source_id: "lineage-replaced".to_owned(),
+                    source_revision: 2,
+                    sensitivity: kernel::Sensitivity::Normal,
+                },
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
+    activate_memories_authority(&store, &project);
+    let ask = |body: Value| route_call(&handler, candidates_request(&project, body));
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-replaced" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "not_live" })),
+        "a superseded decision is not live under MODULE authority"
+    );
+    let draining = Arc::clone(&store);
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = Some(Arc::new(move || {
+        draining
+            .authority_begin_drain("ctx", "git:candidates", "memories", "lease", i64::MAX, 0)
+            .unwrap();
+    }));
+    let answer = ask(json!({ "decision_object_id": "object-replaced" })).await;
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = None;
+    assert_eq!(
+        answer,
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
+        "an authority that drained during the judgment answers before not_live"
+    );
+}
+
 /// The read's budget runs from its admission, so a read queued behind a
 /// saturated blocking pool for longer than its budget answers
 /// `store_unavailable` as soon as it runs.

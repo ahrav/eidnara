@@ -22,26 +22,27 @@ carry no descriptor or summary text.
   under the reader guard and runs under the same read budget, and the shared
   predicate (`crates/daemon/src/contradiction_candidates/eligibility.rs:7`
   `eligible`); a failure answers `not_live`
-  (`crates/daemon/src/contradiction_candidates/read.rs:252`) before the store
-  is read.
-- `crates/daemon/src/contradiction_candidates/read.rs:261`
+  (`crates/daemon/src/contradiction_candidates/read.rs:251`) before the
+  candidate page is read, after the route's authority is judged again
+  (`:254`).
+- `crates/daemon/src/contradiction_candidates/read.rs:270`
   `candidates_for_decision_under_route_within` pages at most 64 rows in reader
   order with a keyset cursor, in the connection that reads the route's MODULE
   authority row (`crates/memory-store/src/contradiction_candidates.rs:691`;
   the page query at `:627`, `candidates_for_decision`).
-- `crates/daemon/src/contradiction_candidates/read.rs:292` reads evidence
+- `crates/daemon/src/contradiction_candidates/read.rs:301` reads evidence
   liveness for the page's ids at the same target; `is_current` (`:178`) keeps
   a row only when its evidence is live, its incarnation and matcher digest
   equal the reader's, and its `publish_tip` is at or below the target, and
-  `:304` counts the rest `read_filtered_stale`.
+  `:313` counts the rest `read_filtered_stale`.
 - `crates/daemon/src/contradiction_candidates/read.rs:102` `ItemOut` holds the
-  eight wire keys, encoded once into the page bytes; `packages/opencode-plugin/src/shared/kernel-client/wire.ts:685`
+  eight wire keys, encoded once into the page bytes; `packages/opencode-plugin/src/shared/kernel-client/wire.ts:696`
   refuses any other key set.
 - Equivalence tests: `crates/kernel/tests/kernel_claim_facts.rs:954`
   compares the standing read with claim facts field by field and refusal by
   refusal; `crates/kernel/tests/kernel_source_descriptors.rs:3188` answers
   liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:1798`
-  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2692`
+  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2757`
   shows a page body is the canonical `serde_json` encoding of its value;
   `crates/daemon/src/candidate_pass_tests.rs:2172` answers two pages inside the
   read budget while one Kernel reader is held;
@@ -72,7 +73,7 @@ future tip; a superseded decision with rows; a second root. All in
 
 ### Q: Does the read judge rows at the same tip it reports?
 
-- Sources examined: `crates/daemon/src/contradiction_candidates/read.rs:234-311`.
+- Sources examined: `crates/daemon/src/contradiction_candidates/read.rs:234-320`.
 - Findings: the target is captured once; claim standing, evidence liveness, and
   `as_of` all use it.
 - Missing evidence: none.

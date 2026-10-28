@@ -249,7 +249,16 @@ impl HandlerCore {
                 &counts,
             )?;
             if !live {
-                return Err(Refused::Terminal("not_live"));
+                // The authority is judged again so a drain or move during the judgment answers `disabled`, the terminal before `not_live`.
+                return Err(
+                    match ledger.module_authority_for_route_within(&root, "memories", deadline) {
+                        Ok(row) => match memories_authority(row) {
+                            MemoriesAuthority::Module(_) => Refused::Terminal("not_live"),
+                            MemoriesAuthority::NotModule { .. } => Refused::Terminal("disabled"),
+                        },
+                        Err(_) => Refused::Terminal("store_unavailable"),
+                    },
+                );
             }
             // A malformed spelling runs the first-page query so a storage failure still answers its terminal.
             let after = match &cursor {

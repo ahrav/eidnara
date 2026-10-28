@@ -1777,6 +1777,13 @@ describe("eidnara_memory candidates", () => {
             { kind: "page", as_of: 41, items: [ITEM], next: "10001.1.61" },
             { kind: "page", as_of: 41, items: [ITEM], next: "1.1.ff" },
             { kind: "page", as_of: 41, items: [ITEM], next: "1.1.01" },
+            { kind: "page", as_of: 41, items: [ITEM], next: "1.9999999999999999999.61" },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, evidence_id: "srcev:\ud800" }],
+                next: null,
+            },
             {
                 kind: "page",
                 as_of: 41,
@@ -1804,6 +1811,8 @@ describe("eidnara_memory candidates", () => {
             "next with a score past 10000",
             "next whose id bytes are not UTF-8",
             "next whose id holds a control character",
+            "next whose time is past i64",
+            "a lone surrogate in evidence_id",
             "a state beside a page",
         ]) {
             const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
@@ -1814,7 +1823,7 @@ describe("eidnara_memory candidates", () => {
 
     test("refuses a page whose item carries any key outside the documented set", async () => {
         const h = candidatesHarness([
-            { kind: "page", as_of: 1, items: [{ ...ITEM, summary: "leaked text" }], next: null },
+            { kind: "page", as_of: 41, items: [{ ...ITEM, summary: "leaked text" }], next: null },
         ]);
         const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
         expect(text).not.toContain("leaked text");
@@ -1837,6 +1846,15 @@ describe("eidnara_memory candidates", () => {
         expect(note).not.toContain("File a confirm form");
         expect(byDefault.definition.description).not.toContain("independent evidence");
         expect(admitted.definition.description).toContain("independent evidence");
+    });
+
+    test("renders the next cursor of an id that begins with a byte order mark", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 41, items: [ITEM], next: "7500.1.efbbbf" },
+        ]);
+        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+        expect(text).not.toStartWith("Error:");
+        expect(JSON.parse(text).next).toBe("7500.1.efbbbf");
     });
 
     test("refuses a page naming another memory and paging fields the schema would refuse", async () => {

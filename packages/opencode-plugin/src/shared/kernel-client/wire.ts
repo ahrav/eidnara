@@ -654,8 +654,15 @@ void CANDIDATE_ITEM_KEYS_COVER_THE_ITEM;
 /** The candidate store holds an id of 1 to 512 UTF-8 bytes with no control character, and the dispute route accepts the same shape, so an item carrying another is one no row stored. */
 const STORABLE_ID_MAX_BYTES = 512;
 const CONTROL_CHARACTER = /\p{Cc}/u;
+const LONE_SURROGATE = /\p{Surrogate}/u;
 function isStorableId(value: unknown): value is string {
-    if (typeof value !== "string" || value.length === 0 || CONTROL_CHARACTER.test(value)) {
+    // A lone surrogate has no UTF-8 form, so no JSON the daemon emits carries one.
+    if (
+        typeof value !== "string" ||
+        value.length === 0 ||
+        CONTROL_CHARACTER.test(value) ||
+        LONE_SURROGATE.test(value)
+    ) {
         return false;
     }
     return new TextEncoder().encode(value).length <= STORABLE_ID_MAX_BYTES;
@@ -663,14 +670,18 @@ function isStorableId(value: unknown): value is string {
 
 const TERMS_MAX = 4_294_967_295;
 
-/** The cursor the store issues: a score of at most 10000, a non-negative creation time, and the lower-hex UTF-8 bytes of a storable id, dot-separated, at most 1056 bytes. */
+/** The cursor the store issues: a score of at most 10000, a creation time from 0 to i64::MAX, and the lower-hex UTF-8 bytes of a storable id, dot-separated, at most 1056 bytes. */
 const CURSOR_MAX_BYTES = 1056;
 const CURSOR_FORM = /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,18})\.((?:[0-9a-f]{2}){1,512})$/;
-const UTF8 = new TextDecoder("utf-8", { fatal: true });
+const I64_MAX = 9_223_372_036_854_775_807n;
+// The decoder keeps a leading U+FEFF, a character an id may begin with.
+const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 function isIssuedCursor(value: unknown): value is string {
     if (typeof value !== "string" || value.length > CURSOR_MAX_BYTES) return false;
     const form = CURSOR_FORM.exec(value);
-    if (form === null || Number(form[1]) > 10_000) return false;
+    if (form === null || Number(form[1]) > 10_000 || BigInt(form[2] as string) > I64_MAX) {
+        return false;
+    }
     const hex = form[3] as string;
     const bytes = Uint8Array.from({ length: hex.length / 2 }, (_, i) =>
         Number.parseInt(hex.slice(2 * i, 2 * i + 2), 16),
