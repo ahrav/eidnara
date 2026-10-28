@@ -13,7 +13,7 @@ differ from an empty page.
 - `crates/daemon/src/contradiction_candidates/read.rs:188` answers
   `disabled` for a false frozen flag before the store is reached; `:191`
   answers `store_unavailable` for a daemon with no Memory Store.
-- `crates/daemon/src/contradiction_candidates/read.rs:201` answers
+- `crates/daemon/src/contradiction_candidates/read.rs:205` answers
   `disabled` for a root whose memories authority is not MODULE, and a failed
   authority lookup or page read answers `store_unavailable`.
 - Kernel states come from `kernel_request` and `state_only` and carry no
@@ -22,7 +22,7 @@ differ from an empty page.
   through `module_authority_for_route_within` and
   `candidates_for_decision_within` under the read's deadline, so a held
   connection answers `store_unavailable` at the bound
-  (`crates/daemon/src/candidate_pass_tests.rs:2225`).
+  (`crates/daemon/src/candidate_pass_tests.rs:2318`).
 - `docs/host-wire-protocol.md:833` documents the three terminals, the kernel
   states, and the empty page.
 
@@ -41,13 +41,13 @@ does not change the route's answer.
 A flag-off route with the table renamed away and a flag-on control; a root
 without MODULE authority; a daemon with no Memory Store; a Kernel not yet
 open and one whose open failed; an eligible decision with zero rows. All in
-`crates/daemon/src/candidate_pass_tests.rs:1738` and `:2237`.
+`crates/daemon/src/candidate_pass_tests.rs:1738` and `:2330`.
 
 ## Investigation log
 
 ### Q: Does a failed Kernel open answer differently from a starting one?
 
-- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:2252`, `:2269`.
+- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:2345`, `:2362`.
 - Findings: a Kernel not yet open answers `unavailable`/`store_starting`;
   opening at a file path answers `unavailable`/`store_unavailable`.
 - Missing evidence: none.

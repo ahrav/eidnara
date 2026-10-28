@@ -688,6 +688,25 @@ function parseCandidateItem(raw: unknown): CandidateItem | null {
 }
 
 /** A `review.candidates` answer: a kernel state, a closed terminal, or a page whose items carry exactly the documented keys. */
+/** `later` follows `earlier` in a page: a lower score, the same score at an earlier creation time, or the same score and time at a greater evidence id in UTF-8 byte order, the order the store's `evidence_id>?` comparison uses. */
+function inReaderOrder(earlier: CandidateItem, later: CandidateItem): boolean {
+    if (earlier.score !== later.score) return later.score < earlier.score;
+    if (earlier.created_at_ms !== later.created_at_ms) {
+        return later.created_at_ms < earlier.created_at_ms;
+    }
+    return compareUtf8(earlier.evidence_id, later.evidence_id) < 0;
+}
+
+function compareUtf8(a: string, b: string): number {
+    const encoder = new TextEncoder();
+    const [x, y] = [encoder.encode(a), encoder.encode(b)];
+    const shared = Math.min(x.length, y.length);
+    for (let i = 0; i < shared; i += 1) {
+        if (x[i] !== y[i]) return (x[i] as number) - (y[i] as number);
+    }
+    return x.length - y.length;
+}
+
 export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload> {
     if (!isRecord(raw)) return failed();
     if (raw.kind === undefined && raw.state !== undefined) {
@@ -707,8 +726,10 @@ export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload>
     const items: CandidateItem[] = [];
     for (const entry of raw.items) {
         const item = parseCandidateItem(entry);
-        // The daemon leaves out a row whose publish_tip is past as_of, so a page carrying one is not its answer.
+        // The daemon leaves out a row whose publish_tip is past as_of and orders a page by score descending, creation time descending, then evidence id ascending, so a page breaking either is not its answer.
         if (!item || item.publish_tip > raw.as_of) return failed();
+        const previous = items.at(-1);
+        if (previous && !inReaderOrder(previous, item)) return failed();
         items.push(item);
     }
     return {

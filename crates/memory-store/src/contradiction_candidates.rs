@@ -678,6 +678,41 @@ impl MemoryStore {
         )
     }
 
+    /// [`Self::candidates_for_decision_within`] read in the connection that
+    /// reads the MODULE authority row serving `route_project_root` for `domain`
+    /// ([`Self::module_authority_for_route`]). `None` when the route has no
+    /// MODULE or DRAINING binding or its project has no MODULE row; the page is
+    /// read only under a found row.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::candidates_for_decision_within`], and the authority domain
+    /// errors of [`Self::module_authority_for_route`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn candidates_for_decision_under_route_within(
+        &self,
+        route_project_root: &str,
+        domain: &str,
+        project_digest: &str,
+        decision_object_id: &str,
+        after: Option<&str>,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<Option<(crate::AuthorityRow, CandidatePage)>, MemoryStoreError> {
+        let query = PageQuery::new(project_digest, decision_object_id, after, limit)?;
+        let found = self.module_authority_for_route_then(
+            route_project_root,
+            domain,
+            Some(deadline),
+            |conn, _| query.read(conn),
+        )?;
+        let Some((row, items)) = found else {
+            query.cursor()?;
+            return Ok(None);
+        };
+        Ok(Some((row, query.page(items)?)))
+    }
+
     fn candidates_for_decision_inner(
         &self,
         project_digest: &str,
@@ -686,83 +721,14 @@ impl MemoryStore {
         limit: usize,
         deadline: Option<Instant>,
     ) -> Result<CandidatePage, MemoryStoreError> {
-        check_hex("project_digest", project_digest, 64)?;
-        if decision_object_id.is_empty() || decision_object_id.len() > MAX_CANDIDATE_ID_BYTES {
-            return Err(invalid("decision_object_id is not a Kernel object id"));
-        }
-        // `candidates_for_decision` queries the first page for a malformed cursor so storage errors take precedence over cursor validation errors.
-        let after = after.map(decode_cursor).transpose();
-        let limit = limit.clamp(1, MAX_CANDIDATE_PAGE);
-        let want = limit + 1;
-        macro_rules! page_range {
-            ($range:literal) => {
-                concat!(
-                    "SELECT ",
-                    columns!(),
-                    " FROM contradiction_candidates
-                      WHERE project_digest=?1 AND decision_object_id=?2 AND ",
-                    $range
-                )
-            };
-        }
-        const SAME_TIME: &str = page_range!(
-            "score_bp=?3 AND created_at_ms=?4 AND evidence_id>?5 ORDER BY evidence_id ASC"
-        );
-        const SAME_SCORE: &str = page_range!(
-            "score_bp=?3 AND created_at_ms<?4 ORDER BY created_at_ms DESC, evidence_id ASC"
-        );
-        const LOWER_SCORE: &str =
-            page_range!("score_bp<?3 ORDER BY score_bp DESC, created_at_ms DESC, evidence_id ASC");
-        let read = |conn: &GuardedConn<'_>| {
-            let mut items = Vec::with_capacity(want);
-            let mut extend = |sql: &str, values: &[&dyn rusqlite::ToSql]| {
-                let room = want.saturating_sub(items.len());
-                if room == 0 {
-                    return Ok(());
-                }
-                for row in conn
-                    .prepare_cached(sql)?
-                    .query_map(values, candidate_from_row)?
-                    .take(room)
-                {
-                    items.push(row?);
-                }
-                Ok::<_, rusqlite::Error>(())
-            };
-            let score = match &after {
-                Ok(Some((score, created, evidence))) => {
-                    let score = i64::from(*score);
-                    let (project, decision) = (&project_digest, &decision_object_id);
-                    extend(
-                        SAME_TIME,
-                        params![project, decision, score, created, evidence],
-                    )?;
-                    extend(SAME_SCORE, params![project, decision, score, created])?;
-                    score
-                }
-                _ => i64::MAX,
-            };
-            extend(
-                LOWER_SCORE,
-                params![project_digest, decision_object_id, score],
-            )?;
-            Ok(items)
-        };
-        let mut items = match deadline {
+        let query = PageQuery::new(project_digest, decision_object_id, after, limit)?;
+        let read = |conn: &GuardedConn<'_>| query.read(conn);
+        let items = match deadline {
             Some(deadline) => self.inner.with_conn_within(deadline, read),
             None => self.inner.with_conn(read),
         }
         .map_err(MemoryStoreError::from)?;
-        after?;
-        let next = if items.len() > limit {
-            items.truncate(limit);
-            items
-                .last()
-                .map(|row| format_cursor(row.score_bp, row.created_at_ms, &row.evidence_id))
-        } else {
-            None
-        };
-        Ok(CandidatePage { items, next })
+        query.page(items)
     }
 
     /// At most `page` rows of every project with a rowid above `after_rowid`,
@@ -901,5 +867,109 @@ impl MemoryStore {
             tx.execute("DELETE FROM contradiction_candidate_totals", [])?;
             Ok(WriteDisposition::Applied(()))
         })
+    }
+}
+
+/// One keyset page query: its checked inputs, its decoded cursor, and the
+/// rows it reads from a connection.
+struct PageQuery<'a> {
+    project_digest: &'a str,
+    decision_object_id: &'a str,
+    /// The decoded cursor; a malformed spelling is kept so the first page's storage errors take precedence over cursor validation errors.
+    after: Result<Option<(u32, i64, String)>, MemoryStoreError>,
+    limit: usize,
+}
+
+impl<'a> PageQuery<'a> {
+    fn new(
+        project_digest: &'a str,
+        decision_object_id: &'a str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Self, MemoryStoreError> {
+        check_hex("project_digest", project_digest, 64)?;
+        if decision_object_id.is_empty() || decision_object_id.len() > MAX_CANDIDATE_ID_BYTES {
+            return Err(invalid("decision_object_id is not a Kernel object id"));
+        }
+        Ok(Self {
+            project_digest,
+            decision_object_id,
+            after: after.map(decode_cursor).transpose(),
+            limit: limit.clamp(1, MAX_CANDIDATE_PAGE),
+        })
+    }
+
+    /// The cursor's validation error, after the page ran.
+    fn cursor(self) -> Result<(), MemoryStoreError> {
+        self.after.map(|_| ())
+    }
+
+    /// Up to `limit + 1` rows from the cursor in reader order: score descending, creation time descending, evidence id ascending.
+    fn read(&self, conn: &GuardedConn<'_>) -> rusqlite::Result<Vec<StoredCandidate>> {
+        macro_rules! page_range {
+            ($range:literal) => {
+                concat!(
+                    "SELECT ",
+                    columns!(),
+                    " FROM contradiction_candidates
+                      WHERE project_digest=?1 AND decision_object_id=?2 AND ",
+                    $range
+                )
+            };
+        }
+        const SAME_TIME: &str = page_range!(
+            "score_bp=?3 AND created_at_ms=?4 AND evidence_id>?5 ORDER BY evidence_id ASC"
+        );
+        const SAME_SCORE: &str = page_range!(
+            "score_bp=?3 AND created_at_ms<?4 ORDER BY created_at_ms DESC, evidence_id ASC"
+        );
+        const LOWER_SCORE: &str =
+            page_range!("score_bp<?3 ORDER BY score_bp DESC, created_at_ms DESC, evidence_id ASC");
+        let want = self.limit + 1;
+        let mut items = Vec::with_capacity(want);
+        let mut extend = |sql: &str, values: &[&dyn rusqlite::ToSql]| {
+            let room = want.saturating_sub(items.len());
+            if room == 0 {
+                return Ok(());
+            }
+            for row in conn
+                .prepare_cached(sql)?
+                .query_map(values, candidate_from_row)?
+                .take(room)
+            {
+                items.push(row?);
+            }
+            Ok::<_, rusqlite::Error>(())
+        };
+        let (project, decision) = (&self.project_digest, &self.decision_object_id);
+        let score = match &self.after {
+            Ok(Some((score, created, evidence))) => {
+                let score = i64::from(*score);
+                extend(
+                    SAME_TIME,
+                    params![project, decision, score, created, evidence],
+                )?;
+                extend(SAME_SCORE, params![project, decision, score, created])?;
+                score
+            }
+            _ => i64::MAX,
+        };
+        extend(LOWER_SCORE, params![project, decision, score])?;
+        Ok(items)
+    }
+
+    /// The page the read rows make: at most `limit` rows and the cursor after the last one when a further row was read.
+    fn page(self, mut items: Vec<StoredCandidate>) -> Result<CandidatePage, MemoryStoreError> {
+        let limit = self.limit;
+        self.cursor()?;
+        let next = if items.len() > limit {
+            items.truncate(limit);
+            items
+                .last()
+                .map(|row| format_cursor(row.score_bp, row.created_at_ms, &row.evidence_id))
+        } else {
+            None
+        };
+        Ok(CandidatePage { items, next })
     }
 }

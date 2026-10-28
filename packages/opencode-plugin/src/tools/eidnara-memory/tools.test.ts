@@ -1692,7 +1692,7 @@ describe("eidnara_memory candidates", () => {
         );
     });
 
-    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, and an item past as_of", async () => {
+    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, and items out of reader order", async () => {
         const h = candidatesHarness([
             { kind: "page", as_of: 1, items: Array.from({ length: 65 }, () => ITEM), next: null },
             { kind: "page", as_of: 1, items: [{ ...ITEM, score: 9999 }], next: null },
@@ -1709,6 +1709,33 @@ describe("eidnara_memory candidates", () => {
                 next: null,
             },
             { kind: "page", as_of: 40, items: [ITEM], next: null },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [
+                    { ...ITEM, matched_terms: 2, score: 5000 },
+                    { ...ITEM, evidence_id: "srcev:other" },
+                ],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [
+                    { ...ITEM, created_at_ms: 1 },
+                    { ...ITEM, created_at_ms: 2 },
+                ],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [
+                    { ...ITEM, evidence_id: "srcev:b" },
+                    { ...ITEM, evidence_id: "srcev:a" },
+                ],
+                next: null,
+            },
         ]);
         for (const shape of [
             "65 items",
@@ -1716,6 +1743,9 @@ describe("eidnara_memory candidates", () => {
             "matched over decision",
             "zero terms",
             "publish_tip past as_of",
+            "score ascending",
+            "created_at_ms ascending within a score",
+            "evidence_id descending within a tie",
         ]) {
             const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
             expect(text, shape).toMatch(/^Error: /);

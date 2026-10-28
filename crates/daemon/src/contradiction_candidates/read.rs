@@ -23,7 +23,7 @@ use crate::kernel_routes::{blocking, state_only};
 use crate::{HandlerCore, MemoriesAuthority, memories_authority};
 
 pub(crate) const CANDIDATES: &str = "review.candidates";
-const READ_BUDGET: Duration = Duration::from_secs(5);
+pub(super) const READ_BUDGET: Duration = Duration::from_secs(5);
 const ONE_CLAIM: NonZeroUsize = NonZeroUsize::new(1).expect("nonzero");
 
 #[derive(Debug, Deserialize)]
@@ -195,9 +195,13 @@ impl HandlerCore {
         let limit = parsed.limit.unwrap_or(MAX_CANDIDATE_PAGE);
         let cursor = Cursor::of(parsed.after);
         let root = scope.project_root.to_string_lossy().to_string();
+        // The budget runs from admission: the wait for a blocking thread, both store reads, and every Kernel read share it, so a held store connection or Kernel reader answers at the bound.
+        #[cfg(test)]
+        let budget = counts.read_budget.lock().unwrap().unwrap_or(READ_BUDGET);
+        #[cfg(not(test))]
+        let budget = READ_BUDGET;
+        let deadline = Instant::now() + budget;
         let read = blocking(move || -> Result<Vec<u8>, Refused> {
-            // Both store reads and every Kernel read wait inside one budget, so a held store connection or Kernel reader answers at the bound.
-            let deadline = Instant::now() + READ_BUDGET;
             match ledger.module_authority_for_route_within(&root, "memories", deadline) {
                 Ok(row) => match memories_authority(row) {
                     MemoriesAuthority::Module(_) => {}
@@ -229,8 +233,11 @@ impl HandlerCore {
                 Cursor::Issued(cursor) => Some(cursor.as_str()),
                 Cursor::Start | Cursor::Malformed => None,
             };
+            // The page read judges the route's authority in the connection that reads the page, so a drain or move after the entry check answers `disabled`.
             let page = ledger
-                .candidates_for_decision_within(
+                .candidates_for_decision_under_route_within(
+                    &root,
+                    "memories",
                     scope.project.digest(),
                     &parsed.decision_object_id,
                     after,
@@ -241,6 +248,15 @@ impl HandlerCore {
                     MemoryStoreError::Serde(_) if after.is_some() => Refused::InvalidCursor,
                     _ => Refused::Terminal("store_unavailable"),
                 })?;
+            let page = match page {
+                Some((row, page)) => match memories_authority(Some(row)) {
+                    MemoriesAuthority::Module(_) => page,
+                    MemoriesAuthority::NotModule { .. } => {
+                        return Err(Refused::Terminal("disabled"));
+                    }
+                },
+                None => return Err(Refused::Terminal("disabled")),
+            };
             if matches!(cursor, Cursor::Malformed) {
                 return Err(Refused::InvalidCursor);
             }

@@ -22,16 +22,16 @@ carry no descriptor or summary text.
   under the reader guard and runs under the same read budget, and the shared
   predicate (`crates/daemon/src/contradiction_candidates/eligibility.rs:7`
   `eligible`); a failure answers `not_live`
-  (`crates/daemon/src/contradiction_candidates/read.rs:225`) before the store
+  (`crates/daemon/src/contradiction_candidates/read.rs:229`) before the store
   is read.
-- `crates/daemon/src/contradiction_candidates/read.rs:229`
+- `crates/daemon/src/contradiction_candidates/read.rs:233`
   `candidates_for_decision` pages at most 64 rows in reader order with a
   keyset cursor (`crates/memory-store/src/contradiction_candidates.rs:628`).
-- `crates/daemon/src/contradiction_candidates/read.rs:253` reads evidence
+- `crates/daemon/src/contradiction_candidates/read.rs:269` reads evidence
   liveness for the page's ids at the same target; `is_current` (`:155`) keeps
   a row only when its evidence is live, its incarnation and matcher digest
   equal the reader's, and its `publish_tip` is at or below the target, and
-  `:265` counts the rest `read_filtered_stale`.
+  `:281` counts the rest `read_filtered_stale`.
 - `crates/daemon/src/contradiction_candidates/read.rs:79` `ItemOut` holds the
   eight wire keys, encoded once into the page bytes; `packages/opencode-plugin/src/shared/kernel-client/wire.ts:654`
   refuses any other key set.
@@ -39,7 +39,7 @@ carry no descriptor or summary text.
   compares the standing read with claim facts field by field and refusal by
   refusal; `crates/kernel/tests/kernel_source_descriptors.rs:3188` answers
   liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:1703`
-  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2491`
+  walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2584`
   shows a page body is the canonical `serde_json` encoding of its value;
   `crates/daemon/src/candidate_pass_tests.rs:2079` answers two pages inside the
   read budget while one Kernel reader is held;
@@ -70,7 +70,7 @@ future tip; a superseded decision with rows; a second root. All in
 
 ### Q: Does the read judge rows at the same tip it reports?
 
-- Sources examined: `crates/daemon/src/contradiction_candidates/read.rs:207-272`.
+- Sources examined: `crates/daemon/src/contradiction_candidates/read.rs:211-288`.
 - Findings: the target is captured once; claim standing, evidence liveness, and
   `as_of` all use it.
 - Missing evidence: none.

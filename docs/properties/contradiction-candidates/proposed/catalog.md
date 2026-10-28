@@ -779,7 +779,7 @@ its Kernel incarnation and matcher digest equal the reader's, and its
 `publish_tip` is at or below `as_of`
 (`crates/daemon/src/contradiction_candidates/read.rs:155` `is_current`); every
 other row on the page is counted `read_filtered_stale`
-(`crates/daemon/src/contradiction_candidates/read.rs:265`). The TypeScript
+(`crates/daemon/src/contradiction_candidates/read.rs:281`). The TypeScript
 parser refuses an item with any other key set
 (`packages/opencode-plugin/src/shared/kernel-client/wire.ts:654`).
 Check: `always` - every answered page satisfies the key, order, bound, and
@@ -833,19 +833,25 @@ with the flag on answers `store_unavailable`
 decision with no rows answers
 `{"kind":"page","as_of":tip,"items":[],"next":null}` (`:1975`).
 `review_candidates_answers_the_store_and_kernel_states_before_any_page`
-(`:2237`) answers the kernel route's `unavailable`/`store_starting` state for
-a Kernel not yet open (`:2252`), `unavailable`/`store_unavailable` for a
-Kernel whose open failed (`:2269`), and `store_unavailable` for a daemon with
-no Memory Store (`:2300`), each without `items`. The OpenCode tool renders
+(`:2330`) answers the kernel route's `unavailable`/`store_starting` state for
+a Kernel not yet open (`:2345`), `unavailable`/`store_unavailable` for a
+Kernel whose open failed (`:2362`), and `store_unavailable` for a daemon with
+no Memory Store (`:2393`), each without `items`. The OpenCode tool renders
 each terminal by name and `disabled` as a plain statement
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1665`). Not
 constructed: a failing authority lookup (dependency fault F18 has no seam).
 Guarantee: after the scope, Kernel-readiness, and body checks, a route whose
 frozen flag is false, or a root whose memories authority is not MODULE,
 answers `disabled` (`crates/daemon/src/contradiction_candidates/read.rs:188`,
-`:184`); an uninstalled Memory Store, or one that fails the authority lookup
-or the page read, answers `store_unavailable`
-(`crates/daemon/src/contradiction_candidates/read.rs:191`); an unready Kernel
+`:184`), and the page read judges the route's authority again in the
+connection that reads the page, so an authority that drains or moves after
+the entry check answers `disabled` (`:238`, `:255`;
+`crates/daemon/src/candidate_pass_tests.rs:2175`); an uninstalled Memory
+Store, or one that fails the authority lookup or the page read, answers
+`store_unavailable` (`crates/daemon/src/contradiction_candidates/read.rs:191`);
+the read's budget runs from its admission, so a read queued behind a saturated
+blocking pool past its budget answers `store_unavailable` as soon as it runs
+(`:203`; `crates/daemon/src/candidate_pass_tests.rs:2216`); an unready Kernel
 or a failed Kernel read answers the kernel routes' state; an eligible decision
 with no rows answers an empty page; no terminal or state renders as a page.
 Check: `always` - the four conditions answer four distinct shapes; the
@@ -896,7 +902,7 @@ counter at zero and no row;
 `the_route_consent_reaches_the_pass_through_a_transform` (`:1146`) binds the
 route against the opposite daemon value and shows the offer follows the
 route's frozen value; #1168 adds
-`a_publication_without_consent_runs_no_candidate_table_statement` (`:2429`),
+`a_publication_without_consent_runs_no_candidate_table_statement` (`:2522`),
 which renames the table away, publishes three consent-off windows with every
 counter at zero, and shows one consenting publication's pass fails on the
 hidden table (`store_unavailable` = 1). Read arm (#1168):
@@ -955,16 +961,16 @@ Reachability: explicit-config-only - as
 Status: active
 Exercised: yes - #1168,
 `a_listed_candidate_confirms_through_dispute_while_its_evidence_lives`
-(`crates/daemon/src/candidate_pass_tests.rs:2305`) publishes two windows
+(`crates/daemon/src/candidate_pass_tests.rs:2398`) publishes two windows
 through the capture job and the pass, lists each decision's row, checks the
-listed `evidence_id` equals a published descriptor's evidence id (`:2351`),
+listed `evidence_id` equals a published descriptor's evidence id (`:2444`),
 truncates the candidate table, and files
 `dispute {object_id, event: mark_disputed, evidence_id}` built from the row
-through `kernel.commit`, which lands `disputed` (`:2388`). After
+through `kernel.commit`, which lands `disputed` (`:2481`). After
 `expire_harness_captures` retires the evidence, the other decision's read
-leaves the row out and counts it (`:2397`), and the same dispute built from
-the earlier listing is refused `not_found` (`:2407`).
-`the_confirm_path_never_reads_the_candidate_table` (`:2411`) is a lexical
+leaves the row out and counts it (`:2490`), and the same dispute built from
+the earlier listing is refused `not_found` (`:2500`).
+`the_confirm_path_never_reads_the_candidate_table` (`:2504`) is a lexical
 check that `kernel_routes/commit.rs` and `kernel_routes/dispute.rs` name no
 candidate store method. The OpenCode tool renders each row's confirm form
 `{"action":"dispute","event":"mark_disputed","objectId":"<decision_object_id>","evidenceId":"<evidence_id>"}`

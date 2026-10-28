@@ -2168,6 +2168,99 @@ async fn review_candidates_refuses_a_target_whose_history_a_restore_replaced_bef
     );
 }
 
+/// The route's memories authority begins draining after the read's entry
+/// check and before its page read; the page read judges authority again in
+/// the connection that reads the page, so the read answers `disabled`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_answers_disabled_when_authority_drains_before_the_page_read() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    activate_memories_authority(&store, &project);
+    let ask = |body: Value| route_call(&handler, candidates_request(&project, body));
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" }))
+            .await
+            .unwrap()["kind"],
+        "page",
+        "the route holds MODULE authority before the drain"
+    );
+    let draining = Arc::clone(&store);
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = Some(Arc::new(move || {
+        draining
+            .authority_begin_drain("ctx", "git:candidates", "memories", "lease", i64::MAX, 0)
+            .unwrap();
+    }));
+    let answer = ask(json!({ "decision_object_id": "object-one" })).await;
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = None;
+    assert_eq!(
+        answer,
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
+        "the page read runs under the authority its connection sees"
+    );
+}
+
+/// The read's budget runs from its admission, so a read queued behind a
+/// saturated blocking pool for longer than its budget answers
+/// `store_unavailable` as soon as it runs.
+#[test]
+fn review_candidates_queued_past_its_budget_answers_at_the_deadline_it_was_admitted_under() {
+    const BLOCKING_THREADS: usize = 4;
+    const BUDGET: Duration = Duration::from_millis(200);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .max_blocking_threads(BLOCKING_THREADS)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+        let binding = kernel_routes::ProjectBinding::new(&project);
+        seed(
+            &kernel_of(&handler),
+            &binding,
+            &[("one", TOPIC, EventKind::Other)],
+        );
+        activate_memories_authority(&store, &project);
+        *handler.contradiction_candidates.read_budget.lock().unwrap() = Some(BUDGET);
+        let released = Arc::new(AtomicBool::new(false));
+        for _ in 0..BLOCKING_THREADS {
+            let released = Arc::clone(&released);
+            tokio::task::spawn_blocking(move || {
+                while !released.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            });
+        }
+        tokio::spawn({
+            let released = Arc::clone(&released);
+            async move {
+                tokio::time::sleep(BUDGET * 3).await;
+                released.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        assert_eq!(
+            route_call(
+                &handler,
+                candidates_request(&project, json!({ "decision_object_id": "object-one" })),
+            )
+            .await,
+            Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
+            "a read that runs after its budget answers at the bound"
+        );
+        drop(handler);
+    });
+}
+
 /// The candidate store's connection is held for longer than the read budget;
 /// the read answers `store_unavailable` at its bound in place of waiting the
 /// hold out.

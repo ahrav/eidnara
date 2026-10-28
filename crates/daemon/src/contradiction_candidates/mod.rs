@@ -88,6 +88,9 @@ pub struct Candidates {
     pub(crate) before_check: Mutex<Option<CheckHook>>,
     #[cfg(test)]
     pub(crate) before_scope_read: Mutex<Option<ReadHook>>,
+    /// A read budget a test sets in place of [`read::READ_BUDGET`].
+    #[cfg(test)]
+    pub(crate) read_budget: Mutex<Option<std::time::Duration>>,
 }
 
 impl Default for Candidates {
@@ -105,6 +108,8 @@ impl Default for Candidates {
             before_check: Mutex::new(None),
             #[cfg(test)]
             before_scope_read: Mutex::new(None),
+            #[cfg(test)]
+            read_budget: Mutex::new(None),
         }
     }
 }
