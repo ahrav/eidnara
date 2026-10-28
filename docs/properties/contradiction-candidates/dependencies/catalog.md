@@ -646,8 +646,10 @@ Reachability: default-production - `MemoryStore::open` runs on every daemon
 start; `evaluate` runs on every MemoryReviewer pass and before every job
 (`memory-reviewer-operations.md:44`).
 Status: active
-Exercised: yes - `crates/memory-store/tests/baseline.rs:492-514` opens a
-prior-baseline file and observes refusal with unchanged bytes;
+Exercised: yes - `crates/memory-store/tests/baseline.rs:496-518` opens a
+prior-baseline file and observes refusal with unchanged bytes; #1165
+re-exercises it with the fixture frozen at the baseline before
+`contradiction_candidates` (`crates/memory-store/tests/fixtures/prior_baseline.sql`);
 `activation.rs:491-495` observes `IdentityMismatch("memory store baseline")`.
 Guarantee: a Memory Store file opens only when its `format_marker` digest
 equals `memory_store::baseline_digest()`; any baseline text change (such as
@@ -666,7 +668,7 @@ Required faults and enabling state: a store created under the current
 baseline, then a binary with a changed `baseline.sql`; an activation record
 naming the old digest.
 Confidence: high - [evidence](evidence/p5dep-baseline-digest-change-closes-the-activation-gate.md).
-Read `memory-store/src/lib.rs:335-340`, `storage/src/lib.rs:2631`,
+Read `memory-store/src/lib.rs:336-341`, `storage/src/lib.rs:2631`,
 `activation.rs:174-240`, `worker.rs:167`.
 Existing check: the tests above and
 `docs/properties/shared-primitives/catalog.md:676`

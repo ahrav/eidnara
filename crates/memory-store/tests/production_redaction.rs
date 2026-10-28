@@ -732,6 +732,10 @@ fn durable_write_registry_references_real_bindings_and_checked_tests() {
             include_str!("memory_reviewer_jobs.rs"),
         ),
         (
+            "contradiction_candidates",
+            include_str!("contradiction_candidates.rs"),
+        ),
+        (
             "memory_capture::tests",
             include_str!("../src/memory_capture.rs"),
         ),

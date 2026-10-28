@@ -447,7 +447,30 @@ complete, none for 3, 4, 5; `deadline` = 1.
 Type: safety
 Reachability: explicit-config-only
 Status: active - PROPOSED
-Exercised: not yet - U3 table does not exist
+Exercised: partial - direct-write store arm (#1165): `crates/memory-store/tests/contradiction_candidates.rs`
+`each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` (`:73`) shows one
+row per key, a lower-tip rewrite that keeps the higher tip and replaces the
+other values, and a newer write that removes keys it no longer names;
+`a_late_write_replaces_held_keys_and_adds_none` (`:446`) shows a write below
+the held tip adds no key, so a descriptor never exceeds K;
+`a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` (`:115`)
+and `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` (`:559`)
+show K accepted, K + 1 refused with the held rows unchanged, and a project
+at `per_project` evicting the lowest `score_bp`, then oldest, then smallest
+key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest`
+(`:188`) shows another project's rows are untouched;
+`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1287`)
+shows a new row below the cap's floor counted written and dropped with the
+held rows and rowids unchanged; and
+`random_write_and_delete_sequences_match_the_reference_model` (`:1038`)
+compares 24 seeded sequences of writes, late writes, incarnation changes,
+evictions at caps of 2 to 4096, and keyed deletes against a reference model
+of the rules, checking every row, the returned counts, rowid stability, and
+the gauge after each step, and pages, cursors across writes, and the sweep
+every seventh step. The store
+(`crates/memory-store/src/contradiction_candidates.rs:488`) enforces K and the
+project cap in the write transaction; the daemon owns the values. The pass
+arm (M per pass, `rows_written`, replayed units) lands with #1167.
 Guarantee: The table key is (project digest, descriptor evidence object id,
 decision object id); a write for an existing key replaces `decision_id`,
 `score`, `matched_atoms`, `publish_tip`, `created_at_ms`; one pass writes at
@@ -465,8 +488,11 @@ project interleaving (bounded by P).
 Required faults and enabling state: flag on; a descriptor overlapping K + 1
 decisions; a batch whose total matches exceed M; the same unit published
 twice (replay).
-Confidence: low - proposed; no implementation evidence
-Existing check: none; proposed
+Confidence: low - proposed; the direct-write store checks above exercise the
+key, the caps, the eviction order, and the counts at the #1165 tip; the pass
+arm (M per pass, `rows_written`, replay) lands with #1167
+Existing check: the store checks named under Exercised, `unaudited`
+(`existing-checks.md` S-D); none for the pass arm
 Impact: duplicate rows inflate candidate counts; uncapped rows make the
 table grow with project size per pass.
 Open questions:
@@ -482,7 +508,12 @@ publishing it again yields the same 5 rows with a newer `publish_tip`.
 Type: safety
 Reachability: explicit-config-only
 Status: active - PROPOSED
-Exercised: not yet - U3 rebuild path does not exist
+Exercised: partial - store arm (#1165):
+`truncating_and_replaying_the_writes_rebuilds_the_same_rows`
+(`crates/memory-store/tests/contradiction_candidates.rs:364`) truncates through the test-support
+`truncate_contradiction_candidates_for_test` and replays a write sequence,
+reproducing the same rows excluding `created_at_ms`. The pass arm, which
+re-scores retained evidence bytes at one tip, lands with #1167.
 Guarantee: For one Kernel snapshot, one scorer contract version V, and no
 budget exhaustion, truncating the table and rebuilding it from the project's
 live descriptors yields the same set of (key, decision_id, score,
@@ -497,8 +528,12 @@ was retired (excluded from the rebuild input and swept from the table).
 Required faults and enabling state: flag on; a pass that wrote rows; a
 rebuild entry point (operator or test) that enumerates live descriptors of
 the project and reads evidence bytes under a budget.
-Confidence: low - proposed; no implementation evidence
-Existing check: none; proposed
+Confidence: low - proposed; `truncating_and_replaying_the_writes_rebuilds_the_same_rows`
+exercises truncate and replay of a recorded write sequence at the #1165 tip;
+the rebuild from evidence bytes lands with #1167
+Existing check: `truncating_and_replaying_the_writes_rebuilds_the_same_rows`
+(`crates/memory-store/tests/contradiction_candidates.rs:364`), `unaudited`;
+none for the pass arm
 Impact: without this the table is a log, not a derivation, and the derived
 classification (index D6) is false.
 Open questions:
@@ -589,6 +624,22 @@ Open questions:
 - Terminal name and the section 7.8 method literal (API handoff); whether
   `matched_atoms` as a count is acceptable where the atom list is not (yes
   proposed: a count is not text).
+- G7, sensitivity and egress class of descriptor-derived rows: unresolved,
+  needs a policy decision. #1165 fixes the facts the decision rests on: a row
+  holds ids, integers, and times only (the table's columns are pinned by
+  `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
+  `crates/memory-store/tests/contradiction_candidates.rs:403`), so a derived
+  row carries none of the captured text, and the store has no sensitivity
+  column. The descriptor it derives from publishes as `Sensitive` with
+  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:844-845`);
+  whether the term counts, the score, and the evidence-to-decision link
+  inherit that class is the open question, and a column set does not answer
+  it. The egress half waits on #1168: the store's `candidates_for_decision`
+  returns rows to its caller, so what leaves the daemon is decided by the U4
+  read route. That route also owns the six-name key-set check above, and the
+  store's `StoredCandidate` carries `project_digest`, `kernel_incarnation_id`,
+  `matcher_digest`, and `decision_terms` beyond that set, so the read projects
+  the row rather than returning it (needs human input).
 Falsifier: the read answers rows for a `superseded` decision, or a row
 includes `summary`.
 Legal witness: active decision with 3 rows answers 3 rows and `next: null`;
@@ -730,7 +781,7 @@ Confidence: low - proposed; no implementation evidence
 Existing check: none; proposed
 Impact: the plan's three stop conditions; a signal would reserve a
 receipt-charged reviewer job against the Q38 ceiling (2,048 per project per
-incarnation, `docs/memory-reviewer-operations.md:257`).
+incarnation, `docs/memory-reviewer-operations.md:263`).
 Open questions: None.
 Falsifier: a non-empty `signals` vector built from candidate rows, or a
 commit-log row attributed to the pass.

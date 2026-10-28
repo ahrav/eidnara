@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod contradiction_candidates;
 pub mod memory_capture;
 pub mod memory_classifier_ledger;
 pub mod memory_reviewer_jobs;
@@ -4152,6 +4153,7 @@ pub enum DurableWriteFamily {
     RedactionReceipts,
     MemoryReviewerJobs,
     MemoryCapture,
+    ContradictionCandidates,
 }
 
 impl DurableWriteFamily {
@@ -4182,6 +4184,7 @@ impl DurableWriteFamily {
         Self::RedactionReceipts,
         Self::MemoryReviewerJobs,
         Self::MemoryCapture,
+        Self::ContradictionCandidates,
     ];
 
     pub const fn owner_kind(self) -> &'static str {
@@ -4210,6 +4213,7 @@ impl DurableWriteFamily {
             Self::RedactionReceipts => "redaction_receipts",
             Self::MemoryReviewerJobs => "memory_reviewer_jobs",
             Self::MemoryCapture => "memory_capture",
+            Self::ContradictionCandidates => "contradiction_candidates",
         }
     }
 }
@@ -4227,6 +4231,12 @@ pub struct DurableWriteRegistration {
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-support"))]
 pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
+    DurableWriteRegistration {
+        family: DurableWriteFamily::ContradictionCandidates,
+        policy: DurableFieldPolicy::Reject,
+        preparation: "closed-shape hex digests, integers, and Kernel ids refused on any detection before the write, so no scan record is kept; no text column",
+        test: "contradiction_candidates::an_id_the_scanner_detects_is_refused_and_nothing_is_written",
+    },
     DurableWriteRegistration {
         family: DurableWriteFamily::MemoryCapture,
         policy: DurableFieldPolicy::Mixed,

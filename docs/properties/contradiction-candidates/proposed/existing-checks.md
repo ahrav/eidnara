@@ -1,7 +1,8 @@
 # Existing checks: P5 proposed obligations
 
-Verified at the #1164 branch tip (base `979fb814e`, scorer commits
-`05acd0107` and `446c7363f`). Every status is
+S-A is verified at the #1164 branch tip (base `979fb814e`, scorer commits
+`05acd0107` and `446c7363f`); S-D is verified at the #1165 branch tip. Every
+status is
 `unaudited`: this file records that a check exists and what it asserts;
 adequacy belongs to `/testing:invariant-test-review` (tests) and
 `/low-level-systems:defensive-assertions-and-invariant-guards` (production
@@ -51,13 +52,47 @@ Analyzer checks the scorer relies on:
 `identity_pins_the_manifest` (`:389-413`); see
 `../dependencies/existing-checks.md` S1.
 
-## S-B to S-H and R5
+## S-D store (`crates/memory-store/tests/contradiction_candidates.rs`, #1165)
 
-None found. The trigger, candidate set, store, sweep, read, flag, and
-dispute-handoff behavior does not exist at the branch tip; the store
-(#1165), sweep (#1166), pass (#1167), and read (#1168) tickets add the code
-and the checks. The 12 proposed records carry `Existing check: none;
-proposed`.
+| Check | Location | Asserts | Records | Status |
+| --- | --- | --- | --- | --- |
+| `each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` | `:73` | one row per key; lower-tip rewrite keeps the tip; a newer write removes unnamed keys | row key and caps | unaudited |
+| `a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` | `:115` | K + 1 rows, bad counts, repeated decisions, bad ids and digests refused; nothing written | row key and caps | unaudited |
+| `an_id_the_scanner_detects_is_refused_and_nothing_is_written` | `:169` | a secret-bearing id is refused | read keys (no text) | unaudited |
+| `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest` | `:188` | eviction order and count; another project untouched | row key and caps | unaudited |
+| `a_decision_pages_in_reader_order_with_a_stable_cursor` | `:236` | reader order; 70 rows at limit 64 page as 64, 6, none; clamp | read serves only live rows (store arm) | unaudited |
+| `the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys` | `:309` | sweep page by rowid; keyed delete; row and byte gauge | sweep (store arm) | unaudited |
+| `truncating_and_replaying_the_writes_rebuilds_the_same_rows` | `:364` | truncate then replay reproduces the rows | rebuildable (store arm) | unaudited |
+| `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:403` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
+| `a_late_write_replaces_held_keys_and_adds_none` | `:446` | a write below the held tip adds no key | row key and caps | unaudited |
+| `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:481` | a new incarnation's write carries its own tip | sweep (incarnation filter) | unaudited |
+| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:506` | rows added before or removed from page one move nothing after the cursor; non-canonical cursors refused | read (paging) | unaudited |
+| `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:559` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
+| `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:623` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
+| `random_write_and_delete_sequences_match_the_reference_model` | `:1038` | seeded write and delete sequences match a reference model: rows, counts, rowid stability, and the gauge each step; pages, cursors across writes, and the sweep every seventh step | row key and caps; read (paging); sweep (store arm) | unaudited |
+| `the_hex_checks_refuse_uppercase_non_hex_and_misfit_lengths` | `:1166` | the hex-shape CHECKs refuse uppercase, non-hex, and wrong-length digests | read keys (no text) | unaudited |
+| `the_totals_follow_replaced_ids_late_writes_deletes_and_truncation` | `:1232` | the gauge equals a sum over the rows through replaced ids, late writes, deletes, and truncation | sweep (store arm) | unaudited |
+| `a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` | `:1287` | a new row below the cap's floor is counted written and dropped; held rows and rowids stay; a landing row takes a fresh rowid | row key and caps | unaudited |
+| `only_the_candidate_module_writes_the_candidate_tables` | `:1418` | no other memory-store source, trigger, or session purge writes either candidate table, so the totals the cap and gauge read stay exact | row key and caps; sweep (store arm) | unaudited |
+| `every_candidate_statement_reuses_its_cached_plan` | `:1342` | 12 rounds of writes, late writes, pages, sweep pages, keyed deletes, and gauge reads run 16 distinct candidate statements; the statement cache re-creates and re-plans none | row key and caps; read (paging); sweep (store arm) (the cost of the checks, not a record directly) | unaudited |
+| `the_page_sweep_and_eviction_scans_stop_at_their_bound` | `:1506` | over a 300-row project, a two-row page, a three-row sweep page, and a one-row eviction each run under 500 VM steps | read (paging); sweep (store arm); row key and caps (bounded scans) | unaudited |
+| `a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores` | `:1550` | 256 rows into a run of equal scores, with and without equal `created_at_ms`, the continuation page returns the next two rows under 500 VM steps | read (paging) | unaudited |
+| `a_read_with_a_secret_shaped_id_answers_an_empty_page` | `:1601` | a page read for a secret-shaped decision id answers an empty page; an empty id is still refused by the shape check | read keys (no text); read (paging) | unaudited |
+
+Baseline: `crates/memory-store/tests/baseline.rs` pins the table, its two
+indexes, and `contradiction_candidate_totals` in `EXPECTED_OBJECTS` and
+refuses a store at the prior baseline untouched (`:496`).
+
+## S-B, S-C, S-E to S-H and R5
+
+None found. The trigger, candidate set, sweep, read, flag, and
+dispute-handoff behavior does not exist at the branch tip. The store arm
+landed with #1165 and is inventoried under S-D above; the sweep (#1166),
+pass (#1167), and read (#1168) tickets add the remaining code and checks.
+The two S-D records (`cc-row-key-unique-and-caps-enforced`,
+`cc-table-rebuildable-from-evidence-bytes-and-live-decisions`) carry
+`Exercised: partial` and link the store checks above as `unaudited`; the
+other 10 proposed records carry `Existing check: none; proposed`.
 
 ## Suspiciously quiet areas
 
