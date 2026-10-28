@@ -28,7 +28,7 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
   with a per-project `ScopeFilter`; then reads evidence liveness for the
   rows still kept. A failed read keeps the rows it would have judged.
 - The `ScopeFilter` reads scope terms through
-  `crates/kernel/src/scope.rs:1573` `scope_terms_within_budget`, which takes
+  `crates/kernel/src/scope.rs:1617` `scope_terms_within_budget`, which takes
   its reader through `reader_with_limit` under the sweep's budget, so a busy
   reader neither holds the run past its deadline nor blocks shutdown, which
   joins the worker. A failed scope read leaves the row out of the
@@ -46,7 +46,7 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
   answers per id from `evidence_meta.created_commit_seq` and
   `invalidated_commit_seq`, read for the whole batch by one statement that
   joins the requested ids to the primary key. It opens no write transaction.
-- `crates/memory-store/src/contradiction_candidates.rs:724`
+- `crates/memory-store/src/contradiction_candidates.rs:728`
   `delete_candidates_as_read` deletes a row only while it holds the values
   the sweep read, so a rewrite after the read survives.
 - `crates/daemon/src/memory_reviewer/lifecycle.rs:448` `pass_then_sweep`

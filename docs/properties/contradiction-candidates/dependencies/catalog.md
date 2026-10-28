@@ -852,7 +852,7 @@ Existing check: the wire tests above; the literal-set test at
 `wire.rs:448-463+`. Status unaudited.
 Re-exercised by #1168: `review.candidates` joins the family through
 `kernel_request` with a `deny_unknown_fields` body
-(`crates/daemon/src/contradiction_candidates/read.rs:29`);
+(`crates/daemon/src/contradiction_candidates/read.rs:30`);
 `review_candidates_pages_live_rows_and_answers_each_terminal`
 (`crates/daemon/src/candidate_pass_tests.rs:1627`) answers `invalid_params`
 for an unknown field and a malformed cursor, `project_mismatch` for a foreign

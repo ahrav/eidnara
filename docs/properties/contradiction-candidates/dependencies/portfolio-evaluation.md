@@ -254,7 +254,8 @@ Dispositions recorded by the unit tickets:
   test publishes a revision. Recorded on `cc-row-key-unique-and-caps-enforced`.
 - G4 to G6 (#1166): recorded on
   `cc-sweep-drops-only-dead-targets-bounded-idempotent-kernel-untouched`.
-- G7 (#1165): resolved on the read record.
+- G7 (#1165, #1168): the sensitivity half is recorded on the read record;
+  the egress half stays open there (needs human input).
 
 ### Refinements (apply directly)
 

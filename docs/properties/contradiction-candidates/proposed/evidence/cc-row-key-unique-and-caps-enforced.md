@@ -9,7 +9,7 @@ one row per key and bounded counts.
 
 ## Evidence trail
 
-- `crates/memory-store/src/contradiction_candidates.rs:487`
+- `crates/memory-store/src/contradiction_candidates.rs:491`
   `replace_candidates_for_descriptor` enforces K, upserts on the key, keeps the
   higher tip, and evicts past the project cap in one transaction.
 - `crates/daemon/src/contradiction_candidates/pass.rs:248` the pass cuts at M in

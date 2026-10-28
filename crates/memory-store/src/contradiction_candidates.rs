@@ -182,6 +182,10 @@ fn decode_cursor(cursor: &str) -> Result<(u32, i64, String), MemoryStoreError> {
     };
     let score: u32 = score.parse().map_err(|_| refused())?;
     let created: i64 = created.parse().map_err(|_| refused())?;
+    // The table's rows hold `score_bp <= 10000` and `created_at_ms >= 0`.
+    if i64::from(score) > SCORE_SCALE || created < 0 {
+        return Err(refused());
+    }
     if evidence.is_empty()
         || evidence.len() % 2 != 0
         || evidence.len() > 2 * MAX_CANDIDATE_ID_BYTES

@@ -6,6 +6,7 @@ use host_runtime::RouteHandle;
 use kernel::applicability::EvalBudget;
 use kernel::{
     ClaimFactsError, EvidenceLiveness, IdentifiedCommitReadTarget, KernelError, KernelStore,
+    ScopeTermsError,
 };
 use memory_store::MemoryStoreError;
 use memory_store::contradiction_candidates::{MAX_CANDIDATE_PAGE, StoredCandidate};
@@ -111,6 +112,7 @@ fn decision_is_live(
     target: &IdentifiedCommitReadTarget,
     decision_object_id: &str,
     budget: &EvalBudget,
+    #[cfg(test)] counts: &super::Candidates,
 ) -> Result<bool, Refused> {
     let facts = match kernel.claim_standing_at_within_budget(
         &[decision_object_id.to_string()],
@@ -129,9 +131,22 @@ fn decision_is_live(
     let Some(facts) = facts else {
         return Ok(false);
     };
+    #[cfg(test)]
+    {
+        let hook = counts.before_scope_read.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+    // The scope read is fenced to the history the claim standing came from, so a restore between the two reads answers the conflict state in place of a judgment over mixed histories.
     let names_project = ScopeFilter::new(project)
         .matches(facts.decision.scope_id.as_deref(), &mut |scope: &str| {
-            kernel.scope_terms_within_budget(scope, budget)
+            kernel
+                .scope_terms_at_within_budget(scope, target.target, budget)
+                .map_err(|error| match error {
+                    ScopeTermsError::Kernel(error) => error,
+                    ScopeTermsError::IncarnationMismatch => KernelError::Conflict,
+                })
         })
         .map_err(Refused::Kernel)?;
     Ok(eligible(&facts, names_project))
@@ -199,6 +214,8 @@ impl HandlerCore {
                 &target,
                 &parsed.decision_object_id,
                 &budget,
+                #[cfg(test)]
+                &counts,
             )?;
             if !live {
                 return Err(Refused::Terminal("not_live"));

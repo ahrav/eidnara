@@ -2000,6 +2000,63 @@ async fn review_candidates_reads_scope_terms_inside_its_budget_beside_a_held_rea
     holder.join().unwrap();
 }
 
+/// A restore between the claim-standing read and the scope-terms read swaps in
+/// a history without the decision's scope; the read answers the Kernel's
+/// conflict state for the stale target, so the live decision is never judged
+/// `not_live` against mixed histories.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_refuses_a_target_whose_history_a_restore_replaced_before_the_scope_read()
+{
+    use std::os::unix::fs::PermissionsExt;
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    activate_memories_authority(&store, &project);
+    let destination = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    let ask = |body: Value| route_call(&handler, candidates_request(&project, body));
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" }))
+            .await
+            .unwrap()["kind"],
+        "page",
+        "the seeded decision is live before the restore"
+    );
+    let backup_path = backup.destination_path.clone();
+    let restored = Arc::clone(&kernel);
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = Some(Arc::new(move || {
+        restored.restore(&backup_path).unwrap();
+    }));
+    let answer = ask(json!({ "decision_object_id": "object-one" })).await;
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = None;
+    assert_ne!(
+        answer,
+        Ok(json!({ "kind": "terminal", "terminal": "not_live" })),
+        "a live decision is not judged against the restored history's scopes"
+    );
+    assert_eq!(
+        answer.as_ref().unwrap()["state"]["kind"],
+        "conflict",
+        "{answer:?}"
+    );
+}
+
 fn find_file(root: &Path, name: &str) -> PathBuf {
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {

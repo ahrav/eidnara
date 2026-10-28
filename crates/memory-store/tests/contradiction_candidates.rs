@@ -550,20 +550,34 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
             .is_err(),
         "a cursor naming an evidence id longer than any stored id was never issued"
     );
-    let longest = format!("{}.{}.{}", u32::MAX, i64::MIN, "61".repeat(512));
-    assert_eq!(longest.len(), 1056);
+    let longest = format!("10000.{}.{}", i64::MAX, "61".repeat(512));
+    assert_eq!(longest.len(), 1050);
     assert!(
         store
             .candidates_for_decision(PROJECT, "decision", Some(&longest), 4)
             .is_ok(),
         "the longest cursor the store can issue parses"
     );
+    let bound = format!("{}.{}.{}", u32::MAX, i64::MIN, "61".repeat(512));
+    assert_eq!(
+        bound.len(),
+        1056,
+        "the byte bound covers every component's widest spelling"
+    );
     assert!(
         store
-            .candidates_for_decision(PROJECT, "decision", Some(&format!("0{longest}")), 4)
+            .candidates_for_decision(PROJECT, "decision", Some(&format!("0{bound}")), 4)
             .is_err(),
-        "one byte past the longest issued cursor is refused before any component is parsed"
+        "one byte past the byte bound is refused before any component is parsed"
     );
+    for outside in ["10001.5.61", "7500.-1.61"] {
+        assert!(
+            store
+                .candidates_for_decision(PROJECT, "decision", Some(outside), 4)
+                .is_err(),
+            "{outside}: a score over 10000 or a negative time names a row no table holds"
+        );
+    }
 }
 
 #[test]
