@@ -16,7 +16,7 @@ lifecycle transitions; data integrity; C12; L1.
 
 - `crates/kernel/src/cas/mod.rs:155` `HARNESS_CAPTURE_RETENTION_CLASS =
   "harness_capture"`.
-- `crates/daemon/src/harness_sources.rs:607-608`
+- `crates/daemon/src/harness_sources.rs:609-610`
   `HARNESS_CAPTURE_RETENTION_MS = CAPTURE_REPLAY_RETENTION_MS` (30 days,
   `crates/memory-store/src/memory_capture.rs:36`); `:991` doc: captured
   message text and tool results are `harness_capture` evidence owned for that

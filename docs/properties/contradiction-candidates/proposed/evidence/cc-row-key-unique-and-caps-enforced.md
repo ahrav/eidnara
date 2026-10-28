@@ -15,7 +15,7 @@ one row per key and bounded counts.
 - `crates/daemon/src/contradiction_candidates/pass.rs:248` the pass cuts at M in
   publish order, counts the cut `dropped_at_cap`, and skips the write for a
   descriptor that reaches the pass with no room, so its held rows stay.
-- `crates/daemon/src/harness_sources.rs:557` `Published.replayed`: a replayed
+- `crates/daemon/src/harness_sources.rs:559` `Published.replayed`: a replayed
   unit is scored again (G3); a revision's predecessor descriptor is retired in
   the publishing commit, while its evidence stays live, so the predecessor's
   rows stay until the sweep or the age bound removes them.

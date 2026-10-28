@@ -15,7 +15,7 @@ never wait on the kernel or the job." Lens: concurrency; C9.
   once the pass has built its response; "When the response is handed to the
   wire writer, `CaptureHandoff::into_job` takes the store's single publication
   slot"; the 5 s budget's origin is "the handoff's acceptance".
-- `crates/daemon/src/lib.rs:9219-9236` `capture_after_response(offer)`:
+- `crates/daemon/src/lib.rs:9220-9237` `capture_after_response(offer)`:
   `self.source_capture.offer(offer)?` runs synchronously in the handler
   (this is the charge of the retained window to the supervisor's byte budget,
   not a kernel or job wait); returns `AfterResponse::new(move || { if let
@@ -27,15 +27,15 @@ never wait on the kernel or the job." Lens: concurrency; C9.
   unrun is the outcome for a response that never settled."
 - `dispatch.rs:445-460`: `after_response` attaches only to
   `PreparedOutcome::Response`; `take_after_response` detaches it.
-- `lib.rs:13469-13481`: `dispatch_body` -> `take_after_response()` ->
+- `lib.rs:13490-13502`: `dispatch_body` -> `take_after_response()` ->
   charges -> `settle_prepared(&ctx, outcome).await` -> `if let
   (RequestOutcome::Response { .. }, Some(after)) = (&settled, after_response)
   { after.run(); }`. Comment at `:13478`: "The response bytes are encoded and
   about to be handed to the wire writer; work that waits for that point
   starts now and never delays them."
-- `source_capture.rs:596-605` `into_job`: `try_acquire_owned()` (non-blocking)
+- `source_capture.rs:608-617` `into_job`: `try_acquire_owned()` (non-blocking)
   or `RefusedQueueFull`.
-- `source_capture.rs:653-679` `run`: `spawn_blocking(self.publish())`; the
+- `source_capture.rs:665-691` `run`: `spawn_blocking(self.publish())`; the
   handler's task is not awaited by the request path (spawned through
   `admission.spawn`).
 - Tests: `source_capture_tests.rs:330`
@@ -74,7 +74,7 @@ before the handler returns `settled`.
 
 ### Q: Does `offer` itself ever block on the kernel?
 
-- Sources examined: `source_capture.rs:434-485` `offer`.
+- Sources examined: `source_capture.rs:445-496` `offer`.
 - Findings: `offer` charges bytes against the supervisor's `ByteBudget` and
   builds the handoff; it reads no store and takes no slot.
 - Missing evidence: none.

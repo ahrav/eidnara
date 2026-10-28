@@ -717,9 +717,7 @@ impl SourcePublisher<'_> {
                     evidence: None,
                 },
             })?;
-        if let Some((receipt, cited)) = stored {
-            let (evidence_id, evidence_object_id) =
-                cited.unwrap_or((evidence_id, evidence_object_id));
+        if let Some((receipt, (evidence_id, evidence_object_id))) = stored {
             return Ok(Published {
                 object_id: receipt.result,
                 occurrence_id: unit.occurrence_id,
@@ -1359,9 +1357,7 @@ fn publish_prepared(
             );
         }
         match stored {
-            Some((receipt, cited)) => {
-                let (evidence_id, evidence_object_id) =
-                    cited.unwrap_or_else(|| (unit.evidence_id(), unit.evidence_object_id()));
+            Some((receipt, (evidence_id, evidence_object_id))) => {
                 outcomes.push(Some(Published {
                     object_id: receipt.result,
                     occurrence_id: unit.occurrence_id.clone(),
@@ -2119,7 +2115,7 @@ impl Prepared<'_> {
 }
 
 /// The `(evidence_id, evidence object id)` a stored descriptor cites.
-type CitedEvidence = Option<(String, String)>;
+type CitedEvidence = (String, String);
 
 fn stored_descriptor(
     preview: &kernel::Envelope<'_>,
@@ -2130,7 +2126,10 @@ fn stored_descriptor(
     let Some((receipt, _)) = stored_receipt(preview, intent, unit, publisher)? else {
         return Ok(None);
     };
-    let cited = preview.source_descriptor_evidence(&receipt.result)?;
+    // Every publish path writes the descriptor with its evidence, so a stored descriptor without a citation is a corrupt row, and the replay refuses instead of naming the evidence the unit would have had.
+    let cited = preview
+        .source_descriptor_evidence(&receipt.result)?
+        .ok_or(KernelError::CorruptCanonicalRow)?;
     Ok(Some((receipt, cited)))
 }
 
