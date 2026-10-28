@@ -731,7 +731,9 @@ function compareUtf8(a: string, b: string): number {
 
 export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload> {
     if (!isRecord(raw)) return failed();
-    if (raw.kind === undefined && raw.state !== undefined) {
+    // The daemon answers a state on its own; a body carrying a state beside a kind is not its answer.
+    if (raw.state !== undefined) {
+        if (raw.kind !== undefined) return failed();
         const state = parseKernelState(raw.state);
         return state.kind === "available" ? failed() : { state, payload: null };
     }

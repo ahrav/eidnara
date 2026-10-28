@@ -813,7 +813,7 @@ Open questions:
   harness, and the `candidates` action returns it to the model as a tool
   result, so the evidence id, the decision id, the score, the term counts,
   and the times of a descriptor that published as `Sensitive` with
-  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:915`) are
+  `ProviderEgress::LocalOnly` (`crates/daemon/src/source_capture.rs:915-916`) are
   provider-visible. No repository policy states whether metadata derived from
   such a descriptor inherits its class, and the read consults neither
   classification; whether that disclosure is admitted is the open policy

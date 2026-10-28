@@ -1692,7 +1692,7 @@ describe("eidnara_memory candidates", () => {
         );
     });
 
-    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, items out of reader order, an id no row stores, and a next no store issues", async () => {
+    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, items out of reader order, an id no row stores, a next no store issues, and a state beside a page", async () => {
         const h = candidatesHarness([
             {
                 kind: "page",
@@ -1775,6 +1775,13 @@ describe("eidnara_memory candidates", () => {
             { kind: "page", as_of: 41, items: [ITEM], next: "not-a-cursor" },
             { kind: "page", as_of: 41, items: [ITEM], next: `7500.1.${"61".repeat(513)}` },
             { kind: "page", as_of: 41, items: [ITEM], next: "10001.1.61" },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [ITEM],
+                next: null,
+                state: { kind: "unavailable", reason: "project_mismatch" },
+            },
         ]);
         for (const shape of [
             "65 items",
@@ -1793,6 +1800,7 @@ describe("eidnara_memory candidates", () => {
             "next outside the cursor form",
             "next past the longest cursor",
             "next with a score past 10000",
+            "a state beside a page",
         ]) {
             const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
             expect(text, shape).toMatch(/^Error: /);
