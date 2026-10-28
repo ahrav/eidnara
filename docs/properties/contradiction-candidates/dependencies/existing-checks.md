@@ -141,7 +141,7 @@ through the MemoryReviewer class only as far as this pass found.
 | `a_published_proposal_reads_from_every_root_after_a_newer_root_binds` | `:342` | | unaudited |
 | `review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record` | `:409` | `v` field is `invalid_params` (`:643-649`) | unaudited |
 | wire-doc literal test | `crates/daemon/src/memory_reviewer/wire.rs:448-463+` | the doc's `review.accept` terminal set equals the produced set | unaudited |
-| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:35926` | | unaudited |
+| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:35931` | | unaudited |
 
 None found: no test drives `store_unavailable` on `review.list`/`review.read`
 through a failing store read, as far as this pass found (the terminal is

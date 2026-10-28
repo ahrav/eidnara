@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
 use kernel::{KernelStore, Surface};
-use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::{CandidateCaps, CandidateScore, DescriptorCandidates};
+use memory_store::{MemoryStore, MemoryStoreError};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
@@ -390,11 +390,15 @@ fn score_descriptors(
             created_at_ms: now_ms,
             rows: &scores,
         };
-        match store.replace_candidates_for_descriptor(&write, caps) {
+        // The wait for the store's connection ends at the pass's deadline, so another store user cannot hold the pass past its budget.
+        match store.replace_candidates_for_descriptor_bounded(&write, caps, budget.deadline()) {
             Ok(outcome) => {
                 written += outcome.written;
                 counts.add(Count::RowsWritten, outcome.written as u64);
                 counts.add(Count::DroppedAtCap, outcome.dropped_at_cap as u64);
+            }
+            Err(MemoryStoreError::Store(storage::StoreError::Deadline)) => {
+                return unscored(index, Count::Deadline);
             }
             Err(error) => {
                 eprintln!("daemon: contradiction candidate write failed: {error}");

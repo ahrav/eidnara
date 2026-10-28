@@ -3279,9 +3279,21 @@ impl PreparedWrite {
         store: &SqliteStore,
         operation: impl FnOnce(&mut ActiveWriteTransaction<'_>) -> rusqlite::Result<WriteDisposition<T>>,
     ) -> Result<T, MemoryStoreError> {
+        self.execute_bounded(store, None, operation)
+    }
+
+    /// [`Self::execute`] whose connection and write-lock acquisition end at `deadline` when one
+    /// is given, through [`SqliteStore::with_conn_fenced_within`]: [`StoreError::Deadline`]
+    /// means nothing was written.
+    fn execute_bounded<T>(
+        self,
+        store: &SqliteStore,
+        deadline: Option<Instant>,
+        operation: impl FnOnce(&mut ActiveWriteTransaction<'_>) -> rusqlite::Result<WriteDisposition<T>>,
+    ) -> Result<T, MemoryStoreError> {
         let redaction_failure = std::cell::Cell::new(None);
         let redaction_failure_in_tx = &redaction_failure;
-        let result = store.with_conn_fenced(move |tx| {
+        let write = move |tx: &GuardedConn<'_>| {
             let mut coordinated = ActiveWriteTransaction {
                 tx,
                 prepared: std::cell::RefCell::new(self),
@@ -3296,7 +3308,11 @@ impl PreparedWrite {
                 }
                 WriteDisposition::Replay(value) => Ok(value),
             }
-        });
+        };
+        let result = match deadline {
+            Some(deadline) => store.with_conn_fenced_within(deadline, write),
+            None => store.with_conn_fenced(write),
+        };
         match redaction_failure.get() {
             Some(kind) => Err(MemoryStoreError::Redaction(kind)),
             None => result.map_err(Into::into),

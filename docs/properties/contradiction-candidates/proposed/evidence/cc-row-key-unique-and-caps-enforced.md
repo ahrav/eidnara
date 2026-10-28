@@ -9,12 +9,20 @@ one row per key and bounded counts.
 
 ## Evidence trail
 
-- `crates/memory-store/src/contradiction_candidates.rs:492`
+- `crates/memory-store/src/contradiction_candidates.rs:494`
   `replace_candidates_for_descriptor` enforces K, upserts on the key, keeps the
   higher tip, and evicts past the project cap in one transaction.
 - `crates/daemon/src/contradiction_candidates/pass.rs:248` the pass cuts at M in
   publish order, counts the cut `dropped_at_cap`, and skips the write for a
   descriptor that reaches the pass with no room, so its held rows stay.
+- `crates/daemon/src/harness_sources.rs:2120-2134` `stored_descriptor`: a
+  replay takes the evidence row the stored descriptor cites, and a receipt
+  whose observation cites no row, or a row other than the one its detail
+  names, is `CorruptCanonicalRow`
+  (`crates/kernel/src/source_descriptor.rs:911-940`;
+  `a_replay_whose_descriptor_cites_no_evidence_row_is_refused_as_corrupt`
+  and `a_replay_whose_descriptor_cites_another_units_evidence_is_refused_as_corrupt`,
+  `crates/daemon/tests/harness_sources.rs:3909`, `:3955`).
 - `crates/daemon/src/harness_sources.rs:559` `Published.replayed`: a replayed
   unit is scored again (G3); a revision's predecessor descriptor is retired in
   the publishing commit, while its evidence stays live, so the predecessor's

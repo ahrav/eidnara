@@ -535,7 +535,7 @@ fn a_pass_queued_past_its_budget_ends_at_the_deadline_it_was_admitted_under() {
 struct Core {
     dir: tempfile::TempDir,
     kernel: Arc<KernelStore>,
-    store: MemoryStore,
+    store: Arc<MemoryStore>,
     project: kernel_routes::ProjectBinding,
     counts: Candidates,
     /// The interrupt of every budget `score` builds, so a hook can stop the pass between checks.
@@ -547,7 +547,7 @@ impl Core {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("kernel")).unwrap();
         let kernel = Arc::new(KernelStore::open(dir.path().join("kernel")).unwrap());
-        let store = MemoryStore::open_for_test(dir.path(), "pass");
+        let store = Arc::new(MemoryStore::open_for_test(dir.path(), "pass"));
         let project = kernel_routes::ProjectBinding::new(&dir.path().join("project"));
         kernel
             .commit(intent("domain"), |envelope| {
@@ -1508,6 +1508,60 @@ fn a_restore_between_the_reads_and_the_write_ends_the_pass_and_keeps_the_held_ro
         "the pass writes nothing computed against the replaced history"
     );
     assert!(core.rows_for(&later.evidence_id).is_empty());
+}
+
+#[test]
+fn a_write_behind_a_held_store_connection_ends_at_the_pass_deadline() {
+    let core = Core::open(PassBounds {
+        budget: Duration::from_millis(500),
+        ..PassBounds::default()
+    });
+    seed(
+        &core.kernel,
+        &core.project,
+        &[("one", TOPIC, EventKind::Other)],
+    );
+    let descriptor = core.descriptor("d0", TOPIC);
+    // Another store user holds the sole connection for well past the budget.
+    let (held, holding) = mpsc::channel::<()>();
+    let (release, released) = mpsc::channel::<()>();
+    let store = Arc::clone(&core.store);
+    let holder = std::thread::spawn(move || {
+        store
+            .with_conn_for_test(|_| {
+                held.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(20)).unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    holding.recv_timeout(Duration::from_secs(10)).unwrap();
+    // `Core::score` reads the store around the pass, so the pass runs directly here while the connection is held.
+    let budget = kernel::applicability::EvalBudget::new(
+        Some(Instant::now() + core.counts.bounds().budget),
+        Arc::clone(&core.interrupt),
+    );
+    let started = Instant::now();
+    let end = score_publication(
+        &core.kernel,
+        &core.store,
+        &core.project,
+        std::slice::from_ref(&descriptor),
+        &core.counts,
+        &budget,
+        now_ms(),
+    );
+    let waited = started.elapsed();
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(end, CandidateCount::Deadline);
+    assert!(
+        waited < Duration::from_secs(5),
+        "the write waited {waited:?} for a connection held past the deadline"
+    );
+    assert_eq!(core.count("deadline"), 1);
+    assert_eq!(core.count("descriptors_unscored"), 1);
+    assert!(core.rows_for(&descriptor.evidence_id).is_empty());
 }
 
 fn activate_memories_authority(store: &MemoryStore, root: &Path) {

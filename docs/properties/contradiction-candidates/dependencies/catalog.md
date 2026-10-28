@@ -534,10 +534,10 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - `source_capture_enabled` defaults
 `false` (`config.rs:154`); with it off, `offer` is never reached
-(`source_capture.rs:3`, test `source_capture_tests.rs:298`).
+(`source_capture.rs:3`, test `source_capture_tests.rs:312`).
 Status: active
 Exercised: yes - `the_response_is_identical_whatever_capture_and_the_kernel_are_doing`
-(`source_capture_tests.rs:330`) and `capture_latency_measurement` (`:940`).
+(`source_capture_tests.rs:344`) and `capture_latency_measurement` (`:940`).
 Guarantee: the transform response is settled (encoded) before the
 synchronous handoff runs; the handoff (`into_job` with `try_acquire_owned`,
 `admission.spawn`) performs no await, no kernel call, and no waiting lock
@@ -608,7 +608,7 @@ Type: safety
 Reachability: explicit-config-only - as above.
 Status: active
 Exercised: partial - `a_33_unit_window_publishes_32_and_the_next_pass_publishes_the_deferred_one`
-(`source_capture_tests.rs:437`) for the unit count; byte-bound deferral and
+(`source_capture_tests.rs:451`) for the unit count; byte-bound deferral and
 the two-batch shape per job are not asserted together.
 Guarantee: each screened batch admits at most `MAX_SOURCE_BATCH_UNITS` (32)
 units and `MAX_SOURCE_BATCH_BYTES` (64 KiB) of text; a unit over
@@ -854,10 +854,10 @@ Re-exercised by #1168: `review.candidates` joins the family through
 `kernel_request` with a `deny_unknown_fields` body
 (`crates/daemon/src/contradiction_candidates/read.rs:30`);
 `review_candidates_pages_live_rows_and_answers_each_terminal`
-(`crates/daemon/src/candidate_pass_tests.rs:1627`) answers `invalid_params`
+(`crates/daemon/src/candidate_pass_tests.rs:1681`) answers `invalid_params`
 for an unknown field and a malformed cursor, `project_mismatch` for a foreign
-root before the body is read (`:1906`), and `disabled` for a root without
-MODULE authority (`:1645`).
+root before the body is read (`:1960`), and `disabled` for a root without
+MODULE authority (`:1699`).
 Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
 fields, would break the family's stated order. `review.use_outcome` (#1157)
@@ -876,7 +876,7 @@ Reachability: default-production - any route opened with harness `cli`.
 Status: active
 Exercised: yes - `memory_reviewer_wire.rs:260`
 `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`;
-`lib.rs:35926` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
+`lib.rs:35931` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
 Guarantee: a binding whose harness is `OBSERVATIONAL_HARNESS` (`"cli"`)
 authorizes and resolves its project like any route and can call the routed
 read family with the same answers, and is excluded from
@@ -895,7 +895,7 @@ Confidence: high - [evidence](evidence/p5dep-observational-routes-read-and-take-
 Read `lib.rs:274-281`, `:382-386`, `:413-417`.
 Existing check: the two tests above. Status unaudited.
 Re-exercised by #1168: a route bound with `OBSERVATIONAL_HARNESS` reads a
-`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:1918`).
+`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:1972`).
 Impact: P5 U4's owner read is an observational read; it must be callable on a
 `cli` route and must not enroll the project in any background work.
 Open questions: None.

@@ -42,7 +42,7 @@ named function; no wrong file, no wrong claim).
 | `source_capture.rs:666-690` `CaptureJob::run` | corrected: `:667-690` |
 | `lib.rs:9220-9237` `capture_after_response` | confirmed |
 | `lib.rs:13491`, `:13497` `settle_prepared`, `:13500-13502` | corrected: `settle_prepared` is `:13498`; others confirmed |
-| `lib.rs:4000-4008`, `:274-281`, `:413-417`, `:35926` | confirmed |
+| `lib.rs:4000-4008`, `:274-281`, `:413-417`, `:35931` | confirmed |
 | `local_file.rs:64-70`, `:245-247`, `:487-501` | confirmed |
 | `slice/write.rs:42-54`, `:569`, `:585`, `:606-608` Conflict | confirmed |
 | `schema.rs:136` retention comment | confirmed |
@@ -54,7 +54,7 @@ named function; no wrong file, no wrong claim).
 | `config.rs:154`; `memory-store/src/lib.rs:335-340`; `storage/src/lib.rs:2631` | confirmed |
 | `activation.rs:174`; `lifecycle.rs:16-18`, `:327` | confirmed |
 | `tool-registry.ts:58`; `subagent-entry.ts:63` | `tool-registry.ts:58` now passes `EIDNARA_MEMORY_DEFAULT_ACTIONS` (#1161); confirmed at `packages/opencode-plugin/src/plugin/tool-registry.ts:58` and `packages/pi-plugin/src/subagent-entry.ts:63`; the catalog gives bare file names |
-| 22 test function locations (`source_capture_tests.rs:298,321,428,666,783,931,2231`; `source_capture.rs:1791`; `kernel_routes.rs:1958,2080,2112,1803`; `kernel_scope.rs:235`; `kernel_canonical_read.rs:227,448`; `kernel_claim_facts.rs:466`; `claims.rs:993`; `embedding_dispatch.rs:1102`; `search_catchup.rs:1876`; `memory_reviewer_wire.rs:15,260`; `baseline.rs:492`; `lifecycle.rs:704`; `local_file.rs:710,722,791,889`; `tools.test.ts:1185,1193`) | all confirmed |
+| 22 test function locations (`source_capture_tests.rs:312,335,442,666,783,931,2231`; `source_capture.rs:1791`; `kernel_routes.rs:1958,2080,2112,1803`; `kernel_scope.rs:235`; `kernel_canonical_read.rs:227,448`; `kernel_claim_facts.rs:466`; `claims.rs:993`; `embedding_dispatch.rs:1102`; `search_catchup.rs:1876`; `memory_reviewer_wire.rs:15,260`; `baseline.rs:492`; `lifecycle.rs:704`; `local_file.rs:710,722,791,889`; `tools.test.ts:1185,1193`) | all confirmed |
 | `query_route.rs:1055`; `lexical/index.rs:50`; `daemon/Cargo.toml:45`; `admission.rs:4237` | confirmed |
 | `harness_sources.rs:614-618`, `:1233`; `open.rs:614` `hold_readers_for_test` | confirmed |
 
@@ -254,8 +254,11 @@ Dispositions recorded by the unit tickets:
   test publishes a revision. Recorded on `cc-row-key-unique-and-caps-enforced`.
 - G4 to G6 (#1166): recorded on
   `cc-sweep-drops-only-dead-targets-bounded-idempotent-kernel-untouched`.
-- G7 (#1165, #1168): the sensitivity half is recorded on the read record;
-  the egress half stays open there (needs human input).
+- G7 (#1165, #1168): the facts the decision rests on are recorded on the read
+  record (a row holds ids, integers, and times only; the descriptor publishes
+  `Sensitive` and `LocalOnly`; the read returns the row's closed key set to
+  the model as a tool result); the inheritance decision stays open there
+  (needs human input).
 
 ### Refinements (apply directly)
 

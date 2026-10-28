@@ -494,9 +494,27 @@ impl MemoryStore {
         write: &DescriptorCandidates<'_>,
         caps: CandidateCaps,
     ) -> Result<CandidateWrite, MemoryStoreError> {
+        self.replace_candidates_for_descriptor_bounded(write, caps, None)
+    }
+
+    /// [`Self::replace_candidates_for_descriptor`] whose wait for the store's connection and
+    /// write lock ends at `deadline` when one is given.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryStoreError::Store`] carrying [`storage::StoreError::Deadline`] when the connection
+    /// or the write lock is still held at `deadline`; nothing was written. Otherwise as
+    /// [`Self::replace_candidates_for_descriptor`].
+    pub fn replace_candidates_for_descriptor_bounded(
+        &self,
+        write: &DescriptorCandidates<'_>,
+        caps: CandidateCaps,
+        deadline: Option<Instant>,
+    ) -> Result<CandidateWrite, MemoryStoreError> {
         check_write(write, caps)?;
         let per_project = i64::try_from(caps.per_project).map_err(|_| invalid("cap too large"))?;
-        PreparedWrite::new(DurableWriteFamily::ContradictionCandidates).execute(&self.inner, |tx| {
+        let family = PreparedWrite::new(DurableWriteFamily::ContradictionCandidates);
+        family.execute_bounded(&self.inner, deadline, |tx| {
             let tx = tx.tx();
             let held = held_rows(tx, write)?;
             let late = held

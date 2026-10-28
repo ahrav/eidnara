@@ -22,7 +22,7 @@ differ from an empty page.
   through `module_authority_for_route_within` and
   `candidates_for_decision_within` under the read's deadline, so a held
   connection answers `store_unavailable` at the bound
-  (`crates/daemon/src/candidate_pass_tests.rs:2114`).
+  (`crates/daemon/src/candidate_pass_tests.rs:2168`).
 - `docs/host-wire-protocol.md:833` documents the three terminals, the kernel
   states, and the empty page.
 
@@ -41,13 +41,13 @@ does not change the route's answer.
 A flag-off route with the table renamed away and a flag-on control; a root
 without MODULE authority; a daemon with no Memory Store; a Kernel not yet
 open and one whose open failed; an eligible decision with zero rows. All in
-`crates/daemon/src/candidate_pass_tests.rs:1627` and `:2126`.
+`crates/daemon/src/candidate_pass_tests.rs:1681` and `:2180`.
 
 ## Investigation log
 
 ### Q: Does a failed Kernel open answer differently from a starting one?
 
-- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:2141`, `:2158`.
+- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:2195`, `:2212`.
 - Findings: a Kernel not yet open answers `unavailable`/`store_starting`;
   opening at a file path answers `unavailable`/`store_unavailable`.
 - Missing evidence: none.
