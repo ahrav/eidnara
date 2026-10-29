@@ -422,7 +422,7 @@ describe("Pi eidnara_memory dispute", () => {
     it("is absent from the default schema and refused by the default allowlist", async () => {
         const h = seeded();
         expect(h.tool.parameters.properties.action).toMatchObject({
-            enum: ["create", "get", "revise", "archive", "merge"],
+            enum: ["create", "get", "revise", "archive", "merge", "candidates"],
         });
         expect(h.tool.parameters.properties).not.toHaveProperty("evidenceId");
         const refused = await h.execute(disputeArgs, "call-default");
@@ -526,5 +526,71 @@ describe("Pi eidnara_memory dispute", () => {
             expect(result.isError).toBeTrue();
         }
         expect(h.transport.calls).toHaveLength(0);
+    });
+});
+
+describe("Pi eidnara_memory candidates", () => {
+    it("is in the default schema with its paging fields and reads without a stable tool-call identity", async () => {
+        const calls: { method: string; body: Record<string, unknown> }[] = [];
+        const transport = {
+            connectionFileExists: () => true,
+            ensureRoute: async () => {},
+            call: async (call: { method: string; body: unknown }) => {
+                calls.push({ method: call.method, body: call.body as Record<string, unknown> });
+                return { kind: "terminal", terminal: "disabled" };
+            },
+        };
+        const { KernelClient } = await import("@eidnara/opencode/shared/kernel-client");
+        const h = harness(new FakeKernel(), {
+            kernelClient: ({ sessionId, projectRoot }) =>
+                new KernelClient({ transport, enabled: true, sessionId, projectRoot }),
+        });
+        expect(h.tool.parameters.properties.action).toMatchObject({
+            enum: expect.arrayContaining(["candidates"]),
+        });
+        expect(h.tool.parameters.properties).toHaveProperty("after");
+        expect(h.tool.parameters.properties).toHaveProperty("limit");
+        const result = await h.execute({ action: "candidates", objectId: "mem_rule" }, "");
+        expect(textOf(result)).toBe(
+            "Contradiction candidates are off in the daemon for this project.",
+        );
+        expect(calls.map((call) => call.method)).toEqual(["review.candidates"]);
+    });
+
+    it("names who can file the confirm form from the Pi allowlist", async () => {
+        const page = {
+            kind: "page",
+            as_of: 3,
+            items: [
+                {
+                    evidence_id: "srcev:pi",
+                    decision_object_id: "mem_rule",
+                    decision_id: "dec_rule",
+                    matched_terms: 2,
+                    decision_terms: 4,
+                    score: 5000,
+                    publish_tip: 3,
+                    created_at_ms: 1,
+                },
+            ],
+            next: null,
+        };
+        const { KernelClient } = await import("@eidnara/opencode/shared/kernel-client");
+        const noteFor = async (allowedActions?: readonly EidnaraMemoryAction[]) => {
+            const transport = {
+                connectionFileExists: () => true,
+                ensureRoute: async () => {},
+                call: async () => page,
+            };
+            const h = harness(new FakeKernel(), {
+                kernelClient: ({ sessionId, projectRoot }) =>
+                    new KernelClient({ transport, enabled: true, sessionId, projectRoot }),
+                ...(allowedActions ? { allowedActions } : {}),
+            });
+            const result = await h.execute({ action: "candidates", objectId: "mem_rule" }, "");
+            return parseResult<{ note: string }>(result).note;
+        };
+        expect(await noteFor()).toContain("not admitted in this context");
+        expect(await noteFor(["candidates", "dispute"])).not.toContain("not admitted");
     });
 });

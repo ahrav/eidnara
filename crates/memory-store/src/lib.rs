@@ -8724,43 +8724,47 @@ impl MemoryStore {
         route_project_root: &str,
         domain: &str,
     ) -> Result<Option<AuthorityRow>, MemoryStoreError> {
-        self.module_authority_for_route_then(route_project_root, domain, |_, _| Ok(()))
+        self.module_authority_for_route_then(route_project_root, domain, None, |_, _| Ok(()))
             .map(|found| found.map(|(row, ())| row))
     }
 
-    /// [`Self::module_authority_for_route`], then `then` over the found row inside the same `with_conn` read.
+    /// [`Self::module_authority_for_route`], then `then` over the found row inside the same `with_conn` read; a `deadline` bounds the connection wait.
     pub(crate) fn module_authority_for_route_then<T>(
         &self,
         route_project_root: &str,
         domain: &str,
+        deadline: Option<std::time::Instant>,
         then: impl FnOnce(&GuardedConn<'_>, &AuthorityRow) -> rusqlite::Result<T>,
     ) -> Result<Option<(AuthorityRow, T)>, MemoryStoreError> {
         validate_authority_domain(domain)?;
         self.injected_authority_route_read_failure()?;
-        self.inner
-            .with_conn(|conn| {
-                let Some(project) = route_authority_project_in(conn, route_project_root, domain)?
-                else {
-                    return Ok(None);
-                };
-                let Some(row) = conn
-                    .query_row_cached(
-                        authority_select!(
-                            "project = ?1 AND domain = ?2 AND state = 'MODULE'
+        let read = |conn: &GuardedConn<'_>| {
+            let Some(project) = route_authority_project_in(conn, route_project_root, domain)?
+            else {
+                return Ok(None);
+            };
+            let Some(row) = conn
+                .query_row_cached(
+                    authority_select!(
+                        "project = ?1 AND domain = ?2 AND state = 'MODULE'
                       ORDER BY context_store_uuid
                       LIMIT 1"
-                        ),
-                        params![project, domain],
-                        authority_row_from_sql,
-                    )
-                    .optional()?
-                else {
-                    return Ok(None);
-                };
-                let then = then(conn, &row)?;
-                Ok(Some((row, then)))
-            })
-            .map_err(Into::into)
+                    ),
+                    params![project, domain],
+                    authority_row_from_sql,
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            let then = then(conn, &row)?;
+            Ok(Some((row, then)))
+        };
+        match deadline {
+            Some(deadline) => self.inner.with_conn_within(deadline, read),
+            None => self.inner.with_conn(read),
+        }
+        .map_err(Into::into)
     }
 
     fn injected_authority_route_read_failure(&self) -> Result<(), MemoryStoreError> {

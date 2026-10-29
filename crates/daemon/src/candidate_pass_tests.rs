@@ -1731,3 +1731,1195 @@ fn a_scope_term_read_behind_held_kernel_readers_ends_at_the_pass_deadline() {
 fn a_payload_size_read_behind_held_kernel_readers_ends_at_the_pass_deadline() {
     a_kernel_read_behind_held_readers_ends_at_the_pass_deadline(Checkpoint::Kept(1));
 }
+
+fn activate_memories_authority(store: &MemoryStore, root: &Path) {
+    let project = "git:candidates";
+    let preparing = store
+        .authority_begin_prepare("ctx", project, "memories")
+        .unwrap();
+    let checksum = store
+        .authority_seed_checksum("ctx", project, "memories")
+        .unwrap();
+    store
+        .authority_verify_prepare(
+            "ctx",
+            project,
+            "memories",
+            preparing.generation,
+            &checksum,
+            &checksum,
+        )
+        .unwrap();
+    store
+        .authority_ack_prepare("ctx", project, "memories", preparing.generation)
+        .unwrap();
+    store
+        .bind_authority_route("ctx", project, root.to_str().unwrap())
+        .unwrap();
+}
+
+fn candidates_request(project: &Path, body: Value) -> Value {
+    let mut request = json!({
+        "method": "review.candidates",
+        "session_id": SESSION,
+        "project_root": project.to_str().unwrap(),
+    });
+    for (key, value) in body.as_object().unwrap() {
+        request[key] = value.clone();
+    }
+    request
+}
+
+async fn route_call(handler: &Handler, request: Value) -> Result<Value, String> {
+    match handler
+        .dispatch_value_for_test(test_route(7), request)
+        .await
+    {
+        PreparedOutcome::Response(output) => {
+            let mut bytes = Vec::new();
+            output.measure().unwrap().write_to(&mut bytes).unwrap();
+            Ok(serde_json::from_slice(&bytes).unwrap())
+        }
+        PreparedOutcome::Error { code, .. } => Err(code),
+        PreparedOutcome::Streamed => panic!("the route streamed"),
+    }
+}
+
+fn ingest(kernel: &KernelStore, key: &str) -> String {
+    let payload = format!("descriptor {key}").into_bytes();
+    let mut request = intent(&format!("evidence-{key}"));
+    request.request_digest = kernel::source_identity::identity_digest(&payload);
+    kernel
+        .ingest_exact_artifact(kernel::ArtifactIngestRequest {
+            intent: request,
+            payload,
+            evidence_id: format!("srcev:{key}"),
+            object_id: format!("srcev-object:{key}"),
+            object_kind: "evidence".to_owned(),
+            domain_id: crate::canonical_memory::MEMORY_DOMAIN_ID.to_owned(),
+            source_kind: "messages".to_owned(),
+            source_id: format!("native/{key}"),
+            source_revision: 1,
+            media_type: "text/plain".to_owned(),
+            retention_class: "canonical".to_owned(),
+            retain_until: None,
+            asserted_sensitivity: kernel::Sensitivity::Normal,
+            provider_egress: kernel::ProviderEgress::LocalOnly,
+            provenance: None,
+        })
+        .unwrap()
+        .evidence_id
+}
+
+fn write_row(
+    store: &MemoryStore,
+    project: &kernel_routes::ProjectBinding,
+    evidence: &str,
+    decision: &str,
+    matched: u32,
+    (incarnation, digest, tip): (&str, &str, i64),
+) {
+    let object = format!("object-{decision}");
+    let id = format!("decision-{decision}");
+    store
+        .replace_candidates_for_descriptor(
+            &memory_store::contradiction_candidates::DescriptorCandidates {
+                project_digest: project.digest(),
+                evidence_id: evidence,
+                publish_tip: tip,
+                kernel_incarnation_id: incarnation,
+                matcher_digest: digest,
+                created_at_ms: now_ms(),
+                rows: &[memory_store::contradiction_candidates::CandidateScore {
+                    decision_object_id: &object,
+                    decision_id: &id,
+                    matched_terms: matched,
+                    decision_terms: 5,
+                }],
+            },
+            memory_store::contradiction_candidates::CandidateCaps {
+                per_descriptor: 4,
+                per_project: 4096,
+            },
+        )
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
+    let (handler, store, dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(
+        &kernel,
+        &binding,
+        &[
+            ("one", TOPIC, EventKind::Other),
+            ("replaced", TOPIC, EventKind::Other),
+            ("empty", TOPIC, EventKind::Other),
+            ("ctl\u{1}", TOPIC, EventKind::Other),
+        ],
+    );
+    let ask = |body: Value| route_call(&handler, candidates_request(&project, body));
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
+        "a root without MODULE memories authority"
+    );
+    activate_memories_authority(&store, &project);
+    let incarnation = kernel
+        .capture_identified_commit_read_target_within_budget(
+            &kernel::applicability::EvalBudget::unbounded(),
+        )
+        .unwrap()
+        .database_incarnation_id;
+    let digest = crate::contradiction_candidates::scorer::matcher_digest();
+    let evidence: Vec<String> = (0..70)
+        .map(|index| ingest(&kernel, &format!("e{index}")))
+        .collect();
+    let retired = ingest(&kernel, "retired");
+    let tip = kernel.tip().unwrap();
+    for (index, evidence) in evidence.iter().enumerate() {
+        write_row(
+            &store,
+            &binding,
+            evidence,
+            "one",
+            3 + u32::from(index < 35),
+            (&incarnation, digest, tip),
+        );
+    }
+    write_row(
+        &store,
+        &binding,
+        &retired,
+        "one",
+        5,
+        (&incarnation, digest, tip),
+    );
+    let replaced_evidence = ingest(&kernel, "replaced");
+    write_row(
+        &store,
+        &binding,
+        &replaced_evidence,
+        "replaced",
+        5,
+        (&incarnation, digest, tip),
+    );
+    let foreign = ingest(&kernel, "foreign");
+    let stale = ingest(&kernel, "stale");
+    let tip = kernel.tip().unwrap();
+    write_row(
+        &store,
+        &binding,
+        &foreign,
+        "one",
+        3,
+        (&"0".repeat(32), digest, tip),
+    );
+    write_row(
+        &store,
+        &binding,
+        &stale,
+        "one",
+        3,
+        (&incarnation, &"f".repeat(64), tip),
+    );
+    let future = ingest(&kernel, "future");
+    kernel
+        .commit(intent("retire-evidence"), |envelope| {
+            envelope.retire_evidence("srcev-object:retired")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = kernel.tip().unwrap();
+    write_row(
+        &store,
+        &binding,
+        &future,
+        "one",
+        3,
+        (&incarnation, digest, tip + 1),
+    );
+
+    let jobs = store.memory_reviewer_status_facts().unwrap();
+    let written = rows(&store);
+    let first = ask(json!({ "decision_object_id": "object-one", "limit": 65 }))
+        .await
+        .unwrap();
+    assert_eq!(first["kind"], "page");
+    assert_eq!(first["as_of"], tip);
+    assert_eq!(kernel.tip().unwrap(), tip, "the read commits nothing");
+    assert_eq!(store.memory_reviewer_status_facts().unwrap(), jobs);
+    let items = first["items"].as_array().unwrap();
+    let keys: Vec<&str> = items[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let mut keys = keys;
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "created_at_ms",
+            "decision_id",
+            "decision_object_id",
+            "decision_terms",
+            "evidence_id",
+            "matched_terms",
+            "publish_tip",
+            "score"
+        ]
+    );
+    let first_filtered = counts(&handler)["read_filtered_stale"].as_u64().unwrap();
+    assert_eq!(
+        items.len() as u64 + first_filtered,
+        64,
+        "a limit of 65 clamps to 64 rows, each listed or filtered"
+    );
+    let scores: Vec<&Value> = items.iter().map(|item| &item["score"]).collect();
+    assert!(
+        items[..35].iter().all(|item| item["score"] == 8000),
+        "{scores:?}"
+    );
+    assert!(
+        items
+            .iter()
+            .all(|item| item["evidence_id"] != json!(retired))
+    );
+    assert!(first["next"].is_string());
+    let second = ask(json!({
+        "decision_object_id": "object-one",
+        "limit": 64,
+        "after": first["next"],
+    }))
+    .await
+    .unwrap();
+    assert_eq!(second["items"].as_array().unwrap().len(), 70 - items.len());
+    assert_eq!(second["next"], Value::Null);
+    assert_eq!(
+        counts(&handler)["read_filtered_stale"],
+        4,
+        "the retired, foreign-incarnation, stale-digest, and future-tip rows"
+    );
+    assert_eq!(rows(&store), written, "the read deletes no stale row");
+    let walked: Vec<&Value> = items
+        .iter()
+        .chain(second["items"].as_array().unwrap())
+        .collect();
+    let mut ordered = walked.clone();
+    ordered.sort_by(|left, right| {
+        let key = |item: &Value| {
+            (
+                std::cmp::Reverse(item["score"].as_u64()),
+                std::cmp::Reverse(item["created_at_ms"].as_u64()),
+                item["evidence_id"].as_str().unwrap().to_owned(),
+            )
+        };
+        key(left).cmp(&key(right))
+    });
+    assert_eq!(
+        walked, ordered,
+        "the walk follows the documented page order"
+    );
+    let listed: std::collections::BTreeSet<&str> = walked
+        .iter()
+        .map(|item| item["evidence_id"].as_str().unwrap())
+        .collect();
+    let expected: std::collections::BTreeSet<&str> = evidence.iter().map(String::as_str).collect();
+    assert_eq!(
+        listed, expected,
+        "the pages are disjoint and cover every live row"
+    );
+    let filtered = counts(&handler)["read_filtered_stale"].as_u64().unwrap();
+    let smallest = ask(json!({ "decision_object_id": "object-one", "limit": 0 }))
+        .await
+        .unwrap();
+    assert!(smallest["next"].is_string());
+    assert_eq!(
+        smallest["items"].as_array().unwrap().len() as u64
+            + counts(&handler)["read_filtered_stale"].as_u64().unwrap()
+            - filtered,
+        1,
+        "a limit of zero clamps to one row"
+    );
+    let past_the_word: Value =
+        serde_json::from_str(r#"{"decision_object_id":"object-one","limit":18446744073709551616}"#)
+            .unwrap();
+    assert_eq!(
+        ask(past_the_word).await.unwrap(),
+        first,
+        "a limit past the machine word clamps to the page bound"
+    );
+    let two_as_float: Value =
+        serde_json::from_str(r#"{"decision_object_id":"object-one","limit":2.0}"#).unwrap();
+    assert_eq!(
+        ask(two_as_float).await.unwrap(),
+        ask(json!({ "decision_object_id": "object-one", "limit": 2 }))
+            .await
+            .unwrap(),
+        "an integral float spelling is the integer it names"
+    );
+    for spelling in [json!(-1), json!(2.5), json!("2"), json!(true)] {
+        assert_eq!(
+            ask(json!({ "decision_object_id": "object-one", "limit": spelling })).await,
+            Err("invalid_params".to_owned()),
+            "a limit spelled {spelling} is the caller's input"
+        );
+    }
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one", "limit": null }))
+            .await
+            .unwrap(),
+        first,
+        "a null limit is an absent one"
+    );
+
+    kernel
+        .commit(intent("supersede-replaced"), |envelope| {
+            envelope.correct_decision(
+                "object-replaced",
+                DecisionSpec {
+                    decision_id: "decision-successor".to_owned(),
+                    object_id: "object-successor".to_owned(),
+                    domain_id: crate::canonical_memory::MEMORY_DOMAIN_ID.to_owned(),
+                    proposition_id: None,
+                    scope_id: Some(binding.scope_id()),
+                    anchor_id: None,
+                    evidence_id: None,
+                    decision_kind: "architecture".to_owned(),
+                    payload: DecisionPayload {
+                        summary: "a successor".to_owned(),
+                        rationale: "fixture".to_owned(),
+                    },
+                    source_kind: "fixture".to_owned(),
+                    source_id: "lineage-replaced".to_owned(),
+                    source_revision: 2,
+                    sensitivity: kernel::Sensitivity::Normal,
+                },
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-replaced" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "not_live" })),
+        "rows exist for the replaced decision"
+    );
+    let empty = ask(json!({ "decision_object_id": "object-empty" }))
+        .await
+        .unwrap();
+    assert_eq!(
+        empty,
+        json!({ "kind": "page", "as_of": kernel.tip().unwrap(), "items": [], "next": null }),
+        "an eligible decision with no rows"
+    );
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-ctl\u{1}" })).await,
+        Ok(json!({ "kind": "page", "as_of": kernel.tip().unwrap(), "items": [], "next": null })),
+        "a live decision whose id the candidate writer cannot store has no rows"
+    );
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-missing" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "not_live" }))
+    );
+    for body in [
+        json!({ "decision_object_id": "object-one", "extra": 1 }),
+        json!({ "decision_object_id": "object-one", "after": "not-a-cursor" }),
+        json!({ "decision_object_id": "object-one", "after": 42 }),
+        json!({ "decision_object_id": "" }),
+        json!({}),
+    ] {
+        assert_eq!(
+            ask(body.clone()).await,
+            Err("invalid_params".to_owned()),
+            "{body}"
+        );
+    }
+    let elsewhere = project.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let refused = route_call(
+        &handler,
+        candidates_request(&elsewhere, json!({ "decision_object_id": "object-one" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refused["state"]["kind"], "invalid");
+    assert_eq!(refused["state"]["reason"], "project_mismatch");
+    let refused = route_call(
+        &handler,
+        candidates_request(&elsewhere, json!({ "extra": 1 })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        refused["state"]["reason"], "project_mismatch",
+        "the scope is judged before the body"
+    );
+
+    let rebind = |harness: &str, enabled: bool| {
+        let mut bound = binding_with_harness(project.to_str().unwrap(), harness, SESSION);
+        bound.config = candidate_config(true, enabled);
+        handler.bind_route(test_route(7), bound);
+    };
+    rebind(crate::OBSERVATIONAL_HARNESS, true);
+    let observed = ask(json!({ "decision_object_id": "object-one" }))
+        .await
+        .unwrap();
+    assert_eq!(observed["kind"], "page", "an observational route reads");
+
+    let path = find_file(dir.path(), "store.db");
+    let rename = |from: &str, to: &str| {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+            .unwrap();
+    };
+    rename(
+        "contradiction_candidates",
+        "contradiction_candidates_hidden",
+    );
+    rebind("opencode", false);
+    let filtered = counts(&handler)["read_filtered_stale"].clone();
+    // The statement ledger records every statement the store runs, so a flag-off read's statement on either candidate table shows in it.
+    store.start_statement_work_ledger();
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
+        "a false flag answers before any table statement"
+    );
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one", "after": 42 })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
+        "a false flag answers before a non-string cursor is judged"
+    );
+    let candidate_statements = |work: Vec<storage::StatementWork>| {
+        work.into_iter()
+            .map(|statement| statement.sql)
+            .filter(|sql| sql.contains("contradiction_candidate"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        candidate_statements(store.take_statement_work()),
+        Vec::<String>::new(),
+        "two flag-off reads run no statement on a candidate table"
+    );
+    assert_eq!(counts(&handler)["read_filtered_stale"], filtered);
+    rebind("opencode", true);
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
+        "the hidden table fails the read a true flag runs"
+    );
+    for after in [json!("not-a-cursor"), json!(42)] {
+        assert_eq!(
+            ask(json!({ "decision_object_id": "object-one", "after": after })).await,
+            Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
+            "the store terminal is judged before the cursor spelling {after}"
+        );
+    }
+    rename(
+        "contradiction_candidates_hidden",
+        "contradiction_candidates",
+    );
+    // The control: with the table in place, a flag-on read runs a statement the ledger sees on it.
+    store.start_statement_work_ledger();
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" }))
+            .await
+            .unwrap()["kind"],
+        "page"
+    );
+    assert!(
+        !candidate_statements(store.take_statement_work()).is_empty(),
+        "a flag-on read runs a candidate-table statement"
+    );
+}
+
+/// With one of the two Kernel readers held for the whole request, every Kernel
+/// read the route makes takes the free reader inside the read budget: two
+/// requests, which start their reader rotation on opposite readers, both
+/// answer while the hold lasts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_reads_scope_terms_inside_its_budget_beside_a_held_reader() {
+    const HOLD: Duration = Duration::from_secs(8);
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    activate_memories_authority(&store, &project);
+    let held = Arc::new(std::sync::Barrier::new(2));
+    let holder = {
+        let kernel = Arc::clone(&kernel);
+        let held = Arc::clone(&held);
+        std::thread::spawn(move || kernel.hold_first_reader_for_test(&held, HOLD))
+    };
+    held.wait();
+    let started = Instant::now();
+    for _ in 0..2 {
+        let answer = tokio::time::timeout(
+            HOLD,
+            route_call(
+                &handler,
+                candidates_request(&project, json!({ "decision_object_id": "object-one" })),
+            ),
+        )
+        .await
+        .expect("the read answers while the reader is held");
+        assert_eq!(answer.unwrap()["kind"], "page");
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "two reads waited {:?} beside the held reader",
+        started.elapsed()
+    );
+    holder.join().unwrap();
+}
+
+/// A restore between the claim-standing read and the scope-terms read swaps in
+/// a history without the decision's scope; the read answers the Kernel's
+/// conflict state for the stale target, so the live decision is never judged
+/// `not_live` against mixed histories.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_refuses_a_target_whose_history_a_restore_replaced_before_the_scope_read()
+{
+    use std::os::unix::fs::PermissionsExt;
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    activate_memories_authority(&store, &project);
+    let destination = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    let ask = |body: Value| route_call(&handler, candidates_request(&project, body));
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" }))
+            .await
+            .unwrap()["kind"],
+        "page",
+        "the seeded decision is live before the restore"
+    );
+    let backup_path = backup.destination_path.clone();
+    let restored = Arc::clone(&kernel);
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = Some(Arc::new(move || {
+        restored.restore(&backup_path).unwrap();
+    }));
+    let answer = ask(json!({ "decision_object_id": "object-one" })).await;
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = None;
+    assert_ne!(
+        answer,
+        Ok(json!({ "kind": "terminal", "terminal": "not_live" })),
+        "a live decision is not judged against the restored history's scopes"
+    );
+    assert_eq!(
+        answer.as_ref().unwrap()["state"]["kind"],
+        "conflict",
+        "{answer:?}"
+    );
+}
+
+/// The route's memories authority begins draining after the read's entry
+/// check and before its page read; the page read judges authority again in
+/// the connection that reads the page, so the read answers `disabled`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_answers_disabled_when_authority_drains_before_the_page_read() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    activate_memories_authority(&store, &project);
+    let ask = |body: Value| route_call(&handler, candidates_request(&project, body));
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one" }))
+            .await
+            .unwrap()["kind"],
+        "page",
+        "the route holds MODULE authority before the drain"
+    );
+    let draining = Arc::clone(&store);
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = Some(Arc::new(move || {
+        draining
+            .authority_begin_drain("ctx", "git:candidates", "memories", "lease", i64::MAX, 0)
+            .unwrap();
+    }));
+    let answer = ask(json!({ "decision_object_id": "object-one" })).await;
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = None;
+    assert_eq!(
+        answer,
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
+        "the page read runs under the authority its connection sees"
+    );
+}
+
+/// The route's memories authority begins draining after the read's entry
+/// check while the decision is judged; a decision that is not live answers
+/// `disabled`, the terminal the contract puts before `not_live`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_answers_disabled_when_authority_drains_before_a_not_live_judgment() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(&kernel, &binding, &[("replaced", TOPIC, EventKind::Other)]);
+    kernel
+        .commit(intent("supersede-replaced"), |envelope| {
+            envelope.correct_decision(
+                "object-replaced",
+                DecisionSpec {
+                    decision_id: "decision-successor".to_owned(),
+                    object_id: "object-successor".to_owned(),
+                    domain_id: crate::canonical_memory::MEMORY_DOMAIN_ID.to_owned(),
+                    proposition_id: None,
+                    scope_id: Some(binding.scope_id()),
+                    anchor_id: None,
+                    evidence_id: None,
+                    decision_kind: "architecture".to_owned(),
+                    payload: DecisionPayload {
+                        summary: "a successor".to_owned(),
+                        rationale: "fixture".to_owned(),
+                    },
+                    source_kind: "fixture".to_owned(),
+                    source_id: "lineage-replaced".to_owned(),
+                    source_revision: 2,
+                    sensitivity: kernel::Sensitivity::Normal,
+                },
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
+    activate_memories_authority(&store, &project);
+    let ask = |body: Value| route_call(&handler, candidates_request(&project, body));
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-replaced" })).await,
+        Ok(json!({ "kind": "terminal", "terminal": "not_live" })),
+        "a superseded decision is not live under MODULE authority"
+    );
+    let draining = Arc::clone(&store);
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = Some(Arc::new(move || {
+        draining
+            .authority_begin_drain("ctx", "git:candidates", "memories", "lease", i64::MAX, 0)
+            .unwrap();
+    }));
+    let answer = ask(json!({ "decision_object_id": "object-replaced" })).await;
+    *handler
+        .contradiction_candidates
+        .before_scope_read
+        .lock()
+        .unwrap() = None;
+    assert_eq!(
+        answer,
+        Ok(json!({ "kind": "terminal", "terminal": "disabled" })),
+        "an authority that drained during the judgment answers before not_live"
+    );
+}
+
+/// The read's budget runs from its admission, so a read queued behind a
+/// saturated blocking pool for longer than its budget answers
+/// `store_unavailable` as soon as it runs.
+#[test]
+fn review_candidates_queued_past_its_budget_answers_at_the_deadline_it_was_admitted_under() {
+    const BLOCKING_THREADS: usize = 4;
+    const BUDGET: Duration = Duration::from_millis(200);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .max_blocking_threads(BLOCKING_THREADS)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+        let binding = kernel_routes::ProjectBinding::new(&project);
+        seed(
+            &kernel_of(&handler),
+            &binding,
+            &[("one", TOPIC, EventKind::Other)],
+        );
+        activate_memories_authority(&store, &project);
+        *handler.contradiction_candidates.read_budget.lock().unwrap() = Some(BUDGET);
+        let released = Arc::new(AtomicBool::new(false));
+        for _ in 0..BLOCKING_THREADS {
+            let released = Arc::clone(&released);
+            tokio::task::spawn_blocking(move || {
+                while !released.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            });
+        }
+        tokio::spawn({
+            let released = Arc::clone(&released);
+            async move {
+                tokio::time::sleep(BUDGET * 3).await;
+                released.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        assert_eq!(
+            route_call(
+                &handler,
+                candidates_request(&project, json!({ "decision_object_id": "object-one" })),
+            )
+            .await,
+            Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
+            "a read that runs after its budget answers at the bound"
+        );
+        drop(handler);
+    });
+}
+
+/// The candidate store's connection is held for longer than the read budget;
+/// the read answers `store_unavailable` at its bound in place of waiting the
+/// hold out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_answers_store_unavailable_when_the_store_connection_outlasts_its_budget()
+{
+    const HOLD: Duration = Duration::from_secs(9);
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    activate_memories_authority(&store, &project);
+    let held = Arc::new(std::sync::Barrier::new(2));
+    let holder = {
+        let store = Arc::clone(&store);
+        let held = Arc::clone(&held);
+        std::thread::spawn(move || {
+            store
+                .with_conn_for_test(|_| {
+                    held.wait();
+                    std::thread::sleep(HOLD);
+                    Ok(())
+                })
+                .unwrap();
+        })
+    };
+    held.wait();
+    let started = Instant::now();
+    let answer = tokio::time::timeout(
+        HOLD,
+        route_call(
+            &handler,
+            candidates_request(&project, json!({ "decision_object_id": "object-one" })),
+        ),
+    )
+    .await
+    .expect("the read answers while the connection is held");
+    assert_eq!(
+        answer,
+        Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" })),
+        "a connection held past the budget answers the store terminal"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(7),
+        "the read waited {:?} on the held connection",
+        started.elapsed()
+    );
+    holder.join().unwrap();
+}
+
+fn find_file(root: &Path, name: &str) -> PathBuf {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().is_some_and(|file| file == name) {
+                return path;
+            }
+        }
+    }
+    panic!("no {name} under {}", root.display());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_answers_the_store_and_kernel_states_before_any_page() {
+    let (starting, _store, _dir, project) = handler_with_store(
+        Arc::new(ProducerState::default()),
+        candidate_config(true, true),
+    );
+    let mut bound = binding_with_harness(project.to_str().unwrap(), "opencode", SESSION);
+    bound.config = candidate_config(true, true);
+    starting.bind_route(test_route(7), bound);
+    let answer = route_call(
+        &starting,
+        candidates_request(&project, json!({ "decision_object_id": "object-one" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer["state"]["kind"], "unavailable", "{answer}");
+    assert_eq!(answer["state"]["reason"], "store_starting", "{answer}");
+    assert!(answer.get("items").is_none());
+
+    let blocked = _dir.path().join("kernel-is-a-file");
+    std::fs::write(&blocked, b"").unwrap();
+    starting.kernel.set_expected(true);
+    starting
+        .kernel
+        .open(blocked, StoreOpenPolicy::default(), starting.cancel.clone())
+        .await;
+    let answer = route_call(
+        &starting,
+        candidates_request(&project, json!({ "decision_object_id": "object-one" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer["state"]["kind"], "unavailable", "{answer}");
+    assert_eq!(answer["state"]["reason"], "store_unavailable", "{answer}");
+    assert!(answer.get("items").is_none());
+
+    let dir = tempfile::tempdir().unwrap();
+    let storeless = Handler::with_producer_factory_config_resolver(
+        Arc::new(TestProducerFactory {
+            state: Arc::new(ProducerState::default()),
+        }),
+        candidate_config(true, true),
+        Arc::new(MissingSessionResolver),
+    );
+    storeless.kernel.set_expected(true);
+    storeless
+        .kernel
+        .open(
+            dir.path().join("kernel"),
+            StoreOpenPolicy::default(),
+            storeless.cancel.clone(),
+        )
+        .await;
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut bound = binding_with_harness(root.to_str().unwrap(), "opencode", SESSION);
+    bound.config = candidate_config(true, true);
+    storeless.bind_route(test_route(7), bound);
+    assert_eq!(
+        route_call(
+            &storeless,
+            candidates_request(&root, json!({ "decision_object_id": "object-one" })),
+        )
+        .await,
+        Ok(json!({ "kind": "terminal", "terminal": "store_unavailable" }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_listed_candidate_confirms_through_dispute_while_its_evidence_lives() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    activate_memories_authority(&store, &project);
+    seed(
+        &kernel,
+        &binding,
+        &[
+            ("confirmed", TOPIC, EventKind::Other),
+            (
+                "expired",
+                "harbor lighthouse ferry anchor dock",
+                EventKind::Other,
+            ),
+        ],
+    );
+    publish(
+        &handler,
+        &project,
+        &window(0, &format!("{TOPIC} first")),
+        true,
+    );
+    settle(&handler).await;
+    publish(
+        &handler,
+        &project,
+        &window(1, "harbor lighthouse ferry anchor dock second"),
+        true,
+    );
+    settle(&handler).await;
+    let ask = |decision: &str| {
+        route_call(
+            &handler,
+            candidates_request(&project, json!({ "decision_object_id": decision })),
+        )
+    };
+    // The control for the ledger below: the listings run statements on the candidate table.
+    store.start_statement_work_ledger();
+    let listed = ask("object-confirmed").await.unwrap();
+    let confirmed_row = listed["items"][0].clone();
+    let expired_row = ask("object-expired").await.unwrap()["items"][0].clone();
+    let candidate_statements = |work: Vec<storage::StatementWork>| {
+        work.into_iter()
+            .map(|statement| statement.sql)
+            .filter(|sql| sql.contains("contradiction_candidate"))
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        !candidate_statements(store.take_statement_work()).is_empty(),
+        "the listings run candidate-table statements"
+    );
+    // Each row cites the descriptor of the message whose text overlaps its decision.
+    let evidence_of_message = |message: &str| {
+        live_messages(&kernel)
+            .into_iter()
+            .find(|descriptor| {
+                descriptor
+                    .detail
+                    .identity
+                    .contains(&("message_id".to_owned(), message.to_owned()))
+            })
+            .map(|descriptor| descriptor.detail.evidence_id)
+            .unwrap_or_else(|| panic!("{message} is published"))
+    };
+    assert_eq!(
+        confirmed_row["evidence_id"],
+        evidence_of_message("msg_000"),
+        "{confirmed_row} cites the first window's descriptor"
+    );
+    assert_eq!(
+        expired_row["evidence_id"],
+        evidence_of_message("msg_001"),
+        "{expired_row} cites the second window's descriptor"
+    );
+    let dispute = |row: &Value, key: &str| {
+        crate::kernel_route_fixtures::commit_request(
+            &project,
+            SESSION,
+            key,
+            vec![json!({
+                "op": "disposition",
+                "object_id": row["decision_object_id"],
+                "event": "mark_disputed",
+                "evidence_id": row["evidence_id"],
+            })],
+            vec![],
+        )
+    };
+    let kept = rows(&store)
+        .into_iter()
+        .find(|row| row.decision_object_id == "object-expired")
+        .unwrap();
+    store.truncate_contradiction_candidates_for_test().unwrap();
+    // The statement ledger records every statement the store runs, so a confirm that read a candidate table would show in it.
+    store.start_statement_work_ledger();
+    let applied = route_call(&handler, dispute(&confirmed_row, "confirm-1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        candidate_statements(store.take_statement_work()),
+        Vec::<String>::new(),
+        "the confirm runs no statement on a candidate table"
+    );
+    write_row(
+        &store,
+        &binding,
+        &kept.evidence_id,
+        "expired",
+        kept.matched_terms,
+        (
+            &kept.kernel_incarnation_id,
+            &kept.matcher_digest,
+            kept.publish_tip,
+        ),
+    );
+    assert_eq!(applied["state"]["kind"], "available", "{applied}");
+    assert_eq!(applied["dispositions"][0]["disposition"], "disputed");
+
+    let later = now_ms() + 31 * 24 * 60 * 60 * 1000;
+    kernel.expire_harness_captures(later).unwrap();
+    let filtered = counts(&handler)["read_filtered_stale"].as_u64().unwrap();
+    let after = ask("object-expired").await.unwrap();
+    assert_eq!(
+        after["items"],
+        json!([]),
+        "the retired evidence's row is left out"
+    );
+    assert_eq!(
+        counts(&handler)["read_filtered_stale"].as_u64().unwrap(),
+        filtered + 1
+    );
+    let refused = route_call(&handler, dispute(&expired_row, "confirm-2"))
+        .await
+        .unwrap();
+    assert_eq!(refused["state"]["kind"], "invalid", "{refused}");
+    assert_eq!(refused["state"]["reason"], "not_found");
+}
+
+#[test]
+fn the_confirm_path_never_reads_the_candidate_table() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/kernel_routes");
+    for name in ["commit.rs", "dispute.rs"] {
+        let text = std::fs::read_to_string(root.join(name)).unwrap();
+        for token in [
+            "candidates_for_decision",
+            "contradiction_candidates",
+            "candidate_sweep_page",
+            "replace_candidates_for_descriptor",
+            "delete_candidates_as_read",
+            "candidate_rows_and_bytes",
+        ] {
+            assert!(!text.contains(token), "{name} names {token}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_publication_without_consent_runs_no_candidate_table_statement() {
+    let (handler, store, dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    seed(
+        &kernel_of(&handler),
+        &binding,
+        &[("one", TOPIC, EventKind::Other)],
+    );
+    let path = find_file(dir.path(), "store.db");
+    let rename = |from: &str, to: &str| {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+            .unwrap();
+    };
+    rename(
+        "contradiction_candidates",
+        "contradiction_candidates_hidden",
+    );
+    // The statement ledger records every statement the store runs, so a statement on either candidate table shows in it whatever its outcome.
+    store.start_statement_work_ledger();
+    for index in 0..3 {
+        publish(
+            &handler,
+            &project,
+            &window(index, &format!("{TOPIC} note {index}")),
+            false,
+        );
+        settle(&handler).await;
+    }
+    let candidate_statements = |work: Vec<storage::StatementWork>| {
+        work.into_iter()
+            .map(|statement| statement.sql)
+            .filter(|sql| sql.contains("contradiction_candidate"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        candidate_statements(store.take_statement_work()),
+        Vec::<String>::new(),
+        "three consent-off publications run no statement on a candidate table"
+    );
+    assert_eq!(capture_report(&handler)["units_published"], 3);
+    assert!(
+        counts(&handler)
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|value| value == 0),
+        "{}",
+        counts(&handler)
+    );
+    publish(
+        &handler,
+        &project,
+        &window(3, &format!("{TOPIC} note 3")),
+        true,
+    );
+    settle(&handler).await;
+    assert_eq!(
+        counts(&handler)["store_unavailable"],
+        1,
+        "the hidden table fails the pass a consenting publication runs: {}",
+        counts(&handler)
+    );
+    rename(
+        "contradiction_candidates_hidden",
+        "contradiction_candidates",
+    );
+    assert!(rows(&store).is_empty());
+    // The control: with the table in place, a consenting publication's pass runs statements the ledger sees on it.
+    store.start_statement_work_ledger();
+    publish(
+        &handler,
+        &project,
+        &window(4, &format!("{TOPIC} note 4")),
+        true,
+    );
+    settle(&handler).await;
+    assert!(
+        !candidate_statements(store.take_statement_work()).is_empty(),
+        "the consenting publication's pass runs a candidate-table statement"
+    );
+    assert_eq!(rows(&store).len(), 1);
+}
+
+/// A page body is the canonical `serde_json` encoding of its own value, keys in
+/// lexicographic order and no whitespace, which is the encoding of a `json!`
+/// page with the same fields.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_candidates_encodes_a_page_as_its_canonical_json_value() {
+    let (handler, store, _dir, project) = candidate_handler(candidate_config(true, true)).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let kernel = kernel_of(&handler);
+    seed(&kernel, &binding, &[("one", TOPIC, EventKind::Other)]);
+    activate_memories_authority(&store, &project);
+    let incarnation = kernel
+        .capture_identified_commit_read_target_within_budget(
+            &kernel::applicability::EvalBudget::unbounded(),
+        )
+        .unwrap()
+        .database_incarnation_id;
+    let digest = crate::contradiction_candidates::scorer::matcher_digest();
+    let evidence: Vec<String> = ["first", "second", "third"]
+        .into_iter()
+        .map(|key| ingest(&kernel, key))
+        .collect();
+    let tip = kernel.tip().unwrap();
+    for (matched, evidence) in (3..).zip(&evidence) {
+        write_row(
+            &store,
+            &binding,
+            evidence,
+            "one",
+            matched,
+            (&incarnation, digest, tip),
+        );
+    }
+    let mut next = Value::Null;
+    for expected in [2, 1] {
+        let request = candidates_request(
+            &project,
+            json!({ "decision_object_id": "object-one", "limit": 2, "after": next }),
+        );
+        let PreparedOutcome::Response(output) = handler
+            .dispatch_value_for_test(test_route(7), request)
+            .await
+        else {
+            panic!("the read answers a page");
+        };
+        let mut bytes = Vec::new();
+        output.measure().unwrap().write_to(&mut bytes).unwrap();
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), expected, "{page}");
+        assert_eq!(bytes, serde_json::to_vec(&page).unwrap());
+        next = page["next"].clone();
+    }
+    assert_eq!(next, Value::Null);
+}

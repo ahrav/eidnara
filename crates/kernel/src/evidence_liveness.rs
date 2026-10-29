@@ -3,11 +3,11 @@
 //! snapshot's commit. The read is the fact P4's confirm checks before a
 //! dispute cites evidence, offered without a write transaction or a hold.
 
-use rusqlite::{OptionalExtension, TransactionBehavior};
+use rusqlite::TransactionBehavior;
 
 use super::applicability::EvalBudget;
 use super::commit_read::{CommitReadTarget, tip};
-use super::{CachedSql, KernelError, KernelStore, map_sqlite};
+use super::{KernelError, KernelStore, map_sqlite};
 
 /// The most evidence ids one [`KernelStore::evidence_liveness_at_within_budget`] call reads.
 pub const MAX_EVIDENCE_LIVENESS_IDS: usize = 256;
@@ -35,10 +35,10 @@ pub enum EvidenceLivenessError {
 
 impl KernelStore {
     /// The liveness of each of `evidence_ids` at `target.through_commit`, in
-    /// request order, from one snapshot transaction with one indexed lookup
-    /// per id. The incarnation is compared under the reader guard, so a
-    /// restore between capturing the target and this read cannot pair one
-    /// history's tip with another's rows.
+    /// request order, from one snapshot transaction and one statement that
+    /// looks up each id through the primary key. The incarnation is compared
+    /// under the reader guard, so a restore between capturing the target and
+    /// this read cannot pair one history's tip with another's rows.
     ///
     /// # Errors
     ///
@@ -69,28 +69,35 @@ impl KernelStore {
             if target.through_commit > tip(&tx).map_err(map_sqlite)? {
                 return Err(KernelError::FutureSnapshot.into());
             }
-            let mut standing = Vec::with_capacity(evidence_ids.len());
-            for evidence_id in evidence_ids {
-                limit.check()?;
-                let row: Option<(i64, Option<i64>)> = tx
-                    .query_row_cached(
-                        "SELECT created_commit_seq, invalidated_commit_seq
-                           FROM evidence_meta WHERE evidence_id=?1",
-                        [evidence_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+            let mut standing = vec![EvidenceLiveness::Unknown; evidence_ids.len()];
+            if !evidence_ids.is_empty() {
+                let ids =
+                    serde_json::to_string(evidence_ids).map_err(|_| KernelError::InvalidInput)?;
+                let mut statement = tx
+                    .prepare_cached(
+                        "SELECT ids.key, meta.created_commit_seq, meta.invalidated_commit_seq
+                           FROM json_each(?1) AS ids
+                           JOIN evidence_meta AS meta ON meta.evidence_id=ids.value",
                     )
-                    .optional()
                     .map_err(map_sqlite)?;
-                standing.push(match row {
-                    Some((created, _)) if created > target.through_commit => {
+                let mut rows = statement.query([ids]).map_err(map_sqlite)?;
+                while let Some(row) = rows.next().map_err(map_sqlite)? {
+                    limit.check()?;
+                    let index: i64 = row.get(0).map_err(map_sqlite)?;
+                    let created: i64 = row.get(1).map_err(map_sqlite)?;
+                    let invalidated: Option<i64> = row.get(2).map_err(map_sqlite)?;
+                    let slot = usize::try_from(index)
+                        .ok()
+                        .and_then(|index| standing.get_mut(index))
+                        .ok_or(KernelError::CorruptCanonicalRow)?;
+                    *slot = if created > target.through_commit {
                         EvidenceLiveness::Unknown
-                    }
-                    Some((_, Some(invalidated))) if invalidated <= target.through_commit => {
+                    } else if invalidated.is_some_and(|seq| seq <= target.through_commit) {
                         EvidenceLiveness::Retired
-                    }
-                    Some(_) => EvidenceLiveness::Live,
-                    None => EvidenceLiveness::Unknown,
-                });
+                    } else {
+                        EvidenceLiveness::Live
+                    };
+                }
             }
             tx.commit()?;
             limit.check()?;

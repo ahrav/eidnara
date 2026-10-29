@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
 import { MemoryInputError } from "@eidnara/opencode/shared/kernel-client/anti-memory";
+import { CANDIDATES_PAGE_MAX } from "@eidnara/opencode/shared/kernel-client/wire";
 import {
     actionList,
     EIDNARA_MEMORY_TOOL_NAME,
@@ -66,7 +67,9 @@ const SHARED_PARAMS = {
         }),
     ),
     antiMemory: Type.Optional(AntiMemorySchema),
-    objectId: Type.Optional(Type.String({ description: "Object id for revise/archive" })),
+    objectId: Type.Optional(
+        Type.String({ description: "Object id for revise/archive/candidates" }),
+    ),
     objectIds: Type.Optional(
         Type.Array(Type.String(), {
             maxItems: 20,
@@ -78,7 +81,9 @@ const SHARED_PARAMS = {
 
 /** The fields only `dispute` reads; exposed exactly when the allowlist admits it. */
 const DISPUTE_PARAMS = {
-    objectId: Type.Optional(Type.String({ description: "Object id for revise/archive/dispute" })),
+    objectId: Type.Optional(
+        Type.String({ description: "Object id for revise/archive/dispute/candidates" }),
+    ),
     event: Type.Optional(
         Type.String({
             enum: [...EIDNARA_MEMORY_DISPUTE_EVENTS],
@@ -94,6 +99,22 @@ const DISPUTE_PARAMS = {
     ),
 };
 
+/** The paging fields only `candidates` reads; exposed exactly when the allowlist admits it. */
+const CANDIDATES_PARAMS = {
+    after: Type.Optional(
+        Type.Union([Type.String(), Type.Null()], {
+            description: "The next cursor of a prior candidates page",
+        }),
+    ),
+    limit: Type.Optional(
+        Type.Integer({
+            minimum: 1,
+            maximum: CANDIDATES_PAGE_MAX,
+            description: `candidates page size, 1 to ${CANDIDATES_PAGE_MAX}`,
+        }),
+    ),
+};
+
 /** The `action` field lists exactly the actions the tool admits. */
 function paramsSchema(actions: readonly EidnaraMemoryAction[]) {
     return Type.Object(
@@ -102,6 +123,7 @@ function paramsSchema(actions: readonly EidnaraMemoryAction[]) {
                 Type.String({ enum: [...actions], description: actionList(actions) }),
             ),
             ...SHARED_PARAMS,
+            ...(actions.includes("candidates") ? CANDIDATES_PARAMS : {}),
             ...(actions.includes("dispute") ? DISPUTE_PARAMS : {}),
         },
         { additionalProperties: true },
@@ -196,6 +218,7 @@ export function createEidnaraMemoryTool(deps: EidnaraMemoryToolDeps): ToolDefini
                     action,
                     identity: { sessionId, toolCallId: toolCallId || "read" },
                     actor: PI_EIDNARA_MEMORY_ACTOR,
+                    disputeAdmitted: actions.includes("dispute"),
                     ...(signal ? { signal } : {}),
                 });
                 return text.startsWith("Error:") ? err(text) : ok(text);

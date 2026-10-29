@@ -12,6 +12,7 @@ import { stableStringify } from "../stable-json";
 import { cancelled, conflict, disabled, invalid, type MemoryState, unavailable } from "./state";
 import { TokenCache, type TokenStore } from "./token";
 import {
+    type CandidatesPayload,
     type CommitPayload,
     type DispositionEvent,
     MAX_COMMIT_OPERATIONS,
@@ -20,6 +21,7 @@ import {
     type MutationToken,
     type Parsed,
     type PreviewPayload,
+    parseCandidatesResponse,
     parseCommitResponse,
     parsePreviewResponse,
     parseQueryResponse,
@@ -180,6 +182,15 @@ export interface QueryArgs extends CallOptions {
 }
 
 export type QueryResult = KernelResult<QueryPayload>;
+
+export interface CandidatesArgs extends CallOptions {
+    decisionObjectId: string;
+    /** The `next` of a prior page; `null` starts at the first row. */
+    after?: string | null;
+    limit?: number;
+}
+
+export type CandidatesResult = KernelResult<CandidatesPayload>;
 
 /**
  * A read projected to the value injectors and status surfaces carry: the
@@ -591,6 +602,33 @@ export class KernelClient {
             { signal: args.signal, deadline, reissuable: true },
             parseQueryResponse,
         );
+        return result;
+    }
+
+    /** One `review.candidates` page of a decision's contradiction candidates. A read has no side effects, so an ambiguous transport outcome reissues once. */
+    async candidates(args: CandidatesArgs): Promise<CandidatesResult> {
+        const deadline = this.deadline(args);
+        if (!(deadline instanceof Deadline)) return { state: deadline };
+        const { result } = await this.call(
+            "review.candidates",
+            () =>
+                this.wireBody("review.candidates", {
+                    decision_object_id: args.decisionObjectId,
+                    after: args.after ?? null,
+                    ...(args.limit === undefined ? {} : { limit: args.limit }),
+                }),
+            { signal: args.signal, deadline, reissuable: true },
+            parseCandidatesResponse,
+        );
+        // A page's next is the cursor after a stored row past the one asked for, so a next equal to after names no progress.
+        if (
+            isAvailable(result) &&
+            result.kind === "page" &&
+            result.next !== null &&
+            result.next === (args.after ?? null)
+        ) {
+            return { state: nonAvailable(invalid("unrecognized_state")) };
+        }
         return result;
     }
 

@@ -68,6 +68,8 @@ export const MEMORY_DOMAIN_ID = "memory";
  * A filtered read scopes visible rows to named objects before the daemon applies its row cap, so a targeted lookup reaches rows a capped unfiltered read drops.
  */
 export const MAX_READ_OBJECT_IDS = 64;
+/** The most items one `review.candidates` page carries (host wire protocol, section 7.8). */
+export const CANDIDATES_PAGE_MAX = 64;
 
 /** `kernel.commit` rejects an envelope carrying more operations with `invalid_params` before any kernel work. Mirrors the daemon route's `MAX_OPERATIONS`. */
 export const MAX_COMMIT_OPERATIONS = 256;
@@ -606,5 +608,159 @@ export function parseQueryResponse(raw: unknown): Parsed<QueryPayload> {
             lanes,
             entries,
         },
+    };
+}
+
+/** The terminals `review.candidates` answers in place of a page. */
+export const CANDIDATE_TERMINALS = ["disabled", "store_unavailable", "not_live"] as const;
+export type CandidateTerminal = (typeof CANDIDATE_TERMINALS)[number];
+
+/** One `review.candidates` item: ids, integers, and times; `score` is in basis points. */
+export interface CandidateItem {
+    evidence_id: string;
+    decision_object_id: string;
+    decision_id: string;
+    matched_terms: number;
+    decision_terms: number;
+    score: number;
+    publish_tip: number;
+    created_at_ms: number;
+}
+
+export type CandidatesPayload =
+    | { kind: "page"; as_of: number; items: CandidateItem[]; next: string | null }
+    | { kind: "terminal"; terminal: CandidateTerminal };
+
+export const CANDIDATE_ITEM_KEYS = [
+    "evidence_id",
+    "decision_object_id",
+    "decision_id",
+    "matched_terms",
+    "decision_terms",
+    "score",
+    "publish_tip",
+    "created_at_ms",
+] as const satisfies readonly (keyof CandidateItem)[];
+
+/** Fails to compile when `CandidateItem` gains a key the list above omits. */
+const CANDIDATE_ITEM_KEYS_COVER_THE_ITEM: Exclude<
+    keyof CandidateItem,
+    (typeof CANDIDATE_ITEM_KEYS)[number]
+> extends never
+    ? true
+    : never = true;
+void CANDIDATE_ITEM_KEYS_COVER_THE_ITEM;
+
+/** The candidate store holds an id of 1 to 512 UTF-8 bytes with no control character, and the dispute route accepts the same shape, so an item carrying another is one no row stored. */
+const STORABLE_ID_MAX_BYTES = 512;
+const CONTROL_CHARACTER = /\p{Cc}/u;
+const LONE_SURROGATE = /\p{Surrogate}/u;
+function isStorableId(value: unknown): value is string {
+    // A lone surrogate has no UTF-8 form, so no JSON the daemon emits carries one.
+    if (
+        typeof value !== "string" ||
+        value.length === 0 ||
+        CONTROL_CHARACTER.test(value) ||
+        LONE_SURROGATE.test(value)
+    ) {
+        return false;
+    }
+    return new TextEncoder().encode(value).length <= STORABLE_ID_MAX_BYTES;
+}
+
+const TERMS_MAX = 4_294_967_295;
+
+function parseCandidateItem(raw: unknown): CandidateItem | null {
+    if (!isRecord(raw) || Object.keys(raw).length !== CANDIDATE_ITEM_KEYS.length) return null;
+    const { evidence_id, decision_object_id, decision_id } = raw;
+    const { matched_terms, decision_terms, score, publish_tip, created_at_ms } = raw;
+    if (
+        !isStorableId(evidence_id) ||
+        !isStorableId(decision_object_id) ||
+        !isStorableId(decision_id) ||
+        !isNonNegativeInteger(matched_terms) ||
+        !isNonNegativeInteger(decision_terms) ||
+        !isNonNegativeInteger(score) ||
+        !isNonNegativeInteger(publish_tip) ||
+        !isNonNegativeInteger(created_at_ms)
+    ) {
+        return null;
+    }
+    // A row holds `1 <= matched_terms <= decision_terms` in the store's u32 columns, so `matched_terms * 10000` is exact in a double, and `score = matched_terms * 10000 / decision_terms` in integer arithmetic.
+    if (
+        matched_terms < 1 ||
+        decision_terms < matched_terms ||
+        decision_terms > TERMS_MAX ||
+        score < 1 ||
+        score !== Math.floor((matched_terms * 10_000) / decision_terms)
+    ) {
+        return null;
+    }
+    return {
+        evidence_id,
+        decision_object_id,
+        decision_id,
+        matched_terms,
+        decision_terms,
+        score,
+        publish_tip,
+        created_at_ms,
+    };
+}
+
+/** `later` follows `earlier` in a page: a lower score, the same score at an earlier creation time, or the same score and time at a greater evidence id in UTF-8 byte order, the order the store's `evidence_id>?` comparison uses. */
+function inReaderOrder(earlier: CandidateItem, later: CandidateItem): boolean {
+    if (earlier.score !== later.score) return later.score < earlier.score;
+    if (earlier.created_at_ms !== later.created_at_ms) {
+        return later.created_at_ms < earlier.created_at_ms;
+    }
+    return compareUtf8(earlier.evidence_id, later.evidence_id) < 0;
+}
+
+function compareUtf8(a: string, b: string): number {
+    const encoder = new TextEncoder();
+    const [x, y] = [encoder.encode(a), encoder.encode(b)];
+    const shared = Math.min(x.length, y.length);
+    for (let i = 0; i < shared; i += 1) {
+        if (x[i] !== y[i]) return (x[i] as number) - (y[i] as number);
+    }
+    return x.length - y.length;
+}
+
+/** A `review.candidates` answer: a kernel state, a closed terminal, or a page whose items carry exactly the documented keys. */
+export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload> {
+    if (!isRecord(raw)) return failed();
+    // The daemon answers a state on its own; a body carrying a state beside a kind is not its answer.
+    if (raw.state !== undefined) {
+        if (raw.kind !== undefined) return failed();
+        const state = parseKernelState(raw.state);
+        return state.kind === "available" ? failed() : { state, payload: null };
+    }
+    if (raw.kind === "terminal") {
+        return oneOf(CANDIDATE_TERMINALS, raw.terminal)
+            ? { state: available(), payload: { kind: "terminal", terminal: raw.terminal } }
+            : failed();
+    }
+    if (raw.kind !== "page" || !isNonNegativeInteger(raw.as_of) || !Array.isArray(raw.items)) {
+        return failed();
+    }
+    // The cursor is opaque to the client; the daemon judges its form on the way back in.
+    const next = raw.next;
+    if (next !== null && (typeof next !== "string" || next.length === 0)) return failed();
+    if (raw.items.length > CANDIDATES_PAGE_MAX) return failed();
+    const items: CandidateItem[] = [];
+    for (const entry of raw.items) {
+        const item = parseCandidateItem(entry);
+        // The daemon leaves out a row whose publish_tip is past as_of and orders a page by score descending, creation time descending, then evidence id ascending, so a page breaking either is not its answer.
+        if (!item || item.publish_tip > raw.as_of) return failed();
+        const previous = items.at(-1);
+        if (previous && !inReaderOrder(previous, item)) return failed();
+        // The store keys a row by its evidence id within the decision, so a page names each id once.
+        if (items.some((earlier) => earlier.evidence_id === item.evidence_id)) return failed();
+        items.push(item);
+    }
+    return {
+        state: available(),
+        payload: { kind: "page", as_of: raw.as_of, items, next },
     };
 }

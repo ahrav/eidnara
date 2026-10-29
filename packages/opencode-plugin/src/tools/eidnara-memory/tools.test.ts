@@ -1578,3 +1578,388 @@ describe("eidnara_memory dispute", () => {
         expect(refused).toContain("(invalid:invalid_input)");
     });
 });
+
+describe("eidnara_memory candidates", () => {
+    const ITEM = {
+        evidence_id: "srcev:abc",
+        decision_object_id: "mem_labeled",
+        decision_id: "dec_labeled",
+        matched_terms: 3,
+        decision_terms: 4,
+        score: 7500,
+        publish_tip: 41,
+        created_at_ms: 1_700_000_000_000,
+    };
+
+    function candidatesHarness(
+        replies: unknown[] | ((body: Record<string, unknown>) => unknown),
+        allowedActions?: readonly EidnaraMemoryAction[],
+    ) {
+        const calls: { method: string; body: Record<string, unknown> }[] = [];
+        const transport = {
+            connectionFileExists: () => true,
+            ensureRoute: async () => {},
+            call: async (call: { method: string; body: unknown }) => {
+                const body = call.body as Record<string, unknown>;
+                calls.push({ method: call.method, body });
+                return typeof replies === "function" ? replies(body) : replies.shift();
+            },
+        };
+        const definition = createEidnaraMemoryTools({
+            kernelClient: ({ sessionId, projectRoot }) =>
+                new KernelClient({ transport, enabled: true, sessionId, projectRoot }),
+            resolveProjectPath: () => PROJECT,
+            ...(allowedActions === undefined ? {} : { allowedActions: [...allowedActions] }),
+        }).eidnara_memory;
+        const execute = (args: Record<string, unknown>) =>
+            definition.execute(
+                args as never,
+                {
+                    sessionID: SESSION,
+                    directory: ROOT,
+                    callID: undefined,
+                    agent: "primary",
+                } as never,
+            ) as Promise<string>;
+        return { definition, execute, calls };
+    }
+
+    test("is a default read: admitted without a tool-call identity and present in the schema", async () => {
+        const h = candidatesHarness([{ kind: "page", as_of: 41, items: [ITEM], next: null }]);
+        const action = (h.definition.args as Record<string, any>).action;
+        expect(action.safeParse("candidates").success).toBe(true);
+        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+        const parsed = JSON.parse(text);
+        expect(h.calls).toEqual([
+            {
+                method: "review.candidates",
+                body: expect.objectContaining({
+                    method: "review.candidates",
+                    decision_object_id: "mem_labeled",
+                    after: null,
+                }),
+            },
+        ]);
+        expect(parsed.asOf).toBe(41);
+        expect(parsed.next).toBeNull();
+        expect(parsed.note).toContain("lexical overlap");
+        expect(parsed.note).toContain("not a judgment");
+        expect(parsed.candidates).toEqual([
+            {
+                evidenceId: "srcev:abc",
+                decisionId: "dec_labeled",
+                score: 7500,
+                matchedTerms: 3,
+                decisionTerms: 4,
+                publishTip: 41,
+                createdAtMs: 1_700_000_000_000,
+                confirm: {
+                    action: "dispute",
+                    event: "mark_disputed",
+                    objectId: "mem_labeled",
+                    evidenceId: "srcev:abc",
+                },
+            },
+        ]);
+    });
+
+    test("pages with after and limit and renders each terminal by name", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 9, items: [], next: "7500.1.61" },
+            { kind: "terminal", terminal: "disabled" },
+            { kind: "terminal", terminal: "not_live" },
+            { kind: "terminal", terminal: "store_unavailable" },
+            { state: { kind: "unavailable", reason: "store_starting" } },
+        ]);
+        const first = JSON.parse(
+            await h.execute({ action: "candidates", objectId: "m", after: "7500.2.62", limit: 5 }),
+        );
+        expect(h.calls[0].body).toEqual(expect.objectContaining({ after: "7500.2.62", limit: 5 }));
+        expect(first).toEqual(
+            expect.objectContaining({ candidates: [], next: "7500.1.61", asOf: 9 }),
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m" })).toBe(
+            "Contradiction candidates are off in the daemon for this project.",
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m" })).toContain("not_live");
+        expect(await h.execute({ action: "candidates", objectId: "m" })).toContain(
+            "store_unavailable",
+        );
+        const starting = await h.execute({ action: "candidates", objectId: "m" });
+        expect(starting).toMatch(/^Error: /);
+        expect(starting).toContain("while the store opens");
+        expect(await h.execute({ action: "candidates" })).toBe(
+            "Error: 'objectId' is required when action is 'candidates'",
+        );
+    });
+
+    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, items out of reader order, an id no row stores, an empty next, and a state beside a page", async () => {
+        const h = candidatesHarness([
+            {
+                kind: "page",
+                as_of: 41,
+                // Distinct ascending ids keep the page in reader order, so the bound is the check that refuses it.
+                items: Array.from({ length: 65 }, (_, index) => ({
+                    ...ITEM,
+                    evidence_id: `srcev:${String(index).padStart(3, "0")}`,
+                })),
+                next: null,
+            },
+            { kind: "page", as_of: 41, items: [{ ...ITEM, score: 9999 }], next: null },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, matched_terms: 5, decision_terms: 4 }],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, matched_terms: 0, decision_terms: 0, score: 0 }],
+                next: null,
+            },
+            { kind: "page", as_of: 40, items: [ITEM], next: null },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [
+                    { ...ITEM, matched_terms: 2, score: 5000 },
+                    { ...ITEM, evidence_id: "srcev:other" },
+                ],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [
+                    { ...ITEM, created_at_ms: 1 },
+                    { ...ITEM, created_at_ms: 2 },
+                ],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [
+                    { ...ITEM, evidence_id: "srcev:b" },
+                    { ...ITEM, evidence_id: "srcev:a" },
+                ],
+                next: null,
+            },
+            { kind: "page", as_of: 41, items: [{ ...ITEM, evidence_id: "" }], next: null },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, evidence_id: `srcev:${"x".repeat(507)}` }],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, decision_id: "dec\u0001" }],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [
+                    {
+                        ...ITEM,
+                        matched_terms: 9_007_199_254_740_990,
+                        decision_terms: 9_007_199_254_740_991,
+                        score: 10_000,
+                    },
+                ],
+                next: null,
+            },
+            { kind: "page", as_of: 41, items: [ITEM], next: "" },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [
+                    { ...ITEM, matched_terms: 4, score: 10_000 },
+                    { ...ITEM, created_at_ms: 1 },
+                ],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, evidence_id: "srcev:\ud800" }],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [ITEM],
+                next: null,
+                state: { kind: "unavailable", reason: "project_mismatch" },
+            },
+        ]);
+        for (const shape of [
+            "65 items",
+            "score 9999",
+            "matched over decision",
+            "zero terms",
+            "publish_tip past as_of",
+            "score ascending",
+            "created_at_ms ascending within a score",
+            "evidence_id descending within a tie",
+            "empty evidence_id",
+            "evidence_id past 512 bytes",
+            "control character in decision_id",
+            "terms past the store's u32",
+            "empty next",
+            "an evidence id named twice",
+            "a lone surrogate in evidence_id",
+            "a state beside a page",
+        ]) {
+            const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+            expect(text, shape).toMatch(/^Error: /);
+            expect(text, shape).not.toContain("candidates");
+        }
+    });
+
+    test("refuses a page whose item carries any key outside the documented set", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 41, items: [{ ...ITEM, summary: "leaked text" }], next: null },
+        ]);
+        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+        expect(text).not.toContain("leaked text");
+        expect(text).toContain("does not recognize");
+    });
+
+    test("names who can file the confirm form from the allowlist", async () => {
+        const page = { kind: "page", as_of: 41, items: [ITEM], next: null };
+        const byDefault = candidatesHarness([page]);
+        const note = JSON.parse(
+            await byDefault.execute({ action: "candidates", objectId: "mem_labeled" }),
+        ).note;
+        expect(note).toContain("not admitted in this context");
+        const admitted = candidatesHarness([page], ["candidates", "dispute"]);
+        const parsed = JSON.parse(
+            await admitted.execute({ action: "candidates", objectId: "mem_labeled" }),
+        );
+        expect(parsed.note).not.toContain("not admitted");
+        expect(parsed.candidates[0].confirm.action).toBe("dispute");
+        expect(note).not.toContain("File a confirm form");
+        expect(byDefault.definition.description).not.toContain("source you read yourself");
+        expect(admitted.definition.description).toContain("source you read yourself");
+    });
+
+    test("refuses a page whose next is the cursor it was asked after", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 41, items: [], next: "7500.2.62" },
+            { kind: "page", as_of: 41, items: [ITEM], next: "7500.1.61" },
+        ]);
+        expect(
+            await h.execute({ action: "candidates", objectId: "mem_labeled", after: "7500.2.62" }),
+        ).toMatch(/^Error: /);
+        expect(
+            await h.execute({ action: "candidates", objectId: "mem_labeled", after: "7500.2.62" }),
+        ).not.toStartWith("Error:");
+    });
+
+    test("refuses an empty page whose cursor alone leaves the response budget", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 41, items: [], next: "7500.1.".concat("61".repeat(60_000)) },
+        ]);
+        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+        expect(text).toMatch(/^Error: /);
+        expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(16 * 1024);
+        expect(h.calls).toHaveLength(1);
+    });
+
+    test("refuses a page with more rows than the requested limit and an item with a zero score", async () => {
+        const two = [
+            { ...ITEM, evidence_id: "srcev:a" },
+            { ...ITEM, evidence_id: "srcev:b" },
+        ];
+        const h = candidatesHarness([
+            { kind: "page", as_of: 41, items: two, next: null },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, matched_terms: 1, decision_terms: 20_000, score: 0 }],
+                next: null,
+            },
+        ]);
+        expect(
+            await h.execute({ action: "candidates", objectId: "mem_labeled", limit: 1 }),
+            "a page past the requested limit",
+        ).toMatch(/^Error: /);
+        expect(
+            await h.execute({ action: "candidates", objectId: "mem_labeled" }),
+            "a zero score",
+        ).toMatch(/^Error: /);
+    });
+
+    test("renders complete rows under the response budget and takes next from a page of that size", async () => {
+        // Rows of several id lengths, each page carrying a cursor of the longest form the store issues (a 512-byte id in hex).
+        for (const idLength of [120, 150, 180, 215, 250, 300, 350, 400, 450, 500]) {
+            const wide = Array.from({ length: 64 }, (_, index) => ({
+                ...ITEM,
+                evidence_id: `srcev:${String(index).padStart(3, "0")}:${"x".repeat(idLength)}`,
+                decision_id: `dec:${"y".repeat(idLength)}`,
+            }));
+            // The first page's cursor is null or short; the fitted page's cursor names a 512-byte id, as a stable store answers when the last stored row's id is short.
+            const cursorAfter = (count: number) =>
+                count === 64
+                    ? idLength % 2 === 0
+                        ? null
+                        : "7500.1.7a7a"
+                    : `10000.${"9".repeat(19)}.${String(count).padStart(2, "0").repeat(512)}`;
+            // The daemon answers the leading rows of the requested size and the cursor after its last row.
+            const h = candidatesHarness((body) => {
+                const limit = typeof body.limit === "number" ? body.limit : 64;
+                return {
+                    kind: "page",
+                    as_of: 41,
+                    items: wide.slice(0, limit),
+                    next: cursorAfter(limit),
+                };
+            });
+            const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+            expect(text, `id length ${idLength}`).not.toStartWith("Error:");
+            expect(Buffer.byteLength(text, "utf8"), `id length ${idLength}`).toBeLessThanOrEqual(
+                16 * 1024,
+            );
+            const parsed = JSON.parse(text);
+            const limits = h.calls.map((call) => call.body.limit);
+            expect(limits[0]).toBeUndefined();
+            expect(limits[1], `id length ${idLength}`).toBeGreaterThan(0);
+            expect(limits[1]).toBeLessThan(64);
+            expect(parsed.candidates.length).toBe(limits[1]);
+            expect(parsed.next).toBe(cursorAfter(limits[1] as number));
+        }
+    });
+
+    test("refuses a page naming another memory and paging fields the schema would refuse", async () => {
+        const h = candidatesHarness([
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, decision_object_id: "mem_other" }],
+                next: null,
+            },
+        ]);
+        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+        expect(text).toBe(
+            "Error: the daemon answered candidates for another memory than mem_labeled; nothing was rendered. Retry once; report it to the user if it repeats.",
+        );
+        expect(text).not.toContain("srcev:abc");
+        expect(await h.execute({ action: "candidates", objectId: "m", limit: "5" })).toBe(
+            "Error: 'limit' must be an integer from 1 to 64",
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m", limit: 2.5 })).toBe(
+            "Error: 'limit' must be an integer from 1 to 64",
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m", after: 5 })).toBe(
+            "Error: 'after' must be a string",
+        );
+        expect(await h.execute({ action: "candidates", objectId: "m", limit: 65 })).toBe(
+            "Error: 'limit' must be an integer from 1 to 64",
+        );
+        expect(h.calls).toHaveLength(1);
+    });
+});

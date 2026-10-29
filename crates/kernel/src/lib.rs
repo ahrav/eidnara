@@ -154,8 +154,8 @@ pub use review_staging::{
 };
 pub use scope::{
     CanonicalScope, Dimension, GraphOracle, MatchOutcome, ScopeFormError, ScopeMatchContext,
-    ScopeSpec, ScopeTermSpec, ScopeWriteOutcome, TermValue, UnknownGraph, VersionSpec,
-    coerce_version, is_lower_hex_oid, scope_equivalent, scope_matches, scope_overlaps,
+    ScopeSpec, ScopeTermSpec, ScopeTermsError, ScopeWriteOutcome, TermValue, UnknownGraph,
+    VersionSpec, coerce_version, is_lower_hex_oid, scope_equivalent, scope_matches, scope_overlaps,
     scope_subsumes,
 };
 pub use slice::{

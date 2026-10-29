@@ -1,6 +1,8 @@
 export {
     type AvailableState,
     type CallOptions,
+    type CandidatesArgs,
+    type CandidatesResult,
     type CommitArgs,
     type CommitOperation,
     type CommitResult,

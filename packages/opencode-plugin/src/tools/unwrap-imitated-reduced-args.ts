@@ -12,6 +12,10 @@ export type ImitatedArgRule =
           values: readonly string[];
       }
     | {
+          type: "nullable";
+          rule: ImitatedArgRule;
+      }
+    | {
           type: "object";
           fields: Readonly<Record<string, ImitatedArgRule>>;
           /**
@@ -67,6 +71,7 @@ function validField(value: unknown, rule: ImitatedArgRule): boolean {
     if (rule === "number") return typeof value === "number" && Number.isFinite(value);
     if (rule === "boolean") return typeof value === "boolean";
     if (rule.type === "enum") return typeof value === "string" && rule.values.includes(value);
+    if (rule.type === "nullable") return value === null || validField(value, rule.rule);
     if (rule.type === "object") return validObjectField(value, rule.fields, rule.optionalFields);
     if (!Array.isArray(value) || value.length > (rule.maxItems ?? MAX_DECODED_ARRAY_ITEMS)) {
         return false;

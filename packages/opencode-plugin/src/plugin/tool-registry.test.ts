@@ -104,6 +104,8 @@ describe("createToolRegistry — registered tool set", () => {
                 "objectId",
                 "objectIds",
                 "reason",
+                "after",
+                "limit",
             ],
         };
 

@@ -14741,6 +14741,9 @@ impl HandlerCore {
                 memory_reviewer::wire::USE_OUTCOME => {
                     self.handle_review_use_outcome(channel, request).await
                 }
+                contradiction_candidates::read::CANDIDATES => {
+                    self.handle_review_candidates(channel, request).await
+                }
                 search_lifecycle_wire::STATUS => {
                     self.handle_search_lifecycle_status(channel, request)
                 }

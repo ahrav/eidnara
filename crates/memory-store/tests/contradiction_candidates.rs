@@ -13,6 +13,17 @@ const CAPS: CandidateCaps = CandidateCaps {
     per_project: 4096,
 };
 
+/// The cursor refusal the handler maps to `invalid_params`: a `Serde` error, as the
+/// store's `candidates_for_decision` documents for a cursor outside the canonical form.
+fn refuses_cursor(
+    result: Result<
+        memory_store::contradiction_candidates::CandidatePage,
+        memory_store::MemoryStoreError,
+    >,
+) -> bool {
+    matches!(result, Err(memory_store::MemoryStoreError::Serde(_)))
+}
+
 fn open() -> (tempfile::TempDir, MemoryStore) {
     let dir = tempfile::tempdir().unwrap();
     let store = MemoryStore::open_for_test(dir.path(), "eidnara-candidates-test");
@@ -498,6 +509,92 @@ fn a_write_under_another_kernel_incarnation_takes_its_own_tip() {
     );
 }
 
+/// The under-route page read judges the route's authority first: a route with
+/// no MODULE row reads no page and judges no cursor, so a malformed cursor
+/// under a drained authority answers the route's `disabled`; a route with a
+/// MODULE row reads the page the plain read returns.
+#[test]
+fn the_under_route_page_read_answers_the_authority_before_the_cursor() {
+    use std::time::{Duration, Instant};
+    let (_dir, store) = open();
+    let rows = [score("decision", 3, 4)];
+    store
+        .replace_candidates_for_descriptor(&write(PROJECT, "ev-1", 1, 1, &rows), CAPS)
+        .unwrap();
+    let deadline = || Instant::now() + Duration::from_secs(5);
+    let unbound = store
+        .candidates_for_decision_under_route_within(
+            "/repo",
+            "memories",
+            PROJECT,
+            "decision",
+            Some("not a cursor"),
+            4,
+            deadline(),
+        )
+        .unwrap();
+    assert!(
+        unbound.is_none(),
+        "a route without MODULE authority reads no page and judges no cursor"
+    );
+    let project = "git:candidates";
+    let preparing = store
+        .authority_begin_prepare("ctx", project, "memories")
+        .unwrap();
+    let checksum = store
+        .authority_seed_checksum("ctx", project, "memories")
+        .unwrap();
+    store
+        .authority_verify_prepare(
+            "ctx",
+            project,
+            "memories",
+            preparing.generation,
+            &checksum,
+            &checksum,
+        )
+        .unwrap();
+    store
+        .authority_ack_prepare("ctx", project, "memories", preparing.generation)
+        .unwrap();
+    store.bind_authority_route("ctx", project, "/repo").unwrap();
+    let (row, page) = store
+        .candidates_for_decision_under_route_within(
+            "/repo",
+            "memories",
+            PROJECT,
+            "decision",
+            None,
+            4,
+            deadline(),
+        )
+        .unwrap()
+        .expect("the bound route reads the page");
+    assert_eq!(row.project, project);
+    assert_eq!(
+        page.items,
+        store
+            .candidates_for_decision(PROJECT, "decision", None, 4)
+            .unwrap()
+            .items
+    );
+    assert!(
+        store
+            .candidates_for_decision_under_route_within(
+                "/repo",
+                "memories",
+                PROJECT,
+                "decision",
+                Some("not a cursor"),
+                4,
+                deadline(),
+            )
+            .err()
+            .is_some_and(|error| matches!(error, memory_store::MemoryStoreError::Serde(_))),
+        "under a MODULE row a malformed cursor is judged after the page ran"
+    );
+}
+
 #[test]
 fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
     let (_dir, store) = open();
@@ -537,12 +634,66 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
         "7500.5.",
     ] {
         assert!(
-            store
-                .candidates_for_decision(PROJECT, "decision", Some(cursor), 4)
-                .is_err(),
+            refuses_cursor(store.candidates_for_decision(PROJECT, "decision", Some(cursor), 4)),
             "{cursor}"
         );
     }
+    let oversized = format!("7500.5.{}", "61".repeat(513));
+    assert!(
+        refuses_cursor(store.candidates_for_decision(PROJECT, "decision", Some(&oversized), 4)),
+        "a cursor naming an evidence id longer than any stored id was never issued"
+    );
+    let longest = format!("10000.{}.{}", i64::MAX, "61".repeat(512));
+    assert_eq!(longest.len(), 1050);
+    assert!(
+        store
+            .candidates_for_decision(PROJECT, "decision", Some(&longest), 4)
+            .is_ok(),
+        "the longest cursor the store can issue parses"
+    );
+    let bound = format!("{}.{}.{}", u32::MAX, i64::MIN, "61".repeat(512));
+    assert_eq!(
+        bound.len(),
+        1056,
+        "the byte bound covers every component's widest spelling"
+    );
+    assert!(
+        refuses_cursor(store.candidates_for_decision(
+            PROJECT,
+            "decision",
+            Some(&format!("0{bound}")),
+            4
+        )),
+        "one byte past the byte bound is refused as a cursor"
+    );
+    for outside in [
+        "0.5.61",
+        "10001.5.61",
+        "7500.-1.61",
+        "7500.5.01",
+        "7500.5.617f",
+    ] {
+        assert!(
+            refuses_cursor(store.candidates_for_decision(PROJECT, "decision", Some(outside), 4)),
+            "{outside}: a score outside 1 to 10000, a negative time, or a control character in the id names a row no page issued"
+        );
+    }
+    // The cursor's id is a keyset bound judged by shape; an id the write path's secret scanner refuses still parses and names a position no row holds.
+    let secret_hex = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678"
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(
+        store
+            .candidates_for_decision(
+                PROJECT,
+                "decision",
+                Some(&format!("7500.5.{secret_hex}")),
+                4
+            )
+            .is_ok(),
+        "a cursor round-trips under the shape rules alone"
+    );
 }
 
 #[test]
@@ -1660,4 +1811,47 @@ fn a_read_with_a_secret_shaped_id_answers_an_empty_page() {
         store.candidates_for_decision(PROJECT, "", None, 4).is_err(),
         "the shape check still refuses an empty id"
     );
+}
+
+/// Each limit from 1 past the page bound walks the decision's rows once in
+/// reader order, while first pages of other limits read between its pages.
+#[test]
+fn every_page_limit_walks_each_row_once_in_reader_order() {
+    let (_dir, store) = open();
+    for index in 0..70_i64 {
+        let matched = 1 + u32::try_from(index % 4).unwrap();
+        let rows = [score("decision", matched, 4), score("other", 2, 4)];
+        store
+            .replace_candidates_for_descriptor(
+                &write(PROJECT, &format!("ev-{index:03}"), 1, index % 5, &rows),
+                CAPS,
+            )
+            .unwrap();
+    }
+    let mut expected: Vec<StoredCandidate> = all_rows(&store)
+        .into_iter()
+        .filter(|row| row.decision_object_id == "decision")
+        .collect();
+    reader_order(&mut expected);
+    for limit in 1..=MAX_CANDIDATE_PAGE + 1 {
+        let mut walked = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = store
+                .candidates_for_decision(PROJECT, "decision", after.as_deref(), limit)
+                .unwrap();
+            assert!(page.items.len() <= limit.min(MAX_CANDIDATE_PAGE), "{limit}");
+            walked.extend(page.items);
+            let other = MAX_CANDIDATE_PAGE + 1 - limit;
+            let first = store
+                .candidates_for_decision(PROJECT, "decision", None, other)
+                .unwrap();
+            assert_eq!(first.items, expected[..other.clamp(1, MAX_CANDIDATE_PAGE)]);
+            after = page.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        assert_eq!(walked, expected, "limit {limit}");
+    }
 }

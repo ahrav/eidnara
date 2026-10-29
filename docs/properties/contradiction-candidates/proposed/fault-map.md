@@ -1,9 +1,9 @@
 # Fault map: P5 proposed obligations
 
-Verified at the #1164 branch tip (base `979fb814e`). This map covers the
-three active S-A records. The 12 proposed records need the faults their
-catalog entries list under "Required faults and enabling state"; their
-availability is assessed when #1165 to #1168 land the code.
+Verified at the #1164 branch tip (base `979fb814e`) for the S-A rows; the
+read and confirm rows (R1 to R5) are verified at the #1168 tip (base
+`cda655423`). The other records list their faults under "Required faults and
+enabling state" and name the tests that construct them.
 
 ## Fault classes and availability
 
@@ -20,6 +20,11 @@ availability is assessed when #1165 to #1168 land the code.
 | A9 diacritic-only and NFC versus NFD spellings | yes | literal strings (`:131-159`) |
 | A10 second thread or process | yes, unused | spawn a thread in the test; no test does |
 | A11 toolchain Unicode change | no in-tree | build under another toolchain; the digest pin fails by design |
+| R1 evidence retired between list and confirm | yes | `expire_harness_captures` past the retention (`candidate_pass_tests.rs:2630`) |
+| R2 Kernel starting or failed at read | yes | no open, or an open at a file path (`candidate_pass_tests.rs:2562`) |
+| R3 Memory Store absent | yes | a handler built without a store (`candidate_pass_tests.rs:2562`) |
+| R4 candidate table hidden | yes | `ALTER TABLE ... RENAME` on `store.db` (`candidate_pass_tests.rs:1849`, `:2788`) |
+| R5 authority lookup fails | no | no seam (dependency fault F18) |
 
 ## Per-property required faults
 
@@ -28,6 +33,10 @@ availability is assessed when #1165 to #1168 land the code.
 | `cc-scorer-output-deterministic-under-contract-version` | A1, A2, A3, A7 | A1, A2, A3, A7; A10 absent |
 | `cc-oversize-text-refused-whole-never-truncated` | A4, A5, A7 | A4, A5, A7; A6 unconstructible |
 | `cc-case-fold-applied-identically-to-both-sides` | A8, A9 | A8, A9 |
+| `cc-read-serves-only-live-decision-rows-ids-and-scores-only` | R1 | R1: a row whose evidence is retired at the read is seeded directly (`candidate_pass_tests.rs:1849`) and retired by the sweep after a listing (`:2630`) |
+| `cc-read-distinguishes-disabled-unavailable-and-empty` | R2, R3, R4, R5 | R2, R3 (`candidate_pass_tests.rs:2562`), R4 (`:1849`); R5 has no seam |
+| `cc-flag-off-no-pass-no-write-no-table-read` | R4 | R4 (`candidate_pass_tests.rs:1849`, `:2788`) |
+| `cc-candidate-carries-dispute-ids-evidence-liveness-checked-at-confirm` | R1 | R1 (`candidate_pass_tests.rs:2630`) |
 
 ## Coverage checks to add
 

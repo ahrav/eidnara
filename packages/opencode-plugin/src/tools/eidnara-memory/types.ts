@@ -10,6 +10,7 @@ export const EIDNARA_MEMORY_ACTIONS = [
     "archive",
     "merge",
     "dispute",
+    "candidates",
 ] as const;
 
 export type EidnaraMemoryAction = (typeof EIDNARA_MEMORY_ACTIONS)[number];
@@ -21,7 +22,10 @@ export const EIDNARA_MEMORY_DEFAULT_ACTIONS: readonly EidnaraMemoryAction[] =
 /** The events a `dispute` files; both must cite evidence. */
 export const EIDNARA_MEMORY_DISPUTE_EVENTS = ["mark_disputed", "contradict"] as const;
 
-const EIDNARA_MEMORY_READ_ACTIONS: ReadonlySet<EidnaraMemoryAction> = new Set(["get"]);
+const EIDNARA_MEMORY_READ_ACTIONS: ReadonlySet<EidnaraMemoryAction> = new Set([
+    "get",
+    "candidates",
+]);
 
 /** Whether `action` commits through the kernel rather than reading from it. */
 export function isEidnaraMemoryMutation(action: EidnaraMemoryAction): boolean {
@@ -33,8 +37,12 @@ export interface EidnaraMemoryArgs extends ImitatedReducedArgs {
     content?: string;
     category?: string;
     antiMemory?: AntiMemoryPayload;
-    /** The one target of `revise`, `archive`, or `dispute`. */
+    /** The one target of `revise`, `archive`, `dispute`, or `candidates`. */
     objectId?: string;
+    /** The `next` cursor of a prior `candidates` page. */
+    after?: string | null;
+    /** The `candidates` page size, 1 to 64. */
+    limit?: number;
     /** The `dispute` event: one of `EIDNARA_MEMORY_DISPUTE_EVENTS`. */
     event?: string;
     /** A live Kernel evidence id the `dispute` cites. */

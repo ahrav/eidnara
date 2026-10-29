@@ -7,12 +7,12 @@ until the specification resolves it on its own evidence; the dependency
 catalog does not resolve any of them (see bias B3 in
 `../dependencies/portfolio-evaluation.md`).
 
-## Unknowns OQ-D and OQ-E
+## Unknowns OQ-D and OQ-F
 
 | Id | Question | Owner |
 | --- | --- | --- |
+| OQ-F | Candidate rows after a completed Kernel restore of a backup of the same database: the restore installs the backup's `database_incarnation_id` from its `kernel_format_marker` row (`crates/kernel/src/open.rs:952-956`), so a backup of another store fails the read's incarnation filter for every pre-restore row (`crates/kernel/tests/kernel_commit_read.rs:1057-1113`), while a backup of the same database carries the same identity, and a row written before that restore passes the read's incarnation, matcher-digest, and `publish_tip <= as_of` filters once the restored history advances past its tip, and its evidence-liveness check reads the restored history; a descriptor the restored history republishes under the same deterministic evidence id would then serve the pre-restore score. The read's incarnation fences catch a restore during a request only. Remedies are a restore-sensitive token in the row or truncating the table on restore; `KernelStore::restore` has no production caller at this tip, so the decision is design-time (needs human input). | specification owner |
 | OQ-D | The candidate-set bound N, and whether a budgeted Kernel id read is needed given the unbounded `visible_domain_decisions_as_of_in_scope` (plan OQ5-1; certificate conflict 2). | specification owner |
-| OQ-E | Whether the TS plugin hides the `candidates` action from the tool schema when the daemon flag is off (certificate conflict 3). | specification owner |
 
 Plan open questions OQ5-2 and OQ5-3 are carried by the certificate
 unchanged. #1164 resolves OQ5-3 (the scorer-side constant values) and OQ5-5
@@ -31,6 +31,7 @@ in OQ5-3; the code follows the literals (see
 | OQ-B | One eligibility predicate shared by the pass, the sweep, and the reads: which dispositions are candidates and which are swept; `Stale` and `Quarantined` need a human decision (certificate conflict 6). | Resolved by #1166: `eligible` (`crates/daemon/src/contradiction_candidates/eligibility.rs:7-24`) is the one predicate; a decision is eligible when its registry row is served, in the `memory` domain, its scope names the project, it is visible to explicit search, it has no successor, and its disposition is none of `Superseded`, `Contradicted`, `Rejected`, `Quarantined`; `Stale` and `Disputed` stay eligible. The sweep drops rows whose decision fails it; the pass (#1167) and read (#1168) take the same predicate. |
 | OQ-C | Descriptor text source (H3): carried out of the publication job past the capture commit gate, or read back from the Kernel evidence bytes (certificate conflict 4). | Resolved by #1167: the job keeps each published text with its receipt (`CaptureJob::keep_published`, `crates/daemon/src/source_capture.rs:871-877`), `publish_settled` (`:828-877`) hands them out after the publication, and `capture_after_response` offers them to the pass (`crates/daemon/src/lib.rs:9303-9311`); `a_rerun_from_the_retained_bytes_at_one_tip_rebuilds_the_rows_and_the_kernel_is_untouched` shows the kept texts equal the retained evidence bytes. |
 | C4 | Trigger location: the `Published` list and the unit text existed only inside `publish_locked` under the capture commit gate; "on publish settlement" needed plumbing to carry (evidence id, text) past the gate. | Resolved by #1167 with OQ-C: `kept_for_pass` (`crates/daemon/src/source_capture.rs:785`) carries them out of the gate and `run_settled` (`:801-825`) returns them with the terminal `Count`. |
+| OQ-E | Whether the TS plugin hides the `candidates` action from the tool schema when the daemon flag is off (certificate conflict 3). | Resolved by #1168 (OQ5-6, option a): the action is in both schemas whatever the flag and answers `disabled`. |
 
 ## Plan-versus-HEAD conflicts
 

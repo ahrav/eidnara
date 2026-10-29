@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 
 pub mod eligibility;
 pub mod pass;
+pub(crate) mod read;
 pub mod scorer;
 pub mod sweep;
 
@@ -65,6 +66,11 @@ pub(crate) enum Checkpoint {
 #[cfg(test)]
 pub(crate) type CheckHook = Arc<dyn Fn(Checkpoint) + Send + Sync>;
 
+/// Runs inside a `review.candidates` read between its claim-standing read and
+/// its scope-terms read.
+#[cfg(test)]
+pub(crate) type ReadHook = Arc<dyn Fn() + Send + Sync>;
+
 /// The daemon's candidate supervisor: the store's one pass permit and the
 /// counters reported under `contradiction_candidates` in the status block.
 /// `active`, `retained_bytes`, and `pass_ms_last` are gauges; every other
@@ -83,6 +89,11 @@ pub struct Candidates {
     pub(crate) before_descriptor: Mutex<Option<DescriptorHook>>,
     #[cfg(test)]
     pub(crate) before_check: Mutex<Option<CheckHook>>,
+    #[cfg(test)]
+    pub(crate) before_scope_read: Mutex<Option<ReadHook>>,
+    /// A read budget a test sets in place of [`read::READ_BUDGET`].
+    #[cfg(test)]
+    pub(crate) read_budget: Mutex<Option<std::time::Duration>>,
 }
 
 impl Default for Candidates {
@@ -98,6 +109,10 @@ impl Default for Candidates {
             before_descriptor: Mutex::new(None),
             #[cfg(test)]
             before_check: Mutex::new(None),
+            #[cfg(test)]
+            before_scope_read: Mutex::new(None),
+            #[cfg(test)]
+            read_budget: Mutex::new(None),
         }
     }
 }

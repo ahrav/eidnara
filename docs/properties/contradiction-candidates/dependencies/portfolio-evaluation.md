@@ -42,7 +42,7 @@ named function; no wrong file, no wrong claim).
 | `source_capture.rs:796-825` `CaptureJob::run`, `run_settled` | confirmed at this tip |
 | `lib.rs:9279-9325` `capture_after_response` | confirmed |
 | `lib.rs:13653`, `:13660` `settle_prepared`, `:13662-13664` | confirmed at this tip |
-| `lib.rs:4000-4008`, `:274-281`, `:413-417`, `:35536` | confirmed |
+| `lib.rs:4000-4008`, `:274-281`, `:413-417`, `:35931` | confirmed |
 | `local_file.rs:64-70`, `:245-247`, `:487-501` | confirmed |
 | `slice/write.rs:42-54`, `:569`, `:585`, `:606-608` Conflict | confirmed |
 | `schema.rs:136` retention comment | confirmed |
@@ -50,7 +50,7 @@ named function; no wrong file, no wrong claim).
 | `wire.rs:131-139` `authority_project` | confirmed |
 | `host-wire-protocol.md:795-799`, `:819-823` | confirmed |
 | `types.ts:6`, `:24`, `:27-29`; `tools.ts:72-74`, `:125-138` | confirmed at `3a3b916b7`; at the #1164 tip the allowlist default is `tools.ts:103-106` and `isEidnaraMemoryMutation` is `types.ts:26-29` (#1161) |
-| pi `eidnara-memory.ts:162-169`, no `allowedActions` | confirmed at `3a3b916b7` (grep count 0); at the #1164 tip #1161 added `allowedActions` (`eidnara-memory.ts:129-134`) and D7 is resolved |
+| pi `eidnara-memory.ts:155-169`, no `allowedActions` | confirmed at `3a3b916b7` (grep count 0); at the #1164 tip #1161 added `allowedActions` (`eidnara-memory.ts:146-151`) and D7 is resolved |
 | `config.rs:154`; `memory-store/src/lib.rs:335-340`; `storage/src/lib.rs:2631` | confirmed |
 | `activation.rs:174`; `lifecycle.rs:16-18`, `:327` | confirmed |
 | `tool-registry.ts:58`; `subagent-entry.ts:63` | `tool-registry.ts:58` now passes `EIDNARA_MEMORY_DEFAULT_ACTIONS` (#1161); confirmed at `packages/opencode-plugin/src/plugin/tool-registry.ts:58` and `packages/pi-plugin/src/subagent-entry.ts:63`; the catalog gives bare file names |
@@ -254,10 +254,11 @@ Dispositions recorded by the unit tickets:
   test publishes a revision. Recorded on `cc-row-key-unique-and-caps-enforced`.
 - G4 to G6 (#1166): recorded on
   `cc-sweep-drops-only-dead-targets-bounded-idempotent-kernel-untouched`.
-- G7 (#1165): the facts the decision rests on are recorded on the read
+- G7 (#1165, #1168): the facts the decision rests on are recorded on the read
   record (a row holds ids, integers, and times only; the descriptor publishes
-  `Sensitive` and `LocalOnly`); the inheritance decision itself stays open
-  there, needs a policy decision, and the egress half waits on #1168.
+  `Sensitive` and `LocalOnly`; the read returns the row's closed key set to
+  the model as a tool result); the inheritance decision stays open there
+  (needs human input).
 
 ### Refinements (apply directly)
 

@@ -43,7 +43,7 @@ C13; D6.
   (`:422-426`), `project.accepts(requested_root)` else `project_mismatch`
   (`:428-432`), `kernel_store()` else its state.
 - `kernel_routes/mod.rs:446-455` `kernel_request`: scope first, then `parse_request_body`.
-- `mod.rs:460-476`: `ENVELOPE_KEYS = ["method", "kind", "session_id",
+- `mod.rs:461-473`: `ENVELOPE_KEYS = ["method", "kind", "session_id",
   "project_root"]` removed before `serde_json::from_value::<T>`; a failure is
   `invalid_params_error("invalid {operation}: {error}")`.
 - `crates/daemon/src/kernel_routes/read.rs:34-55` `ReadRequest` for
@@ -82,7 +82,7 @@ there is `store_unavailable`.
 
 ### Q: D6. Is `kind` an intended envelope key?
 
-- Sources examined: `mod.rs:463`, `host-wire-protocol.md:768`, `:861`.
+- Sources examined: `crates/daemon/src/kernel_routes/mod.rs:461-473`, `host-wire-protocol.md:801`, `:833`.
 - Findings: the code strips `kind` with the three documented keys; the doc
   does not name it. A body with a `kind` field is accepted silently.
 - Missing evidence: author intent; whether the transport ever adds `kind`.

@@ -180,7 +180,7 @@ case-boundary parts (`HTTPServer` to `http`, `server`), kept diacritics,
 and distinct NFC and NFD terms, which hold only if the analyzer returns
 original bytes; `:276-318` shows equal output under 18 input orders.
 Impact: the P5 scorer must fold case itself (plan R3); if the analyzer folded,
-the fold would be double and the FTS5 contract at `mod.rs:31` would no longer
+the fold would be double and the FTS5 contract at `crates/retrieval/src/lexical/mod.rs:30` would no longer
 describe the probe.
 Open questions: None.
 
@@ -189,7 +189,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - `AnalysisIdentity::current()` is computed
 once per process (`identity.rs:13-18`) and `ANALYSIS_CONTRACT_EPOCH` is a
-public constant (`mod.rs:41`).
+public constant (`crates/retrieval/src/lexical/mod.rs:40`).
 Status: active
 Exercised: yes - `identity_pins_the_manifest`
 (`tests/lexical_analysis.rs:389-412`) asserts the epoch string and the
@@ -475,7 +475,7 @@ Required faults and enabling state: a held reader pool
 inside the statement; a parent interrupt raised mid-read.
 Confidence: medium - [evidence](evidence/p5dep-budget-exhaustion-stops-a-budgeted-kernel-read.md).
 Read `slice/read.rs:134`, `:241`, `open.rs:565-593`, `:1654-1664`,
-`:1693-1722`, `claim_facts.rs:248`, `:313`, `:326`, `:545`, `:552`. The
+`:1693-1722`, `claim_facts.rs:248`, `:313`, `:326`, `:548`, `:552`. The
 statement-interrupt path for claim facts is read in code but not observed by
 a test this pass found.
 Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget`,
@@ -850,6 +850,14 @@ Confidence: high - [evidence](evidence/p5dep-review-reads-parse-strict-bodies-af
 Read `wire.rs:32-51`, `:145-153`, `:217-234`; `kernel_routes/mod.rs:415-474`.
 Existing check: the wire tests above; the literal-set test at
 `wire.rs:448-463+`. Status unaudited.
+Re-exercised by #1168: `review.candidates` joins the family through
+`kernel_request` with a `deny_unknown_fields` body
+(`crates/daemon/src/contradiction_candidates/read.rs:30`);
+`review_candidates_pages_live_rows_and_answers_each_terminal`
+(`crates/daemon/src/candidate_pass_tests.rs:1849`) answers `invalid_params`
+for an unknown field and a malformed cursor, `project_mismatch` for a foreign
+root before the body is read (`:2159`), and `disabled` for a root without
+MODULE authority (`:1867`).
 Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
 fields, would break the family's stated order. `review.use_outcome` (#1157)
@@ -857,8 +865,8 @@ joined the family after `3a3b916b7`: it reads the Kernel alone and has no
 `disabled` terminal (`host-wire-protocol.md:827`); this record does not
 cover it.
 Open questions:
-- D6: `kind` is stripped as an envelope key (`mod.rs:463`) but the doc at
-  `host-wire-protocol.md:797` names three envelope fields. Is a body field
+- D6: `kind` is stripped as an envelope key (`crates/daemon/src/kernel_routes/mod.rs:461`, `:467-470`) but the doc at
+  `host-wire-protocol.md:801` names three envelope fields. Is a body field
   `kind` meant to be accepted silently? (needs human input)
 
 ### p5dep-observational-routes-read-and-take-no-background-part
@@ -868,7 +876,7 @@ Reachability: default-production - any route opened with harness `cli`.
 Status: active
 Exercised: yes - `memory_reviewer_wire.rs:260`
 `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`;
-`lib.rs:35928` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
+`lib.rs:35931` `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`.
 Guarantee: a binding whose harness is `OBSERVATIONAL_HARNESS` (`"cli"`)
 authorizes and resolves its project like any route and can call the routed
 read family with the same answers, and is excluded from
@@ -886,6 +894,8 @@ recorded receipt to read.
 Confidence: high - [evidence](evidence/p5dep-observational-routes-read-and-take-no-background-part.md).
 Read `lib.rs:274-281`, `:382-386`, `:413-417`.
 Existing check: the two tests above. Status unaudited.
+Re-exercised by #1168: a route bound with `OBSERVATIONAL_HARNESS` reads a
+`review.candidates` page (`crates/daemon/src/candidate_pass_tests.rs:2171`).
 Impact: P5 U4's owner read is an observational read; it must be callable on a
 `cli` route and must not enroll the project in any background work.
 Open questions: None.
@@ -905,13 +915,14 @@ approve/enforce/delete refusals; the dispute test (`:1338-1354`) covers the
 missing tool-call identity, the context-researcher agent, and a narrowed
 allowlist with zero transport calls; the pi tests cover a disallowed action
 (`packages/pi-plugin/src/tools/eidnara-memory.test.ts:303-326`), the default
-allowlist refusing `dispute` (`:422-431`), and the registration omission
-(`packages/pi-plugin/src/tools/index.test.ts:40-70`). This pass found no
-test that calls `get` without a tool-call id to show a read runs under the
-`"read"` identity.
+schema listing `candidates` and the default allowlist refusing `dispute`
+(`:422-431`), and the registration omission
+(`packages/pi-plugin/src/tools/index.test.ts:40-70`). The #1168
+`candidates` test (`tools.test.ts:1627`) runs a read without a tool-call
+id.
 Guarantee: the action vocabulary is the closed list
-`["create","get","revise","archive","merge","dispute"]`; `get` is the only
-read and every other action is a mutation that requires a stable tool-call
+`["create","get","revise","archive","merge","dispute","candidates"]`; `get`
+and `candidates` are the reads and every other action is a mutation that requires a stable tool-call
 identity; in both plugins an omitted `allowedActions` admits the default
 actions, which exclude `dispute`, an explicit empty list admits none, and a
 disallowed or unknown action answers
@@ -921,7 +932,7 @@ opencode a call from the `context-researcher` agent is refused inside the
 tool; in pi the tool is omitted from the context_researcher's registered
 surface (`memoryToolEnabled: false`).
 Check: `always` - `action ∉ allowed ⇒ error text && transport.calls
-unchanged`; `isEidnaraMemoryMutation(a) == (a != "get")`; `agent ==
+unchanged`; `isEidnaraMemoryMutation(a) == (a ∉ {"get","candidates"})`; `agent ==
 "context-researcher" ⇒ refused` (opencode); `"dispute" ∉
 EIDNARA_MEMORY_DEFAULT_ACTIONS`; the pi registration for
 `memoryToolEnabled: false` excludes `eidnara_memory`. `always` because every
@@ -931,20 +942,28 @@ Required faults and enabling state: each action under an empty, partial, and
 omitted allowlist; a call with `agent: "context-researcher"`; a pi
 registration with `memoryToolEnabled: false`.
 Confidence: high - [evidence](evidence/p5dep-memory-tool-actions-are-closed-and-allowlisted.md).
-Read `types.ts:6-29`, `tools.ts:48-58`, `:99-138`, `:152-154`,
+Read `types.ts:6-33`, `tools.ts:48-58`, `:118-158`, `:172-174`,
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58`,
-`packages/pi-plugin/src/tools/eidnara-memory.ts:97-108`, `:125-185`,
+`packages/pi-plugin/src/tools/eidnara-memory.ts:119-131`, `:156-233`,
 `packages/pi-plugin/src/tools/index.ts:30-32`, `:69-75`,
 `packages/pi-plugin/src/subagent-entry.ts:63`.
 Existing check: the tests above. Status unaudited.
+Re-exercised by #1168: the closed list gains `candidates`
+(`packages/opencode-plugin/src/tools/eidnara-memory/types.ts:6-14`), a read
+in `EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:25`) that both default lists
+admit; `eidnara_memory candidates`
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1627`) runs
+it without a tool-call id, and `Pi eidnara_memory candidates`
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:532`) shows it and its
+paging fields in Pi's default schema.
 Impact: P5 R6 adds `candidates` as a read; it must enter the closed list and
-`EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:24`), and its default-allowlist
+`EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:25`), and its default-allowlist
 membership is a rollout decision in both plugins.
 Open questions:
 - D7 is resolved since `3a3b916b7`: #1161 gave the pi tool `allowedActions`
-  with the same default as opencode (`eidnara-memory.ts:129-134`). Whether
-  `candidates` joins `EIDNARA_MEMORY_DEFAULT_ACTIONS` is a decision for #1168
-  (needs human input).
+  with the same default as opencode (`eidnara-memory.ts:156-157`).
+- Resolved by #1168: `candidates` is in the default list in both plugins
+  (`types.ts:19-20`).
 
 ## Relationship map
 

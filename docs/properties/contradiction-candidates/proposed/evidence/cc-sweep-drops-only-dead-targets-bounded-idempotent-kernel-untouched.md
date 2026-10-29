@@ -28,7 +28,7 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
   with a per-project `ScopeFilter`; then reads evidence liveness for the
   rows still kept. A failed read keeps the rows it would have judged.
 - The `ScopeFilter` reads scope terms through
-  `crates/kernel/src/scope.rs:1573` `scope_terms_within_budget`, which takes
+  `crates/kernel/src/scope.rs:1617` `scope_terms_within_budget`, which takes
   its reader through `reader_with_limit` under the sweep's budget, so a busy
   reader neither holds the run past its deadline nor blocks shutdown, which
   joins the worker. A failed scope read leaves the row out of the
@@ -37,15 +37,16 @@ bounded per run, repeat to a fixed point, and leave the Kernel untouched.
   checks the claim bound inside the budget, then the target against the tip
   and the incarnation under the reader guard, and reads the served view plus
   one statement for the registry row, decision row, and own admission row of
-  every id (`standing_sql`, `:391`). Each standing equals those fields of
+  every id (`standing_sql`, `:394`). Each standing equals those fields of
   claim facts at the same target
   (`crates/kernel/tests/kernel_claim_standing.rs:111`, at every snapshot).
 - `crates/kernel/src/evidence_liveness.rs:50`
   `evidence_liveness_at_within_budget` checks the id bound, then the
   incarnation under the reader guard, then the target against the tip, and
   answers per id from `evidence_meta.created_commit_seq` and
-  `invalidated_commit_seq`. It opens no write transaction.
-- `crates/memory-store/src/contradiction_candidates.rs:732`
+  `invalidated_commit_seq`, read for the whole batch by one statement that
+  joins the requested ids to the primary key. It opens no write transaction.
+- `crates/memory-store/src/contradiction_candidates.rs:742`
   `delete_candidates_as_read` deletes a row only while it holds the values
   the sweep read, so a rewrite after the read survives.
 - `crates/daemon/src/memory_reviewer/lifecycle.rs:448` `pass_then_sweep`

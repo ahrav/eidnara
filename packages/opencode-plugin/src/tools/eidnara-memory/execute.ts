@@ -34,6 +34,7 @@ import {
 } from "../../shared/kernel-client/anti-memory";
 import { MAX_RENDER_FIELD_BYTES, truncateUtf8Bytes } from "../eidnara-search/bounds";
 import { readObjectRowsChunked } from "../eidnara-search/kernel-memory-search";
+import { executeCandidates } from "./candidates";
 import {
     EIDNARA_MEMORY_RESPONSE_BUDGET_BYTES,
     GET_MAX_CLAIMS,
@@ -339,6 +340,8 @@ export interface ExecuteEidnaraMemoryArgs {
     sourceKind?: SourceKind;
     /** The host tool call's abort signal, forwarded into every daemon read and commit. */
     signal?: AbortSignal;
+    /** Whether the tool's allowlist admits `dispute`; `candidates` replies name who can file their confirm forms. */
+    disputeAdmitted: boolean;
 }
 
 /** `objectIds` scopes the read to the named objects, so a preflight or replay probe reaches a target beyond the daemon's row cap. */
@@ -584,6 +587,15 @@ export async function executeEidnaraMemory(input: ExecuteEidnaraMemoryArgs): Pro
             operationId,
             toolCallId: identity.toolCallId,
             actor,
+            ...(signal ? { signal } : {}),
+        });
+    }
+    if (action === "candidates") {
+        return executeCandidates({
+            client,
+            objectId: requireTarget(args),
+            args,
+            disputeAdmitted: input.disputeAdmitted,
             ...(signal ? { signal } : {}),
         });
     }

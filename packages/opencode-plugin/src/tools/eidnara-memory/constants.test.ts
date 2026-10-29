@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ANTI_MEMORY_CATEGORY } from "../../shared/kernel-client/anti-memory";
+import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import {
     EIDNARA_MEMORY_DESCRIPTION,
     EIDNARA_MEMORY_UNWRAP_RULES,
@@ -27,5 +28,18 @@ describe("eidnara_memory description", () => {
             type: "enum",
             values: WRITABLE_MEMORY_CATEGORIES,
         });
+    });
+
+    test("a reduced candidates call admits the schema's null first-page cursor", () => {
+        const firstPage = { action: "candidates", objectId: "mem_labeled", after: null };
+        const outer = { reduced: true, summary: JSON.stringify(firstPage) };
+        expect(unwrapImitatedReducedArgs(outer, ["action"], EIDNARA_MEMORY_UNWRAP_RULES)).toEqual(
+            firstPage,
+        );
+        const notACursor = { ...firstPage, after: 7 };
+        const wrong = { reduced: true, summary: JSON.stringify(notACursor) };
+        expect(unwrapImitatedReducedArgs(wrong, ["action"], EIDNARA_MEMORY_UNWRAP_RULES)).toBe(
+            wrong,
+        );
     });
 });

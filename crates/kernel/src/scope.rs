@@ -1562,7 +1562,51 @@ pub fn scope_equivalent(a: &CanonicalScope, b: &CanonicalScope, oracle: &dyn Gra
     scope_subsumes(a, b, oracle) && scope_subsumes(b, a, oracle)
 }
 
+/// Why a fenced scope-terms read answered no terms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeTermsError {
+    /// The store's history is not the one the target was captured from.
+    IncarnationMismatch,
+    Kernel(KernelError),
+}
+
+impl From<KernelError> for ScopeTermsError {
+    fn from(error: KernelError) -> Self {
+        Self::Kernel(error)
+    }
+}
+
 impl super::KernelStore {
+    /// [`Self::scope_terms_within_budget`] over the history `target` was captured
+    /// from. The incarnation is compared under the reader guard, so a restore
+    /// between capturing the target and this read answers
+    /// [`ScopeTermsError::IncarnationMismatch`] in place of the restored
+    /// history's terms.
+    ///
+    /// # Errors
+    ///
+    /// `IncarnationMismatch` for a restored store; `Kernel(Deadline)` for an
+    /// exhausted budget; a failed read produces the SQLite error classification.
+    pub fn scope_terms_at_within_budget(
+        &self,
+        scope_id: &str,
+        target: super::commit_read::CommitReadTarget,
+        budget: &super::applicability::EvalBudget,
+    ) -> Result<Option<Vec<ScopeTermSpec>>, ScopeTermsError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            let mut reader = self.reader_with_limit(&limit)?;
+            if target.incarnation != self.incarnation() {
+                return Err(ScopeTermsError::IncarnationMismatch);
+            }
+            let tx = reader.transaction(TransactionBehavior::Deferred)?;
+            let terms = load_scope_terms(&tx, scope_id)?;
+            tx.commit()?;
+            limit.check()?;
+            Ok(terms)
+        })
+    }
+
     /// [`Self::scope_terms`] bounded by `budget`, or `None` when no scope row
     /// exists.
     ///
