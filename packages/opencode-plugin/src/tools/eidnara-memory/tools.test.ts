@@ -1847,6 +1847,16 @@ describe("eidnara_memory candidates", () => {
         expect(admitted.definition.description).toContain("source you read yourself");
     });
 
+    test("refuses an empty page whose cursor alone leaves the response budget", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 41, items: [], next: "7500.1.".concat("61".repeat(60_000)) },
+        ]);
+        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+        expect(text).toMatch(/^Error: /);
+        expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(16 * 1024);
+        expect(h.calls).toHaveLength(1);
+    });
+
     test("refuses a page with more rows than the requested limit and an item with a zero score", async () => {
         const two = [
             { ...ITEM, evidence_id: "srcev:a" },
@@ -1879,7 +1889,6 @@ describe("eidnara_memory candidates", () => {
                 evidence_id: `srcev:${String(index).padStart(3, "0")}:${"x".repeat(idLength)}`,
                 decision_id: `dec:${"y".repeat(idLength)}`,
             }));
-            // The first page's cursor names a short id; the fitted page's cursor names a 512-byte one, as a stable store answers when the last stored row's id is short.
             // The first page's cursor is null or short; the fitted page's cursor names a 512-byte id, as a stable store answers when the last stored row's id is short.
             const cursorAfter = (count: number) =>
                 count === 64

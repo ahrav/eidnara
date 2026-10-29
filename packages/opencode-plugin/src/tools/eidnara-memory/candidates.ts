@@ -130,9 +130,11 @@ export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<s
         page = judge(await ask(limit), limit);
         if (typeof page === "string") return page;
         rows = page.items.map(renderRow);
-        if (rowsWithinBudget(envelope(page, page.next), rows) < rows.length) {
-            return `Error: a page of ${rows.length} candidates for ${objectId} and its cursor do not fit the response budget; nothing was rendered. Retry with a smaller limit.`;
-        }
     }
-    return JSON.stringify({ ...envelope(page, page.next), candidates: rows });
+    // The reply is measured whole with the cursor the page carries, so a cursor past the reserve leaves nothing over the budget.
+    const reply = JSON.stringify({ ...envelope(page, page.next), candidates: rows });
+    if (Buffer.byteLength(reply, "utf8") > EIDNARA_MEMORY_RESPONSE_BUDGET_BYTES) {
+        return `Error: a page of ${rows.length} candidates for ${objectId} and its cursor do not fit the response budget; nothing was rendered. Retry with a smaller limit.`;
+    }
+    return reply;
 }
