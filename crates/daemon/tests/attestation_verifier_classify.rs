@@ -655,8 +655,17 @@ fn a_stored_path_outside_the_document_path_rule_is_refused_for_that_decision() {
         reachable_from(3),
         &events(&[&bad, &bare]),
     );
+    // `srcev:abare` sorts before `srcev:bad`, so the reason-bearing row is read first here.
+    let (first_bare, _) = store.document("abare", "docs/first.md", "# First\n");
+    let reason_first = store.decision(
+        "bare_then_bad",
+        "assistant",
+        reachable_from(4),
+        &events(&[&first_bare, &bad]),
+    );
     strip_digest(&store, &bare);
-    for object_id in [&refused, &over_reason] {
+    strip_digest(&store, &first_bare);
+    for object_id in [&refused, &over_reason, &reason_first] {
         assert_eq!(
             classify(
                 &store.kernel,
@@ -691,6 +700,19 @@ fn a_target_of_another_incarnation_is_refused() {
         ),
         Err(ClassifyError::Facts(ClaimFactsError::IncarnationMismatch))
     ));
+    // A read that refuses before its own incarnation comparison still yields the mismatch,
+    // because `classify` rechecks the incarnation after `class_of` whatever it returned.
+    let future = CommitReadTarget {
+        through_commit: store.kernel.tip().unwrap() + 1,
+        ..target
+    };
+    let cancelled = EvalBudget::new(None, Arc::new(true.into()));
+    for (target, budget) in [(future, EvalBudget::unbounded()), (target, cancelled)] {
+        assert!(matches!(
+            classify(&store.kernel, &object_id, target, &[], &budget),
+            Err(ClassifyError::Facts(ClaimFactsError::IncarnationMismatch))
+        ));
+    }
 }
 
 #[test]

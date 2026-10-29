@@ -130,13 +130,13 @@ verified at the #1171 branch.
 | `a_descriptor_without_a_digest_is_digest_missing` | `crates/daemon/tests/attestation_verifier_classify.rs:547` | verifier input | unaudited |
 | `a_verifier_decision_is_self_source_before_any_anchor_or_citation_read` | `crates/daemon/tests/attestation_verifier_classify.rs:565` | party, `self_source` half | unaudited |
 | `a_stored_path_outside_the_document_path_rule_is_refused_for_that_decision` | `crates/daemon/tests/attestation_verifier_classify.rs:639` | verifier input (invalid stored path) | unaudited |
-| `a_target_of_another_incarnation_is_refused` | `crates/daemon/tests/attestation_verifier_classify.rs:676` | snapshot purity (incarnation) | unaudited |
-| `the_row_level_citation_is_read_before_the_capped_event_citations` | `crates/daemon/tests/attestation_verifier_classify.rs:697` | verifier input (citation cap) | unaudited |
-| `a_decision_outside_the_input_set_counts_under_no_reason` | `crates/daemon/tests/attestation_verifier_classify.rs:755` | verifier input; snapshot purity | unaudited |
-| `a_decision_citing_a_message_and_a_document_is_verifiable_through_the_document` | `crates/daemon/tests/attestation_verifier_classify.rs:806` | verifier input | unaudited |
-| `classification_at_one_sequence_ignores_the_worktree_head_and_later_commits` | `crates/daemon/tests/attestation_verifier_classify.rs:874` | snapshot purity; F3 at the classification step | unaudited |
-| `the_repository_binds_to_the_first_matching_root_in_bound_order` | `crates/daemon/tests/attestation_verifier_classify.rs:1005` | verifier input (binding) | unaudited |
-| `the_document_kind_path_rule_is_a_closed_table` | `crates/daemon/tests/attestation_verifier_classify.rs:1044` | document kind for #1172's classes (F15) | unaudited |
+| `a_target_of_another_incarnation_is_refused` | `crates/daemon/tests/attestation_verifier_classify.rs:685` | snapshot purity (incarnation) | unaudited |
+| `the_row_level_citation_is_read_before_the_capped_event_citations` | `crates/daemon/tests/attestation_verifier_classify.rs:719` | verifier input (citation cap) | unaudited |
+| `a_decision_outside_the_input_set_counts_under_no_reason` | `crates/daemon/tests/attestation_verifier_classify.rs:777` | verifier input; snapshot purity | unaudited |
+| `a_decision_citing_a_message_and_a_document_is_verifiable_through_the_document` | `crates/daemon/tests/attestation_verifier_classify.rs:828` | verifier input | unaudited |
+| `classification_at_one_sequence_ignores_the_worktree_head_and_later_commits` | `crates/daemon/tests/attestation_verifier_classify.rs:896` | snapshot purity; F3 at the classification step | unaudited |
+| `the_repository_binds_to_the_first_matching_root_in_bound_order` | `crates/daemon/tests/attestation_verifier_classify.rs:1027` | verifier input (binding) | unaudited |
+| `the_document_kind_path_rule_is_a_closed_table` | `crates/daemon/tests/attestation_verifier_classify.rs:1066` | document kind for #1172's classes (F15) | unaudited |
 
 ## Categories with no check found
 
