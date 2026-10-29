@@ -3242,3 +3242,195 @@ fn evidence_liveness_answers_each_requested_position() {
             .all(|liveness| *liveness == Unknown)
     );
 }
+
+/// The evidence-keyed read returns the live descriptor of the requested class citing an evidence
+/// id at the requested sequence: the first in object id order when equal texts share the
+/// evidence, the next one after a retirement, `Retired` once none of the class is live or the
+/// evidence is invalidated, and `Uncited` for evidence the class never cited, a `messages`
+/// descriptor included. It applies the page read's row checks and honors the budget.
+#[test]
+fn the_evidence_keyed_read_returns_the_live_document_descriptor_citing_the_evidence() {
+    use std::sync::Arc;
+
+    use kernel::CitingDescriptor::{Live, Retired, Uncited};
+    use kernel::applicability::EvalBudget;
+
+    let fixture = Fixture::open();
+    let budget = EvalBudget::unbounded();
+    let read = |class, evidence_id: &str, at| {
+        fixture
+            .store
+            .source_descriptor_citing_evidence(class, evidence_id, at, &budget)
+    };
+    let live_id = |found: Result<kernel::CitingDescriptor, KernelError>| match found.unwrap() {
+        Live(row) => row.object_id,
+        other => panic!("expected a live descriptor, found {other:?}"),
+    };
+    let docs = OccurrenceClass::RepositoryDocuments;
+    let text = "# Architecture\n";
+    let evidence = fixture.retain("doc", text);
+    let structure: &[(&str, &str)] = &[
+        ("project_id", "proj-a"),
+        ("repository_id", "repo-0"),
+        ("relative_path", "STRUCTURE.md"),
+    ];
+    let (architecture, first, _) = fixture
+        .publish("doc-architecture", &request(document("1"), &evidence, text))
+        .unwrap();
+    let found = read(docs, &evidence.0, first).unwrap();
+    let Live(row) = &found else {
+        panic!("expected a live descriptor, found {found:?}")
+    };
+    assert_eq!(row.object_id, architecture.object_id);
+    assert_eq!(row.detail.evidence_id, evidence.0);
+    assert_eq!(row.detail.artifact_digest, evidence.1);
+    assert_eq!(row.byte_length, text.len() as u64);
+    assert!(
+        row.detail
+            .identity
+            .contains(&("relative_path".to_string(), "ARCHITECTURE.md".to_string()))
+    );
+    let (structure, second, _) = fixture
+        .publish(
+            "doc-structure",
+            &request(
+                Occurrence {
+                    identity: structure,
+                    ..document("1")
+                },
+                &evidence,
+                text,
+            ),
+        )
+        .unwrap();
+    let (low, high) = if architecture.object_id < structure.object_id {
+        (architecture.object_id.clone(), structure.object_id.clone())
+    } else {
+        (structure.object_id.clone(), architecture.object_id.clone())
+    };
+    assert_eq!(live_id(read(docs, &evidence.0, second)), low);
+    let retire = |key: &str, object_id: &str| {
+        fixture
+            .store
+            .commit(intent(key), |envelope| {
+                envelope.retire_observation(object_id)?;
+                Ok(String::new())
+            })
+            .unwrap()
+            .commit_seq
+    };
+    let third = retire("retire-low", &low);
+    assert_eq!(live_id(read(docs, &evidence.0, third)), high);
+    let fourth = retire("retire-high", &high);
+    assert_eq!(read(docs, &evidence.0, fourth), Ok(Retired));
+    assert_eq!(
+        live_id(read(docs, &evidence.0, first)),
+        architecture.object_id,
+        "an earlier sequence still reads its live descriptor"
+    );
+
+    let message_text = "Deploy failed";
+    let message_evidence = fixture.retain("message", message_text);
+    let (message, at, _) = fixture
+        .publish(
+            "message",
+            &request(message(MSG_A, "1"), &message_evidence, message_text),
+        )
+        .unwrap();
+    assert_eq!(
+        read(docs, &message_evidence.0, at),
+        Ok(Uncited),
+        "a messages descriptor is outside the documents class"
+    );
+    assert_eq!(
+        live_id(read(OccurrenceClass::Messages, &message_evidence.0, at)),
+        message.object_id
+    );
+    assert_eq!(read(docs, "evidence-never", at), Ok(Uncited));
+
+    let config_text = "[package]\n";
+    let config_evidence = fixture.retain("config", config_text);
+    let config_identity: &[(&str, &str)] = &[
+        ("project_id", "proj-a"),
+        ("repository_id", "repo-0"),
+        ("relative_path", "Cargo.toml"),
+    ];
+    let (config, published, _) = fixture
+        .publish(
+            "config",
+            &request(
+                Occurrence {
+                    identity: config_identity,
+                    ..document("1")
+                },
+                &config_evidence,
+                config_text,
+            ),
+        )
+        .unwrap();
+    let connection = rusqlite::Connection::open_with_flags(
+        fixture.root.path().join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap();
+    let invalidated = fixture.store.tip().unwrap() + 1;
+    fixture
+        .store
+        .commit(intent("later"), |_| Ok(String::new()))
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE evidence_meta SET invalidated_commit_seq=?1 WHERE evidence_id=?2",
+            rusqlite::params![invalidated, config_evidence.0],
+        )
+        .unwrap();
+    assert_eq!(read(docs, &config_evidence.0, invalidated), Ok(Retired));
+    assert_eq!(
+        live_id(read(docs, &config_evidence.0, published)),
+        config.object_id
+    );
+
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        read(docs, &message_evidence.0, tip + 1),
+        Err(KernelError::FutureSnapshot)
+    );
+    assert_eq!(
+        read(docs, &message_evidence.0, -1),
+        Err(KernelError::InvalidInput)
+    );
+    let cancelled = EvalBudget::new(None, Arc::new(true.into()));
+    assert_eq!(
+        fixture.store.source_descriptor_citing_evidence(
+            OccurrenceClass::Messages,
+            &message_evidence.0,
+            tip,
+            &cancelled
+        ),
+        Err(KernelError::Deadline)
+    );
+
+    let payload: Vec<u8> = connection
+        .query_row(
+            "SELECT observation_payload FROM observations WHERE object_id=?1",
+            [&message.object_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut stored: Value = serde_json::from_slice(&payload).unwrap();
+    let mut detail: SourceDescriptorDetail =
+        serde_json::from_str(stored["detail"].as_str().unwrap()).unwrap();
+    detail.class = "repository_documents".to_string();
+    stored["detail"] = Value::String(serde_json::to_string(&detail).unwrap());
+    connection
+        .execute(
+            "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
+            rusqlite::params![serde_json::to_vec(&stored).unwrap(), message.object_id],
+        )
+        .unwrap();
+    assert_eq!(
+        read(OccurrenceClass::Messages, &message_evidence.0, tip),
+        Err(KernelError::CorruptCanonicalRow),
+        "a stored class other than the requested one is refused"
+    );
+}

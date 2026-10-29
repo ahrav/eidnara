@@ -3,15 +3,15 @@
 Fault classes come from the specification's fault map
 ([#1169](https://github.com/ahrav/eidnara/issues/1169), Fault and state
 coverage). Availability names what can construct the fault at the #1170
-branch.
+branch, updated at the #1171 branch for F1, F3, F14, and F15.
 
 ## Fault classes
 
 | Id | Fault | Availability |
 | --- | --- | --- |
-| F1 | Trigger absent, foreign, wrong kind, invalidated, at another revision, or with retired backing evidence | constructible: Kernel admission fixtures |
+| F1 | Trigger absent, foreign, wrong kind, invalidated, at another revision, or with retired backing evidence | constructible: Kernel admission fixtures; for the classifier, a cited evidence row invalidated by `delete_artifact` classifies `evidence_retired` |
 | F2 | Model decision superseded, retired, or re-disposed between selection and commit | constructible: Kernel slice fixtures; the verifier write set lands with #1172 |
-| F3 | Evidence or anchor invalidated in that window; `delete_artifact` bypassing the citation guard | constructible: `retire_evidence` and `delete_artifact` in Kernel tests |
+| F3 | Evidence or anchor invalidated in that window; `delete_artifact` bypassing the citation guard | constructible: `retire_evidence` and `delete_artifact` in Kernel tests; at the classification step, `delete_artifact` on cited evidence and `retire_observation` on a cited descriptor in the classifier fixture store, and an anchor row the decoder refuses written by SQL |
 | F4 | Header over budget; header under budget with an over-budget delta base; hash mismatch on decode | constructible: large blobs, `write_delta_pack` in `crates/daemon/tests/support/git_repo.rs`, and a valid object stored under another id |
 | F5 | Partial clone or missing object; corrupt commit, tree, or blob | constructible: a deleted loose object stands in for a missing promisor object; a valid object stored under another id, an undecodable object written with `git hash-object --literally`, or a loose object whose bytes are not zlib data, for corruption |
 | F6 | Path absent; gitlink, symlink, or tree at the path; path beneath a gitlink | constructible: `git mktree --missing` in a bare fixture |
@@ -22,8 +22,8 @@ branch.
 | F11 | Fault-injected rollback after the admission; crash after commit then fresh open | constructible with #1172 |
 | F12 | Flag absent, reload true to false, project-tier flag | constructible with #1173 |
 | F13 | More than N candidates; a starving two-project pattern; a permanently transient head decision | constructible with #1173 |
-| F14 | A `Sensitive` evidence row cited through the row FK, the observation FK, or the admission event | constructible: Kernel slice and admission fixtures |
-| F15 | Default prose documents with no code-or-config kind | constructible with #1172 (OQ6-9) |
+| F14 | A `Sensitive` evidence row cited through the row FK, the observation FK, or the admission event | constructible: Kernel slice and admission fixtures; the precondition at classification is constructed by the classifier fixture store, whose document evidence is `Sensitive`, cited by the row FK and by events, and named in the input by id only |
+| F15 | Default prose documents with no code-or-config kind | constructible: the OQ6-9 path rule classifies `ARCHITECTURE.md` and `STRUCTURE.md` `CurrentCode` (#1171); the attestation classes that use it land with #1172 |
 
 ## Per-property required faults
 
@@ -52,8 +52,8 @@ branch.
 | `p6-document-evidence-cited-by-fk-serves-no-wider-than-explicit-search` | F14 |
 | `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard` | F3 |
 | `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements` | F4; a `refs/replace` entry |
-| `p6-new-verifiability-pure-function-of-snapshot` | F8 at the classification step |
-| `p6-new-verifier-input-anchor-and-document-citation` | each unverifiable shape |
+| `p6-new-verifiability-pure-function-of-snapshot` | F8 at the classification step; a later Kernel commit |
+| `p6-new-verifier-input-anchor-and-document-citation` | each unverifiable shape; F1 and F3 at the classification step; the F14 precondition |
 | `p6-new-attestation-identity-unique-per-decision-oid` | F10 |
 | `p6-new-attestation-classes-and-cited-fields` | F14, F15 |
 | `p6-new-attestation-sibling-model-stays-candidate` | F2 |
@@ -62,7 +62,7 @@ branch.
 | `p6-new-witness-degradation-never-silent` | F1 |
 | `p6-new-attestation-write-set-one-outcome` | F11 |
 | `p6-new-mismatch-stale-unavailable-silent` | F5, F6 |
-| `p6-new-party-distinct-and-self-refusal` | an attestation in the store |
+| `p6-new-party-distinct-and-self-refusal` | an attestation in the store; an undecodable anchor on it, so a read before the check fails |
 | `p6-new-flag-off-nothing-runs` | F12 |
 | `p6-new-pass-bounds-and-accounting` | F7, F13 |
 | `p6-new-cursor-never-skips-unresolved` | F7, F13 |
@@ -89,6 +89,14 @@ never the violation.
   one claim evaluated before and after a worktree edit and a HEAD move.
   Constructed today by
   `verdicts_survive_a_worktree_edit_a_head_move_and_a_repack`.
+- `sometimes(classifier_cited_evidence_invalidated_while_decision_live)`: a
+  live `Active` decision whose cited evidence `delete_artifact` invalidated.
+  Constructed today by
+  `each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is_written`.
+- `sometimes(classifier_tip_differs_from_requested_sequence)`: a commit after
+  the requested sequence that changes the decision's classification at the
+  tip. Constructed today by
+  `classification_at_one_sequence_ignores_the_worktree_head_and_later_commits`.
 - `sometimes(witness_event_after_mark_stale)`: a validated witness on a
   `Stale` subject, for
   `p6-mark-stale-withdraws-support-and-is-terminal-in-place`. No test
@@ -101,6 +109,8 @@ never the violation.
    packs; the `Evaluation` value and the `Deadline` double's poll log are the
    oracle.
 3. Kernel admission and slice fixtures for S1, S2, and S7.
+   The classifier fixture store for N1 is in this tier: Kernel commits and
+   reads with no repository.
 4. Source-capture tests for S5, which need the daemon test host.
 5. The bounded pass (#1173), which needs a test host, a controlled clock, and
    tiered flags.

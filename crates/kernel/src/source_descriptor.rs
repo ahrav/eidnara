@@ -1204,6 +1204,66 @@ impl<'v> Narrowing<'v> {
     }
 }
 
+impl KernelStore {
+    /// Equal texts can share one evidence row, so several live descriptors of `class` can cite `evidence_id`. The read returns the first in object id order at `requested`, using [`Self::live_source_descriptors`]' liveness predicate and row checks. Reader acquisition and query execution use `budget`'s deadline and interrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Deadline`] when the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and [`KernelError::CorruptCanonicalRow`] when the live row fails the row checks, including a stored class other than `class`.
+    pub fn source_descriptor_citing_evidence(
+        &self,
+        class: OccurrenceClass,
+        evidence_id: &str,
+        requested: i64,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<CitingDescriptor, KernelError> {
+        static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
+                "SELECT {DESCRIPTOR_COLUMNS},({live})
+                 FROM observations b INDEXED BY idx_observations_evidence_fk
+                 CROSS JOIN object_registry o ON o.object_id=b.object_id
+                 CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
+                 WHERE b.evidence_id=?3 AND b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
+                   AND o.object_id GLOB '{DESCRIPTOR_OBJECT_ID_PREFIX}*'
+                   AND o.source_kind=?1 AND o.object_kind='observation'
+                   AND o.created_commit_seq<=?2
+                 ORDER BY 15 DESC,o.object_id
+                 LIMIT 1",
+                live = Descriptors::LiveAtEnd.predicate("?2", "0"),
+            )
+        });
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            let mut reader = self.reader_with_limit(&limit)?;
+            let tx = reader.transaction(rusqlite::TransactionBehavior::Deferred)?;
+            crate::slice::snapshot_tip(&tx, requested)?;
+            let found = tx
+                .query_row_cached(
+                    &SQL,
+                    rusqlite::params![class.code(), requested, evidence_id],
+                    |row| Ok((raw_descriptor(row)?, row.get::<_, bool>(14)?)),
+                )
+                .optional()
+                .map_err(map_sqlite)?;
+            Ok(match found {
+                Some((raw, true)) => CitingDescriptor::Live(Box::new(checked(raw, class)?)),
+                Some((_, false)) => CitingDescriptor::Retired,
+                None => CitingDescriptor::Uncited,
+            })
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CitingDescriptor {
+    /// A descriptor of the class citing the evidence is live at the sequence, with live evidence.
+    Live(Box<LiveDescriptor>),
+    /// Descriptors of the class cited the evidence by the sequence, and each was retired, superseded, or left with invalidated evidence at it.
+    Retired,
+    /// Zero descriptors of the class cited the evidence by the sequence.
+    Uncited,
+}
+
 #[cfg(test)]
 mod narrowing_tests {
     use std::num::NonZeroUsize;

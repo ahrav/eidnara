@@ -458,3 +458,53 @@ impl Envelope<'_> {
         Ok(outcome)
     }
 }
+
+impl super::KernelStore {
+    /// The condition of the anchor `anchor_id` live at `requested`, decoded by [`validate_anchor_row`], the check every committed anchor row passes, or `None` when no anchor of that id is live at `requested`. Reader acquisition and query execution use `budget`'s deadline and interrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::CorruptCanonicalRow`] for a stored row that fails [`validate_anchor_row`], [`KernelError::Deadline`] when the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, and [`KernelError::FutureSnapshot`] when `requested` exceeds the tip.
+    pub fn anchor_condition_at(
+        &self,
+        anchor_id: &str,
+        requested: i64,
+        budget: &super::applicability::EvalBudget,
+    ) -> Result<Option<AnchorCondition>, KernelError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            let mut reader = self.reader_with_limit(&limit)?;
+            let tx = reader.transaction(rusqlite::TransactionBehavior::Deferred)?;
+            super::slice::snapshot_tip(&tx, requested)?;
+            let row = rusqlite::OptionalExtension::optional(tx.query_row_cached(
+                "SELECT anchor_id,anchor_kind,exact_value,reachable_from_oid,
+                        reachable_between_start_oid,reachable_between_end_oid,
+                        deployment_revision,config_revision,platform_version_range,
+                        wall_clock_start,wall_clock_end,payload
+                 FROM anchors
+                 WHERE anchor_id=?1 AND created_commit_seq<=?2
+                   AND (invalidated_commit_seq IS NULL OR invalidated_commit_seq>?2)",
+                params![anchor_id, requested],
+                |row| {
+                    Ok(AnchorRowSpec {
+                        anchor_id: row.get(0)?,
+                        anchor_kind: row.get(1)?,
+                        exact_value: row.get(2)?,
+                        reachable_from_oid: row.get(3)?,
+                        reachable_between_start_oid: row.get(4)?,
+                        reachable_between_end_oid: row.get(5)?,
+                        deployment_revision: row.get(6)?,
+                        config_revision: row.get(7)?,
+                        platform_version_range: row.get(8)?,
+                        wall_clock_start: row.get(9)?,
+                        wall_clock_end: row.get(10)?,
+                        payload: row.get(11)?,
+                    })
+                },
+            ))
+            .map_err(super::map_sqlite)?;
+            row.map(|row| validate_anchor_row(&row).map_err(|_| KernelError::CorruptCanonicalRow))
+                .transpose()
+        })
+    }
+}

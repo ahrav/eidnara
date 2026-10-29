@@ -4,7 +4,9 @@ Every check below has status `unaudited`. A listed check is evidence that a
 claim is exercised, not a verdict that it is adequate; adequacy belongs to
 `/testing:invariant-test-review` for tests and
 `/low-level-systems:defensive-assertions-and-invariant-guards` for
-production guards. References were verified at the #1170 branch.
+production guards. References were verified at the #1170 branch, and the
+rows #1171 added and every row pointing into a file #1171 changed were
+verified at the #1171 branch.
 
 ## Production guards
 
@@ -33,6 +35,12 @@ production guards. References were verified at the #1170 branch.
 | Verifier object read | `crates/daemon/src/attestation_verifier.rs:373` (`read_object`) | kind and hash checked after decode, decoded length recorded first; allocation refusal is `over_budget` | unaudited |
 | Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:362` (`poll`), `:327` (`Deadline`) | polled before the open and before every object read | unaudited |
 | Verifier claim path | `crates/daemon/src/attestation_verifier.rs:61` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
+| Evidence-keyed descriptor read | `crates/kernel/src/source_descriptor.rs:1213` (`source_descriptor_citing_evidence`) through `checked` (`:795`) | the live descriptor of a class citing an evidence id at a sequence, first in object id order, with the page read's row checks; `Retired` and `Uncited` otherwise | unaudited |
+| Anchor-condition read | `crates/kernel/src/anchor_write.rs:468` (`anchor_condition_at`) through `validate_anchor_row` (`:287`) | the anchor live at a sequence decodes as the engine decodes it; an undecodable row is `CorruptCanonicalRow` | unaudited |
+| Classifier self-source check | `crates/daemon/src/attestation_verifier/classify.rs:219` in `class_of` (`:199`) | a `verifier` decision is `self_source` before any anchor or citation read | unaudited |
+| Classifier reason order | `crates/daemon/src/attestation_verifier/classify.rs:199` (`class_of`) | one class per decision: `NotInput`, `self_source`, the anchor reasons, then the citation reasons in citation order | unaudited |
+| Classifier claim and binding | `crates/daemon/src/attestation_verifier/classify.rs:303` (`VerifierInput::new`), root match at `:326` | the claim's path and digest from the descriptor, its length from the evidence row, its oid from the anchor; the first bound root with the repository identity, else `repository_unbound` | unaudited |
+| Document kind rule | `crates/daemon/src/attestation_verifier/classify.rs:153` (`DocumentKind::of`) | configuration extensions are `CurrentConfig` with `config_present`; every other path is `CurrentCode` with `code_present` | unaudited |
 
 ## Tests
 
@@ -105,6 +113,16 @@ production guards. References were verified at the #1170 branch.
 | `the_pure_verdict_compares_digests_after_the_header_gate` | `crates/daemon/tests/attestation_verifier.rs:714` | verdict deterministic | unaudited |
 | `normalized_digests_exist_only_for_a_reachable_length` | `crates/daemon/tests/attestation_verifier.rs:781` | verdict deterministic | unaudited |
 | `reasons_have_stable_names_and_a_terminal_split` | `crates/daemon/tests/attestation_verifier.rs:795` | reason names for #1173 counters | unaudited |
+| `the_evidence_keyed_read_returns_the_live_document_descriptor_citing_the_evidence` | `crates/kernel/tests/kernel_source_descriptors.rs:3252` | document descriptor; verifier input | unaudited |
+| `the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row` | `crates/kernel/tests/kernel_anchor_write.rs:869` | verifier input | unaudited |
+| `each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is_written` | `crates/daemon/tests/attestation_verifier_classify.rs:326` | verifier input (AC16) | unaudited |
+| `a_descriptor_without_a_digest_is_digest_missing` | `crates/daemon/tests/attestation_verifier_classify.rs:470` | verifier input | unaudited |
+| `a_verifier_decision_is_self_source_before_any_anchor_or_citation_read` | `crates/daemon/tests/attestation_verifier_classify.rs:512` | party, `self_source` half | unaudited |
+| `a_decision_outside_the_input_set_counts_under_no_reason` | `crates/daemon/tests/attestation_verifier_classify.rs:550` | verifier input; snapshot purity | unaudited |
+| `a_decision_citing_a_message_and_a_document_is_verifiable_through_the_document` | `crates/daemon/tests/attestation_verifier_classify.rs:599` | verifier input | unaudited |
+| `classification_at_one_sequence_ignores_the_worktree_head_and_later_commits` | `crates/daemon/tests/attestation_verifier_classify.rs:668` | snapshot purity | unaudited |
+| `the_repository_binds_to_the_first_matching_root_in_bound_order` | `crates/daemon/tests/attestation_verifier_classify.rs:736` | verifier input (binding) | unaudited |
+| `the_document_kind_path_rule_is_a_closed_table` | `crates/daemon/tests/attestation_verifier_classify.rs:775` | document kind for #1172's classes (F15) | unaudited |
 
 ## Categories with no check found
 
@@ -118,9 +136,14 @@ production guards. References were verified at the #1170 branch.
   replacement ref through it.
 - The trigger fold of `Sensitive` document evidence: no test promotes through
   a trigger whose observation cites document evidence.
-- Every proposed `p6-new-*` record: its code does not exist at the branch tip.
+- Every proposed `p6-new-*` record: its code does not exist at the branch tip,
+  except the `self_source` half of `p6-new-party-distinct-and-self-refusal`.
 
 ## Quiet areas
+
+- A document descriptor superseded by a revision citing other evidence: the
+  classifier reads it as `descriptor_retired`; the Kernel test covers a
+  retired descriptor and no test supersedes one under a citing decision.
 
 - A tree object above 256 KiB: the verifier maps its allocation refusal to
   `over_budget`, and no test constructs one.

@@ -176,7 +176,7 @@ fn message_lineages(job: &CaptureJob, blocks: Range<usize>) -> Vec<String> {
 
 /// The 32 bytes a lowercase hex SHA-256 digest names, or `None` for any other
 /// string.
-fn digest_bytes(hex: &str) -> Option<[u8; 32]> {
+pub(crate) fn digest_bytes(hex: &str) -> Option<[u8; 32]> {
     let digit = |byte: u8| match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),

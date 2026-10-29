@@ -860,3 +860,83 @@ fn a_written_reachable_from_anchor_holds_through_descendants_and_not_after_a_rew
         assert_eq!(batch.objects[0].state, state, "HEAD {head}");
     }
 }
+
+/// `anchor_condition_at` returns every kind's condition as the engine's decoder reads the stored
+/// row, at the requested sequence; an anchor created later or never written is `None`; a stored
+/// row the decoder refuses is `CorruptCanonicalRow`; and an exhausted budget, a future sequence,
+/// and a negative sequence are refused before any row is read.
+#[test]
+fn the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = seeded_store(directory.path());
+    let budget = EvalBudget::unbounded();
+    let mut written = Vec::new();
+    for (name, value, expected) in every_kind() {
+        let spec = spec(name, value);
+        let receipt = store
+            .commit_before(deadline(), intent(name), |envelope| {
+                envelope.insert_anchor(spec.clone())?;
+                Ok(String::new())
+            })
+            .unwrap();
+        written.push((spec.anchor_id, receipt.commit_seq, expected));
+    }
+    let tip = store.tip().unwrap();
+    for (anchor_id, seq, expected) in &written {
+        assert_eq!(
+            store.anchor_condition_at(anchor_id, tip, &budget),
+            Ok(Some(expected.clone()))
+        );
+        assert_eq!(
+            store.anchor_condition_at(anchor_id, seq - 1, &budget),
+            Ok(None),
+            "an anchor is absent before its commit"
+        );
+    }
+    assert_eq!(
+        store.anchor_condition_at("anchor-never", tip, &budget),
+        Ok(None)
+    );
+    assert_eq!(
+        store.anchor_condition_at(&written[0].0, tip + 1, &budget),
+        Err(KernelError::FutureSnapshot)
+    );
+    assert_eq!(
+        store.anchor_condition_at(&written[0].0, -1, &budget),
+        Err(KernelError::InvalidInput)
+    );
+    let cancelled = EvalBudget::new(None, std::sync::Arc::new(true.into()));
+    assert_eq!(
+        store.anchor_condition_at(&written[0].0, tip, &cancelled),
+        Err(KernelError::Deadline)
+    );
+
+    let (reachable_from, _, _) = written
+        .iter()
+        .find(|(_, _, condition)| {
+            matches!(
+                condition,
+                AnchorCondition::Git(GitCondition::ReachableFrom { .. })
+            )
+        })
+        .unwrap();
+    Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap()
+    .execute(
+        "UPDATE anchors SET reachable_from_oid='not-an-oid' WHERE anchor_id=?1",
+        [reachable_from],
+    )
+    .unwrap();
+    assert_eq!(
+        store.anchor_condition_at(reachable_from, tip, &budget),
+        Err(KernelError::CorruptCanonicalRow)
+    );
+    assert_eq!(
+        store.anchor_condition_at(&written[0].0, tip, &budget),
+        Ok(Some(written[0].2.clone())),
+        "a corrupt neighbor leaves another anchor readable"
+    );
+}
