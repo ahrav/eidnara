@@ -351,7 +351,7 @@ fn exhausts_slots(error: &gix::objs::find::Error) -> bool {
 }
 
 /// Whether the store refused an object because materializing it needs an allocation above its limit, anywhere in a delta chain.
-fn exceeds_allocation(error: &gix::objs::find::Error) -> bool {
+pub(crate) fn exceeds_allocation(error: &gix::objs::find::Error) -> bool {
     use gix::odb::store::find::Error as Store;
     fn walk(error: &Store) -> bool {
         match error {

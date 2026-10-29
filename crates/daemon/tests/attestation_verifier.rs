@@ -1,0 +1,762 @@
+//! The attestation verifier's core over bare fixture repositories with no worktree: each verdict and
+//! reason, the header gate and the one blob read, the deadline polls, and identical verdicts across
+//! a worktree edit, a HEAD move, and a repack.
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+mod support;
+
+use daemon::attestation_verifier::{
+    Claim, Deadline, Digests, EntryClass, Evaluation, InvalidClaimPath, MAX_BLOB_BYTES,
+    ObjectClass, Observed, Reason, Stage, Verdict, header_verdict, verdict, verify,
+};
+use kernel::applicability::EvalBudget;
+use sha2::{Digest as _, Sha256};
+
+const DOC: &[u8] = b"# Architecture\n\nThe daemon owns the store.\n";
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn claim(path: &str, bytes: &[u8], oid: &str) -> Claim {
+    Claim::new(path, sha256(bytes), bytes.len() as u64, oid).unwrap()
+}
+
+fn unbounded() -> EvalBudget {
+    EvalBudget::unbounded()
+}
+
+/// A bare repository driven through git plumbing with fixed identities and times.
+struct Bare {
+    root: PathBuf,
+}
+
+impl Bare {
+    fn init(root: &Path) -> Self {
+        std::fs::create_dir_all(root).unwrap();
+        let bare = Self {
+            root: root.to_path_buf(),
+        };
+        bare.git(
+            &["init", "--bare", "--quiet", "--initial-branch=main"],
+            None,
+        );
+        bare
+    }
+
+    fn git(&self, args: &[&str], stdin: Option<&[u8]>) -> String {
+        use std::io::Write as _;
+        let mut child = Command::new("git")
+            .args(["-c", "core.autocrlf=false"])
+            .args(args)
+            .current_dir(&self.root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_DATE", "@1 +0000")
+            .env("GIT_COMMITTER_DATE", "@1 +0000")
+            .env("GIT_AUTHOR_NAME", "fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.unwrap_or_default())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn blob(&self, bytes: &[u8]) -> String {
+        self.git(&["hash-object", "-w", "--stdin"], Some(bytes))
+    }
+
+    /// A tree of `(mode, kind, oid, name)` entries; `--missing` admits a gitlink whose commit this
+    /// repository does not hold.
+    fn tree(&self, entries: &[(&str, &str, &str, &str)]) -> String {
+        let listing: String = entries
+            .iter()
+            .map(|(mode, kind, oid, name)| format!("{mode} {kind} {oid}\t{name}\n"))
+            .collect();
+        self.git(&["mktree", "--missing"], Some(listing.as_bytes()))
+    }
+
+    fn commit(&self, tree: &str, parent: Option<&str>, message: &str) -> String {
+        let mut args = vec!["commit-tree", tree, "-m", message];
+        if let Some(parent) = parent {
+            args.extend(["-p", parent]);
+        }
+        self.git(&args, None)
+    }
+
+    /// A commit whose tree holds `doc.md` with `bytes` and nothing else.
+    fn commit_doc(&self, bytes: &[u8], parent: Option<&str>) -> String {
+        let blob = self.blob(bytes);
+        let tree = self.tree(&[("100644", "blob", &blob, "doc.md")]);
+        self.commit(&tree, parent, "doc")
+    }
+
+    fn loose_path(&self, oid: &str) -> PathBuf {
+        self.root.join("objects").join(&oid[..2]).join(&oid[2..])
+    }
+
+    fn delete_loose(&self, oid: &str) {
+        std::fs::remove_file(self.loose_path(oid)).unwrap();
+    }
+
+    /// Replaces `oid`'s loose file with `stored`, written as-is.
+    fn replace_loose(&self, oid: &str, stored: &[u8]) {
+        let path = self.loose_path(oid);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(path, stored).unwrap();
+    }
+
+    /// Every file under the repository with the sha256 of its bytes.
+    fn snapshot(&self) -> BTreeMap<PathBuf, [u8; 32]> {
+        fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, [u8; 32]>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    out.insert(path.clone(), sha256(&std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(&self.root, &mut out);
+        out
+    }
+}
+
+fn fixture(dir: &Path) -> Bare {
+    Bare::init(&dir.join("repo.git"))
+}
+
+fn unavailable(reason: Reason) -> Evaluation {
+    Evaluation {
+        verdict: Verdict::Unavailable(reason),
+        bytes_read: 0,
+    }
+}
+
+/// A deadline that has passed exactly at the poll before `at`, recording every poll it answers.
+struct PassesAt {
+    at: Option<Stage>,
+    polls: RefCell<Vec<Stage>>,
+}
+
+impl PassesAt {
+    fn new(at: Option<Stage>) -> Self {
+        Self {
+            at,
+            polls: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Deadline for PassesAt {
+    fn passed(&self, stage: Stage) -> bool {
+        self.polls.borrow_mut().push(stage);
+        self.at == Some(stage)
+    }
+}
+
+#[test]
+fn the_fixture_has_no_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let repo = gix::open_opts(&bare.root, gix::open::Options::isolated()).unwrap();
+    assert!(repo.is_bare());
+    assert!(repo.workdir().is_none());
+    assert!(!bare.root.join("doc.md").exists());
+}
+
+#[test]
+fn committed_bytes_match_and_a_later_commit_mismatches() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let first = bare.commit_doc(DOC, None);
+    let changed = b"# Architecture\n\nThe plugin owns the store.\n";
+    assert_eq!(changed.len(), DOC.len());
+    let second = bare.commit_doc(changed, Some(&first));
+
+    let polls = PassesAt::new(None);
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", DOC, &first), &polls),
+        Evaluation {
+            verdict: Verdict::Match,
+            bytes_read: DOC.len() as u64,
+        }
+    );
+    // One header poll and one blob poll: the claim reads one blob.
+    assert_eq!(
+        *polls.polls.borrow(),
+        [
+            Stage::Open,
+            Stage::Commit,
+            Stage::Tree,
+            Stage::Header,
+            Stage::Blob
+        ]
+    );
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", DOC, &second), &unbounded()),
+        Evaluation {
+            verdict: Verdict::Mismatch,
+            bytes_read: DOC.len() as u64,
+        }
+    );
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", changed, &second), &unbounded()).verdict,
+        Verdict::Match
+    );
+}
+
+#[test]
+fn a_nested_path_walks_one_tree_per_component() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let blob = bare.blob(DOC);
+    let guide = bare.tree(&[("100755", "blob", &blob, "a.md")]);
+    let docs = bare.tree(&[("040000", "tree", &guide, "guide")]);
+    let root = bare.tree(&[("040000", "tree", &docs, "docs")]);
+    let commit = bare.commit(&root, None, "nested");
+    let polls = PassesAt::new(None);
+    assert_eq!(
+        verify(&bare.root, &claim("docs/guide/a.md", DOC, &commit), &polls).verdict,
+        Verdict::Match
+    );
+    let trees = polls
+        .polls
+        .borrow()
+        .iter()
+        .filter(|stage| **stage == Stage::Tree)
+        .count();
+    assert_eq!(trees, 3);
+}
+
+#[test]
+fn line_endings_normalize_in_either_direction() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let lf = bare.commit_doc(b"one\ntwo\n", None);
+    assert_eq!(
+        verify(
+            &bare.root,
+            &claim("doc.md", b"one\r\ntwo\r\n", &lf),
+            &unbounded()
+        ),
+        Evaluation {
+            verdict: Verdict::Match,
+            bytes_read: 8,
+        }
+    );
+    let crlf = bare.commit_doc(b"one\r\ntwo\r\n", None);
+    assert_eq!(
+        verify(
+            &bare.root,
+            &claim("doc.md", b"one\ntwo\n", &crlf),
+            &unbounded()
+        )
+        .verdict,
+        Verdict::Match
+    );
+    let mixed = bare.commit_doc(b"one\r\ntwo\n", None);
+    assert_eq!(
+        verify(
+            &bare.root,
+            &claim("doc.md", b"one\r\ntwo\r\n", &mixed),
+            &unbounded()
+        )
+        .verdict,
+        Verdict::Match
+    );
+    // A conversion that changes other bytes is no line-ending form.
+    assert_eq!(
+        verify(
+            &bare.root,
+            &claim("doc.md", b"one\r\ntwo\r\r", &lf),
+            &unbounded()
+        )
+        .verdict,
+        Verdict::Mismatch
+    );
+}
+
+#[test]
+fn entries_that_hold_no_blob_are_named_by_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let blob = bare.blob(DOC);
+    let target = bare.blob(b"doc.md");
+    let sub = bare.tree(&[("100644", "blob", &blob, "inner.md")]);
+    let gitlink = "1111111111111111111111111111111111111111";
+    let root = bare.tree(&[
+        ("040000", "tree", &sub, "dir"),
+        ("100644", "blob", &blob, "doc.md"),
+        ("120000", "blob", &target, "link"),
+        ("160000", "commit", gitlink, "module"),
+    ]);
+    let commit = bare.commit(&root, None, "kinds");
+    let check = |path: &str| verify(&bare.root, &claim(path, DOC, &commit), &unbounded());
+    assert_eq!(check("dir/inner.md").verdict, Verdict::Match);
+    assert_eq!(check("absent.md"), unavailable(Reason::PathAbsent));
+    assert_eq!(check("dir/absent.md"), unavailable(Reason::PathAbsent));
+    assert_eq!(check("doc.md/beneath"), unavailable(Reason::PathAbsent));
+    assert_eq!(
+        check("dir"),
+        unavailable(Reason::NotABlob(EntryClass::Tree))
+    );
+    assert_eq!(
+        check("link"),
+        unavailable(Reason::NotABlob(EntryClass::Symlink))
+    );
+    assert_eq!(
+        check("link/beneath"),
+        unavailable(Reason::NotABlob(EntryClass::Symlink))
+    );
+    assert_eq!(
+        check("module"),
+        unavailable(Reason::NotABlob(EntryClass::Gitlink))
+    );
+    assert_eq!(
+        check("module/beneath/file.md"),
+        unavailable(Reason::NotABlob(EntryClass::Gitlink))
+    );
+}
+
+#[test]
+fn missing_or_corrupt_objects_are_unreadable_never_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let corrupt = |bare: &Bare, oid: &str, kind: &str, body: &[u8]| {
+        let mut stored = format!("{kind} {}\0", body.len()).into_bytes();
+        stored.extend_from_slice(body);
+        bare.replace_loose(oid, &support::git_repo::zlib(&stored));
+    };
+    let cases: [(&str, ObjectClass, bool); 6] = [
+        ("commit", ObjectClass::Commit, false),
+        ("commit", ObjectClass::Commit, true),
+        ("tree", ObjectClass::Tree, false),
+        ("tree", ObjectClass::Tree, true),
+        ("blob", ObjectClass::Blob, false),
+        ("blob", ObjectClass::Blob, true),
+    ];
+    for (index, (kind, class, corrupted)) in cases.into_iter().enumerate() {
+        let bare = Bare::init(&dir.path().join(format!("repo-{index}.git")));
+        let blob = bare.blob(DOC);
+        let tree = bare.tree(&[("100644", "blob", &blob, "doc.md")]);
+        let commit = bare.commit(&tree, None, "doc");
+        let target = match class {
+            ObjectClass::Commit => &commit,
+            ObjectClass::Tree => &tree,
+            ObjectClass::Blob => &blob,
+        };
+        if corrupted {
+            // A well-formed loose object of the same kind, and for the blob the claimed length,
+            // whose bytes do not hash to its id.
+            corrupt(&bare, target, kind, &vec![b'z'; DOC.len()]);
+        } else {
+            bare.delete_loose(target);
+        }
+        assert_eq!(
+            verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+            unavailable(Reason::ObjectUnreadable(class)),
+            "{kind} corrupted={corrupted}"
+        );
+    }
+
+    // A blob whose stored bytes are not zlib data is unreadable at its header.
+    let bare = Bare::init(&dir.path().join("garbage.git"));
+    let commit = bare.commit_doc(DOC, None);
+    let blob = bare.blob(DOC);
+    bare.replace_loose(&blob, b"not zlib");
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+        unavailable(Reason::ObjectUnreadable(ObjectClass::Blob))
+    );
+
+    // An oid that names a blob, or does not parse, names no readable commit.
+    let parsed_blob = bare.blob(b"other");
+    for oid in [parsed_blob.as_str(), "not-an-oid", &"A".repeat(40)] {
+        assert_eq!(
+            verify(&bare.root, &claim("doc.md", DOC, oid), &unbounded()),
+            unavailable(Reason::ObjectUnreadable(ObjectClass::Commit)),
+            "{oid}"
+        );
+    }
+}
+
+#[test]
+fn a_directory_that_is_no_repository_is_unopenable() {
+    let dir = tempfile::tempdir().unwrap();
+    let oid = "1111111111111111111111111111111111111111";
+    assert_eq!(
+        verify(dir.path(), &claim("doc.md", DOC, oid), &unbounded()),
+        unavailable(Reason::RepositoryUnopenable)
+    );
+}
+
+#[test]
+fn the_driver_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let commit = bare.commit_doc(DOC, None);
+    let before = bare.snapshot();
+    for path in ["doc.md", "absent.md", "doc.md/x"] {
+        verify(&bare.root, &claim(path, DOC, &commit), &unbounded());
+    }
+    verify(
+        &bare.root,
+        &claim("doc.md", b"other", &commit),
+        &unbounded(),
+    );
+    assert_eq!(bare.snapshot(), before);
+    // The snapshot observes a write to the object store.
+    bare.blob(b"a new object");
+    assert_ne!(bare.snapshot(), before);
+}
+
+#[test]
+fn the_header_gates_every_blob_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let at_budget = vec![b'x'; MAX_BLOB_BYTES as usize];
+    let over_budget = vec![b'x'; MAX_BLOB_BYTES as usize + 1];
+    let at = bare.commit_doc(&at_budget, None);
+    let over = bare.commit_doc(&over_budget, None);
+
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", &at_budget, &at), &unbounded()),
+        Evaluation {
+            verdict: Verdict::Match,
+            bytes_read: MAX_BLOB_BYTES,
+        }
+    );
+    let polls = PassesAt::new(None);
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", &over_budget, &over), &polls),
+        unavailable(Reason::OverBudget)
+    );
+    assert!(!polls.polls.borrow().contains(&Stage::Blob));
+
+    // A header size no line-ending form can reach decides the mismatch before any read.
+    let doc = bare.commit_doc(DOC, None);
+    let long = DOC.repeat(3);
+    let polls = PassesAt::new(None);
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", &long, &doc), &polls),
+        Evaluation {
+            verdict: Verdict::Mismatch,
+            bytes_read: 0,
+        }
+    );
+    assert!(!polls.polls.borrow().contains(&Stage::Blob));
+    let short = &DOC[..DOC.len() / 2 - 1];
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", short, &doc), &unbounded()),
+        Evaluation {
+            verdict: Verdict::Mismatch,
+            bytes_read: 0,
+        }
+    );
+    // A length a line-ending form could reach reads the blob and compares its digests.
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", &DOC[1..], &doc), &unbounded()),
+        Evaluation {
+            verdict: Verdict::Mismatch,
+            bytes_read: DOC.len() as u64,
+        }
+    );
+}
+
+#[test]
+fn a_blob_whose_delta_base_exceeds_the_allocation_limit_is_over_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let base = vec![b'b'; MAX_BLOB_BYTES as usize + 1024];
+    let (_, small) = support::git_repo::write_delta_pack(
+        &bare.root.join("objects"),
+        gix::objs::Kind::Blob,
+        &base,
+        DOC,
+    );
+    let small = small.to_string();
+    let tree = bare.tree(&[("100644", "blob", &small, "doc.md")]);
+    let commit = bare.commit(&tree, None, "delta");
+    let polls = PassesAt::new(None);
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", DOC, &commit), &polls),
+        unavailable(Reason::OverBudget)
+    );
+    // The header passed the gate, so the refusal came from the blob read.
+    assert_eq!(polls.polls.borrow().last(), Some(&Stage::Blob));
+
+    // The same delta against a base inside the limit reads back and matches.
+    let roomy = Bare::init(&dir.path().join("roomy.git"));
+    let (_, small) = support::git_repo::write_delta_pack(
+        &roomy.root.join("objects"),
+        gix::objs::Kind::Blob,
+        &vec![b'b'; 1024],
+        DOC,
+    );
+    let tree = roomy.tree(&[("100644", "blob", &small.to_string(), "doc.md")]);
+    let commit = roomy.commit(&tree, None, "delta");
+    assert_eq!(
+        verify(&roomy.root, &claim("doc.md", DOC, &commit), &unbounded()).verdict,
+        Verdict::Match
+    );
+}
+
+#[test]
+fn a_passed_deadline_opens_no_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no-repository-here");
+    let oid = "1111111111111111111111111111111111111111";
+    // With time left the same root is unopenable, so a deadline verdict proves the open never ran.
+    assert_eq!(
+        verify(&missing, &claim("doc.md", DOC, oid), &unbounded()),
+        unavailable(Reason::RepositoryUnopenable)
+    );
+    let cancelled = unbounded();
+    cancelled.cancel();
+    assert_eq!(
+        verify(&missing, &claim("doc.md", DOC, oid), &cancelled),
+        unavailable(Reason::Deadline(Stage::Open))
+    );
+    let expired = EvalBudget::new(
+        Some(std::time::Instant::now()),
+        Arc::new(AtomicBool::new(false)),
+    );
+    assert_eq!(
+        verify(&missing, &claim("doc.md", DOC, oid), &expired),
+        unavailable(Reason::Deadline(Stage::Open))
+    );
+}
+
+#[test]
+fn a_deadline_before_the_header_poll_reads_no_blob() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let commit = bare.commit_doc(DOC, None);
+    let doc = claim("doc.md", DOC, &commit);
+    for stage in [Stage::Commit, Stage::Tree, Stage::Header, Stage::Blob] {
+        let polls = PassesAt::new(Some(stage));
+        assert_eq!(
+            verify(&bare.root, &doc, &polls),
+            unavailable(Reason::Deadline(stage))
+        );
+        assert_eq!(polls.polls.borrow().last(), Some(&stage));
+    }
+    assert_eq!(
+        verify(&bare.root, &doc, &unbounded()).bytes_read,
+        DOC.len() as u64
+    );
+}
+
+#[test]
+fn verdicts_survive_a_worktree_edit_a_head_move_and_a_repack() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let first = bare.commit_doc(DOC, None);
+    let second = bare.commit_doc(b"# Architecture\n\nRewritten.\n", Some(&first));
+    bare.git(&["update-ref", "refs/heads/main", &first], None);
+    let claims = [
+        claim("doc.md", DOC, &first),
+        claim("doc.md", DOC, &second),
+        claim("absent.md", DOC, &first),
+    ];
+    let before: Vec<_> = claims
+        .iter()
+        .map(|claim| verify(&bare.root, claim, &unbounded()))
+        .collect();
+    assert_eq!(
+        before.iter().map(|e| e.verdict).collect::<Vec<_>>(),
+        [
+            Verdict::Match,
+            Verdict::Mismatch,
+            Verdict::Unavailable(Reason::PathAbsent)
+        ]
+    );
+
+    // A linked worktree checks out the first commit; its file is then edited.
+    let worktree = dir.path().join("worktree");
+    bare.git(
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            worktree.to_str().unwrap(),
+            "main",
+        ],
+        None,
+    );
+    assert_eq!(std::fs::read(worktree.join("doc.md")).unwrap(), DOC);
+    std::fs::write(worktree.join("doc.md"), b"edited in the worktree\n").unwrap();
+    bare.git(&["update-ref", "refs/heads/main", &second], None);
+    bare.git(&["repack", "-a", "-d", "--quiet"], None);
+    assert!(!bare.loose_path(&first).exists());
+
+    let after: Vec<_> = claims
+        .iter()
+        .map(|claim| verify(&bare.root, claim, &unbounded()))
+        .collect();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn claim_paths_follow_the_document_path_rule() {
+    let oid = "1111111111111111111111111111111111111111";
+    let sixteen = vec!["d"; 16].join("/");
+    assert!(Claim::new(&sixteen, [0; 32], 0, oid).is_ok());
+    let seventeen = vec!["d"; 17].join("/");
+    for path in [
+        seventeen.as_str(),
+        "",
+        "/abs",
+        "a//b",
+        "./a",
+        "a/../b",
+        ".git/config",
+    ] {
+        assert_eq!(
+            Claim::new(path, [0; 32], 0, oid),
+            Err(InvalidClaimPath),
+            "{path:?}"
+        );
+    }
+}
+
+#[test]
+fn the_pure_verdict_compares_digests_after_the_header_gate() {
+    let oid = "1111111111111111111111111111111111111111";
+    let doc = claim("doc.md", b"one\r\ntwo\r\n", oid);
+    let content = |bytes: &[u8]| Observed::Content {
+        header_size: bytes.len() as u64,
+        digests: Digests::of(bytes, doc.byte_length()),
+    };
+    assert_eq!(verdict(&doc, &content(b"one\r\ntwo\r\n")), Verdict::Match);
+    assert_eq!(verdict(&doc, &content(b"one\ntwo\n")), Verdict::Match);
+    assert_eq!(verdict(&doc, &content(b"one\ntwo!")), Verdict::Mismatch);
+    assert_eq!(verdict(&doc, &content(b"one\r\ntwo\r!")), Verdict::Mismatch);
+    for reason in [
+        Reason::PathAbsent,
+        Reason::NotABlob(EntryClass::Gitlink),
+        Reason::ObjectUnreadable(ObjectClass::Tree),
+        Reason::OverBudget,
+        Reason::Deadline(Stage::Header),
+        Reason::RepositoryUnbound,
+        Reason::RepositoryUnopenable,
+    ] {
+        assert_eq!(
+            verdict(&doc, &Observed::Unavailable(reason)),
+            Verdict::Unavailable(reason)
+        );
+    }
+    // A header above the budget is over budget even when the digests agree.
+    let matching = Digests {
+        raw: *doc.digest(),
+        normalized: None,
+    };
+    assert_eq!(
+        verdict(
+            &doc,
+            &Observed::Content {
+                header_size: MAX_BLOB_BYTES + 1,
+                digests: matching,
+            }
+        ),
+        Verdict::Unavailable(Reason::OverBudget)
+    );
+    assert_eq!(
+        header_verdict(&doc, MAX_BLOB_BYTES + 1),
+        Some(Verdict::Unavailable(Reason::OverBudget))
+    );
+    // The claimed 10 bytes are reachable from 5 to 20 header bytes.
+    assert_eq!(header_verdict(&doc, 4), Some(Verdict::Mismatch));
+    assert_eq!(header_verdict(&doc, 5), None);
+    assert_eq!(header_verdict(&doc, 20), None);
+    assert_eq!(header_verdict(&doc, 21), Some(Verdict::Mismatch));
+    let empty = claim("doc.md", b"", oid);
+    assert_eq!(header_verdict(&empty, 0), None);
+    assert_eq!(header_verdict(&empty, 1), Some(Verdict::Mismatch));
+    assert_eq!(header_verdict(&doc, 0), Some(Verdict::Mismatch));
+}
+
+#[test]
+fn normalized_digests_exist_only_for_a_reachable_length() {
+    let lf = b"a\nb\r\nc\n";
+    assert_eq!(Digests::of(lf, 7).raw, sha256(lf));
+    assert_eq!(Digests::of(lf, 7).normalized, None);
+    assert_eq!(
+        Digests::of(lf, 9).normalized,
+        Some(sha256(b"a\r\nb\r\nc\r\n"))
+    );
+    assert_eq!(Digests::of(lf, 6).normalized, Some(sha256(b"a\nb\nc\n")));
+    assert_eq!(Digests::of(lf, 8).normalized, None);
+    assert_eq!(Digests::of(b"\n", 2).normalized, Some(sha256(b"\r\n")));
+}
+
+#[test]
+fn reasons_have_stable_names_and_a_terminal_split() {
+    let names: Vec<_> = [
+        Reason::PathAbsent,
+        Reason::NotABlob(EntryClass::Symlink),
+        Reason::ObjectUnreadable(ObjectClass::Blob),
+        Reason::OverBudget,
+        Reason::Deadline(Stage::Open),
+        Reason::RepositoryUnbound,
+        Reason::RepositoryUnopenable,
+    ]
+    .into_iter()
+    .map(|reason| (reason.as_str(), reason.is_terminal()))
+    .collect();
+    assert_eq!(
+        names,
+        [
+            ("path_absent", true),
+            ("not_a_blob", true),
+            ("object_unreadable", false),
+            ("over_budget", true),
+            ("deadline", false),
+            ("repository_unbound", false),
+            ("repository_unopenable", false),
+        ]
+    );
+    assert_eq!(
+        [EntryClass::Gitlink, EntryClass::Symlink, EntryClass::Tree].map(EntryClass::as_str),
+        ["gitlink", "symlink", "tree"]
+    );
+    assert_eq!(
+        [ObjectClass::Commit, ObjectClass::Tree, ObjectClass::Blob].map(ObjectClass::as_str),
+        ["commit", "tree", "blob"]
+    );
+    assert_eq!(
+        [
+            Stage::Open,
+            Stage::Commit,
+            Stage::Tree,
+            Stage::Header,
+            Stage::Blob
+        ]
+        .map(Stage::as_str),
+        ["open", "commit", "tree", "header", "blob"]
+    );
+}

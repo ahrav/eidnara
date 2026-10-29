@@ -21,7 +21,7 @@ fn sha1(bytes: &[u8]) -> gix::ObjectId {
     hasher.try_finalize().unwrap()
 }
 
-fn zlib(bytes: &[u8]) -> Vec<u8> {
+pub fn zlib(bytes: &[u8]) -> Vec<u8> {
     use std::io::Write as _;
     let mut writer =
         gix::zlib::stream::deflate::Write::new(Vec::new(), gix::zlib::Compression::DEFAULT);
@@ -165,79 +165,16 @@ impl Repo {
         let serialize = |commit: gix::objs::Commit| {
             let mut bytes = Vec::new();
             commit.write_to(&mut bytes).unwrap();
-            let id =
-                gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Commit, &bytes)
-                    .unwrap();
-            (bytes, id)
+            bytes
         };
-        let (base, base_id) = serialize(self.object(base_message.as_bytes(), None, 1, Vec::new()));
-        let (result, delta_id) =
-            serialize(self.object(delta_message.as_bytes(), None, 2, Vec::new()));
-
-        // The delta reproduces `result` from `base` by inserting every result byte; the base contributes only its declared size.
-        let mut delta = Vec::new();
-        leb128(&mut delta, base.len() as u64);
-        leb128(&mut delta, result.len() as u64);
-        for chunk in result.chunks(127) {
-            delta.push(chunk.len() as u8);
-            delta.extend_from_slice(chunk);
-        }
-
-        let mut pack = Vec::new();
-        pack.extend_from_slice(b"PACK");
-        pack.extend_from_slice(&2u32.to_be_bytes());
-        pack.extend_from_slice(&2u32.to_be_bytes());
-        let base_offset = pack.len();
-        pack.extend_from_slice(&entry_header(1, base.len() as u64));
-        pack.extend_from_slice(&zlib(&base));
-        let delta_offset = pack.len();
-        pack.extend_from_slice(&entry_header(6, delta.len() as u64));
-        pack.extend_from_slice(&ofs_delta_distance((delta_offset - base_offset) as u64));
-        pack.extend_from_slice(&zlib(&delta));
-        let entries_end = pack.len();
-        let pack_checksum = sha1(&pack);
-        pack.extend_from_slice(pack_checksum.as_slice());
-
-        let mut entries = [
-            (
-                base_id,
-                base_offset,
-                gix::features::hash::crc32(&pack[base_offset..delta_offset]),
-            ),
-            (
-                delta_id,
-                delta_offset,
-                gix::features::hash::crc32(&pack[delta_offset..entries_end]),
-            ),
-        ];
-        entries.sort_by_key(|entry| entry.0);
-        let mut idx = vec![0xff, b't', b'O', b'c'];
-        idx.extend_from_slice(&2u32.to_be_bytes());
-        for first in 0..=255u8 {
-            let count = entries
-                .iter()
-                .filter(|(id, _, _)| id.as_slice()[0] <= first)
-                .count() as u32;
-            idx.extend_from_slice(&count.to_be_bytes());
-        }
-        for (id, _, _) in &entries {
-            idx.extend_from_slice(id.as_slice());
-        }
-        for (_, _, crc) in &entries {
-            idx.extend_from_slice(&crc.to_be_bytes());
-        }
-        for (_, offset, _) in &entries {
-            idx.extend_from_slice(&(*offset as u32).to_be_bytes());
-        }
-        idx.extend_from_slice(pack_checksum.as_slice());
-        let idx_checksum = sha1(&idx);
-        idx.extend_from_slice(idx_checksum.as_slice());
-
-        let pack_dir = self.root.join(".git/objects/pack");
-        std::fs::create_dir_all(&pack_dir).unwrap();
-        let stem = format!("pack-{pack_checksum}");
-        std::fs::write(pack_dir.join(format!("{stem}.pack")), &pack).unwrap();
-        std::fs::write(pack_dir.join(format!("{stem}.idx")), &idx).unwrap();
+        let base = serialize(self.object(base_message.as_bytes(), None, 1, Vec::new()));
+        let result = serialize(self.object(delta_message.as_bytes(), None, 2, Vec::new()));
+        let (base_id, delta_id) = write_delta_pack(
+            &self.root.join(".git/objects"),
+            gix::objs::Kind::Commit,
+            &base,
+            &result,
+        );
         (base_id.to_string(), delta_id.to_string())
     }
 
@@ -247,4 +184,86 @@ impl Repo {
             path: self.root.clone(),
         }
     }
+}
+
+/// Writes one pack into `objects` holding `base` whole and `result` as an ofs-delta against it, both as objects of `kind`, with the pack's index. Neither object exists loose, so `result` reads back only through its base. Returns `(base id, result id)`.
+pub fn write_delta_pack(
+    objects: &Path,
+    kind: gix::objs::Kind,
+    base: &[u8],
+    result: &[u8],
+) -> (gix::ObjectId, gix::ObjectId) {
+    let base_id = gix::objs::compute_hash(gix::hash::Kind::Sha1, kind, base).unwrap();
+    let delta_id = gix::objs::compute_hash(gix::hash::Kind::Sha1, kind, result).unwrap();
+    let type_code = match kind {
+        gix::objs::Kind::Commit => 1,
+        gix::objs::Kind::Tree => 2,
+        gix::objs::Kind::Blob => 3,
+        gix::objs::Kind::Tag => 4,
+    };
+    // The delta reproduces `result` from `base` by inserting every result byte; the base contributes only its declared size.
+    let mut delta = Vec::new();
+    leb128(&mut delta, base.len() as u64);
+    leb128(&mut delta, result.len() as u64);
+    for chunk in result.chunks(127) {
+        delta.push(chunk.len() as u8);
+        delta.extend_from_slice(chunk);
+    }
+
+    let mut pack = Vec::new();
+    pack.extend_from_slice(b"PACK");
+    pack.extend_from_slice(&2u32.to_be_bytes());
+    pack.extend_from_slice(&2u32.to_be_bytes());
+    let base_offset = pack.len();
+    pack.extend_from_slice(&entry_header(type_code, base.len() as u64));
+    pack.extend_from_slice(&zlib(base));
+    let delta_offset = pack.len();
+    pack.extend_from_slice(&entry_header(6, delta.len() as u64));
+    pack.extend_from_slice(&ofs_delta_distance((delta_offset - base_offset) as u64));
+    pack.extend_from_slice(&zlib(&delta));
+    let entries_end = pack.len();
+    let pack_checksum = sha1(&pack);
+    pack.extend_from_slice(pack_checksum.as_slice());
+
+    let mut entries = [
+        (
+            base_id,
+            base_offset,
+            gix::features::hash::crc32(&pack[base_offset..delta_offset]),
+        ),
+        (
+            delta_id,
+            delta_offset,
+            gix::features::hash::crc32(&pack[delta_offset..entries_end]),
+        ),
+    ];
+    entries.sort_by_key(|entry| entry.0);
+    let mut idx = vec![0xff, b't', b'O', b'c'];
+    idx.extend_from_slice(&2u32.to_be_bytes());
+    for first in 0..=255u8 {
+        let count = entries
+            .iter()
+            .filter(|(id, _, _)| id.as_slice()[0] <= first)
+            .count() as u32;
+        idx.extend_from_slice(&count.to_be_bytes());
+    }
+    for (id, _, _) in &entries {
+        idx.extend_from_slice(id.as_slice());
+    }
+    for (_, _, crc) in &entries {
+        idx.extend_from_slice(&crc.to_be_bytes());
+    }
+    for (_, offset, _) in &entries {
+        idx.extend_from_slice(&(*offset as u32).to_be_bytes());
+    }
+    idx.extend_from_slice(pack_checksum.as_slice());
+    let idx_checksum = sha1(&idx);
+    idx.extend_from_slice(idx_checksum.as_slice());
+
+    let pack_dir = objects.join("pack");
+    std::fs::create_dir_all(&pack_dir).unwrap();
+    let stem = format!("pack-{pack_checksum}");
+    std::fs::write(pack_dir.join(format!("{stem}.pack")), &pack).unwrap();
+    std::fs::write(pack_dir.join(format!("{stem}.idx")), &idx).unwrap();
+    (base_id, delta_id)
 }
