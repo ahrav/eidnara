@@ -314,7 +314,8 @@ impl KernelStore {
     }
 
     /// Callers must hold a reader or writer guard so a restore cannot occur between this check
-    /// and the guarded write.
+    /// and the guarded write. An unguarded call detects any restore that completed before the
+    /// call, because the generation only increases.
     pub fn require_incarnation(&self, expected: CommitReadIncarnation) -> Result<(), KernelError> {
         if self.incarnation() != expected {
             return Err(KernelError::InvalidInput);

@@ -419,6 +419,18 @@ fn each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is
         ),
         (
             store.decision(
+                "row_evidence_retired",
+                "assistant",
+                reachable_from(12),
+                &Cites {
+                    row: Some(&deleted),
+                    events: Vec::new(),
+                },
+            ),
+            Unverifiable::EvidenceRetired,
+        ),
+        (
+            store.decision(
                 "descriptor_retired",
                 "assistant",
                 reachable_from(5),
@@ -626,18 +638,38 @@ fn a_verifier_decision_is_self_source_before_any_anchor_or_citation_read() {
 #[test]
 fn a_stored_path_outside_the_document_path_rule_is_refused_for_that_decision() {
     let store = Store::open();
-    let (document, _) = store.document("doc", ".git/config", "[core]\n");
-    let object_id = store.decision("doc", "assistant", reachable_from(1), &events(&[&document]));
-    assert_eq!(
-        classify(
-            &store.kernel,
-            &object_id,
-            store.target(),
-            &[],
-            &EvalBudget::unbounded()
-        ),
-        Err(ClassifyError::InvalidDocumentPath)
+    let (bad, _) = store.document("bad", ".git/config", "[core]\n");
+    let (document, _) = store.document("doc", "ARCHITECTURE.md", "# Architecture\n");
+    let (bare, _) = store.document("bare", "docs/bare.md", "# Bare\n");
+    let refused = store.decision("bad", "assistant", reachable_from(1), &events(&[&bad]));
+    // The events share one commit, so citation order is evidence id order: the bad path first.
+    let rescued = store.decision(
+        "bad_then_doc",
+        "assistant",
+        reachable_from(2),
+        &events(&[&bad, &document]),
     );
+    let over_reason = store.decision(
+        "bad_then_bare",
+        "assistant",
+        reachable_from(3),
+        &events(&[&bad, &bare]),
+    );
+    strip_digest(&store, &bare);
+    for object_id in [&refused, &over_reason] {
+        assert_eq!(
+            classify(
+                &store.kernel,
+                object_id,
+                store.target(),
+                &[],
+                &EvalBudget::unbounded()
+            ),
+            Err(ClassifyError::InvalidDocumentPath),
+            "{object_id}"
+        );
+    }
+    assert_eq!(verifiable(store.class(&rescued)).evidence_id, document.id);
 }
 
 #[test]
@@ -687,7 +719,32 @@ fn the_row_level_citation_is_read_before_the_capped_event_citations() {
         reachable_from(2),
         &events(&capped),
     );
-    assert_eq!(verifiable(store.class(&row_level)).evidence_id, document.id);
+    let mut at_cap = all[..MAX_EVENT_CITATIONS.get() - 1].to_vec();
+    at_cap.push(&document);
+    let last_in_cap = store.decision(
+        "last_in_cap",
+        "assistant",
+        reachable_from(3),
+        &events(&at_cap),
+    );
+    // The row's own evidence is also an event citation and is read once, so the document, the
+    // 33rd event citation, is the 32nd event citation read.
+    let shared_row = store.decision(
+        "shared_row",
+        "assistant",
+        reachable_from(4),
+        &Cites {
+            row: Some(&messages[0]),
+            events: capped.clone(),
+        },
+    );
+    for object_id in [&row_level, &last_in_cap, &shared_row] {
+        assert_eq!(
+            verifiable(store.class(object_id)).evidence_id,
+            document.id,
+            "{object_id}"
+        );
+    }
     assert_eq!(
         store.class(&event_level),
         unverifiable(Unverifiable::CitationNotDocument)
@@ -842,16 +899,43 @@ fn classification_at_one_sequence_ignores_the_worktree_head_and_later_commits() 
     let pinned = decide("pinned", &document);
     let unanchored = decide("unanchored", &structure);
     let deleted = decide("deleted", &structure);
+    let row_deleted = store.decision(
+        "row_deleted",
+        "assistant",
+        Some(AnchorValue::ReachableFrom {
+            oid: head.clone(),
+            captures: Vec::new(),
+        }),
+        &Cites {
+            row: Some(&structure),
+            events: Vec::new(),
+        },
+    );
     let roots = [BoundRoot {
         root: checkout.path(),
         repository_id: REPOSITORY,
     }];
     let target = store.target();
-    let decisions = [&pinned, &unanchored, &deleted];
+    let decisions = [&pinned, &unanchored, &deleted, &row_deleted];
     let first = decisions.map(|object_id| store.classify_at(object_id, target, &roots));
 
+    // HEAD moves to an orphan commit, from which the anchor's oid is unreachable.
+    git(
+        checkout.path(),
+        &["checkout", "--quiet", "--orphan", "other"],
+    );
     std::fs::write(checkout.path().join("ARCHITECTURE.md"), "# Edited\n").unwrap();
     git(checkout.path(), &["commit", "--quiet", "-am", "edit"]);
+    let reachable = Command::new("git")
+        .args(["merge-base", "--is-ancestor", &head, "HEAD"])
+        .current_dir(checkout.path())
+        .status()
+        .unwrap();
+    assert_eq!(
+        reachable.code(),
+        Some(1),
+        "the anchor oid is unreachable from HEAD"
+    );
     std::fs::write(checkout.path().join("ARCHITECTURE.md"), "# Dirty\n").unwrap();
     store
         .kernel
@@ -892,6 +976,7 @@ fn classification_at_one_sequence_ignores_the_worktree_head_and_later_commits() 
         (&pinned, Unverifiable::DescriptorRetired),
         (&unanchored, Unverifiable::NoAnchor),
         (&deleted, Unverifiable::EvidenceRetired),
+        (&row_deleted, Unverifiable::EvidenceRetired),
     ] {
         assert_eq!(
             store.class(object_id),

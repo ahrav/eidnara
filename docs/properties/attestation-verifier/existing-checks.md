@@ -38,12 +38,12 @@ verified at the #1171 branch.
 | Verifier claim path | `crates/daemon/src/attestation_verifier.rs:68` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
 | Evidence-keyed descriptor read | `crates/kernel/src/source_descriptor.rs:1213` (`source_descriptor_citing_evidence`) through `checked` (`:795`) | the live descriptor of a class citing an evidence id at a sequence, first in object id order, with the page read's row checks; `Retired` and `Uncited` otherwise | unaudited |
 | Anchor-condition read | `crates/kernel/src/anchor_write.rs:468` (`anchor_condition_at`) through `validate_anchor_row` (`:287`) | the anchor live at a sequence decodes as the engine decodes it; an undecodable row is `CorruptCanonicalRow` | unaudited |
-| Classifier self-source check | `crates/daemon/src/attestation_verifier/classify.rs:264` in `class_of` (`:238`) | after the `Active` filter (`:258`), both on the standing read, a live `Active` `verifier` decision is `self_source` before any anchor or citation read | unaudited |
-| Classifier reason order | `crates/daemon/src/attestation_verifier/classify.rs:238` (`class_of`) | one class per decision: `NotInput` for a decision not live or not `Active`, then `self_source`, then the anchor reasons, then the citation reasons in citation order | unaudited |
-| Classifier citation order and cap | `crates/daemon/src/attestation_verifier/classify.rs:328` (`citations`), `MAX_EVENT_CITATIONS` at `:42` | the row-level `evidence_id` first, then at most 32 event-level citations of other evidence | unaudited |
-| Classifier incarnation recheck | `crates/daemon/src/attestation_verifier/classify.rs:233` in `classify` (`:222`) | after the last read, a store that is not the target's incarnation is `IncarnationMismatch` | unaudited |
-| Classifier claim and binding | `crates/daemon/src/attestation_verifier/classify.rs:404` (`VerifierInput::new`), path refusal at `:424`, root match at `:425` | the claim's path and digest from the descriptor, its length from the evidence row, its oid from the anchor; a stored path outside the document path rule is `InvalidDocumentPath`; the first bound root with the repository identity, else `repository_unbound` | unaudited |
-| Document kind rule | `crates/daemon/src/attestation_verifier/classify.rs:179` (`DocumentKind::of`) | configuration extensions are `CurrentConfig` with `config_present`; every other path is `CurrentCode` with `code_present` | unaudited |
+| Classifier self-source check | `crates/daemon/src/attestation_verifier/classify.rs:292` in `class_of` (`:266`) | after the `Active` filter (`:286`), both on the standing read, a live `Active` `verifier` decision is `self_source` before any anchor or citation read | unaudited |
+| Classifier reason order | `crates/daemon/src/attestation_verifier/classify.rs:266` (`class_of`) | one class per decision: `NotInput` for a decision not live or not `Active`, then `self_source`, then the anchor reasons, then the citation reasons in citation order | unaudited |
+| Classifier citation order and cap | `crates/daemon/src/attestation_verifier/classify.rs:351` (`citations`), `MAX_EVENT_CITATIONS` at `:46` | the row-level `evidence_id` first, then at most 32 event-level citations of other evidence | unaudited |
+| Classifier incarnation recheck | `crates/daemon/src/attestation_verifier/classify.rs:258` in `classify` (`:247`) | after the last read, successful or refused, a store that is not the target's incarnation is `IncarnationMismatch` | unaudited |
+| Classifier claim and binding | `crates/daemon/src/attestation_verifier/classify.rs:428` (`VerifierInput::new`), path refusal at `:448`, root match at `:449` | the claim's path and digest from the descriptor, its length from the evidence row, its oid from the anchor; a stored path outside the document path rule is `InvalidDocumentPath` when no cited row resolves to a verifiable document; the first bound root with the repository identity, else `repository_unbound` | unaudited |
+| Document kind rule | `crates/daemon/src/attestation_verifier/classify.rs:203` (`DocumentKind::of`) | configuration extensions are `CurrentConfig` with `config_present`; every other path is `CurrentCode` with `code_present` | unaudited |
 
 ## Tests
 
@@ -127,16 +127,16 @@ verified at the #1171 branch.
 | `the_evidence_keyed_read_returns_the_live_document_descriptor_citing_the_evidence` | `crates/kernel/tests/kernel_source_descriptors.rs:3252` | document descriptor; verifier input | unaudited |
 | `the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row` | `crates/kernel/tests/kernel_anchor_write.rs:869` | verifier input | unaudited |
 | `each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is_written` | `crates/daemon/tests/attestation_verifier_classify.rs:355` | verifier input (AC16); citation order | unaudited |
-| `a_descriptor_without_a_digest_is_digest_missing` | `crates/daemon/tests/attestation_verifier_classify.rs:535` | verifier input | unaudited |
-| `a_verifier_decision_is_self_source_before_any_anchor_or_citation_read` | `crates/daemon/tests/attestation_verifier_classify.rs:553` | party, `self_source` half | unaudited |
-| `a_stored_path_outside_the_document_path_rule_is_refused_for_that_decision` | `crates/daemon/tests/attestation_verifier_classify.rs:627` | verifier input (invalid stored path) | unaudited |
-| `a_target_of_another_incarnation_is_refused` | `crates/daemon/tests/attestation_verifier_classify.rs:644` | snapshot purity (incarnation) | unaudited |
-| `the_row_level_citation_is_read_before_the_capped_event_citations` | `crates/daemon/tests/attestation_verifier_classify.rs:665` | verifier input (citation cap) | unaudited |
-| `a_decision_outside_the_input_set_counts_under_no_reason` | `crates/daemon/tests/attestation_verifier_classify.rs:698` | verifier input; snapshot purity | unaudited |
-| `a_decision_citing_a_message_and_a_document_is_verifiable_through_the_document` | `crates/daemon/tests/attestation_verifier_classify.rs:749` | verifier input | unaudited |
-| `classification_at_one_sequence_ignores_the_worktree_head_and_later_commits` | `crates/daemon/tests/attestation_verifier_classify.rs:817` | snapshot purity; F3 at the classification step | unaudited |
-| `the_repository_binds_to_the_first_matching_root_in_bound_order` | `crates/daemon/tests/attestation_verifier_classify.rs:920` | verifier input (binding) | unaudited |
-| `the_document_kind_path_rule_is_a_closed_table` | `crates/daemon/tests/attestation_verifier_classify.rs:959` | document kind for #1172's classes (F15) | unaudited |
+| `a_descriptor_without_a_digest_is_digest_missing` | `crates/daemon/tests/attestation_verifier_classify.rs:547` | verifier input | unaudited |
+| `a_verifier_decision_is_self_source_before_any_anchor_or_citation_read` | `crates/daemon/tests/attestation_verifier_classify.rs:565` | party, `self_source` half | unaudited |
+| `a_stored_path_outside_the_document_path_rule_is_refused_for_that_decision` | `crates/daemon/tests/attestation_verifier_classify.rs:639` | verifier input (invalid stored path) | unaudited |
+| `a_target_of_another_incarnation_is_refused` | `crates/daemon/tests/attestation_verifier_classify.rs:676` | snapshot purity (incarnation) | unaudited |
+| `the_row_level_citation_is_read_before_the_capped_event_citations` | `crates/daemon/tests/attestation_verifier_classify.rs:697` | verifier input (citation cap) | unaudited |
+| `a_decision_outside_the_input_set_counts_under_no_reason` | `crates/daemon/tests/attestation_verifier_classify.rs:755` | verifier input; snapshot purity | unaudited |
+| `a_decision_citing_a_message_and_a_document_is_verifiable_through_the_document` | `crates/daemon/tests/attestation_verifier_classify.rs:806` | verifier input | unaudited |
+| `classification_at_one_sequence_ignores_the_worktree_head_and_later_commits` | `crates/daemon/tests/attestation_verifier_classify.rs:874` | snapshot purity; F3 at the classification step | unaudited |
+| `the_repository_binds_to_the_first_matching_root_in_bound_order` | `crates/daemon/tests/attestation_verifier_classify.rs:1005` | verifier input (binding) | unaudited |
+| `the_document_kind_path_rule_is_a_closed_table` | `crates/daemon/tests/attestation_verifier_classify.rs:1044` | document kind for #1172's classes (F15) | unaudited |
 
 ## Categories with no check found
 
@@ -148,6 +148,9 @@ verified at the #1171 branch.
   replacement ref through it.
 - The trigger fold of `Sensitive` document evidence: no test promotes through
   a trigger whose observation cites document evidence.
+- `p6-new-verifiability-pure-function-of-snapshot`: no test restores the store
+  after the first read of a classification, so the incarnation recheck after the
+  last read has no behavioral test; `classify` has no seam between its reads.
 - Every proposed `p6-new-*` record: its code does not exist at the branch tip,
   except the `self_source` half of `p6-new-party-distinct-and-self-refusal`.
 
