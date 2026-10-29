@@ -29,10 +29,11 @@ production guards. References were verified at the #1170 branch.
 | Document caps | `crates/daemon/src/project_docs.rs:23` (`MAX_PROJECT_DOC_BYTES`); `crates/daemon/src/harness_sources.rs:642` (`MAX_SOURCE_UNIT_BYTES`); unit cap applied at `crates/daemon/src/source_capture.rs:1297` | 256 KiB read, 64 KiB published | unaudited |
 | Document publisher class | `crates/daemon/src/source_capture.rs:922` | documents publish at `Sensitive` | unaudited |
 | Causality parents | `crates/kernel/src/claim_causality.rs:218` (`record_claim_causality`), `:38` (`MAX_DERIVATION_PARENTS`) | live exact parents; bounded parent list | unaudited |
-| Verifier header gate | `crates/daemon/src/attestation_verifier.rs:292` (`header_verdict`), used at `:407` (`lookup`) and `:306` (`verdict`) | header over 256 KiB is `over_budget`; an unreachable length is `Mismatch`; both before any content read | unaudited |
-| Verifier object read | `crates/daemon/src/attestation_verifier.rs:373` (`read_object`) | kind and hash checked after decode, decoded length recorded first; allocation refusal is `over_budget` | unaudited |
-| Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:362` (`poll`), `:327` (`Deadline`) | polled before the open and before every object read | unaudited |
-| Verifier claim path | `crates/daemon/src/attestation_verifier.rs:61` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
+| Verifier header gate | `crates/daemon/src/attestation_verifier.rs:298` (`header_verdict`), used at `:433` (`lookup`) and `:314` (`verdict`) | header over 256 KiB is `over_budget`; a claimed length above twice or below half the header size is `Mismatch`; both before any content read | unaudited |
+| Verifier object read | `crates/daemon/src/attestation_verifier.rs:399` (`read_object`) | kind and hash checked after decode, decoded length recorded first; allocation refusal is `over_budget` | unaudited |
+| Verifier delta-chain walk | `crates/daemon/src/attestation_verifier.rs:385` (`guard_delta_chain`) via `crates/daemon/src/git_sources.rs:205` (`file_object_kind`) | a ref-delta chain that revisits an entry in the repository's own packs is `object_unreadable(class)` before gix reads it | unaudited |
+| Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:372` (`poll`), `:337` (`Deadline`) | polled before the open and before every object read | unaudited |
+| Verifier claim path | `crates/daemon/src/attestation_verifier.rs:68` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
 
 ## Tests
 
@@ -56,8 +57,8 @@ production guards. References were verified at the #1170 branch.
 | `policy_revision_matches_policy_content` | `crates/kernel/src/admission.rs:5931` | policy digest | unaudited |
 | `the_served_fold_is_under_the_serving_digest` | `crates/kernel/src/admission.rs:5900` | policy digest | unaudited |
 | `observe_code` (fixture) | `crates/daemon/src/lib.rs:14394` | positive witness | unaudited |
-| `reads_at_a_snapshot_return_what_was_visible_then` | `crates/daemon/tests/kernel_routes.rs:1875` | positive witness | unaudited |
-| `a_disposition_preview_reports_visibility_per_surface_and_writes_nothing` | `crates/daemon/tests/kernel_routes.rs:5120` | positive witness | unaudited |
+| `reads_at_a_snapshot_return_what_was_visible_then` | `crates/daemon/tests/kernel_routes.rs:1875` | positive witness; object-subject provenance | unaudited |
+| `a_disposition_preview_reports_visibility_per_surface_and_writes_nothing` | `crates/daemon/tests/kernel_routes.rs:5120` | positive witness; object-subject provenance | unaudited |
 | `a_plugin_route_cannot_declare_a_class_above_the_derived_one` | `crates/daemon/tests/kernel_routes.rs:1145` | plugin table | unaudited |
 | `disposition_events_apply_the_fixed_table_and_report_outcome_and_disposition` | `crates/daemon/tests/kernel_routes.rs:4398` | mark stale | unaudited |
 | `a_plugin_write_is_capped_at_inference_classes` | `crates/daemon/src/kernel_routes/commit.rs:1249` | plugin table | unaudited |
@@ -87,33 +88,39 @@ production guards. References were verified at the #1170 branch.
 | `detail_operation_and_parent_list_must_agree_with_the_registry` | `crates/kernel/tests/kernel_claim_causality.rs:710` | derived reinjection | unaudited |
 | `refused_selections_publish_nothing_and_encodings_are_dispositions` | `crates/daemon/tests/git_sources.rs:549` | header gate; daemon opener | unaudited |
 | `delta_packed_commit_against_an_oversized_base_is_refused` | `crates/daemon/tests/git_sources.rs:827` | header gate; daemon opener | unaudited |
-| `the_fixture_has_no_worktree` | `crates/daemon/tests/attestation_verifier.rs:190` | verdict deterministic | unaudited |
-| `committed_bytes_match_and_a_later_commit_mismatches` | `crates/daemon/tests/attestation_verifier.rs:200` | verdict deterministic; blob read bounded | unaudited |
-| `a_nested_path_walks_one_tree_per_component` | `crates/daemon/tests/attestation_verifier.rs:241` | blob read bounded | unaudited |
-| `line_endings_normalize_in_either_direction` | `crates/daemon/tests/attestation_verifier.rs:264` | verdict deterministic | unaudited |
-| `entries_that_hold_no_blob_are_named_by_kind` | `crates/daemon/tests/attestation_verifier.rs:312` | blob read bounded | unaudited |
-| `missing_or_corrupt_objects_are_unreadable_never_absent` | `crates/daemon/tests/attestation_verifier.rs:354` | blob read bounded | unaudited |
-| `a_directory_that_is_no_repository_is_unopenable` | `crates/daemon/tests/attestation_verifier.rs:447` | blob read bounded | unaudited |
-| `the_driver_writes_nothing` | `crates/daemon/tests/attestation_verifier.rs:457` | blob read bounded | unaudited |
-| `replacement_refs_are_ignored` | `crates/daemon/tests/attestation_verifier.rs:477` | verdict deterministic; Kernel checkout open record (daemon-opener half) | unaudited |
-| `the_header_gates_every_blob_read` | `crates/daemon/tests/attestation_verifier.rs:504` | blob read bounded | unaudited |
-| `a_blob_whose_delta_base_exceeds_the_allocation_limit_is_over_budget` | `crates/daemon/tests/attestation_verifier.rs:557` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
-| `a_passed_deadline_opens_no_repository` | `crates/daemon/tests/attestation_verifier.rs:595` | blob read bounded | unaudited |
-| `a_deadline_before_the_header_poll_reads_no_blob` | `crates/daemon/tests/attestation_verifier.rs:621` | blob read bounded | unaudited |
-| `verdicts_survive_a_worktree_edit_a_head_move_and_a_repack` | `crates/daemon/tests/attestation_verifier.rs:641` | verdict deterministic | unaudited |
-| `claim_paths_follow_the_document_path_rule` | `crates/daemon/tests/attestation_verifier.rs:691` | blob read bounded | unaudited |
-| `the_pure_verdict_compares_digests_after_the_header_gate` | `crates/daemon/tests/attestation_verifier.rs:714` | verdict deterministic | unaudited |
-| `normalized_digests_exist_only_for_a_reachable_length` | `crates/daemon/tests/attestation_verifier.rs:781` | verdict deterministic | unaudited |
-| `reasons_have_stable_names_and_a_terminal_split` | `crates/daemon/tests/attestation_verifier.rs:795` | reason names for #1173 counters | unaudited |
+| `the_fixture_has_no_worktree` | `crates/daemon/tests/attestation_verifier.rs:202` | verdict deterministic | unaudited |
+| `committed_bytes_match_and_a_later_commit_mismatches` | `crates/daemon/tests/attestation_verifier.rs:212` | verdict deterministic; blob read bounded | unaudited |
+| `a_nested_path_walks_one_tree_per_component` | `crates/daemon/tests/attestation_verifier.rs:253` | blob read bounded | unaudited |
+| `line_endings_normalize_in_either_direction` | `crates/daemon/tests/attestation_verifier.rs:276` | verdict deterministic | unaudited |
+| `entries_that_hold_no_blob_are_named_by_kind` | `crates/daemon/tests/attestation_verifier.rs:324` | blob read bounded | unaudited |
+| `missing_or_corrupt_objects_are_unreadable_never_absent` | `crates/daemon/tests/attestation_verifier.rs:366` | blob read bounded | unaudited |
+| `a_directory_that_is_no_repository_is_unopenable` | `crates/daemon/tests/attestation_verifier.rs:475` | blob read bounded | unaudited |
+| `the_driver_writes_nothing` | `crates/daemon/tests/attestation_verifier.rs:485` | blob read bounded | unaudited |
+| `replacement_refs_are_ignored` | `crates/daemon/tests/attestation_verifier.rs:505` | verdict deterministic; Kernel checkout open record (daemon-opener half) | unaudited |
+| `the_header_gates_every_blob_read` | `crates/daemon/tests/attestation_verifier.rs:541` | blob read bounded | unaudited |
+| `a_blob_whose_delta_base_exceeds_the_allocation_limit_is_over_budget` | `crates/daemon/tests/attestation_verifier.rs:594` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
+| `a_passed_deadline_opens_no_repository` | `crates/daemon/tests/attestation_verifier.rs:678` | blob read bounded | unaudited |
+| `a_deadline_before_the_header_poll_reads_no_blob` | `crates/daemon/tests/attestation_verifier.rs:704` | blob read bounded | unaudited |
+| `verdicts_survive_a_worktree_edit_a_head_move_and_a_repack` | `crates/daemon/tests/attestation_verifier.rs:724` | verdict deterministic | unaudited |
+| `claim_paths_follow_the_document_path_rule` | `crates/daemon/tests/attestation_verifier.rs:782` | blob read bounded | unaudited |
+| `the_pure_verdict_compares_digests_after_the_header_gate` | `crates/daemon/tests/attestation_verifier.rs:805` | verdict deterministic | unaudited |
+| `normalized_digests_exist_only_for_a_reachable_length` | `crates/daemon/tests/attestation_verifier.rs:879` | verdict deterministic | unaudited |
+| `reasons_have_stable_names_and_a_terminal_split` | `crates/daemon/tests/attestation_verifier.rs:904` | reason names for #1173 counters | unaudited |
+| `a_delta_chain_that_revisits_an_entry_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:651` | blob read bounded | unaudited |
+| `a_raw_digest_match_needs_the_claimed_length` | `crates/daemon/tests/attestation_verifier.rs:951` | verdict deterministic | unaudited |
+| `an_empty_committed_file_matches_an_empty_claim` | `crates/daemon/tests/attestation_verifier.rs:970` | verdict deterministic | unaudited |
+| `an_unsupported_object_format_is_unopenable` | `crates/daemon/tests/attestation_verifier.rs:993` | blob read bounded | unaudited |
+| `a_blob_mode_entry_naming_another_kind_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1012` | blob read bounded | unaudited |
+| `each_deadline_poll_precedes_its_read` | `crates/daemon/tests/attestation_verifier.rs:1037` | blob read bounded | unaudited |
+| `a_non_bare_root_answers_from_the_object_store_not_the_worktree` | `crates/daemon/tests/attestation_verifier.rs:1071` | verdict deterministic | unaudited |
+| `evidence_cited_in_refuses_a_deleted_evidence_row_that_live_decisions_still_cite` | `crates/kernel/tests/kernel_slice.rs:2248` | artifact deletion | unaudited |
 
 ## Categories with no check found
 
-- `p6-object-subject-provenance-passes-trusted-classes`: no test admits an
-  object subject under trusted classes and asserts the provenance check.
 - `p6-plugin-cannot-replace-a-foreign-source-decision`: no test submits a
   plugin replacement of a decision of another source kind.
 - `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard`:
-  no test deletes an artifact a live decision cites.
+  no test follows the deletion of cited evidence with a witness admission.
 - The Kernel checkout opener: no test reads an over-budget delta base or a
   replacement ref through it.
 - The trigger fold of `Sensitive` document evidence: no test promotes through
@@ -122,8 +129,8 @@ production guards. References were verified at the #1170 branch.
 
 ## Quiet areas
 
-- A tree object above 256 KiB: the verifier maps its allocation refusal to
-  `over_budget`, and no test constructs one.
-- A repository in the SHA-256 object format: `object_format` refuses it and
-  the verifier answers `repository_unopenable`; no verifier test constructs
-  one.
+- A commit or tree object above 256 KiB, or one on an oversized delta base:
+  the verifier maps its allocation refusal to `over_budget`, and no test
+  constructs one.
+- A delta chain that revisits an entry through an alternate object directory:
+  the verifier's walk covers the repository's own packs only.

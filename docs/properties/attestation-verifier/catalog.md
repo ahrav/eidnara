@@ -117,7 +117,7 @@ status `unaudited` in `existing-checks.md`.
 | `p6-new-flag-off-nothing-runs` | safety | N7 | proposed | `unreachable` | default-production |
 | `p6-new-pass-bounds-and-accounting` | safety | N7 | proposed | `always` | explicit-config-only |
 | `p6-new-cursor-never-skips-unresolved` | safety | N7 | proposed | `always` | explicit-config-only |
-| `p6-new-pass-progress-under-transient-unavailable` | liveness | N7 | proposed | `sometimes` | explicit-config-only |
+| `p6-new-pass-progress-under-transient-unavailable` | liveness | N7 | proposed | `always` | explicit-config-only |
 | `p6-new-attestation-stale-on-byte-change` | safety | N8 | proposed | `always-or-unreached` | explicit-config-only |
 | `p6-new-verdict-deterministic` | safety | N2 | active | `always` | test-only |
 | `p6-new-blob-read-bounded-at-oid` | safety | N2 | active | `always` | test-only |
@@ -157,8 +157,8 @@ Type: safety
 Reachability: test-only - the only daemon emitter of `CodeObserved` is `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`
 Status: active
 Exercised: yes - admission unit tests evaluate every legal source and taint pair against its ceiling
-Guarantee: A subject admitted under `(ModelInference, AssistantInference)` cannot reach `Verified` through a witness event: its automatic ceiling is `Candidate`, and an admission whose classes differ from the subject's prior admission is refused.
-Check: `always` - for every admission of a subject with a prior admission the classes equal the prior's, and for every subject under an inference taint the effective maturity after any witness event is at most `Candidate`
+Guarantee: A subject admitted under `(ModelInference, AssistantInference)` has an automatic ceiling of `Candidate`: a witness event that raises support above that ceiling requires valid approval, and an admission whose classes differ from the subject's prior admission is refused.
+Check: `always` - for every admission of a subject with a prior admission the classes equal the prior's, and for every subject under an inference taint a witness event that raises effective maturity above `Candidate` carries valid approval
 Fault/timing angle: none
 Required faults and enabling state: a model-class decision followed by a `CodeObserved` event with a valid trigger; a second admission of that subject under trusted classes
 Confidence: high - [evidence](evidence/p6-witness-cannot-lift-an-inference-class-subject.md). Read `automatic_ceiling` (`crates/kernel/src/admission.rs:4302`), which maps every inference taint to `Candidate`, and the prior-class refusal at `:284` in `evaluate_admission` (`:280`)
@@ -173,7 +173,7 @@ Reachability: test-only - the only daemon emitter of `CodeObserved` is `observe_
 Status: active
 Exercised: yes - Kernel admission tests submit triggers from another source, at another revision, of the other kind, invalidated, and with retired evidence
 Guarantee: Under trusted classes whose ceiling admits `Verified`, a witness event promotes only when its trigger observation is live, of the event's kind, carries the subject's exact `(source_kind, source_id, source_revision)`, and has live backing evidence when it cites any.
-Check: `always` - every admission row with a witness kind and outcome `promote` names a trigger observation that, at the admission's commit, was live, of kind `code_present` or `config_present` matching the event, had the subject's source triple, and had live or absent backing evidence; the trusted-class precondition is refinement R4
+Check: `always` - every admission row with a witness kind and outcome `admit` or `promote` names a trigger observation that, at the admission's commit, was live, of kind `code_present` or `config_present` matching the event, had the subject's source triple, and had live or absent backing evidence; the trusted-class precondition is refinement R4
 Fault/timing angle: the trigger or its evidence invalidated in an earlier commit or earlier in the same envelope
 Required faults and enabling state: F1
 Confidence: high - [evidence](evidence/p6-trigger-must-match-subject-source-triple.md). Read the lookup predicate in `validate_trigger` (`crates/kernel/src/admission.rs:2807`); it compares the source triple and liveness and never compares evidence ids
@@ -204,7 +204,7 @@ Reachability: test-only - the only daemon emitter of `CodeObserved` is `observe_
 Status: active
 Exercised: yes - the `observe_code` fixture and the route tests that build a verified decision through the sibling `code_observation` fixture
 Guarantee: A fixture campaign constructs at least one subject under `(TrustedLocalCode, CurrentCode)` that a validated `CodeObserved` trigger promotes to `Verified`, the positive witness the S1 `always` records depend on.
-Check: `sometimes` - a coverage floor for fixtures, reworded by refinement R7: at least one committed admission with event `code_observed`, a non-null trigger, outcome `promote`, and effective maturity `verified`
+Check: `sometimes` - a coverage floor for fixtures, reworded by refinement R7: at least one committed admission with event `code_observed`, a validated non-null trigger, outcome `admit` or `promote`, effective maturity `verified`, and disposition `active`; a subject's first admission records `admit` (`crates/kernel/src/admission.rs:381`)
 Fault/timing angle: none
 Required faults and enabling state: a trusted-class subject and a matching `code_present` observation in one envelope
 Confidence: high - [evidence](evidence/p6-validated-witness-under-trusted-classes-promotes.md). Read `observe_code` (`crates/daemon/src/lib.rs:14394`) and the route test at `crates/daemon/tests/kernel_routes.rs:1875`, whose observation comes from `code_observation` (`:887`), a sibling fixture in the test file (reference correction 3)
@@ -217,13 +217,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - `record_admission` runs `validate_provenance` on every admission
 Status: active
-Exercised: not yet - no test admits an object subject under `TrustedLocalCode` and asserts the provenance check passed
+Exercised: partial - object-subject admissions under `(TrustedLocalCode, CurrentCode)` in `crates/daemon/tests/kernel_routes.rs:1875`, `:5120` and the `observe_code` fixture (`crates/daemon/src/lib.rs:14394`) pass `validate_provenance` with `None` provenance; no test covers the other legal class pairs
 Guarantee: `validate_provenance` refuses `TrustedLocalCode` only for `unclassified` provenance, which only staging candidates carry, so an object subject with no provenance passes under trusted classes (N2, OQ6-2).
 Check: `always` - for every admission of a subject whose provenance kind is `None`, `validate_provenance` returns `Ok` for every legal class pair
 Fault/timing angle: none
 Required faults and enabling state: an object subject with no provenance under `(TrustedLocalCode, CurrentCode)`
 Confidence: high - [evidence](evidence/p6-object-subject-provenance-passes-trusted-classes.md). Read `validate_provenance` (`crates/kernel/src/admission.rs:2650`) and its call at `:1622`
-Existing check: none
+Existing check: `crates/daemon/tests/kernel_routes.rs:1875`, `:5120` (unaudited)
 Impact: a refusal here would make every attestation admission fail with `AdmissionPolicy`
 Open questions: None.
 
@@ -253,7 +253,7 @@ Check: `always` - for every successor row, its domain and source pair equal the 
 Fault/timing angle: none
 Required faults and enabling state: a replacement under another domain or source; a replacement at the same revision
 Confidence: high - [evidence](evidence/p6-successor-keeps-identity-and-advances-revision.md). Read `validate_successor` (`crates/kernel/src/slice/write.rs:1271`)
-Existing check: `crates/kernel/tests/kernel_slice.rs:1003`; the unbumped case inside `crates/kernel/tests/kernel_slice.rs:607` at `:701` to `:712` (unaudited)
+Existing check: `crates/kernel/tests/kernel_slice.rs:1003`; the unbumped case inside `crates/kernel/tests/kernel_slice.rs:607` at `:704` to `:712` (unaudited)
 Impact: succession is unavailable across parties, so the verifier writes a sibling (K8)
 Open questions: None.
 
@@ -262,7 +262,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - plugin `kernel.commit` replacements and memory capture call `supersede_decision`
 Status: active
-Exercised: yes - slice and admission tests replace live decisions and read them back
+Exercised: partial - `crates/kernel/tests/kernel_slice.rs:1096` exercises decision replacement, folding, and registry liveness; `crates/kernel/tests/kernel_admission.rs:393` exercises admission-history retention for a replaced domain; no cited test reads a replaced decision's admission history
 Guarantee: A replaced decision is invalidated at the replacement's commit and no longer served, while its admission history stays readable.
 Check: `always` - after a committed replacement the predecessor's registry row is invalidated and no serving read returns it
 Fault/timing angle: none
@@ -293,7 +293,7 @@ Type: safety
 Reachability: default-production - plugin routes submit `MarkStale` with the shipped configuration
 Status: active
 Exercised: yes - admission unit and route tests apply `MarkStale` and read the disposition
-Guarantee: `MarkStale` sets disposition `Stale` in place with outcome `Deny`; a later event that names no disposition keeps `Stale`, so after `MarkStale` a validated `CodeObserved` returns `Outcome::Promote` while the disposition stays `Stale`, and `Outcome` alone is never the oracle.
+Guarantee: `MarkStale` sets disposition `Stale` in place with outcome `Deny`; a later event that names no disposition keeps `Stale`. After `MarkStale`, a validated `CodeObserved` returns `Outcome::Promote` when the subject's automatic ceiling admits `Verified` or approval is valid, and `Outcome::Deny` otherwise, while the disposition stays `Stale`; `Outcome` alone is never the oracle.
 Check: `always` - after a committed `MarkStale`, every later admission of the subject that names no disposition leaves the disposition `stale`; clause added by refinement R2
 Fault/timing angle: a witness event after `MarkStale` in the same or a later envelope
 Required faults and enabling state: `MarkStale` followed by a validated `CodeObserved` on the same subject
@@ -371,7 +371,7 @@ Reachability: explicit-config-only - source capture publishes documents only whe
 Status: active
 Exercised: yes - source-capture tests edit, remove, rename, and fail to read documents
 Guarantee: Source capture republishes a document only when its digest changes, retires the capture's own lineage when the file is missing, retires stale lineages of a path first, and retires nothing when a read fails.
-Check: `always` - every new document revision has a digest different from its predecessor's, and every retirement follows a read that found the file missing
+Check: `always` - a publication either has no live capture-owned predecessor or changes that predecessor's digest; retirement of the current repository lineage follows a read that found the file missing, retirement of another repository identity's lineage follows a read that settles the path, and an unreadable read retires nothing
 Fault/timing angle: a document edited or removed between passes
 Required faults and enabling state: an unchanged document; a removed document; a renamed document; an unreadable document
 Confidence: high - [evidence](evidence/p6-document-republishes-only-on-digest-change-and-retires-on-missing.md). Read the cited tests at the branch tip
@@ -414,8 +414,8 @@ Open questions: None.
 Type: safety
 Reachability: test-only - `record_claim_causality` has no production caller
 Status: active
-Exercised: yes - claim-causality tests record derived reinjections over live, retired, and mismatched parents
-Guarantee: A `DerivedReinjection` record is written only when every named parent is live at the named revision, and a later read reports `Unknown(ParentUnavailable)` once a parent is gone.
+Exercised: yes - claim-causality tests record derived reinjections over live and mismatched parents, and retire a parent after the write to show the derivation survives (`crates/kernel/tests/kernel_claim_causality.rs:315`)
+Guarantee: A `DerivedReinjection` record is written only when every named parent is live at the named revision. A later read requires each parent row to have existed at the requested snapshot with the named revision, so a later retirement or supersession keeps `DerivedReinjection`; a missing historical parent row or a revision mismatch yields `Unknown(ParentUnavailable)` (`parents_existed`, `crates/kernel/src/claim_causality.rs:719`).
 Check: `always` - every committed derived-reinjection record names parents live at its commit, and its detail, operation, and parent list agree with the registry
 Fault/timing angle: the parent superseded between selection and commit
 Required faults and enabling state: F2: a parent retired or superseded before the write
@@ -459,13 +459,13 @@ Open questions: None.
 Type: safety
 Reachability: test-only - `delete_artifact` has no production caller in the daemon; its callers are tests and the eval-runner example (`crates/daemon/examples/eval_runner/fault.rs:817`), which corrects the specification's `default-production` label
 Status: active
-Exercised: not yet - no test deletes an artifact whose evidence a live decision cites
+Exercised: partial - `crates/kernel/tests/kernel_slice.rs:2248` deletes cited artifact evidence and asserts the evidence is invalidated while its citing decision stays live; no test follows the deletion with a witness admission
 Guarantee: `retire_evidence` refuses a cited evidence row with `Conflict`, while `delete_artifact` invalidates every live evidence row of a digest with no citation predicate, so a trigger backed by that evidence then fails validation.
 Check: `always` - after `delete_artifact` on a digest a live decision cites, the evidence row is invalidated while the citing decision stays live; recorded as present behavior
 Fault/timing angle: a deletion between the verifier's read and its commit
 Required faults and enabling state: F3: `delete_artifact` on a cited digest
 Confidence: high - [evidence](evidence/p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard.md). Read the citation check in `retire_evidence` (`crates/kernel/src/slice/write.rs:585`, `Conflict` at `:607`) and the `UPDATE evidence_meta` in `delete_artifact` (`crates/kernel/src/cas/deletion.rs:239`, update at `:389`)
-Existing check: none
+Existing check: `crates/kernel/tests/kernel_slice.rs:2248` (unaudited)
 Impact: the pin on cited evidence holds for the expiry sweep only; an attestation's witness can lose its backing evidence (gap G2)
 Open questions:
 - Should `delete_artifact` honor the citation guard? (needs human input)
@@ -473,15 +473,15 @@ Open questions:
 ### p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements
 
 Type: safety
-Reachability: test-only - the applicability engine has no production caller; no production code builds an `ApplicabilityCandidate`; the daemon opener's callers that tests reach are `read_selection` and, since this ticket, `attestation_verifier::verify`, neither with a production caller
+Reachability: test-only - this label covers the Kernel opener and the verifier clauses: the applicability engine has no production caller, no production code builds an `ApplicabilityCandidate`, and `read_selection` and `attestation_verifier::verify` have no production caller. The shared daemon opener is default-production through `memory_capture::head::observe_head` (`crates/daemon/src/memory_capture/head.rs:32`), called after native capture output parses (`crates/daemon/src/memory_capture/native.rs:614`), as `p2-git-open-is-isolated-and-allocation-bounded` records
 Status: active
 Exercised: partial - the daemon opener's allocation limit is exercised by delta-base tests; no test reads a delta base or a replacement ref through the Kernel opener
-Guarantee: The Kernel checkout open is `Options::isolated()` with command configuration stripped, no `gitoxide.objects.allocLimit`, and replacement refs honored; `git_sources::open` installs the limit after the repository's configuration and ignores replacements.
+Guarantee: The Kernel checkout open is `Options::isolated()` with command configuration stripped, no `gitoxide.objects.allocLimit`, and replacement refs left to the repository's configuration; under gix 0.87.1 `refs/replace` loads only when the repository sets `core.useReplaceRefs = false`, so an entry alone substitutes nothing. `git_sources::open` installs the limit after the repository's configuration and ignores replacements.
 Check: `always` - the verifier opens repositories only through `git_sources::open`, and a delta-packed blob whose base exceeds the limit is refused before allocation
 Fault/timing angle: none
-Required faults and enabling state: F4: an over-budget delta base; a `refs/replace` entry
+Required faults and enabling state: F4: an over-budget delta base; a `refs/replace` entry with `core.useReplaceRefs = false`
 Confidence: high - [evidence](evidence/p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements.md). Read `open_isolated` (`crates/kernel/src/applicability/checkout.rs:639`) and `isolated_options` and `open_with_slots` (`crates/daemon/src/git_sources.rs:131`, `:148`); no `allocLimit` or `ignore_replacements` appears under `crates/kernel/src`
-Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`, and `crates/daemon/tests/attestation_verifier.rs:557`, `:477` for the daemon opener; none for the Kernel opener (unaudited)
+Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`, and `crates/daemon/tests/attestation_verifier.rs:594`, `:505` for the daemon opener; none for the Kernel opener (unaudited)
 Impact: a verifier on the Kernel opener would inflate a delta chain without a bound and could read a replaced object (C4)
 Open questions:
 - Which opener does the U1 driver use? - resolved with answer; this resolves the open question the portfolio evaluation tied to G3.
@@ -682,7 +682,8 @@ Required faults and enabling state: F7 between decisions; F13: more than N candi
 Confidence: low - [evidence](evidence/p6-new-pass-bounds-and-accounting.md). designed obligation from the specification ([#1169](https://github.com/ahrav/eidnara/issues/1169)); no code to read
 Existing check: none
 Impact: falsifier: a pass looping to exhaustion, double counting, or an effect counted before commit
-Open questions: None.
+Open questions:
+- `Evaluation::bytes_read` counts blob content only; commit and tree payloads and delta materialization are excluded. Does the #1173 pass budget cover blob content or all decoded-object work? (needs human input)
 
 ### p6-new-cursor-never-skips-unresolved
 
@@ -698,7 +699,7 @@ Confidence: low - [evidence](evidence/p6-new-cursor-never-skips-unresolved.md). 
 Existing check: none
 Impact: falsifier: a `deadline` decision passed and never revisited, or a second `MarkStale`
 Open questions:
-- What are N and K? - unresolved, needs the #1173 decision on OQ6-10.
+- What are N and K? - resolved with answer: N = 8 and K = 3 ([#1173](https://github.com/ahrav/eidnara/issues/1173), OQ6-10).
 
 ### p6-new-pass-progress-under-transient-unavailable
 
@@ -706,8 +707,8 @@ Type: liveness
 Reachability: explicit-config-only - intended; the behavior has no code at this branch
 Status: proposed - converts in [#1173](https://github.com/ahrav/eidnara/issues/1173)
 Exercised: not yet - the code lands in [#1173](https://github.com/ahrav/eidnara/issues/1173)
-Guarantee: While passes run at the retry interval, a head decision reaches a terminal outcome within K passes.
-Check: `sometimes` - the campaign constructs a head decision that is transient-unavailable, then terminal within K passes; the bound is K passes
+Guarantee: While passes run at the retry interval, a head decision reaches a terminal outcome within K = 3 passes.
+Check: `always` - every head decision that is transient-unavailable has a terminal outcome recorded within K = 3 passes of its first transient attempt; paired with `sometimes(head_decision_transient_unavailable)` as precondition coverage
 Fault/timing angle: see the fault map
 Required faults and enabling state: F13: a permanently transient head decision
 Confidence: low - [evidence](evidence/p6-new-pass-progress-under-transient-unavailable.md). designed obligation from the specification ([#1169](https://github.com/ahrav/eidnara/issues/1169)); no code to read
@@ -721,33 +722,33 @@ Type: safety
 Reachability: explicit-config-only - intended; the behavior has no code at this branch
 Status: proposed - converts in [#1174](https://github.com/ahrav/eidnara/issues/1174)
 Exercised: not yet - the code lands in [#1174](https://github.com/ahrav/eidnara/issues/1174)
-Guarantee: When the bytes at the cited path differ from the digest at a later checkout, the attestation is `Stale` at read or marked `Stale` by a later pass.
-Check: `always-or-unreached` - whenever the engine or a pass evaluates such an attestation the result is `Stale`; unreached until a mechanism exists
+Guarantee: When a pass evaluates an attestation whose lineage's live document descriptor has a digest different from the witnessed digest, the pass marks the attestation `Stale`; a lineage with no live descriptor, or an undecodable witness detail, writes nothing (a documented limitation).
+Check: `always-or-unreached` - whenever a pass evaluates such an attestation the result is `Stale`; unreached until #1174 lands
 Fault/timing angle: see the fault map
-Required faults and enabling state: a descendant commit that changes the cited file
+Required faults and enabling state: source capture republishing the cited document's lineage with a different digest after the attestation
 Confidence: low - [evidence](evidence/p6-new-attestation-stale-on-byte-change.md). designed obligation from the specification ([#1169](https://github.com/ahrav/eidnara/issues/1169)); no code to read
 Existing check: none
-Impact: falsifier: bytes changed at a descendant and `Current` reported because `reachable_from` still holds
+Impact: falsifier: a live descriptor with a different digest and the attestation left `Active`
 Open questions:
-- Which mechanism carries applicability? (needs human input)
+- Which mechanism carries applicability? - resolved with answer: OQ6-4 alternative 3, the push model inside the pass ([#1174](https://github.com/ahrav/eidnara/issues/1174)).
 
 ### p6-new-verdict-deterministic
 
 Type: safety
 Reachability: test-only - `attestation_verifier::verify` has no production caller at this branch; #1173 wires it behind `verifier.enabled` and relabels the record `explicit-config-only`
 Status: active - converted by [#1170](https://github.com/ahrav/eidnara/issues/1170)
-Exercised: yes - bare fixtures without a worktree drive every verdict and reason, and one test repeats claims across a worktree edit, a HEAD move, and a repack
+Exercised: yes - bare fixtures without a worktree drive every verdict and every reason except `repository_unbound`, which `verify` never produces since it takes a resolved root and which only an `Observed` double reaches; a non-bare root shows a worktree edit and a staged index leave the verdict unchanged; one test repeats claims across a worktree edit, a HEAD move, and a repack
 Guarantee: The verdict is a function of object-store contents, the claim's path, digest, byte length, and oid, and the budgets; `Match` asserts only that the sha256 of the bytes git stores for the path in the commit's tree equals the digest, up to line-ending normalization.
-Check: `always` - equal claims against equal object-store contents give equal verdicts, `Unavailable(deadline)` and `over_budget` from a delta chain above the allocation limit excepted; the verdict function takes no repository handle and no clock
+Check: `always` - equal claims against equal object-store contents give equal verdicts, except when either evaluation returns a transient reason (`deadline`, `object_unreadable`, `repository_unopenable`, or `repository_unbound`, which environmental failures such as descriptor exhaustion can produce) or `over_budget` from the allocation limit; for an `Observed::Content` admitted by the header gate, `Match` holds iff the header size equals the claimed length and the raw digest equals the claim, or the exact-length normalized digest equals it; the verdict function takes no repository handle and no clock
 Fault/timing angle: a worktree edit, a HEAD move, or a repack between two evaluations of one claim
-Required faults and enabling state: F8: worktree edit, HEAD move, repack, excluding over-budget delta chains; F9: an LF blob with a CRLF-form digest, and the reverse
-Confidence: high - [evidence](evidence/p6-new-verdict-deterministic.md). Read `verdict` (`crates/daemon/src/attestation_verifier.rs:306`), `Digests::of` (`:230`), and `observe` (`:403`) with its `lookup` (`:407`): the driver reads the commit, trees, header, and blob by object id and passes the observation to `verdict`, which decides every verdict
-Existing check: `crates/daemon/tests/attestation_verifier.rs:641`, `:190`, `:200`, `:264`, `:477`, `:714`, `:781` (unaudited)
+Required faults and enabling state: F8: worktree edit, HEAD move, repack, excluding allocation-limit refusals; F9: an LF blob with a CRLF-form digest, and the reverse
+Confidence: high - [evidence](evidence/p6-new-verdict-deterministic.md). Read `verdict` (`crates/daemon/src/attestation_verifier.rs:314`), `Digests::of` (`:242`), and `observe` (`:429`) with its `lookup` (`:433`): the driver reads the commit, trees, header, and blob by object id and passes the observation to `verdict`, which decides every verdict
+Existing check: `crates/daemon/tests/attestation_verifier.rs:724`, `:202`, `:212`, `:276`, `:505`, `:805`, `:879`, `:951`, `:970`, `:1071` (unaudited)
 Impact: a verdict that depended on worktree state would mark a correct finding stale after an unrelated edit
 Open questions:
 - How are line endings normalized? - resolved with answer.
 - Does the length shortcut hold as AC3 words it, a header size different from the claimed length being `Mismatch` with zero bytes read? AC1 requires a CRLF-form claim of a different length to `Match`, so the implementation reads the blob whenever a line-ending form can reach the claimed length, a deviation from AC3's literal wording. (needs human input)
-- Is `over_budget` from an over-budget delta chain terminal? It depends on the pack layout and a repack can change it, so F8's repack clause excludes it; the ticket's mapping and terminal split are kept for the #1173 (U3) owner to decide. (needs human input)
+- Is `over_budget` from the allocation limit terminal? It depends on how the pack stores the commit, a tree on the path, or the blob, and a repack can change it, so F8's repack clause excludes it; the ticket's mapping and terminal split are kept for the #1173 (U3) owner to decide. (needs human input)
 
 ### p6-new-blob-read-bounded-at-oid
 
@@ -756,23 +757,25 @@ Reachability: test-only - `attestation_verifier::verify` has no production calle
 Status: active - converted by [#1170](https://github.com/ahrav/eidnara/issues/1170)
 Exercised: partial - the per-claim clauses are exercised over bare fixtures; the per-pass budget lands with #1173
 Guarantee: The driver checks the blob's header against the 256 KiB per-blob budget before reading any content, reads at most one blob per claim, opens through the daemon opener with the budget as allocation limit, polls the deadline before the open and before each object read, and opens no worktree path.
-Check: `always` - every claim's `bytes_read <= MAX_BLOB_BYTES`; an over-budget header yields `Unavailable(over_budget)` with `bytes_read == 0` and no blob poll; a passed deadline yields `Unavailable(deadline(stage))` with `bytes_read == 0`; the per-pass clause `bytes_read_pass <= budget` converts with #1173
+Check: `always` - every claim's `bytes_read <= MAX_BLOB_BYTES`; every claim's poll trace is `Open`, `Commit`, one `Tree` per path component, `Header`, then at most one `Blob`, and ends at the first passed poll, each poll preceding its read; an over-budget header yields `Unavailable(over_budget)` with `bytes_read == 0` and no blob poll; a passed deadline yields `Unavailable(deadline(stage))` with `bytes_read == 0`; a missing object, a failed full decode, kind, or hash check, or a delta chain that revisits an entry in the repository's own packs yields `object_unreadable(class)`, an absent entry `path_absent`, and a gitlink or symlink at or above the path or a tree at the final component `not_a_blob(kind)`; no verification writes to the repository; the per-pass clause `bytes_read_pass <= budget` converts with #1173
 Fault/timing angle: the deadline crossing between object reads
-Required faults and enabling state: F4: header over budget, an over-budget delta base, bytes that do not hash to the id; F5: missing and corrupt commit, tree, and blob; F6: absent path, gitlink, symlink, tree, a path beneath a gitlink; F7: deadline before the open and before the header poll
-Confidence: high - [evidence](evidence/p6-new-blob-read-bounded-at-oid.md). Read `lookup` (`crates/daemon/src/attestation_verifier.rs:407`), `read_object` (`:373`), and `header_verdict` (`:292`); `MAX_BLOB_BYTES` (`:34`) is both the header budget and the allocation limit
-Existing check: `crates/daemon/tests/attestation_verifier.rs:504`, `:557`, `:595`, `:621`, `:354`, `:312`, `:457`, `:200` (unaudited)
+Required faults and enabling state: F4: header over budget, an over-budget delta base, bytes that do not hash to the id; F5: missing and corrupt commit, tree, and blob, including a valid prefix with a malformed remainder and a self-referencing ref-delta; F6: absent path, gitlink, symlink, tree, a path beneath a gitlink; F7: deadline before the open and before the header poll
+Confidence: high - [evidence](evidence/p6-new-blob-read-bounded-at-oid.md). Read `lookup` (`crates/daemon/src/attestation_verifier.rs:433`), `read_object` (`:399`), and `header_verdict` (`:298`); `MAX_BLOB_BYTES` (`:38`) is both the header budget and the allocation limit, and `guard_delta_chain` (`:385`) bounds each ref-delta walk before gix reads the object
+Existing check: `crates/daemon/tests/attestation_verifier.rs:541`, `:594`, `:678`, `:704`, `:366`, `:324`, `:485`, `:212`, `:253`, `:475`, `:505`, `:651`, `:1012`, `:1037`, `:782` (unaudited)
 Impact: an unbounded read would let one claim allocate a delta chain or read a large blob inside the pass
 Open questions:
 - Does the allocation limit admit a blob of exactly 256 KiB? - resolved with answer.
-- Which reason does a commit or tree above the allocation limit take? - resolved with answer; the tree case has no test.
+- Which reason does a commit or tree above the allocation limit take? - resolved with answer: `over_budget`; no verifier test covers an oversized commit or tree, or either object on an oversized delta base.
 
 ## Relationships
 
 - `p6-new-verdict-deterministic` and `p6-new-blob-read-bounded-at-oid` rest on
   `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements`:
   the driver uses the daemon opener, which installs the allocation limit and
-  ignores replacements, and follows the order
-  `p6-blob-read-is-header-gated-before-decode` records for `read_selection`.
+  ignores replacements, and header-gates its one blob read, the blob-only
+  analogue of the order `p6-blob-read-is-header-gated-before-decode` records
+  for `read_selection`; its commit and tree reads go to `find_object` under
+  the allocation limit after the delta-chain walk.
 - `p6-new-verdict-deterministic` consumes the claim
   `p6-document-descriptor-identity-digest-and-revision` describes: path,
   digest, and byte length of a document descriptor, plus the anchor's oid.

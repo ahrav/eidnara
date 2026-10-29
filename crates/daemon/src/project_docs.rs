@@ -20,7 +20,7 @@ const DEFAULT_PROJECT_DOC_FILES: [&str; 2] = ["ARCHITECTURE.md", "STRUCTURE.md"]
 /// Entries one `project_docs.files` list may hold.
 const MAX_PROJECT_DOC_FILES: usize = 8;
 const PROJECT_DOCS_DELIMITER: &str = "\n\n---\n\n";
-const MAX_PROJECT_DOC_BYTES: u64 = 256 * 1024;
+pub(crate) const MAX_PROJECT_DOC_BYTES: u64 = 256 * 1024;
 
 /// A configured document's path relative to the project root: `/`-separated ordinary components,
 /// at most 16, none of them `.`, `..`, `.eidnara`, or `.git`, with no variable reference. The path

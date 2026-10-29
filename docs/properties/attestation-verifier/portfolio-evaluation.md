@@ -59,6 +59,7 @@ the current line.
 | G4 | A plugin `RetireDecision` can retire an attestation | queued; owner #1172 with OQ6-15 |
 | G5 | No record on the served form of an unpromoted trusted-class attestation (`ExplicitLabeled`) | queued; owner #1172 |
 | G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1171 |
+| G7 | The two records this part activates, `p6-new-verdict-deterministic` and `p6-new-blob-read-bounded-at-oid`, have no fresh-context four-lens evaluation | queued; owner U1 ([#1170](https://github.com/ahrav/eidnara/issues/1170)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
 
 ## Biases for a human
 
@@ -81,9 +82,17 @@ the current line.
   no line-ending form can reach the claimed length, and reads the blob
   otherwise (`p6-new-verdict-deterministic`). This is recorded for the owner
   as a deviation from AC3's literal wording.
-- `over_budget` from a delta chain above the allocation limit depends on the
-  pack layout, so a repack can change it, while the ticket classes
-  `over_budget` as terminal. The question is recorded for the #1173 owner as
+- `over_budget` from the allocation limit depends on the pack layout of the
+  commit, a tree on the path, or the blob, so a repack can change it, while
+  the ticket classes `over_budget` as terminal. The question is recorded for the #1173 owner as
   `needs human input` (`p6-new-verdict-deterministic`).
 - The verifier maps an allocation refusal on any object, including a commit
-  or tree, to `over_budget`. No test constructs a tree above 256 KiB.
+  or tree, to `over_budget`. No test constructs a commit or tree above
+  256 KiB.
+- gix follows a ref-delta chain without a hop bound. The driver walks each
+  object's entry in the repository's own packs with the hop bound of
+  `git_sources::file_object_kind` before gix reads it, so a chain that
+  revisits an entry is `object_unreadable(class)`; a chain through an
+  alternate object directory is outside that walk.
+- A raw digest match counts only when the header size equals the claimed
+  length, so a claim with the right digest and a wrong length is `Mismatch`.
