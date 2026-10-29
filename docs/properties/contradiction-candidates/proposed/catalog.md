@@ -772,9 +772,9 @@ the retired-evidence, foreign-incarnation, stale-digest, and future-tip rows
 are left out and counted `read_filtered_stale` = 4 (`:2005`), a superseded
 decision with rows present answers `not_live` (`:2095`), an unknown decision
 answers `not_live` (`:2111`), and a foreign root answers `project_mismatch`
-(`:2136`), also with a bad body (`:2145`). The tip, the reviewer job facts,
-and the tip and job facts are unchanged after the first read (`:1952`,
-`:1953`) and the table's rows after the walk (`:2007`). Not constructed: the
+(`:2136`), also with a bad body (`:2145`). The tip and the reviewer job facts
+are unchanged after the first read (`:1952`, `:1953`), and the table's rows
+are unchanged after the walk (`:2007`). Not constructed: the
 other `eligible` refusals (another domain, a foreign scope, hidden, or a
 contradicted, rejected, or quarantined disposition) through the read; the
 eligibility predicate's own test covers them
