@@ -89,10 +89,11 @@ the current line.
 - The verifier maps an allocation refusal on any object, including a commit
   or tree, to `over_budget`. No test constructs a commit or tree above
   256 KiB.
-- gix follows a ref-delta chain without a hop bound. The driver walks each
-  object's entry in the repository's own packs with the hop bound of
-  `git_sources::file_object_kind` before gix reads it, so a chain that
-  revisits an entry is `object_unreadable(class)`; a chain through an
-  alternate object directory is outside that walk.
+- gix follows a ref-delta chain without a hop bound. The driver decodes each
+  object held in the repository's own packs itself, after
+  `git_sources::OwnPacks` walks the object's entry with the hop bound of the
+  index's entry count, so a chain that revisits an entry is
+  `object_unreadable(class)`; an object in an alternate object directory reads
+  through the object store, outside that walk.
 - A raw digest match counts only when the header size equals the claimed
   length, so a claim with the right digest and a wrong length is `Mismatch`.

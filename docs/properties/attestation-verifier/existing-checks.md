@@ -24,16 +24,16 @@ production guards. References were verified at the #1170 branch.
 | Plugin class table | `crates/daemon/src/kernel_routes/commit.rs:370` (`derive_classes`) | closed `source_kind` table; `verifier` is outside it | unaudited |
 | Plugin replacement | `crates/daemon/src/kernel_routes/commit.rs:1002` | a replacement carries the route's `source_kind` | unaudited |
 | Daemon isolated open | `crates/daemon/src/git_sources.rs:131` (`isolated_options`), `:138` (`open`), `:148` (`open_with_slots`) | allocation limit after repository configuration; replacement refs ignored | unaudited |
-| Header pass before decode | `crates/daemon/src/git_sources.rs:442` and `:456` in `read_selection` (`:390`); `exceeds_allocation` at `:354` | headers judged before any decode; allocation refusals named | unaudited |
+| Header pass before decode | `crates/daemon/src/git_sources.rs:596` and `:610` in `read_selection` (`:544`); `exceeds_allocation` at `:508` | headers judged before any decode; allocation refusals named | unaudited |
 | Kernel checkout open | `crates/kernel/src/applicability/checkout.rs:639` (`open_isolated`) | isolated, command configuration stripped; no allocation limit; replacements honored | unaudited |
 | Document caps | `crates/daemon/src/project_docs.rs:23` (`MAX_PROJECT_DOC_BYTES`); `crates/daemon/src/harness_sources.rs:642` (`MAX_SOURCE_UNIT_BYTES`); unit cap applied at `crates/daemon/src/source_capture.rs:1297` | 256 KiB read, 64 KiB published | unaudited |
 | Document publisher class | `crates/daemon/src/source_capture.rs:922` | documents publish at `Sensitive` | unaudited |
 | Causality parents | `crates/kernel/src/claim_causality.rs:218` (`record_claim_causality`), `:38` (`MAX_DERIVATION_PARENTS`) | live exact parents; bounded parent list | unaudited |
-| Verifier header gate | `crates/daemon/src/attestation_verifier.rs:298` (`header_verdict`), used at `:433` (`lookup`) and `:314` (`verdict`) | header over 256 KiB is `over_budget`; a claimed length above twice or below half the header size is `Mismatch`; both before any content read | unaudited |
-| Verifier object read | `crates/daemon/src/attestation_verifier.rs:399` (`read_object`) | kind and hash checked after decode, decoded length recorded first; allocation refusal is `over_budget` | unaudited |
-| Verifier delta-chain walk | `crates/daemon/src/attestation_verifier.rs:385` (`guard_delta_chain`) via `crates/daemon/src/git_sources.rs:205` (`file_object_kind`) | a ref-delta chain that revisits an entry in the repository's own packs is `object_unreadable(class)` before gix reads it | unaudited |
-| Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:372` (`poll`), `:337` (`Deadline`) | polled before the open and before every object read | unaudited |
-| Verifier claim path | `crates/daemon/src/attestation_verifier.rs:68` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
+| Verifier header gate | `crates/daemon/src/attestation_verifier.rs:313` (`header_verdict`), used at `:532` (`lookup`) and `:329` (`verdict`) | header over 256 KiB is `over_budget`; a claimed length above twice or below half the header size is `Mismatch`; both before any content read | unaudited |
+| Verifier object read | `crates/daemon/src/attestation_verifier.rs:469` (`Objects::read`), `:444` (`Objects::blob_header`) | own packs, then the loose store, then the object store, each under the allocation limit; kind and hash checked after decode, decoded length recorded first; allocation refusal is `over_budget`; slot exhaustion reopens the repository once | unaudited |
+| Verifier delta-chain walk | `crates/daemon/src/git_sources.rs:314` (`OwnPacks::header`), `:329` (`OwnPacks::decode`), `:444` (`entry_header`) | a ref-delta chain that revisits an entry in the repository's own packs is `object_unreadable(class)` before any decode | unaudited |
+| Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:387` (`poll`), `:352` (`Deadline`) | polled before the open and before every object read | unaudited |
+| Verifier claim path | `crates/daemon/src/attestation_verifier.rs:71` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
 
 ## Tests
 
@@ -113,6 +113,8 @@ production guards. References were verified at the #1170 branch.
 | `a_blob_mode_entry_naming_another_kind_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1012` | blob read bounded | unaudited |
 | `each_deadline_poll_precedes_its_read` | `crates/daemon/tests/attestation_verifier.rs:1037` | blob read bounded | unaudited |
 | `a_non_bare_root_answers_from_the_object_store_not_the_worktree` | `crates/daemon/tests/attestation_verifier.rs:1071` | verdict deterministic | unaudited |
+| `a_ref_delta_in_an_own_pack_decodes_against_its_base_in_that_pack` | `crates/daemon/tests/attestation_verifier.rs:1115` | blob read bounded | unaudited |
+| `objects_in_an_alternate_with_more_packs_than_index_slots_match` | `crates/daemon/tests/attestation_verifier.rs:1146` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
 | `evidence_cited_in_refuses_a_deleted_evidence_row_that_live_decisions_still_cite` | `crates/kernel/tests/kernel_slice.rs:2248` | artifact deletion | unaudited |
 
 ## Categories with no check found

@@ -6,7 +6,7 @@ The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/i
 
 ## Evidence trail
 
-`read_selection` (`crates/daemon/src/git_sources.rs:390`) reads every header with `try_find_header` (`:442`) and charges it before the second loop decodes any object with `find_object` (`:456`), maps an allocation refusal through `exceeds_allocation` (`:354`), charges the decoded length, and refuses a hash mismatch. The verifier reuses `open`, `object_format`, `parse_oid`, and `exceeds_allocation`; this ticket widens `exceeds_allocation` to `pub(crate)`.
+`read_selection` (`crates/daemon/src/git_sources.rs:544`) reads every header with `try_find_header` (`:596`) and charges it before the second loop decodes any object with `find_object` (`:610`), maps an allocation refusal through `exceeds_allocation` (`:508`), charges the decoded length, and refuses a hash mismatch. The verifier reuses `open`, `object_format`, `parse_oid`, and `exceeds_allocation`; this ticket widens `exceeds_allocation` to `pub(crate)`.
 
 ## Failure scenario
 
@@ -31,7 +31,7 @@ A selection with one oversized header after a small object.
 
 ### Q: Does the U1 verifier follow the same order?
 
-- Sources examined: `lookup` (`crates/daemon/src/attestation_verifier.rs:433`) and `crates/daemon/tests/attestation_verifier.rs:541`.
+- Sources examined: `lookup` (`crates/daemon/src/attestation_verifier.rs:532`) and `crates/daemon/tests/attestation_verifier.rs:541`.
 - Findings: Yes: the header read and `header_verdict` precede the one blob read, and the test asserts no blob poll after an over-budget header.
 - Missing evidence: none.
 - Conclusion: resolved with answer: covered for the verifier by `p6-new-blob-read-bounded-at-oid`.

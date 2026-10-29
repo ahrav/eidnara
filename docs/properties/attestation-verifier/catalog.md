@@ -51,7 +51,7 @@ New behavior: N1 verifiability; N2 verdict; N3 attestation; N4 witness; N5
 stale path; N6 party; N7 bounded pass; N8 applicability. This ticket lands N2
 in `crates/daemon/src/attestation_verifier.rs`: the `Claim`, `Observed`,
 `Verdict`, and `Reason` domain, the pure `verdict` and `header_verdict`
-functions, and the `verify` driver over `git_sources::open`.
+functions, and the `verify` driver over `git_sources::open_with_slots`.
 
 ## Status vocabulary
 
@@ -343,7 +343,7 @@ Guarantee: `read_selection` judges every selected object's header against the pe
 Check: `always` - for every selection the header pass refused, no `find_object` call ran; for every accepted object, its decoded bytes hash to its id
 Fault/timing angle: none
 Required faults and enabling state: F4: a header over the bound; a header under the bound with an over-budget delta base; bytes that do not hash to the id
-Confidence: high - [evidence](evidence/p6-blob-read-is-header-gated-before-decode.md). Read the header loop at `crates/daemon/src/git_sources.rs:442` and the decode loop at `:456` in `read_selection` (`:390`)
+Confidence: high - [evidence](evidence/p6-blob-read-is-header-gated-before-decode.md). Read the header loop at `crates/daemon/src/git_sources.rs:596` and the decode loop at `:610` in `read_selection` (`:544`)
 Existing check: none direct; `p2-git-open-is-isolated-and-allocation-bounded` covers the open, and `crates/daemon/tests/git_sources.rs:549`, `:827` cover the refusals (unaudited)
 Impact: a decode before the gate would let one object allocate past the bound
 Open questions:
@@ -476,8 +476,8 @@ Type: safety
 Reachability: test-only - this label covers the Kernel opener and the verifier clauses: the applicability engine has no production caller, no production code builds an `ApplicabilityCandidate`, and `read_selection` and `attestation_verifier::verify` have no production caller. The shared daemon opener is default-production through `memory_capture::head::observe_head` (`crates/daemon/src/memory_capture/head.rs:32`), called after native capture output parses (`crates/daemon/src/memory_capture/native.rs:614`), as `p2-git-open-is-isolated-and-allocation-bounded` records
 Status: active
 Exercised: partial - the daemon opener's allocation limit is exercised by delta-base tests; no test reads a delta base or a replacement ref through the Kernel opener
-Guarantee: The Kernel checkout open is `Options::isolated()` with command configuration stripped, no `gitoxide.objects.allocLimit`, and replacement refs left to the repository's configuration; under gix 0.87.1 `refs/replace` loads only when the repository sets `core.useReplaceRefs = false`, so an entry alone substitutes nothing. `git_sources::open` installs the limit after the repository's configuration and ignores replacements.
-Check: `always` - the verifier opens repositories only through `git_sources::open`, and a delta-packed blob whose base exceeds the limit is refused before allocation
+Guarantee: The Kernel checkout open is `Options::isolated()` with command configuration stripped, no `gitoxide.objects.allocLimit`, and replacement refs left to the repository's configuration; under gix 0.87.1 `refs/replace` loads only when the repository sets `core.useReplaceRefs = false`, so an entry alone substitutes nothing. `git_sources::open` and `git_sources::open_with_slots` install the limit after the repository's configuration and ignore replacements.
+Check: `always` - the verifier opens repositories only through `git_sources::open_with_slots` and, after a store lookup exhausts the index slots, `git_sources::open`; it reads its own packs and loose objects under the same limit; and a delta-packed blob whose base exceeds the limit is refused before allocation
 Fault/timing angle: none
 Required faults and enabling state: F4: an over-budget delta base; a `refs/replace` entry with `core.useReplaceRefs = false`
 Confidence: high - [evidence](evidence/p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements.md). Read `open_isolated` (`crates/kernel/src/applicability/checkout.rs:639`) and `isolated_options` and `open_with_slots` (`crates/daemon/src/git_sources.rs:131`, `:148`); no `allocLimit` or `ignore_replacements` appears under `crates/kernel/src`
@@ -742,7 +742,7 @@ Guarantee: The verdict is a function of object-store contents, the claim's path,
 Check: `always` - equal claims against equal object-store contents give equal verdicts, except when either evaluation returns a transient reason (`deadline`, `object_unreadable`, `repository_unopenable`, or `repository_unbound`, which environmental failures such as descriptor exhaustion can produce) or `over_budget` from the allocation limit; for an `Observed::Content` admitted by the header gate, `Match` holds iff the header size equals the claimed length and the raw digest equals the claim, or the exact-length normalized digest equals it; the verdict function takes no repository handle and no clock
 Fault/timing angle: a worktree edit, a HEAD move, or a repack between two evaluations of one claim
 Required faults and enabling state: F8: worktree edit, HEAD move, repack, excluding allocation-limit refusals; F9: an LF blob with a CRLF-form digest, and the reverse
-Confidence: high - [evidence](evidence/p6-new-verdict-deterministic.md). Read `verdict` (`crates/daemon/src/attestation_verifier.rs:314`), `Digests::of` (`:242`), and `observe` (`:429`) with its `lookup` (`:433`): the driver reads the commit, trees, header, and blob by object id and passes the observation to `verdict`, which decides every verdict
+Confidence: high - [evidence](evidence/p6-new-verdict-deterministic.md). Read `verdict` (`crates/daemon/src/attestation_verifier.rs:329`), `Digests::of` (`:245`), and `observe` (`:528`) with its `lookup` (`:532`): the driver reads the commit, trees, header, and blob by object id and passes the observation to `verdict`, which decides every verdict
 Existing check: `crates/daemon/tests/attestation_verifier.rs:724`, `:202`, `:212`, `:276`, `:505`, `:805`, `:879`, `:951`, `:970`, `:1071` (unaudited)
 Impact: a verdict that depended on worktree state would mark a correct finding stale after an unrelated edit
 Open questions:
@@ -760,7 +760,7 @@ Guarantee: The driver checks the blob's header against the 256 KiB per-blob budg
 Check: `always` - every claim's `bytes_read <= MAX_BLOB_BYTES`; every claim's poll trace is `Open`, `Commit`, one `Tree` per path component, `Header`, then at most one `Blob`, and ends at the first passed poll, each poll preceding its read; an over-budget header yields `Unavailable(over_budget)` with `bytes_read == 0` and no blob poll; a passed deadline yields `Unavailable(deadline(stage))` with `bytes_read == 0`; a missing object, a failed full decode, kind, or hash check, or a delta chain that revisits an entry in the repository's own packs yields `object_unreadable(class)`, an absent entry `path_absent`, and a gitlink or symlink at or above the path or a tree at the final component `not_a_blob(kind)`; no verification writes to the repository; the per-pass clause `bytes_read_pass <= budget` converts with #1173
 Fault/timing angle: the deadline crossing between object reads
 Required faults and enabling state: F4: header over budget, an over-budget delta base, bytes that do not hash to the id; F5: missing and corrupt commit, tree, and blob, including a valid prefix with a malformed remainder and a self-referencing ref-delta; F6: absent path, gitlink, symlink, tree, a path beneath a gitlink; F7: deadline before the open and before the header poll
-Confidence: high - [evidence](evidence/p6-new-blob-read-bounded-at-oid.md). Read `lookup` (`crates/daemon/src/attestation_verifier.rs:433`), `read_object` (`:399`), and `header_verdict` (`:298`); `MAX_BLOB_BYTES` (`:38`) is both the header budget and the allocation limit, and `guard_delta_chain` (`:385`) bounds each ref-delta walk before gix reads the object
+Confidence: high - [evidence](evidence/p6-new-blob-read-bounded-at-oid.md). Read `lookup` (`crates/daemon/src/attestation_verifier.rs:532`), `Objects::read` (`:469`), `Objects::blob_header` (`:444`), and `header_verdict` (`:313`); `MAX_BLOB_BYTES` (`:37`) is both the header budget and the allocation limit of the store, the own packs, and the loose store, and `OwnPacks::decode` (`crates/daemon/src/git_sources.rs:329`) bounds each ref-delta walk through `entry_header` (`:444`) before it decodes the object
 Existing check: `crates/daemon/tests/attestation_verifier.rs:541`, `:594`, `:678`, `:704`, `:366`, `:324`, `:485`, `:212`, `:253`, `:475`, `:505`, `:651`, `:1012`, `:1037`, `:782` (unaudited)
 Impact: an unbounded read would let one claim allocate a delta chain or read a large blob inside the pass
 Open questions:
@@ -774,8 +774,10 @@ Open questions:
   the driver uses the daemon opener, which installs the allocation limit and
   ignores replacements, and header-gates its one blob read, the blob-only
   analogue of the order `p6-blob-read-is-header-gated-before-decode` records
-  for `read_selection`; its commit and tree reads go to `find_object` under
-  the allocation limit after the delta-chain walk.
+  for `read_selection`; its commit and tree reads decode from the
+  repository's own packs after the bounded delta-chain walk, or read from its
+  loose store, under the allocation limit, and every other object reads
+  through `find_object` under the same limit.
 - `p6-new-verdict-deterministic` consumes the claim
   `p6-document-descriptor-identity-digest-and-revision` describes: path,
   digest, and byte length of a document descriptor, plus the anchor's oid.
