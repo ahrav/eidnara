@@ -1592,7 +1592,7 @@ describe("eidnara_memory candidates", () => {
     };
 
     function candidatesHarness(
-        replies: unknown[],
+        replies: unknown[] | ((body: Record<string, unknown>) => unknown),
         allowedActions?: readonly EidnaraMemoryAction[],
     ) {
         const calls: { method: string; body: Record<string, unknown> }[] = [];
@@ -1600,8 +1600,9 @@ describe("eidnara_memory candidates", () => {
             connectionFileExists: () => true,
             ensureRoute: async () => {},
             call: async (call: { method: string; body: unknown }) => {
-                calls.push({ method: call.method, body: call.body as Record<string, unknown> });
-                return replies.shift();
+                const body = call.body as Record<string, unknown>;
+                calls.push({ method: call.method, body });
+                return typeof replies === "function" ? replies(body) : replies.shift();
             },
         };
         const definition = createEidnaraMemoryTools({
@@ -1775,6 +1776,15 @@ describe("eidnara_memory candidates", () => {
             {
                 kind: "page",
                 as_of: 41,
+                items: [
+                    { ...ITEM, matched_terms: 4, score: 10_000 },
+                    { ...ITEM, created_at_ms: 1 },
+                ],
+                next: null,
+            },
+            {
+                kind: "page",
+                as_of: 41,
                 items: [{ ...ITEM, evidence_id: "srcev:\ud800" }],
                 next: null,
             },
@@ -1800,6 +1810,7 @@ describe("eidnara_memory candidates", () => {
             "control character in decision_id",
             "terms past the store's u32",
             "empty next",
+            "an evidence id named twice",
             "a lone surrogate in evidence_id",
             "a state beside a page",
         ]) {
@@ -1861,27 +1872,38 @@ describe("eidnara_memory candidates", () => {
     });
 
     test("renders complete rows under the response budget and takes next from a page of that size", async () => {
-        const long = (tag: string) => `srcev:${tag}:${"x".repeat(500)}`;
-        const wide = Array.from({ length: 64 }, (_, index) => ({
-            ...ITEM,
-            evidence_id: long(String(index).padStart(3, "0")),
-            decision_id: `dec:${"y".repeat(500)}`,
-        }));
-        const h = candidatesHarness([
-            { kind: "page", as_of: 41, items: wide, next: `7500.1.${"61".repeat(4)}` },
-            // The re-request with the fitted limit answers a page of at most that size and the cursor after its last row.
-            { kind: "page", as_of: 41, items: wide.slice(0, 1), next: "7500.1.6162" },
-        ]);
-        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
-        expect(text).not.toStartWith("Error:");
-        expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(16 * 1024);
-        const parsed = JSON.parse(text);
-        expect(parsed.candidates.length).toBe(1);
-        const limits = h.calls.map((call) => call.body.limit);
-        expect(limits[0]).toBeUndefined();
-        expect(limits[1]).toBeGreaterThan(0);
-        expect(limits[1]).toBeLessThan(64);
-        expect(parsed.next).toBe("7500.1.6162");
+        // Rows of several id lengths, each page carrying a cursor of the longest form the store issues (a 512-byte id in hex).
+        for (const idLength of [120, 150, 180, 215, 250, 300, 350, 400, 450, 500]) {
+            const wide = Array.from({ length: 64 }, (_, index) => ({
+                ...ITEM,
+                evidence_id: `srcev:${String(index).padStart(3, "0")}:${"x".repeat(idLength)}`,
+                decision_id: `dec:${"y".repeat(idLength)}`,
+            }));
+            const cursorAfter = (count: number) =>
+                `10000.${"9".repeat(19)}.${String(count).padStart(2, "0").repeat(512)}`;
+            // The daemon answers the leading rows of the requested size and the cursor after its last row.
+            const h = candidatesHarness((body) => {
+                const limit = typeof body.limit === "number" ? body.limit : 64;
+                return {
+                    kind: "page",
+                    as_of: 41,
+                    items: wide.slice(0, limit),
+                    next: cursorAfter(limit),
+                };
+            });
+            const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+            expect(text, `id length ${idLength}`).not.toStartWith("Error:");
+            expect(Buffer.byteLength(text, "utf8"), `id length ${idLength}`).toBeLessThanOrEqual(
+                16 * 1024,
+            );
+            const parsed = JSON.parse(text);
+            const limits = h.calls.map((call) => call.body.limit);
+            expect(limits[0]).toBeUndefined();
+            expect(limits[1], `id length ${idLength}`).toBeGreaterThan(0);
+            expect(limits[1]).toBeLessThan(64);
+            expect(parsed.candidates.length).toBe(limits[1]);
+            expect(parsed.next).toBe(cursorAfter(limits[1] as number));
+        }
     });
 
     test("refuses a page naming another memory and paging fields the schema would refuse", async () => {
@@ -1895,7 +1917,7 @@ describe("eidnara_memory candidates", () => {
         ]);
         const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
         expect(text).toBe(
-            "Error: the daemon answered candidates for another memory than mem_labeled or more rows than asked; nothing was rendered. Retry once; report it to the user if it repeats.",
+            "Error: the daemon answered candidates for another memory than mem_labeled; nothing was rendered. Retry once; report it to the user if it repeats.",
         );
         expect(text).not.toContain("srcev:abc");
         expect(await h.execute({ action: "candidates", objectId: "m", limit: "5" })).toBe(

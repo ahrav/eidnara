@@ -1,6 +1,11 @@
-import { isAvailable, type KernelClient, renderToolStateText } from "../../shared/kernel-client";
+import {
+    type CandidatesResult,
+    isAvailable,
+    type KernelClient,
+    renderToolStateText,
+} from "../../shared/kernel-client";
 import { MemoryInputError } from "../../shared/kernel-client/anti-memory";
-import { CANDIDATES_PAGE_MAX } from "../../shared/kernel-client/wire";
+import { CANDIDATES_PAGE_MAX, type CandidateItem } from "../../shared/kernel-client/wire";
 import { EIDNARA_MEMORY_RESPONSE_BUDGET_BYTES } from "./constants";
 import type { EidnaraMemoryArgs } from "./types";
 
@@ -40,10 +45,10 @@ function pagingOf(args: EidnaraMemoryArgs): { after?: string | null; limit?: num
     };
 }
 
-type CandidatesPage = Extract<Awaited<ReturnType<KernelClient["candidates"]>>, { kind: "page" }>;
+type CandidatesPage = Extract<CandidatesResult, { kind: "page" }>;
 
 /** One rendered row: the ids and integers the model reads and the dispute form that would confirm the row. */
-function renderRow(item: CandidatesPage["items"][number]) {
+function renderRow(item: CandidateItem) {
     return {
         evidenceId: item.evidence_id,
         decisionId: item.decision_id,
@@ -61,7 +66,7 @@ function renderRow(item: CandidatesPage["items"][number]) {
     };
 }
 
-/** How many leading rows render inside `EIDNARA_MEMORY_RESPONSE_BUDGET_BYTES` beside `envelope`; the ids' caps keep one row inside it. */
+/** How many leading rows render inside `EIDNARA_MEMORY_RESPONSE_BUDGET_BYTES` beside `envelope`, which carries every other field of the reply, `next` included; the ids' caps keep one row inside it. */
 function rowsWithinBudget(envelope: Record<string, unknown>, rows: unknown[]): number {
     let used = Buffer.byteLength(JSON.stringify({ ...envelope, candidates: [] }), "utf8");
     for (const [index, row] of rows.entries()) {
@@ -81,7 +86,7 @@ export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<s
             ...(limit === undefined ? {} : { limit }),
             ...(input.signal ? { signal: input.signal } : {}),
         });
-    const judge = (result: Awaited<ReturnType<typeof ask>>, limit: number) => {
+    const judge = (result: CandidatesResult, limit: number) => {
         if (!isAvailable(result)) return `Error: ${renderToolStateText(result.state)}`;
         if (result.kind === "terminal") {
             switch (result.terminal) {
@@ -94,32 +99,37 @@ export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<s
                     return "Error: the candidate store is unavailable (store_unavailable); retry later.";
             }
         }
-        if (
-            result.items.length > limit ||
-            result.items.some((item) => item.decision_object_id !== objectId)
-        ) {
-            return `Error: the daemon answered candidates for another memory than ${objectId} or more rows than asked; nothing was rendered. Retry once; report it to the user if it repeats.`;
+        if (result.items.length > limit) {
+            return `Error: the daemon answered ${result.items.length} candidates for a page of ${limit}; nothing was rendered. Retry once; report it to the user if it repeats.`;
+        }
+        if (result.items.some((item) => item.decision_object_id !== objectId)) {
+            return `Error: the daemon answered candidates for another memory than ${objectId}; nothing was rendered. Retry once; report it to the user if it repeats.`;
         }
         return result;
     };
-    let page = judge(await ask(), paging.limit ?? CANDIDATES_PAGE_MAX);
-    if (typeof page === "string") return page;
-    const envelope = {
+    const note = OVERLAP_NOTE + (input.disputeAdmitted ? FILE_FORM_NOTE : REPORT_FORM_NOTE);
+    // The reply's fields beside the rows, measured with the rows; `next` is a cursor of up to about 1 KiB.
+    const envelope = (page: CandidatesPage) => ({
         action: "candidates",
         objectId,
-        note: OVERLAP_NOTE + (input.disputeAdmitted ? FILE_FORM_NOTE : REPORT_FORM_NOTE),
+        note,
         asOf: page.as_of,
-    };
+        next: page.next,
+    });
+    let page = judge(await ask(), paging.limit ?? CANDIDATES_PAGE_MAX);
+    if (typeof page === "string") return page;
     let rows = page.items.map(renderRow);
-    const fitted = rowsWithinBudget(envelope, rows);
+    const fitted = rowsWithinBudget(envelope(page), rows);
     if (fitted < rows.length) {
         // The cursor is opaque, so the page of the fitted size comes from the daemon: its next lands after the last rendered row.
-        page = judge(await ask(Math.max(fitted, 1)), Math.max(fitted, 1));
+        const limit = Math.max(fitted, 1);
+        page = judge(await ask(limit), limit);
         if (typeof page === "string") return page;
         rows = page.items.map(renderRow);
-        if (rowsWithinBudget({ ...envelope, asOf: page.as_of }, rows) < rows.length) {
-            return `Error: a page of ${rows.length} candidates for ${objectId} does not fit the response budget; retry with a smaller limit.`;
+        if (rowsWithinBudget(envelope(page), rows) < rows.length) {
+            // The second page holds other rows than the first, so the store changed between the two reads.
+            return `Error: the candidates of ${objectId} changed between two reads; nothing was rendered. Retry once; report it to the user if it repeats.`;
         }
     }
-    return JSON.stringify({ ...envelope, asOf: page.as_of, candidates: rows, next: page.next });
+    return JSON.stringify({ ...envelope(page), candidates: rows });
 }

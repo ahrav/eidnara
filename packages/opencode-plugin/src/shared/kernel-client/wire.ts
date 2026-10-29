@@ -755,6 +755,8 @@ export function parseCandidatesResponse(raw: unknown): Parsed<CandidatesPayload>
         if (!item || item.publish_tip > raw.as_of) return failed();
         const previous = items.at(-1);
         if (previous && !inReaderOrder(previous, item)) return failed();
+        // The store keys a row by its evidence id within the decision, so a page names each id once.
+        if (items.some((earlier) => earlier.evidence_id === item.evidence_id)) return failed();
         items.push(item);
     }
     return {
