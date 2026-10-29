@@ -13,10 +13,10 @@ branch.
 | F2 | Model decision superseded, retired, or re-disposed between selection and commit | constructible: Kernel slice fixtures; the verifier write set lands with #1172 |
 | F3 | Evidence or anchor invalidated in that window; `delete_artifact` bypassing the citation guard | constructible: `retire_evidence` and `delete_artifact` in Kernel tests |
 | F4 | Header over budget; header under budget with an over-budget delta base; hash mismatch on decode | constructible: large blobs, `write_delta_pack` in `crates/daemon/tests/support/git_repo.rs`, and rewritten loose objects |
-| F5 | Partial clone or missing object; corrupt commit, tree, or blob | constructible: a deleted loose object stands in for a missing promisor object; a rewritten loose object for corruption |
+| F5 | Partial clone or missing object; corrupt commit, tree, or blob | constructible: a deleted loose object stands in for a missing promisor object; a valid object stored under another id, or an undecodable object written with `git hash-object --literally`, for corruption |
 | F6 | Path absent; gitlink, symlink, or tree at the path; path beneath a gitlink | constructible: `git mktree --missing` in a bare fixture |
 | F7 | Deadline before the pass, between decisions, and during a read; budget cancellation | constructible for one claim: a cancelled or expired `EvalBudget`, and a stage-aware `Deadline` double; between decisions with #1173 |
-| F8 | Worktree edit, HEAD move, repack between two verdicts | constructible: a linked worktree of the bare fixture, `git update-ref`, `git repack -a -d` |
+| F8 | Worktree edit, HEAD move, repack between two verdicts; the repack clause excludes over-budget delta chains, whose verdict depends on pack layout | constructible: a linked worktree of the bare fixture, `git update-ref`, `git repack -a -d` |
 | F9 | `text eol`, `ident`, encoding, or clean filter attributes at the oid | partial: the LF and CRLF forms are constructible; `ident`, encoding, and clean filters stay false mismatches by the OQ6-8 decision |
 | F10 | Operation key replayed with the same and with a different verdict | constructible with #1172 |
 | F11 | Fault-injected rollback after the admission; crash after commit then fresh open | constructible with #1172 |

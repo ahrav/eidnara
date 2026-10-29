@@ -29,10 +29,10 @@ production guards. References were verified at the #1170 branch.
 | Document caps | `crates/daemon/src/project_docs.rs:23` (`MAX_PROJECT_DOC_BYTES`); `crates/daemon/src/harness_sources.rs:642` (`MAX_SOURCE_UNIT_BYTES`); unit cap applied at `crates/daemon/src/source_capture.rs:1297` | 256 KiB read, 64 KiB published | unaudited |
 | Document publisher class | `crates/daemon/src/source_capture.rs:922` | documents publish at `Sensitive` | unaudited |
 | Causality parents | `crates/kernel/src/claim_causality.rs:218` (`record_claim_causality`), `:38` (`MAX_DERIVATION_PARENTS`) | live exact parents; bounded parent list | unaudited |
-| Verifier header gate | `crates/daemon/src/attestation_verifier.rs:272` (`header_verdict`), used at `:377` (`observe`) | header over 256 KiB is `over_budget`; an unreachable length is `Mismatch`; both before any content read | unaudited |
-| Verifier object read | `crates/daemon/src/attestation_verifier.rs:350` (`read_object`) | kind and hash checked after decode; allocation refusal is `over_budget` | unaudited |
-| Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:340` (`poll`), `:302` (`Deadline`) | polled before the open and before every object read | unaudited |
-| Verifier claim path | `crates/daemon/src/attestation_verifier.rs:50` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
+| Verifier header gate | `crates/daemon/src/attestation_verifier.rs:292` (`header_verdict`), used at `:407` (`lookup`) and `:306` (`verdict`) | header over 256 KiB is `over_budget`; an unreachable length is `Mismatch`; both before any content read | unaudited |
+| Verifier object read | `crates/daemon/src/attestation_verifier.rs:373` (`read_object`) | kind and hash checked after decode, decoded length recorded first; allocation refusal is `over_budget` | unaudited |
+| Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:362` (`poll`), `:327` (`Deadline`) | polled before the open and before every object read | unaudited |
+| Verifier claim path | `crates/daemon/src/attestation_verifier.rs:61` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
 
 ## Tests
 
@@ -87,23 +87,24 @@ production guards. References were verified at the #1170 branch.
 | `detail_operation_and_parent_list_must_agree_with_the_registry` | `crates/kernel/tests/kernel_claim_causality.rs:710` | derived reinjection | unaudited |
 | `refused_selections_publish_nothing_and_encodings_are_dispositions` | `crates/daemon/tests/git_sources.rs:549` | header gate; daemon opener | unaudited |
 | `delta_packed_commit_against_an_oversized_base_is_refused` | `crates/daemon/tests/git_sources.rs:827` | header gate; daemon opener | unaudited |
-| `the_fixture_has_no_worktree` | `crates/daemon/tests/attestation_verifier.rs:183` | verdict deterministic | unaudited |
-| `committed_bytes_match_and_a_later_commit_mismatches` | `crates/daemon/tests/attestation_verifier.rs:193` | verdict deterministic; blob read bounded | unaudited |
-| `a_nested_path_walks_one_tree_per_component` | `crates/daemon/tests/attestation_verifier.rs:234` | blob read bounded | unaudited |
-| `line_endings_normalize_in_either_direction` | `crates/daemon/tests/attestation_verifier.rs:257` | verdict deterministic | unaudited |
-| `entries_that_hold_no_blob_are_named_by_kind` | `crates/daemon/tests/attestation_verifier.rs:305` | blob read bounded | unaudited |
-| `missing_or_corrupt_objects_are_unreadable_never_absent` | `crates/daemon/tests/attestation_verifier.rs:347` | blob read bounded | unaudited |
-| `a_directory_that_is_no_repository_is_unopenable` | `crates/daemon/tests/attestation_verifier.rs:408` | blob read bounded | unaudited |
-| `the_driver_writes_nothing` | `crates/daemon/tests/attestation_verifier.rs:418` | blob read bounded | unaudited |
-| `the_header_gates_every_blob_read` | `crates/daemon/tests/attestation_verifier.rs:438` | blob read bounded | unaudited |
-| `a_blob_whose_delta_base_exceeds_the_allocation_limit_is_over_budget` | `crates/daemon/tests/attestation_verifier.rs:491` | blob read bounded; Kernel opener contrast | unaudited |
-| `a_passed_deadline_opens_no_repository` | `crates/daemon/tests/attestation_verifier.rs:529` | blob read bounded | unaudited |
-| `a_deadline_before_the_header_poll_reads_no_blob` | `crates/daemon/tests/attestation_verifier.rs:555` | blob read bounded | unaudited |
-| `verdicts_survive_a_worktree_edit_a_head_move_and_a_repack` | `crates/daemon/tests/attestation_verifier.rs:575` | verdict deterministic | unaudited |
-| `claim_paths_follow_the_document_path_rule` | `crates/daemon/tests/attestation_verifier.rs:625` | blob read bounded | unaudited |
-| `the_pure_verdict_compares_digests_after_the_header_gate` | `crates/daemon/tests/attestation_verifier.rs:648` | verdict deterministic | unaudited |
-| `normalized_digests_exist_only_for_a_reachable_length` | `crates/daemon/tests/attestation_verifier.rs:704` | verdict deterministic | unaudited |
-| `reasons_have_stable_names_and_a_terminal_split` | `crates/daemon/tests/attestation_verifier.rs:718` | reason names for #1173 counters | unaudited |
+| `the_fixture_has_no_worktree` | `crates/daemon/tests/attestation_verifier.rs:190` | verdict deterministic | unaudited |
+| `committed_bytes_match_and_a_later_commit_mismatches` | `crates/daemon/tests/attestation_verifier.rs:200` | verdict deterministic; blob read bounded | unaudited |
+| `a_nested_path_walks_one_tree_per_component` | `crates/daemon/tests/attestation_verifier.rs:241` | blob read bounded | unaudited |
+| `line_endings_normalize_in_either_direction` | `crates/daemon/tests/attestation_verifier.rs:264` | verdict deterministic | unaudited |
+| `entries_that_hold_no_blob_are_named_by_kind` | `crates/daemon/tests/attestation_verifier.rs:312` | blob read bounded | unaudited |
+| `missing_or_corrupt_objects_are_unreadable_never_absent` | `crates/daemon/tests/attestation_verifier.rs:354` | blob read bounded | unaudited |
+| `a_directory_that_is_no_repository_is_unopenable` | `crates/daemon/tests/attestation_verifier.rs:447` | blob read bounded | unaudited |
+| `the_driver_writes_nothing` | `crates/daemon/tests/attestation_verifier.rs:457` | blob read bounded | unaudited |
+| `replacement_refs_are_ignored` | `crates/daemon/tests/attestation_verifier.rs:477` | verdict deterministic; Kernel checkout open record (daemon-opener half) | unaudited |
+| `the_header_gates_every_blob_read` | `crates/daemon/tests/attestation_verifier.rs:504` | blob read bounded | unaudited |
+| `a_blob_whose_delta_base_exceeds_the_allocation_limit_is_over_budget` | `crates/daemon/tests/attestation_verifier.rs:557` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
+| `a_passed_deadline_opens_no_repository` | `crates/daemon/tests/attestation_verifier.rs:595` | blob read bounded | unaudited |
+| `a_deadline_before_the_header_poll_reads_no_blob` | `crates/daemon/tests/attestation_verifier.rs:621` | blob read bounded | unaudited |
+| `verdicts_survive_a_worktree_edit_a_head_move_and_a_repack` | `crates/daemon/tests/attestation_verifier.rs:641` | verdict deterministic | unaudited |
+| `claim_paths_follow_the_document_path_rule` | `crates/daemon/tests/attestation_verifier.rs:691` | blob read bounded | unaudited |
+| `the_pure_verdict_compares_digests_after_the_header_gate` | `crates/daemon/tests/attestation_verifier.rs:714` | verdict deterministic | unaudited |
+| `normalized_digests_exist_only_for_a_reachable_length` | `crates/daemon/tests/attestation_verifier.rs:781` | verdict deterministic | unaudited |
+| `reasons_have_stable_names_and_a_terminal_split` | `crates/daemon/tests/attestation_verifier.rs:795` | reason names for #1173 counters | unaudited |
 
 ## Categories with no check found
 

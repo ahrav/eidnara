@@ -31,7 +31,7 @@ A selection with one oversized header after a small object.
 
 ### Q: Does the U1 verifier follow the same order?
 
-- Sources examined: `observe` (`crates/daemon/src/attestation_verifier.rs:377`) and `crates/daemon/tests/attestation_verifier.rs:438`.
+- Sources examined: `lookup` (`crates/daemon/src/attestation_verifier.rs:407`) and `crates/daemon/tests/attestation_verifier.rs:504`.
 - Findings: Yes: the header read and `header_verdict` precede the one blob read, and the test asserts no blob poll after an over-budget header.
 - Missing evidence: none.
 - Conclusion: resolved with answer: covered for the verifier by `p6-new-blob-read-bounded-at-oid`.

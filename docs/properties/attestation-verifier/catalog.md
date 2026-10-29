@@ -481,7 +481,7 @@ Check: `always` - the verifier opens repositories only through `git_sources::ope
 Fault/timing angle: none
 Required faults and enabling state: F4: an over-budget delta base; a `refs/replace` entry
 Confidence: high - [evidence](evidence/p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements.md). Read `open_isolated` (`crates/kernel/src/applicability/checkout.rs:639`) and `isolated_options` and `open_with_slots` (`crates/daemon/src/git_sources.rs:131`, `:148`); no `allocLimit` or `ignore_replacements` appears under `crates/kernel/src`
-Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`, and `crates/daemon/tests/attestation_verifier.rs:491` for the daemon opener; none for the Kernel opener (unaudited)
+Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`, and `crates/daemon/tests/attestation_verifier.rs:557`, `:477` for the daemon opener; none for the Kernel opener (unaudited)
 Impact: a verifier on the Kernel opener would inflate a delta chain without a bound and could read a replaced object (C4)
 Open questions:
 - Which opener does the U1 driver use? - resolved with answer; this resolves the open question the portfolio evaluation tied to G3.
@@ -740,13 +740,14 @@ Exercised: yes - bare fixtures without a worktree drive every verdict and reason
 Guarantee: The verdict is a function of object-store contents, the claim's path, digest, byte length, and oid, and the budgets; `Match` asserts only that the sha256 of the bytes git stores for the path in the commit's tree equals the digest, up to line-ending normalization.
 Check: `always` - equal claims against equal object-store contents give equal verdicts, `Unavailable(deadline)` excepted; the verdict function takes no repository handle and no clock
 Fault/timing angle: a worktree edit, a HEAD move, or a repack between two evaluations of one claim
-Required faults and enabling state: F8: worktree edit, HEAD move, repack; F9: an LF blob with a CRLF-form digest, and the reverse
-Confidence: high - [evidence](evidence/p6-new-verdict-deterministic.md). Read `verdict` (`crates/daemon/src/attestation_verifier.rs:284`), `Digests::of` (`:223`), and `observe` (`:377`): the driver reads the commit, trees, header, and blob by object id and passes the observation to `verdict`
-Existing check: `crates/daemon/tests/attestation_verifier.rs:575`, `:183`, `:193`, `:257`, `:648`, `:704` (unaudited)
+Required faults and enabling state: F8: worktree edit, HEAD move, repack, excluding over-budget delta chains; F9: an LF blob with a CRLF-form digest, and the reverse
+Confidence: high - [evidence](evidence/p6-new-verdict-deterministic.md). Read `verdict` (`crates/daemon/src/attestation_verifier.rs:306`), `Digests::of` (`:230`), and `observe` (`:403`) with its `lookup` (`:407`): the driver reads the commit, trees, header, and blob by object id and passes the observation to `verdict`, which decides every verdict
+Existing check: `crates/daemon/tests/attestation_verifier.rs:641`, `:190`, `:200`, `:264`, `:477`, `:714`, `:781` (unaudited)
 Impact: a verdict that depended on worktree state would mark a correct finding stale after an unrelated edit
 Open questions:
 - How are line endings normalized? - resolved with answer.
-- Does the length shortcut hold as AC3 words it, a header size different from the claimed length being `Mismatch` with zero bytes read? - resolved with answer; a deviation from AC3's literal wording, recorded for the owner.
+- Does the length shortcut hold as AC3 words it, a header size different from the claimed length being `Mismatch` with zero bytes read? AC1 requires a CRLF-form claim of a different length to `Match`, so the implementation reads the blob whenever a line-ending form can reach the claimed length, a deviation from AC3's literal wording. (needs human input)
+- Is `over_budget` from an over-budget delta chain terminal? It depends on the pack layout and a repack can change it, so F8's repack clause excludes it; the ticket's mapping and terminal split are kept for the #1173 (U3) owner to decide. (needs human input)
 
 ### p6-new-blob-read-bounded-at-oid
 
@@ -758,8 +759,8 @@ Guarantee: The driver checks the blob's header against the 256 KiB per-blob budg
 Check: `always` - every claim's `bytes_read <= MAX_BLOB_BYTES`; an over-budget header yields `Unavailable(over_budget)` with `bytes_read == 0` and no blob poll; a passed deadline yields `Unavailable(deadline(stage))` with `bytes_read == 0`; the per-pass clause `bytes_read_pass <= budget` converts with #1173
 Fault/timing angle: the deadline crossing between object reads
 Required faults and enabling state: F4: header over budget, an over-budget delta base, bytes that do not hash to the id; F5: missing and corrupt commit, tree, and blob; F6: absent path, gitlink, symlink, tree, a path beneath a gitlink; F7: deadline before the open and before the header poll
-Confidence: high - [evidence](evidence/p6-new-blob-read-bounded-at-oid.md). Read `observe` (`crates/daemon/src/attestation_verifier.rs:377`), `read_object` (`:350`), and `header_verdict` (`:272`); `MAX_BLOB_BYTES` (`:31`) is both the header budget and the allocation limit
-Existing check: `crates/daemon/tests/attestation_verifier.rs:438`, `:491`, `:529`, `:555`, `:347`, `:305`, `:418`, `:193` (unaudited)
+Confidence: high - [evidence](evidence/p6-new-blob-read-bounded-at-oid.md). Read `lookup` (`crates/daemon/src/attestation_verifier.rs:407`), `read_object` (`:373`), and `header_verdict` (`:292`); `MAX_BLOB_BYTES` (`:34`) is both the header budget and the allocation limit
+Existing check: `crates/daemon/tests/attestation_verifier.rs:504`, `:557`, `:595`, `:621`, `:354`, `:312`, `:457`, `:200` (unaudited)
 Impact: an unbounded read would let one claim allocate a delta chain or read a large blob inside the pass
 Open questions:
 - Does the allocation limit admit a blob of exactly 256 KiB? - resolved with answer.
