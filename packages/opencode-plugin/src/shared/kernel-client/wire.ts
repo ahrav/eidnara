@@ -691,6 +691,7 @@ function parseCandidateItem(raw: unknown): CandidateItem | null {
         matched_terms < 1 ||
         decision_terms < matched_terms ||
         decision_terms > TERMS_MAX ||
+        score < 1 ||
         score !== Math.floor((matched_terms * 10_000) / decision_terms)
     ) {
         return null;

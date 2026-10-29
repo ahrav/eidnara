@@ -36,8 +36,8 @@ carry no descriptor or summary text.
   a row only when its evidence is live, its incarnation and matcher digest
   equal the reader's, and its `publish_tip` is at or below the target, and
   `:311` counts the rest `read_filtered_stale`.
-- `crates/daemon/src/contradiction_candidates/read.rs:102` `ItemOut` holds the
-  eight wire keys, encoded once into the page bytes; `packages/opencode-plugin/src/shared/kernel-client/wire.ts:673`
+- `crates/daemon/src/contradiction_candidates/read.rs:102-110` `ItemOut` holds
+  the eight wire keys, encoded once into the page bytes; `packages/opencode-plugin/src/shared/kernel-client/wire.ts:673`
   refuses any other key set.
 - Equivalence tests: `crates/kernel/tests/kernel_claim_facts.rs:954`
   compares the standing read with claim facts field by field and refusal by

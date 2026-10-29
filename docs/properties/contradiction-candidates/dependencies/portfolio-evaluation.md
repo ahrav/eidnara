@@ -50,7 +50,7 @@ named function; no wrong file, no wrong claim).
 | `wire.rs:131-139` `authority_project` | confirmed |
 | `host-wire-protocol.md:795-799`, `:819-823` | confirmed |
 | `types.ts:6`, `:24`, `:27-29`; `tools.ts:72-74`, `:125-138` | confirmed at `3a3b916b7`; at the #1164 tip the allowlist default is `tools.ts:103-106` and `isEidnaraMemoryMutation` is `types.ts:26-29` (#1161) |
-| pi `eidnara-memory.ts:179-186`, no `allowedActions` | confirmed at `3a3b916b7` (grep count 0); at the #1164 tip #1161 added `allowedActions` (`eidnara-memory.ts:146-151`) and D7 is resolved |
+| pi `eidnara-memory.ts:155-169`, no `allowedActions` | confirmed at `3a3b916b7` (grep count 0); at the #1164 tip #1161 added `allowedActions` (`eidnara-memory.ts:146-151`) and D7 is resolved |
 | `config.rs:154`; `memory-store/src/lib.rs:335-340`; `storage/src/lib.rs:2631` | confirmed |
 | `activation.rs:174`; `lifecycle.rs:16-18`, `:327` | confirmed |
 | `tool-registry.ts:58`; `subagent-entry.ts:63` | `tool-registry.ts:58` now passes `EIDNARA_MEMORY_DEFAULT_ACTIONS` (#1161); confirmed at `packages/opencode-plugin/src/plugin/tool-registry.ts:58` and `packages/pi-plugin/src/subagent-entry.ts:63`; the catalog gives bare file names |

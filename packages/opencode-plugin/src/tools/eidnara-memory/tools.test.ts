@@ -1836,6 +1836,54 @@ describe("eidnara_memory candidates", () => {
         expect(admitted.definition.description).toContain("source you read yourself");
     });
 
+    test("refuses a page with more rows than the requested limit and an item with a zero score", async () => {
+        const two = [
+            { ...ITEM, evidence_id: "srcev:a" },
+            { ...ITEM, evidence_id: "srcev:b" },
+        ];
+        const h = candidatesHarness([
+            { kind: "page", as_of: 41, items: two, next: null },
+            {
+                kind: "page",
+                as_of: 41,
+                items: [{ ...ITEM, matched_terms: 1, decision_terms: 20_000, score: 0 }],
+                next: null,
+            },
+        ]);
+        expect(
+            await h.execute({ action: "candidates", objectId: "mem_labeled", limit: 1 }),
+            "a page past the requested limit",
+        ).toMatch(/^Error: /);
+        expect(
+            await h.execute({ action: "candidates", objectId: "mem_labeled" }),
+            "a zero score",
+        ).toMatch(/^Error: /);
+    });
+
+    test("renders complete rows under the response budget and takes next from a page of that size", async () => {
+        const long = (tag: string) => `srcev:${tag}:${"x".repeat(500)}`;
+        const wide = Array.from({ length: 64 }, (_, index) => ({
+            ...ITEM,
+            evidence_id: long(String(index).padStart(3, "0")),
+            decision_id: `dec:${"y".repeat(500)}`,
+        }));
+        const h = candidatesHarness([
+            { kind: "page", as_of: 41, items: wide, next: `7500.1.${"61".repeat(4)}` },
+            // The re-request with the fitted limit answers a page of at most that size and the cursor after its last row.
+            { kind: "page", as_of: 41, items: wide.slice(0, 1), next: "7500.1.6162" },
+        ]);
+        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
+        expect(text).not.toStartWith("Error:");
+        expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(16 * 1024);
+        const parsed = JSON.parse(text);
+        expect(parsed.candidates.length).toBe(1);
+        const limits = h.calls.map((call) => call.body.limit);
+        expect(limits[0]).toBeUndefined();
+        expect(limits[1]).toBeGreaterThan(0);
+        expect(limits[1]).toBeLessThan(64);
+        expect(parsed.next).toBe("7500.1.6162");
+    });
+
     test("refuses a page naming another memory and paging fields the schema would refuse", async () => {
         const h = candidatesHarness([
             {
@@ -1847,7 +1895,7 @@ describe("eidnara_memory candidates", () => {
         ]);
         const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
         expect(text).toBe(
-            "Error: the daemon answered candidates for another memory than mem_labeled; nothing was rendered. Retry once; report it to the user if it repeats.",
+            "Error: the daemon answered candidates for another memory than mem_labeled or more rows than asked; nothing was rendered. Retry once; report it to the user if it repeats.",
         );
         expect(text).not.toContain("srcev:abc");
         expect(await h.execute({ action: "candidates", objectId: "m", limit: "5" })).toBe(
