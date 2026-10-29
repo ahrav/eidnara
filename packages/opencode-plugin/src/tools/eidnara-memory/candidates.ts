@@ -1,35 +1,37 @@
 import { isAvailable, type KernelClient, renderToolStateText } from "../../shared/kernel-client";
 import { MemoryInputError } from "../../shared/kernel-client/anti-memory";
+import { CANDIDATES_PAGE_MAX } from "../../shared/kernel-client/wire";
 import type { EidnaraMemoryArgs } from "./types";
 
 const OVERLAP_NOTE =
     "A candidate is a lexical overlap between a published source and this memory, not a judgment that they contradict.";
 
 const FILE_FORM_NOTE =
-    " File a confirm form only with independent evidence that the source conflicts with the memory; otherwise report the candidate to the user. The form uses mark_disputed; change event to contradict only when the source directly contradicts the memory.";
+    " A row names no readable source, so file a confirm form only when you have read the conflicting source yourself in this session; otherwise report the candidate to the user. The form uses mark_disputed, which lowers the memory's standing and is reversible; contradict removes the memory from every serving surface except audit, so use it only for a source you read that directly contradicts the memory.";
 
 const REPORT_FORM_NOTE =
     " The dispute action is not admitted in this context, so show each form to the user instead of filing it.";
 
 export interface ExecuteCandidatesArgs {
     client: KernelClient;
+    /** The trimmed target the caller's `requireTarget` established. */
+    objectId: string;
     args: EidnaraMemoryArgs;
     /** Whether this tool admits `dispute`, so the reply says who can file the confirm form. */
     disputeAdmitted: boolean;
     signal?: AbortSignal;
 }
 
-/** The wrappers pass raw arguments when schema parsing fails, so the paging fields are checked here for both harnesses. */
+/** The wrappers pass raw arguments when schema parsing fails; `after` is typed by the shared field gate, and `limit`, a number, is bounded here for both harnesses. */
 function pagingOf(args: EidnaraMemoryArgs): { after?: string | null; limit?: number } {
-    const { after, limit } = args as { after?: unknown; limit?: unknown };
-    if (after !== undefined && after !== null && typeof after !== "string") {
-        throw new MemoryInputError("'after' must be a string or null");
-    }
+    const { after, limit } = args as { after?: string | null; limit?: unknown };
     if (
         limit !== undefined &&
-        (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 64)
+        (!Number.isSafeInteger(limit) ||
+            (limit as number) < 1 ||
+            (limit as number) > CANDIDATES_PAGE_MAX)
     ) {
-        throw new MemoryInputError("'limit' must be an integer from 1 to 64");
+        throw new MemoryInputError(`'limit' must be an integer from 1 to ${CANDIDATES_PAGE_MAX}`);
     }
     return {
         ...(after === undefined ? {} : { after }),
@@ -38,8 +40,7 @@ function pagingOf(args: EidnaraMemoryArgs): { after?: string | null; limit?: num
 }
 
 export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<string> {
-    const objectId = input.args.objectId?.trim();
-    if (!objectId) return "Error: 'objectId' is required when action is 'candidates'.";
+    const { objectId } = input;
     const result = await input.client.candidates({
         decisionObjectId: objectId,
         ...pagingOf(input.args),
@@ -48,6 +49,7 @@ export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<s
     if (!isAvailable(result)) return `Error: ${renderToolStateText(result.state)}`;
     if (result.kind === "terminal") {
         switch (result.terminal) {
+            // The contract renders a feature that is off as a plain statement, so Pi reports it as a result and not an error.
             case "disabled":
                 return "Contradiction candidates are off in the daemon for this project.";
             case "not_live":
@@ -57,7 +59,7 @@ export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<s
         }
     }
     if (result.items.some((item) => item.decision_object_id !== objectId)) {
-        return `Error: the daemon answered candidates for another memory than ${objectId}; nothing was rendered.`;
+        return `Error: the daemon answered candidates for another memory than ${objectId}; nothing was rendered. Retry once; report it to the user if it repeats.`;
     }
     return JSON.stringify({
         action: "candidates",

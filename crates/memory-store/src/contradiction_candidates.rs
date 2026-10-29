@@ -200,8 +200,12 @@ fn decode_cursor(cursor: &str) -> Result<(u32, i64, String), MemoryStoreError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| refused())?;
     let evidence = String::from_utf8(bytes).map_err(|_| refused())?;
-    // A stored id passes `check_id`, so a cursor naming an id it refuses was never issued.
-    if check_id("after", &evidence).is_err() || format_cursor(score, created, &evidence) != cursor {
+    // The id is a keyset bound, judged by the shape every stored id has: 1 to 512 bytes with no control character. The secret scan stays on the write path, so a row's cursor round-trips whatever rules the scanner gains later.
+    if evidence.is_empty()
+        || evidence.len() > MAX_CANDIDATE_ID_BYTES
+        || evidence.chars().any(char::is_control)
+        || format_cursor(score, created, &evidence) != cursor
+    {
         return Err(refused());
     }
     Ok((score, created, evidence))
@@ -631,7 +635,12 @@ impl MemoryStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<CandidatePage, MemoryStoreError> {
-        self.candidates_for_decision_inner(project_digest, decision_object_id, after, limit, None)
+        let query = PageQuery::new(project_digest, decision_object_id, after, limit)?;
+        let items = self
+            .inner
+            .with_conn(|conn| query.read(conn))
+            .map_err(MemoryStoreError::from)?;
+        query.page(items)
     }
 
     /// [`Self::module_authority_for_route`] whose connection wait ends at `deadline`.
@@ -653,40 +662,19 @@ impl MemoryStore {
         .map(|found| found.map(|(row, ())| row))
     }
 
-    /// [`Self::candidates_for_decision`] whose connection wait ends at `deadline`.
+    /// [`Self::candidates_for_decision`] read in the connection that reads the
+    /// MODULE authority row serving `route_project_root` for `domain`
+    /// ([`Self::module_authority_for_route`]), with the connection wait ending at
+    /// `deadline`. `None` when the route has no MODULE or DRAINING binding or its
+    /// project has no MODULE row, with the cursor unjudged; the page is read only
+    /// under a found row.
     ///
     /// # Errors
     ///
-    /// [`MemoryStoreError::Store`] with [`storage::StoreError::Deadline`] when the
-    /// connection is still held at `deadline`; otherwise as
-    /// [`Self::candidates_for_decision`].
-    pub fn candidates_for_decision_within(
-        &self,
-        project_digest: &str,
-        decision_object_id: &str,
-        after: Option<&str>,
-        limit: usize,
-        deadline: Instant,
-    ) -> Result<CandidatePage, MemoryStoreError> {
-        self.candidates_for_decision_inner(
-            project_digest,
-            decision_object_id,
-            after,
-            limit,
-            Some(deadline),
-        )
-    }
-
-    /// [`Self::candidates_for_decision_within`] read in the connection that
-    /// reads the MODULE authority row serving `route_project_root` for `domain`
-    /// ([`Self::module_authority_for_route`]). `None` when the route has no
-    /// MODULE or DRAINING binding or its project has no MODULE row, with the
-    /// cursor unjudged; the page is read only under a found row.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::candidates_for_decision_within`], and the authority domain
-    /// errors of [`Self::module_authority_for_route`].
+    /// As [`Self::candidates_for_decision`]; [`MemoryStoreError::Store`] with
+    /// [`storage::StoreError::Deadline`] when the connection is still held at
+    /// `deadline`; and the authority domain errors of
+    /// [`Self::module_authority_for_route`].
     #[allow(clippy::too_many_arguments)]
     pub fn candidates_for_decision_under_route_within(
         &self,
@@ -710,24 +698,6 @@ impl MemoryStore {
             return Ok(None);
         };
         Ok(Some((row, query.page(items)?)))
-    }
-
-    fn candidates_for_decision_inner(
-        &self,
-        project_digest: &str,
-        decision_object_id: &str,
-        after: Option<&str>,
-        limit: usize,
-        deadline: Option<Instant>,
-    ) -> Result<CandidatePage, MemoryStoreError> {
-        let query = PageQuery::new(project_digest, decision_object_id, after, limit)?;
-        let read = |conn: &GuardedConn<'_>| query.read(conn);
-        let items = match deadline {
-            Some(deadline) => self.inner.with_conn_within(deadline, read),
-            None => self.inner.with_conn(read),
-        }
-        .map_err(MemoryStoreError::from)?;
-        query.page(items)
     }
 
     /// At most `page` rows of every project with a rowid above `after_rowid`,
@@ -898,11 +868,6 @@ impl<'a> PageQuery<'a> {
         })
     }
 
-    /// The cursor's validation error, after the page ran.
-    fn cursor(self) -> Result<(), MemoryStoreError> {
-        self.after.map(|_| ())
-    }
-
     /// Up to `limit + 1` rows from the cursor in reader order: score descending, creation time descending, evidence id ascending.
     fn read(&self, conn: &GuardedConn<'_>) -> rusqlite::Result<Vec<StoredCandidate>> {
         macro_rules! page_range {
@@ -959,10 +924,10 @@ impl<'a> PageQuery<'a> {
 
     /// The page the read rows make: at most `limit` rows and the cursor after the last one when a further row was read.
     fn page(self, mut items: Vec<StoredCandidate>) -> Result<CandidatePage, MemoryStoreError> {
-        let limit = self.limit;
-        self.cursor()?;
-        let next = if items.len() > limit {
-            items.truncate(limit);
+        // The cursor's validation error is answered after the page ran.
+        self.after?;
+        let next = if items.len() > self.limit {
+            items.truncate(self.limit);
             items
                 .last()
                 .map(|row| format_cursor(row.score_bp, row.created_at_ms, &row.evidence_id))

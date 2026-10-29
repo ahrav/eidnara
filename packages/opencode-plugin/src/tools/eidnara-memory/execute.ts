@@ -593,6 +593,7 @@ export async function executeEidnaraMemory(input: ExecuteEidnaraMemoryArgs): Pro
     if (action === "candidates") {
         return executeCandidates({
             client,
+            objectId: requireTarget(args),
             args,
             disputeAdmitted: input.disputeAdmitted,
             ...(signal ? { signal } : {}),

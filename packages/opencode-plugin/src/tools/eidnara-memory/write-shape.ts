@@ -36,6 +36,7 @@ export function assertEidnaraMemoryFieldTypes(args: EidnaraMemoryWriteShape): vo
         "evidenceId",
         "path",
         "gitObjectId",
+        "after",
     ] as const) {
         const value = (args as Record<string, unknown>)[field];
         if (value !== undefined && value !== null && typeof value !== "string") {

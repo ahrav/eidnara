@@ -16,7 +16,7 @@ the ids the dispute validates, and the confirm must stay a Kernel decision.
   renders `confirm: {action: "dispute", event: "mark_disputed", objectId,
   evidenceId}` from the row, and `:59` refuses a page naming another memory.
 - `crates/daemon/src/kernel_routes/dispute.rs` validates the evidence at
-  commit; `crates/daemon/src/candidate_pass_tests.rs:2756` checks that it and
+  commit; `crates/daemon/src/candidate_pass_tests.rs:2770` checks that it and
   `commit.rs` name no candidate store method.
 
 ## Failure scenario
@@ -35,13 +35,13 @@ earlier form `not_found`.
 Rows written by a real pass for two decisions; a confirm from one row with
 the candidate table truncated; `expire_harness_captures` past the retention;
 a confirm from the other row's earlier listing. All in
-`crates/daemon/src/candidate_pass_tests.rs:2616`.
+`crates/daemon/src/candidate_pass_tests.rs:2630`.
 
 ## Investigation log
 
 ### Q: Does the confirm depend on the table?
 
-- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:2709`, `:2733`.
+- Sources examined: `crates/daemon/src/candidate_pass_tests.rs:2723`, `:2747`.
 - Findings: the table is truncated before the confirm, and the confirm still
   lands `disputed`.
 - Missing evidence: no call-graph check; the source check is lexical.

@@ -2062,6 +2062,20 @@ async fn review_candidates_pages_live_rows_and_answers_each_terminal() {
             .unwrap(),
         "an integral float spelling is the integer it names"
     );
+    for spelling in [json!(-1), json!(2.5), json!("2"), json!(true)] {
+        assert_eq!(
+            ask(json!({ "decision_object_id": "object-one", "limit": spelling })).await,
+            Err("invalid_params".to_owned()),
+            "a limit spelled {spelling} is the caller's input"
+        );
+    }
+    assert_eq!(
+        ask(json!({ "decision_object_id": "object-one", "limit": null }))
+            .await
+            .unwrap(),
+        first,
+        "a null limit is an absent one"
+    );
 
     kernel
         .commit(intent("supersede-replaced"), |envelope| {

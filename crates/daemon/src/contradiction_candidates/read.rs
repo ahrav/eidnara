@@ -16,11 +16,11 @@ use serde_json::{Value, json};
 use super::Count;
 use super::eligibility::eligible;
 use super::scorer::matcher_digest;
+use crate::HandlerCore;
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES;
 use crate::kernel_routes::project::{ProjectBinding, ScopeFilter};
 use crate::kernel_routes::{blocking, state_only};
-use crate::{HandlerCore, MemoriesAuthority, memories_authority};
 
 pub(crate) const CANDIDATES: &str = "review.candidates";
 pub(super) const READ_BUDGET: Duration = Duration::from_secs(5);
@@ -175,6 +175,20 @@ fn decision_is_live(
     Ok(eligible(&facts, names_project))
 }
 
+/// The route's MODULE memories authority as a read terminal: a MODULE row
+/// holds, a route without one answers `disabled`, and a failed lookup answers
+/// `store_unavailable`. The row's identity is the daemon's `memories_authority`
+/// mapping; the read keeps only its presence.
+fn module_authority(
+    lookup: Result<Option<memory_store::AuthorityRow>, MemoryStoreError>,
+) -> Result<(), Refused> {
+    match lookup {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(Refused::Terminal("disabled")),
+        Err(_) => Err(Refused::Terminal("store_unavailable")),
+    }
+}
+
 fn is_current(
     row: &StoredCandidate,
     liveness: EvidenceLiveness,
@@ -225,15 +239,12 @@ impl HandlerCore {
         let budget = READ_BUDGET;
         let deadline = Instant::now() + budget;
         let read = blocking(move || -> Result<Vec<u8>, Refused> {
-            match ledger.module_authority_for_route_within(&root, "memories", deadline) {
-                Ok(row) => match memories_authority(row) {
-                    MemoriesAuthority::Module(_) => {}
-                    MemoriesAuthority::NotModule { .. } => {
-                        return Err(Refused::Terminal("disabled"));
-                    }
-                },
-                Err(_) => return Err(Refused::Terminal("store_unavailable")),
-            }
+            let authority = |root: &str| {
+                module_authority(
+                    ledger.module_authority_for_route_within(root, "memories", deadline),
+                )
+            };
+            authority(&root)?;
             let kernel = &scope.store;
             let budget = EvalBudget::new(Some(deadline), Arc::default());
             let target = kernel
@@ -250,15 +261,8 @@ impl HandlerCore {
             )?;
             if !live {
                 // The authority is judged again so a drain or move during the judgment answers `disabled`, the terminal before `not_live`.
-                return Err(
-                    match ledger.module_authority_for_route_within(&root, "memories", deadline) {
-                        Ok(row) => match memories_authority(row) {
-                            MemoriesAuthority::Module(_) => Refused::Terminal("not_live"),
-                            MemoriesAuthority::NotModule { .. } => Refused::Terminal("disabled"),
-                        },
-                        Err(_) => Refused::Terminal("store_unavailable"),
-                    },
-                );
+                authority(&root)?;
+                return Err(Refused::Terminal("not_live"));
             }
             // A malformed spelling runs the first-page query so a storage failure still answers its terminal.
             let after = match &cursor {
@@ -280,14 +284,8 @@ impl HandlerCore {
                     MemoryStoreError::Serde(_) if after.is_some() => Refused::InvalidCursor,
                     _ => Refused::Terminal("store_unavailable"),
                 })?;
-            let page = match page {
-                Some((row, page)) => match memories_authority(Some(row)) {
-                    MemoriesAuthority::Module(_) => page,
-                    MemoriesAuthority::NotModule { .. } => {
-                        return Err(Refused::Terminal("disabled"));
-                    }
-                },
-                None => return Err(Refused::Terminal("disabled")),
+            let Some((_, page)) = page else {
+                return Err(Refused::Terminal("disabled"));
             };
             if matches!(cursor, Cursor::Malformed) {
                 return Err(Refused::InvalidCursor);

@@ -137,9 +137,7 @@ export function unwrapImitatedReducedArgs<T extends object>(
         ) {
             return parsed as T;
         }
-    } catch {
-        return args;
-    }
+    } catch {}
 
     return args;
 }

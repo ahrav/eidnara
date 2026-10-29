@@ -1688,11 +1688,11 @@ describe("eidnara_memory candidates", () => {
         expect(starting).toMatch(/^Error: /);
         expect(starting).toContain("while the store opens");
         expect(await h.execute({ action: "candidates" })).toBe(
-            "Error: 'objectId' is required when action is 'candidates'.",
+            "Error: 'objectId' is required when action is 'candidates'",
         );
     });
 
-    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, items out of reader order, an id no row stores, a next no store issues, and a state beside a page", async () => {
+    test("refuses a page above the 64-item bound, an item whose score breaks the basis-point formula, an item past as_of, items out of reader order, an id no row stores, an empty next, and a state beside a page", async () => {
         const h = candidatesHarness([
             {
                 kind: "page",
@@ -1772,14 +1772,6 @@ describe("eidnara_memory candidates", () => {
                 next: null,
             },
             { kind: "page", as_of: 41, items: [ITEM], next: "" },
-            { kind: "page", as_of: 41, items: [ITEM], next: "not-a-cursor" },
-            { kind: "page", as_of: 41, items: [ITEM], next: `7500.1.${"61".repeat(513)}` },
-            { kind: "page", as_of: 41, items: [ITEM], next: "10001.1.61" },
-            { kind: "page", as_of: 41, items: [ITEM], next: "1.1.ff" },
-            { kind: "page", as_of: 41, items: [ITEM], next: "1.1.01" },
-            { kind: "page", as_of: 41, items: [ITEM], next: "1.9999999999999999999.61" },
-            { kind: "page", as_of: 41, items: [ITEM], next: "9000.2.62" },
-            { kind: "page", as_of: 41, items: [ITEM], next: "7500.1700000000001.62" },
             {
                 kind: "page",
                 as_of: 41,
@@ -1808,14 +1800,6 @@ describe("eidnara_memory candidates", () => {
             "control character in decision_id",
             "terms past the store's u32",
             "empty next",
-            "next outside the cursor form",
-            "next past the longest cursor",
-            "next with a score past 10000",
-            "next whose id bytes are not UTF-8",
-            "next whose id holds a control character",
-            "next whose time is past i64",
-            "next with a higher score than the last item",
-            "next with a later time than the last item at its score",
             "a lone surrogate in evidence_id",
             "a state beside a page",
         ]) {
@@ -1848,17 +1832,8 @@ describe("eidnara_memory candidates", () => {
         expect(parsed.note).not.toContain("not admitted");
         expect(parsed.candidates[0].confirm.action).toBe("dispute");
         expect(note).not.toContain("File a confirm form");
-        expect(byDefault.definition.description).not.toContain("independent evidence");
-        expect(admitted.definition.description).toContain("independent evidence");
-    });
-
-    test("renders the next cursor of an id that begins with a byte order mark", async () => {
-        const h = candidatesHarness([
-            { kind: "page", as_of: 41, items: [ITEM], next: "7500.1.efbbbf" },
-        ]);
-        const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
-        expect(text).not.toStartWith("Error:");
-        expect(JSON.parse(text).next).toBe("7500.1.efbbbf");
+        expect(byDefault.definition.description).not.toContain("source you read yourself");
+        expect(admitted.definition.description).toContain("source you read yourself");
     });
 
     test("refuses a page naming another memory and paging fields the schema would refuse", async () => {
@@ -1872,7 +1847,7 @@ describe("eidnara_memory candidates", () => {
         ]);
         const text = await h.execute({ action: "candidates", objectId: "mem_labeled" });
         expect(text).toBe(
-            "Error: the daemon answered candidates for another memory than mem_labeled; nothing was rendered.",
+            "Error: the daemon answered candidates for another memory than mem_labeled; nothing was rendered. Retry once; report it to the user if it repeats.",
         );
         expect(text).not.toContain("srcev:abc");
         expect(await h.execute({ action: "candidates", objectId: "m", limit: "5" })).toBe(
@@ -1882,7 +1857,7 @@ describe("eidnara_memory candidates", () => {
             "Error: 'limit' must be an integer from 1 to 64",
         );
         expect(await h.execute({ action: "candidates", objectId: "m", after: 5 })).toBe(
-            "Error: 'after' must be a string or null",
+            "Error: 'after' must be a string",
         );
         expect(await h.execute({ action: "candidates", objectId: "m", limit: 65 })).toBe(
             "Error: 'limit' must be an integer from 1 to 64",

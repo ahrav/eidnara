@@ -58,7 +58,7 @@ candidates: objectId, with optional after (a prior page's next) and limit (1 to 
 
 /** How the agent treats a confirm form, by whether the allowlist admits `dispute`. */
 const EIDNARA_MEMORY_CANDIDATES_FILE_FORM =
-    " File a form only with independent evidence of a conflict, and otherwise report the candidate to the user.";
+    " A row names no readable source, so file a form only for a conflicting source you read yourself in this session, and otherwise report the candidate to the user.";
 const EIDNARA_MEMORY_CANDIDATES_REPORT_FORM =
     " This tool does not file disputes here, so report a candidate and its form to the user.";
 

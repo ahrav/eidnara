@@ -495,7 +495,7 @@ during the scan writes no row (`crates/daemon/src/contradiction_candidates/pass.
 and before each write the pass checks the Kernel incarnation it read at
 (`pass.rs:372-377`); the write's wait for the store connection ends at the
 pass deadline (`pass.rs:408`,
-`crates/memory-store/src/contradiction_candidates.rs:509`).
+`crates/memory-store/src/contradiction_candidates.rs:513`).
 Guarantee: When the pass's budget is exhausted or interrupted, the rows
 written equal exactly the rows a complete pass would have written for a
 prefix of the publication's descriptors in publish order; a descriptor whose
@@ -533,27 +533,27 @@ Type: safety
 Reachability: explicit-config-only
 Status: active
 Exercised: yes - direct-write store arm (#1165): `crates/memory-store/tests/contradiction_candidates.rs`
-`each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` (`:72`) shows one
+`each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` (`:83`) shows one
 row per key, a lower-tip rewrite that keeps the higher tip and replaces the
 other values, and a newer write that removes keys it no longer names;
-`a_late_write_replaces_held_keys_and_adds_none` (`:442`) shows a write below
+`a_late_write_replaces_held_keys_and_adds_none` (`:453`) shows a write below
 the held tip adds no key, so a descriptor never exceeds K;
-`a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` (`:114`)
-and `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` (`:679`)
+`a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` (`:125`)
+and `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` (`:694`)
 show K accepted, K + 1 refused with the held rows unchanged, and a project
 at `per_project` evicting the lowest `score_bp`, then oldest, then smallest
 key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest`
-(`:187`) shows another project's rows are untouched;
-`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1468`)
+(`:198`) shows another project's rows are untouched;
+`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1483`)
 shows a new row below the cap's floor counted written and dropped with the
 held rows and rowids unchanged; and
-`random_write_and_delete_sequences_match_the_reference_model` (`:1198`)
+`random_write_and_delete_sequences_match_the_reference_model` (`:1213`)
 compares 24 seeded sequences of writes, late writes, incarnation changes,
 evictions at caps of 2 to 4096, and as-read deletes against a reference model
 of the rules, checking every row, the returned counts, rowid stability, and
 the gauge after each step, and pages, cursors across writes, and the sweep
 every seventh step. The store
-(`crates/memory-store/src/contradiction_candidates.rs:493`) enforces K and the
+(`crates/memory-store/src/contradiction_candidates.rs:497`) enforces K and the
 project cap in the write transaction; the daemon owns the values. Pass arm
 (#1167): `the_row_caps_hold_per_descriptor_per_pass_and_per_project_and_a_replay_keeps_the_rows`
 (`crates/daemon/src/candidate_pass_tests.rs:889`) scores K + 1 overlaps into K rows, cuts a pass at M in publish
@@ -599,7 +599,7 @@ Reachability: explicit-config-only
 Status: active
 Exercised: partial - store arm (#1165):
 `truncating_and_replaying_the_writes_rebuilds_the_same_rows`
-(`crates/memory-store/tests/contradiction_candidates.rs:360`) truncates through the test-support
+(`crates/memory-store/tests/contradiction_candidates.rs:371`) truncates through the test-support
 `truncate_contradiction_candidates_for_test` and replays a write sequence,
 reproducing the same rows excluding `created_at_ms`. Pass arm (#1167):
 `a_rerun_from_the_retained_bytes_at_one_tip_rebuilds_the_rows_and_the_kernel_is_untouched`
@@ -758,7 +758,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - the read answers rows only for a route
 whose frozen `contradiction_candidates.enabled` is true
-(`crates/daemon/src/contradiction_candidates/read.rs:211`).
+(`crates/daemon/src/contradiction_candidates/read.rs:225`).
 Status: active
 Exercised: yes - #1168,
 `review_candidates_pages_live_rows_and_answers_each_terminal`
@@ -770,9 +770,9 @@ limit of 0 to one (`:2046`), the two-page walk follows (score desc, created
 desc, evidence asc) and covers the 70 live rows once each (`:2025`, `:2034`),
 the retired-evidence, foreign-incarnation, stale-digest, and future-tip rows
 are left out and counted `read_filtered_stale` = 4 (`:2005`), a superseded
-decision with rows present answers `not_live` (`:2095`), an unknown decision
-answers `not_live` (`:2111`), and a foreign root answers `project_mismatch`
-(`:2136`), also with a bad body (`:2145`). The tip and the reviewer job facts
+decision with rows present answers `not_live` (`:2109`), an unknown decision
+answers `not_live` (`:2125`), and a foreign root answers `project_mismatch`
+(`:2150`), also with a bad body (`:2159`). The tip and the reviewer job facts
 are unchanged after the first read (`:1952`, `:1953`), and the table's rows
 are unchanged after the walk (`:2007`). Not constructed: the
 other `eligible` refusals (another domain, a foreign scope, hidden, or a
@@ -792,11 +792,11 @@ of at most 64 rows in (score desc, created desc, evidence id asc) order,
 summary, or term. A row is listed only when its evidence is live at `as_of`,
 its Kernel incarnation and matcher digest equal the reader's, and its
 `publish_tip` is at or below `as_of`
-(`crates/daemon/src/contradiction_candidates/read.rs:178` `is_current`); every
+(`crates/daemon/src/contradiction_candidates/read.rs:192` `is_current`); every
 other row on the page is counted `read_filtered_stale`
-(`crates/daemon/src/contradiction_candidates/read.rs:313`). The TypeScript
+(`crates/daemon/src/contradiction_candidates/read.rs:311`). The TypeScript
 parser refuses an item with any other key set
-(`packages/opencode-plugin/src/shared/kernel-client/wire.ts:712`).
+(`packages/opencode-plugin/src/shared/kernel-client/wire.ts:673`).
 Check: `always` - every answered page satisfies the key, order, bound, and
 filter predicates above, and every ineligible decision answers `not_live`; the
 semantics is `always` because every response must satisfy it.
@@ -810,7 +810,7 @@ root.
 Confidence: high - [evidence](evidence/cc-read-serves-only-live-decision-rows-ids-and-scores-only.md)
 Existing check: the test above (#1168) and the store paging test
 `a_decision_pages_in_reader_order_with_a_stable_cursor`
-(`crates/memory-store/tests/contradiction_candidates.rs:235`), unaudited.
+(`crates/memory-store/tests/contradiction_candidates.rs:246`), unaudited.
 Impact: rows for a dead decision invite a dispute the Kernel will refuse; text
 in the answer would be a disclosure path for Sensitive harness capture to the
 model.
@@ -822,7 +822,7 @@ Open questions:
   (needs human input). #1165 fixes the facts: a row holds ids, integers, and
   times only (the table's columns are pinned by
   `the_table_holds_ids_integers_and_times_and_checks_its_shapes`,
-  `crates/memory-store/tests/contradiction_candidates.rs:399`), so no captured
+  `crates/memory-store/tests/contradiction_candidates.rs:410`), so no captured
   text is stored, and the store has no sensitivity column. #1168 fixes what
   leaves the daemon: the read answers the closed key set above to the calling
   harness, and the `candidates` action returns it to the model as a tool
@@ -844,32 +844,33 @@ Exercised: yes - #1168: a root without MODULE memories authority answers
 `disabled` (`crates/daemon/src/candidate_pass_tests.rs:1867`); a flag-off
 route answers `disabled` while the table is renamed away, and the same route
 with the flag on answers `store_unavailable`
-(`crates/daemon/src/candidate_pass_tests.rs:2177`, `:2200`); an eligible
+(`crates/daemon/src/candidate_pass_tests.rs:2191`, `:2214`); an eligible
 decision with no rows answers
-`{"kind":"page","as_of":tip,"items":[],"next":null}` (`:2103`).
+`{"kind":"page","as_of":tip,"items":[],"next":null}` (`:2117`).
 `review_candidates_answers_the_store_and_kernel_states_before_any_page`
-(`:2548`) answers the kernel route's `unavailable`/`store_starting` state for
-a Kernel not yet open (`:2563`), `unavailable`/`store_unavailable` for a
-Kernel whose open failed (`:2580`), and `store_unavailable` for a daemon with
-no Memory Store (`:2611`), each without `items`. The OpenCode tool renders
+(`:2562`) answers the kernel route's `unavailable`/`store_starting` state for
+a Kernel not yet open (`:2577`), `unavailable`/`store_unavailable` for a
+Kernel whose open failed (`:2594`), and `store_unavailable` for a daemon with
+no Memory Store (`:2625`), each without `items`. The OpenCode tool renders
 each terminal by name and `disabled` as a plain statement
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1665`). Not
 constructed: a failing authority lookup (dependency fault F18 has no seam).
 Guarantee: after the scope, Kernel-readiness, and body checks, a route whose
 frozen flag is false, or a root whose memories authority is not MODULE,
-answers `disabled` (`crates/daemon/src/contradiction_candidates/read.rs:211`,
-`:231`), and the page read judges the route's authority again in the
-connection that reads the page, so an authority that drains or moves after
-the entry check answers `disabled` (`:270`, `:287`;
-`crates/daemon/src/candidate_pass_tests.rs:2328`), and a decision that is
-not live answers after the authority is judged once more, so a drain during
-the judgment answers `disabled` before `not_live` (`:254-257`;
-`crates/daemon/src/candidate_pass_tests.rs:2369`); an uninstalled Memory
+answers `disabled` (`crates/daemon/src/contradiction_candidates/read.rs:225`,
+`:247` through `module_authority`, `:182-190`), and the page read judges the
+route's authority again in the connection that reads the page, so an
+authority that drains or moves after the entry check answers `disabled`
+(`:274`, `:288`; `crates/daemon/src/candidate_pass_tests.rs:2342`), and a
+decision that is not live answers after the authority is judged once more, so
+a drain during the judgment answers `disabled` before `not_live` (`:264-265`;
+`crates/daemon/src/candidate_pass_tests.rs:2383`); an uninstalled Memory
 Store, or one that fails the authority lookup or the page read, answers
-`store_unavailable` (`crates/daemon/src/contradiction_candidates/read.rs:214`);
+`store_unavailable` (`crates/daemon/src/contradiction_candidates/read.rs:229`,
+`:188`, `:285`);
 the read's budget runs from its admission, so a read queued behind a saturated
 blocking pool past its budget answers `store_unavailable` as soon as it runs
-(`:226`; `crates/daemon/src/candidate_pass_tests.rs:2434`); an unready Kernel
+(`:240`; `crates/daemon/src/candidate_pass_tests.rs:2448`); an unready Kernel
 or a failed Kernel read answers the kernel routes' state; an eligible decision
 with no rows answers an empty page; no terminal or state renders as a page.
 Check: `always` - the four conditions answer four distinct shapes; the
@@ -920,23 +921,23 @@ counter at zero and no row;
 `the_route_consent_reaches_the_pass_through_a_transform` (`:1167`) binds the
 route against the opposite daemon value and shows the offer follows the
 route's frozen value; #1168 adds
-`a_publication_without_consent_runs_no_candidate_table_statement` (`:2774`),
+`a_publication_without_consent_runs_no_candidate_table_statement` (`:2788`),
 which renames the table away, publishes three consent-off windows under the
 store's statement ledger (`start_statement_work_ledger`, every statement the
 store's connection runs) with every counter at zero and no recorded statement
-naming a candidate table (`:2794-2813`), shows one consenting publication's
+naming a candidate table (`:2808-2827`), shows one consenting publication's
 pass fails on the hidden table (`store_unavailable` = 1), and, with the table
 back, shows a consenting publication's pass runs statements the ledger
-records on it (`:2844-2854`). Read arm (#1168):
+records on it (`:2858-2868`). Read arm (#1168):
 `review_candidates_pages_live_rows_and_answers_each_terminal`
-(`crates/daemon/src/candidate_pass_tests.rs:1849`, assertions `:2173-2200`)
+(`crates/daemon/src/candidate_pass_tests.rs:1849`, assertions `:2187-2214`)
 renames the table away, answers `disabled` on a flag-off route with
 `read_filtered_stale` unchanged and no recorded statement naming a candidate
-table (`:2173-2193`), shows the same route with the flag on answers
-`store_unavailable` (`:2200`), and, with the table back, shows a flag-on read
-runs a statement the ledger records on it (`:2214-2223`); the handler answers
+table (`:2187-2207`), shows the same route with the flag on answers
+`store_unavailable` (`:2214`), and, with the table back, shows a flag-on read
+runs a statement the ledger records on it (`:2228-2237`); the handler answers
 `disabled` before it reaches the store
-(`crates/daemon/src/contradiction_candidates/read.rs:211`). The `candidates`
+(`crates/daemon/src/contradiction_candidates/read.rs:225`). The `candidates`
 action renders the terminal as a plain statement in both harnesses
 (`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1665`,
 `packages/pi-plugin/src/tools/eidnara-memory.test.ts:533`).
@@ -988,20 +989,20 @@ Reachability: explicit-config-only - as
 Status: active
 Exercised: yes - #1168,
 `a_listed_candidate_confirms_through_dispute_while_its_evidence_lives`
-(`crates/daemon/src/candidate_pass_tests.rs:2616`) publishes two windows
+(`crates/daemon/src/candidate_pass_tests.rs:2630`) publishes two windows
 through the capture job and the pass, lists each decision's row, checks the
 listed `evidence_id` of each decision equals the evidence id of the
-descriptor of the window whose text overlaps it (`:2681-2690`),
+descriptor of the window whose text overlaps it (`:2695-2704`),
 truncates the candidate table, and files
 `dispute {object_id, event: mark_disputed, evidence_id}` built from the row
-through `kernel.commit`, which lands `disputed` (`:2733`). After
+through `kernel.commit`, which lands `disputed` (`:2747`). After
 `expire_harness_captures` retires the evidence, the other decision's read
-leaves the row out and counts it (`:2742`), and the same dispute built from
-the earlier listing is refused `not_found` (`:2752`).
+leaves the row out and counts it (`:2756`), and the same dispute built from
+the earlier listing is refused `not_found` (`:2766`).
 The dispute runs under the store's statement ledger, which records no
-statement naming a candidate table (`:2711-2718`), beside the listings, which
-the ledger records on the table (`:2654-2666`).
-`the_confirm_path_never_reads_the_candidate_table` (`:2756`) is a lexical
+statement naming a candidate table (`:2725-2732`), beside the listings, which
+the ledger records on the table (`:2668-2680`).
+`the_confirm_path_never_reads_the_candidate_table` (`:2770`) is a lexical
 check that `kernel_routes/commit.rs` and `kernel_routes/dispute.rs` name no
 candidate store method. The OpenCode tool renders each row's confirm form
 `{"action":"dispute","event":"mark_disputed","objectId":"<decision_object_id>","evidenceId":"<evidence_id>"}`

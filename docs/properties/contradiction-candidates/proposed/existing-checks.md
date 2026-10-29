@@ -56,29 +56,29 @@ Analyzer checks the scorer relies on:
 
 | Check | Location | Asserts | Records | Status |
 | --- | --- | --- | --- | --- |
-| `each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` | `:72` | one row per key; lower-tip rewrite keeps the tip; a newer write removes unnamed keys | row key and caps | unaudited |
-| `a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` | `:114` | K + 1 rows, bad counts, repeated decisions, bad ids and digests refused; nothing written | row key and caps | unaudited |
-| `an_id_the_scanner_detects_is_refused_and_nothing_is_written` | `:168` | a secret-bearing id is refused | read keys (no text) | unaudited |
-| `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest` | `:187` | eviction order and count; another project untouched | row key and caps | unaudited |
-| `a_decision_pages_in_reader_order_with_a_stable_cursor` | `:235` | reader order; 70 rows at limit 64 page as 64, 6, none; clamp | read serves only live rows (store arm) | unaudited |
-| `the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys` | `:308` | sweep page by rowid; keyed delete; row and byte gauge | sweep (store arm) | unaudited |
-| `truncating_and_replaying_the_writes_rebuilds_the_same_rows` | `:360` | truncate then replay reproduces the rows | rebuildable (store arm) | unaudited |
-| `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:399` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
-| `a_late_write_replaces_held_keys_and_adds_none` | `:442` | a write below the held tip adds no key | row key and caps | unaudited |
-| `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:477` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
-| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:587` | rows added before or removed from page one move nothing after the cursor; non-canonical, oversized, and unstorable-id cursors refused; the longest issued cursor parses and one byte longer is refused | read (paging) | unaudited |
-| `the_under_route_page_read_answers_the_authority_before_the_cursor` | `:506` | a route without a MODULE row reads no page and judges no cursor; a bound route reads the plain read's page and judges a malformed cursor after it | read (terminals) | unaudited |
-| `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:679` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
-| `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:743` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
-| `random_write_and_delete_sequences_match_the_reference_model` | `:1198` | seeded write and as-read delete sequences match a reference model: rows, counts, rowid stability, and the gauge each step; pages, cursors across writes, and the sweep every seventh step | row key and caps; read (paging); sweep (store arm) | unaudited |
-| `the_hex_checks_refuse_uppercase_non_hex_and_misfit_lengths` | `:1349` | the hex-shape CHECKs refuse uppercase, non-hex, and wrong-length digests | read keys (no text) | unaudited |
-| `the_totals_follow_replaced_ids_late_writes_deletes_and_truncation` | `:1415` | the gauge equals a sum over the rows through replaced ids, late writes, deletes, and truncation | sweep (store arm) | unaudited |
-| `a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` | `:1468` | a new row below the cap's floor is counted written and dropped; held rows and rowids stay; a landing row takes a fresh rowid | row key and caps | unaudited |
-| `only_the_candidate_module_writes_the_candidate_tables` | `:1598` | no other memory-store source, trigger, or session purge writes either candidate table, so the totals the cap and gauge read stay exact | row key and caps; sweep (store arm) | unaudited |
-| `every_candidate_statement_reuses_its_cached_plan` | `:1523` | 12 rounds of writes, late writes, pages, sweep pages, keyed deletes, and gauge reads run 16 distinct candidate statements; the statement cache re-creates and re-plans none | row key and caps; read (paging); sweep (store arm) (the cost of the checks, not a record directly) | unaudited |
-| `the_page_sweep_and_eviction_scans_stop_at_their_bound` | `:1686` | over a 300-row project, a two-row page, a three-row sweep page, and a one-row eviction each run under 500 VM steps | read (paging); sweep (store arm); row key and caps (bounded scans) | unaudited |
-| `a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores` | `:1730` | 256 rows into a run of equal scores, with and without equal `created_at_ms`, the continuation page returns the next two rows under 500 VM steps | read (paging) | unaudited |
-| `a_read_with_a_secret_shaped_id_answers_an_empty_page` | `:1781` | a page read for a secret-shaped decision id answers an empty page; an empty id is still refused by the shape check | read keys (no text); read (paging) | unaudited |
+| `each_key_has_one_row_and_a_rewrite_keeps_the_greater_tip` | `:83` | one row per key; lower-tip rewrite keeps the tip; a newer write removes unnamed keys | row key and caps | unaudited |
+| `a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` | `:125` | K + 1 rows, bad counts, repeated decisions, bad ids and digests refused; nothing written | row key and caps | unaudited |
+| `an_id_the_scanner_detects_is_refused_and_nothing_is_written` | `:179` | a secret-bearing id is refused | read keys (no text) | unaudited |
+| `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest` | `:198` | eviction order and count; another project untouched | row key and caps | unaudited |
+| `a_decision_pages_in_reader_order_with_a_stable_cursor` | `:246` | reader order; 70 rows at limit 64 page as 64, 6, none; clamp | read serves only live rows (store arm) | unaudited |
+| `the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys` | `:319` | sweep page by rowid; keyed delete; row and byte gauge | sweep (store arm) | unaudited |
+| `truncating_and_replaying_the_writes_rebuilds_the_same_rows` | `:371` | truncate then replay reproduces the rows | rebuildable (store arm) | unaudited |
+| `the_table_holds_ids_integers_and_times_and_checks_its_shapes` | `:410` | the column set; `score_bp` and count CHECKs | read keys (no text) | unaudited |
+| `a_late_write_replaces_held_keys_and_adds_none` | `:453` | a write below the held tip adds no key | row key and caps | unaudited |
+| `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:488` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
+| `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:599` | rows added before or removed from page one move nothing after the cursor; non-canonical, oversized, and unstorable-id cursors refused; the longest issued cursor parses and one byte longer is refused | read (paging) | unaudited |
+| `the_under_route_page_read_answers_the_authority_before_the_cursor` | `:517` | a route without a MODULE row reads no page and judges no cursor; a bound route reads the plain read's page and judges a malformed cursor after it | read (terminals) | unaudited |
+| `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:694` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
+| `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:758` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
+| `random_write_and_delete_sequences_match_the_reference_model` | `:1213` | seeded write and as-read delete sequences match a reference model: rows, counts, rowid stability, and the gauge each step; pages, cursors across writes, and the sweep every seventh step | row key and caps; read (paging); sweep (store arm) | unaudited |
+| `the_hex_checks_refuse_uppercase_non_hex_and_misfit_lengths` | `:1364` | the hex-shape CHECKs refuse uppercase, non-hex, and wrong-length digests | read keys (no text) | unaudited |
+| `the_totals_follow_replaced_ids_late_writes_deletes_and_truncation` | `:1430` | the gauge equals a sum over the rows through replaced ids, late writes, deletes, and truncation | sweep (store arm) | unaudited |
+| `a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` | `:1483` | a new row below the cap's floor is counted written and dropped; held rows and rowids stay; a landing row takes a fresh rowid | row key and caps | unaudited |
+| `only_the_candidate_module_writes_the_candidate_tables` | `:1613` | no other memory-store source, trigger, or session purge writes either candidate table, so the totals the cap and gauge read stay exact | row key and caps; sweep (store arm) | unaudited |
+| `every_candidate_statement_reuses_its_cached_plan` | `:1538` | 12 rounds of writes, late writes, pages, sweep pages, keyed deletes, and gauge reads run 16 distinct candidate statements; the statement cache re-creates and re-plans none | row key and caps; read (paging); sweep (store arm) (the cost of the checks, not a record directly) | unaudited |
+| `the_page_sweep_and_eviction_scans_stop_at_their_bound` | `:1701` | over a 300-row project, a two-row page, a three-row sweep page, and a one-row eviction each run under 500 VM steps | read (paging); sweep (store arm); row key and caps (bounded scans) | unaudited |
+| `a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores` | `:1745` | 256 rows into a run of equal scores, with and without equal `created_at_ms`, the continuation page returns the next two rows under 500 VM steps | read (paging) | unaudited |
+| `a_read_with_a_secret_shaped_id_answers_an_empty_page` | `:1796` | a page read for a secret-shaped decision id answers an empty page; an empty id is still refused by the shape check | read keys (no text); read (paging) | unaudited |
 
 Baseline: `crates/memory-store/tests/baseline.rs` pins the table, its two
 indexes, and `contradiction_candidate_totals` in `EXPECTED_OBJECTS` and
@@ -117,7 +117,7 @@ resolved-config freezing), `crates/daemon/src/lib.rs:21502` (bound route and
 status block), `crates/host-runtime/src/control.rs:2011` (host forwarding
 allowlist against `docs/host-wire-protocol.md`), and
 `a_delete_as_read_spares_a_row_rewritten_since_the_read`
-(`crates/memory-store/tests/contradiction_candidates.rs:770`).
+(`crates/memory-store/tests/contradiction_candidates.rs:785`).
 
 ## S-B trigger and S-C candidate set (`crates/daemon/src/candidate_pass_tests.rs`, #1167)
 
@@ -159,16 +159,16 @@ checks are named with their files.
 | Check | Location | Asserts | Records | Status |
 | --- | --- | --- | --- | --- |
 | `review_candidates_pages_live_rows_and_answers_each_terminal` | `:1849` | 8-key items; clamps at 65, 0, a number past the machine word, and an integral float; order and disjoint two-page walk; four stale rows filtered and counted; `not_live` for superseded and unknown; empty page, including for a live decision whose id holds a control character; `invalid_params` bodies; scope refusal before the body; observational read; flag off with the table hidden and a flag-on control; `disabled` and `store_unavailable` before a malformed or non-string cursor; tip, jobs, and rows unchanged | read serves, read terminals, flag off (read arm) | unaudited |
-| `review_candidates_answers_the_store_and_kernel_states_before_any_page` | `:2548` | Kernel starting, Kernel open failed, and no Memory Store answer their states without `items` | read terminals | unaudited |
-| `review_candidates_reads_scope_terms_inside_its_budget_beside_a_held_reader` | `:2232` | with one Kernel reader held for the whole request, two reads answer pages inside the read budget: the scope-term read takes the free reader | read serves | unaudited |
-| `review_candidates_refuses_a_target_whose_history_a_restore_replaced_before_the_scope_read` | `:2272` | a restore between the claim-standing read and the scope-terms read answers the Kernel's conflict state, never `not_live` | read serves, read terminals | unaudited |
-| `review_candidates_answers_store_unavailable_when_the_store_connection_outlasts_its_budget` | `:2486` | a store connection held for 9 s answers `store_unavailable` inside the read budget | read terminals | unaudited |
-| `review_candidates_answers_disabled_when_authority_drains_before_the_page_read` | `:2328` | memories authority begins draining between the entry check and the page read; the read answers `disabled` | read terminals | unaudited |
-| `review_candidates_answers_disabled_when_authority_drains_before_a_not_live_judgment` | `:2369` | memories authority begins draining while a superseded decision is judged; the read answers `disabled` in place of `not_live` | read terminals | unaudited |
-| `review_candidates_queued_past_its_budget_answers_at_the_deadline_it_was_admitted_under` | `:2434` | a read queued behind a saturated blocking pool for three budgets answers `store_unavailable` when it runs | read terminals | unaudited |
-| `a_listed_candidate_confirms_through_dispute_while_its_evidence_lives` | `:2616` | listed evidence id is a published descriptor's; confirm lands `disputed` with the table truncated; after retention the row is filtered and the earlier form is `not_found` | confirm linkage | unaudited |
-| `the_confirm_path_never_reads_the_candidate_table` | `:2756` | `commit.rs` and `dispute.rs` name no candidate store method (lexical) | confirm linkage | unaudited |
-| `a_publication_without_consent_runs_no_candidate_table_statement` | `:2774` | consent-off publications succeed with the table hidden and every counter zero; a consenting publication's pass fails on it | flag off (pass arm) | unaudited |
+| `review_candidates_answers_the_store_and_kernel_states_before_any_page` | `:2562` | Kernel starting, Kernel open failed, and no Memory Store answer their states without `items` | read terminals | unaudited |
+| `review_candidates_reads_scope_terms_inside_its_budget_beside_a_held_reader` | `:2246` | with one Kernel reader held for the whole request, two reads answer pages inside the read budget: the scope-term read takes the free reader | read serves | unaudited |
+| `review_candidates_refuses_a_target_whose_history_a_restore_replaced_before_the_scope_read` | `:2286` | a restore between the claim-standing read and the scope-terms read answers the Kernel's conflict state, never `not_live` | read serves, read terminals | unaudited |
+| `review_candidates_answers_store_unavailable_when_the_store_connection_outlasts_its_budget` | `:2500` | a store connection held for 9 s answers `store_unavailable` inside the read budget | read terminals | unaudited |
+| `review_candidates_answers_disabled_when_authority_drains_before_the_page_read` | `:2342` | memories authority begins draining between the entry check and the page read; the read answers `disabled` | read terminals | unaudited |
+| `review_candidates_answers_disabled_when_authority_drains_before_a_not_live_judgment` | `:2383` | memories authority begins draining while a superseded decision is judged; the read answers `disabled` in place of `not_live` | read terminals | unaudited |
+| `review_candidates_queued_past_its_budget_answers_at_the_deadline_it_was_admitted_under` | `:2448` | a read queued behind a saturated blocking pool for three budgets answers `store_unavailable` when it runs | read terminals | unaudited |
+| `a_listed_candidate_confirms_through_dispute_while_its_evidence_lives` | `:2630` | listed evidence id is a published descriptor's; confirm lands `disputed` with the table truncated; after retention the row is filtered and the earlier form is `not_found` | confirm linkage | unaudited |
+| `the_confirm_path_never_reads_the_candidate_table` | `:2770` | `commit.rs` and `dispute.rs` name no candidate store method (lexical) | confirm linkage | unaudited |
+| `a_publication_without_consent_runs_no_candidate_table_statement` | `:2788` | consent-off publications succeed with the table hidden and every counter zero; a consenting publication's pass fails on it | flag off (pass arm) | unaudited |
 | `eidnara_memory candidates` | `packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1582` | default read without a tool-call id; request body; confirm form; terminals by name; extra-key refusal; dispute-admission note; foreign-decision and paging refusals | read serves (client), confirm linkage | unaudited |
 | `Pi eidnara_memory candidates` | `packages/pi-plugin/src/tools/eidnara-memory.test.ts:532` | default schema with paging fields; `disabled` rendered; dispute-admission note from the Pi allowlist | read terminals, flag off (read arm) | unaudited |
 | `review.candidates is a listed method whose items and terminals are the ones the parser admits` | `packages/cli/src/commands/review-wire.contract.test.ts:120` | section 7.8 lists the method; its item keys and terminals equal the parser's | read serves (wire) | unaudited |

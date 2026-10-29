@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
 import { MemoryInputError } from "@eidnara/opencode/shared/kernel-client/anti-memory";
+import { CANDIDATES_PAGE_MAX } from "@eidnara/opencode/shared/kernel-client/wire";
 import {
     actionList,
     EIDNARA_MEMORY_TOOL_NAME,
@@ -106,7 +107,11 @@ const CANDIDATES_PARAMS = {
         }),
     ),
     limit: Type.Optional(
-        Type.Integer({ minimum: 1, maximum: 64, description: "candidates page size, 1 to 64" }),
+        Type.Integer({
+            minimum: 1,
+            maximum: CANDIDATES_PAGE_MAX,
+            description: `candidates page size, 1 to ${CANDIDATES_PAGE_MAX}`,
+        }),
     ),
 };
 

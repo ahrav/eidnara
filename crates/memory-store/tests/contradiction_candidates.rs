@@ -13,6 +13,17 @@ const CAPS: CandidateCaps = CandidateCaps {
     per_project: 4096,
 };
 
+/// The cursor refusal the handler maps to `invalid_params`: a `Serde` error, as the
+/// store's `candidates_for_decision` documents for a cursor outside the canonical form.
+fn refuses_cursor(
+    result: Result<
+        memory_store::contradiction_candidates::CandidatePage,
+        memory_store::MemoryStoreError,
+    >,
+) -> bool {
+    matches!(result, Err(memory_store::MemoryStoreError::Serde(_)))
+}
+
 fn open() -> (tempfile::TempDir, MemoryStore) {
     let dir = tempfile::tempdir().unwrap();
     let store = MemoryStore::open_for_test(dir.path(), "eidnara-candidates-test");
@@ -578,7 +589,8 @@ fn the_under_route_page_read_answers_the_authority_before_the_cursor() {
                 4,
                 deadline(),
             )
-            .is_err(),
+            .err()
+            .is_some_and(|error| matches!(error, memory_store::MemoryStoreError::Serde(_))),
         "under a MODULE row a malformed cursor is judged after the page ran"
     );
 }
@@ -622,17 +634,13 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
         "7500.5.",
     ] {
         assert!(
-            store
-                .candidates_for_decision(PROJECT, "decision", Some(cursor), 4)
-                .is_err(),
+            refuses_cursor(store.candidates_for_decision(PROJECT, "decision", Some(cursor), 4)),
             "{cursor}"
         );
     }
     let oversized = format!("7500.5.{}", "61".repeat(513));
     assert!(
-        store
-            .candidates_for_decision(PROJECT, "decision", Some(&oversized), 4)
-            .is_err(),
+        refuses_cursor(store.candidates_for_decision(PROJECT, "decision", Some(&oversized), 4)),
         "a cursor naming an evidence id longer than any stored id was never issued"
     );
     let longest = format!("10000.{}.{}", i64::MAX, "61".repeat(512));
@@ -650,29 +658,36 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
         "the byte bound covers every component's widest spelling"
     );
     assert!(
-        store
-            .candidates_for_decision(PROJECT, "decision", Some(&format!("0{bound}")), 4)
-            .is_err(),
-        "one byte past the byte bound is refused before any component is parsed"
+        refuses_cursor(store.candidates_for_decision(
+            PROJECT,
+            "decision",
+            Some(&format!("0{bound}")),
+            4
+        )),
+        "one byte past the byte bound is refused as a cursor"
     );
+    for outside in ["10001.5.61", "7500.-1.61", "7500.5.01", "7500.5.617f"] {
+        assert!(
+            refuses_cursor(store.candidates_for_decision(PROJECT, "decision", Some(outside), 4)),
+            "{outside}: a score over 10000, a negative time, or a control character in the id names a row no table holds"
+        );
+    }
+    // The cursor's id is a keyset bound judged by shape; an id the write path's secret scanner refuses still parses and names a position no row holds.
     let secret_hex = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678"
         .bytes()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    for outside in [
-        "10001.5.61",
-        "7500.-1.61",
-        "7500.5.01",
-        "7500.5.617f",
-        &format!("7500.5.{secret_hex}"),
-    ] {
-        assert!(
-            store
-                .candidates_for_decision(PROJECT, "decision", Some(outside), 4)
-                .is_err(),
-            "{outside}: a score over 10000, a negative time, a control character in the id, or an id the scanner detects names a row no table holds"
-        );
-    }
+    assert!(
+        store
+            .candidates_for_decision(
+                PROJECT,
+                "decision",
+                Some(&format!("7500.5.{secret_hex}")),
+                4
+            )
+            .is_ok(),
+        "a cursor round-trips under the shape rules alone"
+    );
 }
 
 #[test]

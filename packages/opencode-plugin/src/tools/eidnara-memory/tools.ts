@@ -3,6 +3,7 @@ import { CONTEXT_RESEARCHER_AGENT } from "../../agents/context-researcher";
 import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import { toolCallIdFromContext } from "../../plugin/rust-tool-backends";
 import { MemoryInputError } from "../../shared/kernel-client/anti-memory";
+import { CANDIDATES_PAGE_MAX } from "../../shared/kernel-client/wire";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import {
     actionList,
@@ -110,9 +111,9 @@ const candidatesArgsShape = {
         .number()
         .int()
         .min(1)
-        .max(64)
+        .max(CANDIDATES_PAGE_MAX)
         .optional()
-        .describe("candidates page size, 1 to 64"),
+        .describe(`candidates page size, 1 to ${CANDIDATES_PAGE_MAX}`),
 };
 
 const eidnaraMemoryArgsSchema = tool.schema
