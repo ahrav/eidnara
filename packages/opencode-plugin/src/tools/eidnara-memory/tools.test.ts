@@ -1880,9 +1880,12 @@ describe("eidnara_memory candidates", () => {
                 decision_id: `dec:${"y".repeat(idLength)}`,
             }));
             // The first page's cursor names a short id; the fitted page's cursor names a 512-byte one, as a stable store answers when the last stored row's id is short.
+            // The first page's cursor is null or short; the fitted page's cursor names a 512-byte id, as a stable store answers when the last stored row's id is short.
             const cursorAfter = (count: number) =>
                 count === 64
-                    ? "7500.1.7a7a"
+                    ? idLength % 2 === 0
+                        ? null
+                        : "7500.1.7a7a"
                     : `10000.${"9".repeat(19)}.${String(count).padStart(2, "0").repeat(512)}`;
             // The daemon answers the leading rows of the requested size and the cursor after its last row.
             const h = candidatesHarness((body) => {

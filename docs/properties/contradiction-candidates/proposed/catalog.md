@@ -853,7 +853,7 @@ a Kernel not yet open (`:2577`), `unavailable`/`store_unavailable` for a
 Kernel whose open failed (`:2594`), and `store_unavailable` for a daemon with
 no Memory Store (`:2625`), each without `items`. The OpenCode tool renders
 each terminal by name and `disabled` as a plain statement
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1665`). Not
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1666`). Not
 constructed: a failing authority lookup (dependency fault F18 has no seam).
 Guarantee: after the scope, Kernel-readiness, and body checks, a route whose
 frozen flag is false, or a root whose memories authority is not MODULE,
@@ -939,8 +939,8 @@ runs a statement the ledger records on it (`:2228-2237`); the handler answers
 `disabled` before it reaches the store
 (`crates/daemon/src/contradiction_candidates/read.rs:225`). The `candidates`
 action renders the terminal as a plain statement in both harnesses
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1665`,
-`packages/pi-plugin/src/tools/eidnara-memory.test.ts:533`).
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1666`,
+`packages/pi-plugin/src/tools/eidnara-memory.test.ts:532`).
 Guarantee: With the route's frozen `contradiction_candidates.enabled` false
 (default), no candidate pass is offered after any publication, no row is
 written, and neither read surface opens the table; the flag is enabled only by
@@ -1007,7 +1007,7 @@ check that `kernel_routes/commit.rs` and `kernel_routes/dispute.rs` name no
 candidate store method. The OpenCode tool renders each row's confirm form
 `{"action":"dispute","event":"mark_disputed","objectId":"<decision_object_id>","evidenceId":"<evidence_id>"}`
 from the row's ids
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1626`). The
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1627`). The
 form's fields match `dispute`'s arguments by reading
 `packages/opencode-plugin/src/tools/eidnara-memory/dispute.ts`; no test feeds
 a rendered form back into the tool.

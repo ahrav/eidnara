@@ -111,7 +111,7 @@ export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<s
         return result;
     };
     const note = OVERLAP_NOTE + (input.disputeAdmitted ? FILE_FORM_NOTE : REPORT_FORM_NOTE);
-    // The reply's fields beside the rows, measured with the rows. The first measurement reserves the longest cursor the store issues (1056 bytes, a 512-byte id in hex after the score and time), because the fitted page's own cursor names another row than the first page's.
+    // The reply's fields beside the rows, measured with the rows. The first measurement reserves the longest cursor the store issues, because the fitted page's own cursor names another row than the first page's.
     const envelope = (page: CandidatesPage, next: string | null) => ({
         action: "candidates",
         objectId,
@@ -122,8 +122,8 @@ export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<s
     let page = judge(await ask(), paging.limit ?? CANDIDATES_PAGE_MAX);
     if (typeof page === "string") return page;
     let rows = page.items.map(renderRow);
-    const reserved = page.next === null ? null : "0".repeat(CURSOR_RESERVE_BYTES);
-    const fitted = rowsWithinBudget(envelope(page, reserved), rows);
+    // Reserved whatever this page's next is: a page the budget cuts is followed by stored rows, so the fitted page carries a cursor.
+    const fitted = rowsWithinBudget(envelope(page, "0".repeat(CURSOR_RESERVE_BYTES)), rows);
     if (fitted < rows.length) {
         // The cursor is opaque, so the page of the fitted size comes from the daemon: its next lands after the last rendered row.
         const limit = Math.max(fitted, 1);
