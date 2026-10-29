@@ -58,7 +58,7 @@ the current line.
 | G3 | The Kernel checkout open has no allocation limit and honors replacement refs | added as `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements` |
 | G4 | A plugin `RetireDecision` can retire an attestation | queued; owner #1172 with OQ6-15 |
 | G5 | No record on the served form of an unpromoted trusted-class attestation (`ExplicitLabeled`) | queued; owner #1172 |
-| G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1171 |
+| G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1174 (U4 part pass). #1171 does not address it: the classifier reads no `artifact_reference`, and its claim comes from the descriptor detail and the evidence row |
 
 ## Biases for a human
 

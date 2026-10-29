@@ -3,20 +3,23 @@
 //!
 //! [`classify`] reads one decision's registry row, decision row, and latest own admission, its
 //! anchor, its row-level and event-level citations, and the `repository_documents` descriptor
-//! citing each cited evidence row, every read at one commit sequence under one evaluation budget.
-//! The result is a function of the Kernel snapshot at that sequence and of the bound roots the
-//! caller passes: the classifier reads no worktree, clock, or network, and opens no repository. It
-//! carries evidence ids and never evidence bytes, since document evidence is `Sensitive`.
+//! citing each cited evidence row, every read at one commit sequence under one evaluation budget,
+//! and then confirms the store is still the target's incarnation. The result is a function of the
+//! Kernel snapshot at that sequence and of the bound roots the caller passes: the classifier reads
+//! no worktree, clock, or network, and opens no repository. It carries evidence ids and never
+//! evidence bytes, since document evidence is `Sensitive`.
 //!
-//! A decision the verifier authored is [`Unverifiable::SelfSource`] before its anchor or citations
-//! are read. A live, `Active` decision is then either [`Class::Verifiable`] or exactly one
-//! [`Unverifiable`] reason, checked in this order: the anchor (`no_anchor`, `anchor_not_git`),
-//! then the citations (`no_citation`, then per cited evidence row in the linked-evidence order:
-//! `evidence_retired`, `descriptor_retired`, `digest_missing`, or no document descriptor). The
-//! first cited row that resolves to a live document descriptor with a digest makes the decision
-//! verifiable; otherwise the first cited row's reason other than "no document descriptor" names
-//! it, and `citation_not_document` names a decision whose every cited row has no document
-//! descriptor.
+//! The first read decides membership: an object that is absent, not a decision, not live, or whose
+//! latest own admission is not `Active` is [`Class::NotInput`], and a remaining decision the
+//! verifier authored is [`Unverifiable::SelfSource`], both before its anchor or citations are read.
+//! Every other decision is either [`Class::Verifiable`] or exactly one [`Unverifiable`] reason,
+//! checked in this order: the anchor (`no_anchor`, `anchor_not_git`), then the citations
+//! (`no_citation`, then per cited evidence row, the row-level `evidence_id` first and then at most
+//! [`MAX_EVENT_CITATIONS`] event-level citations in the linked-evidence order: `evidence_retired`,
+//! `descriptor_retired`, `digest_missing`, or no document descriptor). The first cited row that
+//! resolves to a live document descriptor with a digest makes the decision verifiable; otherwise
+//! the first cited row's reason other than "no document descriptor" names it, and
+//! `citation_not_document` names a decision whose every cited row has no document descriptor.
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -25,7 +28,8 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     AnchorCondition, CitingDescriptor, ClaimFactsError, CommitReadTarget, Disposition,
-    GitCondition, KernelError, KernelStore, Sensitivity, SourceClass, TaintClass,
+    EvidenceLiveness, EvidenceLivenessError, GitCondition, KernelError, KernelStore,
+    LinkedEvidence, LiveDescriptor, Sensitivity, SourceClass, TaintClass,
 };
 
 use super::{Claim, Reason};
@@ -33,8 +37,9 @@ use super::{Claim, Reason};
 /// The `source_kind` of every decision the verifier writes.
 pub const VERIFIER_SOURCE_KIND: &str = "verifier";
 
-/// The cited evidence rows one classification reads: the decision's own and its newest events'.
-pub const MAX_CITATIONS: NonZeroUsize = NonZeroUsize::new(32).unwrap();
+/// The event-level citations one classification reads, newest first, besides the decision row's
+/// own `evidence_id`, which is always read first.
+pub const MAX_EVENT_CITATIONS: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 
 /// A bound project root and the repository identity its documents are published under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,11 +48,30 @@ pub struct BoundRoot<'a> {
     pub repository_id: &'a str,
 }
 
-/// One decision's classification at `commit_seq`, the sequence every read ran at.
+/// One decision's classification at `target`: every read ran at `target.through_commit`, and the
+/// store was `target.incarnation` from the first read through the last.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Classification {
-    pub commit_seq: i64,
+    pub target: CommitReadTarget,
     pub class: Class,
+}
+
+/// Why [`classify`] returned no classification for a decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ClassifyError {
+    /// A Kernel read refused, or the store left `target`'s incarnation during the reads.
+    #[error(transparent)]
+    Facts(#[from] ClaimFactsError),
+    /// The cited live document descriptor's stored `relative_path` is outside the document path
+    /// rule [`Claim::new`] enforces. The refusal concerns that decision's descriptor alone.
+    #[error("the cited document descriptor's path is outside the document path rule")]
+    InvalidDocumentPath,
+}
+
+impl From<KernelError> for ClassifyError {
+    fn from(error: KernelError) -> Self {
+        Self::Facts(error.into())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +91,8 @@ pub enum Unverifiable {
     NoCitation,
     CitationNotDocument,
     EvidenceRetired,
+    /// Descriptors cited the evidence, and the cited revision is no longer live at the sequence:
+    /// retired, superseded by a newer revision of its lineage, or left with invalidated evidence.
     DescriptorRetired,
     DigestMissing,
     SelfSource,
@@ -175,25 +201,38 @@ impl DocumentKind {
 }
 
 /// Classifies the decision `object_id` at `target.through_commit` under `budget`, mapping its
-/// document's repository to the first of `roots` with that repository identity.
+/// document's repository to the first of `roots` with that repository identity. It reads the
+/// decision row's own `evidence_id` and at most [`MAX_EVENT_CITATIONS`] event-level citations.
+///
+/// The first read compares the store's incarnation with `target.incarnation` under its reader
+/// guard; the anchor, citation, and descriptor reads that follow take the sequence alone, and
+/// after the last of them the incarnation is compared again. A restore only advances the store's
+/// restore generation, so an equal incarnation after the last read means every read saw the
+/// history `target` was captured from.
 ///
 /// # Errors
 ///
-/// Returns the Kernel reads' refusals: `IncarnationMismatch` when the store is not `target`'s
-/// incarnation, `Kernel(Deadline)` when the budget runs out, `Kernel(FutureSnapshot)` past the
-/// tip, and `Kernel(CorruptCanonicalRow)` for a stored anchor, descriptor, or document path that
-/// fails its row checks.
+/// Returns the Kernel reads' refusals: `Facts(IncarnationMismatch)` when the store is not
+/// `target`'s incarnation at the first read or after the last, `Facts(Kernel(Deadline))` when the
+/// budget runs out, `Facts(Kernel(FutureSnapshot))` past the tip, and
+/// `Facts(Kernel(CorruptCanonicalRow))` for a stored anchor or descriptor that fails its row
+/// checks. Returns [`ClassifyError::InvalidDocumentPath`] when the cited live document
+/// descriptor's `relative_path` passes the descriptor row checks and is outside the document path
+/// rule.
 pub fn classify(
     kernel: &KernelStore,
     object_id: &str,
     target: CommitReadTarget,
     roots: &[BoundRoot<'_>],
     budget: &EvalBudget,
-) -> Result<Classification, ClaimFactsError> {
-    Ok(Classification {
-        commit_seq: target.through_commit,
-        class: class_of(kernel, object_id, target, roots, budget)?,
-    })
+) -> Result<Classification, ClassifyError> {
+    let class = class_of(kernel, object_id, target, roots, budget)?;
+    // A restore advances the generation and never returns it, so this comparison detects a restore
+    // between any two reads above without holding a reader guard.
+    kernel
+        .require_incarnation(target.incarnation)
+        .map_err(|_| ClaimFactsError::IncarnationMismatch)?;
+    Ok(Classification { target, class })
 }
 
 fn class_of(
@@ -202,29 +241,29 @@ fn class_of(
     target: CommitReadTarget,
     roots: &[BoundRoot<'_>],
     budget: &EvalBudget,
-) -> Result<Class, ClaimFactsError> {
+) -> Result<Class, ClassifyError> {
     let requested = target.through_commit;
     let ids = [object_id.to_owned()];
     let standing =
         match kernel.claim_standing_at_within_budget(&ids, target, NonZeroUsize::MIN, budget) {
             Ok(mut standings) => standings.pop().flatten(),
             Err(ClaimFactsError::NotADecision) => None,
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
     let Some(standing) =
         standing.filter(|standing| standing.object.invalidated_commit_seq.is_none())
     else {
         return Ok(Class::NotInput);
     };
-    if standing.object.source_kind == VERIFIER_SOURCE_KIND {
-        return Ok(Class::Unverifiable(Unverifiable::SelfSource));
-    }
     let Some(admission) = standing
         .own_admission
         .filter(|admission| admission.disposition == Disposition::Active)
     else {
         return Ok(Class::NotInput);
     };
+    if standing.object.source_kind == VERIFIER_SOURCE_KIND {
+        return Ok(Class::Unverifiable(Unverifiable::SelfSource));
+    }
     let (object, decision) = (standing.object, standing.decision);
     let facts = DecisionFacts {
         object_id: object.object_id,
@@ -251,10 +290,11 @@ fn class_of(
         Some(_) => return unverifiable(Unverifiable::AnchorNotGit),
         None => return unverifiable(Unverifiable::NoAnchor),
     };
-    let cited = kernel.linked_decision_evidence_within_budget(
+    let cited = citations(
+        kernel,
         object_id,
-        requested,
-        MAX_CITATIONS,
+        facts.evidence_id.as_deref(),
+        target,
         budget,
     )?;
     if cited.is_empty() {
@@ -262,52 +302,113 @@ fn class_of(
     }
     let mut first_reason = None;
     for evidence in cited {
-        let reason = if evidence.live {
-            let found = kernel.source_descriptor_citing_evidence(
-                OccurrenceClass::RepositoryDocuments,
-                &evidence.evidence_id,
-                requested,
-                budget,
-            )?;
-            match found {
-                CitingDescriptor::Live(descriptor) => {
-                    match crate::memory_capture::cite::digest_bytes(
-                        &descriptor.detail.artifact_digest,
-                    ) {
-                        Some(digest) => {
-                            let input = VerifierInput::new(
-                                facts,
-                                evidence.evidence_id,
-                                *descriptor,
-                                digest,
-                                &oid,
-                                roots,
-                            )?;
-                            return Ok(Class::Verifiable(Box::new(input)));
-                        }
-                        None => Unverifiable::DigestMissing,
-                    }
-                }
-                CitingDescriptor::Retired => Unverifiable::DescriptorRetired,
-                CitingDescriptor::Uncited => continue,
+        match resolve_citation(kernel, &evidence, requested, budget)? {
+            Resolution::Document(descriptor, digest) => {
+                let input = VerifierInput::new(
+                    facts,
+                    evidence.evidence_id,
+                    *descriptor,
+                    digest,
+                    &oid,
+                    roots,
+                )?;
+                return Ok(Class::Verifiable(Box::new(input)));
             }
-        } else {
-            Unverifiable::EvidenceRetired
-        };
-        first_reason.get_or_insert(reason);
+            Resolution::Reason(reason) => {
+                first_reason.get_or_insert(reason);
+            }
+            Resolution::NotDocument => {}
+        }
     }
     unverifiable(first_reason.unwrap_or(Unverifiable::CitationNotDocument))
+}
+
+/// The decision row's own evidence first, then its newest event-level citations of other
+/// evidence, at most [`MAX_EVENT_CITATIONS`] of them, so no event citation displaces the row's.
+fn citations(
+    kernel: &KernelStore,
+    object_id: &str,
+    own: Option<&str>,
+    target: CommitReadTarget,
+    budget: &EvalBudget,
+) -> Result<Vec<LinkedEvidence>, ClassifyError> {
+    let mut cited = Vec::new();
+    if let Some(evidence_id) = own {
+        let liveness = kernel
+            .evidence_liveness_at_within_budget(&[evidence_id], target, budget)
+            .map_err(|error| match error {
+                EvidenceLivenessError::IncarnationMismatch => ClaimFactsError::IncarnationMismatch,
+                EvidenceLivenessError::Kernel(error) => error.into(),
+                EvidenceLivenessError::TooManyIds => KernelError::InvalidInput.into(),
+            })?;
+        // The decision row's foreign key keeps its evidence row, so a row not live is retired.
+        cited.push(LinkedEvidence {
+            evidence_id: evidence_id.to_owned(),
+            live: liveness.first() == Some(&EvidenceLiveness::Live),
+        });
+    }
+    // One row more than the cap leaves the cap after the row's own evidence is dropped.
+    let max = MAX_EVENT_CITATIONS.saturating_add(1);
+    let events = kernel.linked_decision_evidence_within_budget(
+        object_id,
+        target.through_commit,
+        max,
+        budget,
+    )?;
+    cited.extend(
+        events
+            .into_iter()
+            .filter(|evidence| Some(evidence.evidence_id.as_str()) != own)
+            .take(MAX_EVENT_CITATIONS.get()),
+    );
+    Ok(cited)
+}
+
+/// What one cited evidence row contributes to the classification.
+enum Resolution {
+    /// A live document descriptor with a digest cites it.
+    Document(Box<LiveDescriptor>, [u8; 32]),
+    Reason(Unverifiable),
+    /// No document descriptor cites it.
+    NotDocument,
+}
+
+fn resolve_citation(
+    kernel: &KernelStore,
+    evidence: &LinkedEvidence,
+    requested: i64,
+    budget: &EvalBudget,
+) -> Result<Resolution, KernelError> {
+    if !evidence.live {
+        return Ok(Resolution::Reason(Unverifiable::EvidenceRetired));
+    }
+    let found = kernel.source_descriptor_citing_evidence(
+        OccurrenceClass::RepositoryDocuments,
+        &evidence.evidence_id,
+        requested,
+        budget,
+    )?;
+    Ok(match found {
+        CitingDescriptor::Live(descriptor) => {
+            match crate::memory_capture::cite::digest_bytes(&descriptor.detail.artifact_digest) {
+                Some(digest) => Resolution::Document(descriptor, digest),
+                None => Resolution::Reason(Unverifiable::DigestMissing),
+            }
+        }
+        CitingDescriptor::Retired => Resolution::Reason(Unverifiable::DescriptorRetired),
+        CitingDescriptor::Uncited => Resolution::NotDocument,
+    })
 }
 
 impl VerifierInput {
     fn new(
         decision: DecisionFacts,
         evidence_id: String,
-        descriptor: kernel::LiveDescriptor,
+        descriptor: LiveDescriptor,
         digest: [u8; 32],
         oid: &str,
         roots: &[BoundRoot<'_>],
-    ) -> Result<Self, KernelError> {
+    ) -> Result<Self, ClassifyError> {
         let field = |name: &str| {
             descriptor
                 .detail
@@ -320,7 +421,7 @@ impl VerifierInput {
         let relative_path = field("relative_path")?;
         let repository_id = field("repository_id")?;
         let claim = Claim::new(&relative_path, digest, descriptor.byte_length, oid)
-            .map_err(|_| KernelError::CorruptCanonicalRow)?;
+            .map_err(|_| ClassifyError::InvalidDocumentPath)?;
         let root = roots
             .iter()
             .find(|bound| bound.repository_id == repository_id)

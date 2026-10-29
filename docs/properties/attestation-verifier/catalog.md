@@ -501,16 +501,16 @@ Open questions:
 Type: safety
 Reachability: test-only - `attestation_verifier::classify::classify` has no production caller at this branch; #1173 wires it behind `verifier.enabled` and relabels the record `explicit-config-only`
 Status: active - converted by [#1171](https://github.com/ahrav/eidnara/issues/1171)
-Exercised: yes - a fixture store classifies one decision twice at one commit sequence around a worktree edit, a HEAD move, and a later Kernel commit that changes the decision's classification at the tip
+Exercised: yes - a fixture store classifies three decisions twice at one commit sequence around a worktree edit, a HEAD move, and later Kernel changes that retire a cited descriptor, invalidate an anchor, and delete cited evidence, each changing one decision's classification at the tip; a target of another incarnation is refused
 Guarantee: Classification is a function of the Kernel snapshot at one commit sequence, the bound roots the caller passes, and the verifier's identity; every read runs at that sequence, the result carries it, and the classifier reads no worktree, clock, or network and opens no repository.
-Check: `always` - two classifications of one decision at one `CommitReadTarget` with equal bound roots are equal, and the result's `commit_seq` is the target's sequence
-Fault/timing angle: a worktree edit, a HEAD move, or a Kernel commit between two classifications at one sequence
-Required faults and enabling state: F8 at the classification step, and a later commit that retires the cited descriptor so the tip classification differs
-Confidence: high - [evidence](evidence/p6-new-verifiability-pure-function-of-snapshot.md). Read `classify` (`crates/daemon/src/attestation_verifier/classify.rs:186`) and `class_of` (`:199`): its reads are `claim_standing_at_within_budget` (`:209`), `anchor_condition_at` (`:246`), `linked_decision_evidence_within_budget` (`:254`), and `source_descriptor_citing_evidence` (`:266`), each at `target.through_commit` under one `EvalBudget`
-Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:668`, `:550` (unaudited)
-Impact: a classification that read HEAD or the clock would change between a pass's selection and its write set, so the write set's recheck at the classification's sequence would compare against another snapshot
+Check: `always` - two classifications of one decision at one `CommitReadTarget` with equal bound roots are equal, the result carries that target, and a store that is not the target's incarnation at the first read or after the last is refused with `IncarnationMismatch`
+Fault/timing angle: a worktree edit, a HEAD move, or a Kernel commit between two classifications at one sequence; a restore between two of the classifier's reads
+Required faults and enabling state: F8 at the classification step, and later commits that retire the cited descriptor, invalidate the anchor, and delete the cited evidence, so the tip classifications differ (F3)
+Confidence: high - [evidence](evidence/p6-new-verifiability-pure-function-of-snapshot.md). Read `classify` (`crates/daemon/src/attestation_verifier/classify.rs:222`), whose incarnation comparison after the last read is at `:233`, and `class_of` (`:238`): its reads are `claim_standing_at_within_budget` (`:248`), `anchor_condition_at` (`:285`), `evidence_liveness_at_within_budget` (`:338`), `linked_decision_evidence_within_budget` (`:352`), and `source_descriptor_citing_evidence` (`:385`), each at `target.through_commit` under one `EvalBudget`
+Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:817`, `:698`, `:644` (unaudited)
+Impact: a classification that read HEAD or the clock would change between a pass's selection and its write set, so the write set's recheck at the classification's target would compare against another snapshot
 Open questions:
-- Do the reads after the standing read check the store incarnation? - unresolved, needs a test that restores a backup between two reads, or an incarnation check in the anchor, citation, and descriptor reads.
+- Is a restore between two of the classifier's reads detected? - resolved with answer: yes; the standing read and `evidence_liveness_at_within_budget` compare the incarnation under their reader guards, and `classify` compares it again after the last read. A restore only advances the restore generation, so the last comparison detects a restore between any two reads. No test restores between two reads, because `classify` has no seam between them; `a_target_of_another_incarnation_is_refused` checks the refusal.
 
 ### p6-new-verifier-input-anchor-and-document-citation
 
@@ -521,13 +521,14 @@ Exercised: yes - a fixture store in the memory-capture shape constructs every re
 Guarantee: A decision is verifier input only when live, `Active`, with a live `reachable_from` anchor and a row- or event-level citation resolving to a live `repository_documents` descriptor with a digest; otherwise it carries exactly one reason from {`no_anchor`, `anchor_not_git`, `no_citation`, `citation_not_document`, `evidence_retired`, `descriptor_retired`, `digest_missing`, `self_source`}, or, when not live or not `Active`, no reason. The resolved claim carries the descriptor's path and digest, the evidence row's byte length, and the anchor's oid, and no range.
 Check: `always` - `verifiable XOR exactly one reason` for every live `Active` decision; a decision citing only `messages` evidence is never verifiable
 Fault/timing angle: an anchor, evidence row, or descriptor invalidated before the classification's sequence (F3)
-Required faults and enabling state: a `messages`-only citation, no anchor, an `Exact`, a `ReachableBetween`, and a non-git anchor, a deleted evidence artifact, a retired descriptor, a descriptor without a digest, and no citation
-Confidence: high - [evidence](evidence/p6-new-verifier-input-anchor-and-document-citation.md). Read `class_of` (`crates/daemon/src/attestation_verifier/classify.rs:199`): the self-source check at `:219`, the anchor match after `:246`, and the citation loop after `:254`, which returns at the first live document descriptor with a digest and otherwise the first cited row's reason; and the Kernel reads `source_descriptor_citing_evidence` (`crates/kernel/src/source_descriptor.rs:1213`) and `anchor_condition_at` (`crates/kernel/src/anchor_write.rs:468`)
-Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:326`, `:470`, `:550`, `:599`; `crates/kernel/tests/kernel_source_descriptors.rs:3252`; `crates/kernel/tests/kernel_anchor_write.rs:869` (unaudited)
+Required faults and enabling state: a `messages`-only citation, no anchor, an `Exact`, a `ReachableBetween`, and a non-git anchor, a deleted evidence artifact, a retired descriptor, a descriptor without a digest, no citation, two reasons on one decision in citation order, a row-level document citation, and more event citations than the cap
+Confidence: high - [evidence](evidence/p6-new-verifier-input-anchor-and-document-citation.md). Read `class_of` (`crates/daemon/src/attestation_verifier/classify.rs:238`): the `Active` filter at `:258`, then the self-source check at `:264`, the anchor match after `:285`, the citation list from `citations` (`:328`), which reads the row-level `evidence_id` first and then at most `MAX_EVENT_CITATIONS` (`:42`, 32) event-level citations, and the loop over `resolve_citation` (`:376`), which returns at the first live document descriptor with a digest and otherwise the first cited row's reason; and the Kernel reads `source_descriptor_citing_evidence` (`crates/kernel/src/source_descriptor.rs:1213`) and `anchor_condition_at` (`crates/kernel/src/anchor_write.rs:468`)
+Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:355`, `:535`, `:627`, `:665`, `:698`, `:749`; `crates/kernel/tests/kernel_source_descriptors.rs:3252`; `crates/kernel/tests/kernel_anchor_write.rs:869` (unaudited)
 Impact: falsifier: a `messages`-citing decision classified verifiable
 Open questions:
 - Is `ReachableBetween.start_oid` a legal input? - resolved with answer: no; the #1171 ticket records OQ6-10 as decided, `ReachableBetween` is `anchor_not_git` because no producer emits it.
-- Which reason names a decision whose cited document descriptor was superseded by a revision citing other evidence? - resolved with answer: `descriptor_retired`; the evidence-keyed read finds descriptors of the class that cited the evidence, none live at the sequence.
+- Which reason names a decision whose cited document descriptor was superseded by a revision citing other evidence? - resolved with answer: `descriptor_retired`; the evidence-keyed read finds descriptors of the class that cited the evidence, none live at the sequence. The reason covers a cited revision that is no longer live, including one whose lineage has a newer live revision, because C8 requires a live descriptor citing the cited evidence.
+- Should `descriptor_retired` stay the reason when a newer revision of the cited lineage is live, given the ticket defines it as "a document lineage with no live revision"? (needs human input)
 - Which descriptor resolves when several live document descriptors cite one evidence row? - resolved with answer: the first in object id order; equal texts share one evidence row, so the digest and byte length agree.
 
 ### p6-new-attestation-identity-unique-per-decision-oid
@@ -656,13 +657,13 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only - intended; the `self_source` half has code at this branch with no production caller, and #1173 wires it behind `verifier.enabled`
 Status: proposed - converts in [#1172](https://github.com/ahrav/eidnara/issues/1172) with the plugin-route half; the `self_source` half is checkable since [#1171](https://github.com/ahrav/eidnara/issues/1171)
-Exercised: partial - the `self_source` half: a fixture store classifies a `verifier` decision `self_source` while an undecodable anchor refuses an assistant decision, so the check precedes every anchor and citation read; the plugin-route half and the model-client clause land with [#1172](https://github.com/ahrav/eidnara/issues/1172)
-Guarantee: `verifier` is outside the plugin table; every `source_kind == "verifier"` decision is classified `self_source`; no model client is invoked.
+Exercised: partial - the `self_source` half: a fixture store classifies a `verifier` decision `self_source` while an undecodable anchor and an undecodable cited descriptor refuse two assistant decisions, so the check precedes every anchor and citation read, and classifies a `verifier` decision marked `Stale` outside the input set; the plugin-route half and the model-client clause land with [#1172](https://github.com/ahrav/eidnara/issues/1172)
+Guarantee: `verifier` is outside the plugin table; every live `Active` `source_kind == "verifier"` decision is classified `self_source`, and every other `verifier` decision is outside the input set; no model client is invoked.
 Check: `always` - `derive_classes("verifier")` is `None`, attestations are `self_source` on the next pass, and model-client calls are zero
 Fault/timing angle: see the fault map
 Required faults and enabling state: a store holding an attestation; a plugin write under `verifier`
-Confidence: medium - [evidence](evidence/p6-new-party-distinct-and-self-refusal.md). Read the `self_source` check at `crates/daemon/src/attestation_verifier/classify.rs:219`, after the registry read (`:209`) and before the anchor read (`:246`); the plugin-route half has no code at this branch
-Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:512` for the `self_source` half (unaudited)
+Confidence: medium - [evidence](evidence/p6-new-party-distinct-and-self-refusal.md). Read the `self_source` check at `crates/daemon/src/attestation_verifier/classify.rs:264`, after the standing read (`:248`) and its `Active` filter (`:258`) and before the anchor read (`:285`); the plugin-route half has no code at this branch
+Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:553` for the `self_source` half (unaudited)
 Impact: falsifier: the verifier attests its own attestation
 Open questions:
 - Does anything beyond the plugin route reserve `verifier`? (needs human input)

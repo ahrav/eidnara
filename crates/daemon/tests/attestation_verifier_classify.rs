@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use daemon::attestation_verifier::Reason;
 use daemon::attestation_verifier::classify::{
-    BoundRoot, Class, Classification, DocumentKind, MAX_CITATIONS, Unverifiable,
-    VERIFIER_SOURCE_KIND, VerifierInput, classify,
+    BoundRoot, Class, Classification, ClassifyError, DocumentKind, MAX_EVENT_CITATIONS,
+    Unverifiable, VERIFIER_SOURCE_KIND, VerifierInput, classify,
 };
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass};
@@ -315,6 +315,35 @@ fn digest_bytes(hex: &str) -> [u8; 32] {
     bytes
 }
 
+/// Stores the descriptor citing `evidence` and its evidence row without a digest.
+fn strip_digest(store: &Store, evidence: &Evidence) {
+    let connection = store.sqlite();
+    let payload: Vec<u8> = connection
+        .query_row(
+            "SELECT observation_payload FROM observations WHERE evidence_id=?1",
+            [&evidence.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut stored: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let mut detail: serde_json::Value =
+        serde_json::from_str(stored["detail"].as_str().unwrap()).unwrap();
+    detail["artifact_digest"] = "".into();
+    stored["detail"] = detail.to_string().into();
+    connection
+        .execute(
+            "UPDATE observations SET observation_payload=?1 WHERE evidence_id=?2",
+            rusqlite::params![serde_json::to_vec(&stored).unwrap(), evidence.id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE evidence_meta SET artifact_digest='' WHERE evidence_id=?1",
+            [&evidence.id],
+        )
+        .unwrap();
+}
+
 fn events<'a>(evidence: &[&'a Evidence]) -> Cites<'a> {
     Cites {
         row: None,
@@ -329,6 +358,7 @@ fn each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is
     let (document, _) = store.document("doc", "ARCHITECTURE.md", "# Architecture\n");
     let (deleted, _) = store.document("deleted", "docs/deleted.md", "# Deleted\n");
     let (retired, retired_descriptor) = store.document("retired", "docs/retired.md", "# Old\n");
+    let (stripped, _) = store.document("stripped", "docs/stripped.md", "# Stripped\n");
     let cases = [
         (
             store.decision(
@@ -400,7 +430,34 @@ fn each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is
             store.decision("uncited", "assistant", reachable_from(6), &Cites::default()),
             Unverifiable::NoCitation,
         ),
+        // The events share one commit, so citation order is evidence id order: the retired
+        // descriptor's evidence precedes the digest-less document's, and its reason wins.
+        (
+            store.decision(
+                "retired_then_stripped",
+                "assistant",
+                reachable_from(8),
+                &events(&[&retired, &stripped]),
+            ),
+            Unverifiable::DescriptorRetired,
+        ),
     ];
+    // The deleted evidence precedes the document in citation order; the document still resolves.
+    let deleted_then_document = store.decision(
+        "deleted_then_document",
+        "assistant",
+        reachable_from(10),
+        &events(&[&deleted, &document]),
+    );
+    let row_level = store.decision(
+        "row_level",
+        "assistant",
+        reachable_from(11),
+        &Cites {
+            row: Some(&document),
+            events: Vec::new(),
+        },
+    );
     let control = store.decision(
         "control",
         "assistant",
@@ -426,6 +483,7 @@ fn each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is
             Ok(String::new())
         })
         .unwrap();
+    strip_digest(&store, &stripped);
 
     let tip = store.kernel.tip().unwrap();
     for (object_id, reason) in &cases {
@@ -435,6 +493,13 @@ fn each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is
         matches!(store.class(&control), Class::Verifiable(_)),
         "the shared document citation is verifiable behind a git anchor"
     );
+    for object_id in [&deleted_then_document, &row_level] {
+        assert_eq!(
+            verifiable(store.class(object_id)).evidence_id,
+            document.id,
+            "{object_id} is verifiable through the document"
+        );
+    }
     assert_eq!(
         store.kernel.tip().unwrap(),
         tip,
@@ -477,31 +542,7 @@ fn a_descriptor_without_a_digest_is_digest_missing() {
         reachable_from(1),
         &events(&[&chat, &bare]),
     );
-    let connection = store.sqlite();
-    let payload: Vec<u8> = connection
-        .query_row(
-            "SELECT observation_payload FROM observations WHERE evidence_id=?1",
-            [&bare.id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let mut stored: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-    let mut detail: serde_json::Value =
-        serde_json::from_str(stored["detail"].as_str().unwrap()).unwrap();
-    detail["artifact_digest"] = "".into();
-    stored["detail"] = detail.to_string().into();
-    connection
-        .execute(
-            "UPDATE observations SET observation_payload=?1 WHERE evidence_id=?2",
-            rusqlite::params![serde_json::to_vec(&stored).unwrap(), bare.id],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE evidence_meta SET artifact_digest='' WHERE evidence_id=?1",
-            [&bare.id],
-        )
-        .unwrap();
+    strip_digest(&store, &bare);
     assert_eq!(
         store.class(&object_id),
         unverifiable(Unverifiable::DigestMissing)
@@ -511,38 +552,145 @@ fn a_descriptor_without_a_digest_is_digest_missing() {
 #[test]
 fn a_verifier_decision_is_self_source_before_any_anchor_or_citation_read() {
     let store = Store::open();
+    let (document, _) = store.document("doc", "ARCHITECTURE.md", "# Architecture\n");
+    let cites = events(&[&document]);
     let verifier = store.decision(
         "attestation",
         VERIFIER_SOURCE_KIND,
         reachable_from(1),
-        &Cites::default(),
+        &cites,
     );
-    let assistant = store.decision("model", "assistant", reachable_from(2), &Cites::default());
-    assert_eq!(
-        store.class(&assistant),
-        unverifiable(Unverifiable::NoCitation)
+    let anchored = store.decision("model", "assistant", reachable_from(2), &cites);
+    let cited = store.decision("cited", "assistant", reachable_from(3), &cites);
+    let stale = store.decision(
+        "stale_attestation",
+        VERIFIER_SOURCE_KIND,
+        reachable_from(4),
+        &cites,
     );
     store
-        .sqlite()
+        .kernel
+        .commit(intent("stale-attestation"), |envelope| {
+            admission(envelope, &stale, EventKind::MarkStale)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    for object_id in [&anchored, &cited] {
+        assert!(matches!(store.class(object_id), Class::Verifiable(_)));
+    }
+    let connection = store.sqlite();
+    connection
         .execute(
             "UPDATE anchors SET reachable_from_oid='not-an-oid'
              WHERE anchor_id IN ('anchor_attestation','anchor_model')",
             [],
         )
         .unwrap();
-    assert!(matches!(
+    connection
+        .execute(
+            "UPDATE observations SET observation_payload=x'00' WHERE evidence_id=?1",
+            [&document.id],
+        )
+        .unwrap();
+    let refusal = |object_id: &str| {
         classify(
             &store.kernel,
-            &assistant,
+            object_id,
+            store.target(),
+            &[],
+            &EvalBudget::unbounded(),
+        )
+    };
+    for (object_id, read) in [(&anchored, "anchor"), (&cited, "citation")] {
+        assert!(
+            matches!(
+                refusal(object_id),
+                Err(ClassifyError::Facts(ClaimFactsError::Kernel(
+                    KernelError::CorruptCanonicalRow
+                )))
+            ),
+            "the {read} read refuses {object_id}"
+        );
+    }
+    assert_eq!(
+        store.class(&verifier),
+        unverifiable(Unverifiable::SelfSource)
+    );
+    assert_eq!(
+        store.class(&stale),
+        Class::NotInput,
+        "a stale attestation is outside the input set"
+    );
+}
+
+#[test]
+fn a_stored_path_outside_the_document_path_rule_is_refused_for_that_decision() {
+    let store = Store::open();
+    let (document, _) = store.document("doc", ".git/config", "[core]\n");
+    let object_id = store.decision("doc", "assistant", reachable_from(1), &events(&[&document]));
+    assert_eq!(
+        classify(
+            &store.kernel,
+            &object_id,
             store.target(),
             &[],
             &EvalBudget::unbounded()
         ),
-        Err(ClaimFactsError::Kernel(KernelError::CorruptCanonicalRow))
+        Err(ClassifyError::InvalidDocumentPath)
+    );
+}
+
+#[test]
+fn a_target_of_another_incarnation_is_refused() {
+    let store = Store::open();
+    let (document, _) = store.document("doc", "ARCHITECTURE.md", "# Architecture\n");
+    let object_id = store.decision("doc", "assistant", reachable_from(1), &events(&[&document]));
+    let target = CommitReadTarget {
+        incarnation: Store::open().target().incarnation,
+        ..store.target()
+    };
+    assert!(matches!(
+        classify(
+            &store.kernel,
+            &object_id,
+            target,
+            &[],
+            &EvalBudget::unbounded()
+        ),
+        Err(ClassifyError::Facts(ClaimFactsError::IncarnationMismatch))
     ));
+}
+
+#[test]
+fn the_row_level_citation_is_read_before_the_capped_event_citations() {
+    let store = Store::open();
+    let messages: Vec<Evidence> = (0..=MAX_EVENT_CITATIONS.get())
+        .map(|index| store.message(&format!("m{index:02}"), &format!("message {index}")))
+        .collect();
+    let (document, _) = store.document("zz_doc", "ARCHITECTURE.md", "# Architecture\n");
+    let all: Vec<&Evidence> = messages.iter().collect();
+    let row_level = store.decision(
+        "row_level",
+        "assistant",
+        reachable_from(1),
+        &Cites {
+            row: Some(&document),
+            events: all.clone(),
+        },
+    );
+    let mut capped = all[..MAX_EVENT_CITATIONS.get()].to_vec();
+    capped.push(&document);
+    // The events share one commit, so the document's evidence id sorts it past the cap.
+    let event_level = store.decision(
+        "event_level",
+        "assistant",
+        reachable_from(2),
+        &events(&capped),
+    );
+    assert_eq!(verifiable(store.class(&row_level)).evidence_id, document.id);
     assert_eq!(
-        store.class(&verifier),
-        unverifiable(Unverifiable::SelfSource)
+        store.class(&event_level),
+        unverifiable(Unverifiable::CitationNotDocument)
     );
 }
 
@@ -591,7 +739,9 @@ fn a_decision_outside_the_input_set_counts_under_no_reason() {
     let cancelled = EvalBudget::new(None, Arc::new(true.into()));
     assert!(matches!(
         classify(&store.kernel, &stale, store.target(), &[], &cancelled),
-        Err(ClaimFactsError::Kernel(KernelError::Deadline))
+        Err(ClassifyError::Facts(ClaimFactsError::Kernel(
+            KernelError::Deadline
+        )))
     ));
 }
 
@@ -612,7 +762,7 @@ fn a_decision_citing_a_message_and_a_document_is_verifiable_through_the_document
     );
     let target = store.target();
     let classification = store.classify_at(&object_id, target, &[]);
-    assert_eq!(classification.commit_seq, target.through_commit);
+    assert_eq!(classification.target, target);
     let input = verifiable(classification.class);
     assert_eq!(input.claim.relative_path(), "ARCHITECTURE.md");
     assert_eq!(input.claim.digest(), &digest_bytes(&document.digest));
@@ -644,7 +794,6 @@ fn a_decision_citing_a_message_and_a_document_is_verifiable_through_the_document
     assert_eq!(decision.sensitivity, Sensitivity::Sensitive);
     let rendered = format!("{input:?}");
     assert!(!rendered.contains("The daemon owns the store."));
-    assert!(MAX_CITATIONS.get() >= 2);
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -669,6 +818,7 @@ fn classification_at_one_sequence_ignores_the_worktree_head_and_later_commits() 
     let store = Store::open();
     let text = "# Architecture\n";
     let (document, descriptor) = store.document("doc", "ARCHITECTURE.md", text);
+    let (structure, _) = store.document("structure", "STRUCTURE.md", "# Structure\n");
     let checkout = tempfile::tempdir().unwrap();
     git(
         checkout.path(),
@@ -678,21 +828,27 @@ fn classification_at_one_sequence_ignores_the_worktree_head_and_later_commits() 
     git(checkout.path(), &["add", "ARCHITECTURE.md"]);
     git(checkout.path(), &["commit", "--quiet", "-m", "doc"]);
     let head = git(checkout.path(), &["rev-parse", "HEAD"]);
-    let object_id = store.decision(
-        "pinned",
-        "assistant",
-        Some(AnchorValue::ReachableFrom {
-            oid: head,
-            captures: Vec::new(),
-        }),
-        &events(&[&document]),
-    );
+    let decide = |name: &str, cited: &Evidence| {
+        store.decision(
+            name,
+            "assistant",
+            Some(AnchorValue::ReachableFrom {
+                oid: head.clone(),
+                captures: Vec::new(),
+            }),
+            &events(&[cited]),
+        )
+    };
+    let pinned = decide("pinned", &document);
+    let unanchored = decide("unanchored", &structure);
+    let deleted = decide("deleted", &structure);
     let roots = [BoundRoot {
         root: checkout.path(),
         repository_id: REPOSITORY,
     }];
     let target = store.target();
-    let first = store.classify_at(&object_id, target, &roots);
+    let decisions = [&pinned, &unanchored, &deleted];
+    let first = decisions.map(|object_id| store.classify_at(object_id, target, &roots));
 
     std::fs::write(checkout.path().join("ARCHITECTURE.md"), "# Edited\n").unwrap();
     git(checkout.path(), &["commit", "--quiet", "-am", "edit"]);
@@ -704,19 +860,47 @@ fn classification_at_one_sequence_ignores_the_worktree_head_and_later_commits() 
             Ok(String::new())
         })
         .unwrap();
+    store
+        .sqlite()
+        .execute(
+            "UPDATE anchors SET invalidated_commit_seq=?1 WHERE anchor_id='anchor_unanchored'",
+            [store.kernel.tip().unwrap()],
+        )
+        .unwrap();
+    store
+        .kernel
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("delete-later"),
+            identity: ArtifactDeletionIdentity::Digest(structure.digest.clone()),
+            kind: ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: 1,
+        })
+        .unwrap();
     assert!(store.kernel.tip().unwrap() > target.through_commit);
-    let second = store.classify_at(&object_id, target, &roots);
+    let second = decisions.map(|object_id| store.classify_at(object_id, target, &roots));
     assert_eq!(first, second);
-    assert_eq!(
-        verifiable(second.class).root,
-        Ok(checkout.path().to_path_buf())
-    );
-    assert_eq!(
-        store.class(&object_id),
-        unverifiable(Unverifiable::DescriptorRetired),
-        "the later commit is visible at the tip"
-    );
+    for classification in second {
+        assert_eq!(
+            verifiable(classification.class).root,
+            Ok(checkout.path().to_path_buf())
+        );
+    }
+    for (object_id, reason) in [
+        (&pinned, Unverifiable::DescriptorRetired),
+        (&unanchored, Unverifiable::NoAnchor),
+        (&deleted, Unverifiable::EvidenceRetired),
+    ] {
+        assert_eq!(
+            store.class(object_id),
+            unverifiable(reason),
+            "the later commit is visible at the tip for {object_id}"
+        );
+    }
 
+    // A backstop: the assertions above carry the claim, and this scan flags a direct dependency.
     let source = include_str!("../src/attestation_verifier/classify.rs");
     for api in [
         "gix",

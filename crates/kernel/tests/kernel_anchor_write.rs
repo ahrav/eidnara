@@ -862,9 +862,9 @@ fn a_written_reachable_from_anchor_holds_through_descendants_and_not_after_a_rew
 }
 
 /// `anchor_condition_at` returns every kind's condition as the engine's decoder reads the stored
-/// row, at the requested sequence; an anchor created later or never written is `None`; a stored
-/// row the decoder refuses is `CorruptCanonicalRow`; and an exhausted budget, a future sequence,
-/// and a negative sequence are refused before any row is read.
+/// row, at the requested sequence; an anchor created later, invalidated by then, or never written
+/// is `None`; a stored row the decoder refuses is `CorruptCanonicalRow`; and an exhausted budget,
+/// a future sequence, and a negative sequence are refused before any row is read.
 #[test]
 fn the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row() {
     let directory = tempfile::tempdir().unwrap();
@@ -920,16 +920,39 @@ fn the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row(
             )
         })
         .unwrap();
-    Connection::open_with_flags(
+    let connection = Connection::open_with_flags(
         directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_WRITE,
     )
-    .unwrap()
-    .execute(
-        "UPDATE anchors SET reachable_from_oid='not-an-oid' WHERE anchor_id=?1",
-        [reachable_from],
-    )
     .unwrap();
+    let (invalidated, created, condition) = written
+        .iter()
+        .skip(1)
+        .find(|(anchor_id, _, _)| anchor_id != reachable_from)
+        .unwrap();
+    assert!(*created < tip);
+    connection
+        .execute(
+            "UPDATE anchors SET invalidated_commit_seq=?1 WHERE anchor_id=?2",
+            rusqlite::params![tip, invalidated],
+        )
+        .unwrap();
+    assert_eq!(
+        store.anchor_condition_at(invalidated, tip - 1, &budget),
+        Ok(Some(condition.clone())),
+        "an anchor is live before its invalidation"
+    );
+    assert_eq!(
+        store.anchor_condition_at(invalidated, tip, &budget),
+        Ok(None),
+        "an anchor is absent from its invalidation on"
+    );
+    connection
+        .execute(
+            "UPDATE anchors SET reachable_from_oid='not-an-oid' WHERE anchor_id=?1",
+            [reachable_from],
+        )
+        .unwrap();
     assert_eq!(
         store.anchor_condition_at(reachable_from, tip, &budget),
         Err(KernelError::CorruptCanonicalRow)

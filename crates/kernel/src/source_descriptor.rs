@@ -1205,7 +1205,7 @@ impl<'v> Narrowing<'v> {
 }
 
 impl KernelStore {
-    /// Equal texts can share one evidence row, so several live descriptors of `class` can cite `evidence_id`. The read returns the first in object id order at `requested`, using [`Self::live_source_descriptors`]' liveness predicate and row checks. Reader acquisition and query execution use `budget`'s deadline and interrupt.
+    /// Equal texts can share one evidence row, so several live descriptors of `class` can cite `evidence_id`. The read returns the first in object id order at `requested`, using [`Self::live_source_descriptors`]' liveness predicate and row checks. A [`CitingDescriptor::Retired`] result runs no row checks, since it carries no row. The query walks the observation rows citing `evidence_id` through `idx_observations_evidence_fk`, so its work is proportional to that count; `budget`'s deadline and interrupt bound reader acquisition and query execution.
     ///
     /// # Errors
     ///
@@ -1219,7 +1219,7 @@ impl KernelStore {
     ) -> Result<CitingDescriptor, KernelError> {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
-                "SELECT {DESCRIPTOR_COLUMNS},({live})
+                "SELECT {DESCRIPTOR_COLUMNS},({live}) AS live
                  FROM observations b INDEXED BY idx_observations_evidence_fk
                  CROSS JOIN object_registry o ON o.object_id=b.object_id
                  CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
@@ -1227,7 +1227,7 @@ impl KernelStore {
                    AND o.object_id GLOB '{DESCRIPTOR_OBJECT_ID_PREFIX}*'
                    AND o.source_kind=?1 AND o.object_kind='observation'
                    AND o.created_commit_seq<=?2
-                 ORDER BY 15 DESC,o.object_id
+                 ORDER BY live DESC,o.object_id
                  LIMIT 1",
                 live = Descriptors::LiveAtEnd.predicate("?2", "0"),
             )
