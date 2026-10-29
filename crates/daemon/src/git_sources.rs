@@ -236,23 +236,7 @@ fn packed_kind(
     {
         return Ok(Some(kind));
     }
-    let Ok(entries) = std::fs::read_dir(pack_dir) else {
-        return Ok(None);
-    };
-    let mut indices: Vec<_> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            let is_index = entry.file_type().is_ok_and(|kind| kind.is_file())
-                && path.extension().is_some_and(|extension| extension == "idx");
-            if !is_index || hinted.as_ref() == Some(&path) {
-                return None;
-            }
-            Some((entry.metadata().ok()?.modified().ok()?, path))
-        })
-        .collect();
-    indices.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-    for (_, path) in indices {
+    for path in indices_newest_first(pack_dir, hinted.as_deref()) {
         if let Some(kind) = index_kind(&path, hash, id)? {
             if let Ok(mut hint) = hint.lock() {
                 *hint = Some(path);
@@ -261,6 +245,160 @@ fn packed_kind(
         }
     }
     Ok(None)
+}
+
+/// The `.idx` files in `pack_dir` other than `skip`, newest first; an unreadable directory lists none.
+fn indices_newest_first(pack_dir: &Path, skip: Option<&Path>) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(pack_dir) else {
+        return Vec::new();
+    };
+    let mut indices: Vec<_> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let is_index = entry.file_type().is_ok_and(|kind| kind.is_file())
+                && path.extension().is_some_and(|extension| extension == "idx");
+            if !is_index || skip == Some(path.as_path()) {
+                return None;
+            }
+            Some((entry.metadata().ok()?.modified().ok()?, path))
+        })
+        .collect();
+    indices.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    indices.into_iter().map(|(_, path)| path).collect()
+}
+
+/// The packs in a repository's own `objects/pack`. `OwnPacks` lists the packs once and caches each
+/// opened index and pack for delta-chain checks and decodes. A decode refuses an allocation above
+/// the limit the packs were opened with. [`OwnPacks::decode`] bounds the entry's ref-delta chain by
+/// the index's entry count before it decodes the entry.
+pub(crate) struct OwnPacks {
+    dir: PathBuf,
+    hash: gix::hash::Kind,
+    alloc_limit: usize,
+    listed: Option<Vec<OwnPack>>,
+    last: Option<usize>,
+}
+
+struct OwnPack {
+    path: PathBuf,
+    index: std::cell::OnceCell<Option<gix::odb::pack::index::File>>,
+    data: std::cell::OnceCell<Option<gix::odb::pack::data::File>>,
+}
+
+#[derive(Debug)]
+pub(crate) enum OwnPackError {
+    Corruption,
+    Decode(gix::odb::pack::data::decode::Error),
+}
+
+impl OwnPacks {
+    pub(crate) fn new(repo: &gix::Repository, alloc_limit: NonZeroU64) -> Self {
+        Self {
+            dir: repo.objects.store_ref().path().join("pack"),
+            hash: repo.object_hash(),
+            alloc_limit: usize::try_from(alloc_limit.get()).unwrap_or(usize::MAX),
+            listed: None,
+            last: None,
+        }
+    }
+
+    /// The header of `id`'s entry in the first own pack whose index holds it and whose entry
+    /// decodes, trying the index that answered last, then the others newest first. `None` when no
+    /// own pack holds a decodable entry for `id`. Each index and pack must be a regular file.
+    ///
+    /// # Errors
+    ///
+    /// A pack whose index describes another pack, or whose delta chain revisits an entry, produces
+    /// [`PackCorruption`].
+    pub(crate) fn header(
+        &mut self,
+        id: &gix::oid,
+    ) -> Result<Option<gix::odb::pack::data::decode::header::Outcome>, PackCorruption> {
+        Ok(self.locate(id)?.map(|(_, header)| header))
+    }
+
+    /// `OwnPacks::decode` decodes `id` into `out` from the pack selected by [`Self::header`],
+    /// resolves ref-delta bases through that pack's index, and returns the object's kind; `None`
+    /// when [`Self::header`] is `None`.
+    ///
+    /// # Errors
+    ///
+    /// `OwnPacks::decode` propagates [`Self::header`]'s errors as [`OwnPackError::Corruption`] and
+    /// returns [`OwnPackError::Decode`] when the entry does not decode within the allocation limit.
+    pub(crate) fn decode(
+        &mut self,
+        id: &gix::oid,
+        out: &mut Vec<u8>,
+    ) -> Result<Option<gix::object::Kind>, OwnPackError> {
+        use gix::odb::pack::data::decode::entry::ResolvedBase;
+        let Some((position, _)) = self.locate(id).map_err(|_| OwnPackError::Corruption)? else {
+            return Ok(None);
+        };
+        let pack = &self.listed.as_ref().map_or(&[][..], Vec::as_slice)[position];
+        let (Some(Some(index)), Some(Some(data))) = (pack.index.get(), pack.data.get()) else {
+            return Ok(None);
+        };
+        let entry_at = |id: &gix::oid| {
+            let position = index.lookup(id)?;
+            data.entry(index.pack_offset_at_index(position)).ok()
+        };
+        let Some(entry) = entry_at(id) else {
+            return Ok(None);
+        };
+        let resolve = |base: &gix::oid, _: &mut Vec<u8>| entry_at(base).map(ResolvedBase::InPack);
+        data.decode_entry(
+            entry,
+            out,
+            &mut gix::zlib::Inflate::default(),
+            &resolve,
+            &mut gix::odb::pack::cache::Never,
+        )
+        .map(|outcome| Some(outcome.kind))
+        .map_err(OwnPackError::Decode)
+    }
+
+    fn locate(
+        &mut self,
+        id: &gix::oid,
+    ) -> Result<Option<(usize, gix::odb::pack::data::decode::header::Outcome)>, PackCorruption>
+    {
+        let (hash, alloc_limit) = (self.hash, self.alloc_limit);
+        let listed = self.listed.get_or_insert_with(|| {
+            indices_newest_first(&self.dir, None)
+                .into_iter()
+                .map(|path| OwnPack {
+                    path,
+                    index: std::cell::OnceCell::new(),
+                    data: std::cell::OnceCell::new(),
+                })
+                .collect()
+        });
+        let last = self.last;
+        let order = last
+            .into_iter()
+            .chain((0..listed.len()).filter(|&position| Some(position) != last));
+        for position in order {
+            let pack = &listed[position];
+            let index = pack.index.get_or_init(|| open_index(&pack.path, hash));
+            let Some(index) = index.as_ref().filter(|index| index.lookup(id).is_some()) else {
+                continue;
+            };
+            let data = pack.data.get_or_init(|| {
+                gix::odb::pack::data::File::at(pack.path.with_extension("pack"), hash)
+                    .ok()
+                    .map(|data| data.with_alloc_limit_bytes(Some(alloc_limit)))
+            });
+            let Some(data) = data else {
+                continue;
+            };
+            if let Some(header) = entry_header(index, data, id)? {
+                self.last = Some(position);
+                return Ok(Some((position, header)));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// A pack of the repository holds the looked-up object in a form whose header cannot be decoded.
@@ -276,24 +414,40 @@ fn is_regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
-/// Reads `id`'s header from the pack `path` indexes. Each ref-delta hop resolves its base in the same index; a well-formed chain visits each entry at most once, so more hops than the index holds entries means the chain revisits an entry.
+/// Reads `id`'s kind from the pack `path` indexes.
 fn index_kind(
     path: &Path,
     hash: gix::hash::Kind,
     id: &gix::oid,
 ) -> Result<Option<gix::object::Kind>, PackCorruption> {
-    use gix::odb::pack;
-    let pack_path = path.with_extension("pack");
-    if !is_regular_file(path) || !is_regular_file(&pack_path) {
+    let Some(index) = open_index(path, hash) else {
+        return Ok(None);
+    };
+    if index.lookup(id).is_none() {
         return Ok(None);
     }
-    let Ok(index) = pack::index::File::at(path, hash) else {
+    let Ok(data) = gix::odb::pack::data::File::at(path.with_extension("pack"), hash) else {
         return Ok(None);
     };
+    Ok(entry_header(&index, &data, id)?.map(|header| header.kind))
+}
+
+/// The index at `path` when it and its pack are regular files and the index reader accepts it.
+fn open_index(path: &Path, hash: gix::hash::Kind) -> Option<gix::odb::pack::index::File> {
+    if !is_regular_file(path) || !is_regular_file(&path.with_extension("pack")) {
+        return None;
+    }
+    gix::odb::pack::index::File::at(path, hash).ok()
+}
+
+/// Reads `id`'s header from `data` through `index`. Each ref-delta hop resolves its base in the same index; a well-formed chain visits each entry at most once, so more hops than the index holds entries means the chain revisits an entry.
+fn entry_header(
+    index: &gix::odb::pack::index::File,
+    data: &gix::odb::pack::data::File,
+    id: &gix::oid,
+) -> Result<Option<gix::odb::pack::data::decode::header::Outcome>, PackCorruption> {
+    use gix::odb::pack;
     let Some(position) = index.lookup(id) else {
-        return Ok(None);
-    };
-    let Ok(data) = pack::data::File::at(pack_path, hash) else {
         return Ok(None);
     };
     if index.pack_checksum() != data.checksum() {
@@ -316,7 +470,7 @@ fn index_kind(
     };
     let header = data.decode_header(entry, &mut gix::zlib::Inflate::default(), &in_pack);
     match header {
-        Ok(header) => Ok(Some(header.kind)),
+        Ok(header) => Ok(Some(header)),
         Err(_) if revisited.get() => Err(PackCorruption::CyclicDeltaChain),
         Err(_) => Ok(None),
     }
@@ -338,7 +492,7 @@ pub(crate) fn store_object_kind(
 }
 
 /// Whether the store ran out of pack index slots while looking up the object or any base in its delta chain. The store wraps a base lookup's failure in `DeltaBaseLookup`.
-fn exhausts_slots(error: &gix::objs::find::Error) -> bool {
+pub(crate) fn exhausts_slots(error: &gix::objs::find::Error) -> bool {
     use gix::odb::store::{find::Error as Store, load_index::Error as LoadIndex};
     fn walk(error: &Store) -> bool {
         match error {

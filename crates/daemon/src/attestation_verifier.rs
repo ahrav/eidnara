@@ -22,11 +22,10 @@
 //! (about 6,500 entries with short names) makes every claim beneath it `over_budget`.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use gix::objs::tree::EntryKind;
 use kernel::applicability::EvalBudget;
-use sha2::{Digest as _, Sha256};
+use ring::digest::{Context, SHA256};
 
 use crate::confined_path;
 use crate::git_sources;
@@ -38,6 +37,10 @@ use crate::git_sources;
 pub const MAX_BLOB_BYTES: u64 = crate::project_docs::MAX_PROJECT_DOC_BYTES;
 
 const ALLOCATION_LIMIT: std::num::NonZeroU64 = std::num::NonZeroU64::new(MAX_BLOB_BYTES).unwrap();
+
+/// The pack index slots of the object store the driver opens. A store lookup that exhausts them
+/// reopens the repository through `Objects::resize`.
+const INDEX_SLOTS: u16 = 32;
 
 /// Bytes at a path in a commit's tree, named by their sha256 digest and length.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,7 +243,7 @@ pub struct Digests {
 impl Digests {
     /// The digests of `content` for a claim of `claimed_length` bytes.
     pub fn of(content: &[u8], claimed_length: u64) -> Self {
-        let raw = Sha256::digest(content).into();
+        let raw = sha256(content);
         let length = content.len() as u64;
         let no_form = Self {
             raw,
@@ -262,7 +265,7 @@ impl Digests {
         };
         // Each line's ending, with or without its CR, becomes the selected ending; an unterminated
         // last segment is kept as is.
-        let mut hasher = Sha256::new();
+        let mut hasher = Context::new(&SHA256);
         for line in lines() {
             match line.strip_suffix(b"\n") {
                 Some(text) => {
@@ -274,9 +277,21 @@ impl Digests {
         }
         Self {
             raw,
-            normalized: Some(hasher.finalize().into()),
+            normalized: Some(finish(hasher)),
         }
     }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Context::new(&SHA256);
+    hasher.update(bytes);
+    finish(hasher)
+}
+
+fn finish(hasher: Context) -> [u8; 32] {
+    let mut out = [0; 32];
+    out.copy_from_slice(hasher.finish().as_ref());
+    out
 }
 
 /// What the driver observed for a claim.
@@ -377,52 +392,136 @@ fn poll(deadline: &impl Deadline, stage: Stage) -> Result<(), Reason> {
     }
 }
 
-/// Refuses `id` as `object_unreadable(class)` when its pack entry in the repository's own packs has
-/// a delta chain that revisits an entry or an index that describes another pack. gix follows a
-/// ref-delta chain without a hop bound, so the driver walks the chain through
-/// [`git_sources::file_object_kind`], which bounds the hops by the index's entry count, before gix
-/// reads the object or its header. Objects in alternates are outside this walk.
 fn guard_delta_chain(
-    repo: &gix::Repository,
+    packs: &mut git_sources::OwnPacks,
     id: gix::ObjectId,
     class: ObjectClass,
-    hint: &Mutex<Option<std::path::PathBuf>>,
-) -> Result<(), Reason> {
-    git_sources::file_object_kind(repo, &id, hint)
-        .map(drop)
+) -> Result<Option<gix::odb::pack::data::decode::header::Outcome>, Reason> {
+    packs
+        .header(&id)
         .map_err(|_| Reason::ObjectUnreadable(class))
 }
 
-/// Reads `id` as an object of `class`, adding the decoded length to `decoded` before the integrity
-/// check. An object that is missing, of another kind, or whose bytes do not hash to `id` is
-/// unreadable; an allocation above the limit is over budget.
-fn read_object<'repo>(
+struct Objects<'repo> {
+    root: &'repo Path,
     repo: &'repo gix::Repository,
-    id: gix::ObjectId,
-    class: ObjectClass,
-    decoded: &mut u64,
-) -> Result<gix::Object<'repo>, Reason> {
-    let unreadable = Reason::ObjectUnreadable(class);
-    let object = repo.find_object(id).map_err(|error| match error {
-        gix::object::find::existing::Error::Find(error)
-            if git_sources::exceeds_allocation(&error) =>
-        {
-            Reason::OverBudget
+    resized: Option<gix::Repository>,
+    packs: git_sources::OwnPacks,
+    loose: gix::odb::loose::Store,
+    data: Vec<u8>,
+}
+
+impl<'repo> Objects<'repo> {
+    fn new(root: &'repo Path, repo: &'repo gix::Repository) -> Self {
+        let options = gix::odb::loose::Options {
+            alloc_limit_bytes: usize::try_from(MAX_BLOB_BYTES).ok(),
+            ..Default::default()
+        };
+        Self {
+            root,
+            repo,
+            resized: None,
+            packs: git_sources::OwnPacks::new(repo, ALLOCATION_LIMIT),
+            loose: gix::odb::loose::Store::at_opts(
+                repo.objects.store_ref().path(),
+                repo.object_hash(),
+                options,
+            ),
+            data: Vec::new(),
         }
-        _ => unreadable,
-    })?;
-    *decoded = decoded.saturating_add(object.data.len() as u64);
-    let kind = match class {
-        ObjectClass::Commit => gix::object::Kind::Commit,
-        ObjectClass::Tree => gix::object::Kind::Tree,
-        ObjectClass::Blob => gix::object::Kind::Blob,
-    };
-    let hashes_to_id = gix::objs::compute_hash(repo.object_hash(), kind, &object.data)
-        .is_ok_and(|actual| actual == id);
-    if object.kind != kind || !hashes_to_id {
-        return Err(unreadable);
     }
-    Ok(object)
+
+    /// `Objects::resize` reopens the repository after an object-store lookup exhausts its index
+    /// slots, retaining the first successful reopen for subsequent lookups.
+    fn resize(&mut self) -> bool {
+        if self.resized.is_some() {
+            return false;
+        }
+        self.resized = git_sources::open(self.root, ALLOCATION_LIMIT).ok();
+        self.resized.is_some()
+    }
+
+    fn blob_header(&mut self, id: gix::ObjectId) -> Result<u64, Reason> {
+        let unreadable = Reason::ObjectUnreadable(ObjectClass::Blob);
+        let header = match guard_delta_chain(&mut self.packs, id, ObjectClass::Blob)? {
+            Some(header) => Some((header.kind, header.object_size)),
+            None => match self.loose.try_header(&id) {
+                Ok(Some((size, kind))) => Some((kind, size)),
+                Ok(None) => loop {
+                    let repo = self.resized.as_ref().unwrap_or(self.repo);
+                    let exhausted = match repo.try_find_header(id) {
+                        Ok(header) => break header.map(|header| (header.kind(), header.size())),
+                        Err(error) => git_sources::exhausts_slots(&error.0),
+                    };
+                    if !(exhausted && self.resize()) {
+                        break None;
+                    }
+                },
+                Err(_) => None,
+            },
+        };
+        match header {
+            Some((gix::object::Kind::Blob, size)) => Ok(size),
+            _ => Err(unreadable),
+        }
+    }
+
+    fn read(
+        &mut self,
+        id: gix::ObjectId,
+        class: ObjectClass,
+        decoded: &mut u64,
+    ) -> Result<&[u8], Reason> {
+        use git_sources::OwnPackError;
+        use gix::odb::pack::data::decode::Error as PackDecode;
+        let unreadable = Reason::ObjectUnreadable(class);
+        let found = match self.packs.decode(&id, &mut self.data) {
+            Ok(Some(kind)) => kind,
+            Err(OwnPackError::Decode(PackDecode::OutOfMemory)) => return Err(Reason::OverBudget),
+            Err(_) => return Err(unreadable),
+            Ok(None) => match self.loose.try_find(&id, &mut self.data) {
+                Ok(Some(object)) => object.kind,
+                Err(gix::odb::loose::find::Error::OutOfMemory { .. }) => {
+                    return Err(Reason::OverBudget);
+                }
+                Err(_) => return Err(unreadable),
+                Ok(None) => loop {
+                    let repo = self.resized.as_ref().unwrap_or(self.repo);
+                    let exhausted = match repo.find_object(id) {
+                        Ok(object) => {
+                            self.data.clear();
+                            self.data.extend_from_slice(&object.data);
+                            break object.kind;
+                        }
+                        Err(gix::object::find::existing::Error::Find(error))
+                            if git_sources::exceeds_allocation(&error) =>
+                        {
+                            return Err(Reason::OverBudget);
+                        }
+                        Err(gix::object::find::existing::Error::Find(error)) => {
+                            git_sources::exhausts_slots(&error)
+                        }
+                        Err(_) => false,
+                    };
+                    if !(exhausted && self.resize()) {
+                        return Err(unreadable);
+                    }
+                },
+            },
+        };
+        *decoded = decoded.saturating_add(self.data.len() as u64);
+        let kind = match class {
+            ObjectClass::Commit => gix::object::Kind::Commit,
+            ObjectClass::Tree => gix::object::Kind::Tree,
+            ObjectClass::Blob => gix::object::Kind::Blob,
+        };
+        let hashes_to_id = gix::objs::compute_hash(self.repo.object_hash(), kind, &self.data)
+            .is_ok_and(|actual| actual == id);
+        if found != kind || !hashes_to_id {
+            return Err(unreadable);
+        }
+        Ok(&self.data)
+    }
 }
 
 /// What the object store holds for `claim`, setting `bytes_read` to the blob content bytes decoded.
@@ -437,33 +536,31 @@ fn lookup(
     bytes_read: &mut u64,
 ) -> Result<Observed, Reason> {
     poll(deadline, Stage::Open)?;
-    let repo =
-        git_sources::open(root, ALLOCATION_LIMIT).map_err(|_| Reason::RepositoryUnopenable)?;
+    let slots = gix::odb::store::init::Slots::Given(INDEX_SLOTS);
+    let repo = git_sources::open_with_slots(root, ALLOCATION_LIMIT, slots)
+        .map_err(|_| Reason::RepositoryUnopenable)?;
     let hash = repo.object_hash();
     git_sources::object_format(hash).map_err(|_| Reason::RepositoryUnopenable)?;
     // An oid that does not parse for the repository's format names no commit the store can return.
     let commit_id = git_sources::parse_oid(&claim.oid, hash)
         .ok_or(Reason::ObjectUnreadable(ObjectClass::Commit))?;
 
-    let hint = Mutex::new(None);
+    let mut objects = Objects::new(root, &repo);
 
     poll(deadline, Stage::Commit)?;
-    guard_delta_chain(&repo, commit_id, ObjectClass::Commit, &hint)?;
-    let commit = read_object(&repo, commit_id, ObjectClass::Commit, &mut 0)?;
+    let commit = objects.read(commit_id, ObjectClass::Commit, &mut 0)?;
     // The whole commit and each whole tree decode, so an object with a valid prefix and a malformed
     // remainder is unreadable.
-    let mut id = gix::objs::CommitRef::from_bytes(&commit.data, hash)
+    let mut id = gix::objs::CommitRef::from_bytes(commit, hash)
         .map_err(|_| Reason::ObjectUnreadable(ObjectClass::Commit))?
         .tree();
-    drop(commit);
 
     let mut components = claim.relative_path.split('/').peekable();
     while let Some(component) = components.next() {
         poll(deadline, Stage::Tree)?;
-        guard_delta_chain(&repo, id, ObjectClass::Tree, &hint)?;
-        let tree = read_object(&repo, id, ObjectClass::Tree, &mut 0)?;
+        let tree = objects.read(id, ObjectClass::Tree, &mut 0)?;
         let mut found = None;
-        for entry in gix::objs::TreeRefIter::from_bytes(&tree.data, hash) {
+        for entry in gix::objs::TreeRefIter::from_bytes(tree, hash) {
             let entry = entry.map_err(|_| Reason::ObjectUnreadable(ObjectClass::Tree))?;
             if found.is_none() && entry.filename == component.as_bytes() {
                 found = Some((entry.mode.kind(), entry.oid.to_owned()));
@@ -488,23 +585,18 @@ fn lookup(
 
     poll(deadline, Stage::Header)?;
     let unreadable_blob = Reason::ObjectUnreadable(ObjectClass::Blob);
-    guard_delta_chain(&repo, id, ObjectClass::Blob, &hint)?;
-    let header = match repo.try_find_header(id) {
-        Ok(Some(header)) if header.kind() == gix::object::Kind::Blob => header,
-        _ => return Err(unreadable_blob),
-    };
-    let header_size = header.size();
+    let header_size = objects.blob_header(id)?;
     if header_verdict(claim, header_size).is_some() {
         return Ok(Observed::Header { header_size });
     }
 
     poll(deadline, Stage::Blob)?;
-    let blob = read_object(&repo, id, ObjectClass::Blob, bytes_read)?;
+    let blob = objects.read(id, ObjectClass::Blob, bytes_read)?;
     if *bytes_read != header_size {
         return Err(unreadable_blob);
     }
     Ok(Observed::Content {
         header_size,
-        digests: Digests::of(&blob.data, claim.byte_length),
+        digests: Digests::of(blob, claim.byte_length),
     })
 }

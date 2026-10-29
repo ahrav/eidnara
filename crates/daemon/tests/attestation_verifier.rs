@@ -1090,3 +1090,105 @@ fn a_non_bare_root_answers_from_the_object_store_not_the_worktree() {
         Verdict::Mismatch
     );
 }
+
+/// The entry type codes of every object `bare`'s packs hold, read from each pack at its index's
+/// offsets.
+fn pack_entry_types(bare: &Bare) -> Vec<u8> {
+    let pack_dir = bare.root.join("objects").join("pack");
+    let mut types = Vec::new();
+    for entry in std::fs::read_dir(&pack_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "idx") {
+            continue;
+        }
+        let index = gix::odb::pack::index::File::at(&path, gix::hash::Kind::Sha1).unwrap();
+        let pack = std::fs::read(path.with_extension("pack")).unwrap();
+        for entry in index.iter() {
+            let offset = usize::try_from(entry.pack_offset).unwrap();
+            types.push((pack[offset] >> 4) & 0b111);
+        }
+    }
+    types
+}
+
+#[test]
+fn a_ref_delta_in_an_own_pack_decodes_against_its_base_in_that_pack() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let base: Vec<u8> = (0..200)
+        .flat_map(|line| format!("line {line} of the architecture document\n").into_bytes())
+        .collect();
+    let mut edited = base.clone();
+    edited.extend_from_slice(b"one more line\n");
+    let first = bare.commit_doc(&base, None);
+    let second = bare.commit_doc(&edited, Some(&first));
+    bare.git(&["update-ref", "refs/heads/main", &second], None);
+    bare.git(
+        &["-c", "repack.useDeltaBaseOffset=false", "repack", "-adfq"],
+        None,
+    );
+    bare.git(&["prune-packed"], None);
+    // Type 7 is a ref-delta, whose base the entry names by object id.
+    let types = pack_entry_types(&bare);
+    assert!(types.contains(&7), "{types:?}");
+    for (commit, bytes) in [(&first, &base), (&second, &edited)] {
+        assert_eq!(
+            verify(&bare.root, &claim("doc.md", bytes, commit), &unbounded()),
+            Evaluation {
+                verdict: Verdict::Match,
+                bytes_read: bytes.len() as u64,
+            }
+        );
+    }
+}
+
+#[test]
+fn objects_in_an_alternate_with_more_packs_than_index_slots_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let alternate = Bare::init(&dir.path().join("alternate.git"));
+    let commit = alternate.commit_doc(DOC, None);
+    let bare = fixture(dir.path());
+    std::fs::write(
+        bare.root.join("objects").join("info").join("alternates"),
+        format!("{}\n", alternate.root.join("objects").display()),
+    )
+    .unwrap();
+    let doc = claim("doc.md", DOC, &commit);
+    let matched = Evaluation {
+        verdict: Verdict::Match,
+        bytes_read: DOC.len() as u64,
+    };
+    // The repository holds none of the claim's objects; its alternate holds them loose.
+    assert_eq!(verify(&bare.root, &doc, &unbounded()), matched);
+
+    // Forty-one packs in the alternate exceed the slots of the store the driver opens.
+    let tree = alternate.git(&["rev-parse", &format!("{commit}^{{tree}}")], None);
+    let blob = alternate.git(&["rev-parse", &format!("{commit}:doc.md")], None);
+    let listing = format!("{commit}\n{tree}\n{blob}\n");
+    alternate.git(
+        &["pack-objects", "-q", "objects/pack/pack"],
+        Some(listing.as_bytes()),
+    );
+    for index in 0..40 {
+        let filler = alternate.blob(format!("filler {index}\n").as_bytes());
+        alternate.git(
+            &["pack-objects", "-q", "objects/pack/pack"],
+            Some(format!("{filler}\n").as_bytes()),
+        );
+    }
+    alternate.git(&["prune-packed"], None);
+    let packs = std::fs::read_dir(alternate.root.join("objects").join("pack"))
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "idx")
+        })
+        .count();
+    assert_eq!(packs, 41);
+    assert!(!alternate.loose_path(&blob).exists());
+    assert_eq!(verify(&bare.root, &doc, &unbounded()), matched);
+}
