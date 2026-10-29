@@ -666,10 +666,16 @@ fn the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse() {
         )),
         "one byte past the byte bound is refused as a cursor"
     );
-    for outside in ["10001.5.61", "7500.-1.61", "7500.5.01", "7500.5.617f"] {
+    for outside in [
+        "0.5.61",
+        "10001.5.61",
+        "7500.-1.61",
+        "7500.5.01",
+        "7500.5.617f",
+    ] {
         assert!(
             refuses_cursor(store.candidates_for_decision(PROJECT, "decision", Some(outside), 4)),
-            "{outside}: a score over 10000, a negative time, or a control character in the id names a row no table holds"
+            "{outside}: a score outside 1 to 10000, a negative time, or a control character in the id names a row no page issued"
         );
     }
     // The cursor's id is a keyset bound judged by shape; an id the write path's secret scanner refuses still parses and names a position no row holds.
