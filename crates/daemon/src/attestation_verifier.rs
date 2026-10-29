@@ -276,7 +276,7 @@ enum Form {
 /// What the driver observed for a claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Observed {
-    /// A lookup or read ended before the blob's header was available, or the blob read failed.
+    /// A lookup, poll, or read ended before the blob's content was compared.
     Unavailable(Reason),
     /// The blob's header size, read without its content because the size decides the verdict.
     Header { header_size: u64 },

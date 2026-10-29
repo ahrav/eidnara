@@ -738,7 +738,7 @@ Reachability: test-only - `attestation_verifier::verify` has no production calle
 Status: active - converted by [#1170](https://github.com/ahrav/eidnara/issues/1170)
 Exercised: yes - bare fixtures without a worktree drive every verdict and reason, and one test repeats claims across a worktree edit, a HEAD move, and a repack
 Guarantee: The verdict is a function of object-store contents, the claim's path, digest, byte length, and oid, and the budgets; `Match` asserts only that the sha256 of the bytes git stores for the path in the commit's tree equals the digest, up to line-ending normalization.
-Check: `always` - equal claims against equal object-store contents give equal verdicts, `Unavailable(deadline)` excepted; the verdict function takes no repository handle and no clock
+Check: `always` - equal claims against equal object-store contents give equal verdicts, `Unavailable(deadline)` and `over_budget` from a delta chain above the allocation limit excepted; the verdict function takes no repository handle and no clock
 Fault/timing angle: a worktree edit, a HEAD move, or a repack between two evaluations of one claim
 Required faults and enabling state: F8: worktree edit, HEAD move, repack, excluding over-budget delta chains; F9: an LF blob with a CRLF-form digest, and the reverse
 Confidence: high - [evidence](evidence/p6-new-verdict-deterministic.md). Read `verdict` (`crates/daemon/src/attestation_verifier.rs:306`), `Digests::of` (`:230`), and `observe` (`:403`) with its `lookup` (`:407`): the driver reads the commit, trees, header, and blob by object id and passes the observation to `verdict`, which decides every verdict

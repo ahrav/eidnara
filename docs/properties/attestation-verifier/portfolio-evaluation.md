@@ -81,5 +81,9 @@ the current line.
   no line-ending form can reach the claimed length, and reads the blob
   otherwise (`p6-new-verdict-deterministic`). This is recorded for the owner
   as a deviation from AC3's literal wording.
+- `over_budget` from a delta chain above the allocation limit depends on the
+  pack layout, so a repack can change it, while the ticket classes
+  `over_budget` as terminal. The question is recorded for the #1173 owner as
+  `needs human input` (`p6-new-verdict-deterministic`).
 - The verifier maps an allocation refusal on any object, including a commit
   or tree, to `over_budget`. No test constructs a tree above 256 KiB.
