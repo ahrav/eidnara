@@ -31,7 +31,7 @@ A descendant commit that changes the cited file.
 
 ### Q: Which mechanism carries applicability?
 
-- Sources examined: OQ6-4.
-- Findings: Four alternatives; none chosen.
-- Missing evidence: see the conclusion.
-- Conclusion: needs human input
+- Sources examined: OQ6-4 and its resolution in [#1174](https://github.com/ahrav/eidnara/issues/1174).
+- Findings: The owner chose alternative 3, the push model inside the pass: after verification the pass reads the live descriptor of each attestation's lineage and writes `MarkStale` when its digest differs from the witnessed one. A lineage with no live descriptor, or an undecodable witness detail, writes nothing.
+- Missing evidence: none.
+- Conclusion: resolved with answer.

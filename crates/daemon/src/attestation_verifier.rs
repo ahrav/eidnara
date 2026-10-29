@@ -15,11 +15,14 @@
 //! reads the blob's header before any content, reads at most one blob, and hands the observation
 //! to [`verdict`], which decides every verdict. The driver reads object-store contents only, so the
 //! verdict for one claim at one oid is the same after any worktree edit or HEAD move, and after a
-//! repack except in one case: `over_budget` for a blob whose header is within the budget but whose
-//! delta base or summed deltas exceed the allocation limit depends on how the pack stores the blob,
-//! so a repack can change it.
+//! repack except in one case: `over_budget` from the allocation limit for the commit, a tree on the
+//! path, or the blob depends on how the pack stores that object, since a delta base, intermediate
+//! result, or accumulated delta data can exceed the limit while the object itself fits, so a repack
+//! can change it. The limit applies to every object read, so a commit or a tree above 256 KiB
+//! (about 6,500 entries with short names) makes every claim beneath it `over_budget`.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use gix::objs::tree::EntryKind;
 use kernel::applicability::EvalBudget;
@@ -30,8 +33,9 @@ use crate::git_sources;
 
 /// The per-blob budget: the document read cap source capture applies. The driver also installs it
 /// as gix's allocation limit, so a commit, tree, blob, or delta base above it is refused before it
-/// is allocated.
-pub const MAX_BLOB_BYTES: u64 = 256 * 1024;
+/// is allocated. gix checks each object and base against the limit separately; its delta work
+/// buffer for an admitted chain can reach about twice the limit plus the delta bytes.
+pub const MAX_BLOB_BYTES: u64 = crate::project_docs::MAX_PROJECT_DOC_BYTES;
 
 const ALLOCATION_LIMIT: std::num::NonZeroU64 = std::num::NonZeroU64::new(MAX_BLOB_BYTES).unwrap();
 
@@ -44,16 +48,19 @@ pub struct Claim {
     oid: String,
 }
 
-/// The claim's path is outside the document path rule: `/`-separated ordinary components, at most
-/// 16, none of them `.`, `..`, `.eidnara`, or `.git`.
+/// The claim's path is outside the confinement rule shared with document paths: at most 16
+/// nonempty `/`-separated components, no NUL byte, and no `.`, `..`, or `.eidnara` or `.git` in any
+/// ASCII case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("the claim's path is outside the document path rule")]
 pub struct InvalidClaimPath;
 
 impl Claim {
     /// A claim on `relative_path` at the commit `oid`, whose bytes have the sha256 `digest` and
-    /// length `byte_length`. The path follows the rule document paths are published under, so the
-    /// tree walk visits at most 16 components.
+    /// length `byte_length`. The path satisfies the confinement rule document paths share, which
+    /// bounds the tree walk to 16 components. The oid is parsed by [`verify`], where an oid
+    /// that does not parse for the repository's object format is
+    /// `Unavailable(object_unreadable(commit))`.
     ///
     /// # Errors
     ///
@@ -108,16 +115,19 @@ pub enum Verdict {
 pub enum Reason {
     /// The tree at the oid has no entry at the path.
     PathAbsent,
-    /// The path names an entry whose content is not a blob in this repository, or lies beneath a
-    /// gitlink or symlink.
+    /// The path's tree entry has tree, symlink, or gitlink mode, or the path lies beneath a symlink
+    /// or gitlink entry. The entry mode decides before any read of the object it names.
     NotABlob(EntryClass),
-    /// The object store could not return the object, or returned bytes that do not decode as that
-    /// object or do not hash to its id. A missing object is unreadable, never absent.
+    /// The requested object is missing, of the wrong kind, or fails an integrity check: its bytes
+    /// do not fully decode as that object or do not hash to its id, its delta chain revisits an
+    /// entry, or a blob's decoded length differs from its header size. A claim oid that does not
+    /// parse for the repository's object format is `ObjectUnreadable(ObjectClass::Commit)`. A
+    /// missing object is unreadable, never absent.
     ObjectUnreadable(ObjectClass),
-    /// The blob's header size is above [`MAX_BLOB_BYTES`], or materializing an object or a delta
-    /// base needs an allocation above it.
+    /// The blob's header size is above [`MAX_BLOB_BYTES`], or materializing the commit, a tree, or
+    /// the blob needs an object or delta base above the allocation limit.
     OverBudget,
-    /// The deadline had passed at the poll before the named stage.
+    /// The deadline had passed, or the budget was cancelled, at the poll before the named stage.
     Deadline(Stage),
     /// The claim's repository is bound to no project root.
     RepositoryUnbound,
@@ -125,7 +135,7 @@ pub enum Reason {
     RepositoryUnopenable,
 }
 
-/// The tree entry kinds that hold no blob content.
+/// The tree entry modes the driver does not read as document content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryClass {
     Gitlink,
@@ -214,11 +224,13 @@ impl Stage {
 /// The digests of one blob's content: the raw bytes, and the one line-ending-normalized form whose
 /// length equals the claimed length, when the content has one.
 ///
-/// Normalization treats CRLF and LF as one line ending. A claimed length above the content's
-/// selects the CRLF form, in which every LF without a preceding CR becomes CRLF: a blob stored with
-/// LF whose worktree form has CRLF. A claimed length below it selects the LF form, in which every
-/// CRLF becomes LF. A claimed length equal to the content's selects no normalized form, since a
-/// conversion that changes a byte changes the length.
+/// Normalization compares the claim with one uniform conversion of the content. A claimed length
+/// above the content's selects the CRLF form, in which every LF without a preceding CR becomes
+/// CRLF: a blob stored with LF whose worktree form has CRLF. A claimed length below it selects the
+/// LF form, in which every CRLF becomes LF. The converted length must equal the claimed length. A
+/// claimed length equal to the content's selects no normalized form, since a conversion that
+/// changes a byte changes the length. Claimed bytes whose line endings mix the two forms in any
+/// other pattern match neither form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Digests {
     pub raw: [u8; 32],
@@ -229,48 +241,42 @@ impl Digests {
     /// The digests of `content` for a claim of `claimed_length` bytes.
     pub fn of(content: &[u8], claimed_length: u64) -> Self {
         let raw = Sha256::digest(content).into();
+        let length = content.len() as u64;
+        let no_form = Self {
+            raw,
+            normalized: None,
+        };
+        if claimed_length == length {
+            return no_form;
+        }
         // Every line ending is the last byte of its segment, so a CRLF never spans two segments.
         let lines = || content.split_inclusive(|&byte| byte == b'\n');
         let crlf = lines().filter(|line| line.ends_with(b"\r\n")).count() as u64;
         let lone_lf = lines().filter(|line| line.ends_with(b"\n")).count() as u64 - crlf;
-        let length = content.len() as u64;
-        let form = if claimed_length > length && length + lone_lf == claimed_length {
-            Form::Crlf
+        let ending: &[u8] = if claimed_length > length && length + lone_lf == claimed_length {
+            b"\r\n"
         } else if claimed_length < length && length - crlf == claimed_length {
-            Form::Lf
+            b"\n"
         } else {
-            return Self {
-                raw,
-                normalized: None,
-            };
+            return no_form;
         };
+        // Each line's ending, with or without its CR, becomes the selected ending; an unterminated
+        // last segment is kept as is.
         let mut hasher = Sha256::new();
         for line in lines() {
-            let (text, ending): (&[u8], &[u8]) = match form {
-                Form::Crlf => match line.strip_suffix(b"\n") {
-                    Some(text) if !text.ends_with(b"\r") => (text, b"\r\n"),
-                    _ => (line, b""),
-                },
-                Form::Lf => match line.strip_suffix(b"\r\n") {
-                    Some(text) => (text, b"\n"),
-                    None => (line, b""),
-                },
-            };
-            hasher.update(text);
-            hasher.update(ending);
+            match line.strip_suffix(b"\n") {
+                Some(text) => {
+                    hasher.update(text.strip_suffix(b"\r").unwrap_or(text));
+                    hasher.update(ending);
+                }
+                None => hasher.update(line),
+            }
         }
         Self {
             raw,
             normalized: Some(hasher.finalize().into()),
         }
     }
-}
-
-/// The line-ending form a normalized digest is computed over.
-#[derive(Clone, Copy)]
-enum Form {
-    Crlf,
-    Lf,
 }
 
 /// What the driver observed for a claim.
@@ -300,7 +306,9 @@ pub fn header_verdict(claim: &Claim, header_size: u64) -> Option<Verdict> {
 }
 
 /// The verdict for `claim` given what the driver observed. The header size decides first; then
-/// `Match` when the raw digest or the normalized digest equals the claimed digest. A header size
+/// `Match` when the header size equals the claimed length and the raw digest equals the claimed
+/// digest, or when the normalized digest, whose length equals the claimed length, equals it. A
+/// header size
 /// that decides nothing leaves no bytes to compare, so a header observed without content is
 /// `Unavailable(object_unreadable(blob))`.
 pub fn verdict(claim: &Claim, observed: &Observed) -> Verdict {
@@ -313,7 +321,9 @@ pub fn verdict(claim: &Claim, observed: &Observed) -> Verdict {
             header_size,
             digests,
         } => header_verdict(claim, *header_size).unwrap_or(
-            if digests.raw == claim.digest || digests.normalized == Some(claim.digest) {
+            if (*header_size == claim.byte_length && digests.raw == claim.digest)
+                || digests.normalized == Some(claim.digest)
+            {
                 Verdict::Match
             } else {
                 Verdict::Mismatch
@@ -336,8 +346,8 @@ impl Deadline for EvalBudget {
 }
 
 /// One claim's verdict and the blob content bytes the driver read for it: zero unless the blob was
-/// read, and at most [`MAX_BLOB_BYTES`]. A blob whose decoded bytes then fail the kind or hash
-/// check counts its decoded length.
+/// read, and at most [`MAX_BLOB_BYTES`]. Commit and tree bytes are not counted. A blob whose
+/// decoded bytes then fail the kind, hash, or header-length check counts its decoded length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Evaluation {
     pub verdict: Verdict,
@@ -367,7 +377,23 @@ fn poll(deadline: &impl Deadline, stage: Stage) -> Result<(), Reason> {
     }
 }
 
-/// Reads `id` as an object of `class`, setting `decoded` to the decoded length before the integrity
+/// Refuses `id` as `object_unreadable(class)` when its pack entry in the repository's own packs has
+/// a delta chain that revisits an entry or an index that describes another pack. gix follows a
+/// ref-delta chain without a hop bound, so the driver walks the chain through
+/// [`git_sources::file_object_kind`], which bounds the hops by the index's entry count, before gix
+/// reads the object or its header. Objects in alternates are outside this walk.
+fn guard_delta_chain(
+    repo: &gix::Repository,
+    id: gix::ObjectId,
+    class: ObjectClass,
+    hint: &Mutex<Option<std::path::PathBuf>>,
+) -> Result<(), Reason> {
+    git_sources::file_object_kind(repo, &id, hint)
+        .map(drop)
+        .map_err(|_| Reason::ObjectUnreadable(class))
+}
+
+/// Reads `id` as an object of `class`, adding the decoded length to `decoded` before the integrity
 /// check. An object that is missing, of another kind, or whose bytes do not hash to `id` is
 /// unreadable; an allocation above the limit is over budget.
 fn read_object<'repo>(
@@ -385,7 +411,7 @@ fn read_object<'repo>(
         }
         _ => unreadable,
     })?;
-    *decoded = object.data.len() as u64;
+    *decoded = decoded.saturating_add(object.data.len() as u64);
     let kind = match class {
         ObjectClass::Commit => gix::object::Kind::Commit,
         ObjectClass::Tree => gix::object::Kind::Tree,
@@ -419,23 +445,28 @@ fn lookup(
     let commit_id = git_sources::parse_oid(&claim.oid, hash)
         .ok_or(Reason::ObjectUnreadable(ObjectClass::Commit))?;
 
+    let hint = Mutex::new(None);
+
     poll(deadline, Stage::Commit)?;
+    guard_delta_chain(&repo, commit_id, ObjectClass::Commit, &hint)?;
     let commit = read_object(&repo, commit_id, ObjectClass::Commit, &mut 0)?;
-    let mut id = gix::objs::CommitRefIter::from_bytes(&commit.data, hash)
-        .tree_id()
-        .map_err(|_| Reason::ObjectUnreadable(ObjectClass::Commit))?;
+    // The whole commit and each whole tree decode, so an object with a valid prefix and a malformed
+    // remainder is unreadable.
+    let mut id = gix::objs::CommitRef::from_bytes(&commit.data, hash)
+        .map_err(|_| Reason::ObjectUnreadable(ObjectClass::Commit))?
+        .tree();
     drop(commit);
 
     let mut components = claim.relative_path.split('/').peekable();
     while let Some(component) = components.next() {
         poll(deadline, Stage::Tree)?;
+        guard_delta_chain(&repo, id, ObjectClass::Tree, &hint)?;
         let tree = read_object(&repo, id, ObjectClass::Tree, &mut 0)?;
         let mut found = None;
         for entry in gix::objs::TreeRefIter::from_bytes(&tree.data, hash) {
             let entry = entry.map_err(|_| Reason::ObjectUnreadable(ObjectClass::Tree))?;
-            if entry.filename == component.as_bytes() {
+            if found.is_none() && entry.filename == component.as_bytes() {
                 found = Some((entry.mode.kind(), entry.oid.to_owned()));
-                break;
             }
         }
         let (kind, entry_id) = found.ok_or(Reason::PathAbsent)?;
@@ -457,6 +488,7 @@ fn lookup(
 
     poll(deadline, Stage::Header)?;
     let unreadable_blob = Reason::ObjectUnreadable(ObjectClass::Blob);
+    guard_delta_chain(&repo, id, ObjectClass::Blob, &hint)?;
     let header = match repo.try_find_header(id) {
         Ok(Some(header)) if header.kind() == gix::object::Kind::Blob => header,
         _ => return Err(unreadable_blob),

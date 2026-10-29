@@ -6,7 +6,7 @@ The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/i
 
 ## Evidence trail
 
-`record_claim_causality` (`crates/kernel/src/claim_causality.rs:218`) validates the parent list, bounded by `MAX_DERIVATION_PARENTS` (`:38`), against live registry rows. `derived_reinjection_rests_on_exact_live_parents` (`crates/kernel/tests/kernel_claim_causality.rs:229`) and `detail_operation_and_parent_list_must_agree_with_the_registry` (`:710`) cover it.
+`record_claim_causality` (`crates/kernel/src/claim_causality.rs:218`) validates the parent list, bounded by `MAX_DERIVATION_PARENTS` (`:38`), against live registry rows. `derived_reinjection_rests_on_exact_live_parents` (`crates/kernel/tests/kernel_claim_causality.rs:229`) and `detail_operation_and_parent_list_must_agree_with_the_registry` (`:710`) cover it. A later read uses `parents_existed` (`crates/kernel/src/claim_causality.rs:719`), which requires each parent row to have existed at the requested snapshot with the named revision and ignores later invalidation; `derived_reinjection_rests_on_exact_live_parents` retires a parent after the write and asserts the class stays `DerivedReinjection` (`crates/kernel/tests/kernel_claim_causality.rs:315`).
 
 ## Failure scenario
 

@@ -31,7 +31,7 @@ F7, F13.
 
 ### Q: What are N and K?
 
-- Sources examined: OQ6-10.
-- Findings: Recommended N = 8 and K = 3; not decided.
-- Missing evidence: see the conclusion.
-- Conclusion: unresolved, needs the #1173 decision on OQ6-10.
+- Sources examined: OQ6-10 and its resolution in [#1173](https://github.com/ahrav/eidnara/issues/1173).
+- Findings: N = 8 and K = 3, decided at ticketing.
+- Missing evidence: none.
+- Conclusion: resolved with answer.

@@ -6,7 +6,7 @@ The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/i
 
 ## Evidence trail
 
-`retire_evidence` (`crates/kernel/src/slice/write.rs:585`) selects the row with the `EVIDENCE_CITED_SQL` predicate and returns `Conflict` when cited (`:607`). `delete_artifact` (`crates/kernel/src/cas/deletion.rs:239`) runs `UPDATE evidence_meta SET invalidated_commit_seq=...` for every live row of the digest (`:389`) with no citation predicate. `validate_trigger` (`crates/kernel/src/admission.rs:2807`) then fails for an observation backed by that row.
+`retire_evidence` (`crates/kernel/src/slice/write.rs:585`) selects the row with the `EVIDENCE_CITED_SQL` predicate and returns `Conflict` when cited (`:607`). `delete_artifact` (`crates/kernel/src/cas/deletion.rs:239`) runs `UPDATE evidence_meta SET invalidated_commit_seq=...` for every live row of the digest (`:389`) with no citation predicate. `validate_trigger` (`crates/kernel/src/admission.rs:2807`) then fails for an observation backed by that row. `evidence_cited_in_refuses_a_deleted_evidence_row_that_live_decisions_still_cite` (`crates/kernel/tests/kernel_slice.rs:2248`) deletes a cited artifact and asserts the evidence is invalidated while its citing decision stays live.
 
 ## Failure scenario
 

@@ -186,6 +186,74 @@ impl Repo {
     }
 }
 
+/// The delta instructions that reproduce `result` from a base of `base_len` bytes by inserting every result byte; the base contributes only its declared size.
+fn insert_delta(base_len: u64, result: &[u8]) -> Vec<u8> {
+    let mut delta = Vec::new();
+    leb128(&mut delta, base_len);
+    leb128(&mut delta, result.len() as u64);
+    for chunk in result.chunks(127) {
+        delta.push(chunk.len() as u8);
+        delta.extend_from_slice(chunk);
+    }
+    delta
+}
+
+/// A version 2 pack header announcing `count` entries.
+fn pack_header(count: u32) -> Vec<u8> {
+    let mut pack = b"PACK".to_vec();
+    pack.extend_from_slice(&2u32.to_be_bytes());
+    pack.extend_from_slice(&count.to_be_bytes());
+    pack
+}
+
+/// Appends the trailer to `pack`, the header and entries, and writes it into `objects/pack` with a version 2 index of `entries`: each entry's id and offset, in pack order.
+fn write_pack_and_index(objects: &Path, mut pack: Vec<u8>, entries: &[(gix::ObjectId, usize)]) {
+    let entries_end = pack.len();
+    let mut indexed: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .map(|(position, (id, offset))| {
+            let end = entries.get(position + 1).map_or(entries_end, |next| next.1);
+            (
+                *id,
+                *offset,
+                gix::features::hash::crc32(&pack[*offset..end]),
+            )
+        })
+        .collect();
+    let pack_checksum = sha1(&pack);
+    pack.extend_from_slice(pack_checksum.as_slice());
+
+    indexed.sort_by_key(|entry| entry.0);
+    let mut idx = vec![0xff, b't', b'O', b'c'];
+    idx.extend_from_slice(&2u32.to_be_bytes());
+    for first in 0..=255u8 {
+        let count = indexed
+            .iter()
+            .filter(|(id, _, _)| id.as_slice()[0] <= first)
+            .count() as u32;
+        idx.extend_from_slice(&count.to_be_bytes());
+    }
+    for (id, _, _) in &indexed {
+        idx.extend_from_slice(id.as_slice());
+    }
+    for (_, _, crc) in &indexed {
+        idx.extend_from_slice(&crc.to_be_bytes());
+    }
+    for (_, offset, _) in &indexed {
+        idx.extend_from_slice(&(*offset as u32).to_be_bytes());
+    }
+    idx.extend_from_slice(pack_checksum.as_slice());
+    let idx_checksum = sha1(&idx);
+    idx.extend_from_slice(idx_checksum.as_slice());
+
+    let pack_dir = objects.join("pack");
+    std::fs::create_dir_all(&pack_dir).unwrap();
+    let stem = format!("pack-{pack_checksum}");
+    std::fs::write(pack_dir.join(format!("{stem}.pack")), &pack).unwrap();
+    std::fs::write(pack_dir.join(format!("{stem}.idx")), &idx).unwrap();
+}
+
 /// Writes one pack into `objects` holding `base` whole and `result` as an ofs-delta against it, both as objects of `kind`, with the pack's index. Neither object exists loose, so `result` reads back only through its base. Returns `(base id, result id)`.
 pub fn write_delta_pack(
     objects: &Path,
@@ -201,19 +269,8 @@ pub fn write_delta_pack(
         gix::objs::Kind::Blob => 3,
         gix::objs::Kind::Tag => 4,
     };
-    // The delta reproduces `result` from `base` by inserting every result byte; the base contributes only its declared size.
-    let mut delta = Vec::new();
-    leb128(&mut delta, base.len() as u64);
-    leb128(&mut delta, result.len() as u64);
-    for chunk in result.chunks(127) {
-        delta.push(chunk.len() as u8);
-        delta.extend_from_slice(chunk);
-    }
-
-    let mut pack = Vec::new();
-    pack.extend_from_slice(b"PACK");
-    pack.extend_from_slice(&2u32.to_be_bytes());
-    pack.extend_from_slice(&2u32.to_be_bytes());
+    let delta = insert_delta(base.len() as u64, result);
+    let mut pack = pack_header(2);
     let base_offset = pack.len();
     pack.extend_from_slice(&entry_header(type_code, base.len() as u64));
     pack.extend_from_slice(&zlib(base));
@@ -221,49 +278,21 @@ pub fn write_delta_pack(
     pack.extend_from_slice(&entry_header(6, delta.len() as u64));
     pack.extend_from_slice(&ofs_delta_distance((delta_offset - base_offset) as u64));
     pack.extend_from_slice(&zlib(&delta));
-    let entries_end = pack.len();
-    let pack_checksum = sha1(&pack);
-    pack.extend_from_slice(pack_checksum.as_slice());
-
-    let mut entries = [
-        (
-            base_id,
-            base_offset,
-            gix::features::hash::crc32(&pack[base_offset..delta_offset]),
-        ),
-        (
-            delta_id,
-            delta_offset,
-            gix::features::hash::crc32(&pack[delta_offset..entries_end]),
-        ),
-    ];
-    entries.sort_by_key(|entry| entry.0);
-    let mut idx = vec![0xff, b't', b'O', b'c'];
-    idx.extend_from_slice(&2u32.to_be_bytes());
-    for first in 0..=255u8 {
-        let count = entries
-            .iter()
-            .filter(|(id, _, _)| id.as_slice()[0] <= first)
-            .count() as u32;
-        idx.extend_from_slice(&count.to_be_bytes());
-    }
-    for (id, _, _) in &entries {
-        idx.extend_from_slice(id.as_slice());
-    }
-    for (_, _, crc) in &entries {
-        idx.extend_from_slice(&crc.to_be_bytes());
-    }
-    for (_, offset, _) in &entries {
-        idx.extend_from_slice(&(*offset as u32).to_be_bytes());
-    }
-    idx.extend_from_slice(pack_checksum.as_slice());
-    let idx_checksum = sha1(&idx);
-    idx.extend_from_slice(idx_checksum.as_slice());
-
-    let pack_dir = objects.join("pack");
-    std::fs::create_dir_all(&pack_dir).unwrap();
-    let stem = format!("pack-{pack_checksum}");
-    std::fs::write(pack_dir.join(format!("{stem}.pack")), &pack).unwrap();
-    std::fs::write(pack_dir.join(format!("{stem}.idx")), &idx).unwrap();
+    write_pack_and_index(
+        objects,
+        pack,
+        &[(base_id, base_offset), (delta_id, delta_offset)],
+    );
     (base_id, delta_id)
+}
+
+/// Writes one pack into `objects` holding `id` as a ref-delta whose base is `id` itself, with the pack's index. The delta inserts `result`, so each hop declares `result`'s length as both base and result size; the chain never reaches a whole object.
+pub fn write_self_delta_pack(objects: &Path, id: gix::ObjectId, result: &[u8]) {
+    let delta = insert_delta(result.len() as u64, result);
+    let mut pack = pack_header(1);
+    let offset = pack.len();
+    pack.extend_from_slice(&entry_header(7, delta.len() as u64));
+    pack.extend_from_slice(id.as_slice());
+    pack.extend_from_slice(&zlib(&delta));
+    write_pack_and_index(objects, pack, &[(id, offset)]);
 }
