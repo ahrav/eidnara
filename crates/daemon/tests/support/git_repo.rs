@@ -21,7 +21,7 @@ fn sha1(bytes: &[u8]) -> gix::ObjectId {
     hasher.try_finalize().unwrap()
 }
 
-pub fn zlib(bytes: &[u8]) -> Vec<u8> {
+fn zlib(bytes: &[u8]) -> Vec<u8> {
     use std::io::Write as _;
     let mut writer =
         gix::zlib::stream::deflate::Write::new(Vec::new(), gix::zlib::Compression::DEFAULT);

@@ -121,6 +121,13 @@ impl Bare {
         std::fs::remove_file(self.loose_path(oid)).unwrap();
     }
 
+    /// Replaces `oid`'s loose file with the loose file of `other`, a valid object stored under the
+    /// wrong id.
+    fn store_under(&self, oid: &str, other: &str) {
+        let stored = std::fs::read(self.loose_path(other)).unwrap();
+        self.replace_loose(oid, &stored);
+    }
+
     /// Replaces `oid`'s loose file with `stored`, written as-is.
     fn replace_loose(&self, oid: &str, stored: &[u8]) {
         let path = self.loose_path(oid);
@@ -346,11 +353,6 @@ fn entries_that_hold_no_blob_are_named_by_kind() {
 #[test]
 fn missing_or_corrupt_objects_are_unreadable_never_absent() {
     let dir = tempfile::tempdir().unwrap();
-    let corrupt = |bare: &Bare, oid: &str, kind: &str, body: &[u8]| {
-        let mut stored = format!("{kind} {}\0", body.len()).into_bytes();
-        stored.extend_from_slice(body);
-        bare.replace_loose(oid, &support::git_repo::zlib(&stored));
-    };
     let cases: [(&str, ObjectClass, bool); 6] = [
         ("commit", ObjectClass::Commit, false),
         ("commit", ObjectClass::Commit, true),
@@ -364,24 +366,61 @@ fn missing_or_corrupt_objects_are_unreadable_never_absent() {
         let blob = bare.blob(DOC);
         let tree = bare.tree(&[("100644", "blob", &blob, "doc.md")]);
         let commit = bare.commit(&tree, None, "doc");
-        let target = match class {
-            ObjectClass::Commit => &commit,
-            ObjectClass::Tree => &tree,
-            ObjectClass::Blob => &blob,
+        // A valid object of the same kind that would read as a mismatch or an absent path: a blob
+        // of the claimed length, a tree without `doc.md`, and a commit of that tree.
+        let other_blob = bare.blob(&vec![b'z'; DOC.len()]);
+        let other_tree = bare.tree(&[("100644", "blob", &blob, "other.md")]);
+        let other_commit = bare.commit(&other_tree, None, "other");
+        let (target, other) = match class {
+            ObjectClass::Commit => (&commit, &other_commit),
+            ObjectClass::Tree => (&tree, &other_tree),
+            ObjectClass::Blob => (&blob, &other_blob),
         };
         if corrupted {
-            // A well-formed loose object of the same kind, and for the blob the claimed length,
-            // whose bytes do not hash to its id.
-            corrupt(&bare, target, kind, &vec![b'z'; DOC.len()]);
+            // The object decodes, so only the hash check rejects it.
+            bare.store_under(target, other);
         } else {
             bare.delete_loose(target);
         }
+        // A rejected blob counts the bytes decoded before the hash check.
+        let bytes_read = if corrupted && class == ObjectClass::Blob {
+            DOC.len() as u64
+        } else {
+            0
+        };
         assert_eq!(
             verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
-            unavailable(Reason::ObjectUnreadable(class)),
+            Evaluation {
+                verdict: Verdict::Unavailable(Reason::ObjectUnreadable(class)),
+                bytes_read,
+            },
             "{kind} corrupted={corrupted}"
         );
     }
+
+    // A commit and a tree whose bytes hash to their ids but do not decode are unreadable.
+    let bare = Bare::init(&dir.path().join("literal.git"));
+    let literal = |kind: &str, bytes: &[u8]| {
+        bare.git(
+            &["hash-object", "-t", kind, "--literally", "-w", "--stdin"],
+            Some(bytes),
+        )
+    };
+    let malformed_tree = literal("tree", b"100644 doc.md");
+    let commit = bare.commit(&malformed_tree, None, "malformed tree");
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+        unavailable(Reason::ObjectUnreadable(ObjectClass::Tree))
+    );
+    let malformed_commit = literal("commit", b"no tree header\n");
+    assert_eq!(
+        verify(
+            &bare.root,
+            &claim("doc.md", DOC, &malformed_commit),
+            &unbounded()
+        ),
+        unavailable(Reason::ObjectUnreadable(ObjectClass::Commit))
+    );
 
     // A blob whose stored bytes are not zlib data is unreadable at its header.
     let bare = Bare::init(&dir.path().join("garbage.git"));
@@ -432,6 +471,33 @@ fn the_driver_writes_nothing() {
     // The snapshot observes a write to the object store.
     bare.blob(b"a new object");
     assert_ne!(bare.snapshot(), before);
+}
+
+#[test]
+fn replacement_refs_are_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let commit = bare.commit_doc(DOC, None);
+    let replaced = b"# Architecture\n\nThe plugin owns the store.\n";
+    let other_commit = bare.commit_doc(replaced, None);
+    bare.git(&["replace", &bare.blob(DOC), &bare.blob(replaced)], None);
+    bare.git(&["replace", &commit, &other_commit], None);
+    // Git itself honors both replacements.
+    let shown = bare.git(&["cat-file", "-p", &format!("{commit}:doc.md")], None);
+    assert_eq!(format!("{shown}\n").as_bytes(), replaced);
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()).verdict,
+        Verdict::Match
+    );
+    assert_eq!(
+        verify(
+            &bare.root,
+            &claim("doc.md", replaced, &commit),
+            &unbounded()
+        )
+        .verdict,
+        Verdict::Mismatch
+    );
 }
 
 #[test]
@@ -670,6 +736,17 @@ fn the_pure_verdict_compares_digests_after_the_header_gate() {
             Verdict::Unavailable(reason)
         );
     }
+    // A header observed without content: the size decides, or no bytes were compared.
+    let header = |header_size| verdict(&doc, &Observed::Header { header_size });
+    assert_eq!(
+        header(MAX_BLOB_BYTES + 1),
+        Verdict::Unavailable(Reason::OverBudget)
+    );
+    assert_eq!(header(21), Verdict::Mismatch);
+    assert_eq!(
+        header(10),
+        Verdict::Unavailable(Reason::ObjectUnreadable(ObjectClass::Blob))
+    );
     // A header above the budget is over budget even when the digests agree.
     let matching = Digests {
         raw: *doc.digest(),

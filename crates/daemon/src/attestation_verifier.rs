@@ -13,8 +13,11 @@
 //! through the daemon's isolated opener with [`MAX_BLOB_BYTES`] as gix's allocation limit and
 //! replacement refs ignored, finds the commit and walks its tree one path component at a time,
 //! reads the blob's header before any content, reads at most one blob, and hands the observation
-//! to [`verdict`]. The driver reads object-store contents only, so the verdict for one claim at one
-//! oid is the same after any worktree edit, HEAD move, or repack.
+//! to [`verdict`], which decides every verdict. The driver reads object-store contents only, so the
+//! verdict for one claim at one oid is the same after any worktree edit or HEAD move, and after a
+//! repack except in one case: `over_budget` for a blob whose header is within the budget but whose
+//! delta base or summed deltas exceed the allocation limit depends on how the pack stores the blob,
+//! so a repack can change it.
 
 use std::path::Path;
 
@@ -163,9 +166,11 @@ impl Reason {
         }
     }
 
-    /// A terminal reason holds for every later read of the same claim at the same oid, because the
-    /// commit's tree and the blob's size are fixed by the oid. The other reasons depend on the
-    /// repository's current state or the clock.
+    /// A terminal reason holds for every later read of the same claim at the same oid: the commit's
+    /// tree fixes `path_absent` and `not_a_blob`, and the blob's size fixes `over_budget` from the
+    /// header gate. `over_budget` from a delta chain above the allocation limit is also terminal
+    /// here, though it depends on the pack layout and a repack can change it. The other reasons
+    /// depend on the repository's current state or the clock.
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -229,10 +234,10 @@ impl Digests {
         let crlf = lines().filter(|line| line.ends_with(b"\r\n")).count() as u64;
         let lone_lf = lines().filter(|line| line.ends_with(b"\n")).count() as u64 - crlf;
         let length = content.len() as u64;
-        let (ending, other) = if claimed_length > length && length + lone_lf == claimed_length {
-            (&b"\r\n"[..], &b"\n"[..])
+        let form = if claimed_length > length && length + lone_lf == claimed_length {
+            Form::Crlf
         } else if claimed_length < length && length - crlf == claimed_length {
-            (&b"\n"[..], &b"\r\n"[..])
+            Form::Lf
         } else {
             return Self {
                 raw,
@@ -241,13 +246,18 @@ impl Digests {
         };
         let mut hasher = Sha256::new();
         for line in lines() {
-            match line.strip_suffix(other) {
-                Some(text) if !(other == b"\n" && text.ends_with(b"\r")) => {
-                    hasher.update(text);
-                    hasher.update(ending);
-                }
-                _ => hasher.update(line),
-            }
+            let (text, ending): (&[u8], &[u8]) = match form {
+                Form::Crlf => match line.strip_suffix(b"\n") {
+                    Some(text) if !text.ends_with(b"\r") => (text, b"\r\n"),
+                    _ => (line, b""),
+                },
+                Form::Lf => match line.strip_suffix(b"\r\n") {
+                    Some(text) => (text, b"\n"),
+                    None => (line, b""),
+                },
+            };
+            hasher.update(text);
+            hasher.update(ending);
         }
         Self {
             raw,
@@ -256,12 +266,22 @@ impl Digests {
     }
 }
 
+/// The line-ending form a normalized digest is computed over.
+#[derive(Clone, Copy)]
+enum Form {
+    Crlf,
+    Lf,
+}
+
 /// What the driver observed for a claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Observed {
-    /// A lookup or read ended before the blob's content was available.
+    /// A lookup or read ended before the blob's header was available, or the blob read failed.
     Unavailable(Reason),
-    /// The blob's header size and the digests of its content.
+    /// The blob's header size, read without its content because the size decides the verdict.
+    Header { header_size: u64 },
+    /// The blob's header size and the digests of its content, computed for the claim's
+    /// `byte_length`.
     Content { header_size: u64, digests: Digests },
 }
 
@@ -279,11 +299,16 @@ pub fn header_verdict(claim: &Claim, header_size: u64) -> Option<Verdict> {
     (!reachable).then_some(Verdict::Mismatch)
 }
 
-/// The verdict for `claim` given what the driver observed. `Match` when the raw digest or the
-/// normalized digest equals the claimed digest.
+/// The verdict for `claim` given what the driver observed. The header size decides first; then
+/// `Match` when the raw digest or the normalized digest equals the claimed digest. A header size
+/// that decides nothing leaves no bytes to compare, so a header observed without content is
+/// `Unavailable(object_unreadable(blob))`.
 pub fn verdict(claim: &Claim, observed: &Observed) -> Verdict {
     match observed {
         Observed::Unavailable(reason) => Verdict::Unavailable(*reason),
+        Observed::Header { header_size } => header_verdict(claim, *header_size).unwrap_or(
+            Verdict::Unavailable(Reason::ObjectUnreadable(ObjectClass::Blob)),
+        ),
         Observed::Content {
             header_size,
             digests,
@@ -311,7 +336,8 @@ impl Deadline for EvalBudget {
 }
 
 /// One claim's verdict and the blob content bytes the driver read for it: zero unless the blob was
-/// read, and at most [`MAX_BLOB_BYTES`].
+/// read, and at most [`MAX_BLOB_BYTES`]. A blob whose decoded bytes then fail the kind or hash
+/// check counts its decoded length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Evaluation {
     pub verdict: Verdict,
@@ -328,39 +354,38 @@ pub fn verify(root: &Path, claim: &Claim, deadline: &impl Deadline) -> Evaluatio
     let mut bytes_read = 0;
     let observed = observe(root, claim, deadline, &mut bytes_read);
     Evaluation {
-        verdict: observed.map_or_else(|decided| decided, |observed| verdict(claim, &observed)),
+        verdict: verdict(claim, &observed),
         bytes_read,
     }
 }
 
-fn unavailable(reason: Reason) -> Verdict {
-    Verdict::Unavailable(reason)
-}
-
-fn poll(deadline: &impl Deadline, stage: Stage) -> Result<(), Verdict> {
+fn poll(deadline: &impl Deadline, stage: Stage) -> Result<(), Reason> {
     if deadline.passed(stage) {
-        Err(unavailable(Reason::Deadline(stage)))
+        Err(Reason::Deadline(stage))
     } else {
         Ok(())
     }
 }
 
-/// Reads `id` as an object of `class`. An object that is missing, of another kind, or whose bytes
-/// do not hash to `id` is unreadable; an allocation above the limit is over budget.
+/// Reads `id` as an object of `class`, setting `decoded` to the decoded length before the integrity
+/// check. An object that is missing, of another kind, or whose bytes do not hash to `id` is
+/// unreadable; an allocation above the limit is over budget.
 fn read_object<'repo>(
     repo: &'repo gix::Repository,
     id: gix::ObjectId,
     class: ObjectClass,
-) -> Result<gix::Object<'repo>, Verdict> {
-    let unreadable = unavailable(Reason::ObjectUnreadable(class));
+    decoded: &mut u64,
+) -> Result<gix::Object<'repo>, Reason> {
+    let unreadable = Reason::ObjectUnreadable(class);
     let object = repo.find_object(id).map_err(|error| match error {
         gix::object::find::existing::Error::Find(error)
             if git_sources::exceeds_allocation(&error) =>
         {
-            unavailable(Reason::OverBudget)
+            Reason::OverBudget
         }
         _ => unreadable,
     })?;
+    *decoded = object.data.len() as u64;
     let kind = match class {
         ObjectClass::Commit => gix::object::Kind::Commit,
         ObjectClass::Tree => gix::object::Kind::Tree,
@@ -374,70 +399,75 @@ fn read_object<'repo>(
     Ok(object)
 }
 
-fn observe(
+/// What the object store holds for `claim`, setting `bytes_read` to the blob content bytes decoded.
+fn observe(root: &Path, claim: &Claim, deadline: &impl Deadline, bytes_read: &mut u64) -> Observed {
+    lookup(root, claim, deadline, bytes_read).unwrap_or_else(Observed::Unavailable)
+}
+
+fn lookup(
     root: &Path,
     claim: &Claim,
     deadline: &impl Deadline,
     bytes_read: &mut u64,
-) -> Result<Observed, Verdict> {
+) -> Result<Observed, Reason> {
     poll(deadline, Stage::Open)?;
-    let repo = git_sources::open(root, ALLOCATION_LIMIT)
-        .map_err(|_| unavailable(Reason::RepositoryUnopenable))?;
+    let repo =
+        git_sources::open(root, ALLOCATION_LIMIT).map_err(|_| Reason::RepositoryUnopenable)?;
     let hash = repo.object_hash();
-    git_sources::object_format(hash).map_err(|_| unavailable(Reason::RepositoryUnopenable))?;
+    git_sources::object_format(hash).map_err(|_| Reason::RepositoryUnopenable)?;
     // An oid that does not parse for the repository's format names no commit the store can return.
     let commit_id = git_sources::parse_oid(&claim.oid, hash)
-        .ok_or(unavailable(Reason::ObjectUnreadable(ObjectClass::Commit)))?;
+        .ok_or(Reason::ObjectUnreadable(ObjectClass::Commit))?;
 
     poll(deadline, Stage::Commit)?;
-    let commit = read_object(&repo, commit_id, ObjectClass::Commit)?;
+    let commit = read_object(&repo, commit_id, ObjectClass::Commit, &mut 0)?;
     let mut id = gix::objs::CommitRefIter::from_bytes(&commit.data, hash)
         .tree_id()
-        .map_err(|_| unavailable(Reason::ObjectUnreadable(ObjectClass::Commit)))?;
+        .map_err(|_| Reason::ObjectUnreadable(ObjectClass::Commit))?;
     drop(commit);
 
     let mut components = claim.relative_path.split('/').peekable();
     while let Some(component) = components.next() {
         poll(deadline, Stage::Tree)?;
-        let tree = read_object(&repo, id, ObjectClass::Tree)?;
+        let tree = read_object(&repo, id, ObjectClass::Tree, &mut 0)?;
         let mut found = None;
         for entry in gix::objs::TreeRefIter::from_bytes(&tree.data, hash) {
-            let entry =
-                entry.map_err(|_| unavailable(Reason::ObjectUnreadable(ObjectClass::Tree)))?;
+            let entry = entry.map_err(|_| Reason::ObjectUnreadable(ObjectClass::Tree))?;
             if entry.filename == component.as_bytes() {
                 found = Some((entry.mode.kind(), entry.oid.to_owned()));
                 break;
             }
         }
-        let (kind, entry_id) = found.ok_or(unavailable(Reason::PathAbsent))?;
+        let (kind, entry_id) = found.ok_or(Reason::PathAbsent)?;
         let last = components.peek().is_none();
-        match kind {
-            EntryKind::Commit => return Err(unavailable(Reason::NotABlob(EntryClass::Gitlink))),
-            EntryKind::Link => return Err(unavailable(Reason::NotABlob(EntryClass::Symlink))),
-            EntryKind::Tree if last => {
-                return Err(unavailable(Reason::NotABlob(EntryClass::Tree)));
+        match (kind, last) {
+            (EntryKind::Tree, false) | (EntryKind::Blob | EntryKind::BlobExecutable, true) => {
+                id = entry_id;
             }
-            EntryKind::Blob | EntryKind::BlobExecutable if !last => {
-                return Err(unavailable(Reason::PathAbsent));
+            (EntryKind::Tree, true) => return Err(Reason::NotABlob(EntryClass::Tree)),
+            (EntryKind::Blob | EntryKind::BlobExecutable, false) => {
+                return Err(Reason::PathAbsent);
             }
-            _ => id = entry_id,
+            (EntryKind::Link, true | false) => return Err(Reason::NotABlob(EntryClass::Symlink)),
+            (EntryKind::Commit, true | false) => {
+                return Err(Reason::NotABlob(EntryClass::Gitlink));
+            }
         }
     }
 
     poll(deadline, Stage::Header)?;
-    let unreadable_blob = unavailable(Reason::ObjectUnreadable(ObjectClass::Blob));
+    let unreadable_blob = Reason::ObjectUnreadable(ObjectClass::Blob);
     let header = match repo.try_find_header(id) {
         Ok(Some(header)) if header.kind() == gix::object::Kind::Blob => header,
         _ => return Err(unreadable_blob),
     };
     let header_size = header.size();
-    if let Some(verdict) = header_verdict(claim, header_size) {
-        return Err(verdict);
+    if header_verdict(claim, header_size).is_some() {
+        return Ok(Observed::Header { header_size });
     }
 
     poll(deadline, Stage::Blob)?;
-    let blob = read_object(&repo, id, ObjectClass::Blob)?;
-    *bytes_read = blob.data.len() as u64;
+    let blob = read_object(&repo, id, ObjectClass::Blob, bytes_read)?;
     if *bytes_read != header_size {
         return Err(unreadable_blob);
     }
