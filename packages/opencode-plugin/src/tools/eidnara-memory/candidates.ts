@@ -66,6 +66,9 @@ function renderRow(item: CandidateItem) {
     };
 }
 
+/** The longest `next` the store issues: a ten-digit score, a twenty-character time, two dots, and the hex of a 512-byte id. */
+const CURSOR_RESERVE_BYTES = 1056;
+
 /** How many leading rows render inside `EIDNARA_MEMORY_RESPONSE_BUDGET_BYTES` beside `envelope`, which carries every other field of the reply, `next` included; the ids' caps keep one row inside it. */
 function rowsWithinBudget(envelope: Record<string, unknown>, rows: unknown[]): number {
     let used = Buffer.byteLength(JSON.stringify({ ...envelope, candidates: [] }), "utf8");
@@ -108,28 +111,28 @@ export async function executeCandidates(input: ExecuteCandidatesArgs): Promise<s
         return result;
     };
     const note = OVERLAP_NOTE + (input.disputeAdmitted ? FILE_FORM_NOTE : REPORT_FORM_NOTE);
-    // The reply's fields beside the rows, measured with the rows; `next` is a cursor of up to about 1 KiB.
-    const envelope = (page: CandidatesPage) => ({
+    // The reply's fields beside the rows, measured with the rows. The first measurement reserves the longest cursor the store issues (1056 bytes, a 512-byte id in hex after the score and time), because the fitted page's own cursor names another row than the first page's.
+    const envelope = (page: CandidatesPage, next: string | null) => ({
         action: "candidates",
         objectId,
         note,
         asOf: page.as_of,
-        next: page.next,
+        next,
     });
     let page = judge(await ask(), paging.limit ?? CANDIDATES_PAGE_MAX);
     if (typeof page === "string") return page;
     let rows = page.items.map(renderRow);
-    const fitted = rowsWithinBudget(envelope(page), rows);
+    const reserved = page.next === null ? null : "0".repeat(CURSOR_RESERVE_BYTES);
+    const fitted = rowsWithinBudget(envelope(page, reserved), rows);
     if (fitted < rows.length) {
         // The cursor is opaque, so the page of the fitted size comes from the daemon: its next lands after the last rendered row.
         const limit = Math.max(fitted, 1);
         page = judge(await ask(limit), limit);
         if (typeof page === "string") return page;
         rows = page.items.map(renderRow);
-        if (rowsWithinBudget(envelope(page), rows) < rows.length) {
-            // The second page holds other rows than the first, so the store changed between the two reads.
-            return `Error: the candidates of ${objectId} changed between two reads; nothing was rendered. Retry once; report it to the user if it repeats.`;
+        if (rowsWithinBudget(envelope(page, page.next), rows) < rows.length) {
+            return `Error: a page of ${rows.length} candidates for ${objectId} and its cursor do not fit the response budget; nothing was rendered. Retry with a smaller limit.`;
         }
     }
-    return JSON.stringify({ ...envelope(page), candidates: rows });
+    return JSON.stringify({ ...envelope(page, page.next), candidates: rows });
 }

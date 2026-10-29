@@ -15,7 +15,7 @@ the ids the dispute validates, and the confirm must stay a Kernel decision.
   it as the row's `evidence_id` (`pass.rs:398-400`).
 - `packages/opencode-plugin/src/tools/eidnara-memory/candidates.ts:51-67`
   `renderRow` renders `confirm: {action: "dispute", event: "mark_disputed",
-  objectId, evidenceId}` from the row, and `:102-107` refuses a page naming
+  objectId, evidenceId}` from the row, and `:105-110` refuses a page naming
   another memory or holding more rows than asked.
 - `crates/daemon/src/kernel_routes/dispute.rs` validates the evidence at
   commit; `crates/daemon/src/candidate_pass_tests.rs:2770` checks that it and

@@ -1879,8 +1879,11 @@ describe("eidnara_memory candidates", () => {
                 evidence_id: `srcev:${String(index).padStart(3, "0")}:${"x".repeat(idLength)}`,
                 decision_id: `dec:${"y".repeat(idLength)}`,
             }));
+            // The first page's cursor names a short id; the fitted page's cursor names a 512-byte one, as a stable store answers when the last stored row's id is short.
             const cursorAfter = (count: number) =>
-                `10000.${"9".repeat(19)}.${String(count).padStart(2, "0").repeat(512)}`;
+                count === 64
+                    ? "7500.1.7a7a"
+                    : `10000.${"9".repeat(19)}.${String(count).padStart(2, "0").repeat(512)}`;
             // The daemon answers the leading rows of the requested size and the cursor after its last row.
             const h = candidatesHarness((body) => {
                 const limit = typeof body.limit === "number" ? body.limit : 64;
