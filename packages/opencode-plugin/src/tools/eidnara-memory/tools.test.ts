@@ -1847,6 +1847,19 @@ describe("eidnara_memory candidates", () => {
         expect(admitted.definition.description).toContain("source you read yourself");
     });
 
+    test("refuses a page whose next is the cursor it was asked after", async () => {
+        const h = candidatesHarness([
+            { kind: "page", as_of: 41, items: [], next: "7500.2.62" },
+            { kind: "page", as_of: 41, items: [ITEM], next: "7500.1.61" },
+        ]);
+        expect(
+            await h.execute({ action: "candidates", objectId: "mem_labeled", after: "7500.2.62" }),
+        ).toMatch(/^Error: /);
+        expect(
+            await h.execute({ action: "candidates", objectId: "mem_labeled", after: "7500.2.62" }),
+        ).not.toStartWith("Error:");
+    });
+
     test("refuses an empty page whose cursor alone leaves the response budget", async () => {
         const h = candidatesHarness([
             { kind: "page", as_of: 41, items: [], next: "7500.1.".concat("61".repeat(60_000)) },

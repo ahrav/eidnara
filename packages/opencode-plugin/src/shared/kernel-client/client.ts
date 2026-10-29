@@ -620,6 +620,15 @@ export class KernelClient {
             { signal: args.signal, deadline, reissuable: true },
             parseCandidatesResponse,
         );
+        // A page's next is the cursor after a stored row past the one asked for, so a next equal to after names no progress.
+        if (
+            isAvailable(result) &&
+            result.kind === "page" &&
+            result.next !== null &&
+            result.next === (args.after ?? null)
+        ) {
+            return { state: nonAvailable(invalid("unrecognized_state")) };
+        }
         return result;
     }
 

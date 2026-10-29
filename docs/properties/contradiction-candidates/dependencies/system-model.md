@@ -156,7 +156,7 @@ added `candidates`);
 `:171-174` mutation needs a tool-call id.
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58` passes
 `EIDNARA_MEMORY_DEFAULT_ACTIONS`. Pi plugin
-`packages/pi-plugin/src/tools/eidnara-memory.ts:143-205` has the same
+`packages/pi-plugin/src/tools/eidnara-memory.ts:156-233` has the same
 allowlist default, the allowlist check, and the mutation identity check;
 exclusion of the context_researcher is by registration
 (`packages/pi-plugin/src/tools/index.ts:30-32`, `:69`;
@@ -300,7 +300,7 @@ is silent on `kind`; recorded as a lead, not a defect.
 
 D7 At `3a3b916b7` the pi plugin's `eidnara_memory` tool had no
 `allowedActions`. #1161 resolved this: both plugins default to
-`EIDNARA_MEMORY_DEFAULT_ACTIONS` (pi `eidnara-memory.ts:147-152`, opencode
+`EIDNARA_MEMORY_DEFAULT_ACTIONS` (pi `eidnara-memory.ts:156-157`, opencode
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58`), so the P4/P5
 "allowlist as rollout lever" assumption holds in both.
 

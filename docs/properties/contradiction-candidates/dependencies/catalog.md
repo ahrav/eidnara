@@ -918,7 +918,7 @@ allowlist with zero transport calls; the pi tests cover a disallowed action
 schema listing `candidates` and the default allowlist refusing `dispute`
 (`:422-431`), and the registration omission
 (`packages/pi-plugin/src/tools/index.test.ts:40-70`). The #1168
-`candidates` test (`tools.test.ts:1626`) runs a read without a tool-call
+`candidates` test (`tools.test.ts:1627`) runs a read without a tool-call
 id.
 Guarantee: the action vocabulary is the closed list
 `["create","get","revise","archive","merge","dispute","candidates"]`; `get`
@@ -944,7 +944,7 @@ registration with `memoryToolEnabled: false`.
 Confidence: high - [evidence](evidence/p5dep-memory-tool-actions-are-closed-and-allowlisted.md).
 Read `types.ts:6-33`, `tools.ts:48-58`, `:118-158`, `:172-174`,
 `packages/opencode-plugin/src/plugin/tool-registry.ts:58`,
-`packages/pi-plugin/src/tools/eidnara-memory.ts:114-126`, `:143-205`,
+`packages/pi-plugin/src/tools/eidnara-memory.ts:119-131`, `:156-233`,
 `packages/pi-plugin/src/tools/index.ts:30-32`, `:69-75`,
 `packages/pi-plugin/src/subagent-entry.ts:63`.
 Existing check: the tests above. Status unaudited.
@@ -952,16 +952,16 @@ Re-exercised by #1168: the closed list gains `candidates`
 (`packages/opencode-plugin/src/tools/eidnara-memory/types.ts:6-14`), a read
 in `EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:25`) that both default lists
 admit; `eidnara_memory candidates`
-(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1626`) runs
+(`packages/opencode-plugin/src/tools/eidnara-memory/tools.test.ts:1627`) runs
 it without a tool-call id, and `Pi eidnara_memory candidates`
-(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:533`) shows it and its
+(`packages/pi-plugin/src/tools/eidnara-memory.test.ts:532`) shows it and its
 paging fields in Pi's default schema.
 Impact: P5 R6 adds `candidates` as a read; it must enter the closed list and
 `EIDNARA_MEMORY_READ_ACTIONS` (`types.ts:25`), and its default-allowlist
 membership is a rollout decision in both plugins.
 Open questions:
 - D7 is resolved since `3a3b916b7`: #1161 gave the pi tool `allowedActions`
-  with the same default as opencode (`eidnara-memory.ts:147-152`).
+  with the same default as opencode (`eidnara-memory.ts:156-157`).
 - Resolved by #1168: `candidates` is in the default list in both plugins
   (`types.ts:19-20`).
 
