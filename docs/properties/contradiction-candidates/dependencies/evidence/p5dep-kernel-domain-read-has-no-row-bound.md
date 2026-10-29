@@ -17,10 +17,10 @@ resource boundaries, vacuity.
   requested: i64, domain_id: &str, scope: Option<ScopeTermFilter>) ->
   Result<VisibleAsOf, KernelError>`. No `max_rows`, no `max_bytes`, no
   `EvalBudget`.
-- `admission.rs:3178-3207` `visible_selected_as_of`: `served_rows(..)?
+- `admission.rs:3178-3231` `visible_selected_as_of`: `served_rows(..)?
   .into_iter().filter_map(..).collect()` into `Vec<VisibleRow>`, then
   `sort_unstable_by`. Every matching row is materialized.
-- `admission.rs:3458-3475` `served_rows`: `served_classes_selected(..)?
+- `admission.rs:3482-3499` `served_rows`: `served_classes_selected(..)?
   .into_iter().map(..).collect()`; also a full `Vec`.
 - `crates/kernel/src/open.rs:595-607` `lock_reader`: the plain reader lock
   used by `read_snapshot` has no deadline.
@@ -62,7 +62,7 @@ None; the cost is in the read itself.
 
 - Sources examined: `slice/read.rs:126-220` (`decision_page_within_budget`),
   `:236-243` (`decisions_for_objects_as_of_within_budget`),
-  `claim_facts.rs:240-257`, `admission.rs:3146-3163`
+  `claim_facts.rs:240-257`, `admission.rs:3146-3164`
   (`visible_as_of_in_scope` with `ids`).
 - Findings: the page API is store-wide (no domain or scope predicate) and its
   budget bounds only the reader wait (D2). The `ids` variant of

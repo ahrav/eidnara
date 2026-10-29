@@ -551,6 +551,8 @@ pub struct Published {
     pub occurrence_id: String,
     /// The evidence object retaining the unit's exact bytes.
     pub evidence_object_id: String,
+    /// The id of that object's evidence row, which a dispute cites.
+    pub evidence_id: String,
     /// The predecessor revision this publication invalidated in the same commit.
     pub replaced_object_id: Option<String>,
     /// The kernel answered from a stored receipt: the same unit was published before.
@@ -646,6 +648,17 @@ pub const MAX_SOURCE_BATCH_BYTES: usize = crate::memory_capture::MAX_CAPTURE_INP
 /// How long `publish` waits for a kernel reader to consult the stored receipt before offering bytes to the store.
 const RECEIPT_WAIT: Duration = Duration::from_secs(30);
 
+/// Runs in [`SourcePublisher::publish_within`] after the artifact is retained and before the descriptor commit, where a test lets another writer commit the descriptor first.
+#[cfg(feature = "test-support")]
+static BEFORE_DESCRIPTOR_COMMIT: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
+/// Installs or clears the hook `publish_within` runs before its descriptor commit.
+#[cfg(feature = "test-support")]
+pub fn set_before_descriptor_commit_for_test(hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
+    *BEFORE_DESCRIPTOR_COMMIT.lock().expect("hook mutex") = hook;
+}
+
 /// The deadline a batch's receipt preview waits until: the receipt wait, or `budget`'s deadline when that is sooner.
 fn preview_deadline(budget: Option<&kernel::applicability::EvalBudget>) -> Instant {
     let receipt_wait = Instant::now() + RECEIPT_WAIT;
@@ -688,6 +701,7 @@ impl SourcePublisher<'_> {
     ) -> Result<Published, PublishError> {
         let unit = self.prepare(unit, observed_at)?;
         let evidence_object_id = unit.evidence_object_id();
+        let evidence_id = unit.evidence_id();
         // A unit published before answers from its descriptor receipt without offering its bytes to the store again; a receipt under another request is the conflict the digest exists to catch.
         let descriptor_intent = self.descriptor_intent(&unit);
         let (_, (stored, admission, evidence_digest)) = self
@@ -699,8 +713,7 @@ impl SourcePublisher<'_> {
                     stored_receipt(preview, self.evidence_intent(&unit), &unit, self)?
                         .map_or_else(|| unit.request_digest.clone(), |(_, digest)| digest);
                 Ok((
-                    stored_receipt(preview, descriptor_intent.clone(), &unit, self)?
-                        .map(|(receipt, _)| receipt),
+                    stored_descriptor(preview, descriptor_intent.clone(), &unit, self)?,
                     unit.rule.resolve(preview)?,
                     evidence_digest,
                 ))
@@ -715,11 +728,12 @@ impl SourcePublisher<'_> {
                     evidence: None,
                 },
             })?;
-        if let Some(receipt) = stored {
+        if let Some((receipt, (evidence_id, evidence_object_id))) = stored {
             return Ok(Published {
                 object_id: receipt.result,
                 occurrence_id: unit.occurrence_id,
                 evidence_object_id,
+                evidence_id,
                 replaced_object_id: None,
                 replayed: true,
                 admission,
@@ -758,6 +772,13 @@ impl SourcePublisher<'_> {
             outcome = Some((published, admission));
             Ok(result)
         };
+        #[cfg(feature = "test-support")]
+        {
+            let hook = BEFORE_DESCRIPTOR_COMMIT.lock().expect("hook mutex").clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let receipt = match budget {
             Some(budget) => self
                 .kernel
@@ -769,19 +790,34 @@ impl SourcePublisher<'_> {
                 object_id: published.object_id,
                 occurrence_id: published.occurrence_id,
                 evidence_object_id,
+                evidence_id: evidence_id.clone(),
                 replaced_object_id: published.replaced_object_id,
                 replayed: receipt.replayed,
                 admission: committed_admission,
             }),
-            // A receipt committed between the preview and this commit replays here; it ran no operation, and its result is the object id the first publication returned.
-            (Ok(receipt), None) => Ok(Published {
-                object_id: receipt.result,
-                occurrence_id: unit.occurrence_id,
-                evidence_object_id,
-                replaced_object_id: None,
-                replayed: true,
-                admission,
-            }),
+            // A receipt committed between the preview and this commit replays here; it ran no operation, and its result is the object id the first publication returned, whose stored descriptor names the evidence it cites.
+            (Ok(receipt), None) => {
+                let (_, (evidence_id, evidence_object_id)) = self
+                    .kernel
+                    .preview(preview_deadline(budget), |preview| {
+                        preview
+                            .source_descriptor_evidence(&receipt.result)?
+                            .ok_or(KernelError::CorruptCanonicalRow)
+                    })
+                    .map_err(|error| PublishError::Kernel {
+                        error,
+                        evidence: None,
+                    })?;
+                Ok(Published {
+                    object_id: receipt.result,
+                    occurrence_id: unit.occurrence_id,
+                    evidence_object_id,
+                    evidence_id,
+                    replaced_object_id: None,
+                    replayed: true,
+                    admission,
+                })
+            }
             (Err(error), _) => {
                 let error = match refusal {
                     Some(Err(SourceDescriptorError::Kernel(error))) => error,
@@ -1034,7 +1070,7 @@ impl SourcePublisher<'_> {
                 ..self.evidence_intent(unit)
             },
             payload: unit.unit.text.as_bytes().to_vec(),
-            evidence_id: format!("srcev:{}", unit.key),
+            evidence_id: unit.evidence_id(),
             object_id: unit.evidence_object_id(),
             object_kind: "evidence".to_owned(),
             domain_id: self.domain_id.to_owned(),
@@ -1311,13 +1347,12 @@ fn publish_prepared(
                 let mut step = || {
                     publisher.check_scope_once(unit, preview, &mut scopes)?;
                     Ok((
-                        stored_receipt(
+                        stored_descriptor(
                             preview,
                             publisher.descriptor_intent(unit),
                             unit,
                             publisher,
-                        )?
-                        .map(|(receipt, _)| receipt),
+                        )?,
                         unit.rule.resolve(preview)?,
                         stored_receipt(preview, publisher.evidence_intent(unit), unit, publisher)?
                             .map(|(receipt, _)| receipt),
@@ -1353,14 +1388,17 @@ fn publish_prepared(
             );
         }
         match stored {
-            Some(receipt) => outcomes.push(Some(Published {
-                object_id: receipt.result,
-                occurrence_id: unit.occurrence_id.clone(),
-                evidence_object_id: unit.evidence_object_id(),
-                replaced_object_id: None,
-                replayed: true,
-                admission,
-            })),
+            Some((receipt, (evidence_id, evidence_object_id))) => {
+                outcomes.push(Some(Published {
+                    object_id: receipt.result,
+                    occurrence_id: unit.occurrence_id.clone(),
+                    evidence_object_id,
+                    evidence_id,
+                    replaced_object_id: None,
+                    replayed: true,
+                    admission,
+                }));
+            }
             None => {
                 outcomes.push(None);
                 pending.push(index);
@@ -1473,6 +1511,7 @@ fn publish_prepared(
                     object_id: descriptor.object_id,
                     occurrence_id: descriptor.occurrence_id,
                     evidence_object_id,
+                    evidence_id: handle.evidence_id.clone(),
                     replaced_object_id: descriptor.replaced_object_id,
                     replayed: false,
                     admission,
@@ -2095,11 +2134,39 @@ impl Prepared<'_> {
         format!("srcev-object:{}", self.key)
     }
 
+    fn evidence_id(&self) -> String {
+        format!("srcev:{}", self.key)
+    }
+
     /// The head a `repository_documents` publication expects. Its producer reads the lineage's historical head ([`kernel::KernelStore::source_lineage_head`]) and proposes exactly the head plus one, 1 for an empty lineage, so the expected head is the revision before the proposal and any gap refuses as a moved head. Every other class names no head.
     fn expected_head(&self) -> Option<i64> {
         (self.unit.class == OccurrenceClass::RepositoryDocuments && self.revision > 1)
             .then(|| self.revision - 1)
     }
+}
+
+/// The `(evidence_id, evidence object id)` a stored descriptor cites.
+type CitedEvidence = (String, String);
+
+fn stored_descriptor(
+    preview: &kernel::Envelope<'_>,
+    intent: CommitIntent,
+    unit: &Prepared<'_>,
+    publisher: &SourcePublisher<'_>,
+) -> Result<Option<(kernel::CommitReceipt, CitedEvidence)>, KernelError> {
+    let Some((receipt, _)) = stored_receipt(preview, intent, unit, publisher)? else {
+        return Ok(None);
+    };
+    // The receipt's result is the descriptor this unit's lineage and revision name; a receipt naming another descriptor is a corrupt receipt.
+    if receipt.result != kernel::descriptor_object_id(&unit.lineage_id, &unit.revision.to_string())
+    {
+        return Err(KernelError::CorruptCanonicalRow);
+    }
+    // Every publish path writes the descriptor with its evidence, so a stored descriptor without a citation is a corrupt row, and the replay refuses instead of naming the evidence the unit would have had.
+    let cited = preview
+        .source_descriptor_evidence(&receipt.result)?
+        .ok_or(KernelError::CorruptCanonicalRow)?;
+    Ok(Some((receipt, cited)))
 }
 
 /// Where a unit's admission classes come from.

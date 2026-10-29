@@ -22,9 +22,9 @@ analysis, no diacritic or Unicode normalization.
   `str::to_lowercase` (`:124`) and floored by `kept` (`:147-153`).
   Comparisons fold a spelling with `eq_ignore_ascii_case` and a lowercase
   byte order (`:134-145`).
-- `scorer.rs:432-465` `DescriptorTerms::new` takes the descriptor's terms
-  from `terms` and stores each folded; `:526-562` `score` takes the
-  summary's terms from `scan_ascii` through `count_ascii` (`:483-524`) when
+- `scorer.rs:440-473` `DescriptorTerms::new` takes the descriptor's terms
+  from `terms` and stores each folded; `:534-566` `score` takes the
+  summary's terms from `scan_ascii` through `count_ascii` (`:491-532`) when
   every term is ASCII and at most 64 are distinct, and from `terms`
   otherwise. Both sides share the fold and the floor; only the bound
   differs.
@@ -32,7 +32,7 @@ analysis, no diacritic or Unicode normalization.
   plus a combining dot, `ß` stays `ß`, and NFC and NFD spellings are
   different terms.
 - `scorer.rs:77` `FOLD_RULE_ID = "str-to-lowercase-per-term.v1"` enters the
-  preimage (`:648-683`).
+  preimage (`:652-687`).
 - Tests: `crates/daemon/tests/contradiction_candidates_scorer.rs:131-159`
   `case_folds_identically_on_both_sides_and_diacritics_do_not_fold`;
   `:31-80` `term_sets_follow_the_documented_fold_and_floor` (`ÉCOLE École`
@@ -91,7 +91,7 @@ None; pure computation.
 
 ### Q: Is the score symmetric?
 
-- Sources examined: `scorer.rs:526-562`.
+- Sources examined: `scorer.rs:534-566`.
 - Findings: the score is containment on the decision side,
   `|A ∩ B| / |B|`, so swapping the texts changes the denominator. The fold
   is applied identically, so term-set equality under the fold is

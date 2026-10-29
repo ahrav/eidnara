@@ -11,32 +11,32 @@ boundaries; C9.
 
 ## Evidence trail
 
-- `source_capture.rs:234-236`: "The daemon's capture supervisor: one
+- `source_capture.rs:235-237`: "The daemon's capture supervisor: one
   publication slot for its one kernel store"; field `slot: Arc<Semaphore>`.
-- `source_capture.rs:268`: `slot: Arc::new(Semaphore::new(1))`.
-- `source_capture.rs:422-433` `ActiveSlot { capture, _permit:
+- `source_capture.rs:269`: `slot: Arc::new(Semaphore::new(1))`.
+- `source_capture.rs:433-444` `ActiveSlot { capture, _permit:
   OwnedSemaphorePermit }` with `Drop` that subtracts 1 from `Count::Active`;
   doc: "Counts the slot as active while the permit lives, so a panicking job
   releases both."
-- `source_capture.rs:488-493` `is_idle()` (test-support):
+- `source_capture.rs:499-504` `is_idle()` (test-support):
   `available_permits() == 1`.
-- `source_capture.rs:598-632` `into_job`: `try_acquire_owned()` else
+- `source_capture.rs:722-765` `into_job`: `try_acquire_owned()` else
   `refuse(RefusedQueueFull)` and `return None`; on success `Active += 1` and
-  the permit moves into `CaptureJob._slot`.
-- `source_capture.rs:635-652` `CaptureJob` owns `_slot: ActiveSlot`,
+  the permit moves into `CaptureJob.slot`.
+- `source_capture.rs:769-786` `CaptureJob` owns `slot: ActiveSlot` after
   `_retained: RetainedCharge`, the window, documents.
-- `source_capture.rs:655-681` `run`: `spawn_blocking(move || self.publish())`
+- `source_capture.rs:801-825` `run_settled`: `spawn_blocking(move || self.publish_settled())`
   moves the job (and the permit) into the blocking closure; "A failed join
   dropped the slot, the charges, and the window while the closure unwound"
-  (`:667`).
-- `source_capture.rs:791-805`: the commit gate is a separate `Mutex<()>`;
+  (`:679`).
+- `source_capture.rs:813-879`: the commit gate is a separate `Mutex<()>`;
   `catch_unwind` around `publish_locked` so a panic does not poison the gate;
   `resume_unwind` after `drop(gate)`, which then unwinds through `publish`
   and drops the job.
-- Tests: `source_capture_tests.rs:674`
+- Tests: `source_capture_tests.rs:675`
   `shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slot`;
-  `source_capture.rs:1720` `a_settled_report_counts_the_job_that_released_the_slot`
-  (acquires the slot directly at `:1722`).
+  `source_capture.rs:1797` `a_settled_report_counts_the_job_that_released_the_slot`
+  (acquires the slot directly at `:1799`).
 
 ## Failure scenario
 

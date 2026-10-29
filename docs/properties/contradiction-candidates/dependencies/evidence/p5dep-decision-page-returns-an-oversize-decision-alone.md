@@ -68,7 +68,7 @@ per page.
 
 ### Q: D2. Is a domain- and scope-filtered page needed for P5?
 
-- Sources examined: `slice/read.rs:139-146`; `admission.rs:3550-3556` (the
+- Sources examined: `slice/read.rs:139-146`; `admission.rs:3574-3580` (the
   domain predicate the served read uses).
 - Findings: the page API has no filter; the served read has the filter but no
   bound. Neither alone meets OQ5-1.

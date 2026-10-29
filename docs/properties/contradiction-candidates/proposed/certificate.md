@@ -15,7 +15,7 @@ feature: the `contradiction_candidates` derived table in the memory-store
 (daemon-owned, `crates/memory-store/baseline.sql`, single baseline, Batch M1).
 Authority read, never written: the Kernel (decisions in domain `memory`,
 `canonical_memory.rs:19`; source descriptors `srcdesc:*` and their evidence
-objects in domain `harness-capture`, `source_capture.rs:53`, `schema.rs:94`).
+objects in domain `harness-capture`, `source_capture.rs:54`, `schema.rs:94`).
 Independently failing participants: the Kernel store (may be Starting or
 Unavailable), the memory-store (may be unreadable), the publication job (its own
 5 s budget, `source_capture.rs:3`), the daemon runtime (shutdown cancel). No
@@ -91,7 +91,7 @@ External command this feature feeds but does not own:
 Legal witness (end to end). Flag on. A pass publishes descriptor D with
 evidence E (`Published.evidence_object_id`, `harness_sources.rs:521-532`)
 scoped `project:<digest>`. The job reaches terminal `Completed`, the commit gate
-is released (`source_capture.rs:800`), the pass starts under its own budget,
+is released (`source_capture.rs:1006`), the pass starts under its own budget,
 reads the project's eligible `memory` decisions at `tip`, scores D's folded
 atoms against each summary, writes one row (digest, E, O1) with score 0.62,
 matched 8, tip, created. Later the agent calls `candidates {object_id: O1}`,
@@ -140,16 +140,16 @@ differ only under F score identically. The analyzer itself does not fold
 (`analysis.rs:6`), so the daemon owns F. Kind: state predicate (intrinsic).
 Validity: return. Settled in direction (R3), F's definition is OQ-A below.
 
-R-B1 Trigger after terminal. The pass starts only after `CaptureJob::run`
-(`source_capture.rs:653-676`) has returned its terminal `Count` and the capture
-commit gate has been dropped (`source_capture.rs:800`). Kind: transition/history
+R-B1 Trigger after terminal. The pass starts only after `CaptureJob::run_settled`
+(`source_capture.rs:801-825`) has returned its terminal `Count` and the capture
+commit gate has been dropped (`source_capture.rs:1006`). Kind: transition/history
 safety (ordering). Observation: current runtime state (job terminal) only.
 Validity: pass start. Settled (R1, KTD2).
 
 R-B2 Own budget, never the response path. The pass runs under an `EvalBudget`
 (`applicability/checkout.rs:146-154`) whose origin is the pass start, linked
 to the daemon cancel, never to the job's budget; the response bytes were
-handed to the wire writer before `AfterResponse` ran (`lib.rs:9219-9238`,
+handed to the wire writer before `AfterResponse` ran (`lib.rs:9275`, `:9297-9320`,
 `source_capture.rs:3`). Kind: transition safety. Validity: pass start. Settled.
 
 R-B3 Bounded in flight. At most P passes exist at once (P a named constant;
@@ -190,7 +190,7 @@ text-source obligation added.
 
 R-E1 Sweep drops only dead targets. A row is dropped when, at the sweep's
 Kernel snapshot, its decision object is invalidated, or its current disposition
-is `Superseded` or `Contradicted` (`admission.rs:4224-4225, 4157`), or its
+is `Superseded` or `Contradicted` (`admission.rs:4248-4249, 4157`), or its
 descriptor object or evidence row is invalidated; every other row is kept.
 Kind: transition safety (what a sweep step may remove). Observation: derived
 observation of the Kernel at a snapshot. Validity: sweep commit. Settled (R4)
@@ -323,7 +323,7 @@ and after the gate guard is dropped; the pass constructs its own `EvalBudget`
 from the daemon cancel. Writers: only the one trigger site. Bypass that must
 not exist: calling the scorer from `publish_locked` or passing `self.budget`.
 Verification obligation: a test hook at `before_publish` /
-`between_screen_and_commit` (`source_capture.rs:781, 839`) showing zero
+`between_screen_and_commit` (`source_capture.rs:987, 1047`) showing zero
 candidate rows exist while the gate is held.
 
 E3 (R-E1, R-E2 sweep). Authority for eligibility: the Kernel at the sweep's
@@ -627,14 +627,14 @@ HANDOFF
    the daemon flag unless the plugin hides it (OQ-E).
 4. Trigger location. The `Published` list (with `evidence_object_id`) and the
    unit text exist only inside `publish_locked` under the capture commit gate
-   (`source_capture.rs:789-800, 826-840`), and `publish_screened_between`
+   (`source_capture.rs:1016-1101`), and `publish_screened_between`
    consumes the `SourceUnit` vector. The plan's "on publish settlement"
    requires the job to carry (evidence id, text or a handle to it) out past the
    gate and the terminal, or the pass to read evidence bytes back from the
    Kernel. Either choice is new plumbing the plan does not list under U2's
    files.
-5. Line drift: the plan cites `lib.rs:9207-9220` for `AfterResponse`; at HEAD
-   it is `:9219-9238` with the same semantics. The plan cites
+5. Line drift: the plan cites `lib.rs:9207-9221` for `AfterResponse`; at HEAD
+   it is `:9220-9239` with the same semantics. The plan cites
    `crates/daemon/Cargo.toml:41` for the retrieval dependency; context records
    `:45`.
 6. Eligibility predicate. The plan says "live" for the candidate set and

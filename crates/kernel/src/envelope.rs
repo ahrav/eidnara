@@ -1049,6 +1049,20 @@ impl KernelStore {
         read_snapshot_on(&mut reader, requested, read)
     }
 
+    /// [`Self::read_snapshot`] whose wait for a pooled reader ends at `budget`'s deadline or interrupt.
+    pub(super) fn read_snapshot_within_budget<T>(
+        &self,
+        requested: i64,
+        budget: &crate::applicability::EvalBudget,
+        read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
+    ) -> Result<(i64, T), KernelError> {
+        if requested < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
+        read_snapshot_on(&mut reader, requested, read)
+    }
+
     pub fn stage_candidate(
         &self,
         spec: StagingCandidateSpec,

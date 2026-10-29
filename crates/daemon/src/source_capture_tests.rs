@@ -130,6 +130,20 @@ fn kernel_store(handler: &Handler) -> Arc<KernelStore> {
     handler.kernel.kernel_store().unwrap()
 }
 
+/// Opens the Kernel at `root` once the previous owner's lease is released: a dropped handler's background work can still hold it for a moment, as `reopen_store_after_restart` waits out for the memory store.
+fn reopen_kernel_after_restart(root: &Path) -> KernelStore {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match KernelStore::open(root) {
+            Ok(kernel) => return kernel,
+            Err(kernel::KernelError::Held) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("reopen the kernel after a restart: {error}"),
+        }
+    }
+}
+
 /// The Kernel tip minus the use-outcome serves the handler wrote: each written serve is one commit, and a
 /// document pass that folds HARD over a new served set writes one beside whatever capture commits.
 fn capture_tip(handler: &Handler) -> i64 {
@@ -540,6 +554,7 @@ async fn capture_job(
             window: window.iter().cloned().map(Arc::new).collect(),
             epoch: handler.source_capture.epoch(),
             documents: None,
+            candidates: false,
         })
         .unwrap()
         .into_job(
@@ -771,7 +786,7 @@ async fn captured_units_create_no_decision_and_stay_hidden_from_auto_inject_afte
     assert!(!captured.is_empty());
     drop(store);
     drop(handler);
-    let reopened = KernelStore::open(dir.path().join("kernel")).unwrap();
+    let reopened = reopen_kernel_after_restart(&dir.path().join("kernel"));
     let tip = reopened.tip().unwrap();
     let visible = reopened
         .visible_as_of_in_scope(Surface::AutoInject, tip, Some(&captured), None)
@@ -810,6 +825,7 @@ async fn the_capture_report_carries_no_unit_text() {
             window: window.to_vec(),
             epoch: handler.source_capture.epoch(),
             documents: None,
+            candidates: false,
         })
     };
     let foreign = vec![Arc::new(json!({
@@ -1252,6 +1268,7 @@ async fn a_window_past_the_remaining_budget_is_refused_resident_short() {
             window: window.clone(),
             epoch: handler.source_capture.epoch(),
             documents: None,
+            candidates: false,
         })
     };
     let held = offer().expect("the first window fits");
@@ -1347,6 +1364,7 @@ async fn identity_keys_past_the_remaining_budget_end_resident_short() {
             window: filler,
             epoch: handler.source_capture.epoch(),
             documents: None,
+            candidates: false,
         })
         .expect("the filler fits");
     let parts: Vec<Value> = (0..9_000)

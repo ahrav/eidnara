@@ -24,7 +24,7 @@ compatibility; lifecycle transitions; C11.
   `STORE_BASELINE`, a newline, and `consumer`. `open_sqlite` verifies each
   file against this digest; fresh files store it in `format_marker`."
 - `storage/src/lib.rs:2846`, `:2884-2890`: `format_marker` read and write.
-- `lib.rs:8157-8158` `MemoryStore::open` -> `open_sqlite(descriptor,
+- `crates/memory-store/src/lib.rs:8122` `MemoryStore::open` -> `open_sqlite(descriptor,
   BASELINE)`.
 - `crates/memory-store/tests/baseline.rs:250-262`
   `the_published_baseline_digest_is_the_one_every_open_checks`; `:458`

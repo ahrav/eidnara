@@ -908,6 +908,40 @@ impl Envelope<'_> {
         historical_head(self.tx, lineage_id)
     }
 
+    /// Returns the `(evidence_id, evidence object id)` of the evidence row cited by descriptor `object_id` in this envelope's view, including retired observations. Returns `None` when the observation is absent or cites no evidence row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::CorruptCanonicalRow`] when the descriptor's stored detail names an evidence id or artifact digest other than the cited row's, or fails [`SourceDescriptorDetail::is_consistent_with`] for `object_id`, the disagreements [`KernelStore::live_source_descriptors`] refuses.
+    pub fn source_descriptor_evidence(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<(String, String)>, KernelError> {
+        let cited: Option<(String, String, String, Vec<u8>)> = self
+            .tx
+            .query_row_cached(
+                "SELECT e.evidence_id,e.object_id,e.artifact_digest,o.observation_payload
+                 FROM observations o
+                 JOIN evidence_meta e ON e.evidence_id=o.evidence_id
+                 WHERE o.object_id=?1 AND o.observation_kind=?2",
+                [object_id, SOURCE_DESCRIPTOR_KIND],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        let Some((evidence_id, evidence_object_id, artifact_digest, payload)) = cited else {
+            return Ok(None);
+        };
+        let detail = stored_detail(&payload)?;
+        if detail.evidence_id != evidence_id
+            || detail.artifact_digest != artifact_digest
+            || !detail.is_consistent_with(object_id)
+        {
+            return Err(KernelError::CorruptCanonicalRow);
+        }
+        Ok(Some((evidence_id, evidence_object_id)))
+    }
+
     /// The live descriptor of `class` in lineage `lineage_id` in this envelope's view, or `None` when the lineage has no live revision. The read restricts descriptor scanning to the lineage's `srcdesc:{lineage_id}:` object id range and applies [`KernelStore::live_source_descriptors`]' liveness predicate and row checks.
     ///
     /// # Errors

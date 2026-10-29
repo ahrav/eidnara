@@ -13,7 +13,7 @@ over the three active S-A records in `catalog.md`, `existing-checks.md`,
 of scope. Short names: determinism, oversize, case fold.
 
 Sampled citations confirmed: `scorer.rs:66-68`, `:77`, `:85-96`,
-`:103-109`, `:386-395`, `:432-562`, `:590-606`, `:627-644`, `:694-695`
+`:103-109`, `:386-395`, `:440-570`, `:594-610`, `:631-648`, `:698-699`
 (line numbers re-verified after the term pipeline moved to hashed
 spellings);
 `analysis.rs:78-105`; `lib.rs:17`; `contradiction_candidates/mod.rs:4`;
@@ -42,14 +42,14 @@ All three records are `always` safety records on S-A. That fits a pure
 scorer. The scorer's own surface has two uncatalogued obligations.
 
 First, the determinism Guarantee holds "under an equal matcher digest". The
-digest preimage is a list of rule ids and constants (`scorer.rs:648-683`).
+digest preimage is a list of rule ids and constants (`scorer.rs:652-687`).
 A change to `kept`, `scan_ascii`, `terms`, or `rank` that keeps those ids leaves the
 digest unchanged, so the version stops identifying the behavior. Only the
 hand-written term-set test (`tests:31-80`) would notice some such changes.
 Gap G1.
 
 Second, the candidate predicate (three gates, compared by
-cross-multiplication, `scorer.rs:547-561`) has tests (`tests:187-222`) and
+cross-multiplication, `scorer.rs:416-421`) has tests (`tests:187-222`) and
 no record. `existing-checks.md` marks those tests "none directly". Gap G2.
 
 The three `sometimes` markers in `fault-map.md` have no owner until #1167
@@ -84,7 +84,7 @@ Three clauses lack an oracle:
   The record states the fold correctly. It overstates the consequence
   (R1, B2).
 - `unscorable` holds decision object ids, not decision ids
-  (`scorer.rs:636`). With a repeated object id, one id can appear twice in
+  (`scorer.rs:640`). With a repeated object id, one id can appear twice in
   `unscorable`, or in both `unscorable` and `candidates`. The determinism
   Guarantee admits repeated ids, so the oversize Check clause "in
   `unscorable` and absent from `candidates`" is false for such inputs (R3).
@@ -99,7 +99,7 @@ Three clauses lack an oracle:
 |---|---|---|---|
 | R1 | refinement | case fold: Guarantee and Check claim equal term sets for case-only differences; false when the case change crosses a part boundary (`analysis.rs:198`). Restate as "one fold over the analyzer's output on both sides", limit the equality clause to case changes that keep part boundaries, add a `configLoader`/`configloader` pair to the record and to fault class A8 | applied: Guarantee and Check restated in `catalog.md`; `a_case_change_inside_an_identifier_changes_its_parts` (`tests:163-171`) constructs the pair and pins `configLoader` to {configloader, config, loader} and `CONFIGLOADER` and `configloader` to {configloader}; added to `existing-checks.md`, fault class A8, and the evidence file |
 | R2 | refinement | case fold: "a diacritic-only or NFC-versus-NFD difference gives disjoint terms" holds per term, not per text; reword | applied: the Check states distinctness per term; the evidence file notes that every term of the tested pairs differs |
-| R3 | refinement | oversize: qualify the unscorable clause for repeated object ids, and note that `unscorable` lists object ids and can repeat one | applied: Guarantee and Check qualified for repeated object ids; record and evidence note that `unscorable` lists object ids (`scorer.rs:636`) |
+| R3 | refinement | oversize: qualify the unscorable clause for repeated object ids, and note that `unscorable` lists object ids and can repeat one | applied: Guarantee and Check qualified for repeated object ids; record and evidence note that `unscorable` lists object ids (`scorer.rs:640`) |
 | R4 | refinement | oversize: the "result unchanged without the unscorable summary" clause has no assertion; mark it `partial` in `Exercised` or name a test that compares against a run without it | applied: `Exercised: partial` with the unasserted clause named; index, `existing-checks.md`, and evidence updated |
 | R5 | refinement | determinism: no test combines a repeated object id with more than K passing summaries across many orders; name a property test over random permutations with repeated ids as the stronger oracle | applied: `Exercised`, fault class A3, `existing-checks.md`, and evidence name the property test as the stronger oracle |
 | R6 | refinement | citations: `harness_sources.rs:612-616` is `:612`; `identity_pins_the_manifest` is `lexical_analysis.rs:389-413`; the determinism evidence's "only identical triples tie" should say equal ids and counts tie with equal outputs | applied: `harness_sources.rs:612` and `lexical_analysis.rs:389-413` corrected; the evidence's tie wording restated |
@@ -110,12 +110,12 @@ Three clauses lack an oracle:
 
 ## Gaps queued
 
-- G1: read `matcher_preimage` (`scorer.rs:648-683`) and the digest pin
+- G1: read `matcher_preimage` (`scorer.rs:652-687`) and the digest pin
   (`tests:348-400`). Write one record: for a fixed corpus of descriptor and
   summary pairs, a change in any score requires a changed preimage. The
   corpus scores are pinned next to the digest literal so both change
   together.
-- G2: read `DescriptorTerms::score` (`scorer.rs:526-562`). Write one record
+- G2: read `DescriptorTerms::score` (`scorer.rs:534-566`). Write one record
   covering the three gates and the exact-threshold boundary, citing
   `tests:187-222`.
 

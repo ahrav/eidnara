@@ -9215,6 +9215,7 @@ impl HandlerCore {
             window: parsed.native_messages.clone().unwrap_or_default(),
             epoch: self.source_capture.epoch(),
             documents: document_reads.clone(),
+            candidates: binding.config.contradiction_candidates_enabled,
         });
         // Read after the lane wait, so a preceding pass's first-pass settlement is visible. A
         // route unbound or rebound during the waits no longer holds the resolved binding; the
@@ -9277,8 +9278,22 @@ impl HandlerCore {
     /// Charges the built pass's window for source capture and returns the work that starts its tracked job once the response settles: the job takes the publication slot then, and a closed admission or a busy slot refuses it. A response that never settles drops it unrun.
     fn capture_after_response(
         &self,
-        offer: source_capture::Offer,
+        mut offer: source_capture::Offer,
     ) -> Option<dispatch::AfterResponse> {
+        // The route's frozen consent decides whether the job's settled publication is offered to a candidate pass; the pass's Kernel handle travels only with that offer, so a job without one releases the Kernel when it ends.
+        let candidates = offer
+            .candidates
+            .then(|| {
+                self.store().map(|store| {
+                    (
+                        Arc::clone(&self.contradiction_candidates),
+                        store,
+                        Arc::clone(&self.kernel),
+                    )
+                })
+            })
+            .flatten();
+        offer.candidates = candidates.is_some();
         let handoff = self.source_capture.offer(offer)?;
         let admission = self.admission();
         let kernel = Arc::clone(&self.kernel);
@@ -9286,9 +9301,20 @@ impl HandlerCore {
         let cancel = self.cancel.clone();
         Some(dispatch::AfterResponse::new(move || {
             let capture = handoff.supervisor();
-            if let Some(job) = handoff.into_job(kernel, gate, cancel) {
+            if let Some(job) = handoff.into_job(kernel, gate, cancel.clone()) {
                 let session = job.session().clone();
-                if let Err(refused) = admission.try_spawn(job.run()) {
+                let follow_on = admission.clone();
+                let task = async move {
+                    let (end, settled) = job.run_settled().await;
+                    if let (Some(settled), Some((counts, store, kernel))) = (settled, candidates)
+                        && let Some(pass) = counts.offer(settled, kernel, store, cancel)
+                        && follow_on.spawn(pass.run()).is_none()
+                    {
+                        counts.add(contradiction_candidates::Count::RefusedShuttingDown, 1);
+                    }
+                    end
+                };
+                if let Err(refused) = admission.try_spawn(task) {
                     // Recorded before the unrun job drops, so its slot's
                     // release cannot end the entry first.
                     capture.refuse_handoff(source_capture::Count::RefusedShuttingDown, &session);
@@ -19205,6 +19231,8 @@ impl Handler {
 mod tests {
     #[path = "transform_unit/tests.rs"]
     mod blocking_unit_tests;
+    #[path = "candidate_pass_tests.rs"]
+    mod candidate_pass_tests;
     #[path = "compression_fidelity_corpus.rs"]
     mod compression_fidelity_corpus;
     #[path = "compression_fidelity_observation.rs"]

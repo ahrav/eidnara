@@ -412,6 +412,14 @@ pub enum SummaryScore {
     Unscorable,
 }
 
+/// Whether a summary of `decision_terms` terms, `matched_terms` of them in the descriptor, is a candidate.
+pub(crate) fn passes_gates(matched_terms: usize, decision_terms: usize) -> bool {
+    let (numerator, denominator) = CANDIDATE_SCORE_THRESHOLD;
+    matched_terms >= MIN_MATCHED_TERMS
+        && decision_terms >= MIN_DECISION_TERMS
+        && matched_terms * denominator >= numerator * decision_terms
+}
+
 /// One descriptor's analyzed terms, scored against one summary at a time so
 /// only one summary's term set is resident.
 ///
@@ -544,11 +552,7 @@ impl DescriptorTerms {
         if decision_terms == 0 {
             return SummaryScore::Unscorable;
         }
-        let (numerator, denominator) = CANDIDATE_SCORE_THRESHOLD;
-        if matched_terms >= MIN_MATCHED_TERMS
-            && decision_terms >= MIN_DECISION_TERMS
-            && matched_terms * denominator >= numerator * decision_terms
-        {
+        if passes_gates(matched_terms, decision_terms) {
             SummaryScore::Candidate {
                 matched_terms,
                 decision_terms,
@@ -588,7 +592,7 @@ impl TopCandidates {
     }
 
     /// A later duplicate of a kept decision object id keeps the better-ranked entry.
-    fn offer(&mut self, candidate: ScoredCandidate) {
+    pub(crate) fn offer(&mut self, candidate: ScoredCandidate) {
         if let Some(index) = self
             .0
             .iter()

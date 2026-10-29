@@ -333,6 +333,27 @@ impl KernelStore {
         requested: i64,
     ) -> Result<Vec<(String, u64)>, KernelError> {
         let mut reader = self.lock_reader()?;
+        decision_payload_sizes_on(&mut reader, object_ids, requested)
+    }
+
+    /// [`Self::decision_payload_sizes_as_of`] whose wait for a pooled reader ends at `budget`'s deadline or interrupt with [`KernelError::Deadline`].
+    pub fn decision_payload_sizes_as_of_within_budget(
+        &self,
+        object_ids: &[String],
+        requested: i64,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Vec<(String, u64)>, KernelError> {
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
+        decision_payload_sizes_on(&mut reader, object_ids, requested)
+    }
+}
+
+fn decision_payload_sizes_on(
+    reader: &mut rusqlite::Connection,
+    object_ids: &[String],
+    requested: i64,
+) -> Result<Vec<(String, u64)>, KernelError> {
+    {
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| KernelError::Io)?;

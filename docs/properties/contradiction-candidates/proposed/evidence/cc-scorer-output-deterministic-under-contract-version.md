@@ -14,9 +14,9 @@ iteration. #1163 D1 and C4 fix the total order; #1164 implements it.
 ## Evidence trail
 
 - `crates/daemon/src/contradiction_candidates/scorer.rs:111-132` `terms`
-  yields each kept term with its hash. `DescriptorTerms::new` (`:432-465`)
+  yields each kept term with its hash. `DescriptorTerms::new` (`:440-473`)
   sorts the descriptor's terms by hash, then folded bytes, and drops
-  repeats, so equal term sets build equal tables; `score` (`:483-562`)
+  repeats, so equal term sets build equal tables; `score` (`:491-566`)
   reduces a summary to its distinct `matched_terms` and `decision_terms`
   counts. Only those counts leave the term pipeline, so no container
   iteration order reaches the output. `term_set` (`:103-109`) still returns
@@ -27,16 +27,16 @@ iteration. #1163 D1 and C4 fix the total order; #1164 implements it.
   object id ascending, decision id ascending. `String` comparison is byte
   order, so `rank` is a total order over distinct (object id, decision id)
   pairs.
-- `scorer.rs:573-588` `TopCandidates::record` scores one summary and offers
-  a passing one; `:590-606` `offer` replaces a kept entry with the same
+- `scorer.rs:577-592` `TopCandidates::record` scores one summary and offers
+  a passing one; `:594-610` `offer` replaces a kept entry with the same
   decision object id only when the new one ranks better, inserts at
   `partition_point`, and truncates to `CANDIDATES_PER_DESCRIPTOR` (`:63`,
   K = 4).
-- `scorer.rs:627-644` `score_descriptor` feeds every candidate through
+- `scorer.rs:631-648` `score_descriptor` feeds every candidate through
   `record`, collects unscorable ids, and sorts them (`sort_unstable` on
   `String`, a total order, so equal ids are indistinguishable).
-- `scorer.rs:648-683` `matcher_preimage` names `ORDER_RULE_ID` (`:80-81`);
-  `:694-701` the digest is the SHA-256 of the preimage, held in a
+- `scorer.rs:652-687` `matcher_preimage` names `ORDER_RULE_ID` (`:80-81`);
+  `:698-705` the digest is the SHA-256 of the preimage, held in a
   `LazyLock`.
 - Tests: `crates/daemon/tests/contradiction_candidates_scorer.rs:276-318`
   `the_top_k_is_the_same_under_every_input_order`;
@@ -78,8 +78,8 @@ None. The function is pure: it reads only its arguments and the constant
 
 ### Q: Does the order depend on anything outside the inputs?
 
-- Sources examined: `scorer.rs:111-132`, `:386-395`, `:432-606`,
-  `:627-644`.
+- Sources examined: `scorer.rs:111-132`, `:386-395`, `:440-610`,
+  `:631-648`.
 - Findings: no hash container, clock, global, or I/O reaches the result.
   `rank` ignores the summary and ends at the decision id, so two entries
   tie only when their ids and counts are equal, and such entries give

@@ -26,9 +26,10 @@ pub(crate) use settlement::{Observed, SettlementOutcome, settle};
 use tokio_util::sync::CancellationToken;
 
 use crate::harness_sources::{
-    Harness, MAX_SOURCE_BATCH_BYTES, MAX_SOURCE_UNIT_BYTES, PublishError, Representation,
-    SessionIdentity, SourcePublisher, SourceUnit, UnitDisposition, opencode_units_within,
-    pi_units_within, publish_screened, publish_screened_between, receipt_key_of,
+    Harness, MAX_SOURCE_BATCH_BYTES, MAX_SOURCE_UNIT_BYTES, PublishError, Published,
+    Representation, SessionIdentity, SourcePublisher, SourceUnit, UnitDisposition,
+    opencode_units_within, pi_units_within, publish_screened, publish_screened_between,
+    receipt_key_of,
 };
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{KernelOpenCoordinator, ProjectBinding};
@@ -361,6 +362,15 @@ pub(crate) struct Offer {
     pub epoch: u64,
     /// Where the pass leaves the configured repository documents it reads for its prompt; `None` when the route injects no documents. A pass that composes no prompt block leaves none.
     pub documents: Option<Arc<crate::project_docs::DocumentReads>>,
+    /// The route's frozen `contradiction_candidates.enabled`: the job then keeps each published unit's text for one candidate pass after it ends.
+    pub candidates: bool,
+}
+
+/// What a `Completed` job that published at least one unit hands to the candidate pass once the slot is released: each published unit's exact text with its receipt, the project, and the job's retained charge, which stays charged until the pass drops this.
+pub(crate) struct SettledPublication {
+    pub(crate) project: ProjectBinding,
+    pub(crate) units: Vec<(String, Published)>,
+    _retained: RetainedCharge,
 }
 
 /// A charged window waiting for its response to reach the wire writer. Dropping it releases the charge.
@@ -373,6 +383,7 @@ pub(crate) struct CaptureHandoff {
     window_bytes: usize,
     retained: RetainedCharge,
     documents: PendingDocuments,
+    candidates: bool,
 }
 
 /// The document reads a capture holds until its documents batch takes them. A handoff or job dropped with reads still held dropped them before the batch, so the drop counts them as `documents_refused`; the reads wait for the next pass that composes the block.
@@ -529,6 +540,7 @@ impl SourceCapture {
             window_bytes,
             retained,
             documents,
+            candidates: offer.candidates,
         })
     }
 
@@ -748,6 +760,7 @@ impl CaptureHandoff {
             epoch: self.epoch,
             window_bytes: self.window_bytes,
             documents: self.documents,
+            kept_for_pass: self.candidates.then(std::cell::RefCell::default),
         })
     }
 }
@@ -760,13 +773,16 @@ pub(crate) struct CaptureJob {
     kernel: Arc<KernelOpenCoordinator>,
     commit_gate: Arc<Mutex<()>>,
     cancel: CancellationToken,
-    slot: ActiveSlot,
     _retained: RetainedCharge,
+    /// Declared after the charge, so an unwinding job releases its charge before the slot it holds frees.
+    slot: ActiveSlot,
     window: Vec<Arc<Value>>,
     project: ProjectBinding,
     epoch: u64,
     window_bytes: usize,
     documents: PendingDocuments,
+    /// The text and receipt of each unit this job published, kept only when the route consents to candidates.
+    kept_for_pass: Option<std::cell::RefCell<Vec<(String, Published)>>>,
 }
 
 impl CaptureJob {
@@ -775,14 +791,20 @@ impl CaptureJob {
         &self.slot.session
     }
 
-    /// Runs the publication on the blocking pool and returns once it physically completes. Cancellation interrupts the budget, so the job stops before its next kernel wait; the wait for completion is then bounded by the budget, the capture commit gate's current holder, and the adapters' work on the window.
+    /// Runs the publication and returns its end; the settled publication is dropped.
+    #[cfg(test)]
     pub(crate) async fn run(self) -> Count {
+        self.run_settled().await.0
+    }
+
+    /// Runs the publication on the blocking pool and returns once it physically completes, with the publication a candidate pass scores; the blocking closure has returned, so the slot permit is released and the commit gate is free. Cancellation interrupts the budget, so the job stops before its next kernel wait; the wait for completion is then bounded by the budget, the capture commit gate's current holder, and the adapters' work on the window.
+    pub(crate) async fn run_settled(self) -> (Count, Option<SettledPublication>) {
         self.capture.counters.add(Count::Admitted, 1);
         let interrupt = Arc::clone(&self.interrupt);
         let cancel = self.cancel.clone();
         let capture = Arc::clone(&self.capture);
         let (session, acceptance) = (self.slot.session.clone(), self.slot.acceptance);
-        let mut join = tokio::task::spawn_blocking(move || self.publish());
+        let mut join = tokio::task::spawn_blocking(move || self.publish_settled());
         let joined = tokio::select! {
             joined = &mut join => joined,
             () = cancel.cancelled() => {
@@ -792,14 +814,67 @@ impl CaptureJob {
         };
         // A failed join dropped the slot, the charges, and the window while the closure unwound.
         let end = match joined {
-            Ok(end) => return end,
+            Ok(settled) => return settled,
             Err(error) if error.is_panic() => Count::WorkerPanicked,
             Err(_) => Count::Discarded,
         };
         capture.counters.add(end, 1);
         capture.settlements().end(&session, acceptance, end);
         log("job ended", end, 1);
-        end
+        (end, None)
+    }
+
+    /// Publishes, then releases the slot permit by dropping the job before it returns. The pass holds a charge for the kept texts and receipts in place of the job's charge; when the budget cannot take it while the job's charge is still held, the pass keeps the job's larger charge.
+    fn publish_settled(mut self) -> (Count, Option<SettledPublication>) {
+        let end = self.publish();
+        let CaptureJob {
+            capture,
+            project,
+            _retained,
+            slot,
+            kept_for_pass,
+            ..
+        } = self;
+        let units = kept_for_pass
+            .map(std::cell::RefCell::into_inner)
+            .unwrap_or_default();
+        // A kept unit's commit landed and the memo holds it, whatever ended the job after that commit, so the pass sees it now or never.
+        if units.is_empty() {
+            // The charge drops before the slot frees, so an offer that takes the slot meets the budget this job released.
+            drop(_retained);
+            drop(slot);
+            return (end, None);
+        }
+        let kept: usize = units
+            .iter()
+            .map(|(text, published)| {
+                text.capacity()
+                    + published.object_id.len()
+                    + published.occurrence_id.len()
+                    + published.evidence_object_id.len()
+                    + published.evidence_id.len()
+                    + std::mem::size_of::<(String, Published)>()
+            })
+            .sum();
+        let retained = RetainedCharge::take(&capture, kept).unwrap_or(_retained);
+        drop(slot);
+        (
+            end,
+            Some(SettledPublication {
+                project,
+                units,
+                _retained: retained,
+            }),
+        )
+    }
+
+    /// Keeps a published unit's text and receipt for the candidate pass when the route consents to one.
+    fn keep_published(&self, disposition: &UnitDisposition, text: String) {
+        if let (Some(kept), UnitDisposition::Published(published)) =
+            (&self.kept_for_pass, disposition)
+        {
+            kept.borrow_mut().push((text, published.clone()));
+        }
     }
 
     fn end(&self, end: Count) -> Count {
@@ -813,7 +888,7 @@ impl CaptureJob {
         end
     }
 
-    fn publish(mut self) -> Count {
+    fn publish(&mut self) -> Count {
         if self.cancel.is_cancelled() {
             return self.end(Count::Discarded);
         }
@@ -983,7 +1058,9 @@ impl CaptureJob {
         let mut memo = self.capture.memo();
         match result {
             Ok(dispositions) => {
-                for (disposition, key) in dispositions.into_iter().zip(keys) {
+                for ((disposition, key), unit) in dispositions.into_iter().zip(keys).zip(candidates)
+                {
+                    self.keep_published(&disposition, unit.text);
                     let (count, recorded) = classify(disposition, observed_at);
                     counters.add(count, 1);
                     if let Some((key, digest)) = key {
@@ -1111,7 +1188,8 @@ impl CaptureJob {
         }
         match publish_screened(publisher, &units, crate::now_ms(), Some(&self.budget)) {
             Ok(dispositions) => {
-                for disposition in dispositions {
+                for (disposition, unit) in dispositions.into_iter().zip(units) {
+                    self.keep_published(&disposition, unit.text);
                     let count = match disposition {
                         UnitDisposition::Published(published) if published.replayed => {
                             Count::UnitsReplayed

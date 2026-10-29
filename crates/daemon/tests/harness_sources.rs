@@ -3904,6 +3904,244 @@ fn v1_digest(unit: &SourceUnit) -> String {
     kernel::source_identity::identity_digest(&bytes)
 }
 
+/// A descriptor receipt whose observation cites no evidence row is a canonical anomaly: every publish path writes the descriptor with its evidence, so the replay refuses instead of naming the evidence the unit would have had.
+#[test]
+fn a_replay_whose_descriptor_cites_no_evidence_row_is_refused_as_corrupt() {
+    use daemon::harness_sources::publish_batch;
+    use kernel::KernelError;
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let unit = pi_text_unit("pi-u1", "a replay without its citation");
+    let published = publisher.publish(&unit, NOW).unwrap();
+    assert!(!published.replayed);
+    let conn = Connection::open(&corpus.kernel_db).unwrap();
+    let changed = conn
+        .execute(
+            "UPDATE observations SET evidence_id=NULL WHERE object_id=?1",
+            rusqlite::params![published.object_id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    drop(conn);
+    let tip = corpus.tip();
+    let refused = publisher.publish(&unit, NOW).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            PublishError::Kernel {
+                error: KernelError::CorruptCanonicalRow,
+                evidence: None,
+            }
+        ),
+        "{refused:?}"
+    );
+    let refusal = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &unit)],
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.error, KernelError::CorruptCanonicalRow);
+    assert_eq!(refusal.unit, Some(0));
+    assert_eq!(corpus.tip(), tip, "a refused replay commits nothing");
+}
+
+/// A descriptor receipt whose observation cites an evidence row other than the one its stored detail names is the same anomaly: the replay refuses instead of scoring the text under the other evidence key.
+#[test]
+fn a_replay_whose_descriptor_cites_another_units_evidence_is_refused_as_corrupt() {
+    use daemon::harness_sources::publish_batch;
+    use kernel::KernelError;
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let unit = pi_text_unit("pi-u1", "a replay under another citation");
+    let other = pi_text_unit("pi-u2", "the other unit's text");
+    let published = publisher.publish(&unit, NOW).unwrap();
+    let other_published = publisher.publish(&other, NOW).unwrap();
+    assert_ne!(published.evidence_id, other_published.evidence_id);
+    let conn = Connection::open(&corpus.kernel_db).unwrap();
+    let changed = conn
+        .execute(
+            "UPDATE observations SET evidence_id=?1 WHERE object_id=?2",
+            rusqlite::params![other_published.evidence_id, published.object_id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    drop(conn);
+    let tip = corpus.tip();
+    let refused = publisher.publish(&unit, NOW).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            PublishError::Kernel {
+                error: KernelError::CorruptCanonicalRow,
+                evidence: None,
+            }
+        ),
+        "{refused:?}"
+    );
+    let refusal = publish_batch(
+        &corpus.kernel,
+        Vec::new(),
+        &[(&publisher, &unit)],
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.error, KernelError::CorruptCanonicalRow);
+    assert_eq!(refusal.unit, Some(0));
+    assert_eq!(corpus.tip(), tip, "a refused replay commits nothing");
+    assert!(publisher.publish(&other, NOW).unwrap().replayed);
+
+    // The other unit's whole observation copied under this descriptor's object id agrees with its evidence row and names another lineage; the replay refuses that too.
+    let conn = Connection::open(&corpus.kernel_db).unwrap();
+    let changed = conn
+        .execute(
+            "UPDATE observations SET observation_payload=(SELECT observation_payload FROM observations WHERE object_id=?1)
+             WHERE object_id=?2",
+            rusqlite::params![other_published.object_id, published.object_id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    drop(conn);
+    let refused = publisher.publish(&unit, NOW).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            PublishError::Kernel {
+                error: KernelError::CorruptCanonicalRow,
+                evidence: None,
+            }
+        ),
+        "{refused:?}"
+    );
+}
+
+/// A descriptor another writer commits between `publish_within`'s preview and its commit replays at the commit; the replay names the evidence that stored descriptor cites, which a batch's equal-text sibling may own.
+#[test]
+fn a_commit_time_replay_names_the_evidence_the_stored_descriptor_cites() {
+    use daemon::harness_sources::{publish_batch, set_before_descriptor_commit_for_test};
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let sibling = pi_text_unit("pi-u1", "the same words twice");
+    let unit = pi_text_unit("pi-u2", "the same words twice");
+    // Between the preview and the commit, a batch publishes the sibling and the unit; the unit's descriptor cites the sibling's evidence row.
+    let kernel = Arc::clone(&corpus.kernel);
+    let (batch_sibling, batch_unit) = (sibling.clone(), unit.clone());
+    set_before_descriptor_commit_for_test(Some(Arc::new(move || {
+        set_before_descriptor_commit_for_test(None);
+        let other_publisher = SourcePublisher {
+            kernel: &kernel,
+            domain_id: "domain",
+            scope_id: Some(SCOPE),
+            egress: ProviderEgress::LocalOnly,
+            sensitivity: Sensitivity::Normal,
+        };
+        publish_batch(
+            &kernel,
+            Vec::new(),
+            &[
+                (&other_publisher, &batch_sibling),
+                (&other_publisher, &batch_unit),
+            ],
+            NOW,
+            None,
+        )
+        .unwrap();
+    })));
+    let published = publisher.publish(&unit, NOW).unwrap();
+    set_before_descriptor_commit_for_test(None);
+    assert!(
+        published.replayed,
+        "the batch's commit replayed at the commit"
+    );
+    let sibling_published = publisher.publish(&sibling, NOW).unwrap();
+    assert!(sibling_published.replayed);
+    assert_eq!(
+        (
+            published.evidence_id.clone(),
+            published.evidence_object_id.clone()
+        ),
+        (
+            sibling_published.evidence_id.clone(),
+            sibling_published.evidence_object_id.clone()
+        ),
+        "the replay names the sibling's evidence row the stored descriptor cites"
+    );
+    assert_eq!(
+        publisher.publish(&unit, NOW).unwrap().evidence_id,
+        published.evidence_id,
+        "the stored-receipt replay agrees"
+    );
+}
+
+/// A descriptor receipt whose result names another unit's descriptor is a corrupt receipt: the replay refuses instead of answering with that descriptor and its evidence.
+#[test]
+fn a_replay_whose_receipt_names_another_units_descriptor_is_refused_as_corrupt() {
+    use kernel::KernelError;
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let unit = pi_text_unit("pi-u1", "a replay through another receipt");
+    let other = pi_text_unit("pi-u2", "the other unit's text");
+    let published = publisher.publish(&unit, NOW).unwrap();
+    let other_published = publisher.publish(&other, NOW).unwrap();
+    let (key, _) = publisher.receipt_identity(&unit).unwrap();
+    // The store guards receipts with a trigger; the rewrite lifts it for this one statement and reinstalls it unchanged.
+    let conn = Connection::open(&corpus.kernel_db).unwrap();
+    let guards: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT name,sql FROM sqlite_master
+             WHERE type='trigger' AND tbl_name='operation_receipts'",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for (name, _) in &guards {
+        conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
+    }
+    let changed = conn
+        .execute(
+            "UPDATE operation_receipts SET result_payload=CAST(?1 AS BLOB)
+             WHERE producer='eidnara-daemon/harness-sources' AND operation_key=?2",
+            rusqlite::params![
+                other_published.object_id,
+                format!("source-descriptor:{key}")
+            ],
+        )
+        .unwrap();
+    for (_, sql) in &guards {
+        conn.execute_batch(sql).unwrap();
+    }
+    assert_eq!(changed, 1);
+    drop(conn);
+    let tip = corpus.tip();
+    let refused = publisher.publish(&unit, NOW).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            PublishError::Kernel {
+                error: KernelError::CorruptCanonicalRow,
+                evidence: None,
+            }
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(corpus.tip(), tip, "a refused replay commits nothing");
+    assert_ne!(published.object_id, other_published.object_id);
+    assert!(publisher.publish(&other, NOW).unwrap().replayed);
+}
+
 /// Rewrites the stored request digest of `unit`'s `kind` receipt (`source-descriptor` or `source-evidence`) to `digest`, as a store written before the outcome record holds it.
 fn store_receipt_as(
     corpus: &Corpus,
@@ -4387,4 +4625,49 @@ fn rerun_lookup_cost_at_ten_thousand_live_tool_descriptors() {
             )
             .unwrap();
     assert_eq!(live, 1);
+}
+
+fn cited_evidence_id(corpus: &Corpus, descriptor_object_id: &str) -> String {
+    Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT evidence_id FROM observations WHERE object_id=?1",
+            [descriptor_object_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// A descriptor can cite an evidence row shared by equal-text batch siblings; a replay through either publication path preserves that reference.
+#[test]
+fn a_replay_reports_the_evidence_row_its_descriptor_cites() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let units = [
+        pi_text_unit("pi-first", "repeated words"),
+        pi_text_unit("pi-second", "repeated words"),
+    ];
+    let fresh = publish_screened(&publisher, &units, NOW, None).unwrap();
+    let cited: Vec<String> = fresh
+        .iter()
+        .map(|disposition| cited_evidence_id(&corpus, &published(disposition).object_id))
+        .collect();
+    assert_eq!(cited[0], cited[1], "equal text in one batch cites one row");
+    let replayed = publish_screened(&publisher, &units, NOW + 1, None).unwrap();
+    for (index, unit) in units.iter().enumerate() {
+        let fresh = published(&fresh[index]);
+        let batch = published(&replayed[index]);
+        let single = publisher.publish(unit, NOW + 2).unwrap();
+        assert!(!fresh.replayed && batch.replayed && single.replayed);
+        for reported in [fresh, batch, &single] {
+            assert_eq!(reported.evidence_id, cited[index], "unit {index}");
+            assert_eq!(
+                evidence_id_of(&corpus, &reported.evidence_object_id),
+                cited[index],
+                "unit {index}: the evidence object is the cited row's"
+            );
+        }
+    }
 }

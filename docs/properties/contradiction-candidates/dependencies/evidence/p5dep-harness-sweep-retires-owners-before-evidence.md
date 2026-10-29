@@ -16,9 +16,9 @@ lifecycle transitions; data integrity; C12; L1.
 
 - `crates/kernel/src/cas/mod.rs:155` `HARNESS_CAPTURE_RETENTION_CLASS =
   "harness_capture"`.
-- `crates/daemon/src/harness_sources.rs:607-608`
+- `crates/daemon/src/harness_sources.rs:637-639`
   `HARNESS_CAPTURE_RETENTION_MS = CAPTURE_REPLAY_RETENTION_MS` (30 days,
-  `crates/memory-store/src/memory_capture.rs:36`); `:991` doc: captured
+  `crates/memory-store/src/memory_capture.rs:36`); `:1024-1031` doc: captured
   message text and tool results are `harness_capture` evidence owned for that
   long from `observed_at`; the deadline is set only when the evidence row is
   first created, so a replay keeps the first deadline.
