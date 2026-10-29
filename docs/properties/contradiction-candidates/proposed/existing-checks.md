@@ -68,17 +68,17 @@ Analyzer checks the scorer relies on:
 | `a_write_under_another_kernel_incarnation_takes_its_own_tip` | `:488` | a new incarnation's write carries its own tip | sweep and reads (incarnation filter) | unaudited |
 | `the_page_cursor_is_a_keyset_position_and_only_issued_cursors_parse` | `:599` | rows added before or removed from page one move nothing after the cursor; non-canonical, oversized, and unstorable-id cursors refused; the longest issued cursor parses and one byte longer is refused | read (paging) | unaudited |
 | `the_under_route_page_read_answers_the_authority_before_the_cursor` | `:517` | a route without a MODULE row reads no page and judges no cursor; a bound route reads the plain read's page and judges a malformed cursor after it | read (terminals) | unaudited |
-| `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:694` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
-| `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:758` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
-| `random_write_and_delete_sequences_match_the_reference_model` | `:1213` | seeded write and as-read delete sequences match a reference model: rows, counts, rowid stability, and the gauge each step; pages, cursors across writes, and the sweep every seventh step | row key and caps; read (paging); sweep (store arm) | unaudited |
-| `the_hex_checks_refuse_uppercase_non_hex_and_misfit_lengths` | `:1364` | the hex-shape CHECKs refuse uppercase, non-hex, and wrong-length digests | read keys (no text) | unaudited |
-| `the_totals_follow_replaced_ids_late_writes_deletes_and_truncation` | `:1430` | the gauge equals a sum over the rows through replaced ids, late writes, deletes, and truncation | sweep (store arm) | unaudited |
-| `a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` | `:1483` | a new row below the cap's floor is counted written and dropped; held rows and rowids stay; a landing row takes a fresh rowid | row key and caps | unaudited |
-| `only_the_candidate_module_writes_the_candidate_tables` | `:1613` | no other memory-store source, trigger, or session purge writes either candidate table, so the totals the cap and gauge read stay exact | row key and caps; sweep (store arm) | unaudited |
-| `every_candidate_statement_reuses_its_cached_plan` | `:1538` | 12 rounds of writes, late writes, pages, sweep pages, keyed deletes, and gauge reads run 16 distinct candidate statements; the statement cache re-creates and re-plans none | row key and caps; read (paging); sweep (store arm) (the cost of the checks, not a record directly) | unaudited |
-| `the_page_sweep_and_eviction_scans_stop_at_their_bound` | `:1701` | over a 300-row project, a two-row page, a three-row sweep page, and a one-row eviction each run under 500 VM steps | read (paging); sweep (store arm); row key and caps (bounded scans) | unaudited |
-| `a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores` | `:1745` | 256 rows into a run of equal scores, with and without equal `created_at_ms`, the continuation page returns the next two rows under 500 VM steps | read (paging) | unaudited |
-| `a_read_with_a_secret_shaped_id_answers_an_empty_page` | `:1796` | a page read for a secret-shaped decision id answers an empty page; an empty id is still refused by the shape check | read keys (no text); read (paging) | unaudited |
+| `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` | `:700` | K accepted, K + 1 refused with held rows kept; multi-row eviction; smallest-key tie-break | row key and caps | unaudited |
+| `a_keyed_delete_names_its_project_and_the_gauge_counts_bytes` | `:764` | a delete is project-scoped; the gauge counts UTF-8 bytes | sweep (store arm) | unaudited |
+| `random_write_and_delete_sequences_match_the_reference_model` | `:1219` | seeded write and as-read delete sequences match a reference model: rows, counts, rowid stability, and the gauge each step; pages, cursors across writes, and the sweep every seventh step | row key and caps; read (paging); sweep (store arm) | unaudited |
+| `the_hex_checks_refuse_uppercase_non_hex_and_misfit_lengths` | `:1370` | the hex-shape CHECKs refuse uppercase, non-hex, and wrong-length digests | read keys (no text) | unaudited |
+| `the_totals_follow_replaced_ids_late_writes_deletes_and_truncation` | `:1436` | the gauge equals a sum over the rows through replaced ids, late writes, deletes, and truncation | sweep (store arm) | unaudited |
+| `a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` | `:1489` | a new row below the cap's floor is counted written and dropped; held rows and rowids stay; a landing row takes a fresh rowid | row key and caps | unaudited |
+| `only_the_candidate_module_writes_the_candidate_tables` | `:1619` | no other memory-store source, trigger, or session purge writes either candidate table, so the totals the cap and gauge read stay exact | row key and caps; sweep (store arm) | unaudited |
+| `every_candidate_statement_reuses_its_cached_plan` | `:1544` | 12 rounds of writes, late writes, pages, sweep pages, keyed deletes, and gauge reads run 16 distinct candidate statements; the statement cache re-creates and re-plans none | row key and caps; read (paging); sweep (store arm) (the cost of the checks, not a record directly) | unaudited |
+| `the_page_sweep_and_eviction_scans_stop_at_their_bound` | `:1707` | over a 300-row project, a two-row page, a three-row sweep page, and a one-row eviction each run under 500 VM steps | read (paging); sweep (store arm); row key and caps (bounded scans) | unaudited |
+| `a_continuation_page_seeks_to_its_cursor_inside_a_run_of_equal_scores` | `:1751` | 256 rows into a run of equal scores, with and without equal `created_at_ms`, the continuation page returns the next two rows under 500 VM steps | read (paging) | unaudited |
+| `a_read_with_a_secret_shaped_id_answers_an_empty_page` | `:1802` | a page read for a secret-shaped decision id answers an empty page; an empty id is still refused by the shape check | read keys (no text); read (paging) | unaudited |
 
 Baseline: `crates/memory-store/tests/baseline.rs` pins the table, its two
 indexes, and `contradiction_candidate_totals` in `EXPECTED_OBJECTS` and
@@ -117,7 +117,7 @@ resolved-config freezing), `crates/daemon/src/lib.rs:21502` (bound route and
 status block), `crates/host-runtime/src/control.rs:2011` (host forwarding
 allowlist against `docs/host-wire-protocol.md`), and
 `a_delete_as_read_spares_a_row_rewritten_since_the_read`
-(`crates/memory-store/tests/contradiction_candidates.rs:785`).
+(`crates/memory-store/tests/contradiction_candidates.rs:791`).
 
 ## S-B trigger and S-C candidate set (`crates/daemon/src/candidate_pass_tests.rs`, #1167)
 

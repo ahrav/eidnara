@@ -539,15 +539,15 @@ other values, and a newer write that removes keys it no longer names;
 `a_late_write_replaces_held_keys_and_adds_none` (`:453`) shows a write below
 the held tip adds no key, so a descriptor never exceeds K;
 `a_descriptor_over_its_cap_or_with_a_malformed_row_is_refused_whole` (`:125`)
-and `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` (`:694`)
+and `the_caps_hold_at_their_boundaries_and_refusals_leave_held_rows` (`:700`)
 show K accepted, K + 1 refused with the held rows unchanged, and a project
 at `per_project` evicting the lowest `score_bp`, then oldest, then smallest
 key with the count returned; `a_project_at_its_cap_evicts_the_lowest_score_then_the_oldest`
 (`:198`) shows another project's rows are untouched;
-`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1483`)
+`a_new_row_the_cap_evicts_at_once_counts_as_written_and_dropped` (`:1489`)
 shows a new row below the cap's floor counted written and dropped with the
 held rows and rowids unchanged; and
-`random_write_and_delete_sequences_match_the_reference_model` (`:1213`)
+`random_write_and_delete_sequences_match_the_reference_model` (`:1219`)
 compares 24 seeded sequences of writes, late writes, incarnation changes,
 evictions at caps of 2 to 4096, and as-read deletes against a reference model
 of the rules, checking every row, the returned counts, rowid stability, and
