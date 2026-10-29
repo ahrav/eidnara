@@ -1,0 +1,84 @@
+# Attestation verifier: portfolio evaluation
+
+## Source of this evaluation
+
+The specification ([#1169](https://github.com/ahrav/eidnara/issues/1169),
+Portfolio evaluation) records a fresh-context evaluation over its 20
+existing-behavior records through four lenses: harness fit, coverage balance,
+implementability, and wildcard. It re-verified every cited `path:line` and 60
+cited test names at `3a3b916b7`, invalidated no record, and returned 6 gaps,
+10 refinements, 3 biases, and 4 reference corrections. The evaluation's
+working files are not durable (specification N4), so this file restates its
+findings and records their disposition as applied by the U1 ticket
+([#1170](https://github.com/ahrav/eidnara/issues/1170)). The evaluation did
+not cover the 18 proposed obligations; they enter as designed records with
+falsifiers. No new fresh-context evaluation ran for this part.
+
+## Refinements
+
+The specification lists the refinements inline in one sentence of eight
+items; the relabel item covers three records, which brings the count to ten.
+The numbering below follows the sentence's order.
+
+| Id | Refinement | Disposition |
+| --- | --- | --- |
+| R1 | State both document caps (64 KiB publication, 256 KiB read) | applied to `p6-document-descriptor-identity-digest-and-revision` |
+| R2 | Pin that after `MarkStale` a validated `CodeObserved` returns `Outcome::Promote` while effective maturity, disposition, and visibility are unchanged, so `Outcome` alone is never the oracle | applied to `p6-mark-stale-withdraws-support-and-is-terminal-in-place`; the disposition half is verified from `event_effect`, and the maturity and visibility halves stay an open question on that record |
+| R3 | Scope the `Other`-degradation guarantee to a well-formed trigger id | applied to `p6-degraded-witness-event-denies-without-error` |
+| R4 | State the trusted-class precondition in the trigger record | applied to `p6-trigger-must-match-subject-source-triple` |
+| R5 | Relabel three records that mix production and test-only clauses | applied by labelling every record from its own evidence; the specification body does not name the three records, so this part cannot say which three the evaluation meant. The records whose notes separate the clauses are `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements`, `p6-document-evidence-cited-by-fk-serves-no-wider-than-explicit-search`, and `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard` |
+| R6 | Add the missing `Exercised` notes | applied: every record carries one |
+| R7 | Reword `sometimes` markers as fixture coverage floors | applied to `p6-validated-witness-under-trusted-classes-promotes` |
+| R8 | Resolve two open questions with G3 and G4 | applied: the opener question resolves on `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements` (the U1 driver uses the daemon opener); the plugin retire question is recorded on `p6-new-party-distinct-and-self-refusal` and in `p6-plugin-cannot-replace-a-foreign-source-decision`'s impact as G4 |
+
+## Reference corrections
+
+| Id | Correction | Disposition |
+| --- | --- | --- |
+| C1 | `claim_causality.rs:36` is `:38` | applied: `MAX_DERIVATION_PARENTS` is `crates/kernel/src/claim_causality.rs:38` |
+| C2 | Two `checks.rs` arm ranges shifted by two lines | applied: the `FileExists` arm is `crates/kernel/src/applicability/checks.rs:285` and the `ConfigKey` arm `:296` at the branch tip; the specification's original ranges are not recoverable |
+| C3 | `kernel_routes.rs:1888, 5131` call a sibling fixture | applied: the records cite the tests (`:1875`, `:5120`) and their `code_observation` fixture (`:887`) |
+| C4 | A preamble wording | applied: the catalog's reachability section states no blanket claim and each record carries its own evidence |
+
+Line drift between `3a3b916b7` and the branch tip moved several references:
+`crates/kernel/src/admission.rs` unit tests by 197 lines,
+`crates/daemon/src/source_capture_tests.rs` by 28 lines,
+`crates/kernel/tests/kernel_slice.rs` by one line, the `observe_code` fixture
+from `crates/daemon/src/lib.rs:14043` to `:14394`, and the test-support guard
+the specification placed at `lib.rs:13690` (K9) to `:14041`. Each record cites
+the current line.
+
+## Gaps
+
+| Id | Gap | Disposition |
+| --- | --- | --- |
+| G1 | Document evidence is at least `Sensitive` and anything citing it by FK serves no wider than `ExplicitSearch` | added as `p6-document-evidence-cited-by-fk-serves-no-wider-than-explicit-search` |
+| G2 | `delete_artifact` bypasses the citation guard | added as `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard`; relabelled `test-only` because `delete_artifact` has no production caller |
+| G3 | The Kernel checkout open has no allocation limit and honors replacement refs | added as `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements` |
+| G4 | A plugin `RetireDecision` can retire an attestation | queued; owner #1172 with OQ6-15 |
+| G5 | No record on the served form of an unpromoted trusted-class attestation (`ExplicitLabeled`) | queued; owner #1172 |
+| G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1171 |
+
+## Biases for a human
+
+- Surface selection followed the plan's touch list, while G1 to G3 sit in
+  files the plan does not name.
+- Uniform `high` confidence carries no information. This part lowers
+  `p6-mark-stale-withdraws-support-and-is-terminal-in-place` to `medium` and
+  every proposed record to `low`.
+- Cross-catalog P2 citations (`p2-git-open-is-isolated-and-allocation-bounded`,
+  `p2-decision-parents-must-be-live-at-insert`,
+  `p2-citing-decision-carries-at-least-its-evidence-class`) were accepted in
+  prose where METHOD treats them as claims under test. They stay records of
+  `../cited-capture-anchors/`; this part cites them without re-authoring.
+
+## Findings from the U1 implementation
+
+- AC3's length shortcut conflicts with AC1's normalized clause: a CRLF-form
+  claim against an LF blob has a length different from the header size and
+  must `Match`. The driver decides `Mismatch` with zero bytes read only when
+  no line-ending form can reach the claimed length, and reads the blob
+  otherwise (`p6-new-verdict-deterministic`). This is recorded for the owner
+  as a deviation from AC3's literal wording.
+- The verifier maps an allocation refusal on any object, including a commit
+  or tree, to `over_budget`. No test constructs a tree above 256 KiB.

@@ -1,0 +1,128 @@
+# Attestation verifier: existing checks
+
+Every check below has status `unaudited`. A listed check is evidence that a
+claim is exercised, not a verdict that it is adequate; adequacy belongs to
+`/testing:invariant-test-review` for tests and
+`/low-level-systems:defensive-assertions-and-invariant-guards` for
+production guards. References were verified at the #1170 branch.
+
+## Production guards
+
+| Guard | Location | Claim it carries | Status |
+| --- | --- | --- | --- |
+| Prior-class refusal | `crates/kernel/src/admission.rs:284` in `evaluate_admission` (`:280`) | an admission's classes equal the subject's prior admission's | unaudited |
+| Automatic ceiling | `crates/kernel/src/admission.rs:4302` (`automatic_ceiling`) | inference taints cap at `Candidate`; trusted code and config pairs reach `Verified` | unaudited |
+| Trigger validation | `crates/kernel/src/admission.rs:2807` (`validate_trigger`), called at `:1662`, degraded to `Other` at `:1699` | live trigger of the event's kind with the subject's source triple and live backing evidence; a failed trigger admits as `Other` | unaudited |
+| Event effects | `crates/kernel/src/admission.rs:4245` (`event_effect`) | `MarkStale` sets `Stale` with `Deny`; witness events promote with no disposition | unaudited |
+| Provenance | `crates/kernel/src/admission.rs:2650` (`validate_provenance`), called at `:1622` | trusted classes refused only for `unclassified` provenance | unaudited |
+| Succession events refused | `crates/kernel/src/admission.rs:2640` (`refuse_succession_events`) | `Correct`, `Replace`, `ApprovalRevoked` cannot be submitted as admission events | unaudited |
+| Policy revision | `crates/kernel/src/admission.rs:20` (`POLICY_REVISION`) | admissions and served reads are under one pinned policy | unaudited |
+| Successor identity | `crates/kernel/src/slice/write.rs:1271` (`validate_successor`) | same domain and source pair, larger revision | unaudited |
+| Barred lineage | `crates/kernel/src/admission.rs:1395` (`refuse_barred_lineage`) | quarantined, rejected, contradicted lineages cannot be superseded | unaudited |
+| Cited-evidence retirement | `crates/kernel/src/slice/write.rs:585` (`retire_evidence`), `Conflict` at `:607` | cited evidence is not retired | unaudited |
+| Artifact deletion | `crates/kernel/src/cas/deletion.rs:239` (`delete_artifact`), evidence update at `:389` | invalidates every live evidence row of a digest; no citation predicate | unaudited |
+| Plugin class table | `crates/daemon/src/kernel_routes/commit.rs:370` (`derive_classes`) | closed `source_kind` table; `verifier` is outside it | unaudited |
+| Plugin replacement | `crates/daemon/src/kernel_routes/commit.rs:1002` | a replacement carries the route's `source_kind` | unaudited |
+| Daemon isolated open | `crates/daemon/src/git_sources.rs:131` (`isolated_options`), `:138` (`open`), `:148` (`open_with_slots`) | allocation limit after repository configuration; replacement refs ignored | unaudited |
+| Header pass before decode | `crates/daemon/src/git_sources.rs:442` and `:456` in `read_selection` (`:390`); `exceeds_allocation` at `:354` | headers judged before any decode; allocation refusals named | unaudited |
+| Kernel checkout open | `crates/kernel/src/applicability/checkout.rs:639` (`open_isolated`) | isolated, command configuration stripped; no allocation limit; replacements honored | unaudited |
+| Document caps | `crates/daemon/src/project_docs.rs:23` (`MAX_PROJECT_DOC_BYTES`); `crates/daemon/src/harness_sources.rs:642` (`MAX_SOURCE_UNIT_BYTES`); unit cap applied at `crates/daemon/src/source_capture.rs:1297` | 256 KiB read, 64 KiB published | unaudited |
+| Document publisher class | `crates/daemon/src/source_capture.rs:922` | documents publish at `Sensitive` | unaudited |
+| Causality parents | `crates/kernel/src/claim_causality.rs:218` (`record_claim_causality`), `:38` (`MAX_DERIVATION_PARENTS`) | live exact parents; bounded parent list | unaudited |
+| Verifier header gate | `crates/daemon/src/attestation_verifier.rs:272` (`header_verdict`), used at `:377` (`observe`) | header over 256 KiB is `over_budget`; an unreachable length is `Mismatch`; both before any content read | unaudited |
+| Verifier object read | `crates/daemon/src/attestation_verifier.rs:350` (`read_object`) | kind and hash checked after decode; allocation refusal is `over_budget` | unaudited |
+| Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:340` (`poll`), `:302` (`Deadline`) | polled before the open and before every object read | unaudited |
+| Verifier claim path | `crates/daemon/src/attestation_verifier.rs:50` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
+
+## Tests
+
+| Test | Location | Records | Status |
+| --- | --- | --- | --- |
+| `unvalidated_observation_denies_without_materializing_candidate` | `crates/kernel/tests/kernel_admission.rs:648` | degraded witness | unaudited |
+| `observation_from_another_source_cannot_authorize_candidate` | `crates/kernel/tests/kernel_admission.rs:677` | degraded witness; source triple | unaudited |
+| `a_config_observation_authorizes_only_a_config_event` | `crates/kernel/tests/kernel_admission.rs:1292` | source triple | unaudited |
+| `an_observation_at_another_source_revision_cannot_authorize` | `crates/kernel/tests/kernel_admission.rs:1323` | degraded witness; source triple | unaudited |
+| `an_invalidated_observation_cannot_authorize` | `crates/kernel/tests/kernel_admission.rs:1339` | degraded witness; source triple | unaudited |
+| `a_trigger_whose_evidence_is_gone_cannot_admit` | `crates/kernel/tests/kernel_admission.rs:4211` | source triple | unaudited |
+| `an_admitted_object_carries_the_class_of_its_trigger_and_the_evidence_behind_it` | `crates/kernel/tests/kernel_admission.rs:4150` | trigger sensitivity | unaudited |
+| `an_object_admitted_by_a_trigger_serves_no_lower_than_that_trigger_reads_today` | `crates/kernel/tests/kernel_admission.rs:6378` | trigger sensitivity | unaudited |
+| `newer_policy_revision_fails_closed_while_older_still_serves` | `crates/kernel/tests/kernel_admission.rs:3371` | policy digest | unaudited |
+| `replacement_preserves_predecessor_history_and_leaves_successor_unadmitted` | `crates/kernel/tests/kernel_admission.rs:393` | replaced decision | unaudited |
+| `same_envelope_subject_decision_after_admission_uses_the_recorded_prior` | `crates/kernel/tests/kernel_admission.rs:1047` | mark stale | unaudited |
+| `dispositions_and_sensitivity_only_reduce_visibility` | `crates/kernel/tests/kernel_admission.rs:2735` | mark stale | unaudited |
+| `inference_ceiling_requires_authority_and_lifts_only_to_event_target` | `crates/kernel/src/admission.rs:4942` | inference class | unaudited |
+| `every_legal_source_taint_pair_enforces_its_automatic_ceiling` | `crates/kernel/src/admission.rs:4720` | inference class | unaudited |
+| `an_event_that_names_a_disposition_keeps_its_own_outcome` | `crates/kernel/src/admission.rs:5437` | mark stale | unaudited |
+| `policy_revision_matches_policy_content` | `crates/kernel/src/admission.rs:5931` | policy digest | unaudited |
+| `the_served_fold_is_under_the_serving_digest` | `crates/kernel/src/admission.rs:5900` | policy digest | unaudited |
+| `observe_code` (fixture) | `crates/daemon/src/lib.rs:14394` | positive witness | unaudited |
+| `reads_at_a_snapshot_return_what_was_visible_then` | `crates/daemon/tests/kernel_routes.rs:1875` | positive witness | unaudited |
+| `a_disposition_preview_reports_visibility_per_surface_and_writes_nothing` | `crates/daemon/tests/kernel_routes.rs:5120` | positive witness | unaudited |
+| `a_plugin_route_cannot_declare_a_class_above_the_derived_one` | `crates/daemon/tests/kernel_routes.rs:1145` | plugin table | unaudited |
+| `disposition_events_apply_the_fixed_table_and_report_outcome_and_disposition` | `crates/daemon/tests/kernel_routes.rs:4398` | mark stale | unaudited |
+| `a_plugin_write_is_capped_at_inference_classes` | `crates/daemon/src/kernel_routes/commit.rs:1249` | plugin table | unaudited |
+| `corrections_preserve_old_rows_and_reauthor_observation_dependencies` | `crates/kernel/tests/kernel_slice.rs:607` | successor identity | unaudited |
+| `corrections_reject_cross_domain_replacements` | `crates/kernel/tests/kernel_slice.rs:1003` | successor identity | unaudited |
+| `supersede_decision_replaces_a_live_predecessor_and_folds_merges_into_a_survivor` | `crates/kernel/tests/kernel_slice.rs:1096` | replaced decision | unaudited |
+| `supersede_decision_refuses_a_quarantined_predecessor` | `crates/kernel/tests/kernel_slice.rs:1187` | barred lineage | unaudited |
+| `a_decision_citing_evidence_is_classified_no_lower_than_that_evidence` | `crates/kernel/tests/kernel_slice.rs:1454` | document evidence fold | unaudited |
+| `a_decision_serves_no_lower_than_its_cited_evidence_reads_today` | `crates/kernel/tests/kernel_slice.rs:1527` | document evidence fold | unaudited |
+| `unsupported_symbol_checks_are_uncertain_and_failed_checks_go_stale` | `crates/kernel/tests/kernel_applicability_engine.rs:283` | cheap check | unaudited |
+| `unreadable_payloads_are_uncertain_rather_than_current` | `crates/kernel/tests/kernel_applicability_engine.rs:626` | payload fails closed | unaudited |
+| `unknown_check_kinds_degrade_without_voiding_the_payload` | `crates/kernel/tests/kernel_applicability_engine.rs:703` | payload fails closed | unaudited |
+| `an_oversized_payload_is_uncertain_without_being_decoded` | `crates/kernel/tests/kernel_applicability_engine.rs:1832` | payload fails closed | unaudited |
+| `unknown_payload_fields_are_undecodable_at_any_depth_but_an_unknown_kind_is_not` | `crates/kernel/tests/kernel_applicability_engine.rs:2703` | payload fails closed | unaudited |
+| `failed_check_appends_observation_event_and_job_in_one_commit` | `crates/kernel/tests/kernel_read_repair.rs:141` | cheap check | unaudited |
+| `sha256_hex_is_the_kernel_payload_id` | `crates/daemon/src/project_docs.rs:446` | document descriptor | unaudited |
+| `every_request_in_a_batch_proves_its_buffer_against_the_artifact` | `crates/kernel/tests/kernel_source_descriptors.rs:1180` | document descriptor | unaudited |
+| `repository_document_revisions_exceed_the_historical_head_including_retired_rows` | `crates/kernel/tests/kernel_source_descriptors.rs:2007` | document descriptor | unaudited |
+| `a_configured_document_is_one_lineage_whose_edits_supersede_and_removal_retires` | `crates/daemon/src/source_capture_tests.rs:1992` | document descriptor; republication; evidence fold | unaudited |
+| `a_missing_document_retires_only_the_captures_own_lineage` | `crates/daemon/src/source_capture_tests.rs:2172` | republication | unaudited |
+| `a_renamed_document_retires_the_old_path_and_publishes_the_new` | `crates/daemon/src/source_capture_tests.rs:2237` | republication | unaudited |
+| `unreadable_documents_are_counted_and_retire_nothing` | `crates/daemon/src/source_capture_tests.rs:2350` | republication | unaudited |
+| `every_stale_lineage_of_a_path_retires_before_the_current_one_publishes` | `crates/daemon/src/source_capture_tests.rs:3009` | republication | unaudited |
+| `direct_observation_rests_on_live_exact_evidence` | `crates/kernel/tests/kernel_claim_causality.rs:42` | direct observation | unaudited |
+| `derived_reinjection_rests_on_exact_live_parents` | `crates/kernel/tests/kernel_claim_causality.rs:229` | derived reinjection | unaudited |
+| `forged_records_and_copied_strings_grant_nothing` | `crates/kernel/tests/kernel_claim_causality.rs:364` | direct observation | unaudited |
+| `detail_operation_and_parent_list_must_agree_with_the_registry` | `crates/kernel/tests/kernel_claim_causality.rs:710` | derived reinjection | unaudited |
+| `refused_selections_publish_nothing_and_encodings_are_dispositions` | `crates/daemon/tests/git_sources.rs:549` | header gate; daemon opener | unaudited |
+| `delta_packed_commit_against_an_oversized_base_is_refused` | `crates/daemon/tests/git_sources.rs:827` | header gate; daemon opener | unaudited |
+| `the_fixture_has_no_worktree` | `crates/daemon/tests/attestation_verifier.rs:183` | verdict deterministic | unaudited |
+| `committed_bytes_match_and_a_later_commit_mismatches` | `crates/daemon/tests/attestation_verifier.rs:193` | verdict deterministic; blob read bounded | unaudited |
+| `a_nested_path_walks_one_tree_per_component` | `crates/daemon/tests/attestation_verifier.rs:234` | blob read bounded | unaudited |
+| `line_endings_normalize_in_either_direction` | `crates/daemon/tests/attestation_verifier.rs:257` | verdict deterministic | unaudited |
+| `entries_that_hold_no_blob_are_named_by_kind` | `crates/daemon/tests/attestation_verifier.rs:305` | blob read bounded | unaudited |
+| `missing_or_corrupt_objects_are_unreadable_never_absent` | `crates/daemon/tests/attestation_verifier.rs:347` | blob read bounded | unaudited |
+| `a_directory_that_is_no_repository_is_unopenable` | `crates/daemon/tests/attestation_verifier.rs:408` | blob read bounded | unaudited |
+| `the_driver_writes_nothing` | `crates/daemon/tests/attestation_verifier.rs:418` | blob read bounded | unaudited |
+| `the_header_gates_every_blob_read` | `crates/daemon/tests/attestation_verifier.rs:438` | blob read bounded | unaudited |
+| `a_blob_whose_delta_base_exceeds_the_allocation_limit_is_over_budget` | `crates/daemon/tests/attestation_verifier.rs:491` | blob read bounded; Kernel opener contrast | unaudited |
+| `a_passed_deadline_opens_no_repository` | `crates/daemon/tests/attestation_verifier.rs:529` | blob read bounded | unaudited |
+| `a_deadline_before_the_header_poll_reads_no_blob` | `crates/daemon/tests/attestation_verifier.rs:555` | blob read bounded | unaudited |
+| `verdicts_survive_a_worktree_edit_a_head_move_and_a_repack` | `crates/daemon/tests/attestation_verifier.rs:575` | verdict deterministic | unaudited |
+| `claim_paths_follow_the_document_path_rule` | `crates/daemon/tests/attestation_verifier.rs:625` | blob read bounded | unaudited |
+| `the_pure_verdict_compares_digests_after_the_header_gate` | `crates/daemon/tests/attestation_verifier.rs:648` | verdict deterministic | unaudited |
+| `normalized_digests_exist_only_for_a_reachable_length` | `crates/daemon/tests/attestation_verifier.rs:704` | verdict deterministic | unaudited |
+| `reasons_have_stable_names_and_a_terminal_split` | `crates/daemon/tests/attestation_verifier.rs:718` | reason names for #1173 counters | unaudited |
+
+## Categories with no check found
+
+- `p6-object-subject-provenance-passes-trusted-classes`: no test admits an
+  object subject under trusted classes and asserts the provenance check.
+- `p6-plugin-cannot-replace-a-foreign-source-decision`: no test submits a
+  plugin replacement of a decision of another source kind.
+- `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard`:
+  no test deletes an artifact a live decision cites.
+- The Kernel checkout opener: no test reads an over-budget delta base or a
+  replacement ref through it.
+- The trigger fold of `Sensitive` document evidence: no test promotes through
+  a trigger whose observation cites document evidence.
+- Every proposed `p6-new-*` record: its code does not exist at the branch tip.
+
+## Quiet areas
+
+- A tree object above 256 KiB: the verifier maps its allocation refusal to
+  `over_budget`, and no test constructs one.
+- A repository in the SHA-256 object format: `object_format` refuses it and
+  the verifier answers `repository_unopenable`; no verifier test constructs
+  one.
