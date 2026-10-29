@@ -348,10 +348,13 @@ impl Deadline for EvalBudget {
 /// One claim's verdict and the blob content bytes the driver read for it: zero unless the blob was
 /// read, and at most [`MAX_BLOB_BYTES`]. Commit and tree bytes are not counted. A blob whose
 /// decoded bytes then fail the kind, hash, or header-length check counts its decoded length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `blob_oid` is the hex id of the blob entry the tree walk reached at the path, set from that
+/// entry onward, so every `Match` and `Mismatch` carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evaluation {
     pub verdict: Verdict,
     pub bytes_read: u64,
+    pub blob_oid: Option<String>,
 }
 
 /// Checks `claim` against the object store of the repository at `root` under `deadline`.
@@ -362,10 +365,13 @@ pub struct Evaluation {
 /// writes nothing.
 pub fn verify(root: &Path, claim: &Claim, deadline: &impl Deadline) -> Evaluation {
     let mut bytes_read = 0;
-    let observed = observe(root, claim, deadline, &mut bytes_read);
+    let mut blob_oid = None;
+    let observed = lookup(root, claim, deadline, &mut bytes_read, &mut blob_oid)
+        .unwrap_or_else(Observed::Unavailable);
     Evaluation {
         verdict: verdict(claim, &observed),
         bytes_read,
+        blob_oid: blob_oid.map(|id| id.to_string()),
     }
 }
 
@@ -425,16 +431,14 @@ fn read_object<'repo>(
     Ok(object)
 }
 
-/// What the object store holds for `claim`, setting `bytes_read` to the blob content bytes decoded.
-fn observe(root: &Path, claim: &Claim, deadline: &impl Deadline, bytes_read: &mut u64) -> Observed {
-    lookup(root, claim, deadline, bytes_read).unwrap_or_else(Observed::Unavailable)
-}
-
+/// What the object store holds for `claim`, setting `bytes_read` to the blob content bytes decoded
+/// and `blob_oid` to the blob entry the path resolves to.
 fn lookup(
     root: &Path,
     claim: &Claim,
     deadline: &impl Deadline,
     bytes_read: &mut u64,
+    blob_oid: &mut Option<gix::ObjectId>,
 ) -> Result<Observed, Reason> {
     poll(deadline, Stage::Open)?;
     let repo =
@@ -486,6 +490,7 @@ fn lookup(
         }
     }
 
+    *blob_oid = Some(id);
     poll(deadline, Stage::Header)?;
     let unreadable_blob = Reason::ObjectUnreadable(ObjectClass::Blob);
     guard_delta_chain(&repo, id, ObjectClass::Blob, &hint)?;
@@ -509,4 +514,5 @@ fn lookup(
     })
 }
 
+pub mod attest;
 pub mod classify;

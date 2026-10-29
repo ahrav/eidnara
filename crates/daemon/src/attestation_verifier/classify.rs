@@ -78,6 +78,7 @@ impl DecisionFacts {
         Self {
             object_id: object.object_id,
             decision_id: decision.decision_id,
+            domain_id: object.domain_id,
             source_kind: object.source_kind,
             source_id: object.source_id,
             source_revision: object.source_revision,
@@ -144,6 +145,7 @@ impl Unverifiable {
 pub struct DecisionFacts {
     pub object_id: String,
     pub decision_id: String,
+    pub domain_id: String,
     pub source_kind: String,
     pub source_id: String,
     pub source_revision: i64,

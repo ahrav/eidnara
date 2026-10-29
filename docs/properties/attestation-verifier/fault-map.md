@@ -3,27 +3,28 @@
 Fault classes come from the specification's fault map
 ([#1169](https://github.com/ahrav/eidnara/issues/1169), Fault and state
 coverage). Availability names what can construct the fault at the #1170
-branch, updated at the #1171 branch for F1, F3, F14, and F15.
+branch, updated at the #1171 branch for F1, F3, F14, and F15, and at the
+#1172 branch for F1, F2, F3, F10, F11, F14, and F15.
 
 ## Fault classes
 
 | Id | Fault | Availability |
 | --- | --- | --- |
-| F1 | Trigger absent, foreign, wrong kind, invalidated, at another revision, or with retired backing evidence | constructible: Kernel admission fixtures; for the classifier, a cited evidence row invalidated by `delete_artifact` classifies `evidence_retired` |
-| F2 | Model decision superseded, retired, or re-disposed between selection and commit | constructible: Kernel slice fixtures; the verifier write set lands with #1172 |
-| F3 | Evidence or anchor invalidated in that window; `delete_artifact` bypassing the citation guard | constructible: `retire_evidence` and `delete_artifact` in Kernel tests; at the classification step, the classifier fixture store invalidates cited evidence (`delete_artifact`), a cited descriptor (`retire_observation`), and an anchor (`anchors.invalidated_commit_seq` set by SQL) after the requested sequence, which leaves the classification at that sequence unchanged and changes it at the tip, and the AC16 table invalidates evidence and a descriptor before it; the Kernel anchor-read test finds an anchor invalidated by SQL live before that sequence and absent from it on |
+| F1 | Trigger absent, foreign, wrong kind, invalidated, at another revision, or with retired backing evidence | constructible: Kernel admission fixtures; for the classifier, a cited evidence row invalidated by `delete_artifact` classifies `evidence_retired`; for the write set, a SQLite trigger on the test store rewrites the witness's kind at insert, and another attestation's witness is named as a trigger |
+| F2 | Model decision superseded, retired, or re-disposed between selection and commit | constructible: Kernel slice fixtures; the write-set fixture supersedes, retires, quarantines, and marks stale a model decision after its classification |
+| F3 | Evidence or anchor invalidated in that window; `delete_artifact` bypassing the citation guard | constructible: `retire_evidence` and `delete_artifact` in Kernel tests; at the classification step, the classifier fixture store invalidates cited evidence (`delete_artifact`), a cited descriptor (`retire_observation`), and an anchor (`anchors.invalidated_commit_seq` set by SQL) after the requested sequence, which leaves the classification at that sequence unchanged and changes it at the tip, and the AC16 table invalidates evidence and a descriptor before it; the Kernel anchor-read test finds an anchor invalidated by SQL live before that sequence and absent from it on; the write-set fixture invalidates an anchor and retires a descriptor after classification |
 | F4 | Header over budget; header under budget with an over-budget delta base; hash mismatch on decode | constructible: large blobs, `write_delta_pack` in `crates/daemon/tests/support/git_repo.rs`, and a valid object stored under another id |
 | F5 | Partial clone or missing object; corrupt commit, tree, or blob | constructible: a deleted loose object stands in for a missing promisor object; a valid object stored under another id, an undecodable object written with `git hash-object --literally`, a loose object whose bytes are not zlib data, a commit or tree with a valid prefix and a malformed remainder, or `write_self_delta_pack`'s self-referencing ref-delta, for corruption |
 | F6 | Path absent; gitlink, symlink, or tree at the path; path beneath a gitlink | constructible: `git mktree --missing` in a bare fixture |
 | F7 | Deadline before the pass, between decisions, and during a read; budget cancellation | constructible for one claim: a cancelled or expired `EvalBudget`, and a stage-aware `Deadline` double; between decisions with #1173 |
 | F8 | Worktree edit, HEAD move, repack between two verdicts; the repack clause excludes allocation-limit refusals of the commit, a tree, or the blob, whose verdict depends on pack layout | constructible: a linked worktree of the bare fixture, `git update-ref`, `git repack -a -d` |
 | F9 | `text eol`, `ident`, encoding, or clean filter attributes at the oid | partial: the LF and CRLF forms are constructible; `ident`, encoding, and clean filters stay false mismatches by the OQ6-8 decision |
-| F10 | Operation key replayed with the same and with a different verdict | constructible with #1172 |
-| F11 | Fault-injected rollback after the admission; crash after commit then fresh open | constructible with #1172 |
+| F10 | Operation key replayed with the same and with a different verdict | constructible: the write-set fixture repeats a call, changes the blob id under the same key, and calls the opposite verdict for the same decision and oid |
+| F11 | Fault-injected rollback after the admission; crash after commit then fresh open | constructible: a SQLite trigger on the test store aborts the citation event, the last write; a dropped and reopened store stands in for the crash |
 | F12 | Flag absent, reload true to false, project-tier flag | constructible with #1173 |
 | F13 | More than N candidates; a starving two-project pattern; a permanently transient head decision | constructible with #1173 |
-| F14 | A `Sensitive` evidence row cited through the row FK, the observation FK, or the admission event | constructible: Kernel slice and admission fixtures; the precondition at classification is constructed by the classifier fixture store, whose document evidence is `Sensitive`, cited by the row FK and by events, and named in the input by id only |
-| F15 | Default prose documents with no code-or-config kind | constructible: the OQ6-9 path rule classifies `ARCHITECTURE.md` and `STRUCTURE.md` `CurrentCode` (#1171); the attestation classes that use it land with #1172 |
+| F14 | A `Sensitive` evidence row cited through the row FK, the observation FK, or the admission event | constructible: Kernel slice and admission fixtures; the precondition at classification is constructed by the classifier fixture store, whose document evidence is `Sensitive`, cited by the row FK and by events, and named in the input by id only; the write-set fixture commits attestations for a model decision citing the evidence by an event and by its row |
+| F15 | Default prose documents with no code-or-config kind | constructible: the OQ6-9 path rule classifies `ARCHITECTURE.md` and `STRUCTURE.md` `CurrentCode` (#1171); the write set attests `ARCHITECTURE.md` under `CurrentCode` (#1172) |
 
 ## Per-property required faults
 
@@ -56,13 +57,13 @@ branch, updated at the #1171 branch for F1, F3, F14, and F15.
 | `p6-new-verifier-input-anchor-and-document-citation` | each unverifiable shape; F1 and F3 at the classification step; the F14 precondition |
 | `p6-new-attestation-identity-unique-per-decision-oid` | F10 |
 | `p6-new-attestation-classes-and-cited-fields` | F14, F15 |
-| `p6-new-attestation-sibling-model-stays-candidate` | F2 |
+| `p6-new-attestation-sibling-model-stays-candidate` | F2, F3 |
 | `p6-new-attestation-verified-only-via-witness` | F1 |
 | `p6-new-witness-evidence-id-equals-attestation` | F1, F3 |
 | `p6-new-witness-degradation-never-silent` | F1 |
 | `p6-new-attestation-write-set-one-outcome` | F11 |
-| `p6-new-mismatch-stale-unavailable-silent` | F5, F6 |
-| `p6-new-party-distinct-and-self-refusal` | an attestation in the store; an undecodable anchor on it, so a read before the check fails |
+| `p6-new-mismatch-stale-unavailable-silent` | other bytes at the cited path; `Unavailable` verdicts (F5, F6) |
+| `p6-new-party-distinct-and-self-refusal` | an attestation in the store; an undecodable anchor on it, so a read before the check fails; a plugin write under `verifier` |
 | `p6-new-flag-off-nothing-runs` | F12 |
 | `p6-new-pass-bounds-and-accounting` | F7, F13 |
 | `p6-new-cursor-never-skips-unresolved` | F7, F13 |
@@ -97,6 +98,13 @@ never the violation.
   the requested sequence that changes the decision's classification at the
   tip. Constructed today by
   `classification_at_one_sequence_ignores_the_worktree_head_and_later_commits`.
+- `sometimes(write_set_model_changed_after_classification)`: a model
+  decision superseded, retired, or re-disposed between its classification and
+  the write set's commit. Constructed today by
+  `a_model_decision_changed_after_classification_aborts_the_set`.
+- `sometimes(write_set_witness_trigger_fails_inside_envelope)`: a witness
+  whose trigger fails validation in the envelope that inserted it.
+  Constructed today by `a_witness_admitted_below_verified_aborts_the_envelope`.
 - `sometimes(witness_event_after_mark_stale)`: a validated witness on a
   `Stale` subject, for
   `p6-mark-stale-withdraws-support-and-is-terminal-in-place`. No test

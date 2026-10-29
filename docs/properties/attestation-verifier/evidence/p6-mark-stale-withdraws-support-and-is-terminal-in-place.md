@@ -6,7 +6,7 @@ The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/i
 
 ## Evidence trail
 
-`event_effect` (`crates/kernel/src/admission.rs:4245`) returns a disposition only for the disposition events; the comment above it states that a `None` disposition leaves the prior one in place. `an_event_that_names_a_disposition_keeps_its_own_outcome` (`:5437`) pins the `MarkStale` row. `same_envelope_subject_decision_after_admission_uses_the_recorded_prior` (`crates/kernel/tests/kernel_admission.rs:1047`) applies `MarkStale` after an admission in one envelope; the specification's `:1070` is a line inside it. `dispositions_and_sensitivity_only_reduce_visibility` (`:2735`) and `disposition_events_apply_the_fixed_table_and_report_outcome_and_disposition` (`crates/daemon/tests/kernel_routes.rs:4398`) cover the route.
+`event_effect` (`crates/kernel/src/admission.rs:4245`) returns a disposition only for the disposition events; the comment above it states that a `None` disposition leaves the prior one in place. `an_event_that_names_a_disposition_keeps_its_own_outcome` (`:5437`) pins the `MarkStale` row. `same_envelope_subject_decision_after_admission_uses_the_recorded_prior` (`crates/kernel/tests/kernel_admission.rs:1047`) applies `MarkStale` after an admission in one envelope; the specification's `:1070` is a line inside it. `dispositions_and_sensitivity_only_reduce_visibility` (`:2735`) and `disposition_events_apply_the_fixed_table_and_report_outcome_and_disposition` (`crates/daemon/tests/kernel_routes.rs:4455`) cover the route.
 
 ## Failure scenario
 

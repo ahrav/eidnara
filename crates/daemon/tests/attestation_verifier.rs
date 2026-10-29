@@ -12,8 +12,8 @@ use std::sync::atomic::AtomicBool;
 mod support;
 
 use daemon::attestation_verifier::{
-    Claim, Deadline, Digests, EntryClass, Evaluation, InvalidClaimPath, MAX_BLOB_BYTES,
-    ObjectClass, Observed, Reason, Stage, Verdict, header_verdict, verdict, verify,
+    self as verifier, Claim, Deadline, Digests, EntryClass, InvalidClaimPath, MAX_BLOB_BYTES,
+    ObjectClass, Observed, Reason, Stage, Verdict, header_verdict, verdict,
 };
 use kernel::applicability::EvalBudget;
 use sha2::{Digest as _, Sha256};
@@ -30,6 +30,22 @@ fn claim(path: &str, bytes: &[u8], oid: &str) -> Claim {
 
 fn unbounded() -> EvalBudget {
     EvalBudget::unbounded()
+}
+
+/// The verdict and blob content bytes of one [`verifier::verify`] call; the blob id it reports
+/// is checked by `the_evaluation_names_the_blob_the_path_resolved_to`.
+#[derive(Debug, PartialEq, Eq)]
+struct Evaluation {
+    verdict: Verdict,
+    bytes_read: u64,
+}
+
+fn verify(root: &Path, claim: &Claim, deadline: &impl Deadline) -> Evaluation {
+    let evaluation = verifier::verify(root, claim, deadline);
+    Evaluation {
+        verdict: evaluation.verdict,
+        bytes_read: evaluation.bytes_read,
+    }
 }
 
 /// A bare repository driven through git plumbing with fixed identities and times.
@@ -1089,4 +1105,24 @@ fn a_non_bare_root_answers_from_the_object_store_not_the_worktree() {
         verify(&root, &claim("doc.md", edited, &oid), &unbounded()).verdict,
         Verdict::Mismatch
     );
+}
+
+#[test]
+fn the_evaluation_names_the_blob_the_path_resolved_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let first = bare.commit_doc(DOC, None);
+    let blob = bare.blob(DOC);
+    let matched = verifier::verify(&bare.root, &claim("doc.md", DOC, &first), &unbounded());
+    assert_eq!(matched.verdict, Verdict::Match);
+    assert_eq!(matched.blob_oid.as_deref(), Some(blob.as_str()));
+    // A length no line-ending form reaches mismatches on the header and still names the blob.
+    let long = [DOC, DOC, DOC].concat();
+    let header_only = verifier::verify(&bare.root, &claim("doc.md", &long, &first), &unbounded());
+    assert_eq!(header_only.verdict, Verdict::Mismatch);
+    assert_eq!(header_only.bytes_read, 0);
+    assert_eq!(header_only.blob_oid.as_deref(), Some(blob.as_str()));
+    let absent = verifier::verify(&bare.root, &claim("other.md", DOC, &first), &unbounded());
+    assert_eq!(absent.verdict, Verdict::Unavailable(Reason::PathAbsent));
+    assert_eq!(absent.blob_oid, None);
 }

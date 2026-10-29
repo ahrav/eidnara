@@ -2,11 +2,13 @@
 
 ## Discovery trigger
 
-The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/issues/1169)), surface N4. A proposed obligation: `proposed - converts in [#1172](https://github.com/ahrav/eidnara/issues/1172)`.
+The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/issues/1169)), surface N4. Converted to active by [#1172](https://github.com/ahrav/eidnara/issues/1172), which lands `crates/daemon/src/attestation_verifier/attest.rs` and the fixture-store tests in `crates/daemon/tests/attestation_verifier_attest.rs`.
 
 ## Evidence trail
 
-The specification's Property Catalog defines this obligation for N4. [#1172](https://github.com/ahrav/eidnara/issues/1172) lands the code and the check that converts it.
+After the witness admission at `crates/daemon/src/attestation_verifier/attest.rs:329`, the envelope checks the returned `AdmissionDecision` (`:345`): effective maturity other than `Verified` or disposition other than `Active` stops the envelope with `Outcome::WitnessDegraded`, and `run` (`:439`) returns that outcome after the Kernel rolls the transaction back. The amended oracle applies: an attestation's first admission has no prior, so a validated witness yields `Outcome::Admit` at `Verified`, and the outcome field is not read.
+
+The tests share one fixture in `crates/daemon/tests/attestation_verifier_attest.rs`: a Kernel store with a `Sensitive` document evidence row, the `repository_documents` descriptor citing it, and a model decision under `(ModelInference, AssistantInference)` with a `reachable_from` anchor at a git checkout's commit, citing the evidence through a `memory_capture_citation` event or its own `evidence_id`. Each test classifies the decision with `classify`, computes the verdict with `verify` against the checkout, and calls `attest`, the order a pass will use. `a_witness_admitted_below_verified_aborts_the_envelope` (`crates/daemon/tests/attestation_verifier_attest.rs:750`) creates a SQLite trigger on the fixture store that rewrites a `verwitnessobj:` observation's kind to `code_absent` as it is inserted, so `validate_trigger` finds no `code_present` observation and admits the event as `Other`. `attest` returns `witness_degraded`, the tip is unchanged, no write-set row exists, and the model decision's facts are unchanged; after the trigger is dropped the same call commits. The fault is test-side SQL against the test store, not a production emitter. `a_match_commits_the_attestation_with_every_companion_row` (`:416`) reads the committed admission: outcome `admit`, effective maturity `verified`, disposition `active`.
 
 ## Failure scenario
 
@@ -14,17 +16,17 @@ A committed attestation at `Candidate`.
 
 ## Timing windows and dependencies
 
-See the fault map.
+The witness row changed between its insert and the admission inside one envelope.
 
 ## What a test must construct
 
-F1.
+F1: a witness whose trigger fails validation inside the envelope.
 
 ## Investigation log
 
 ### Q: Do the cited references exist at the branch tip under the cited names?
 
-- Sources examined: every `path:line` in the record, read at the branch that adds this part.
+- Sources examined: every `path:line` in the record and this file, read at the #1172 branch tip.
 - Findings: Each cited line is the first line of the named test, function, or constant, or the named line inside it.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
@@ -32,6 +34,6 @@ F1.
 ### Q: Should repeated degradation stop the task?
 
 - Sources examined: OQ6-11.
-- Findings: Undecided.
+- Findings: The write set returns `witness_degraded`; the K-bounded retry and `witness_degraded_skipped` belong to #1173.
 - Missing evidence: see the conclusion.
 - Conclusion: needs human input

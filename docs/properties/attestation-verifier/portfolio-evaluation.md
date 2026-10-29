@@ -37,7 +37,7 @@ The numbering below follows the sentence's order.
 | --- | --- | --- |
 | C1 | `claim_causality.rs:36` is `:38` | applied: `MAX_DERIVATION_PARENTS` is `crates/kernel/src/claim_causality.rs:38` |
 | C2 | Two `checks.rs` arm ranges shifted by two lines | applied: the `FileExists` arm is `crates/kernel/src/applicability/checks.rs:285` and the `ConfigKey` arm `:296` at the branch tip; the specification's original ranges are not recoverable |
-| C3 | `kernel_routes.rs:1888, 5131` call a sibling fixture | applied: the records cite the tests (`:1875`, `:5120`) and their `code_observation` fixture (`:887`) |
+| C3 | The specification's two `kernel_routes.rs` references name lines that call a sibling fixture | applied: the records cite the tests (`:1932`, `:5177` at the #1172 branch) and their `code_observation` fixture (`:887`) |
 | C4 | A preamble wording | applied: the catalog's reachability section states no blanket claim and each record carries its own evidence |
 
 Line drift between `3a3b916b7` and the branch tip moved several references:
@@ -56,8 +56,8 @@ the current line.
 | G1 | Document evidence is at least `Sensitive` and anything citing it by FK serves no wider than `ExplicitSearch` | added as `p6-document-evidence-cited-by-fk-serves-no-wider-than-explicit-search` |
 | G2 | `delete_artifact` bypasses the citation guard | added as `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard`; relabelled `test-only` because `delete_artifact` has no production caller |
 | G3 | The Kernel checkout open has no allocation limit and honors replacement refs | added as `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements` |
-| G4 | A plugin `RetireDecision` can retire an attestation | queued; owner #1172 with OQ6-15 |
-| G5 | No record on the served form of an unpromoted trusted-class attestation (`ExplicitLabeled`) | queued; owner #1172 |
+| G4 | A plugin `RetireDecision` can retire an attestation | re-queued; owner #1174: the #1172 ticket resolves OQ6-15 as no new mechanism and documents the plugin `mark_stale` and retire exposure in U4 |
+| G5 | No record on the served form of an unpromoted trusted-class attestation (`ExplicitLabeled`) | closed by #1172 with no record: no verifier write commits an unpromoted attestation, because the envelope rolls back below `Verified` (`p6-new-witness-degradation-never-silent`), and the plugin route cannot write under `verifier` (`p6-new-party-distinct-and-self-refusal`), so the state has no producer |
 | G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1174 (U4 part pass). #1171 does not address it: the classifier reads no `artifact_reference`, and its claim comes from the descriptor detail and the evidence row |
 | G7 | The two records #1170 activates, `p6-new-verdict-deterministic` and `p6-new-blob-read-bounded-at-oid`, have no fresh-context four-lens evaluation | queued; owner U1 ([#1170](https://github.com/ahrav/eidnara/issues/1170)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
 
@@ -96,3 +96,20 @@ the current line.
   alternate object directory is outside that walk.
 - A raw digest match counts only when the header size equals the claimed
   length, so a claim with the right digest and a wrong length is `Mismatch`.
+
+## Findings from the U2 write-set implementation
+
+- The Kernel derives the causality record's ids from the attestation's
+  object id and the commit sequence, so the causality id is a function of
+  `(model object id, oid)` and the commit, not of the pair alone.
+- The ticket keys the two verdicts' writes separately, `attest:` and
+  `stale:`. The write set refuses a recorded key for the other verdict on
+  the same decision and oid as `Conflict` inside the envelope, so "the same
+  key with the opposite verdict" reads as the same `(decision, oid)` pair.
+- The stale reason names the cited sha256 and the git blob id: a mismatch the
+  header size decides reads no content, so the blob id is the observed value
+  every mismatch carries. `Evaluation` gains `blob_oid` for this and for the
+  witness detail.
+- The witness admission's degradation is constructed by a SQLite trigger on
+  the test store that rewrites the witness's kind at insert; no production
+  seam exists for it.

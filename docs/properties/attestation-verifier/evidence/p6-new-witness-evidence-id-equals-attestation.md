@@ -2,11 +2,13 @@
 
 ## Discovery trigger
 
-The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/issues/1169)), surface N4. A proposed obligation: `proposed - converts in [#1172](https://github.com/ahrav/eidnara/issues/1172)`.
+The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/issues/1169)), surface N4. Converted to active by [#1172](https://github.com/ahrav/eidnara/issues/1172), which lands `crates/daemon/src/attestation_verifier/attest.rs` and the fixture-store tests in `crates/daemon/tests/attestation_verifier_attest.rs`.
 
 ## Evidence trail
 
-The specification's Property Catalog defines this obligation for N4. [#1172](https://github.com/ahrav/eidnara/issues/1172) lands the code and the check that converts it.
+`WriteSet::check` (`crates/daemon/src/attestation_verifier/attest.rs:269`) parses the witness detail, a `WitnessDetail` with `deny_unknown_fields` at version 1, and holds only when the detail's evidence id, the citation event's evidence id, and the compared evidence id (`VerifierInput::evidence_id`) are one id, the witness's source triple equals the attestation's, the attestation's source kind is `verifier`, the witness kind is the document kind's, and neither spec carries an `evidence_id`. `WriteSet::commit` (`:297`) returns `Outcome::InvalidWriteSet` before the commit when it fails. Inside the envelope `recheck` (`:485`) also requires the descriptor the claim came from to still cite the compared evidence.
+
+The tests share one fixture in `crates/daemon/tests/attestation_verifier_attest.rs`: a Kernel store with a `Sensitive` document evidence row, the `repository_documents` descriptor citing it, and a model decision under `(ModelInference, AssistantInference)` with a `reachable_from` anchor at a git checkout's commit, citing the evidence through a `memory_capture_citation` event or its own `evidence_id`. Each test classifies the decision with `classify`, computes the verdict with `verify` against the checkout, and calls `attest`, the order a pass will use. `a_write_set_citing_other_evidence_or_another_revision_is_refused_before_the_commit` (`crates/daemon/tests/attestation_verifier_attest.rs:694`) builds a write set, confirms it passes, and applies five mutations: the witness at revision 2, the witness under another source id, the detail naming another live evidence row, the citation naming it, and the `config_present` kind. Each fails the check and returns `invalid_write_set` with the tip unchanged and no write-set row; the unmutated set then commits.
 
 ## Failure scenario
 
@@ -14,17 +16,17 @@ A `Verified` attestation citing E whose witness detail names E'.
 
 ## Timing windows and dependencies
 
-See the fault map.
+None; the check runs before the commit.
 
 ## What a test must construct
 
-F1, F3.
+F1, F3: a detail or citation naming another live evidence row; a witness at another revision.
 
 ## Investigation log
 
 ### Q: Do the cited references exist at the branch tip under the cited names?
 
-- Sources examined: every `path:line` in the record, read at the branch that adds this part.
+- Sources examined: every `path:line` in the record and this file, read at the #1172 branch tip.
 - Findings: Each cited line is the first line of the named test, function, or constant, or the named line inside it.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

@@ -31,7 +31,7 @@ A delta-packed blob over an oversized base, read through each opener.
 
 ### Q: Which opener does the U1 driver use?
 
-- Sources examined: `lookup` (`crates/daemon/src/attestation_verifier.rs:433`) and `replacement_refs_are_ignored` (`crates/daemon/tests/attestation_verifier.rs:505`).
+- Sources examined: `lookup` (`crates/daemon/src/attestation_verifier.rs:436`) and `replacement_refs_are_ignored` (`crates/daemon/tests/attestation_verifier.rs:521`).
 - Findings: `git_sources::open` with `MAX_BLOB_BYTES` as the limit.
 - Missing evidence: none.
 - Conclusion: resolved with answer; this resolves the open question the portfolio evaluation tied to G3.

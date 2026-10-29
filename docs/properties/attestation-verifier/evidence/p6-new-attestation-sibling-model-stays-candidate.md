@@ -2,29 +2,38 @@
 
 ## Discovery trigger
 
-The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/issues/1169)), surface N3. A proposed obligation: `proposed - converts in [#1172](https://github.com/ahrav/eidnara/issues/1172)`.
+The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/issues/1169)), surface N3. Converted to active by [#1172](https://github.com/ahrav/eidnara/issues/1172), which lands `crates/daemon/src/attestation_verifier/attest.rs` and the fixture-store tests in `crates/daemon/tests/attestation_verifier_attest.rs`.
 
 ## Evidence trail
 
-The specification's Property Catalog defines this obligation for N3. [#1172](https://github.com/ahrav/eidnara/issues/1172) lands the code and the check that converts it.
+The `Match` envelope writes rows for the attestation only; its one event on the model decision's lineage is none. `recheck` (`crates/daemon/src/attestation_verifier/attest.rs:485`) runs first in the envelope: it compares the store's incarnation with the classification's target (`:495`) while the envelope holds the writer, then requires the model decision's registry row to be live with no successor, a decision with the same creating commit, domain, and source triple, and not `verifier`; its latest admission's classes to equal the classification's; its anchor to be live as `reachable_from` the claim's oid (`:521`); and the cited descriptor to be the live revision of its lineage, still citing the compared evidence (`:530`). A difference stops the envelope with `Outcome::Changed`. The causality record (`:351`) names the model decision at its registered revision, and the Kernel refuses a parent that is not live at that revision.
+
+The tests share one fixture in `crates/daemon/tests/attestation_verifier_attest.rs`: a Kernel store with a `Sensitive` document evidence row, the `repository_documents` descriptor citing it, and a model decision under `(ModelInference, AssistantInference)` with a `reachable_from` anchor at a git checkout's commit, citing the evidence through a `memory_capture_citation` event or its own `evidence_id`. Each test classifies the decision with `classify`, computes the verdict with `verify` against the checkout, and calls `attest`, the order a pass will use. `a_match_commits_the_attestation_with_every_companion_row` (`crates/daemon/tests/attestation_verifier_attest.rs:416`) compares the model decision's registry row and own admission before and after the write and finds them equal, at `Candidate`, and reads the attestation's causality class as `DerivedReinjection` naming `(model object id, 1)`. `a_model_decision_changed_after_classification_aborts_the_set` (`:861`) classifies five decisions, then supersedes one, retires one, quarantines one, marks one `Stale`, and invalidates one's anchor; each returns `Changed`, and a decision whose descriptor is retired after classification returns `Changed` too, with no write-set row.
 
 ## Failure scenario
 
-A `Replace` on the model decision, or an attestation without causality.
+A `Replace` on the model decision, an attestation without causality, or an attestation of a superseded decision.
 
 ## Timing windows and dependencies
 
-See the fault map.
+The model decision, its anchor, or its descriptor changed between the classification and the commit.
 
 ## What a test must construct
 
-F2.
+F2: supersede, retire, quarantine, and mark stale; F3: an invalidated anchor and a retired descriptor.
 
 ## Investigation log
 
 ### Q: Do the cited references exist at the branch tip under the cited names?
 
-- Sources examined: every `path:line` in the record, read at the branch that adds this part.
+- Sources examined: every `path:line` in the record and this file, read at the #1172 branch tip.
 - Findings: Each cited line is the first line of the named test, function, or constant, or the named line inside it.
 - Missing evidence: none.
+- Conclusion: resolved with answer.
+
+### Q: What does the causality read report after the model decision is superseded?
+
+- Sources examined: OQ6-12 in the #1172 ticket; `parents_existed` in `crates/kernel/src/claim_causality.rs`.
+- Findings: The record names the parent at its revision; a later supersession leaves the read `Unknown(ParentUnavailable)` while the attestation keeps `Verified`, which the ticket accepts.
+- Missing evidence: no test reads the causality class after a later supersession.
 - Conclusion: resolved with answer.

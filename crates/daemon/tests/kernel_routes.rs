@@ -1141,6 +1141,63 @@ async fn a_merge_folds_every_predecessor_into_one_survivor_in_one_commit() {
     daemon.handler.shutdown().await.unwrap();
 }
 
+/// AC14: the verifier's `source_kind` is outside the route's closed table, so every operation kind
+/// under it answers `invalid_input`, and a trusted class asserted under `assistant` answers
+/// `class_over_declared`; neither writes anything.
+#[tokio::test]
+async fn a_plugin_route_cannot_write_as_the_verifier_or_assert_trusted_local_code() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let before = write_counts(&daemon);
+    let tip = daemon.tip();
+    let operations = [
+        ("decision", insert_decision(2)),
+        (
+            "observation",
+            observation_implementing(3, "decision-object-1"),
+        ),
+        ("stale", disposition("decision-object-1", "mark_stale")),
+    ];
+    for (key, operation) in operations {
+        let mut request = commit_request(&daemon.project, SESSION, key, vec![operation], vec![]);
+        request["source_kind"] = json!("verifier");
+        assert_state(
+            &daemon.call(daemon.route, request).await,
+            "invalid",
+            Some("invalid_input"),
+        );
+    }
+    for (key, field, class) in [
+        ("trusted", "asserted_source_class", "trusted_local_code"),
+        ("current", "asserted_taint_class", "current_code"),
+        ("config", "asserted_taint_class", "current_config"),
+    ] {
+        let mut request = commit_request(
+            &daemon.project,
+            SESSION,
+            key,
+            vec![insert_decision(4)],
+            vec![],
+        );
+        request[field] = json!(class);
+        assert_state(
+            &daemon.call(daemon.route, request).await,
+            "invalid",
+            Some("class_over_declared"),
+        );
+    }
+    assert_eq!(write_counts(&daemon), before);
+    assert_eq!(daemon.tip(), tip);
+    daemon.handler.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_plugin_route_cannot_declare_a_class_above_the_derived_one() {
     let daemon = Daemon::start().await;
