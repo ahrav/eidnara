@@ -687,11 +687,16 @@ fn an_unavailable_verdict_writes_nothing() {
     let model = store.model("unbound", &checkout.head, &evidence, false);
     let classification = store.classification(&model, &checkout);
     let tip = store.tip();
-    for reason in [Reason::RepositoryUnbound, Reason::PathAbsent] {
+    // `verify` names no blob before the path resolves, and names it for a reason found after.
+    for (reason, blob_oid) in [
+        (Reason::RepositoryUnbound, None),
+        (Reason::PathAbsent, None),
+        (Reason::OverBudget, Some(checkout.blob.clone())),
+    ] {
         let evaluation = Evaluation {
             verdict: Verdict::Unavailable(reason),
             bytes_read: 0,
-            blob_oid: None,
+            blob_oid,
         };
         assert_eq!(
             attest_now(&store, &classification, &evaluation),
@@ -758,7 +763,7 @@ fn a_write_set_citing_other_evidence_or_another_revision_is_refused_before_the_c
     assert!(write_set.check());
     let detail = write_set.witness.payload.detail.clone().unwrap();
     assert!(detail.contains(&format!("\"witness_version\":{WITNESS_DETAIL_VERSION}")));
-    let mutations: [(&str, Mutation); 18] = [
+    let mutations: [(&str, Mutation); 21] = [
         ("revision", |set, _, _| set.witness.source_revision = 2),
         ("source id", |set, _, _| {
             set.witness.source_id = "shared".into()
@@ -810,6 +815,15 @@ fn a_write_set_citing_other_evidence_or_another_revision_is_refused_before_the_c
         ("detail version", |set, detail, _| {
             let version = format!("\"witness_version\":{WITNESS_DETAIL_VERSION}");
             set.witness.payload.detail = Some(detail.replace(&version, "\"witness_version\":2"));
+        }),
+        ("blob", |set, _, _| set.blob_oid = "0".repeat(40)),
+        ("detail commit", |set, detail, _| {
+            set.witness.payload.detail =
+                Some(detail.replace("\"commit_oid\":\"", "\"commit_oid\":\"0"));
+        }),
+        ("detail digest", |set, detail, _| {
+            set.witness.payload.detail =
+                Some(detail.replace("\"artifact_digest\":\"", "\"artifact_digest\":\"0"));
         }),
     ];
     let tip = store.tip();

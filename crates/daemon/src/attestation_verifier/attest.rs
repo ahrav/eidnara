@@ -88,15 +88,17 @@ pub enum Outcome {
     /// same decision and oid is recorded.
     Conflict,
     /// The model decision, its anchor, its cited descriptor or evidence row, or the store's
-    /// incarnation differs from the classification, or the causality parent is no longer live at
-    /// its revision; the envelope rolled back.
+    /// incarnation differs from the classification, or the Kernel reports the causality parent
+    /// missing or at another revision; the envelope rolled back.
     Changed,
-    /// The write set failed [`WriteSet::check`] before the commit, or the `MarkStale` admission
-    /// returned a disposition other than `Stale`; nothing committed.
+    /// The write set failed [`WriteSet::check`] before the commit, the Kernel refused the
+    /// causality request as malformed, or the `MarkStale` admission returned a disposition other
+    /// than `Stale`; nothing committed.
     InvalidWriteSet,
     /// The Kernel refused the commit. A [`KernelError::Io`] can follow a durable commit, so a
-    /// caller treats it as an unknown outcome, which the next pass resolves by replaying the
-    /// key's receipt.
+    /// caller treats it as an unknown outcome. The next pass resolves an attestation by replaying
+    /// the key's receipt; a committed `MarkStale` leaves the model decision `Stale`, outside the
+    /// next pass's input, so a caller resolves it by reading the model decision's disposition.
     Refused(KernelError),
 }
 
@@ -290,8 +292,13 @@ impl WriteSet {
             witness_observation_id: witness.observation_id.clone(),
             witness_object_id: witness.object_id.clone(),
         };
+        let claim = &self.input.claim;
         detail.is_some_and(|detail| {
-            detail.witness_version == WITNESS_DETAIL_VERSION && detail.evidence_id == compared
+            detail.witness_version == WITNESS_DETAIL_VERSION
+                && detail.evidence_id == compared
+                && detail.blob_oid == self.blob_oid
+                && detail.commit_oid == claim.oid()
+                && detail.artifact_digest == hex(claim.digest())
         }) && self.citation.evidence_id.as_deref() == Some(compared)
             && named == Identity::of(&model.object_id, self.input.claim.oid())
             && (attestation.sensitivity, witness.sensitivity)
@@ -378,7 +385,9 @@ impl WriteSet {
             })
             .map_err(|error| match error {
                 ClaimCausalityError::Kernel(error) => Stop::Kernel(error),
-                _ => Stop::Outcome(Outcome::Changed),
+                ClaimCausalityError::ParentMissing
+                | ClaimCausalityError::ParentRevisionMismatch => Stop::Outcome(Outcome::Changed),
+                _ => Stop::Outcome(Outcome::InvalidWriteSet),
             })?;
         envelope.append_decision_event(&self.attestation.decision_id, self.citation.clone())?;
         Ok(())
@@ -570,7 +579,7 @@ enum Write {
 /// and the request digest covers the frozen claim, the evidence it resolved through, the blob,
 /// and the verdict.
 fn intent(input: &VerifierInput, write: Write, blob_oid: &str) -> CommitIntent {
-    let (write, verdict) = match write {
+    let (write_name, verdict) = match write {
         Write::Attest => ("attest", "match"),
         Write::Stale => ("stale", "mismatch"),
     };
@@ -589,7 +598,7 @@ fn intent(input: &VerifierInput, write: Write, blob_oid: &str) -> CommitIntent {
     });
     CommitIntent {
         producer: PRODUCER.into(),
-        operation_key: format!("{write}:{model}:{}", claim.oid()),
+        operation_key: format!("{write_name}:{model}:{}", claim.oid()),
         request_digest: format!("{:x}", Sha256::digest(frozen.to_string())),
         actor: "agent:verifier".into(),
         cause: "deterministic attestation verifier".into(),
