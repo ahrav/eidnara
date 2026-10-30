@@ -19,7 +19,7 @@ publication wait on them.
   after physical completion; `publish_settled` (`:828-877`) hands out every
   kept unit whatever count ended the job after the window batch's commit,
   since that commit landed and the memo holds the unit.
-- `crates/daemon/src/lib.rs:9290` `capture_after_response` offers the pass from
+- `crates/daemon/src/lib.rs:9291` `capture_after_response` offers the pass from
   the same tracked task after `run_settled` returns, and only when the route's
   frozen flag and a memory store are present.
 - `crates/daemon/src/contradiction_candidates/pass.rs:135-151` `run` fixes the

@@ -221,7 +221,7 @@ workspace/Bun gates and index resolution remain controller work. The worktree
 contains no conflict markers; the unmerged index is deliberately untouched.
 
 [selection]: ../../../../../crates/daemon/src/transform.rs#L6363
-[history_summarizer]: ../../../../../crates/daemon/src/lib.rs#L16698
+[history_summarizer]: ../../../../../crates/daemon/src/lib.rs#L16699
 [pressure]: ../../../../../crates/daemon/src/transform.rs#L6326
 [sidecar]: ../../../../../crates/daemon/src/codec/opencode.rs#L2071
 [thresholds]: ../../../../../crates/daemon/src/transform.rs#L24606

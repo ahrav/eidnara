@@ -102,7 +102,7 @@ References consulted and why:
 
 Every record is labelled individually. The shared evidence for
 `default-production` on the route is one fact: the method match at
-`crates/daemon/src/lib.rs:14672` dispatches `"kernel.commit"` to
+`crates/daemon/src/lib.rs:14673` dispatches `"kernel.commit"` to
 `handle_kernel_commit` with no `#[cfg]` attribute, in a default build with
 no configuration. The TypeScript command is registered in both harnesses:
 `packages/pi-plugin/src/index.ts:550` and
@@ -891,7 +891,7 @@ whatever `B.harness` is; the dispute reason's `reporter_taint` is a
 function of `(source_kind, asserted_taint_class)` alone
 (`commit.rs:1137-1151`); the request's `session_id` equals the channel's
 bound session or the request is refused `session_mismatch` before parsing
-(`management_binding`, `crates/daemon/src/lib.rs:6640-6675`). Holds on
+(`management_binding`, `crates/daemon/src/lib.rs:6641-6676`). Holds on
 every request, so `always`.
 Fault/timing angle: none in time; the fault is a client that claims
 another surface.

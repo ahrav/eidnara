@@ -156,13 +156,13 @@ call. Unit tests built with `fixed_config` (`lib.rs:4276`, returned at
   per-pass merge stays, served from the memo while every source identity
   matches.
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4891-L4900
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4892-L4901
 [binding-doc]: ../../../../../crates/daemon/src/lib.rs#L249-L250
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L5152
-[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5473-L5560
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5561
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5967
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L13084-L13085
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L5153
+[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5474-L5561
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5562
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5968
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L13085-L13086
 [tier-struct]: ../../../../../crates/daemon/src/config.rs#L260-L270
 [cache-struct]: ../../../../../crates/daemon/src/config.rs#L273-L279
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L476-L486

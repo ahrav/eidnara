@@ -19,7 +19,7 @@ The settled plan is worktree-only accepted evidence, as cataloged.
 - `crates/memory-store/src/lib.rs:372-447` retains JSON/error-JSON outputs,
   opaque source/raw/optional arc, media source, and nested provider extras.
 - `crates/daemon/src/transform.rs:700-708` retains optional native Values
-  and tail_delta. `crates/daemon/src/lib.rs:4338-4347` reads delta leniently.
+  and tail_delta. `crates/daemon/src/lib.rs:4339-4348` reads delta leniently.
 - `crates/memory-store/src/lib.rs:145-152,266-273` currently replays whole
   originals. `:16096-16112` deliberately preserves an unknown sibling key.
 - `crates/daemon/src/wire.rs:1708-1745` discards an unknown message field

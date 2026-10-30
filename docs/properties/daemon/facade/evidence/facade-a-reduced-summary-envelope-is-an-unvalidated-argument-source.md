@@ -10,7 +10,7 @@ validation question.
 
 ## Evidence trail
 
-`crates/daemon/src/lib.rs:14428-14447`
+`crates/daemon/src/lib.rs:14429-14448`
 
     /// Recover the intended argument object when a model repeats the reduced-call
     /// envelope it saw in context. Only unwrap when no real primary field is present,

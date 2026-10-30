@@ -50,7 +50,7 @@ tests of each.
 Every implemented record is `default-production`. The shared evidence is one
 fact: the daemon's method match dispatches `"kernel.commit"` to
 `handle_kernel_commit` with no `#[cfg]` attribute
-(`crates/daemon/src/lib.rs:14672`), and the route parses the evidence
+(`crates/daemon/src/lib.rs:14673`), and the route parses the evidence
 fields on every disposition operation (`commit.rs:155-172`). The command
 that sends them is registered in both harnesses
 (`packages/opencode-plugin/src/hooks/context/command-handler.ts:413-419`,

@@ -5,7 +5,7 @@
 METHOD.md's effect-accounting rule requires attempted and acknowledged effects to
 be tracked separately when a response can be lost. Scanning this lens's scope for
 places where the store already computes that pair and the module throws it away,
-`drain_history_summarizer_side_channels` at `crates/daemon/src/lib.rs:8263` is bound to
+`drain_history_summarizer_side_channels` at `crates/daemon/src/lib.rs:8264` is bound to
 `let _` while the store fills in three counters for it.
 
 References are to `crates/daemon/src/lib.rs` unless the store is named.

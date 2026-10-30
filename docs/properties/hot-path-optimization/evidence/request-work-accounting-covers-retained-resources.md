@@ -167,12 +167,12 @@ all four unit permits, and exact scratch capacity. These are synthetic delivery
 tests, not actual runtime-stop or route-closing races.
 
 [receipt]: ../existing-checks.md#transform-unit-execution-receipt-2026-09-13
-[env]: ../../../../crates/daemon/src/lib.rs#L3582-L3621
+[env]: ../../../../crates/daemon/src/lib.rs#L3583-L3622
 [take]: ../../../../crates/daemon/src/metered_decode.rs#L211-L245
-[admit]: ../../../../crates/daemon/src/lib.rs#L8433-L8560
-[admit-pass]: ../../../../crates/daemon/src/lib.rs#L8488
-[hold-bound]: ../../../../crates/daemon/src/lib.rs#L12430
-[page-accept]: ../../../../crates/daemon/src/lib.rs#L10011-L10080
+[admit]: ../../../../crates/daemon/src/lib.rs#L8434-L8561
+[admit-pass]: ../../../../crates/daemon/src/lib.rs#L8489
+[hold-bound]: ../../../../crates/daemon/src/lib.rs#L12431
+[page-accept]: ../../../../crates/daemon/src/lib.rs#L10012-L10081
 [holds]: ../../../../crates/daemon/src/transform_unit.rs#L89-L167
 [release]: ../../../../crates/daemon/src/lib.rs#L1439-L1459
 [stage]: ../../../../crates/daemon/src/lib.rs#L1551-L1563
@@ -215,6 +215,6 @@ charges restores the exact pool capacity. The [rebased receipt][rebased-receipt]
 reports five meter passes, eleven blocking passes, and a final Bun pass. The
 earlier full workspace still has three failures; no workspace pass is claimed.
 
-[body-admission]: ../../../../crates/daemon/src/lib.rs#L16378
-[direct-gate]: ../../../../crates/daemon/src/lib.rs#L16052
+[body-admission]: ../../../../crates/daemon/src/lib.rs#L16379
+[direct-gate]: ../../../../crates/daemon/src/lib.rs#L16053
 [rebased-receipt]: ../existing-checks.md#rebased-working-tree-verification-2026-09-13

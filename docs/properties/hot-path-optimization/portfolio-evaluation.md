@@ -46,7 +46,7 @@ that gate to owned physical work" (`catalog.md:217-218`). E3 pairs "close
 during a live current callback" with "extends this witness to physical work
 if execution moves" (`catalog.md:270-271`). The first halves are observable
 at HEAD; the second halves have no observable because no worker exists
-(`catalog.md:44-50`, confirmed by `crates/daemon/src/lib.rs:8150-8216`,
+(`catalog.md:44-50`, confirmed by `crates/daemon/src/lib.rs:8151-8217`,
 which runs `run_transform()` synchronously inside the async handler). The
 records label this BLOCKED honestly, but a single `always` check over two
 guarantees with different constructibility invites a vacuous pass on the
@@ -63,7 +63,7 @@ invents a liveness deadline (`catalog.md:101-103`).
 **H2 mixes reachability classes.** H2 relies on "direct-API nonpositive
 budgets disable that guard" (`catalog.md:376-378`). At HEAD the request path
 filters `history_budget_tokens` with `is_finite() && *budget >= 0.0`
-(`crates/daemon/src/lib.rs:8167-8170`), so a zero budget is
+(`crates/daemon/src/lib.rs:8168-8171`), so a zero budget is
 default-production reachable through the request, and a negative budget is
 reachable only by calling `render_decayed_history_segments` directly. The record
 is labelled `default-production` as a whole (`catalog.md:371`). METHOD rule 4
@@ -106,7 +106,7 @@ compares.
 transform never observes cancellation. `handle` receives `RequestCtx`, whose
 `cancel` token is `pub(crate)` (`crates/host-runtime/src/handler.rs:433-445`),
 and forwards only `ctx.route` into `dispatch_value_with_inbound_bytes`
-(`crates/daemon/src/lib.rs:11834-11836`, `:12569-12574`). The only
+(`crates/daemon/src/lib.rs:11835-11837`, `:12570-12575`). The only
 cancellation check on the transform path is in `settle_prepared_with`, after
 the transform has returned (`:12057-12062`, wired at `:12072-12078`). The
 host checks the token once before the handler starts
@@ -237,7 +237,7 @@ the other differentials.
 
 **Canonical read (K1 to K4).** `kernel_route_fixtures` is a `test-support`
 module for request and store-row builders
-(`crates/daemon/src/lib.rs:12102-12103`), and
+(`crates/daemon/src/lib.rs:12103-12104`), and
 `crates/daemon/tests/kernel_routes.rs` has row-cap, byte-cap, and proptest
 full-sort comparison tests (`:2002`, `:2122-2152`, `:2156-2195`).
 K3 needs more than 8192 admitted visible candidates; K4 needs more than 8 MiB
@@ -275,7 +275,7 @@ not have; its count classes are observable through the double's
 `dispatch_count()` and completion gate
 (`crates/host-runtime/tests/support/mod.rs:187`, `:518-527`). A useful
 existing seam for the commit-versus-bookkeeping gap below is the `cfg(test)`
-hook `between_transform_and_prepare` (`crates/daemon/src/lib.rs:8235-8243`),
+hook `between_transform_and_prepare` (`crates/daemon/src/lib.rs:8236-8244`),
 which runs test code between the first transform and history_summarizer preparation.
 
 ### Anchor verification
@@ -285,11 +285,11 @@ were read at HEAD.
 
 | Anchor | Status | Note |
 | --- | --- | --- |
-| `crates/daemon/src/lib.rs:8144-8213` (pass-read) | verified | Comment at 8133, closure 8139-8193, first call 8202. |
-| `crates/daemon/src/lib.rs:8275-8386` (reruns) | verified | Reruns at 8264, 8291, 8317, 8372; awaits at 8263, 8289, 8315. |
-| `crates/daemon/src/lib.rs:8166-8170` (validation) | verified | Filter is `is_finite() && >= 0.0`; zero passes. |
-| `crates/daemon/src/lib.rs:11816-11837` (parse admission) | verified | `_parse_charge` at 11813; only `ctx.route` forwarded at 11824. |
-| `crates/daemon/src/lib.rs:15420-15466` (footprint) | verified | Doc at 15408, `VALUE_ENVELOPE_BYTES` at 15454. |
+| `crates/daemon/src/lib.rs:8145-8214` (pass-read) | verified | Comment at 8133, closure 8139-8193, first call 8202. |
+| `crates/daemon/src/lib.rs:8276-8387` (reruns) | verified | Reruns at 8264, 8291, 8317, 8372; awaits at 8263, 8289, 8315. |
+| `crates/daemon/src/lib.rs:8167-8171` (validation) | verified | Filter is `is_finite() && >= 0.0`; zero passes. |
+| `crates/daemon/src/lib.rs:11817-11838` (parse admission) | verified | `_parse_charge` at 11813; only `ctx.route` forwarded at 11824. |
+| `crates/daemon/src/lib.rs:15421-15467` (footprint) | verified | Doc at 15408, `VALUE_ENVELOPE_BYTES` at 15454. |
 | `crates/daemon/src/canonical_memory.rs:141-212` | verified | `read_project_memory` 141-175, `injectable_snapshot` 184-212. |
 | `crates/daemon/src/kernel_routes/read.rs:23-26`, `:159-248` | verified | Caps at 23 and 26; `read_visible` 159-248; cutoff loop 208-224. |
 | `crates/kernel/src/admission.rs:3189-3355` | verified | SQL 3113-3204, `ORDER BY o.object_id` at 3202, decode 3215-3277. |
@@ -344,8 +344,8 @@ record defect.
 
 **Commit-versus-bookkeeping separation under relocation.** In the ordinary
 (non-Emergency) path there is no `.await` between the transform commit at
-`crates/daemon/src/lib.rs:8213` and the in-memory bookkeeping that follows:
-lineage-root insertion (`:8220-8225`), projection-cache store (`:8398`), and
+`crates/daemon/src/lib.rs:8214` and the in-memory bookkeeping that follows:
+lineage-root insertion (`:8221-8226`), projection-cache store (`:8399`), and
 `guidance_dates` removal on `response.committed` (`:8398-8403`). The awaits
 at `:8263`, `:8289`, and `:8315` sit only inside the Emergency95 branch. So
 at HEAD a host abort cannot separate a committed transform from its
@@ -393,7 +393,7 @@ would report as an improvement rather than as a difference to adjudicate.
 | 1 | Differential records other than K1 and H1 name no frozen reference; even K1 and H1 defer the executable. | refinement | K2, S1, S2, R1, R2, R3 | Extend "Fixed reference identity" to every differential record: "The reference for this record is the corresponding function set at commit `913234433ae36a80a6e22c6aac14c7f9aab74386`, packaged as a frozen in-tree copy taken at that commit and never regenerated, following `crates/daemon/tests/selection_differential.rs`." |
 | 2 | E2's inequality cannot fail on a missed release, which Impact names. | refinement | E2 | Append to Check: "and after a bounded fault-free drain (no admitted work, all completions observed, one full `route_close_budget` elapsed), `reserved_units[c] == 0` for every class `c`." |
 | 3 | E1 and E3 each fold a current observable and a future unobservable into one guarantee. | refinement | E1, E3 | Split each Guarantee into two sentences and mark the second: "Current: <first half>. Relocation: <second half> - not constructible at HEAD; see the BLOCKED note." Keep `always` and `sometimes`; the Exercised line already says not yet. |
-| 4 | H2's negative-budget clause is direct-API only; zero is request-reachable. | refinement | H2 | Reachability note: "default-production for zero budgets through `parsed.history_budget_tokens` (`crates/daemon/src/lib.rs:8167-8170` admits `>= 0.0`); the negative-budget clause is reachable only through the direct renderer API and is test-only." |
+| 4 | H2's negative-budget clause is direct-API only; zero is request-reachable. | refinement | H2 | Reachability note: "default-production for zero budgets through `parsed.history_budget_tokens` (`crates/daemon/src/lib.rs:8168-8171` admits `>= 0.0`); the negative-budget clause is reachable only through the direct renderer API and is test-only." |
 | 5 | S1's "restored connection state" and per-call setup steps are unnamed; covers probes (a), (c), (f) and lead (2). | refinement | S1 | Replace "restored connection state" with: "restored connection state, meaning `query_only`, authorizer presence, `synchronous`, `journal_mode`, and an infrastructure-object set and `main_names` read at this callback's install rather than from a cache (`crates/storage/src/lib.rs:606-650`, `:669-680`, `:903-918`); include a statement warmed under a fenced scope and reused under a read scope (`:3901-3943`)." |
 | 6 | H2's outer clause omits the tightening step that determines rerender output. | refinement | H2 | After "at-most-three rerenders" add: "each rerender divides the inner budget by a multiplier that grows by 1.15 per attempt (`crates/daemon/src/m0_compose.rs:210`, `crates/daemon/src/memory_render.rs:191`)". |
 | 7 | K3 and K4 hard-code 8 MiB; the constant derives from the transport frame cap. | refinement | K3, K4 | Replace "8 MiB" with "`MAX_READ_ROW_BYTES` (`MAX_WIRE_BODY_BYTES / 8`, currently 8 MiB, derived from `shm_transport::MAX_FRAME_BYTES`)" and add to the scope section: "The TypeScript plugin and `shm-transport` are outside this catalog except where a constant derives from them." |
@@ -404,7 +404,7 @@ would report as an improvement rather than as a difference to adjudicate.
 | 12 | E3 lacks the "cancel while queued" schedule that a worker makes possible. | refinement | E3 | Add to Required faults: "include a cancel that arrives after admission and before the worker dequeues the work; the contract permits either outcome (`docs/host-wire-protocol.md:795`), and the witness records which occurred." |
 | 13 | Host test double has no non-yielding or detached handler mode, so E1/E3's named fault is not constructible. | refinement | E1, E3 | Add to Required faults: "a handler mode that blocks its thread or detaches a `spawn_blocking` task past cancellation, analogous to `BindPolicy::BlockThread` (`crates/host-runtime/tests/support/mod.rs:416-420`); `hang` yields and does not construct this fault (`:528-531`)." |
 | 14 | E1 does not state the baseline route-close observable (fatal trip after two budgets) that relocation trades away. | refinement | E1 | Add to Fault/timing angle: "At HEAD a non-yielding transform makes route close wait two `route_close_budget` intervals and trip fatal (`crates/host-runtime/src/dispatch.rs:1239-1259`); a relocation that instead empties the tracker while work continues changes this observable and must be adjudicated, not silently accepted." |
-| 15 | E2's ledger does not name the uncharged request-body clone as the concrete loss mechanism under relocation. | refinement | E2 | Add to Fault/timing angle: "a `'static` clone of `parsed` or `project_memory` for a blocking worker is an uncharged copy unless `_parse_charge` moves with it (`crates/daemon/src/lib.rs:11824`)." |
+| 15 | E2's ledger does not name the uncharged request-body clone as the concrete loss mechanism under relocation. | refinement | E2 | Add to Fault/timing angle: "a `'static` clone of `parsed` or `project_memory` for a blocking worker is an uncharged copy unless `_parse_charge` moves with it (`crates/daemon/src/lib.rs:11825`)." |
 | 16 | Catalog claims a completed recheck recorded in a file that did not exist and pre-describes this document. | bias | all | Human decision on provenance wording; see below. |
 | 17 | Every `always` record is a differential against an unpackaged oracle; sixteen of sixteen are `Exercised: not yet`. | bias | all | Human decision on sequencing; see below. |
 | 18 | `sometimes` records exist only where an earlier review pointed; S and R have none. | bias | K3, K4, H3, H4, S, R | Human decision on a systematic witness pass; see below. |

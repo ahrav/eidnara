@@ -50,7 +50,7 @@ belongs to a phase whose own comment says it costs a model call.
    comment says the nonbillable drain exposes "sandbox-only due and liveness
    (10/10). Compile and fallback claims launch LLM prompts and belong to the
    scheduled full-budget drain" (`:818-821`), and the same reasoning is repeated
-   at the call site (`crates/daemon/src/lib.rs:11220-11223`). So a fallback
+   at the call site (`crates/daemon/src/lib.rs:11221-11224`). So a fallback
    claim is a billable model call by the module's own account.
 
 5. The only rate limit is in-memory and self-clearing.

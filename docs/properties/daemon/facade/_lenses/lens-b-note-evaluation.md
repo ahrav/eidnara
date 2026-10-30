@@ -13,8 +13,8 @@ Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927`
 
 Primary files read in full: `crates/daemon/src/conditional_note_evaluation.rs`
 (1,851 lines, of which 951-1851 is the inline test module),
-`crates/daemon/src/lib.rs:2964-3022`, `:3830-3978`, `:10891-11571`,
-`:13897-14297`, `:15325-15350`. Store-side lifecycle context read where it bears
+`crates/daemon/src/lib.rs:2964-3022`, `:3831-3980`, `:10903-11583`,
+`:13898-14298`, `:15326-15351`. Store-side lifecycle context read where it bears
 on note state: `crates/memory-store/src/lib.rs:4393-4605`, `:10130-10200`,
 `:10409-10520`, `:12844-12871`, `:13092-13360`, `:13548-13620`. Every line
 reference below was read back individually at `HEAD`. `boundary.rs` was checked

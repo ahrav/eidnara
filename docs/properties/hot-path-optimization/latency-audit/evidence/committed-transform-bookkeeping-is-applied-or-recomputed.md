@@ -232,14 +232,14 @@ The transform ownership question is resolved: the host joins units through
 Fatal close after an over-budget unit is approved, but full-cap paged and
 slow-disk durations remain unmeasured.
 
-[unit-one]: ../../../../../crates/daemon/src/lib.rs#L8477-L8560
-[first]: ../../../../../crates/daemon/src/lib.rs#L8916-L8973
-[rerun-live]: ../../../../../crates/daemon/src/lib.rs#L8876-L8907
-[emergency-live]: ../../../../../crates/daemon/src/lib.rs#L8562-L8679
-[settle-live]: ../../../../../crates/daemon/src/lib.rs#L8995-L9138
+[unit-one]: ../../../../../crates/daemon/src/lib.rs#L8478-L8561
+[first]: ../../../../../crates/daemon/src/lib.rs#L8917-L8974
+[rerun-live]: ../../../../../crates/daemon/src/lib.rs#L8877-L8908
+[emergency-live]: ../../../../../crates/daemon/src/lib.rs#L8563-L8680
+[settle-live]: ../../../../../crates/daemon/src/lib.rs#L8996-L9139
 [abort-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L144
 [emergency-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L772
-[admission-live]: ../../../../../crates/daemon/src/lib.rs#L8409-L8468
-[page-accept]: ../../../../../crates/daemon/src/lib.rs#L10011-L10080
+[admission-live]: ../../../../../crates/daemon/src/lib.rs#L8410-L8469
+[page-accept]: ../../../../../crates/daemon/src/lib.rs#L10012-L10081
 [negative-control]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L206-L220
 [receipt]: ../../existing-checks.md#transform-unit-execution-receipt-2026-09-13

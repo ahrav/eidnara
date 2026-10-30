@@ -6,8 +6,8 @@ other system-model passes.
 
 The byte cap has two paths. Bodies at most 1 MiB bypass the cap probe, but
 larger bodies call `probe_request` before the meter exists
-(`crates/daemon/src/lib.rs:12164-12177,16156-16173`). `ProbeKey` asks serde to
-deserialize a string at `:15849-15872`. Not retaining the key is different
+(`crates/daemon/src/lib.rs:12165-12178,16157-16174`). `ProbeKey` asks serde to
+deserialize a string at `:15850-15873`. Not retaining the key is different
 from avoiding unescape scratch. The sub-cap allocation test does not settle
 the larger-body window. Preserve that as a hidden-peak investigation lead,
 not a reproduced budget violation.

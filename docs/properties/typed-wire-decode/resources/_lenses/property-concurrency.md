@@ -3,7 +3,7 @@
 HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 Scope: [source register](../source-register.md).
 
-`TestPool::hold` at `crates/daemon/src/lib.rs:20273-20277` supplies independent
+`TestPool::hold` at `crates/daemon/src/lib.rs:20274-20278` supplies independent
 pressure. `ShortfallMarker` records needed, charged, and capacity at
 `crates/daemon/src/metered_decode.rs:294-302`, but not another owner's held
 allocation identity. A returned `queue_full` alone is not a witness.

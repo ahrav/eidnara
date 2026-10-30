@@ -315,7 +315,7 @@ Open questions:
 
 Type: safety
 Reachability: explicit-config-only - `capture_after_response`
-(`crates/daemon/src/lib.rs:9290`) offers a pass only when the route's frozen
+(`crates/daemon/src/lib.rs:9291`) offers a pass only when the route's frozen
 `contradiction_candidates.enabled` and a memory store are both present.
 Status: active
 Exercised: partial - #1167, `crates/daemon/src/candidate_pass_tests.rs`:
@@ -645,7 +645,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - the daemon starts the MemoryReviewer
 cleanup loop whenever the memory store opens
-(`crates/daemon/src/lib.rs:4010`), and each pass runs the sweep through
+(`crates/daemon/src/lib.rs:4011`), and each pass runs the sweep through
 `pass_then_sweep` (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`),
 which returns before any table statement unless the user tier sets
 `contradiction_candidates.enabled`.
@@ -912,7 +912,7 @@ then on. The key is `/contradiction_candidates/enabled`
 its value (`config.rs:2320`), and a bound route keeps the value it was bound
 with
 (`a_route_keeps_the_candidate_flag_it_was_bound_with_and_health_reports_the_block`,
-`crates/daemon/src/lib.rs:21514`), which also shows the status block carrying
+`crates/daemon/src/lib.rs:21515`), which also shows the status block carrying
 the key with every counter zero. Pass arm (#1167):
 `a_route_without_consent_offers_no_pass_and_writes_no_row`
 (`crates/daemon/src/candidate_pass_tests.rs:253`) sets the offer's consent off

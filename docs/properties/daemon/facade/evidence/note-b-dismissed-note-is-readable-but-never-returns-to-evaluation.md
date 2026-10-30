@@ -41,7 +41,7 @@ what can undo it.
    unless the current status is one of
    `active | pending | ready | surfacing | surfaced` (`:4565-4571`), so a second
    dismissal of the same note is refused rather than applied twice. The facade turns
-   that `None` into an error text (`crates/daemon/src/lib.rs:11905-11911`).
+   that `None` into an error text (`crates/daemon/src/lib.rs:11906-11912`).
 
 4. The row is readable afterwards. `eidnara_note read` maps
    `filter: "dismissed"` to `vec!["dismissed"]` (`lib.rs:11721`) and

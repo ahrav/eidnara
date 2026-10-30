@@ -91,7 +91,7 @@ kernel store, budget, units, memo, commit gate mutex (`:811`),
 `publish_locked` (`:883-975`): delete epoch, scope, budget,
 `publish_screened_between` for the window (`:907-915`), then
 `capture_documents` in its own batch (`:905-...`). `capture_after_response`
-(`crates/daemon/src/lib.rs:9257-9274`). The request owner runs the
+(`crates/daemon/src/lib.rs:9258-9275`). The request owner runs the
 `AfterResponse` after `settle_prepared` (`lib.rs:13660-13664`;
 `crates/daemon/src/dispatch.rs:24-35`, `:445-460`). `publish_batch`
 (`crates/daemon/src/harness_sources.rs:1292-1298`), `Published` (`:549-562`),

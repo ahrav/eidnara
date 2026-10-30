@@ -428,7 +428,7 @@ previous entry by reference and never edits either source";
 `rust-mode-transform.test.ts:1432` "rejects mutated retained output
 ${mutationTime}"; `:1488` "keeps from the applied previous output and the
 submitted input, then acks its note deliveries";
-`crates/daemon/src/lib.rs:25499`
+`crates/daemon/src/lib.rs:25500`
 `native_previous_keeps_bind_the_applied_revision` (#879). Canonical owner:
 TE21 and `recipe-wire-switch.md`.
 Impact: High. A positional or revision error silently substitutes context.
@@ -534,8 +534,8 @@ Confidence: high -
 [evidence](evidence/wp-e08-ready-snapshots-reject-stale-generations.md).
 Witnesses located at `f2442b2f`. This is a generation fence, not a
 serialization test; WP-P04 owns execution order.
-Existing check: `crates/daemon/src/lib.rs:21147`
-`transform_snapshot_cache_is_generation_safe_and_lru_bounded`; `:21187`
+Existing check: `crates/daemon/src/lib.rs:21148`
+`transform_snapshot_cache_is_generation_safe_and_lru_bounded`; `:21188`
 `snapshot_lease_budget_survives_cache_churn_and_releases_exact_charge`;
 `:21230`
 `ready_snapshot_holds_no_native_payload_and_a_lease_pins_its_generation`
@@ -705,8 +705,8 @@ holding only the D13 previous CK output with LRU eviction, and
 `NativeOutputStore` (`lib.rs:2368`). The per-message memo and its lookup are
 gone; every pass renders its window afresh. The D10 reset leaves handler
 caches in place and relies on the epoch bump.
-Existing check: `crates/daemon/src/lib.rs:25345`
-`native_output_store_enforces_entry_cap_lru_and_revert_epoch`; `:25296`
+Existing check: `crates/daemon/src/lib.rs:25346`
+`native_output_store_enforces_entry_cap_lru_and_revert_epoch`; `:25297`
 `handler_native_cache_adopts_the_bumped_durable_revert_epoch`;
 `crates/memory-store/src/lib.rs:26148`
 `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch`;
@@ -2015,7 +2015,7 @@ fold trigger and is inert under native authority. An oversized native pass
 declines through the resident reservation (`invalid_params` or `queue_full`),
 the invocation budget, or the 64 MiB reconstructed-output cap, which the
 daemon answers with `transform_output_too_large`
-(`crates/daemon/src/lib.rs:15693-15699`, `:15655-15657`) and the client
+(`crates/daemon/src/lib.rs:15694-15700`, `:15656-15658`) and the client
 enforces as `output_too_large`
 (`packages/opencode-plugin/src/hooks/context/edit-recipe.ts:429-434`).
 WP-P15 bounds work at a fixed window and gives no constant-cost claim for

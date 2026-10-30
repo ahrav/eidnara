@@ -27,7 +27,7 @@ through `fail_next_run_on_the_source`:
   `disposition: "retryable"`; after the backoff expires the next wrapup,
   awaited under `tokio::time::timeout(TEST_WAIT_BUDGET, ..)`, returns
   `ok: true` and a model fold is published. The handler's own wrapup budget is
-  `MAX_WRAPUP_REQUEST_BUDGET` less a margin (`crates/daemon/src/lib.rs:6171`,
+  `MAX_WRAPUP_REQUEST_BUDGET` less a margin (`crates/daemon/src/lib.rs:6172`,
   3,800 seconds at `crates/daemon/src/history_summarizer.rs:1580`), so the
   test's timeout is the bound that applies.
 - `source_recovery_tests.rs:157` reattach: a seeded awaiting state answers

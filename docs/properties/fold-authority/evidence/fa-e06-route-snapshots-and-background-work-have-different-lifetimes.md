@@ -47,7 +47,7 @@ Checks at HEAD:
 - `a_sibling_bound_during_the_change_keeps_it_pending` (`:778`): a sibling
   inserted between the plan and the reset.
 - `no_fire_reason_is_durable_change_gated_and_cleared_by_fire`
-  (`crates/daemon/src/lib.rs:41247`): the captured binding configuration has a
+  (`crates/daemon/src/lib.rs:41248`): the captured binding configuration has a
   chain while the handler's live configuration has none, so preparation
   reads the live one.
 - `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`

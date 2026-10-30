@@ -156,7 +156,7 @@ claim changes.
 
 Plan R1 distinguishes plugin callers. Evidence: every `kernel.commit`
 request arrives through a bound plugin connection (dispatch
-`crates/daemon/src/lib.rs:14672`; the daemon has no internal caller of the
+`crates/daemon/src/lib.rs:14673`; the daemon has no internal caller of the
 route). The only non-plugin writer of disposition events is the Kernel API
 `Envelope::record_admission` (`admission.rs:998`), used by Kernel tests.
 Consequence: at the route the qualifier is vacuous; the real question is

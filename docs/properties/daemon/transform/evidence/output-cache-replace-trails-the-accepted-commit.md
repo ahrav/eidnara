@@ -85,7 +85,7 @@ builds. The existing behavioural test on the epoch eviction is
 
 ### The caller that owns the cache
 
-`daemon/src/lib.rs:8333-8339` passes `&self.serialized_outputs`, so the cache
+`daemon/src/lib.rs:8334-8340` passes `&self.serialized_outputs`, so the cache
 outlives one request and is shared across all sessions on the handler. That is
 what makes a stale entry consequential: it would be served to the next request
 for the same session, not just to this one.

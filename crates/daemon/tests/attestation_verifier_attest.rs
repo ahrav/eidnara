@@ -48,6 +48,8 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .args(["-c", "core.autocrlf=false"])
         .args(args)
         .current_dir(dir)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_AUTHOR_NAME", "fixture")
@@ -1059,7 +1061,7 @@ fn a_model_decision_changed_after_classification_aborts_the_set() {
     assert_eq!(store.write_set_rows(), 0);
 }
 
-/// F1: attesting one model decision commits nothing the other's classification rechecks, so a
+/// Timing: attesting one model decision commits nothing the other's classification rechecks, so a
 /// second decision classified at the same sequence still commits on its older classification.
 #[test]
 fn an_unrelated_attestation_does_not_abort_an_older_classification() {
@@ -1323,4 +1325,394 @@ fn no_model_client_is_reachable_from_the_verifier_module() {
     for allowed in ALLOWED {
         assert!(all.contains(allowed), "{allowed}");
     }
+}
+
+/// A model decision like [`Store::model`]'s, citing `evidence` through a decision event, admitted
+/// under `taint`.
+fn model_with_taint(
+    store: &Store,
+    name: &str,
+    oid: &str,
+    evidence: &Evidence,
+    taint: TaintClass,
+) -> String {
+    let object_id = format!("mem_{name}");
+    store
+        .kernel
+        .commit(intent(&format!("decision-{name}")), |envelope| {
+            let anchor_id = format!("anchor_{name}");
+            envelope.insert_anchor(AnchorSpec {
+                anchor_id: anchor_id.clone(),
+                object_id: format!("anchorobj_{name}"),
+                domain_id: "memory".into(),
+                source_kind: "assistant".into(),
+                source_id: "memory_capture".into(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                value: AnchorValue::ReachableFrom {
+                    oid: oid.into(),
+                    captures: Vec::new(),
+                },
+            })?;
+            envelope.insert_decision(model_spec(name, Some(anchor_id), evidence, false, 1))?;
+            envelope.append_decision_event(
+                &format!("dec_{name}"),
+                DecisionEventSpec {
+                    event_kind: "memory_capture_citation".into(),
+                    payload: DecisionEventPayload {
+                        summary: "cites the document".into(),
+                    },
+                    evidence_id: Some(evidence.id.clone()),
+                    recorded_at: 1,
+                },
+            )?;
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: None,
+                subject_object_id: Some(object_id.clone()),
+                source_class: Some(SourceClass::ModelInference),
+                taint_class: Some(taint),
+                event: AdmissionEvent {
+                    kind: EventKind::Other,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: None,
+                    reason: "fixture".into(),
+                },
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    object_id
+}
+
+/// The Match and Mismatch evaluations for `evaluation`'s blob.
+fn both_verdicts(evaluation: &Evaluation) -> [Evaluation; 2] {
+    [Verdict::Match, Verdict::Mismatch].map(|verdict| Evaluation {
+        verdict,
+        ..evaluation.clone()
+    })
+}
+
+/// AC6, C14: a model decision whose registry class is `Normal` but whose `Personal` taint floor
+/// makes the Kernel serve it `Sensitive` gets an attestation served `Sensitive`, hidden on
+/// `AutoInject` like the model decision.
+#[test]
+fn the_attestation_serves_at_the_model_decisions_folded_class() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = model_with_taint(
+        &store,
+        "personal",
+        &checkout.head,
+        &evidence,
+        TaintClass::Personal,
+    );
+    let model_served = served(&store.facts(&model));
+    assert_eq!(model_served.0, Sensitivity::Sensitive);
+    let classification = store.classification(&model, &checkout);
+    assert_eq!(
+        input(&classification).decision.sensitivity,
+        Sensitivity::Normal
+    );
+    assert_eq!(
+        input(&classification).decision.served_sensitivity,
+        Sensitivity::Sensitive
+    );
+    let outcome = attest_now(&store, &classification, &evaluate(&classification));
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+    let attestation = store.facts(&Identity::of(&model, &checkout.head).object_id);
+    assert_eq!(
+        served(&attestation),
+        (Sensitivity::Sensitive, SurfaceVisibility::Hidden)
+    );
+    assert_eq!(served(&attestation), model_served);
+}
+
+/// A classification whose served class no longer matches what the Kernel serves the model
+/// decision at is `Changed` inside the envelope, after the write set's own check passed.
+#[test]
+fn a_served_class_other_than_the_kernels_is_changed() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("served", &checkout.head, &evidence, false);
+    let mut classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    let Class::Verifiable(input) = &mut classification.class else {
+        panic!("expected a verifiable fixture");
+    };
+    input.decision.served_sensitivity = Sensitivity::Sensitive;
+    let budget = EvalBudget::unbounded();
+    let write_set = WriteSet::new(
+        &store.kernel,
+        classification.target,
+        input,
+        &checkout.blob,
+        &budget,
+    )
+    .unwrap();
+    assert!(write_set.check());
+    let tip = store.tip();
+    assert_eq!(write_set.commit(&store.kernel, &budget), Outcome::Changed);
+    assert_eq!(
+        attest_now(&store, &classification, &evaluation),
+        Outcome::Changed
+    );
+    assert_eq!(store.tip(), tip);
+    assert_eq!(store.write_set_rows(), 0);
+}
+
+/// AC9: the witness detail's path, descriptor, lineage, and revision, the witness scope, the
+/// citation kind, the shared source revision, and the shared source kind are bound before the
+/// commit.
+#[test]
+fn a_write_set_naming_another_document_or_revision_is_refused_before_the_commit() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("bound", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let budget = EvalBudget::unbounded();
+    let write_set = WriteSet::new(
+        &store.kernel,
+        classification.target,
+        input(&classification),
+        &checkout.blob,
+        &budget,
+    )
+    .unwrap();
+    assert!(write_set.check());
+    let detail = write_set.witness.payload.detail.clone().unwrap();
+    let mutations: [(&str, Mutation); 9] = [
+        ("detail path", |set, detail, _| {
+            set.witness.payload.detail =
+                Some(detail.replace("\"relative_path\":\"", "\"relative_path\":\"docs/"));
+        }),
+        ("detail descriptor", |set, detail, _| {
+            set.witness.payload.detail = Some(detail.replace(
+                "\"descriptor_object_id\":\"",
+                "\"descriptor_object_id\":\"0",
+            ));
+        }),
+        ("detail lineage", |set, detail, _| {
+            set.witness.payload.detail =
+                Some(detail.replace("\"lineage_id\":\"", "\"lineage_id\":\"0"));
+        }),
+        ("detail descriptor revision", |set, detail, _| {
+            set.witness.payload.detail =
+                Some(detail.replace("\"descriptor_revision\":\"", "\"descriptor_revision\":\"0"));
+        }),
+        ("witness scope", |set, _, _| {
+            set.witness.scope_id = Some("scope".into());
+        }),
+        ("citation kind", |set, _, _| {
+            set.citation.event_kind = "memory_capture_citation".into();
+        }),
+        ("shared revision", |set, _, _| {
+            set.attestation.source_revision = 2;
+            set.witness.source_revision = 2;
+        }),
+        ("shared source kind", |set, _, _| {
+            set.attestation.source_kind = "assistant".into();
+            set.witness.source_kind = "assistant".into();
+        }),
+        ("detail absent", |set, _, _| {
+            set.witness.payload.detail = None;
+        }),
+    ];
+    let tip = store.tip();
+    for (name, mutate) in mutations {
+        let mut mutated = write_set.clone();
+        mutate(&mut mutated, &detail, "");
+        assert_ne!(mutated, write_set, "{name}");
+        assert!(!mutated.check(), "{name}");
+        assert_eq!(
+            mutated.commit(&store.kernel, &budget),
+            Outcome::InvalidWriteSet,
+            "{name}"
+        );
+    }
+    assert_eq!(store.tip(), tip);
+    assert_eq!(store.write_set_rows(), 0);
+}
+
+/// A classification from another store incarnation, or naming other admission classes, is
+/// `Changed` on both verdicts with nothing written.
+#[test]
+fn a_classification_from_another_incarnation_or_with_other_classes_is_changed() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("foreign", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    let foreign = Classification {
+        target: kernel::CommitReadTarget {
+            incarnation: Store::open()
+                .kernel
+                .capture_commit_read_target()
+                .unwrap()
+                .incarnation,
+            ..classification.target
+        },
+        class: classification.class.clone(),
+    };
+    let mut reclassed = classification.clone();
+    let Class::Verifiable(input) = &mut reclassed.class else {
+        panic!("expected a verifiable fixture");
+    };
+    input.decision.taint_class = TaintClass::UserInferred;
+    let tip = store.tip();
+    let admissions = store.admissions_of(&model);
+    for attempted in both_verdicts(&evaluation) {
+        for changed in [&foreign, &reclassed] {
+            assert_eq!(
+                attest_now(&store, changed, &attempted),
+                Outcome::Changed,
+                "{:?}",
+                attempted.verdict
+            );
+        }
+    }
+    assert_eq!(store.tip(), tip);
+    assert_eq!(store.admissions_of(&model), admissions);
+    assert_eq!(store.write_set_rows(), 0);
+}
+
+/// F2 on the stale path: a mismatch for a model decision re-disposed after its classification is
+/// `Changed` and records no `MarkStale`.
+#[test]
+fn a_mismatch_for_a_decision_re_disposed_after_classification_is_changed() {
+    let store = Store::open();
+    let checkout = Checkout::new("# Other\n");
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("quarantined", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    assert_eq!(evaluation.verdict, Verdict::Mismatch);
+    store
+        .kernel
+        .commit(intent("quarantine"), |envelope| {
+            model_admission(envelope, &model, EventKind::Quarantine)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip();
+    let admissions = store.admissions_of(&model);
+    assert_eq!(
+        attest_now(&store, &classification, &evaluation),
+        Outcome::Changed
+    );
+    assert_eq!(store.tip(), tip);
+    assert_eq!(store.admissions_of(&model), admissions);
+}
+
+/// F3: a newer live revision of the cited descriptor's lineage, citing the same evidence or
+/// other evidence, aborts both verdicts' envelopes.
+#[test]
+fn a_descriptor_republished_after_classification_is_changed() {
+    for (key, text) in [("same", DOC), ("other", "# Architecture\n\nRevised.\n")] {
+        let store = Store::open();
+        let checkout = Checkout::new(DOC);
+        let (evidence, _) = store.document("doc", DOC);
+        let model = store.model(key, &checkout.head, &evidence, false);
+        let classification = store.classification(&model, &checkout);
+        let evaluation = evaluate(&classification);
+        let handle = if key == "same" {
+            None
+        } else {
+            Some(store.retain("revised", text))
+        };
+        let (evidence_id, digest) = match &handle {
+            Some(handle) => (handle.evidence_id.clone(), handle.digest.clone()),
+            None => (evidence.id.clone(), digest_hex(DOC)),
+        };
+        let identity = [
+            ("project_id", "proj-a"),
+            ("repository_id", REPOSITORY),
+            ("relative_path", DOC_PATH),
+        ];
+        store
+            .kernel
+            .commit(intent("descriptor-revision-2"), |envelope| {
+                envelope
+                    .publish_source_descriptor(&SourceDescriptorRequest {
+                        occurrence: Occurrence {
+                            class: OccurrenceClass::RepositoryDocuments.code(),
+                            identity: &identity,
+                            revision: "2",
+                            representation: "text",
+                            span: None,
+                        },
+                        source_policy: SourceDescriptorPolicy::Native,
+                        domain_id: "source",
+                        scope_id: None,
+                        evidence_id: &evidence_id,
+                        artifact_digest: &digest,
+                        buffer: text,
+                        sensitivity: Sensitivity::Sensitive,
+                        observed_at: 2,
+                        expected_head: Some(1),
+                        outcome: None,
+                    })
+                    .map_err(|_| KernelError::InvalidInput)?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let tip = store.tip();
+        for attempted in both_verdicts(&evaluation) {
+            assert_eq!(
+                attest_now(&store, &classification, &attempted),
+                Outcome::Changed,
+                "{key} {:?}",
+                attempted.verdict
+            );
+        }
+        assert_eq!(store.tip(), tip, "{key}");
+        assert_eq!(store.write_set_rows(), 0, "{key}");
+    }
+}
+
+/// F10: a `Match` after a `MarkStale` recorded for another blob conflicts through the opposite
+/// key's digest refusal.
+#[test]
+fn a_match_after_a_stale_path_under_another_blob_conflicts() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("flip_blob", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    let mismatch = Evaluation {
+        verdict: Verdict::Mismatch,
+        blob_oid: Some("0".repeat(40)),
+        ..evaluation.clone()
+    };
+    assert!(matches!(
+        attest_now(&store, &classification, &mismatch),
+        Outcome::StaleCommitted(_)
+    ));
+    let tip = store.tip();
+    assert_eq!(
+        attest_now(&store, &classification, &evaluation),
+        Outcome::Conflict
+    );
+    assert_eq!(store.tip(), tip);
+    assert_eq!(store.verifier_rows(), 0);
+}
+
+/// D1: the identity is the SHA-256 of the model object id and the oid, so another oid gives
+/// another identity.
+#[test]
+fn the_identity_depends_on_the_model_and_the_oid() {
+    let oid = "1".repeat(40);
+    let identity = Identity::of("mem_a", &oid);
+    let hash = format!("{:x}", Sha256::digest(format!("mem_a\n{oid}")));
+    assert_eq!(identity.source_id, hash);
+    assert_eq!(identity.object_id, format!("verattest:{hash}"));
+    let other = Identity::of("mem_a", &"2".repeat(40));
+    assert_ne!(identity.source_id, other.source_id);
+    assert_ne!(identity.object_id, other.object_id);
+    assert_ne!(identity.witness_object_id, other.witness_object_id);
 }

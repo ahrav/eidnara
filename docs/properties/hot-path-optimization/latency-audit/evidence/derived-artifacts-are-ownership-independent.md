@@ -640,7 +640,7 @@ all-feature Clippy with `--locked -- -D warnings`, and `cargo fmt --all --
 [canonical-original]: ../../../../../crates/memory-store/src/lib.rs#L232-L264
 [canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13797
 [canonical-retention]: ../../../../../crates/daemon/src/transform.rs#L252-L279
-[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11895-L11917
+[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11896-L11918
 [canonical-source]: ../../../../../crates/daemon/src/transform.rs#L13942
 [canonical-once]: ../../../../../crates/daemon/src/served_json.rs#L171
 

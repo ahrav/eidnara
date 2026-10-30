@@ -141,7 +141,7 @@ outside the window by construction. Options, cheapest first:
 
 - Sources examined: `crates/memory-store/src/lib.rs:9351-9546` (the publish transaction at that revision; now `:11163-11378`); every `#[cfg(test)]`
   and `cfg(feature =` occurrence in `crates/memory-store/src/lib.rs`;
-  `crates/daemon/src/lib.rs:3428-3505` for the two publication fences;
+  `crates/daemon/src/lib.rs:3429-3506` for the two publication fences;
   every `cfg(feature =` occurrence in `crates/daemon/src/lib.rs` (all
   `test-support`; the former `drive-fault` feature block was deleted in
   `06653606`).

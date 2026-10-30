@@ -14,7 +14,7 @@ table, R4, and broad frozen behavior. W1 is invalidated and is not reactivated.
 1. `crates/daemon/src/transform.rs:5885-5913` tokenizes full block bytes,
    accumulates tokens by ordinal in reverse order, and derives the protected
    floor. Lines 4592-4602 store the publication floor on applicable HARD passes.
-2. `crates/daemon/src/lib.rs:17272-17302`, verified against HEAD, builds
+2. `crates/daemon/src/lib.rs:17273-17303`, verified against HEAD, builds
    boundary blocks with `byte_size`, cached original-token counts keyed by
    content hash, and shared original bytes from the flat projection.
    Its token-cache gate at lines 2055-2080 requires both byte length and hash;
@@ -30,7 +30,7 @@ table, R4, and broad frozen behavior. W1 is invalidated and is not reactivated.
    emergency reductions and stop at the reclaim target.
 7. `SelectionOutcome` at lines 1023-1030 includes decisions and independent
    flags/counts; comparing only decisions can miss a state change.
-8. `crates/daemon/src/lib.rs:18194`, boundary goldens, and selection
+8. `crates/daemon/src/lib.rs:18195`, boundary goldens, and selection
    differential tests provide source-visible seams, not replacement evidence.
 
 ## Failure scenario

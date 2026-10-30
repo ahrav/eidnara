@@ -12,7 +12,7 @@ The actual plugin emits absent/true. Golden fixture membership must be
 classified by shape and provenance, not by filename.
 
 Old `raw_messages_json` enters the same message decoder
-(`crates/daemon/src/lib.rs:16455-16473`). Old frozen synthetic pairs explicitly
+(`crates/daemon/src/lib.rs:16456-16474`). Old frozen synthetic pairs explicitly
 discard retained originals on load (`crates/memory-store/src/lib.rs:1301-1319`).
 
 ## Candidates and handoff

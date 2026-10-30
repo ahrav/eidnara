@@ -18,7 +18,7 @@ the commit point actually lives. The scope map places `scheduler.rs` in 4f and
 does not assign `memory-store` to Part 4 at all; all three lens agents took the same
 posture of treating them as cited adjacent surfaces, and the discrepancy is
 recorded rather than resolved. Two further out-of-scope surfaces are load-bearing:
-`crates/daemon/src/lib.rs:8333`, the only production caller, and
+`crates/daemon/src/lib.rs:8334`, the only production caller, and
 `transform.rs:7511-8046`, the tag baseline cache and the speculative mint
 numbering, which is 4e's territory but which the commit predicate depends on.
 

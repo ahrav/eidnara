@@ -11,8 +11,8 @@ semaphore and returns drop-owned charges at
 
 A fake successful reserve with `ByteCharge::none()` can count an estimate but
 cannot prove concurrency admission. Existing `TestPool` uses the real budget
-at `crates/daemon/src/lib.rs:20254-20288`; `hold` constructs another owner.
-The shortfall witness at `:20426-20482` does not run competing ring requests.
+at `crates/daemon/src/lib.rs:20255-20289`; `hold` constructs another owner.
+The shortfall witness at `:20427-20483` does not run competing ring requests.
 
 Candidates: independent held-byte witness and aggregate live-byte envelope.
 Worker relocation is outside this plan's resource change (P:L62).

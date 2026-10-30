@@ -16,4 +16,4 @@ Provenance: HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 
 Quiet area: the decode corpus repeats ingress `mid`, but has no literal
 duplicate CK `role`, block `kind`, or enum `type` case
-(`crates/daemon/src/lib.rs:19774-19976`). Preserve this distinction.
+(`crates/daemon/src/lib.rs:19775-19977`). Preserve this distinction.

@@ -451,7 +451,7 @@ Existing check: `crates/daemon/src/history_summarizer_chunk.rs:2169`
 `a_generated_history_fires_the_longest_whole_block_prefix_within_the_identity_budget`
 (#859 PR C, mixed roles); `:1960`, `:1981`, `:1995` (exact selection through
 the oracle, `:1910-1914`);
-`crates/daemon/src/lib.rs:18630`
+`crates/daemon/src/lib.rs:18631`
 `history_summarizer_boundary_construction_matches_owned_reference` (missing
 identity at `:18836-18841`); `crates/daemon/src/history_summarizer_chunk.rs:2814`
 `budget_stop_and_tool_only_ranges_are_recorded` (range, not identities).
@@ -469,11 +469,11 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - the surviving late path needs a stored
 Eidnara authority with an empty live chain (`cfg` from `effective_config`,
-`crates/daemon/src/lib.rs:5417`), which requires removing the chain after
+`crates/daemon/src/lib.rs:5418`), which requires removing the chain after
 adoption; the default empty chain adopts native and stops at the gate.
 Status: invalidated
 Invalidated: PR #903 (#855) replaces it with the early `native_authority`
-gate of FA-N05 (`crates/daemon/src/lib.rs:9439-9450`). The trigger-then-
+gate of FA-N05 (`crates/daemon/src/lib.rs:9440-9451`). The trigger-then-
 `no_models` order, the change-gated `record_no_fire`, and the ignored commit
 error survive only as defense for a stored Eidnara authority whose live chain
 is empty (a stall that `session.status` reports since #904).
@@ -488,8 +488,8 @@ rejecting an empty chain; identical repeated no-fire reasons did not rewrite
 metadata; the commit error was ignored.
 Check: `always` - under an applied Eidnara authority with an empty live
 chain: a non-firing trigger returns `trigger_false` or `busy`
-(`crates/daemon/src/lib.rs:5564-5587`); a firing trigger returns `no_models`
-(`:5589-5595`); an unchanged stored reason causes zero commits and a failed
+(`crates/daemon/src/lib.rs:5565-5588`); a firing trigger returns `no_models`
+(`:5590-5596`); an unchanged stored reason causes zero commits and a failed
 commit leaves the pass result unchanged (`:5895-5912`). `always` because
 every such pass runs the path.
 Fault/timing angle: Chain removal after adoption, repeated turns, a lost
@@ -503,8 +503,8 @@ Read at HEAD. Corrections: callers `lib.rs:9014`, `:9150` are now `:9011`,
 `history_summarizer_chunk.rs:619-623` is `:908-912`;
 `history_summarizer.rs:1655-1657` is `:1840-1842`; the checks at
 `lib.rs:42058` and `:39354` are at `:41167` and `:37569`.
-Existing check: `crates/daemon/src/lib.rs:41247`
-`no_fire_reason_is_durable_change_gated_and_cleared_by_fire`; `:37610`
+Existing check: `crates/daemon/src/lib.rs:41248`
+`no_fire_reason_is_durable_change_gated_and_cleared_by_fire`; `:37611`
 `session_wrapup_no_models_is_terminal_and_retains_command`;
 `crates/daemon/src/fold_authority_handler_tests.rs:1062`
 `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix`.
@@ -535,7 +535,7 @@ configurations while summarizer preparation reads the live configuration and
 an admitted firing outlives route teardown.
 Check: `sometimes` - within one campaign, observe two participating
 bindings on one session with unequal captured configurations, a preparation
-read (`effective_config`, `crates/daemon/src/lib.rs:5417`) that sees an edited
+read (`effective_config`, `crates/daemon/src/lib.rs:5418`) that sees an edited
 live chain, and a firing task spawned by `spawn_history_summarizer_firing`
 (`:6194`) still running after `unbind_route` (`:4487`) removed its route.
 `sometimes` because this is enabling state to reach, not an invariant.
@@ -551,7 +551,7 @@ live chain beside the captured `memory_enabled` (`lib.rs:5640`).
 Corrections: `lib.rs:211-251` is now `:227-263`; `:5722` is `:5428`;
 `:5924-5925` is `:5640`; `config.rs:2158` is `:2350`.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:245`,
-`:778`; `crates/daemon/src/lib.rs:41247`;
+`:778`; `crates/daemon/src/lib.rs:41248`;
 `crates/daemon/src/config.rs:2379`
 `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`.
 Impact: High. Route mode alone is not a session-wide authority fact, which
@@ -736,7 +736,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - every daemon bind resolves configuration
-through `effective_for_project` (`crates/daemon/src/lib.rs:4755`).
+through `effective_for_project` (`crates/daemon/src/lib.rs:4756`).
 Status: invalidated
 Invalidated: PR #898 (#852) replaces the `.jsonc`-only discovery
 (`discover_tier`, `crates/daemon/src/config.rs:405-412`, now `.jsonc` then
@@ -996,7 +996,7 @@ Type: safety
 Reachability: default-production - the default configuration has an empty
 chain and `compaction_enabled: true` (`crates/daemon/src/config.rs:145-147`),
 so every daemon bind resolves the predicate through
-`ConfigCache::effective_for_project` (`crates/daemon/src/lib.rs:4755`) and
+`ConfigCache::effective_for_project` (`crates/daemon/src/lib.rs:4756`) and
 every plugin boot through `loadPluginConfigDetailed`
 (`packages/opencode-plugin/src/index.ts:77`).
 Status: active
@@ -1250,7 +1250,7 @@ Type: safety
 Reachability: default-production - an empty chain is the default, so a fresh
 session adopts native (`DaemonConfig::eidnara_folds`,
 `crates/daemon/src/config.rs:186-190` at `07ea883b5`) and every non-subagent
-pass reaches the gate (`crates/daemon/src/lib.rs:9664-9675`).
+pass reaches the gate (`crates/daemon/src/lib.rs:9665-9676`).
 Status: active
 Exercised: partial - the preparation clause is covered from both callers
 and the wrapup refusal is witnessed; the wrapup ordering clause, "before
@@ -1284,8 +1284,8 @@ Guarantee: Under native authority the shared preparation entry returns
 before its store load, trigger evaluation, or firing, from both callers, and
 `session.wrapup` refuses before snapshot or boundary work.
 Check: `unreachable` - under an applied native authority,
-`prepare_history_summarizer_fire` (`crates/daemon/src/lib.rs:5474`) and
-`record_no_fire` (`:6085`) never execute from any caller (`:9109`, `:9131`,
+`prepare_history_summarizer_fire` (`crates/daemon/src/lib.rs:5475`) and
+`record_no_fire` (`:6086`) never execute from any caller (`:9110`, `:9132`,
 `:9292`), and the wrapup handler returns `reason = "native_authority"`
 (`:7460-7468`) before the transform snapshot read. `unreachable` because
 these are named code points that must not run. Falsifier: live
@@ -1589,7 +1589,7 @@ in `first_unit` (`:8899-8900`), and promotion before `finished()`
 (`:9247-9249`; `promote_derived_state` `:9252-9281`). The verification
 strategy's reference model `(epoch, accepted_version, derived_payload,
 lease)` is not built; the tests assert outcomes directly.
-Existing check: `crates/daemon/src/lib.rs:35193`
+Existing check: `crates/daemon/src/lib.rs:35194`
 `committing_and_no_write_passes_promote_under_a_charged_lease_and_a_restart_forgets`;
 `:35404` `a_pass_that_loses_every_compare_and_swap_publishes_nothing`;
 `:35442` `a_committed_pass_whose_boundary_read_fails_still_promotes`; `:35506`
@@ -1684,7 +1684,7 @@ Reachability: explicit-config-only - tail-hygiene refresh runs inside
 `apply_once` past the native gate (`crates/daemon/src/transform.rs:3217-3218`,
 join `:4963-4986`); `session.status` reports a tail-hygiene object only when
 the durable row holds a baseline, which only a folding pass writes
-(`crates/daemon/src/lib.rs:6892-6910`, write at
+(`crates/daemon/src/lib.rs:6893-6911`, write at
 `crates/daemon/src/transform.rs:4973`).
 Status: active
 Exercised: yes - #906's recorded workspace gate runs the join table
@@ -1726,7 +1726,7 @@ evaluates. Cases (1) and (2) are disjoint, so the code's order, which tests
 (2) first (`:1097`), is the same decision. Matching keys permit evaluation;
 they do not guarantee validity. `session.status` reports evaluable only when
 the durable baseline is evaluable, not invalidated, and parts are retained
-at the key (`crates/daemon/src/lib.rs:6892-6910`); it makes no prefix
+at the key (`crates/daemon/src/lib.rs:6893-6911`); it makes no prefix
 comparison. A row-version advance that leaves the generation unchanged keeps
 validity. `always-or-unreached` because both consumers see a baseline only
 on folding sessions.
@@ -1743,18 +1743,18 @@ Read `refresh_tail_hygiene_baseline`
 `:1136-1140` ahead of `same_measured_prefix` `:1141`), `parts_for`
 (`crates/daemon/src/derived_state.rs:18-28`), `prior_baseline_parts` and
 `carried_derived_state` (`crates/daemon/src/transform.rs:7943-7966`), and the
-status join (`crates/daemon/src/lib.rs:6892-6910`) at `0ff62b29a`. A
+status join (`crates/daemon/src/lib.rs:6893-6911`) at `0ff62b29a`. A
 non-bust pass does not write its joined result durably: it evaluates it for
 that pass's decisions (`crates/daemon/src/transform.rs:4976-4986`), so
 "invalidated until a bust" holds because parts appear only from a bust or a
 first refresh.
 Existing check: `crates/daemon/src/tail_hygiene.rs:2278`
 `durable_scalars_join_retained_parts_by_generation` (#906);
-`crates/daemon/src/lib.rs:35742`
+`crates/daemon/src/lib.rs:35743`
 `status_reads_hygiene_validity_joined_with_the_retained_parts` (#906);
 `crates/daemon/src/derived_state.rs:122`
 `newer_epochs_and_versions_supersede_and_keys_select_by_epoch_and_generation`
-(#906); `crates/daemon/src/lib.rs:35193`
+(#906); `crates/daemon/src/lib.rs:35194`
 `committing_and_no_write_passes_promote_under_a_charged_lease_and_a_restart_forgets`
 (restart then non-bust stays invalid; a render-config `HARD` restores it;
 #906); `crates/daemon/tests/derived_state_crash_cut.rs:76` (#906).
@@ -1916,7 +1916,7 @@ refusal (`:139-142`), the `IdentityBudget` return before any prompt work
 (`:999-1006`), and the reservation handing the assembled selection to `fire`
 (`crates/daemon/src/history_summarizer.rs:1866-1874`) were read at
 `0ff62b29a`. Reattachment reuses the stored selection and rebuilds only text
-(`crates/daemon/src/lib.rs:5083-5095`), so it never re-selects.
+(`crates/daemon/src/lib.rs:5084-5096`), so it never re-selects.
 Existing check: `crates/daemon/src/history_summarizer_chunk.rs:1960`
 `an_over_budget_selection_stops_at_the_longest_prefix_of_whole_blocks`;
 `:1981` `an_indivisible_first_block_over_the_identity_budget_no_fires`;
@@ -1925,7 +1925,7 @@ Existing check: `crates/daemon/src/history_summarizer_chunk.rs:1960`
 (#859 PR C); all four run through `BudgetCase::assert_matches_oracle`
 (`:1887`), which also asserts the store reserves nothing (`:1875-1883`), and
 compare with the shared `identity_prefix_oracle` (`:1369-1376`);
-`crates/daemon/src/lib.rs:36303`
+`crates/daemon/src/lib.rs:36304`
 `an_indivisible_block_over_the_identity_budget_no_fires_and_reserves_nothing`;
 `:36318` `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix`
 (#859 PR C).
@@ -1936,7 +1936,7 @@ Open questions:
 - Does any test reserve and publish a shrunk chunk with its exact selection?
   Resolved: yes, since #859 PR C,
   `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix`
-  (`crates/daemon/src/lib.rs:36331`).
+  (`crates/daemon/src/lib.rs:36332`).
 
 ### fa-n14-module-meta-is-message-independent
 
@@ -2057,7 +2057,7 @@ cut (`a_credential_that_crosses_the_detail_bound_is_redacted_whole`).
 `NoFire::new` (`crates/memory-store/src/summarizer_timeline.rs:94-95`) and
 `pending_rewrite_detail` (`crates/daemon/src/transform.rs:6841-6858`) keep a
 raw prefix; `record_no_fire` compares the stored form
-(`crates/daemon/src/lib.rs:5914-5918`).
+(`crates/daemon/src/lib.rs:5915-5919`).
 `MAX_PENDING_REWRITE_DETAIL_BYTES` and `MAX_LAST_RECUT_BYTES` (1,024 each)
 live in the store (`crates/memory-store/src/lib.rs:6104`, `:6106`), and the
 descent, reset, and revert-truncation writers cut `last_recut` to the stable
@@ -2247,7 +2247,7 @@ rows across repeats.
 Check: `always` - per repeat, the serialized reconstructed rows equal the
 first pass's, the output revision is fresh, the recipe keeps the retained
 output only when the offered revision and the revert epoch match
-(`crates/daemon/src/lib.rs:2583-2590`, `:9751-9758`), and `committed: false`
+(`crates/daemon/src/lib.rs:2583-2590`, `:9752-9759`), and `committed: false`
 holds only when metadata is unchanged. `always` because every repeat must
 reconstruct the same rows.
 Fault/timing angle: A repeat beside a render change or a lost retained
@@ -2752,7 +2752,7 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - every native pass reaches the native
-gate (`crates/daemon/src/lib.rs:9664-9675`).
+gate (`crates/daemon/src/lib.rs:9665-9676`).
 Status: active
 Exercised: yes - #1071: `pi-rust-delivery` (one provider request per
 completed turn, two pinned compaction requests, fixture

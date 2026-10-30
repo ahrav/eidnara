@@ -78,8 +78,8 @@ grant `resetting`, delete, reseed, and the reseed re-opens the gate. During the
 landing on a mirror that is about to be replaced.
 
 **Reachability.** The apply path is `claim.mirror.apply`, dispatched at
-`crates/daemon/src/lib.rs:10064` and calling `store.apply_claim_mirror_receipt`
-at `:10337`, outside any test module. So the fall-through branch is
+`crates/daemon/src/lib.rs:10065` and calling `store.apply_claim_mirror_receipt`
+at `:10338`, outside any test module. So the fall-through branch is
 default-production; the gated branch is only reachable once something writes the
 control row, which today is test-only.
 

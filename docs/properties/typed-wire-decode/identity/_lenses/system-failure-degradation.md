@@ -6,7 +6,7 @@ External leads: plan R2/R6 and latency-audit A2/W5.
 
 ## Observations
 
-- `crates/daemon/src/lib.rs:12934-12962` falls back from invalid direct decode
+- `crates/daemon/src/lib.rs:12935-12963` falls back from invalid direct decode
   to the tree lane. Resident refusals terminate rather than falling back.
 - `lib.rs:16443-16461` skips missing or undecodable persisted raw messages.
   A compatibility regression can appear as missing history rather than an error.

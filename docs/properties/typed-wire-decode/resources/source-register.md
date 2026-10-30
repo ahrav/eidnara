@@ -50,7 +50,7 @@ by P:L19 or P:L213. No checkout or branch switch is needed for this discovery.
 
 Verified corrections to leads:
 
-- Tree fallback is `crates/daemon/src/lib.rs:12942-12957`; the typed failure
+- Tree fallback is `crates/daemon/src/lib.rs:12943-12958`; the typed failure
   restart is line 12935, not the start of the direct-lane match.
 - Snapshot `tail_delta` accounting is `crates/daemon/src/lib.rs:1767`.
 - Actual retained-original checks span `crates/daemon/src/wire.rs:1708-1792`.

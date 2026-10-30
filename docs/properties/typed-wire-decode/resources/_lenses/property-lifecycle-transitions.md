@@ -5,7 +5,7 @@ Scope: [source register](../source-register.md).
 
 Meter restart preserves charges at
 `crates/daemon/src/metered_decode.rs:201-217`; the handler retains the meter
-through settlement at `crates/daemon/src/lib.rs:12173-12181`. Snapshots retain
+through settlement at `crates/daemon/src/lib.rs:12174-12182`. Snapshots retain
 request ownership after local decode (`:1804-1813`). Active projection lease
 tests preserve charge across cache removal at `:23340-23353`.
 

@@ -50,8 +50,8 @@ The seeding precondition is enforced: an apply against an unseeded mirror return
 without a mirror state row to anchor it.
 
 Production reachability is the facade handler `claim.mirror.apply`, dispatched at
-`crates/daemon/src/lib.rs:10064` and calling
-`store.apply_claim_mirror_receipt` at `:10337`. Neither line is inside a
+`crates/daemon/src/lib.rs:10065` and calling
+`store.apply_claim_mirror_receipt` at `:10338`. Neither line is inside a
 `#[cfg(test)]` module; the `#[cfg(test)]` attributes above that point
 (`daemon/src/lib.rs:133`, `:599`, `:611`) each apply to a single item.
 
@@ -108,7 +108,7 @@ shows production cannot reseed.
 
 ### Q: Does the facade retry `claim.mirror.apply` with byte-identical bytes?
 
-- Sources examined: `crates/daemon/src/lib.rs:10310-10347` (the handler and
+- Sources examined: `crates/daemon/src/lib.rs:10311-10348` (the handler and
   its argument decode), `claim_mirror.rs:921-940` (the dedup contract),
   `claim_mirror.rs:501-505` (the digest input).
 - Findings: the handler decodes a caller-supplied payload and forwards it; it

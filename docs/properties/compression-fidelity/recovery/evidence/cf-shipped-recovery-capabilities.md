@@ -31,7 +31,7 @@ record. No permanent prohibition on adding capabilities is inferred.
   performs kernel-client reads. The
   [client, lines 520-537](../../../../../packages/opencode-plugin/src/shared/kernel-client/client.ts#L520)
   sends `kernel.read`, not an `eidnara_search` facade request.
-- [Separate daemon facade, lines 11887-11945](../../../../../crates/daemon/src/lib.rs#L11898)
+- [Separate daemon facade, lines 11887-11945](../../../../../crates/daemon/src/lib.rs#L11899)
   calls `search_history_segments_and_notes_for_session` and emits history
   title/body or note snippets. A direct facade test is not a registered
   model-tool witness and does not expose exact native occurrence bytes.

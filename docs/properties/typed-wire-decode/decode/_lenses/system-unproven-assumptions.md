@@ -4,7 +4,7 @@ Provenance: HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 
 - The plan says A2 covers explicit-null serializer_profile. The inspected
   corpus covers missing and unknown profiles, not that explicit-null case
-  (`crates/daemon/src/lib.rs:19831-19840`). Add a witness rather than infer it.
+  (`crates/daemon/src/lib.rs:19832-19841`). Add a witness rather than infer it.
 - The plan assumes only the plugin supplies retained-original CK ingress.
   The host wire treats routed bodies as opaque; no runtime sender-shape
   restriction follows from `docs/host-wire-protocol.md:337`.

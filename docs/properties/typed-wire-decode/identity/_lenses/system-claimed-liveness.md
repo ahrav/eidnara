@@ -7,7 +7,7 @@ External lead: plan R6 and latency-audit W5.
 ## Observations
 
 `crates/daemon/src/history_summarizer.rs:326-334` rejects a mismatched chunk
-fingerprint. `crates/daemon/src/lib.rs:16455-16473` skips unreadable raw rows.
+fingerprint. `crates/daemon/src/lib.rs:16456-16474` skips unreadable raw rows.
 Both can prevent useful recovery, but neither defines a new bounded progress
 promise for this decode replacement.
 

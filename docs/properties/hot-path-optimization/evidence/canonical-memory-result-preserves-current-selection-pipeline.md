@@ -67,8 +67,8 @@ baseline commit's rendered bytes does not run yet.
   Oracle packaging as a test-only adapter or reference executable is a test-design
   choice, not an open semantic acceptance rule; candidate helpers are not oracles.
 
-[pass]: ../../../../crates/daemon/src/lib.rs#L8201-L8281
-[reruns]: ../../../../crates/daemon/src/lib.rs#L8348-L8452
+[pass]: ../../../../crates/daemon/src/lib.rs#L8202-L8282
+[reruns]: ../../../../crates/daemon/src/lib.rs#L8349-L8453
 [entry]: ../../../../crates/daemon/src/canonical_memory.rs#L141-L174
 [query]: ../../../../crates/kernel/src/admission.rs#L3485-L3699
 [order]: ../../../../crates/kernel/src/admission.rs#L3193

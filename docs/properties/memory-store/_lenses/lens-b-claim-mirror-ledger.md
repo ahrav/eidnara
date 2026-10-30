@@ -48,7 +48,7 @@ decide this:
 
 The authoritative copy is the host's claim store, reached over the
 `claim.mirror.replace` and `claim.mirror.apply` facade calls dispatched at
-`crates/daemon/src/lib.rs:10063-10064` and invoked at `:10299` and `:10337`.
+`crates/daemon/src/lib.rs:10064-10065` and invoked at `:10300` and `:10338`.
 Neither line sits under a `#[cfg(test)]` module, so the projection is fed in
 default production. The mirror's own transport version is deliberately
 independent of its payload version (`claim_mirror.rs:24-28`).
@@ -311,7 +311,7 @@ Existing check: `crates/memory-store/tests/claim_mirror.rs:177-250` (`u10_scenar
 Impact: A replayed receipt applied twice would double-advance `acked_effect_id`, which then rejects the genuine next receipt with `CheckpointMismatch` and wedges the claim lane for that project until a reseed, which O5 shows production cannot perform.
 Open questions:
 
-- Does the facade retry `claim.mirror.apply` on a lost response, and with byte-identical bytes? `daemon/src/lib.rs:10337` is the call site; the retry policy above it was not traced in this pass.
+- Does the facade retry `claim.mirror.apply` on a lost response, and with byte-identical bytes? `daemon/src/lib.rs:10338` is the call site; the retry policy above it was not traced in this pass.
 
 ### mirror-receipt-conflict-rejects-divergent-replay
 
@@ -529,7 +529,7 @@ replacement requires begin_claim_store_rebuild", and `:1126-1127` describes
 
 Code: `begin_claim_store_rebuild` (`lib.rs:11304-11348`) is called only from
 tests. The facade exposes `claim.mirror.replace` and `claim.mirror.apply`
-(`daemon/src/lib.rs:10063-10064`) and nothing else. Both fail-closed readers
+(`daemon/src/lib.rs:10064-10065`) and nothing else. Both fail-closed readers
 therefore latch permanently in production.
 
 The doc comments describe a real and correct protocol. Nothing wires it up. See
@@ -585,7 +585,7 @@ the overlap is easy to misread, not because either side is wrong.
 
 ### Q1. Does the facade retry `claim.mirror.apply` with byte-identical bytes?
 
-Sources examined: `daemon/src/lib.rs:10310-10347` (the handler),
+Sources examined: `daemon/src/lib.rs:10311-10348` (the handler),
 `claim_mirror.rs:921-940` (the dedup contract).
 Findings: the store's dedup is byte-exact on the canonical group digest, so a
 retry that re-serializes with any difference becomes `ReceiptConflict` rather
@@ -611,7 +611,7 @@ Conclusion: needs human input.
 ### Q3. Is `begin_claim_store_rebuild` meant to be reachable in production?
 
 Sources examined: `grep` for the symbol across `crates/` and `packages/`;
-`daemon/src/lib.rs:10051-10071` (the facade dispatch table);
+`daemon/src/lib.rs:10052-10072` (the facade dispatch table);
 `claim_mirror.rs:219`, `:754`.
 Findings: no production caller and no facade method. The doc comments describe
 the grant as a precondition for two documented operations that production

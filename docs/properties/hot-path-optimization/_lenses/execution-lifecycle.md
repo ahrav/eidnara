@@ -30,5 +30,5 @@ the basis for reasoning about a cancelled request's durable outcome.
 [close]: ../../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
 [wire]: ../../../host-wire-protocol.md#L770-L809
 [ingest]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
-[transform]: ../../../../crates/daemon/src/lib.rs#L8207-L8282
+[transform]: ../../../../crates/daemon/src/lib.rs#L8208-L8283
 [ledger]: ../evidence/request-work-accounting-covers-retained-resources.md#evidence-trail

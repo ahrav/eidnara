@@ -15,7 +15,7 @@ never wait on the kernel or the job." Lens: concurrency; C9.
   once the pass has built its response; "When the response is handed to the
   wire writer, `CaptureHandoff::into_job` takes the store's single publication
   slot"; the 5 s budget's origin is "the handoff's acceptance".
-- `crates/daemon/src/lib.rs:9290-9336` `capture_after_response(offer)`:
+- `crates/daemon/src/lib.rs:9291-9337` `capture_after_response(offer)`:
   `self.source_capture.offer(offer)?` runs synchronously in the handler
   (this is the charge of the retained window to the supervisor's byte budget,
   not a kernel or job wait); returns `AfterResponse::new(move || { if let

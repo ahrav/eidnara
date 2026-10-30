@@ -14,6 +14,6 @@ canonical text (P:L95-L110). Allocation identity matters when snapshots and
 projections share shells; a smaller serialized object is not its heap size.
 Storage durability protocols are N/A to this resource-only change. Refusal
 must nevertheless create no store state, checked by the existing test at
-`crates/daemon/src/lib.rs:20545-20592`.
+`crates/daemon/src/lib.rs:20546-20593`.
 
 Candidate: ownership-led retained accounting across cache/lease handoff.

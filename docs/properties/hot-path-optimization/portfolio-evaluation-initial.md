@@ -176,9 +176,9 @@ as mandatory case accounting, but that decision belongs in test strategy.
 
 **Finding 7, cancellation-observation gap.** Current daemon handling parses and
 dispatches without passing `RequestCtx` cancellation into the operation
-(`crates/daemon/src/lib.rs:11832-11837,12569-12603`). It checks cancellation
+(`crates/daemon/src/lib.rs:11833-11838,12570-12604`). It checks cancellation
 only while settling an already prepared response
-(`crates/daemon/src/lib.rs:12053-12071`). Moving work off-worker changes that
+(`crates/daemon/src/lib.rs:12054-12072`). Moving work off-worker changes that
 shape because host cancellation can abort the waiter while physical work
 continues (`crates/host-runtime/src/dispatch.rs:937-954`). Discovery must define
 transform commit points and state the conditional rule, if intended: work that
@@ -220,7 +220,7 @@ APIs.
   payload over the byte budget at
   `crates/daemon/tests/kernel_routes.rs:2002-2056,2156-2195`.
 - **E1, no for the proposed worker.** The transform closure runs synchronously
-  at `crates/daemon/src/lib.rs:8150-8215`. Host tracking covers the callback at
+  at `crates/daemon/src/lib.rs:8151-8216`. Host tracking covers the callback at
   `crates/host-runtime/src/dispatch.rs:873-934`, not a future detached worker.
 - **E2, partial.** Existing host permits and daemon ingest reservations provide
   examples, but no transform physical-work class or owner ledger exists.
@@ -281,7 +281,7 @@ and harness are unverified.
 
 | Anchor | Verified/off | Note |
 | --- | --- | --- |
-| `catalog.md` `[pass-read]`, `daemon/src/lib.rs:8144-8213` | VERIFIED | Pins one canonical read and invokes the synchronous transform closure. |
+| `catalog.md` `[pass-read]`, `daemon/src/lib.rs:8145-8214` | VERIFIED | Pins one canonical read and invokes the synchronous transform closure. |
 | `catalog.md` `[memory-read]`, `daemon/src/canonical_memory.rs:141-212` | VERIFIED | Captures tip/lag, reads selected rows, filters, trims, and builds snapshot. |
 | `catalog.md` `[dispatch]`, `host-runtime/src/dispatch.rs:823-934` | VERIFIED | Acquires both permit classes and starts tracked callback work. |
 | `catalog.md` `[close]`, `host-runtime/src/dispatch.rs:1237-1268` | VERIFIED | Contains wait, abort, second wait, fatal refusal, and successful gate. |

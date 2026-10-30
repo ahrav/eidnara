@@ -13,7 +13,7 @@ nothing at all alongside it.
 1. There is no logging anywhere in the note-evaluation path.
    `crates/daemon/src/conditional_note_evaluation.rs` contains zero occurrences of
    `tracing` (whole-file grep, count 0), and no `warn!`, `debug!`, `info!`,
-   `error!`, or `trace!` either. `crates/daemon/src/lib.rs:10891-11571`, which
+   `error!`, or `trace!` either. `crates/daemon/src/lib.rs:10892-11572`, which
    spans all seven protocol handlers plus `note_evaluation_claim_scope` and
    `handle_note_delivery_value`, contains none of those macros either (verified by
    an awk scan restricted to that line range, no matches).

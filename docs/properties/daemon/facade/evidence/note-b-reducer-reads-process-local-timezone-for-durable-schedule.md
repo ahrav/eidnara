@@ -12,7 +12,7 @@ the timezone comes from at the one production call site.
 
 ## Evidence trail
 
-1. `crates/daemon/src/lib.rs:14256` is the only production call to the
+1. `crates/daemon/src/lib.rs:14257` is the only production call to the
    reducer:
    `reduce_conditional_note_evaluation(&pre, outcome, note.id, now, &chrono::Local)`.
    `chrono::Local` resolves the process's timezone, which on Linux comes from

@@ -28,7 +28,7 @@ PR C's head; Rust references are verified at `0ff62b29a`.
   `literal_chain_model` (`:1051-1054`); module precedence is
   `module_model_selected` (`:1084-1089`) applied in `apply_key` (`:868-883`).
   Production reaches it through `effective_for_project`
-  (`crates/daemon/src/lib.rs:4755`).
+  (`crates/daemon/src/lib.rs:4756`).
 - TypeScript predicate: `isCompactionEnabled`
   (`packages/opencode-plugin/src/config/agent-disable.ts:21-29`) is
   `compaction.enabled !== false && normalizeSummarizerChain(...).length > 0`.

@@ -113,7 +113,7 @@ refuses a store at the prior baseline untouched (`:496`).
 | `every_standing_equals_the_claim_facts_of_its_claim_at_every_snapshot`, `standing_refusals_match_the_claim_facts_refusals` | `crates/kernel/tests/kernel_claim_standing.rs:111`, `:168` | the sweep's claim standing read equals the registry row, decision row, own admission row, and served standing of claim facts at every snapshot, and refuses as claim facts does | sweep | unaudited |
 
 Also: `crates/daemon/src/config.rs:2328` and `:2349` (default, tier, and
-resolved-config freezing), `crates/daemon/src/lib.rs:21514` (bound route and
+resolved-config freezing), `crates/daemon/src/lib.rs:21515` (bound route and
 status block), `crates/host-runtime/src/control.rs:2017` (host forwarding
 allowlist against `docs/host-wire-protocol.md`), and
 `a_delete_as_read_spares_a_row_rewritten_since_the_read`

@@ -10,9 +10,9 @@ evidence. Inspected 2026-09-19 at
 
 ## Evidence trail
 
-- [lib.rs:5372-5388,9257-9271](../../../../../crates/daemon/src/lib.rs#L5383-L5399)
+- [lib.rs:5372-5388,9257-9271](../../../../../crates/daemon/src/lib.rs#L5384-L5400)
   reads canonical memory only when enabled and pins one read for the pass.
-  The later [pass assembly](../../../../../crates/daemon/src/lib.rs#L9268-L9282)
+  The later [pass assembly](../../../../../crates/daemon/src/lib.rs#L9269-L9283)
   shares it with composition and producer preparation.
 - [canonical_memory.rs:147-174](../../../../../crates/daemon/src/canonical_memory.rs#L147-L174)
   captures the kernel tip, evaluates freshness, and reads the bound project's

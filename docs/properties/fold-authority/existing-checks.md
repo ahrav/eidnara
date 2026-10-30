@@ -18,9 +18,9 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused` | `crates/memory-store/src/lib.rs:32203` | FA-E03 (exact boundary, content) | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `state_sync_metadata_scan_failure_rolls_back_earlier_writes` | `crates/memory-store/src/lib.rs:32030` | FA-E03 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `budget_stop_and_tool_only_ranges_are_recorded` | `crates/daemon/src/history_summarizer_chunk.rs:2814` | FA-E04 (range only) | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `history_summarizer_boundary_construction_matches_owned_reference` | `crates/daemon/src/lib.rs:18630` | FA-E04 (missing identity) | #859 PR A (run at `fd0b52aa5`); fingerprint assertions changed by #859 PR C | unaudited |
-| `no_fire_reason_is_durable_change_gated_and_cleared_by_fire` | `crates/daemon/src/lib.rs:41247` | FA-E05 (surviving stall clause), FA-E06 (live versus captured chain) | #903 (#855); #859 PR A | unaudited |
-| `session_wrapup_no_models_is_terminal_and_retains_command` | `crates/daemon/src/lib.rs:37610` | FA-E05 (wrapup late check) | #859 PR A (run at `fd0b52aa5`) | unaudited |
+| `history_summarizer_boundary_construction_matches_owned_reference` | `crates/daemon/src/lib.rs:18631` | FA-E04 (missing identity) | #859 PR A (run at `fd0b52aa5`); fingerprint assertions changed by #859 PR C | unaudited |
+| `no_fire_reason_is_durable_change_gated_and_cleared_by_fire` | `crates/daemon/src/lib.rs:41248` | FA-E05 (surviving stall clause), FA-E06 (live versus captured chain) | #903 (#855); #859 PR A | unaudited |
+| `session_wrapup_no_models_is_terminal_and_retains_command` | `crates/daemon/src/lib.rs:37611` | FA-E05 (wrapup late check) | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix` | `crates/daemon/src/fold_authority_handler_tests.rs:1062` | FA-E05 | #904 (#856); #859 PR A | unaudited |
 | `defer_delta_and_boundary_advance_are_additive` | `crates/daemon/src/tail_hygiene.rs:2148` | FA-E07 | #906 | unaudited |
 | `non_append_mutation_invalidates_until_a_bust` | `crates/daemon/src/tail_hygiene.rs:2210` | FA-E07, FA-N11 | #906 | unaudited |
@@ -68,17 +68,17 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates` | `crates/memory-store/src/lib.rs:25225` | FA-N06 | #903 (#855); #859 PR A | unaudited |
 | `native_pass_reads_are_bounded_independent_of_stored_rows` | `crates/daemon/src/transform_read_bound.rs:764` | FA-N06 | #903 (#855); #859 PR A | unaudited |
 | `a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly` | `crates/daemon/src/transform.rs:14638` | FA-N06 (folding-path counterpart), FA-N12, FA-E09 | #903 (#855); #859 PR A, #905 | unaudited |
-| `committing_and_no_write_passes_promote_under_a_charged_lease_and_a_restart_forgets` | `crates/daemon/src/lib.rs:35193` | FA-N09, FA-N11 | #906 | unaudited |
-| `a_pass_refused_a_lease_keeps_the_retained_baseline_parts` | `crates/daemon/src/lib.rs:35273` | FA-N09, FA-N11 | #906 | unaudited |
-| `a_promotion_without_parts_keeps_the_retained_parts_of_its_epoch_only` | `crates/daemon/src/lib.rs:35306` | FA-N09, FA-N11 | #906 | unaudited |
-| `an_emergency_pass_holds_a_derived_lease_only_inside_each_transform` | `crates/daemon/src/lib.rs:35331` | FA-N09 | #906 | unaudited |
-| `a_pass_that_loses_every_compare_and_swap_publishes_nothing` | `crates/daemon/src/lib.rs:35417` | FA-N09 | #906 | unaudited |
-| `a_committed_pass_whose_boundary_read_fails_still_promotes` | `crates/daemon/src/lib.rs:35455` | FA-N09 | #906 | unaudited |
-| `a_sibling_route_waits_for_promotion_and_a_delete_revokes_the_paused_incarnation` | `crates/daemon/src/lib.rs:35519` | FA-N09 | #906 | unaudited |
-| `a_session_purged_while_its_pass_awaits_promotion_stays_absent` | `crates/daemon/src/lib.rs:35621` | FA-N09 | #906 | unaudited |
-| `a_worker_lost_between_commit_and_promotion_leaves_the_commit_and_no_derived_state` | `crates/daemon/src/lib.rs:35641` | FA-N09 | #906 | unaudited |
-| `a_caller_cancelled_after_the_commit_still_promotes_once_the_worker_finishes` | `crates/daemon/src/lib.rs:35669` | FA-N09 | #906 | unaudited |
-| `derived_state_keeps_the_newest_acceptance_of_a_live_generation_under_the_shared_budget` | `crates/daemon/src/lib.rs:21739` | FA-N09 | #906 | unaudited |
+| `committing_and_no_write_passes_promote_under_a_charged_lease_and_a_restart_forgets` | `crates/daemon/src/lib.rs:35194` | FA-N09, FA-N11 | #906 | unaudited |
+| `a_pass_refused_a_lease_keeps_the_retained_baseline_parts` | `crates/daemon/src/lib.rs:35274` | FA-N09, FA-N11 | #906 | unaudited |
+| `a_promotion_without_parts_keeps_the_retained_parts_of_its_epoch_only` | `crates/daemon/src/lib.rs:35307` | FA-N09, FA-N11 | #906 | unaudited |
+| `an_emergency_pass_holds_a_derived_lease_only_inside_each_transform` | `crates/daemon/src/lib.rs:35332` | FA-N09 | #906 | unaudited |
+| `a_pass_that_loses_every_compare_and_swap_publishes_nothing` | `crates/daemon/src/lib.rs:35418` | FA-N09 | #906 | unaudited |
+| `a_committed_pass_whose_boundary_read_fails_still_promotes` | `crates/daemon/src/lib.rs:35456` | FA-N09 | #906 | unaudited |
+| `a_sibling_route_waits_for_promotion_and_a_delete_revokes_the_paused_incarnation` | `crates/daemon/src/lib.rs:35520` | FA-N09 | #906 | unaudited |
+| `a_session_purged_while_its_pass_awaits_promotion_stays_absent` | `crates/daemon/src/lib.rs:35622` | FA-N09 | #906 | unaudited |
+| `a_worker_lost_between_commit_and_promotion_leaves_the_commit_and_no_derived_state` | `crates/daemon/src/lib.rs:35642` | FA-N09 | #906 | unaudited |
+| `a_caller_cancelled_after_the_commit_still_promotes_once_the_worker_finishes` | `crates/daemon/src/lib.rs:35670` | FA-N09 | #906 | unaudited |
+| `derived_state_keeps_the_newest_acceptance_of_a_live_generation_under_the_shared_budget` | `crates/daemon/src/lib.rs:21740` | FA-N09 | #906 | unaudited |
 | `newer_epochs_and_versions_supersede_and_keys_select_by_epoch_and_generation` | `crates/daemon/src/derived_state.rs:122` | FA-N09, FA-N10, FA-N11 | #906 | unaudited |
 | `a_no_write_proposal_is_accepted_only_while_its_read_version_is_current` | `crates/daemon/src/derived_state.rs:148` | FA-N09 | #906 | unaudited |
 | `a_process_killed_between_commit_and_promotion_keeps_the_commit_and_forgets_the_derived_state` | `crates/daemon/tests/derived_state_crash_cut.rs:76` | FA-N09, FA-N11 | #906 | unaudited |
@@ -86,7 +86,7 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `divergence_reports_nothing_against_an_unknown_served_history` | `crates/daemon/src/transform.rs:13394` | FA-N10 | #906 | unaudited |
 | `a_new_hint_defers_after_a_restart_forgets_what_was_served` | `crates/daemon/tests/eval_surface_ledger.rs:442` | FA-N10 | #906 | unaudited |
 | `a_new_hint_is_skipped_while_every_deferral_slot_is_taken` | `crates/daemon/tests/eval_surface_ledger.rs:533` | FA-N10, FA-N14 | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `status_reads_hygiene_validity_joined_with_the_retained_parts` | `crates/daemon/src/lib.rs:35742` | FA-N11 | #906 | unaudited |
+| `status_reads_hygiene_validity_joined_with_the_retained_parts` | `crates/daemon/src/lib.rs:35743` | FA-N11 | #906 | unaudited |
 | `durable_scalars_join_retained_parts_by_generation` | `crates/daemon/src/tail_hygiene.rs:2278` | FA-N11, FA-E07 | #906 | unaudited |
 | `derived_output_state_is_absent_from_serialized_meta_and_legacy_rows_still_load` | `crates/memory-store/src/lib.rs:29921` | FA-N11 | #906 | unaudited |
 | `requested_identity_reads_do_not_grow_with_the_identity_table` | `crates/memory-store/src/lib.rs:23944` | FA-N12 | #905 | unaudited |
@@ -107,14 +107,14 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `an_over_budget_selection_stops_at_the_longest_prefix_of_whole_blocks` | `crates/daemon/src/history_summarizer_chunk.rs:1960` | FA-N13, FA-E04 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `an_indivisible_first_block_over_the_identity_budget_no_fires` | `crates/daemon/src/history_summarizer_chunk.rs:1981` | FA-N13, FA-E04 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `escaped_and_unicode_mids_are_charged_as_they_serialize` | `crates/daemon/src/history_summarizer_chunk.rs:1995` | FA-N13, FA-E04 | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `an_indivisible_block_over_the_identity_budget_no_fires_and_reserves_nothing` | `crates/daemon/src/lib.rs:36303` | FA-N13 | #859 PR A (run at `fd0b52aa5`) | unaudited |
+| `an_indivisible_block_over_the_identity_budget_no_fires_and_reserves_nothing` | `crates/daemon/src/lib.rs:36304` | FA-N13 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `module_meta_size_is_independent_of_message_count_and_window_size` | `crates/daemon/src/transform_meta_bound.rs:1273` | FA-N14, FA-E03 (guard not reached) | #859 PR A (run at `fd0b52aa5`); escaping negative control added by #859 PR C | unaudited |
 | `every_metadata_field_has_a_recorded_bound_within_the_headroom` | `crates/daemon/src/transform_meta_bound.rs:732` | FA-N14 | #859 PR A; `Unbounded` entries removed by #859 PR B; summarizer inventory and selection sum by #859 PR C, the table built with `inventory!` by `6fc85742f`, and `last_recut`, `pending_rewrite`, and the table's reuse as `recorded_metadata_bounds` by `186f3c076` and `e02b22383`, and the five-input `last_render_config` bound by `78fc312db` (run at `0ff62b29a`) | unaudited |
 | `request_identity_strings_over_their_bound_are_refused_before_any_read` | `crates/daemon/src/transform_meta_bound.rs:1371` | FA-N14 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `a_hundred_thousand_message_session_commits_a_three_hundred_message_window` | `crates/daemon/src/transform_meta_bound.rs:91` | FA-N14 | #859 PR A (run at `fd0b52aa5`); earlier #833 | unaudited |
 | `state_sync_refuses_anchors_and_watermarks_over_their_bounds` | `crates/memory-store/src/lib.rs:24425` | FA-N14 | #859 PR A (run at `fd0b52aa5`); todo serialized-length cap added by #859 PR C | unaudited |
 | `empty_and_reserved_message_ids_are_rejected` (mid length at `:1005-1015`) | `crates/daemon/src/wire.rs:967` | FA-N14 | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix` | `crates/daemon/src/lib.rs:36331` | FA-N13, FA-E04 (range) | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix` | `crates/daemon/src/lib.rs:36332` | FA-N13, FA-E04 (range) | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_generated_history_fires_the_longest_whole_block_prefix_within_the_identity_budget` (64-case proptest) | `crates/daemon/src/history_summarizer_chunk.rs:2169` | FA-N13, FA-E04 (mixed system and noise roles) | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `covered_systems_grow_in_m0_while_the_stored_meta_stays_fixed` | `crates/daemon/src/transform.rs:26398` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
 | `covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts` | `crates/memory-store/src/lib.rs:34298` | FA-N14, FA-E03 (lost CAS and write-and-delete refusal) | #859 PR B (run at `b45416ac0`) | unaudited |
@@ -231,8 +231,8 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 
 - FA-N05's emergency rerun caller has no native witness: it follows only a
   completed `Busy` wait in `finish_emergency_pass`
-  (`crates/daemon/src/lib.rs:9167` at `07ea883b5`), which native preparation
-  never returns (`:9671-9675`), so the shared gate covers it structurally.
+  (`crates/daemon/src/lib.rs:9168` at `07ea883b5`), which native preparation
+  never returns (`:9672-9676`), so the shared gate covers it structurally.
   #1068's 96 percent arm covers the first-unit caller.
 - The FA-E04 mixed-range witness is a proptest that does not count the
   mixed ranges it generates; the fixed budget-edge fixtures are synthetic

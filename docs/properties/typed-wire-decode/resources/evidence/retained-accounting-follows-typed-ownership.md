@@ -27,8 +27,8 @@ account for all surviving representations.
    the shell, not each handle, owns the block backing.
 6. `crates/daemon/src/lib.rs:1746-1800` retains native Values, messages, and
    tail_delta in snapshot accounting. `:1804-1813` holds the typed request.
-7. `crates/daemon/src/lib.rs:23051-23084` distinguishes shared native raw
-   Values from equal-but-distinct allocations. `:23352-23365` keeps active
+7. `crates/daemon/src/lib.rs:23052-23085` distinguishes shared native raw
+   Values from equal-but-distinct allocations. `:23353-23366` keeps active
    lease charge after cache removal.
 
 These are ordinary production holders; tests need not enable an optional
@@ -83,7 +83,7 @@ Canonical bytes remain retained after the wire representation becomes typed.
 ### Q: Does sharing allow removal of a holder's charge?
 
 - Sources examined: `crates/daemon/src/retained_size.rs:263-271`;
-  `crates/daemon/src/lib.rs:23051-23084,23352-23365`.
+  `crates/daemon/src/lib.rs:23052-23085,23353-23366`.
 - Findings: Per-holder conservative charges coexist with local alias-aware
   accounting. Equal content is insufficient evidence of one allocation.
 - Missing evidence: Candidate observations of unchanged holder/release policy.

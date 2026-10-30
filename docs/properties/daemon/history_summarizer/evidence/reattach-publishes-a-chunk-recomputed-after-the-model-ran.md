@@ -22,7 +22,7 @@ and the bytes stored beside the history_segment come from the same observation.
 
 ### What the reattach path does
 
-`crates/daemon/src/lib.rs:4672-4799`, the `AwaitingProducer` arm:
+`crates/daemon/src/lib.rs:4673-4800`, the `AwaitingProducer` arm:
 
 - `:4686-4691` builds `live` from the **current** request's projection.
 - `:4692-4695` reads `chunk_range` from the durable state; without it the arm gives
@@ -143,7 +143,7 @@ Dependencies:
 
 ### Q: Can the rebuilt `chunk.chunk.end_index` differ from the durable `chunk_range.to_ordinal`?
 
-- Sources examined: `crates/daemon/src/lib.rs:4707-4736`;
+- Sources examined: `crates/daemon/src/lib.rs:4708-4737`;
   `crates/daemon/src/history_summarizer_chunk.rs:352-455` (`build_history_summarizer_chunk`'s
   signature and body start), `:611-790` (the fresh assembly for comparison),
   `:840-856` (`end_placeholder`); `crates/daemon/src/history_summarizer.rs:645`
@@ -167,9 +167,9 @@ Dependencies:
 
 ### Q: Does the reattach path's differing `sequence_offset` and validate options change which range is kept?
 
-- Sources examined: `crates/daemon/src/lib.rs:4771-4779` versus
+- Sources examined: `crates/daemon/src/lib.rs:4772-4780` versus
   `crates/daemon/src/history_summarizer_chunk.rs:777-784` and
-  `crates/daemon/src/lib.rs:5272-5273` with `:5287`;
+  `crates/daemon/src/lib.rs:5273-5274` with `:5288`;
   `crates/daemon/src/history_summarizer_validate.rs:538-556` (discard-last healing gated
   on `in_emergency` and `force_keep_last_history_segment`).
 - Findings: with `in_emergency: false` and `force_keep_last_history_segment: false`, the

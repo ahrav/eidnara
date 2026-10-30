@@ -44,8 +44,8 @@ All references are verified at HEAD `0ff62b29a`.
 - `reset_session_for_recomp` (`:13248`) passes no replacement, so the adopted
   authority survives an ordinary reset. `reset_no_survivor` uses it
   (`crates/daemon/src/transform.rs:2192`).
-- A rerun transform (`rerun_transform`, `crates/daemon/src/lib.rs:9310`, which
-  runs with `PassState::Reload` at `:9322`) plans with `first_pass: false`
+- A rerun transform (`rerun_transform`, `crates/daemon/src/lib.rs:9311-9312`, which
+  runs with `PassState::Reload` at `:9323`) plans with `first_pass: false`
   (`:9212-9215`), so an emergency rerun never changes authority.
 
 Witnesses:

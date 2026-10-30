@@ -20,7 +20,7 @@ by the user after its four completed portfolio lenses.
 3. Lines 13813-13938 show available signed-zero and candidate-order fixtures.
 4. `crates/daemon/src/codec/sidecar.rs:177-201` supplies stamp construction
    and parsing seams, but no aggregate exclusion marker is present.
-5. `crates/daemon/src/lib.rs:16455-16473` requires supplied stored rows to
+5. `crates/daemon/src/lib.rs:16456-16474` requires supplied stored rows to
    reach meaningful history recovery. An empty store is not an upgrade probe.
 6. `crates/daemon/src/history_summarizer_chunk.rs:418-430` requires synthetic and real
    inputs to witness exclusion without demanding a forbidden synthetic item.

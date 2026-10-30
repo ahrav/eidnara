@@ -259,11 +259,11 @@ count runs only for a value past the wire cap.
 
 [unit-runner-live]: ../../../../crates/daemon/src/transform_unit.rs#L23-L49
 [unit-host-live]: ../../../../crates/host-runtime/src/handler.rs#L606
-[unit-first-live]: ../../../../crates/daemon/src/lib.rs#L8916-L8973
-[unit-after-hook]: ../../../../crates/daemon/src/lib.rs#L8926-L8953
-[unit-between-hook]: ../../../../crates/daemon/src/lib.rs#L8954-L8967
-[unit-prepare-live]: ../../../../crates/daemon/src/lib.rs#L5316
-[unit-settle-live]: ../../../../crates/daemon/src/lib.rs#L9004-L9022
+[unit-first-live]: ../../../../crates/daemon/src/lib.rs#L8917-L8974
+[unit-after-hook]: ../../../../crates/daemon/src/lib.rs#L8927-L8954
+[unit-between-hook]: ../../../../crates/daemon/src/lib.rs#L8955-L8968
+[unit-prepare-live]: ../../../../crates/daemon/src/lib.rs#L5317
+[unit-settle-live]: ../../../../crates/daemon/src/lib.rs#L9005-L9023
 [unit-abort-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L143-L254
 [unit-emergency-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L771-L837
 [unit-panic-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L444-L472
@@ -2439,7 +2439,7 @@ Open questions:
   `0ff62b29a`. An `AwaitingProducer` firing with a live producer run reattaches
   (`handle_restart_load`, `:903-954`, arm `:912-939`): the daemon recomputes the
   fingerprint from the current snapshot as a digest
-  (`crates/daemon/src/lib.rs:5122-5124`), and `publish_validated_chunk`
+  (`crates/daemon/src/lib.rs:5123-5125`), and `publish_validated_chunk`
   compares it with the stored joined form, rejects it as
   `FingerprintMismatch`, and abandons the run with the failure backoff
   (`history_summarizer.rs:637-652`). A reserved `Publishing` firing takes
@@ -3117,25 +3117,25 @@ evaluation of this area and its disposition are recorded in
 [wire751]: ../../../host-wire-protocol.md#L440
 [wire77]: ../../../host-wire-protocol.md#L666
 
-[handle]: ../../../../crates/daemon/src/lib.rs#L12456
-[bytecap]: ../../../../crates/daemon/src/lib.rs#L16469-L16487
+[handle]: ../../../../crates/daemon/src/lib.rs#L12457
+[bytecap]: ../../../../crates/daemon/src/lib.rs#L16470-L16488
 [copies]: ../../../../crates/daemon/src/metered_decode.rs#L58
 [step]: ../../../../crates/daemon/src/metered_decode.rs#L66
 [floor]: ../../../../crates/daemon/src/metered_decode.rs#L417-L478
-[toolarge]: ../../../../crates/daemon/src/lib.rs#L16443
-[queuefull]: ../../../../crates/daemon/src/lib.rs#L16450
-[probe]: ../../../../crates/daemon/src/lib.rs#L16027-L16029
-[class]: ../../../../crates/daemon/src/lib.rs#L16264-L16271
-[dispatch]: ../../../../crates/daemon/src/lib.rs#L13246
-[pagefields]: ../../../../crates/daemon/src/lib.rs#L13343-L13347
-[unrecognized]: ../../../../crates/daemon/src/lib.rs#L13382
+[toolarge]: ../../../../crates/daemon/src/lib.rs#L16444
+[queuefull]: ../../../../crates/daemon/src/lib.rs#L16451
+[probe]: ../../../../crates/daemon/src/lib.rs#L16028-L16030
+[class]: ../../../../crates/daemon/src/lib.rs#L16265-L16272
+[dispatch]: ../../../../crates/daemon/src/lib.rs#L13247
+[pagefields]: ../../../../crates/daemon/src/lib.rs#L13344-L13348
+[unrecognized]: ../../../../crates/daemon/src/lib.rs#L13383
 [pageconst]: ../../../../crates/daemon/src/lib.rs#L796-L803
-[freeze]: ../../../../crates/daemon/src/lib.rs#L7684
-[routechan]: ../../../../crates/daemon/src/lib.rs#L8405-L8408
-[accept]: ../../../../crates/daemon/src/lib.rs#L8437
+[freeze]: ../../../../crates/daemon/src/lib.rs#L7685
+[routechan]: ../../../../crates/daemon/src/lib.rs#L8406-L8409
+[accept]: ../../../../crates/daemon/src/lib.rs#L8438
 [ticket]: ../../../../crates/daemon/src/lib.rs#L602-L659
-[pageapply]: ../../../../crates/daemon/src/lib.rs#L10073-L10080
-[testentry]: ../../../../crates/daemon/src/lib.rs#L3699
+[pageapply]: ../../../../crates/daemon/src/lib.rs#L10074-L10081
+[testentry]: ../../../../crates/daemon/src/lib.rs#L3700
 [wirestruct]: ../../../../crates/daemon/src/transform.rs#L809-L980
 [wiremsg]: ../../../../crates/memory-store/src/lib.rs#L126-L143
 [wireblock]: ../../../../crates/memory-store/src/lib.rs#L250-L264
@@ -3148,18 +3148,18 @@ evaluation of this area and its disposition are recorded in
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
 
 [cfg-compaction]: ../../../../crates/daemon/src/config.rs#L124
-[expand]: ../../../../crates/daemon/src/lib.rs#L4467
+[expand]: ../../../../crates/daemon/src/lib.rs#L4468
 [store-pc]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/lib.rs#L4863
-[history_summarizer-fire]: ../../../../crates/daemon/src/lib.rs#L5316
+[history_summarizer-fire]: ../../../../crates/daemon/src/lib.rs#L5317
 [assemble]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L560
 [ingress-chunks]: https://github.com/ahrav/eidnara/blob/2979106a/crates/daemon/src/lib.rs#L13860
 [gate-native]: https://github.com/ahrav/eidnara/blob/2979106a/crates/daemon/src/lib.rs#L13663-L13668
 [native-attach]: https://github.com/ahrav/eidnara/blob/2979106a/crates/daemon/src/lib.rs#L13691
 [native-diff]: https://github.com/ahrav/eidnara/blob/2979106a/crates/daemon/src/lib.rs#L13879-L13896
-[segments-take]: ../../../../crates/daemon/src/lib.rs#L15129-L15146
-[segments]: ../../../../crates/daemon/src/lib.rs#L15149-L15159
-[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L17568
-[sel-kind]: ../../../../crates/daemon/src/lib.rs#L17630
+[segments-take]: ../../../../crates/daemon/src/lib.rs#L15130-L15147
+[segments]: ../../../../crates/daemon/src/lib.rs#L15150-L15160
+[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L17569
+[sel-kind]: ../../../../crates/daemon/src/lib.rs#L17631
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2107
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L301-L308
@@ -3176,8 +3176,8 @@ evaluation of this area and its disposition are recorded in
 [active-match]: ../../../../crates/daemon/src/transform.rs#L7429
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27958
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27709
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L25539
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25822
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L25540
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25823
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
 [tag-baseline]: ../../../../crates/daemon/src/transform.rs#L3045-L3046
 [tag-protection]: ../../../../crates/daemon/src/transform.rs#L3707-L3720
@@ -3215,16 +3215,16 @@ evaluation of this area and its disposition are recorded in
 [load]: ../../../../crates/memory-store/src/lib.rs#L6652
 [full-select]: ../../../../crates/memory-store/src/lib.rs#L4905-L4906
 [epoch-read]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/lib.rs#L4847
-[epoch-read-delta]: ../../../../crates/daemon/src/lib.rs#L4467
-[active]: ../../../../crates/daemon/src/lib.rs#L4870
-[prepare]: ../../../../crates/daemon/src/lib.rs#L5316
-[no-fire]: ../../../../crates/daemon/src/lib.rs#L5772
-[handler]: ../../../../crates/daemon/src/lib.rs#L8261-L8544
-[received-call]: ../../../../crates/daemon/src/lib.rs#L8751
-[rejected-call]: ../../../../crates/daemon/src/lib.rs#L8867-L8869
-[floor-a]: ../../../../crates/daemon/src/lib.rs#L8954-L8958
-[floor-b]: ../../../../crates/daemon/src/lib.rs#L9013-L9018
-[completed-call]: ../../../../crates/daemon/src/lib.rs#L9081
+[epoch-read-delta]: ../../../../crates/daemon/src/lib.rs#L4468
+[active]: ../../../../crates/daemon/src/lib.rs#L4871
+[prepare]: ../../../../crates/daemon/src/lib.rs#L5317
+[no-fire]: ../../../../crates/daemon/src/lib.rs#L5773
+[handler]: ../../../../crates/daemon/src/lib.rs#L8262-L8545
+[received-call]: ../../../../crates/daemon/src/lib.rs#L8752
+[rejected-call]: ../../../../crates/daemon/src/lib.rs#L8868-L8870
+[floor-a]: ../../../../crates/daemon/src/lib.rs#L8955-L8959
+[floor-b]: ../../../../crates/daemon/src/lib.rs#L9014-L9019
+[completed-call]: ../../../../crates/daemon/src/lib.rs#L9082
 [cfg-models]: ../../../../crates/daemon/src/config.rs#L122
 [cfg-user-mem]: ../../../../crates/daemon/src/config.rs#L129
 [cas-retry]: ../../../../crates/daemon/src/transform.rs#L1942-L1981
@@ -3332,7 +3332,7 @@ evaluation of this area and its disposition are recorded in
 [reserve-direct]: ../../../../crates/host-runtime/src/dispatch.rs#L574
 [direct-frame]: ../../../../crates/host-runtime/src/frame_channel.rs#L157-L183
 [native-reserve]: ../../../../crates/shm-transport/src/backend/ring.rs#L1345
-[settle-with]: ../../../../crates/daemon/src/lib.rs#L13362
+[settle-with]: ../../../../crates/daemon/src/lib.rs#L13363
 [fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L509-L544
 [ci-miri]: ../../../../.github/workflows/ci.yml#L804-L867
 [ci-valgrind]: ../../../../.github/workflows/ci.yml#L869-L921
@@ -3401,8 +3401,8 @@ evaluation of this area and its disposition are recorded in
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
 [fx-1400]: ../../../../crates/daemon/src/transform.rs#L12436-L12441
 [fx-2500]: ../../../../crates/daemon/src/transform.rs#L28085-L28090
-[h-pre]: ../../../../crates/daemon/src/lib.rs#L8215-L8232
-[respond]: ../../../../crates/daemon/src/lib.rs#L15109
+[h-pre]: ../../../../crates/daemon/src/lib.rs#L8216-L8233
+[respond]: ../../../../crates/daemon/src/lib.rs#L15110
 [tc-doc]: ../../../../crates/daemon/src/token_cache.rs#L1-L7
 [tc-cap]: ../../../../crates/daemon/src/token_cache.rs#L16
 [tc-bound]: ../../../../crates/daemon/src/token_cache.rs#L24-L28
@@ -3420,9 +3420,9 @@ evaluation of this area and its disposition are recorded in
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L24332
 [selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24584
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
-[native-sharing]: ../../../../crates/daemon/src/lib.rs#L22945
-[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L23263
-[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L23385
+[native-sharing]: ../../../../crates/daemon/src/lib.rs#L22946
+[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L23264
+[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L23386
 [soft-reference]: ../../../../crates/daemon/src/transform.rs#L24361
 [soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24387
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24521
@@ -3448,9 +3448,9 @@ evaluation of this area and its disposition are recorded in
 [as-item]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L40
 [trunc-call]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L693
 [trunc]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L744
-[boundary-view]: ../../../../crates/daemon/src/lib.rs#L17568-L17618
-[construction-corpus]: ../../../../crates/daemon/src/lib.rs#L18511
-[firing-capture]: ../../../../crates/daemon/src/lib.rs#L25539
+[boundary-view]: ../../../../crates/daemon/src/lib.rs#L17569-L17619
+[construction-corpus]: ../../../../crates/daemon/src/lib.rs#L18512
+[firing-capture]: ../../../../crates/daemon/src/lib.rs#L25540
 [fp]: ../../../../crates/daemon/src/history_summarizer.rs#L166-L173
 [fp-field]: ../../../../crates/memory-store/src/lib.rs#L969
 [fp-verify]: ../../../../crates/daemon/src/history_summarizer.rs#L476-L487
@@ -3467,13 +3467,13 @@ evaluation of this area and its disposition are recorded in
 [sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735
 [sched-default]: ../../../../crates/daemon/src/config.rs#L155
 [sched-accept]: ../../../../crates/daemon/src/config.rs#L1249-L1267
-[eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4891-L4900
+[eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4892-L4901
 [binding-doc]: ../../../../crates/daemon/src/lib.rs#L237-L248
-[call-reattach]: ../../../../crates/daemon/src/lib.rs#L5152
-[call-fire]: ../../../../crates/daemon/src/lib.rs#L5454
-[call-fire-caller]: ../../../../crates/daemon/src/lib.rs#L5561
-[call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5967
-[call-bind]: ../../../../crates/daemon/src/lib.rs#L13085
+[call-reattach]: ../../../../crates/daemon/src/lib.rs#L5153
+[call-fire]: ../../../../crates/daemon/src/lib.rs#L5455
+[call-fire-caller]: ../../../../crates/daemon/src/lib.rs#L5562
+[call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5968
+[call-bind]: ../../../../crates/daemon/src/lib.rs#L13086
 [eff-proj]: ../../../../crates/daemon/src/config.rs#L476-L486
 [eff-warn]: ../../../../crates/daemon/src/config.rs#L533-L656
 [tier-cached]: ../../../../crates/daemon/src/config.rs#L743-L779
@@ -3495,15 +3495,15 @@ evaluation of this area and its disposition are recorded in
 [blocking-doc]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L460-L461
 [blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [spawn-kernel-open]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
-[spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L4107-L4115
+[spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L4108-L4116
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 
-[pass-drain]: ../../../../crates/daemon/src/lib.rs#L8744-L8748
+[pass-drain]: ../../../../crates/daemon/src/lib.rs#L8745-L8749
 [due-predicate]: ../../../../crates/memory-store/src/lib.rs#L11631-L11635
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L11744-L11748
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6325
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L97-L98
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38783
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38784
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20682
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21058
 [sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L327
@@ -3524,9 +3524,9 @@ evaluation of this area and its disposition are recorded in
 [cron-probe]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L202
 [cron-zone]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L206-L238
 [cron-local]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L234-L245
-[sched-projects]: ../../../../crates/daemon/src/lib.rs#L15083-L15152
-[sched-authority]: ../../../../crates/daemon/src/lib.rs#L15107-L15112
-[sched-filter]: ../../../../crates/daemon/src/lib.rs#L15131
+[sched-projects]: ../../../../crates/daemon/src/lib.rs#L15084-L15153
+[sched-authority]: ../../../../crates/daemon/src/lib.rs#L15108-L15113
+[sched-filter]: ../../../../crates/daemon/src/lib.rs#L15132
 
 Update, 2026-09-27: [#833](https://github.com/ahrav/eidnara/issues/833) deletes the serialized-output per-message memo and its lookup:
 `SerializedOutputCacheEntry`, `SerializedOutputCacheSnapshot`,

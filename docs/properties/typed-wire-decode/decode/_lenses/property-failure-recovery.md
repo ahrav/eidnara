@@ -10,7 +10,7 @@ cannot retain two occurrences. The compatibility gate must accept the bytes,
 the typed attempt must fail, and the independent tree conversion must succeed.
 The handler must report the tree answer without dispatching the failed parse.
 
-Evidence: `crates/daemon/src/lib.rs:12932-12962,19979-20091,20152-20193`.
+Evidence: `crates/daemon/src/lib.rs:12933-12963,19980-20092,20153-20194`.
 Duplicates inside retained Value maps need separate controls: not every
 duplicate forces a derived struct to fail.
 

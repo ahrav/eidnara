@@ -37,8 +37,8 @@ Production guard: `recheck_before_spawn` at `aws_refresh.rs:612` re-applies
 | `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner` | `model_execution_subprocess.rs:4266` | 49 runs, 26 refreshes, one external login, exact row sequence | unaudited |
 
 Test seams: `TEST_WAIT_BUDGET` and `TEST_WAIT_POLL` at
-`crates/daemon/src/lib.rs:36626`; `fire_and_settle` at `:41653`;
-`expire_history_summarizer_backoff` at `:40656`.
+`crates/daemon/src/lib.rs:36627`; `fire_and_settle` at `:41654`;
+`expire_history_summarizer_backoff` at `:40657`.
 
 ## Source health (N10)
 

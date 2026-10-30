@@ -4,7 +4,7 @@
 
 `handle_authority_prepare_value` computes one side of its checksum comparison
 itself, calling `store.authority_seed_checksum` at
-`crates/daemon/src/lib.rs:7208-7217` and passing only the *expected* side from
+`crates/daemon/src/lib.rs:7209-7218` and passing only the *expected* side from
 the request. `handle_authority_drain_value`, a hundred lines later in the same
 `impl` and serving the same authority state machine, passes both sides from the
 request. Two paths through one state machine treat the same integrity check

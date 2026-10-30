@@ -473,10 +473,10 @@ by the decode/latency catalogs; they are not evidence for canonical block bytes.
 | `crates/daemon/src/history_summarizer.rs:326-334,397-419` | Fingerprint equality gate rejects mismatch, including at publish. | unaudited |
 | `crates/daemon/src/history_summarizer_chunk.rs:418-430` | Snapshot filters synthetic/system/out-of-range blocks before measuring length. | unaudited |
 | `crates/daemon/src/history_summarizer_chunk.rs:646-675` | Missing selected identity refuses firing; raw arrays exclude synthetic messages. | unaudited |
-| `crates/daemon/src/lib.rs:16455-16473` | Missing/malformed raw rows skip; ordinal bounds and first-per-ordinal selection apply. | unaudited |
-| `crates/daemon/src/lib.rs:13317` | `expect`: OpenCode sidecar metadata serializes for its cache key. | unaudited |
-| `crates/daemon/src/lib.rs:13641,13676` | `expect`: a compatible native cache has a snapshot. | unaudited |
-| `crates/daemon/src/lib.rs:13733-13749` | Enabled differential serializes full/incremental native output and asserts no `incremental native attachment cache drift`. | unaudited |
+| `crates/daemon/src/lib.rs:16456-16474` | Missing/malformed raw rows skip; ordinal bounds and first-per-ordinal selection apply. | unaudited |
+| `crates/daemon/src/lib.rs:13318` | `expect`: OpenCode sidecar metadata serializes for its cache key. | unaudited |
+| `crates/daemon/src/lib.rs:13642,13677` | `expect`: a compatible native cache has a snapshot. | unaudited |
+| `crates/daemon/src/lib.rs:13734-13750` | Enabled differential serializes full/incremental native output and asserts no `incremental native attachment cache drift`. | unaudited |
 | `crates/daemon/src/transform.rs:4929` | `expect`: divergence diagnostics serialize before the new durable receipt vector is assigned. | unaudited |
 | `crates/memory-store/src/lib.rs:1301-1319` | Frozen-pair decode clears retained originals for typed replay. | unaudited |
 | `crates/memory-store/src/lib.rs:11298-11321` | Raw history enters durable redaction before storage. | unaudited |

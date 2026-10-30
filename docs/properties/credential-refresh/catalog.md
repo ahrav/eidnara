@@ -42,7 +42,7 @@ non-empty summarizer chain or another operator selection.
   folding needs an admitted, non-empty `model_chain`
   (`crates/daemon/src/config.rs:185` `eidnara_folds`); a default
   `DaemonConfig` leaves the chain empty and the summarizer answers
-  `no_fire: "no_models"` (`crates/daemon/src/lib.rs:5697`), so the N8 and N9
+  `no_fire: "no_models"` (`crates/daemon/src/lib.rs:5698`), so the N8 and N9
   paths are never entered.
 - `test-only`: N13 is a campaign. The gates, the outage judge, and the lineage
   oracle live in `crates/eval-core/src/qualification.rs`; the runner is

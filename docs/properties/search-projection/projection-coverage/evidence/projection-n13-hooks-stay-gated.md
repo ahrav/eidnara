@@ -95,12 +95,12 @@ scheduler record rather than duplicating lease/receipt rules.
 
 [n1]: ../../../../../../commons/docs/plans/2026-09-08-1614-feat-eidnara-rust-product-state-ownership-plan.md#L156-L169
 [plan]: ../../../../../../commons/docs/plans/2026-09-10-feat-eidnara-rp2-1-projection-coverage-plan.md#L54-L59
-[handler]: ../../../../../crates/daemon/src/lib.rs#L11931-L11949
-[dispatch]: ../../../../../crates/daemon/src/lib.rs#L12619-L12690
+[handler]: ../../../../../crates/daemon/src/lib.rs#L11932-L11950
+[dispatch]: ../../../../../crates/daemon/src/lib.rs#L12620-L12691
 [config]: ../../../../../crates/daemon/src/config.rs#L1909-L1957
 [keys]: ../../../../../crates/daemon/src/config.rs#L550-L642
-[facade]: ../../../../../crates/daemon/src/lib.rs#L10289-L10301
-[routes]: ../../../../../crates/daemon/src/lib.rs#L32975-L33015
+[facade]: ../../../../../crates/daemon/src/lib.rs#L10290-L10302
+[routes]: ../../../../../crates/daemon/src/lib.rs#L32976-L33016
 [scheduler]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L25-L36
-[bridge]: ../../../../../crates/daemon/src/lib.rs#L14067-L14132
+[bridge]: ../../../../../crates/daemon/src/lib.rs#L14068-L14133
 [acceptance]: ../catalog.md#projection-acceptance-situations-witnessed

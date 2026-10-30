@@ -4,7 +4,7 @@ HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 Scope: [source register](../source-register.md).
 
 Malformed JSON, a typed-shape error, and transient admission failure are
-different outcomes at `crates/daemon/src/lib.rs:12934-12957,8126-8134`.
+different outcomes at `crates/daemon/src/lib.rs:12935-12958,8127-8135`.
 The whole tree parse must enter a peak window before conversion; a failed
 typed attempt must remain in that same window before fallback.
 

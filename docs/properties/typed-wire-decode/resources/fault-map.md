@@ -10,14 +10,14 @@ All constructions below are recommendations for handoff. None runs here.
 | Fault or state | Existing seam | Availability and limit |
 | --- | --- | --- |
 | Plain/escaped text and dense native/ignored nodes | `crates/daemon/tests/parse_charge_covers_typed_decode.rs:90-199` | Input builders and peak counter exist; text-heavy combined tree cases are missing. |
-| Malformed JSON, typed errors, duplicate keys, raw tokens | `crates/daemon/src/lib.rs:19724-20130` | Corpus and both decoders exist; post-change duplicate message/block fallback must be witnessed separately. |
+| Malformed JSON, typed errors, duplicate keys, raw tokens | `crates/daemon/src/lib.rs:19725-20131` | Corpus and both decoders exist; post-change duplicate message/block fallback must be witnessed separately. |
 | Zero or partially free reserve | `crates/daemon/tests/parse_charge_covers_typed_decode.rs:224-333` | Allocation refusal probes exist; successful fake charges are unbacked. |
-| Real held scratch bytes | `crates/daemon/src/lib.rs:20254-20288,20426-20482` | TestPool uses ByteBudget and a distinct held charge. Ring-level competing-request barrier is not supplied. |
-| Frozen cases and additive ceiling neighbours | `crates/daemon/src/lib.rs:19581-19657,20200-20241` | Freeze original A1-A3 byte/capacity/outcome receipts; length caps and node floor stay fixed. Add new string-ceiling cases without replacing old ones. |
+| Real held scratch bytes | `crates/daemon/src/lib.rs:20255-20289,20427-20483` | TestPool uses ByteBudget and a distinct held charge. Ring-level competing-request barrier is not supplied. |
+| Frozen cases and additive ceiling neighbours | `crates/daemon/src/lib.rs:19582-19658,20201-20242` | Freeze original A1-A3 byte/capacity/outcome receipts; length caps and node floor stay fixed. Add new string-ceiling cases without replacing old ones. |
 | Projection and alias lifetimes | `crates/daemon/src/wire.rs:958-1238,1749-1792` | Manual estimate and pointer-sharing controls exist; no continuous full-path allocator ledger. |
-| Cache removal with live lease | `crates/daemon/src/lib.rs:20636-20687` | Retained owner and charge observations exist; not a transient-construction bound. #828 deletes the projection-lease test that `23311-23353` cited. |
+| Cache removal with live lease | `crates/daemon/src/lib.rs:20637-20688` | Retained owner and charge observations exist; not a transient-construction bound. #828 deletes the projection-lease test that `23311-23353` cited. |
 | Canonical serializer workspace | `crates/daemon/src/served_json.rs:121-141` | Code shows metadata and two buffers; attributable peak/charge instrumentation is missing. |
-| Above-facade-cap escaped key | `crates/daemon/src/lib.rs:12164-12177,15849-15872,16156-16173` | Probe-before-meter ordering is verified and conflicts with A1 at `docs/properties/hot-path-optimization/latency-audit/catalog.md:159-165`; allocation magnitude is unmeasured. |
+| Above-facade-cap escaped key | `crates/daemon/src/lib.rs:12165-12178,15850-15873,16157-16174` | Probe-before-meter ordering is verified and conflicts with A1 at `docs/properties/hot-path-optimization/latency-audit/catalog.md:159-165`; allocation magnitude is unmeasured. |
 | Real host admission outcome | `crates/daemon/tests/direct_host.rs:48-69` | Existing Unix FixtureProcess; request-level resource trace/barrier requires downstream work. |
 | 40/200 combined operation measurement | `crates/daemon/benches/hot_path.rs:69-115` | Existing corpus/projection scaffold; new operation group, manifest, and schedule are missing. |
 

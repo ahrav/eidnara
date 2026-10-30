@@ -2,9 +2,9 @@
 
 Provenance: HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 
-- `crates/daemon/src/lib.rs:19998-20129` compares direct and tree decodes,
+- `crates/daemon/src/lib.rs:19999-20130` compares direct and tree decodes,
   pins accepted and divergent names, and assembles one valid two-page input.
-- `crates/daemon/src/lib.rs:20152-20193` compares handler outcomes and lane
+- `crates/daemon/src/lib.rs:20153-20194` compares handler outcomes and lane
   names using an unbounded test pool. It is not a ring fixture.
 - `crates/daemon/tests/serialized_transform_pages.rs:11-156` is ignored and
   requires generated TypeScript input. It tests real-host page completion and

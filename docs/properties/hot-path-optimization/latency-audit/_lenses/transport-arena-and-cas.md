@@ -584,8 +584,8 @@ the kernel. Five adjacent observations, not disagreements:
 [native-reserve]: ../../../../../packages/shm-native/src/lib.rs#L1024
 [measure]: ../../../../../crates/daemon/src/dispatch.rs#L129-L148
 [write-to]: ../../../../../crates/daemon/src/dispatch.rs#L236-L262
-[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12110-L12165
-[settle-prepared]: ../../../../../crates/daemon/src/lib.rs#L12167-L12182
+[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12111-L12166
+[settle-prepared]: ../../../../../crates/daemon/src/lib.rs#L12168-L12183
 [ingest]: ../../../../../crates/kernel/src/cas/ingest.rs#L361-L663
 [ingest-temp]: ../../../../../crates/kernel/src/cas/ingest.rs#L379-L405
 [ingest-lock]: ../../../../../crates/kernel/src/cas/ingest.rs#L407-L416

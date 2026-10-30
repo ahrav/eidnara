@@ -19,7 +19,7 @@ does not determine the simultaneous allocation peak.
 2. `crates/daemon/src/metered_decode.rs:33-64` sets node copies to two,
    node-growth slack to two, string copies to three, envelope headroom to
    4096 bytes, and unescape-growth slack to two.
-3. `crates/daemon/src/lib.rs:12932-12957` first runs the direct gate, then
+3. `crates/daemon/src/lib.rs:12933-12958` first runs the direct gate, then
    typed decoding, then tree fallback only for invalid decoding.
    `:8115-8123` consumes the Value into a TransformRequest.
 4. `crates/daemon/src/metered_decode.rs:201-207` resets needed counters but
@@ -30,7 +30,7 @@ does not determine the simultaneous allocation peak.
    through `from_value`. It is not a second-stage-only measurement.
 6. The text cases at `:178-199` run only direct decoding. The allocation
    counter at `:28-29` explicitly excludes allocator rounding.
-7. `crates/daemon/src/lib.rs:20293-20327` contains
+7. `crates/daemon/src/lib.rs:20294-20328` contains
    `decode_footprint_counts_values_and_retained_string_copies`; its assertion
    at `:20294-20298` requires at least three times the text length. This needs
    explicit disposition under KTD4, not silent removal from the test inventory.

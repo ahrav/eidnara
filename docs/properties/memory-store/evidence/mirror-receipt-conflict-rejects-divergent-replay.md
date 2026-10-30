@@ -64,8 +64,8 @@ a generation check reports `ReceiptConflict`, which is the more specific
 diagnosis.
 
 Production reachability is `claim.mirror.apply` at
-`crates/daemon/src/lib.rs:10064` calling
-`store.apply_claim_mirror_receipt` at `:10337`, outside any test module.
+`crates/daemon/src/lib.rs:10065` calling
+`store.apply_claim_mirror_receipt` at `:10338`, outside any test module.
 
 ## Failure scenario
 

@@ -27,7 +27,7 @@ Code references are verified at `0ff62b29a` (branch `fold-authority/m2-exit`).
   `(revert_epoch, accepted_row_version)` with `>=` (`:30-33`), so an equal
   pair replaces and an older pair is ignored.
 - Lease: `first_unit` leases the prior state and then calls `begin`, which
-  turns Ready into InFlight (`crates/daemon/src/lib.rs:8910-8911`). Since
+  turns Ready into InFlight (`crates/daemon/src/lib.rs:8911-8912`). Since
   `96aad0baf` (#906 on `main`) the first transform's lease lives in
   `PassStart` (`:3393-3397`) and drops when that transform returns
   (`:9379-9381`); a rerun (`PassState::Reload`) leases for its own
@@ -114,7 +114,7 @@ the lease budget count and bytes, and the reopened store's row version.
   invalid until a bust. Since `96aad0baf` (#906 on `main`), `promote_derived`
   keeps the replaced state's parts when the new state carries none and both
   share a revert epoch (`crates/daemon/src/lib.rs:2162-2171`);
-  `a_pass_refused_a_lease_keeps_the_retained_baseline_parts` (`:35273`) and
+  `a_pass_refused_a_lease_keeps_the_retained_baseline_parts` (`:35274`) and
   `a_promotion_without_parts_keeps_the_retained_parts_of_its_epoch_only`
   (`:35293`) witness it, and
   `an_emergency_pass_holds_a_derived_lease_only_inside_each_transform`
@@ -134,7 +134,7 @@ the lease budget count and bytes, and the reopened store's row version.
 
 ### Q: Does the invariant hold at every `promote_derived` call?
 
-- Sources examined: `crates/daemon/src/lib.rs:2153-2189`, `:9258-9292`;
+- Sources examined: `crates/daemon/src/lib.rs:2153-2189`, `:9259-9293`;
   `crates/daemon/src/transform.rs:1742-1747` at `0ff62b29a`; portfolio
   evaluation I1.
 - Findings: No, only on successful installation. Correct code also calls it

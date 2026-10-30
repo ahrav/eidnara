@@ -121,7 +121,7 @@ tracing the window.
 
 Every line anchor above is as of the recorded head of the investigation. At
 the #1040 head every daemon transform and exact-length response takes the
-direct path through `settle_prepared_via` (`crates/daemon/src/lib.rs:13456`),
+direct path through `settle_prepared_via` (`crates/daemon/src/lib.rs:13457`),
 so the window this record describes opens on every such response, and the
 record is `default-production`. The `direct_fill` fixture arm
 (`crates/host-runtime/tests/support/mod.rs:509`) is the marker test's

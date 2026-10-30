@@ -10,7 +10,7 @@ behavior, test counts, or CI selection.
 
 | Subject | Current disposition | Evidence |
 | --- | --- | --- |
-| Adjacent-only model-chain premise | Invalidated; uniqueness guarantee and unaudited regression check retained | Full deduplication at `crates/daemon/src/config.rs:968-971`; non-adjacent-repeat check at `crates/daemon/src/config.rs:2213-2222` |
+| Adjacent-only model-chain premise | Invalidated; uniqueness guarantee and unaudited regression check retained | Full deduplication at `crates/daemon/src/config.rs:968-972`; non-adjacent-repeat check at `crates/daemon/src/config.rs:2213-2222` |
 | Silent malformed-file premise | Invalidated; path-bearing diagnostic guarantee retained | Tier warning storage at `crates/daemon/src/config.rs:366-397`, collection at `crates/daemon/src/config.rs:266-286`, and existing check at `crates/daemon/src/config.rs:2161-2210` |
 | Clamp diagnostics and threshold floor | Active; user-only inputs isolate range behavior from tier warnings | Clamps at `crates/daemon/src/config.rs:768-770` and `crates/daemon/src/config.rs:845-887`; zero rejection at `crates/daemon/src/config.rs:974-980` |
 | Model-map differential | Active; scheduler map tests exist, but do not compare both walks | The golden deserializes maps and resolves them (`crates/daemon/src/scheduler.rs:923-932`, `crates/daemon/src/scheduler.rs:1011-1013`, `crates/daemon/src/scheduler.rs:1087-1096`); the daemon adapter remains scalar (`crates/daemon/src/transform.rs:5447-5454`) |

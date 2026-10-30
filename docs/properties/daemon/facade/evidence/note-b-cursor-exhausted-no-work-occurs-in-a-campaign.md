@@ -5,7 +5,7 @@
 `select_conditional_note_evaluation_cycle` returns `None` for two operationally
 different reasons, and the module spends real effort distinguishing them: it
 re-runs selection against a freshly constructed cycle purely to classify the empty
-answer (`crates/daemon/src/lib.rs:11231-11240`). Effort that large on a
+answer (`crates/daemon/src/lib.rs:11232-11241`). Effort that large on a
 classification implies the distinction matters, and the comment says why. That
 makes the classified state a situation a campaign must actually reach, not just a
 branch it must execute.

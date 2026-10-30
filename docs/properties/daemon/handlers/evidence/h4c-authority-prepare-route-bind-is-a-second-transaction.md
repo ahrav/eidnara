@@ -4,7 +4,7 @@
 
 `handle_authority_prepare_value` looked like a clean single-transaction handler:
 one match over four phases, each calling exactly one store transition
-(`crates/daemon/src/lib.rs:7197-7256`). Then the success arm at `:7257-7270`
+(`crates/daemon/src/lib.rs:7198-7257`). Then the success arm at `:7258-7271`
 turned out to make a second store call, and to convert its failure into an error
 response after the first transition is already durable.
 

@@ -39,21 +39,21 @@ earlier PR renamed the test.
 | `tail_identity_extension_during_await_still_publishes` | `crates/daemon/src/history_summarizer.rs:3850` | WP-E04 | #873 | unaudited |
 | `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict` | `crates/memory-store/src/lib.rs:26308` | WP-E04 | #873 | unaudited |
 | `publish_rejects_a_firing_whose_set_was_truncated_and_regrown_to_the_same_maximum` | `crates/memory-store/src/lib.rs:22983` | WP-E04 | #873 | unaudited |
-| `native_previous_keeps_bind_the_applied_revision` | `crates/daemon/src/lib.rs:25499` | WP-E05 | #879 | unaudited |
-| `transform_snapshot_cache_is_generation_safe_and_lru_bounded` | `crates/daemon/src/lib.rs:21147` | WP-E08 | #878 | unaudited |
-| `snapshot_lease_budget_survives_cache_churn_and_releases_exact_charge` | `crates/daemon/src/lib.rs:21187` | WP-E08 | #878 | unaudited |
-| `ready_snapshot_holds_no_native_payload_and_a_lease_pins_its_generation` | `crates/daemon/src/lib.rs:21242` | WP-E08 | #878 | unaudited |
+| `native_previous_keeps_bind_the_applied_revision` | `crates/daemon/src/lib.rs:25500` | WP-E05 | #879 | unaudited |
+| `transform_snapshot_cache_is_generation_safe_and_lru_bounded` | `crates/daemon/src/lib.rs:21148` | WP-E08 | #878 | unaudited |
+| `snapshot_lease_budget_survives_cache_churn_and_releases_exact_charge` | `crates/daemon/src/lib.rs:21188` | WP-E08 | #878 | unaudited |
+| `ready_snapshot_holds_no_native_payload_and_a_lease_pins_its_generation` | `crates/daemon/src/lib.rs:21243` | WP-E08 | #878 | unaudited |
 | `window_tag_read_keeps_every_session_relative_tag_decision` | `crates/daemon/src/transform.rs:22704` | WP-E09 | #874 | unaudited |
 | `shared_row_iterator_matches_slice_for_protected_legacy_orphan` | `crates/daemon/src/tail_hygiene.rs:2564` | WP-E09 | #874 | unaudited |
 | `first_hard_pass_meta_respects_the_store_durable_text_bound` | `crates/daemon/src/transform_meta_bound.rs:130` at `f8734c12` | WP-E10 (deleted by #833, `7a8fb84b`) | #873, #881 | unaudited |
 | `meta_bytes_stay_flat_as_covered_history_grows` | `crates/daemon/src/transform_meta_bound.rs:141` at `f8734c12` | WP-E10 (deleted by #833, `7a8fb84b`) | #873 (named `..._and_covered_drift_still_rejects` at `43e88bdc`); #881 (renamed, covered-drift half dropped) | unaudited |
-| `native_output_store_enforces_entry_cap_lru_and_revert_epoch` | `crates/daemon/src/lib.rs:25345` | WP-E12, WP-E05 | #879 | unaudited |
-| `handler_native_cache_adopts_the_bumped_durable_revert_epoch` | `crates/daemon/src/lib.rs:25296` | WP-E12 | #879 | unaudited |
+| `native_output_store_enforces_entry_cap_lru_and_revert_epoch` | `crates/daemon/src/lib.rs:25346` | WP-E12, WP-E05 | #879 | unaudited |
+| `handler_native_cache_adopts_the_bumped_durable_revert_epoch` | `crates/daemon/src/lib.rs:25297` | WP-E12 | #879 | unaudited |
 | `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch` | `crates/memory-store/src/lib.rs:26148` | WP-E02, WP-E12 | #879 | unaudited |
 | `serialized_output_cache_revert_epoch_bump_evicts_session` | `crates/daemon/src/transform.rs:28657` at `f8734c12` | WP-E12 (deleted with the memo by #833, `6477c9f2`) | #879 | unaudited |
-| `multiple_large_sessions_do_not_ping_pong_under_the_native_output_total_budget` | `crates/daemon/src/lib.rs:25450` | WP-E12 (budget) | #879 | unaudited |
-| `handler_small_native_lru_eviction_and_refusal_still_serve` | `crates/daemon/src/lib.rs:25132` | WP-E05, WP-E12 | #879 | unaudited |
-| `handler_warm_normalization_matches_cold_when_a_reserved_todo_follows_the_prefix` | `crates/daemon/src/lib.rs:25236` | WP-E05 | #879 | unaudited |
+| `multiple_large_sessions_do_not_ping_pong_under_the_native_output_total_budget` | `crates/daemon/src/lib.rs:25451` | WP-E12 (budget) | #879 | unaudited |
+| `handler_small_native_lru_eviction_and_refusal_still_serve` | `crates/daemon/src/lib.rs:25133` | WP-E05, WP-E12 | #879 | unaudited |
+| `handler_warm_normalization_matches_cold_when_a_reserved_todo_follows_the_prefix` | `crates/daemon/src/lib.rs:25237` | WP-E05 | #879 | unaudited |
 | `each_resolution_outcome_has_its_cut_ordinals_and_keeps` | `crates/daemon/src/window_coverage/tests.rs:99` | WP-P02 | #875 | unaudited |
 | `impossible_declarations_are_invalid_params` | `crates/daemon/src/window_coverage/tests.rs:217` | WP-P01, WP-P02 | #875 | unaudited |
 | `a_declared_row_without_a_rendered_boundary_is_unknown` | `crates/daemon/src/window_coverage/tests.rs:237` | WP-P02 | #875 | unaudited |
@@ -202,7 +202,7 @@ that cited it.
 
 | Name | Cited by | Finding |
 | --- | --- | --- |
-| `need_full_sync` check at `daemon/lib.rs:37584-37600` | catalog revision 2 (comment 3), at `265df096` | Deleted with the status by #878; two remaining hits at `f2442b2f` (`crates/daemon/src/lib.rs:25192`, `:25530`) assert the field is absent. Dropped. |
+| `need_full_sync` check at `daemon/lib.rs:37584-37600` | catalog revision 2 (comment 3), at `265df096` | Deleted with the status by #878; two remaining hits at `f2442b2f` (`crates/daemon/src/lib.rs:25193`, `:25531`) assert the field is absent. Dropped. |
 | "reports a destination slot that stopped accepting writes and reads no candidate getter", "replaces every slot and the length of an accepted destination in place" | WP-E06 (catalog revision 2) | Present at `328ab11c` (`transform-capture.test.ts:1000`, `:1015`); deleted by #877 with the all-slot preflight. Kept in WP-E06 as the baseline run of #875. |
 | `alternating_sessions_keep_their_delta_prefix_under_the_shared_snapshot_budget`, `cold_soft_plus_over_ready_budget_refuses_the_next_tail_delta`, `giant_degraded_snapshot_refuses_tail_delta_without_a_full_request`, `handler_delta_rechecks_durable_revert_epoch`, `handler_tail_delta_cross_frontier_tool_arc_matches_full_control`, `handler_delta_normalization_matches_full_when_reserved_todo_starts_at_frontier` | #876 | Present at `f8940a26` (for example `lib.rs:26275`, `:25441`, `:27323`); deleted by #878 with the delta channel. Not cited by any record. |
 | `native_attachment_cache_refuses_an_entry_above_its_cap_and_stores_one_under_it` | #878 | Present at `f6b3d7bd` (`lib.rs:26118`) and `7a3db43b` (`:26305`); deleted by #880 with the cache. Its store-level successor is `native_output_store_enforces_entry_cap_lru_and_revert_epoch`. |

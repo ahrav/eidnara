@@ -938,7 +938,7 @@ claim lane for that project until a reseed, which
 Open questions:
 
 - Does the facade retry `claim.mirror.apply` on a lost response, and with
-  byte-identical bytes? `daemon/src/lib.rs:10337` is the call site; the retry
+  byte-identical bytes? `daemon/src/lib.rs:10338` is the call site; the retry
   policy above it was not traced in this pass.
 
 ### mirror-receipt-conflict-rejects-divergent-replay
@@ -1878,7 +1878,7 @@ Impact: a nondeterministic or drifting encoding gives one MemoryClassifier comma
 digests, so `begin_memory_classifier_receipt`
 (`crates/memory-store/src/memory_classifier_ledger.rs:318`) reports `DigestConflict` on a
 legitimate retry and `run_memory_classifier_task` returns `memory_classifier_request_conflict`
-(`crates/daemon/src/lib.rs:9657`) instead of replaying the recorded outcome; a
+(`crates/daemon/src/lib.rs:9658`) instead of replaying the recorded outcome; a
 collision gives two different requests one receipt, so a retry replays the wrong
 result. The durable-write redaction scan at `crates/memory-store/src/lib.rs:3206`
 encodes through the same path, so an encoder change alters the bytes the secret

@@ -6,7 +6,7 @@ Scope and baseline comparison: [source register](../source-register.md).
 History names `3de11b27` (charge before lane probe), `33511c5e` (unescape
 buffer and no second classification parse), and `7edeb90f` (bounded held
 bytes). Their titles are leads, not incident reproductions. The mechanisms
-are visible in `crates/daemon/src/lib.rs:12164-12181,16096-16115` and
+are visible in `crates/daemon/src/lib.rs:12165-12182,16097-16116` and
 `crates/daemon/src/metered_decode.rs:242-303`.
 
 Tests concentrate on successful dense-native tree peaks and direct text

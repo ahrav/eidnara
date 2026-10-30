@@ -251,7 +251,7 @@ Confidence: medium - [evidence](evidence/projection-n13-hooks-stay-gated.md).
 Production routing/configuration reject absent paths; no product path interprets
 the proposed RP2.9 evidence gate, so that obligation has no production reachability.
 Existing check: `crates/daemon/src/config.rs:1909-1957` and
-`crates/daemon/src/lib.rs:32452-32492`, status unaudited.
+`crates/daemon/src/lib.rs:32453-32493`, status unaudited.
 These checks assert absent entry points, not evidence-gate decisions.
 Impact: Product hooks can run against missing durable sources, stale coverage
 or unsupported harness behavior.

@@ -6,7 +6,7 @@ Provenance: HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
   `Arc<TransformRequest>` at `crates/daemon/src/lib.rs:1804-1829`.
 - `ready_delta_request` clones that Arc at
   `crates/daemon/src/lib.rs:2004-2008`. Delta expansion can recover CK shells
-  from either projection or ready snapshot at `:4361-4377`.
+  from either projection or ready snapshot at `:4362-4378`.
 - `crates/daemon/src/wire.rs:89-114` retains the ingress shell behind every
   projected block. Dropping a request variable does not drop all readers.
 - Accepted KTD3 retains owned strings, payload Values, and shared shells.
