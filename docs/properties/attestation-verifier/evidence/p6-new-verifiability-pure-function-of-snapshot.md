@@ -6,7 +6,7 @@ The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/i
 
 ## Evidence trail
 
-`classify` (`crates/daemon/src/attestation_verifier/classify.rs:295`) takes a `CommitReadTarget`, the bound roots, and an `EvalBudget`, and returns a `Classification` that carries the target. `class_of` (`:314`) makes five kinds of Kernel read, each at `target.through_commit` and under that budget:
+`classify` (`crates/daemon/src/attestation_verifier/classify.rs:295-296`) takes a `CommitReadTarget`, the bound roots, and an `EvalBudget`, and returns a `Classification` that carries the target. `class_of` (`:314`) makes five kinds of Kernel read, each at `target.through_commit` and under that budget:
 
 - `claim_standing_at_within_budget` (`crates/daemon/src/attestation_verifier/classify.rs:324`): the registry row, decision row, and latest own admission at the sequence, under the reader guard that compares the store's incarnation with the target's.
 - `anchor_condition_as_of`, called at `crates/daemon/src/attestation_verifier/classify.rs:351` and defined at `crates/kernel/src/anchor_write.rs:469`: the anchor row live at the sequence, decoded by `validate_anchor_row` (`:288`).
