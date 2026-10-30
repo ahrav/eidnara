@@ -952,27 +952,7 @@ impl Envelope<'_> {
         class: OccurrenceClass,
         lineage_id: &str,
     ) -> Result<Option<LiveDescriptor>, KernelError> {
-        let low = descriptor_object_id(lineage_id, "");
-        let high = super::envelope::prefix_upper_bound(&low);
-        let mut raw = descriptor_rows(
-            self.tx,
-            class,
-            self.commit_seq,
-            "o.object_id>=?3 AND o.object_id<?4",
-            &[&low, &high],
-            2,
-        )?;
-        if raw.len() > 1 {
-            return Err(KernelError::CorruptCanonicalRow);
-        }
-        let Some(raw) = raw.pop() else {
-            return Ok(None);
-        };
-        let row = checked(raw, class)?;
-        if row.detail.lineage_id != lineage_id {
-            return Err(KernelError::CorruptCanonicalRow);
-        }
-        Ok(Some(row))
+        lineage_descriptor(self.tx, class, self.commit_seq, lineage_id)
     }
 
     /// [`Self::live_source_descriptor_of_lineage`] for each of `lineage_ids`, in input order, read with one statement that searches each lineage's object id range once.
@@ -1272,6 +1252,60 @@ pub enum CitingDescriptor {
     Retired,
     /// Zero descriptors of the class cited the evidence by the sequence.
     Uncited,
+}
+
+impl KernelStore {
+    /// The live descriptor of `class` in lineage `lineage_id` at `requested`, or `None` when the lineage has no live revision there; the read [`Envelope::live_source_descriptor_of_lineage`] makes in an envelope's view. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and the errors of [`Envelope::live_source_descriptor_of_lineage`].
+    pub fn live_source_descriptor_of_lineage_within_budget(
+        &self,
+        class: OccurrenceClass,
+        lineage_id: &str,
+        requested: i64,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Option<LiveDescriptor>, KernelError> {
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
+        let tx = reader
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+            .map_err(map_sqlite)?;
+        crate::slice::snapshot_tip(&tx, requested)?;
+        let row = lineage_descriptor(&tx, class, requested, lineage_id)?;
+        tx.commit().map_err(map_sqlite)?;
+        Ok(row)
+    }
+}
+
+/// The one live descriptor of `class` at `requested` in lineage `lineage_id`'s `srcdesc:{lineage_id}:` object id range, under [`KernelStore::live_source_descriptors`]' liveness predicate and row checks. A range holding more than one, or a row of another lineage, is [`KernelError::CorruptCanonicalRow`].
+fn lineage_descriptor(
+    tx: &rusqlite::Transaction<'_>,
+    class: OccurrenceClass,
+    requested: i64,
+    lineage_id: &str,
+) -> Result<Option<LiveDescriptor>, KernelError> {
+    let low = descriptor_object_id(lineage_id, "");
+    let high = super::envelope::prefix_upper_bound(&low);
+    let mut raw = descriptor_rows(
+        tx,
+        class,
+        requested,
+        "o.object_id>=?3 AND o.object_id<?4",
+        &[&low, &high],
+        2,
+    )?;
+    if raw.len() > 1 {
+        return Err(KernelError::CorruptCanonicalRow);
+    }
+    let Some(raw) = raw.pop() else {
+        return Ok(None);
+    };
+    let row = checked(raw, class)?;
+    if row.detail.lineage_id != lineage_id {
+        return Err(KernelError::CorruptCanonicalRow);
+    }
+    Ok(Some(row))
 }
 
 #[cfg(test)]

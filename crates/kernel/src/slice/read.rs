@@ -707,6 +707,53 @@ impl KernelStore {
         max_rows: std::num::NonZeroUsize,
         budget: &crate::applicability::EvalBudget,
     ) -> Result<Vec<(i64, String)>, KernelError> {
+        self.scope_decision_page(
+            scope_id,
+            SourceKind::Except(excluded_source_kind),
+            requested,
+            after,
+            max_rows,
+            budget,
+        )
+    }
+
+    /// [`Self::scope_decisions_after_within_budget`] for the decisions whose registry `source_kind` is `source_kind`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::scope_decisions_after_within_budget`].
+    pub fn scope_decisions_of_source_after_within_budget(
+        &self,
+        scope_id: &str,
+        source_kind: &str,
+        requested: i64,
+        after: Option<(i64, &str)>,
+        max_rows: std::num::NonZeroUsize,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Vec<(i64, String)>, KernelError> {
+        self.scope_decision_page(
+            scope_id,
+            SourceKind::Only(source_kind),
+            requested,
+            after,
+            max_rows,
+            budget,
+        )
+    }
+
+    fn scope_decision_page(
+        &self,
+        scope_id: &str,
+        source_kind: SourceKind<'_>,
+        requested: i64,
+        after: Option<(i64, &str)>,
+        max_rows: std::num::NonZeroUsize,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Vec<(i64, String)>, KernelError> {
+        let (operator, source_kind) = match source_kind {
+            SourceKind::Except(kind) => ("<>", kind),
+            SourceKind::Only(kind) => ("=", kind),
+        };
         let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -715,21 +762,21 @@ impl KernelStore {
         let (after_seq, after_id) = after.unwrap_or((-1, ""));
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
         let rows = tx
-            .prepare_cached(
+            .prepare_cached(&format!(
                 "SELECT d.created_commit_seq, d.object_id
                  FROM decisions d JOIN object_registry o ON o.object_id=d.object_id
-                 WHERE d.scope_id=?1 AND o.source_kind<>?2 AND d.created_commit_seq<=?3
+                 WHERE d.scope_id=?1 AND o.source_kind{operator}?2 AND d.created_commit_seq<=?3
                    AND (d.invalidated_commit_seq IS NULL OR ?3<d.invalidated_commit_seq)
                    AND (d.created_commit_seq>?4 OR (d.created_commit_seq=?4 AND d.object_id>?5))
                  ORDER BY d.created_commit_seq, d.object_id
                  LIMIT ?6",
-            )
+            ))
             .and_then(|mut statement| {
                 statement
                     .query_map(
                         rusqlite::params![
                             scope_id,
-                            excluded_source_kind,
+                            source_kind,
                             requested,
                             after_seq,
                             after_id,
@@ -743,4 +790,32 @@ impl KernelStore {
         tx.commit().map_err(crate::map_sqlite)?;
         Ok(rows)
     }
+
+    /// [`Self::observation_for_object_as_of`] with the wait for a pooled reader stopped at `budget`'s deadline or interrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, and the errors of [`Self::observation_for_object_as_of`].
+    pub fn observation_for_object_as_of_within_budget(
+        &self,
+        object_id: &str,
+        requested: i64,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Option<ObservationRow>, KernelError> {
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(crate::map_sqlite)?;
+        snapshot_tip(&tx, requested)?;
+        let row = load_observation_for_object(&tx, requested, object_id)?;
+        tx.commit().map_err(crate::map_sqlite)?;
+        Ok(row)
+    }
+}
+
+/// Which registry `source_kind` a scope decision page keeps.
+#[derive(Clone, Copy)]
+enum SourceKind<'a> {
+    Except(&'a str),
+    Only(&'a str),
 }

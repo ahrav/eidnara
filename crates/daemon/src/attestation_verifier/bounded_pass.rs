@@ -58,6 +58,7 @@ use kernel::{
     ClaimFactsError, CommitReadIncarnation, CommitReadTarget, Disposition, KernelError, KernelStore,
 };
 
+use super::applicability::{self, Applicability};
 use super::attest::{Identity, Outcome, attest};
 use super::classify::{BoundRoot, Class, ClassifyError, VERIFIER_SOURCE_KIND, classify};
 use super::{Deadline, Evaluation, MAX_BLOB_BYTES, Reason, Stage, Verdict, verify};
@@ -79,7 +80,7 @@ pub const IDLE_INTERVAL: Duration = Duration::from_secs(30);
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Every counter of the `metrics.verifier` block. All are process-local and content-free.
-pub const COUNTERS: [&str; 37] = [
+pub const COUNTERS: [&str; 40] = [
     "considered",
     "match",
     "mismatch",
@@ -114,6 +115,9 @@ pub const COUNTERS: [&str; 37] = [
     "witness_degraded",
     "witness_degraded_skipped",
     "unavailable_skipped",
+    "applicability_stale",
+    "applicability_current",
+    "applicability_unavailable",
     "bytes_read",
     "passes",
     "last_pass_ms",
@@ -226,6 +230,7 @@ struct ProjectState {
     cursor: Option<(i64, String)>,
     resolved: HashSet<String>,
     attempts: HashMap<String, u32>,
+    applicability: Option<(i64, String)>,
 }
 
 /// The pass's process-local state.
@@ -404,6 +409,14 @@ impl ProjectRun<'_, '_> {
                 ..ProjectState::default()
             };
         }
+        match self.decisions(target) {
+            Step::StopPass => Step::StopPass,
+            _ => self.applicability(target),
+        }
+    }
+
+    fn decisions(&mut self, target: CommitReadTarget) -> Step {
+        let budget = self.clock.budget();
         let mut after = self.state.cursor.clone();
         let mut prefix = true;
         loop {
@@ -593,18 +606,117 @@ impl ProjectRun<'_, '_> {
             // An `Io` refusal can follow a durable commit; the next attempt finds the attestation
             // in the registry or the decision `Stale` and skips it.
             Outcome::Refused(error) => {
-                self.counters.add(
-                    match error {
-                        KernelError::Busy => "commit_refused_busy",
-                        KernelError::Deadline => "commit_refused_deadline",
-                        KernelError::Io => "commit_refused_io",
-                        _ => "commit_refused_other",
-                    },
-                    1,
-                );
+                self.counters.add(refused_counter(error), 1);
                 return self.transient(object_id, error == KernelError::Deadline);
             }
         };
+        self.counters.add(counter, 1);
+        Step::Resolved
+    }
+}
+
+fn refused_counter(error: KernelError) -> &'static str {
+    match error {
+        KernelError::Busy => "commit_refused_busy",
+        KernelError::Deadline => "commit_refused_deadline",
+        KernelError::Io => "commit_refused_io",
+        _ => "commit_refused_other",
+    }
+}
+
+impl ProjectRun<'_, '_> {
+    fn applicability(&mut self, target: CommitReadTarget) -> Step {
+        let budget = self.clock.budget();
+        let mut evaluated = 0;
+        loop {
+            let after = self.state.applicability.clone();
+            let page = match self.kernel.scope_decisions_of_source_after_within_budget(
+                self.scope_id,
+                VERIFIER_SOURCE_KIND,
+                target.through_commit,
+                after.as_ref().map(|(seq, id)| (*seq, id.as_str())),
+                PAGE_ROWS,
+                budget,
+            ) {
+                Ok(page) if page.is_empty() => {
+                    self.state.applicability = None;
+                    return Step::Resolved;
+                }
+                Ok(page) => page,
+                Err(error) => return self.refused(error == KernelError::Deadline),
+            };
+            let ids: Vec<String> = page.iter().map(|(_, id)| id.clone()).collect();
+            let standings = match self
+                .kernel
+                .claim_standing_at_within_budget(&ids, target, PAGE_ROWS, budget)
+            {
+                Ok(standings) => standings,
+                Err(error) => {
+                    return self.refused(error == ClaimFactsError::Kernel(KernelError::Deadline));
+                }
+            };
+            for ((seq, object_id), standing) in page.into_iter().zip(standings) {
+                let active = standing
+                    .as_ref()
+                    .and_then(|standing| standing.own_admission.as_ref())
+                    .is_some_and(|admission| admission.disposition == Disposition::Active);
+                if active {
+                    if self.clock.passed(Poll::Decision) {
+                        return Step::StopPass;
+                    }
+                    if evaluated == MAX_VERDICTS {
+                        return Step::StopProject;
+                    }
+                    evaluated += 1;
+                    match self.applicable(&object_id, target) {
+                        Step::Resolved => {}
+                        stop => return stop,
+                    }
+                }
+                self.state.applicability = Some((seq, object_id));
+            }
+        }
+    }
+
+    fn applicable(&mut self, object_id: &str, target: CommitReadTarget) -> Step {
+        let budget = self.clock.budget();
+        let republished = match applicability::evaluate(self.kernel, object_id, target, budget) {
+            Ok(Applicability::Current) => {
+                self.counters.add("applicability_current", 1);
+                return Step::Resolved;
+            }
+            Ok(Applicability::Unavailable) => {
+                self.counters.add("applicability_unavailable", 1);
+                return Step::Resolved;
+            }
+            Ok(Applicability::Republished(republished)) => republished,
+            Err(error) => return self.refused(error == KernelError::Deadline),
+        };
+        if self.clock.passed(Poll::Commit) {
+            return Step::StopPass;
+        }
+        let counter =
+            match applicability::mark_republished(self.kernel, target, &republished, budget) {
+                Outcome::StaleCommitted(_) | Outcome::Committed(_) => {
+                    self.report.progressed = true;
+                    "applicability_stale"
+                }
+                Outcome::Replayed(_) | Outcome::Skipped(_) => return Step::Resolved,
+                Outcome::Changed => "commit_refused_changed",
+                Outcome::Conflict => "commit_conflict",
+                Outcome::InvalidWriteSet | Outcome::WitnessDegraded => {
+                    "commit_refused_invalid_write_set"
+                }
+                Outcome::Refused(error) => {
+                    self.counters.add(refused_counter(error), 1);
+                    self.report.failed = true;
+                    if error == KernelError::Deadline {
+                        return Step::StopPass;
+                    }
+                    return Step::Resolved;
+                }
+            };
+        self.report.failed |= counter != "applicability_stale";
         self.counters.add(counter, 1);
         Step::Resolved
     }

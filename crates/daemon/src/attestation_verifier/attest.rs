@@ -63,14 +63,10 @@ pub struct Identity {
 
 impl Identity {
     pub fn of(model_object_id: &str, oid: &str) -> Self {
-        let hash = format!("{:x}", Sha256::digest(format!("{model_object_id}\n{oid}")));
-        Self {
-            source_id: hash.clone(),
-            object_id: format!("verattest:{hash}"),
-            decision_id: format!("verattestdec:{hash}"),
-            witness_observation_id: format!("verwitness:{hash}"),
-            witness_object_id: format!("verwitnessobj:{hash}"),
-        }
+        Self::of_hash(format!(
+            "{:x}",
+            Sha256::digest(format!("{model_object_id}\n{oid}"))
+        ))
     }
 }
 
@@ -158,16 +154,16 @@ pub struct WriteSet {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WitnessDetail {
-    witness_version: u32,
+pub(super) struct WitnessDetail {
+    pub(super) witness_version: u32,
     evidence_id: String,
-    artifact_digest: String,
+    pub(super) artifact_digest: String,
     commit_oid: String,
     blob_oid: String,
-    relative_path: String,
+    pub(super) relative_path: String,
     descriptor_object_id: String,
-    lineage_id: String,
-    descriptor_revision: String,
+    pub(super) lineage_id: String,
+    pub(super) descriptor_revision: String,
 }
 
 impl WriteSet {
@@ -350,7 +346,7 @@ impl WriteSet {
             kernel,
             budget,
             keyed,
-            opposite,
+            Some(opposite),
             Outcome::Committed,
             |envelope| self.write(envelope, kernel),
         )
@@ -445,7 +441,7 @@ fn mark_stale(
         kernel,
         budget,
         keyed,
-        opposite,
+        Some(opposite),
         Outcome::StaleCommitted,
         |envelope| {
             let (_, prior) = recheck(envelope, kernel, target, input)?;
@@ -478,7 +474,7 @@ fn mark_stale(
 }
 
 /// Why an envelope stopped before it committed.
-enum Stop {
+pub(super) enum Stop {
     Outcome(Outcome),
     Kernel(KernelError),
 }
@@ -491,11 +487,11 @@ impl From<KernelError> for Stop {
 
 /// Commits `write` under `intent` after refusing a recorded `opposite` key, mapping the result to
 /// one outcome. A stopped envelope returns its error from the closure, so the commit rolls back.
-fn run(
+pub(super) fn run(
     kernel: &KernelStore,
     budget: &EvalBudget,
     intent: CommitIntent,
-    opposite: CommitIntent,
+    opposite: Option<CommitIntent>,
     committed: fn(CommitReceipt) -> Outcome,
     write: impl FnOnce(&mut Envelope<'_>) -> Result<(), Stop>,
 ) -> Outcome {
@@ -503,7 +499,7 @@ fn run(
     let mut entered = false;
     let result = kernel.commit_within_budget(budget, intent, |envelope| {
         entered = true;
-        let stop = match envelope.stored_receipt(opposite) {
+        let stop = match opposite.map_or(Ok(None), |opposite| envelope.stored_receipt(opposite)) {
             Ok(Some(_)) | Err(KernelError::Conflict) => Stop::Outcome(Outcome::Conflict),
             Ok(None) => match write(envelope) {
                 Ok(()) => return Ok(String::new()),
@@ -631,5 +627,26 @@ fn intent(input: &VerifierInput, write: Write, blob_oid: &str) -> CommitIntent {
         request_digest: format!("{:x}", Sha256::digest(frozen.to_string())),
         actor: "agent:verifier".into(),
         cause: "deterministic attestation verifier".into(),
+    }
+}
+
+impl Identity {
+    /// The ids derived from `hash`, the SHA-256 hex of a `(model object id, oid)` pair.
+    fn of_hash(hash: String) -> Self {
+        Self {
+            object_id: format!("verattest:{hash}"),
+            decision_id: format!("verattestdec:{hash}"),
+            witness_observation_id: format!("verwitness:{hash}"),
+            witness_object_id: format!("verwitnessobj:{hash}"),
+            source_id: hash,
+        }
+    }
+
+    /// The identity whose attestation object id is `object_id`, or `None` for an id outside the
+    /// attestation prefix.
+    pub fn of_attestation(object_id: &str) -> Option<Self> {
+        object_id
+            .strip_prefix("verattest:")
+            .map(|hash| Self::of_hash(hash.to_owned()))
     }
 }
