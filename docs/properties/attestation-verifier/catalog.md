@@ -580,7 +580,7 @@ Guarantee: The attestation is a new lineage linked by a `DerivedReinjection` rec
 Check: `always` - after a match the model decision's registry row and own admission are unchanged, and the attestation is live with a causality record naming `(model object id, model revision)`; after a change to the model decision between the classification and the commit, no verifier row exists
 Fault/timing angle: the model decision, its anchor, its descriptor, or its evidence row changed between the classification and the commit; an unrelated attestation committed in that window
 Required faults and enabling state: F2, F3
-Confidence: high - [evidence](evidence/p6-new-attestation-sibling-model-stays-candidate.md). Read `recheck` (`crates/daemon/src/attestation_verifier/attest.rs:513`), which compares the store's incarnation (`:523`), the model decision's registry row and latest admission, its anchor (`:560`) at the sequence the envelope extends, and its descriptor lineage (`:551`), whose live read requires the cited evidence row live, inside the envelope, and the causality write at `:375`
+Confidence: high - [evidence](evidence/p6-new-attestation-sibling-model-stays-candidate.md). Read `recheck` (`crates/daemon/src/attestation_verifier/attest.rs:513`), which compares the store's incarnation (`:523`), the model decision's registry row and latest admission, its anchor (`:551`) at the sequence the envelope extends, and its descriptor lineage (`:560`), whose live read requires the cited evidence row live, inside the envelope, and the causality write at `:375`
 Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:429`, `:963`, `:1065` (unaudited)
 Impact: falsifier: a `Replace` on the model decision, or an attestation without causality
 Open questions:
