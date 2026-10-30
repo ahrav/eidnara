@@ -1715,3 +1715,44 @@ fn the_identity_depends_on_the_model_and_the_oid() {
     assert_ne!(identity.object_id, other.object_id);
     assert_ne!(identity.witness_object_id, other.witness_object_id);
 }
+
+/// The `Match` envelope reads the model decision's row through the writer, so the attestation
+/// commits while every pooled reader is held, where a reader-side read waits out its budget.
+#[test]
+fn a_match_commits_while_every_pooled_reader_is_held() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("readers", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    let budget = || {
+        EvalBudget::new(
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(200)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    };
+    let (built, outcome) = store.kernel.with_readers_held_for_test(|| {
+        let built = WriteSet::new(
+            &store.kernel,
+            classification.target,
+            input(&classification),
+            &checkout.blob,
+            &budget(),
+        );
+        (
+            built,
+            attest(&store.kernel, &classification, &evaluation, &budget()),
+        )
+    });
+    assert_eq!(built.unwrap_err(), Outcome::Refused(KernelError::Deadline));
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+    assert_eq!(
+        store
+            .facts(&Identity::of(&model, &checkout.head).object_id)
+            .own_admission
+            .unwrap()
+            .effective_maturity,
+        Maturity::Verified
+    );
+}

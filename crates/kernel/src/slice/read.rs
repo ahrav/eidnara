@@ -532,6 +532,21 @@ fn load_decisions_for_objects(
     Ok(rows)
 }
 
+impl crate::Envelope<'_> {
+    /// The decision rows of `object_ids` live at the committed tip this envelope extends, read in
+    /// the envelope's transaction, in unspecified order, one row per id with a live decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::CorruptCanonicalRow`] for a stored payload that fails to decode.
+    pub fn decisions_for_objects(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<DecisionRow>, KernelError> {
+        load_decisions_for_objects(self.tx, self.commit_seq - 1, object_ids)
+    }
+}
+
 /// Returns each successor's latest predecessor invalidation commit at or before `requested`. `ids` is a JSON array of successor IDs.
 fn load_latest_folds(
     tx: &Transaction<'_>,

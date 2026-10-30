@@ -2542,3 +2542,49 @@ fn an_accepted_evidence_check_costs_the_same_however_long_the_citation_history()
         "a check over 200 retired and foreign citers took {long} SQLite steps; over 1, {short}"
     );
 }
+
+/// The envelope read answers as the reader-side read does at the committed tip the envelope
+/// extends: a decision retired before that tip and a decision inserted earlier in the same
+/// envelope both read as absent.
+#[test]
+fn an_envelope_reads_the_decisions_live_at_the_tip_it_extends() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("decisions", '1'), |envelope| {
+            envelope.insert_decision(decision(1))?;
+            envelope.insert_decision(decision(2))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    store
+        .commit(intent("retire", '2'), |envelope| {
+            Ok(envelope.retire_decision("decision-object-2")?.result_json())
+        })
+        .unwrap();
+    let requested = [
+        "decision-object-1".to_string(),
+        "decision-object-2".to_string(),
+        "decision-object-3".to_string(),
+    ];
+    let expected = store
+        .decisions_for_objects_as_of(&requested, store.tip().unwrap())
+        .unwrap();
+    assert_eq!(
+        expected
+            .iter()
+            .map(|row| row.object_id.as_str())
+            .collect::<Vec<_>>(),
+        ["decision-object-1"]
+    );
+    let mut read = None;
+    store
+        .commit(intent("read", '3'), |envelope| {
+            envelope.insert_decision(decision(3))?;
+            read = Some(envelope.decisions_for_objects(&requested)?);
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(read.unwrap(), expected);
+}

@@ -28,9 +28,9 @@ use kernel::source_identity::{OccurrenceClass, lower_hex as hex};
 use kernel::{
     AdmissionEvent, AdmissionRequest, AnchorCondition, CausalEvidence, ClaimCausalityError,
     ClaimCausalityRequest, CommitIntent, CommitReadTarget, CommitReceipt, DecisionEventPayload,
-    DecisionEventSpec, DecisionPayload, DecisionSpec, Disposition, Envelope, EventKind,
-    GitCondition, KernelError, KernelStore, Maturity, ObservationPayload, ObservationSpec,
-    ParentReference, PriorDecision, SourceClass,
+    DecisionEventSpec, DecisionPayload, DecisionRow, DecisionSpec, Disposition, Envelope,
+    EventKind, GitCondition, KernelError, KernelStore, Maturity, ObservationPayload,
+    ObservationSpec, ParentReference, PriorDecision, SourceClass,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -120,8 +120,7 @@ pub enum Skip {
 }
 
 /// Performs the one write `evaluation`'s verdict calls for on the decision `classification`
-/// names, under `budget`, which bounds the model decision's row read and the writer wait. The caller computed `evaluation` for the classification's
-/// claim before the call.
+/// names.
 pub fn attest(
     kernel: &KernelStore,
     classification: &Classification,
@@ -135,12 +134,41 @@ pub fn attest(
     match (evaluation.verdict, evaluation.blob_oid.as_deref()) {
         (Verdict::Unavailable(_), _) => Outcome::Skipped(Skip::Unavailable),
         (_, None) => Outcome::InvalidWriteSet,
-        (Verdict::Match, Some(blob)) => match WriteSet::new(kernel, target, input, blob, budget) {
-            Ok(write_set) => write_set.commit(kernel, budget),
-            Err(outcome) => outcome,
-        },
+        (Verdict::Match, Some(blob)) => attest_match(kernel, target, input, blob, budget),
         (Verdict::Mismatch, Some(blob)) => mark_stale(kernel, target, input, blob, budget),
     }
+}
+
+fn attest_match(
+    kernel: &KernelStore,
+    target: CommitReadTarget,
+    input: &VerifierInput,
+    blob_oid: &str,
+    budget: &EvalBudget,
+) -> Outcome {
+    let keyed = intent(input, Write::Attest, blob_oid);
+    let opposite = intent(input, Write::Stale, blob_oid);
+    run(
+        kernel,
+        budget,
+        keyed,
+        opposite,
+        Outcome::Committed,
+        |envelope| {
+            let model = &input.decision.object_id;
+            let row = envelope
+                .decisions_for_objects(std::slice::from_ref(model))?
+                .into_iter()
+                .find(|row| &row.object_id == model)
+                .ok_or(Stop::Outcome(Outcome::Changed))?;
+            let write_set =
+                WriteSet::from_row(target, input, blob_oid, row).map_err(Stop::Outcome)?;
+            if !write_set.check() {
+                return Err(Stop::Outcome(Outcome::InvalidWriteSet));
+            }
+            write_set.write(envelope, kernel)
+        },
+    )
 }
 
 /// The rows a `Match` writes, built from the classification and the model decision's row before
@@ -199,6 +227,17 @@ impl WriteSet {
             .into_iter()
             .find(|row| row.object_id == model.object_id)
             .ok_or(Outcome::Changed)?;
+        Self::from_row(target, input, blob_oid, row)
+    }
+
+    /// The attestation takes its kind, scope, and summary from `row`, the model decision's row.
+    fn from_row(
+        target: CommitReadTarget,
+        input: &VerifierInput,
+        blob_oid: &str,
+        row: DecisionRow,
+    ) -> Result<Self, Outcome> {
+        let model = &input.decision;
         let claim = &input.claim;
         let ids = Identity::of(&model.object_id, claim.oid());
         let digest = hex(claim.digest());
