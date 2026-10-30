@@ -410,8 +410,8 @@ impl ProjectRun<'_, '_> {
             };
         }
         match self.decisions(target) {
-            Step::StopPass => Step::StopPass,
-            _ => self.applicability(target),
+            Step::StopProject | Step::Resolved => self.applicability(target),
+            step => step,
         }
     }
 
@@ -613,22 +613,17 @@ impl ProjectRun<'_, '_> {
         self.counters.add(counter, 1);
         Step::Resolved
     }
-}
 
-fn refused_counter(error: KernelError) -> &'static str {
-    match error {
-        KernelError::Busy => "commit_refused_busy",
-        KernelError::Deadline => "commit_refused_deadline",
-        KernelError::Io => "commit_refused_io",
-        _ => "commit_refused_other",
-    }
-}
-
-impl ProjectRun<'_, '_> {
+    /// Pages the project's live verifier decisions from the applicability cursor, at most N pages,
+    /// and evaluates at most N `Active` attestations. A refused page read stops the project, and a
+    /// refusal for one attestation resolves it, so one failing row holds back no later one.
     fn applicability(&mut self, target: CommitReadTarget) -> Step {
         let budget = self.clock.budget();
         let mut evaluated = 0;
-        loop {
+        for _ in 0..MAX_VERDICTS {
+            if self.clock.passed(Poll::Decision) {
+                return Step::StopPass;
+            }
             let after = self.state.applicability.clone();
             let page = match self.kernel.scope_decisions_after_within_budget(
                 self.scope_id,
@@ -661,9 +656,6 @@ impl ProjectRun<'_, '_> {
                     .and_then(|standing| standing.own_admission.as_ref())
                     .is_some_and(|admission| admission.disposition == Disposition::Active);
                 if active {
-                    if self.clock.passed(Poll::Decision) {
-                        return Step::StopPass;
-                    }
                     if evaluated == MAX_VERDICTS {
                         return Step::StopProject;
                     }
@@ -676,49 +668,57 @@ impl ProjectRun<'_, '_> {
                 self.state.applicability = Some((seq, object_id));
             }
         }
+        Step::StopProject
+    }
+
+    /// Counts `counter` for one resolved attestation, marking the pass failed when `failed`.
+    fn resolve(&mut self, counter: &str, failed: bool) -> Step {
+        self.counters.add(counter, 1);
+        self.report.failed |= failed;
+        Step::Resolved
     }
 
     fn applicable(&mut self, object_id: &str, target: CommitReadTarget) -> Step {
         let budget = self.clock.budget();
         let republished = match applicability::evaluate(self.kernel, object_id, target, budget) {
-            Ok(Applicability::Current) => {
-                self.counters.add("applicability_current", 1);
-                return Step::Resolved;
-            }
+            Ok(Applicability::Current) => return self.resolve("applicability_current", false),
             Ok(Applicability::Unavailable) => {
-                self.counters.add("applicability_unavailable", 1);
-                return Step::Resolved;
+                return self.resolve("applicability_unavailable", false);
             }
             Ok(Applicability::Republished(republished)) => republished,
-            Err(error) => return self.refused(error == KernelError::Deadline),
+            Err(KernelError::Deadline) => return self.refused(true),
+            Err(_) => return self.resolve("applicability_unavailable", true),
         };
         if self.clock.passed(Poll::Commit) {
             return Step::StopPass;
         }
-        let counter =
-            match applicability::mark_republished(self.kernel, target, &republished, budget) {
-                Outcome::StaleCommitted(_) | Outcome::Committed(_) => {
-                    self.report.progressed = true;
-                    "applicability_stale"
-                }
-                Outcome::Replayed(_) | Outcome::Skipped(_) => return Step::Resolved,
-                Outcome::Changed => "commit_refused_changed",
-                Outcome::Conflict => "commit_conflict",
-                Outcome::InvalidWriteSet | Outcome::WitnessDegraded => {
-                    "commit_refused_invalid_write_set"
-                }
-                Outcome::Refused(error) => {
-                    self.counters.add(refused_counter(error), 1);
-                    self.report.failed = true;
-                    if error == KernelError::Deadline {
-                        return Step::StopPass;
-                    }
-                    return Step::Resolved;
-                }
-            };
-        self.report.failed |= counter != "applicability_stale";
-        self.counters.add(counter, 1);
-        Step::Resolved
+        match applicability::mark_republished(self.kernel, target, &republished, budget) {
+            Outcome::StaleCommitted(_) => {
+                self.report.progressed = true;
+                self.resolve("applicability_stale", false)
+            }
+            Outcome::Replayed(_) | Outcome::Skipped(_) => Step::Resolved,
+            Outcome::Changed => self.resolve("commit_refused_changed", true),
+            Outcome::Conflict => self.resolve("commit_conflict", true),
+            // `mark_republished` commits as `StaleCommitted`; the other two belong to `attest`.
+            Outcome::Committed(_) | Outcome::InvalidWriteSet | Outcome::WitnessDegraded => {
+                self.resolve("commit_refused_invalid_write_set", true)
+            }
+            Outcome::Refused(KernelError::Deadline) => {
+                self.resolve("commit_refused_deadline", true);
+                Step::StopPass
+            }
+            Outcome::Refused(error) => self.resolve(refused_counter(error), true),
+        }
+    }
+}
+
+fn refused_counter(error: KernelError) -> &'static str {
+    match error {
+        KernelError::Busy => "commit_refused_busy",
+        KernelError::Deadline => "commit_refused_deadline",
+        KernelError::Io => "commit_refused_io",
+        _ => "commit_refused_other",
     }
 }
 

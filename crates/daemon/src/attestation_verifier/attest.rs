@@ -63,10 +63,27 @@ pub struct Identity {
 
 impl Identity {
     pub fn of(model_object_id: &str, oid: &str) -> Self {
-        Self::of_hash(format!(
-            "{:x}",
-            Sha256::digest(format!("{model_object_id}\n{oid}"))
-        ))
+        let hash = format!("{:x}", Sha256::digest(format!("{model_object_id}\n{oid}")));
+        Self::of_hash(hash)
+    }
+
+    /// The ids derived from `hash`, the SHA-256 hex of a `(model object id, oid)` pair.
+    fn of_hash(hash: String) -> Self {
+        Self {
+            source_id: hash.clone(),
+            object_id: format!("verattest:{hash}"),
+            decision_id: format!("verattestdec:{hash}"),
+            witness_observation_id: format!("verwitness:{hash}"),
+            witness_object_id: format!("verwitnessobj:{hash}"),
+        }
+    }
+
+    /// The identity whose attestation object id is `object_id`, or `None` for an id outside the
+    /// attestation prefix.
+    pub fn of_attestation(object_id: &str) -> Option<Self> {
+        object_id
+            .strip_prefix("verattest:")
+            .map(|hash| Self::of_hash(hash.to_owned()))
     }
 }
 
@@ -163,7 +180,7 @@ pub(super) struct WitnessDetail {
     pub(super) relative_path: String,
     descriptor_object_id: String,
     pub(super) lineage_id: String,
-    pub(super) descriptor_revision: String,
+    descriptor_revision: String,
 }
 
 impl WriteSet {
@@ -445,32 +462,43 @@ fn mark_stale(
         Outcome::StaleCommitted,
         |envelope| {
             let (_, prior) = recheck(envelope, kernel, target, input)?;
-            match prior.disposition {
-                Disposition::Active => {}
-                Disposition::Stale => {
-                    return Err(Stop::Outcome(Outcome::Skipped(Skip::AlreadyStale)));
-                }
-                _ => return Err(Stop::Outcome(Outcome::Changed)),
-            }
-            let marked = envelope.record_admission(AdmissionRequest {
-                candidate_id: None,
-                subject_object_id: Some(input.decision.object_id.clone()),
-                source_class: Some(prior.source_class),
-                taint_class: Some(prior.taint_class),
-                event: AdmissionEvent {
-                    kind: EventKind::MarkStale,
-                    trigger_object_id: None,
-                    approval_object_id: None,
-                    evidence_id: None,
-                    reason,
-                },
-            })?;
-            if marked.disposition != Disposition::Stale {
-                return Err(Stop::Outcome(Outcome::InvalidWriteSet));
-            }
-            Ok(())
+            record_stale(envelope, &input.decision.object_id, &prior, reason)
         },
     )
+}
+
+/// Records one `MarkStale` on `subject` under the classes of `prior`, its latest admission, with
+/// no evidence. An `Active` subject is marked, a `Stale` one stops the envelope as
+/// [`Skip::AlreadyStale`], and any other disposition stops it as `Changed`; a mark the Kernel
+/// leaves short of `Stale` stops it as an invalid write set.
+pub(super) fn record_stale(
+    envelope: &mut Envelope<'_>,
+    subject: &str,
+    prior: &PriorDecision,
+    reason: String,
+) -> Result<(), Stop> {
+    match prior.disposition {
+        Disposition::Active => {}
+        Disposition::Stale => return Err(Stop::Outcome(Outcome::Skipped(Skip::AlreadyStale))),
+        _ => return Err(Stop::Outcome(Outcome::Changed)),
+    }
+    let marked = envelope.record_admission(AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(subject.to_owned()),
+        source_class: Some(prior.source_class),
+        taint_class: Some(prior.taint_class),
+        event: AdmissionEvent {
+            kind: EventKind::MarkStale,
+            trigger_object_id: None,
+            approval_object_id: None,
+            evidence_id: None,
+            reason,
+        },
+    })?;
+    if marked.disposition != Disposition::Stale {
+        return Err(Stop::Outcome(Outcome::InvalidWriteSet));
+    }
+    Ok(())
 }
 
 /// Why an envelope stopped before it committed.
@@ -627,26 +655,5 @@ fn intent(input: &VerifierInput, write: Write, blob_oid: &str) -> CommitIntent {
         request_digest: format!("{:x}", Sha256::digest(frozen.to_string())),
         actor: "agent:verifier".into(),
         cause: "deterministic attestation verifier".into(),
-    }
-}
-
-impl Identity {
-    /// The ids derived from `hash`, the SHA-256 hex of a `(model object id, oid)` pair.
-    fn of_hash(hash: String) -> Self {
-        Self {
-            object_id: format!("verattest:{hash}"),
-            decision_id: format!("verattestdec:{hash}"),
-            witness_observation_id: format!("verwitness:{hash}"),
-            witness_object_id: format!("verwitnessobj:{hash}"),
-            source_id: hash,
-        }
-    }
-
-    /// The identity whose attestation object id is `object_id`, or `None` for an id outside the
-    /// attestation prefix.
-    pub fn of_attestation(object_id: &str) -> Option<Self> {
-        object_id
-            .strip_prefix("verattest:")
-            .map(|hash| Self::of_hash(hash.to_owned()))
     }
 }

@@ -3,17 +3,15 @@
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
-use kernel::{
-    AdmissionEvent, AdmissionRequest, CommitIntent, CommitReadTarget, Disposition, EventKind,
-    KernelError, KernelStore, LiveDescriptor,
-};
+use kernel::{CommitIntent, CommitReadTarget, KernelError, KernelStore, LiveDescriptor};
 use sha2::{Digest as _, Sha256};
 
 use super::attest::{
-    Identity, Outcome, PRODUCER, Skip, Stop, WITNESS_DETAIL_VERSION, WitnessDetail, run,
+    Identity, Outcome, PRODUCER, Stop, WITNESS_DETAIL_VERSION, WitnessDetail, record_stale, run,
 };
 use super::classify::VERIFIER_SOURCE_KIND;
 
+/// How an attestation's witnessed document stands against its lineage's live descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Applicability {
     /// The live descriptor's digest is the witnessed digest.
@@ -32,6 +30,14 @@ pub struct Republished {
     live: LiveDescriptor,
 }
 
+/// The applicability of attestation `attestation_object_id` at `target`: its witness detail's
+/// digest compared with the digest of its lineage's live document descriptor, both read at
+/// `target`'s commit under `budget`.
+///
+/// # Errors
+///
+/// Returns the Kernel's refusal of either read, [`KernelError::Deadline`] among them when
+/// `budget` runs out.
 pub fn evaluate(
     kernel: &KernelStore,
     attestation_object_id: &str,
@@ -73,6 +79,11 @@ pub fn evaluate(
     })
 }
 
+/// Records one `MarkStale` on the attestation of `republished` under the classes of its latest
+/// admission, keyed by the attestation and the live descriptor revision. The envelope rereads the
+/// attestation and its lineage's live descriptor: a changed store returns `Changed`, an
+/// attestation already `Stale` returns `Skipped(AlreadyStale)`, a recorded key returns
+/// `Replayed`, and a committed mark returns `StaleCommitted`.
 pub fn mark_republished(
     kernel: &KernelStore,
     target: CommitReadTarget,
@@ -126,13 +137,6 @@ pub fn mark_republished(
             let (prior, _) = envelope
                 .subject_admission(attestation)?
                 .ok_or_else(changed)?;
-            match prior.disposition {
-                Disposition::Active => {}
-                Disposition::Stale => {
-                    return Err(Stop::Outcome(Outcome::Skipped(Skip::AlreadyStale)));
-                }
-                _ => return Err(changed()),
-            }
             let current = envelope.live_source_descriptor_of_lineage(
                 OccurrenceClass::RepositoryDocuments,
                 &witnessed.lineage_id,
@@ -140,23 +144,7 @@ pub fn mark_republished(
             if current.map(|current| current.object_id).as_ref() != Some(&live.object_id) {
                 return Err(changed());
             }
-            let marked = envelope.record_admission(AdmissionRequest {
-                candidate_id: None,
-                subject_object_id: Some(attestation.clone()),
-                source_class: Some(prior.source_class),
-                taint_class: Some(prior.taint_class),
-                event: AdmissionEvent {
-                    kind: EventKind::MarkStale,
-                    trigger_object_id: None,
-                    approval_object_id: None,
-                    evidence_id: None,
-                    reason,
-                },
-            })?;
-            if marked.disposition != Disposition::Stale {
-                return Err(Stop::Outcome(Outcome::InvalidWriteSet));
-            }
-            Ok(())
+            record_stale(envelope, attestation, &prior, reason)
         },
     )
 }

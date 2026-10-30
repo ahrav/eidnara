@@ -16,7 +16,7 @@ checkable and re-verifies every reference at its branch; #1171 re-verified
 every reference into the files it changed at its branch, and #1172 and
 #1173 did the same at theirs. #1174 converts the last proposed record,
 applies the remaining queued portfolio items, and re-verifies every
-reference into the files it changed at its branch.
+reference in the part at its branch tip.
 
 This ticket set amends the specification's proposed obligations in three
 ways. The reason set has no `range_outside_blob` and no `filter_unavailable`

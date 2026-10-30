@@ -759,20 +759,18 @@ impl KernelStore {
         requested: i64,
         budget: &crate::applicability::EvalBudget,
     ) -> Result<Option<ObservationRow>, KernelError> {
-        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(crate::map_sqlite)?;
-        snapshot_tip(&tx, requested)?;
-        let row = load_observation_for_object(&tx, requested, object_id)?;
-        tx.commit().map_err(crate::map_sqlite)?;
-        Ok(row)
+        self.read_snapshot_within_budget(requested, budget, |tx, _| {
+            load_observation_for_object(tx, requested, object_id)
+        })
+        .map(|(_, row)| row)
     }
 }
 
 /// The registry `source_kind` a scope decision page keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKindFilter<'a> {
+    /// Every source kind except the named one.
     Except(&'a str),
+    /// Only the named source kind.
     Only(&'a str),
 }
