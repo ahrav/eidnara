@@ -176,7 +176,7 @@ branch tip, so this part labels it `test-only`.
 ### p6-degraded-witness-event-denies-without-error
 
 Type: safety
-Reachability: explicit-config-only - the verifier write set's admission (`crates/daemon/src/attestation_verifier/attest.rs:389`) submits `CodeObserved` or `ConfigObserved` with its witness as trigger from the bounded pass (`crates/daemon/src/attestation_verifier/bounded_pass.rs:583`), which runs only while the user-only `verifier.enabled` is on; it defaults to off (`crates/daemon/src/config.rs:162`). The other daemon emitter, `observe_code` (`crates/daemon/src/lib.rs:14407`), sits inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14054`
+Reachability: explicit-config-only - the verifier write set's admission (`crates/daemon/src/attestation_verifier/attest.rs:389-390`) submits `CodeObserved` or `ConfigObserved` with its witness as trigger from the bounded pass (`crates/daemon/src/attestation_verifier/bounded_pass.rs:583`), which runs only while the user-only `verifier.enabled` is on; it defaults to off (`crates/daemon/src/config.rs:162`). The other daemon emitter, `observe_code` (`crates/daemon/src/lib.rs:14407`), sits inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14054`
 Status: active
 Exercised: yes - Kernel admission tests submit witness events with an unvalidated, foreign, other-revision, and invalidated trigger; the verifier write-set test rewrites its witness's kind at insert and the admission returns below `Verified` with no error
 Guarantee: A `CodeObserved` or `ConfigObserved` event whose trigger id is well-formed but fails validation is evaluated as `Other` and admitted with outcome `Deny` and no error; a malformed trigger id is refused by `identity` before validation.
@@ -191,7 +191,7 @@ Open questions: None.
 ### p6-witness-cannot-lift-an-inference-class-subject
 
 Type: safety
-Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14407`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14054`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:389`), which submits it only on its own subject under `(TrustedLocalCode, CurrentCode|CurrentConfig)`, so no production caller submits a witness event on an inference-class subject
+Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14407`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14054`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:389-390`), which submits it only on its own subject under `(TrustedLocalCode, CurrentCode|CurrentConfig)`, so no production caller submits a witness event on an inference-class subject
 Status: active
 Exercised: yes - admission unit tests evaluate every legal source and taint pair against its ceiling
 Guarantee: A subject admitted under `(ModelInference, AssistantInference)` has an automatic ceiling of `Candidate`: a witness event that raises support above that ceiling requires valid approval, and an admission whose classes differ from the subject's prior admission is refused.
@@ -206,7 +206,7 @@ Open questions: None.
 ### p6-trigger-must-match-subject-source-triple
 
 Type: safety
-Reachability: explicit-config-only - the verifier write set's admission (`crates/daemon/src/attestation_verifier/attest.rs:389`) submits `CodeObserved` or `ConfigObserved` with its witness as trigger from the bounded pass (`crates/daemon/src/attestation_verifier/bounded_pass.rs:583`), which runs only while the user-only `verifier.enabled` is on; it defaults to off (`crates/daemon/src/config.rs:162`). The other daemon emitter, `observe_code` (`crates/daemon/src/lib.rs:14407`), sits inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14054`
+Reachability: explicit-config-only - the verifier write set's admission (`crates/daemon/src/attestation_verifier/attest.rs:389-390`) submits `CodeObserved` or `ConfigObserved` with its witness as trigger from the bounded pass (`crates/daemon/src/attestation_verifier/bounded_pass.rs:583`), which runs only while the user-only `verifier.enabled` is on; it defaults to off (`crates/daemon/src/config.rs:162`). The other daemon emitter, `observe_code` (`crates/daemon/src/lib.rs:14407`), sits inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14054`
 Status: active
 Exercised: yes - Kernel admission tests submit triggers from another source, at another revision, of the other kind, invalidated, and with retired evidence; a verifier fixture admits one attestation identity's subject through another identity's witness and it stays at `Candidate`
 Guarantee: Under trusted classes whose ceiling admits `Verified`, a witness event promotes only when its trigger observation is live, of the event's kind, carries the subject's exact `(source_kind, source_id, source_revision)`, and has live backing evidence when it cites any.
@@ -222,7 +222,7 @@ Open questions:
 ### p6-trigger-sensitivity-composes-into-admission
 
 Type: safety
-Reachability: explicit-config-only - the verifier write set's admission (`crates/daemon/src/attestation_verifier/attest.rs:389`) submits `CodeObserved` or `ConfigObserved` with its witness as trigger from the bounded pass (`crates/daemon/src/attestation_verifier/bounded_pass.rs:583`), which runs only while the user-only `verifier.enabled` is on; it defaults to off (`crates/daemon/src/config.rs:162`). The other daemon emitter, `observe_code` (`crates/daemon/src/lib.rs:14407`), sits inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14054`
+Reachability: explicit-config-only - the verifier write set's admission (`crates/daemon/src/attestation_verifier/attest.rs:389-390`) submits `CodeObserved` or `ConfigObserved` with its witness as trigger from the bounded pass (`crates/daemon/src/attestation_verifier/bounded_pass.rs:583`), which runs only while the user-only `verifier.enabled` is on; it defaults to off (`crates/daemon/src/config.rs:162`). The other daemon emitter, `observe_code` (`crates/daemon/src/lib.rs:14407`), sits inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14054`
 Status: active
 Exercised: yes - Kernel admission tests admit objects through triggers of a stricter class and through triggers backed by stricter evidence
 Guarantee: An object admitted through a validated trigger serves at least as restrictively as the trigger observation and the trigger's backing evidence.
@@ -237,7 +237,7 @@ Open questions: None.
 ### p6-validated-witness-under-trusted-classes-promotes
 
 Type: reachability
-Reachability: explicit-config-only - the verifier write set's admission (`crates/daemon/src/attestation_verifier/attest.rs:389`) submits `CodeObserved` or `ConfigObserved` with its witness as trigger from the bounded pass (`crates/daemon/src/attestation_verifier/bounded_pass.rs:583`), which runs only while the user-only `verifier.enabled` is on; it defaults to off (`crates/daemon/src/config.rs:162`). The other daemon emitter, `observe_code` (`crates/daemon/src/lib.rs:14407`), sits inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14054`
+Reachability: explicit-config-only - the verifier write set's admission (`crates/daemon/src/attestation_verifier/attest.rs:389-390`) submits `CodeObserved` or `ConfigObserved` with its witness as trigger from the bounded pass (`crates/daemon/src/attestation_verifier/bounded_pass.rs:583`), which runs only while the user-only `verifier.enabled` is on; it defaults to off (`crates/daemon/src/config.rs:162`). The other daemon emitter, `observe_code` (`crates/daemon/src/lib.rs:14407`), sits inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14054`
 Status: active
 Exercised: yes - the `observe_code` fixture and the route tests that build a verified decision through the sibling `code_observation` fixture; the verifier write set admits an attestation at `Verified` through its `code_present` witness
 Guarantee: A fixture campaign constructs at least one subject under `(TrustedLocalCode, CurrentCode)` that a validated `CodeObserved` trigger promotes to `Verified`, the positive witness the S1 `always` records depend on.
@@ -587,7 +587,7 @@ Guarantee: The attestation's classes are exactly `(TrustedLocalCode, CurrentCode
 Check: `always` - `anchor_id` equals the model decision's, the one citation event's evidence equals the resolved and compared evidence, the decision row and the witness admission cite no evidence, and the classes are in the allowed pairs
 Fault/timing angle: none
 Required faults and enabling state: F14: the compared evidence is `Sensitive`; F15: a prose document classified `CurrentCode`
-Confidence: high - [evidence](evidence/p6-new-attestation-classes-and-cited-fields.md). Read `WriteSet::new` (`crates/daemon/src/attestation_verifier/attest.rs:194`), which builds the decision, witness, and citation specs, and the writes at `:386` and `:434`; the admission at `:389` takes the classes from `DocumentKind::taint_class` and its event from `DocumentKind::event_kind` (`crates/daemon/src/attestation_verifier/classify.rs:530`); `WriteSet::check` (`crates/daemon/src/attestation_verifier/attest.rs:302`) requires the model decision's anchor, domain, and served sensitivity before the commit, and `WriteSet::write` rereads the served sensitivity in the envelope (`:379`); `classify` takes it from the Kernel's served standing (`crates/daemon/src/attestation_verifier/classify.rs:343`)
+Confidence: high - [evidence](evidence/p6-new-attestation-classes-and-cited-fields.md). Read `WriteSet::new` (`crates/daemon/src/attestation_verifier/attest.rs:194`), which builds the decision, witness, and citation specs, and the writes at `:386` and `:434`; the admission at `:389-390` takes the classes from `DocumentKind::taint_class` and its event from `DocumentKind::event_kind` (`crates/daemon/src/attestation_verifier/classify.rs:530`); `WriteSet::check` (`crates/daemon/src/attestation_verifier/attest.rs:302`) requires the model decision's anchor, domain, and served sensitivity before the commit, and `WriteSet::write` rereads the served sensitivity in the envelope (`:379`); `classify` takes it from the Kernel's served standing (`crates/daemon/src/attestation_verifier/classify.rs:343`)
 Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:431`, `:572`, `:1092`, `:1400`, `:1435` (unaudited)
 Impact: falsifier: no citation event, or a different evidence row, at `Verified`
 Open questions:
@@ -619,7 +619,7 @@ Guarantee: An attestation reaches `Verified` only through a `CodeObserved` or `C
 Check: `always` - every `Verified` attestation has a witness admission row with a non-null trigger naming its own witness, and model maturities are unchanged across a write set
 Fault/timing angle: none
 Required faults and enabling state: F1: a trigger of another kind; a trigger carrying another attestation's source triple
-Confidence: high - [evidence](evidence/p6-new-attestation-verified-only-via-witness.md). Read the admission request at `crates/daemon/src/attestation_verifier/attest.rs:389`, the only admission of the attestation, whose trigger is the witness inserted at `:387`; the Kernel's trigger lookup compares the source triple (`crates/kernel/src/admission.rs:2807`)
+Confidence: high - [evidence](evidence/p6-new-attestation-verified-only-via-witness.md). Read the admission request at `crates/daemon/src/attestation_verifier/attest.rs:389-390`, the only admission of the attestation, whose trigger is the witness inserted at `:387`; the Kernel's trigger lookup compares the source triple (`crates/kernel/src/admission.rs:2807`)
 Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:431`, `:854`, `:1132` (unaudited)
 Impact: falsifier: `Verified` from insert alone
 Open questions: None.
@@ -649,7 +649,7 @@ Guarantee: The envelope aborts unless the returned admission has effective matur
 Check: `always` - a committed attestation's own admission has effective maturity `verified` and disposition `active`, and every other returned admission rolls the envelope back with `witness_degraded`; oracle amended by the write-set ticket
 Fault/timing angle: the witness changed between its insert and the admission in one envelope
 Required faults and enabling state: F1: a witness whose trigger fails validation inside the envelope
-Confidence: high - [evidence](evidence/p6-new-witness-degradation-never-silent.md). Read the assertion at `crates/daemon/src/attestation_verifier/attest.rs:402` after the admission at `:389`, whose failure stops the envelope through `run` (`:518`)
+Confidence: high - [evidence](evidence/p6-new-witness-degradation-never-silent.md). Read the assertion at `crates/daemon/src/attestation_verifier/attest.rs:402` after the admission at `:389-390`, whose failure stops the envelope through `run` (`:518`)
 Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:854`, `:431` (unaudited)
 Impact: falsifier: a committed attestation at `Candidate`
 Open questions:
@@ -725,7 +725,7 @@ Type: safety
 Reachability: explicit-config-only - the pass body runs only for a project whose user-only `verifier.enabled` is on (`crates/daemon/src/attestation_verifier/bounded_pass.rs:283`)
 Status: active - converted by [#1173](https://github.com/ahrav/eidnara/issues/1173)
 Exercised: yes - N + 2 verifiable 200 KiB decisions take two passes, N then 2, reading N × 200 KiB in the first; 3N `path_absent` decisions in one project leave another project's decision attested in the first pass; a fault-injected rollback after the admission and a key another writer committed first; each test checks the bucket sum at every pass end; N + 1 republished attestations take two passes of the applicability step, N then 1
-Guarantee: A pass computes at most N = 8 verdicts, reads at most N × 256 KiB of blob content, and evaluates at most N attestations for applicability per project, polls its deadline before each decision, each object read, and each commit, puts each considered decision in exactly one verdict or unverifiable bucket, and increments effect counters only after the commit returns.
+Guarantee: A pass computes at most N = 8 verdicts, reads at most N × 256 KiB of blob content, and evaluates at most N attestations for applicability from at most N pages per project, polls its deadline before each decision, each applicability page, each object read, and each commit, puts each considered decision in exactly one verdict or unverifiable bucket, and increments effect counters only after the commit returns.
 Check: `always` - per project per pass `verdicts <= N`, `bytes_read <= N × 256 KiB`, and applicability evaluations `<= N`; at every pass end `sum(verdict buckets) + sum(unverifiable buckets) == considered` and `attestation_committed <= match`; after a rollback `match = 1`, `attestation_committed = 0`, `commit_refused_<reason> = 1`; after a replayed key `attestation_replayed = 1` with one attestation
 Fault/timing angle: a commit refused after the verdict; another writer committing the same key between the skip check and the commit
 Required faults and enabling state: F7 between decisions; F10: a replayed key; F11: a fault-injected rollback; F13: more than N candidates and a starving two-project pattern
