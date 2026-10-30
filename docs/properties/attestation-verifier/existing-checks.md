@@ -45,12 +45,12 @@ into a file #1172 changed at the #1172 branch.
 | Classifier incarnation recheck | `crates/daemon/src/attestation_verifier/classify.rs:297` in `classify` (`:286`) | after the last read, successful or refused, a store that is not the target's incarnation is `IncarnationMismatch` | unaudited |
 | Classifier claim and binding | `crates/daemon/src/attestation_verifier/classify.rs:479` (`VerifierInput::new`), path refusal at `:495`, root match at `:496` | the claim's path and digest from the descriptor, its length from the evidence row, its oid from the anchor; a stored path outside the document path rule is `InvalidDocumentPath` when no cited row resolves to a verifiable document; the first bound root with the repository identity, else `repository_unbound` | unaudited |
 | Document kind rule | `crates/daemon/src/attestation_verifier/classify.rs:237` (`DocumentKind::of`), `:517` (`DocumentKind::event_kind`) | configuration extensions are `CurrentConfig` with `config_present` and `ConfigObserved`; every other path is `CurrentCode` with `code_present` and `CodeObserved` | unaudited |
-| Attestation identity | `crates/daemon/src/attestation_verifier/attest.rs:63` (`Identity::of`), `:572` (`intent`) | every id and the `source_id` hash `(model object id, oid)`; the key names the verdict's write, the decision, and the oid | unaudited |
-| Write-set check | `crates/daemon/src/attestation_verifier/attest.rs:276` (`WriteSet::check`), called at `:318` | the compared, detail, and citation evidence ids are one id; the detail is at `WITNESS_DETAIL_VERSION`; every id is the pair's `Identity`; both rows carry the model decision's domain and sensitivity and the attestation its anchor; the witness carries the attestation's source triple and the document kind's witness kind; no row cites evidence by FK | unaudited |
-| Envelope recheck | `crates/daemon/src/attestation_verifier/attest.rs:504` (`recheck`): incarnation at `:514`, anchor at `:542`, descriptor at `:551` | the model decision, its anchor at the sequence the envelope extends, and its descriptor with its cited evidence row live are what the classification read; otherwise `changed` | unaudited |
-| Witness oracle | `crates/daemon/src/attestation_verifier/attest.rs:362` | the envelope commits only at effective maturity `Verified` and disposition `Active`; otherwise `witness_degraded` | unaudited |
-| Opposite-key refusal | `crates/daemon/src/attestation_verifier/attest.rs:468` in `run` (`:456`) | a recorded key for the other verdict on the same decision and oid is `conflict` | unaudited |
-| Stale path | `crates/daemon/src/attestation_verifier/attest.rs:390` (`mark_stale`), skip at `:416`, admission at `:421` | one `MarkStale` under the latest admission's classes; an already `Stale` decision is skipped; a `MarkStale` returning another disposition is `invalid_write_set` | unaudited |
+| Attestation identity | `crates/daemon/src/attestation_verifier/attest.rs:63` (`Identity::of`), `:581` (`intent`) | every id and the `source_id` hash `(model object id, oid)`; the key names the verdict's write, the decision, and the oid | unaudited |
+| Write-set check | `crates/daemon/src/attestation_verifier/attest.rs:278` (`WriteSet::check`), called at `:325` | the compared, detail, and citation evidence ids are one id; the detail is at `WITNESS_DETAIL_VERSION`; every id is the pair's `Identity`; both rows carry the model decision's domain and sensitivity and the attestation its anchor; the witness carries the attestation's source triple and the document kind's witness kind; no row cites evidence by FK | unaudited |
+| Envelope recheck | `crates/daemon/src/attestation_verifier/attest.rs:513` (`recheck`): incarnation at `:523`, anchor at `:560`, descriptor at `:551` | the model decision, its anchor at the sequence the envelope extends, and its descriptor with its cited evidence row live are what the classification read; otherwise `changed` | unaudited |
+| Witness oracle | `crates/daemon/src/attestation_verifier/attest.rs:369` | the envelope commits only at effective maturity `Verified` and disposition `Active`; otherwise `witness_degraded` | unaudited |
+| Opposite-key refusal | `crates/daemon/src/attestation_verifier/attest.rs:477` in `run` (`:465`) | a recorded key for the other verdict on the same decision and oid is `conflict` | unaudited |
+| Stale path | `crates/daemon/src/attestation_verifier/attest.rs:399` (`mark_stale`), skip at `:425`, admission at `:430` | one `MarkStale` under the latest admission's classes; an already `Stale` decision is skipped; a `MarkStale` returning another disposition is `invalid_write_set` | unaudited |
 
 ## Tests
 
@@ -151,17 +151,17 @@ into a file #1172 changed at the #1172 branch.
 | `a_mismatch_marks_the_model_decision_stale_once` | `crates/daemon/tests/attestation_verifier_attest.rs:595` | stale path (AC8); mark stale | unaudited |
 | `a_mismatch_on_a_decision_already_stale_is_skipped` | `crates/daemon/tests/attestation_verifier_attest.rs:658` | stale path | unaudited |
 | `an_unavailable_verdict_writes_nothing` | `crates/daemon/tests/attestation_verifier_attest.rs:683` | stale path (`Unavailable`); witness evidence equality (no blob id) | unaudited |
-| `a_write_set_built_before_the_model_decision_existed_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:720` | one outcome (`changed`) | unaudited |
-| `a_write_set_citing_other_evidence_or_another_revision_is_refused_before_the_commit` | `crates/daemon/tests/attestation_verifier_attest.rs:742` | witness evidence equality (AC9) | unaudited |
-| `a_witness_admitted_below_verified_aborts_the_envelope` | `crates/daemon/tests/attestation_verifier_attest.rs:838` | degradation (AC9); degraded witness | unaudited |
-| `a_replay_returns_the_receipt_and_a_different_verdict_conflicts` | `crates/daemon/tests/attestation_verifier_attest.rs:879` | identity (F10) | unaudited |
-| `a_match_after_the_stale_path_for_the_same_oid_conflicts` | `crates/daemon/tests/attestation_verifier_attest.rs:922` | identity (F10) | unaudited |
-| `a_model_decision_changed_after_classification_aborts_the_set` | `crates/daemon/tests/attestation_verifier_attest.rs:949` | sibling (F2, F3, deleted evidence) | unaudited |
-| `an_unrelated_attestation_does_not_abort_an_older_classification` | `crates/daemon/tests/attestation_verifier_attest.rs:1051` | sibling (F1, unrelated commit) | unaudited |
-| `a_match_on_a_configuration_document_commits_under_current_config` | `crates/daemon/tests/attestation_verifier_attest.rs:1076` | classes and cited fields (`CurrentConfig`) | unaudited |
-| `one_attestations_witness_cannot_promote_another` | `crates/daemon/tests/attestation_verifier_attest.rs:1116` | identity; verified via witness; source triple (F1) | unaudited |
-| `a_rollback_after_the_admission_leaves_no_row_and_a_reopened_store_keeps_every_row` | `crates/daemon/tests/attestation_verifier_attest.rs:1162` | one outcome (F11) | unaudited |
-| `no_model_client_is_reachable_from_the_verifier_module` | `crates/daemon/tests/attestation_verifier_attest.rs:1230` | party (AC15) | unaudited |
+| `a_write_set_built_before_the_model_decision_existed_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:725` | one outcome (`changed`) | unaudited |
+| `a_write_set_citing_other_evidence_or_another_revision_is_refused_before_the_commit` | `crates/daemon/tests/attestation_verifier_attest.rs:747` | witness evidence equality (AC9) | unaudited |
+| `a_witness_admitted_below_verified_aborts_the_envelope` | `crates/daemon/tests/attestation_verifier_attest.rs:852` | degradation (AC9); degraded witness | unaudited |
+| `a_replay_returns_the_receipt_and_a_different_verdict_conflicts` | `crates/daemon/tests/attestation_verifier_attest.rs:893` | identity (F10) | unaudited |
+| `a_match_after_the_stale_path_for_the_same_oid_conflicts` | `crates/daemon/tests/attestation_verifier_attest.rs:936` | identity (F10) | unaudited |
+| `a_model_decision_changed_after_classification_aborts_the_set` | `crates/daemon/tests/attestation_verifier_attest.rs:963` | sibling (F2, F3, deleted evidence) | unaudited |
+| `an_unrelated_attestation_does_not_abort_an_older_classification` | `crates/daemon/tests/attestation_verifier_attest.rs:1065` | sibling (F1, unrelated commit) | unaudited |
+| `a_match_on_a_configuration_document_commits_under_current_config` | `crates/daemon/tests/attestation_verifier_attest.rs:1090` | classes and cited fields (`CurrentConfig`) | unaudited |
+| `one_attestations_witness_cannot_promote_another` | `crates/daemon/tests/attestation_verifier_attest.rs:1130` | identity; verified via witness; source triple (F1) | unaudited |
+| `a_rollback_after_the_admission_leaves_no_row_and_a_reopened_store_keeps_every_row` | `crates/daemon/tests/attestation_verifier_attest.rs:1176` | one outcome (F11) | unaudited |
+| `no_model_client_is_reachable_from_the_verifier_module` | `crates/daemon/tests/attestation_verifier_attest.rs:1244` | party (AC15) | unaudited |
 
 ## Categories with no check found
 
