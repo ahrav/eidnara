@@ -708,7 +708,7 @@ impl KernelStore {
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Deadline`] when no reader frees or the read does not finish before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and the SQLite classification (`Busy`, `Conflict`, `Io`) for a read that fails.
+    /// Returns [`KernelError::Deadline`] when no reader frees or the page query does not finish before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and the SQLite classification (`Busy`, `Conflict`, `Io`) for a read that fails.
     pub fn scope_decisions_after_within_budget(
         &self,
         scope_id: &str,

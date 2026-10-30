@@ -49,9 +49,10 @@
 //! every decision resolved, records as its floor the page start just past the target's commit
 //! sequence, and its next pass pages from the later of the floor and the cursor. A decision is
 //! resolved by a skip, an unverifiable class, a decision outside the verifier's input
-//! ([`Class::NotInput`]), a terminal `Unavailable` reason, a committed or replayed write, a
-//! `conflict`, an invalid write set, or K = [`MAX_ATTEMPTS`] attempts in total, shared across
-//! transient `Unavailable` reasons, deadlines, Kernel refusals, a changed decision, and degraded
+//! ([`Class::NotInput`]), a terminal `Unavailable` reason, a committed, replayed, or skipped write,
+//! a `conflict`, an invalid write set, or K = [`MAX_ATTEMPTS`] attempts in total, shared across
+//! transient `Unavailable` reasons, deadlines at classification, during an object read, or at the
+//! commit, Kernel refusals of the classification or the commit, a changed decision, and degraded
 //! witnesses. The K-th attempt counts `witness_degraded_skipped` when its witness degraded and
 //! `unavailable_skipped` otherwise. A terminal reason is kept per `(decision, oid)` for the process
 //! lifetime. All state is process-local: a restart rescans from the start, and the skips and the
@@ -255,8 +256,8 @@ struct ProjectState {
     /// before the cursor is dropped when the cursor advances.
     resolved: BTreeSet<(i64, String)>,
     attempts: HashMap<String, u32>,
-    /// The page start just past a commit sequence at or before which every live decision of the
-    /// scope is resolved; a pass pages from the later of it and the cursor.
+    /// The page start just past a commit sequence at or before which every live non-`verifier`
+    /// decision of the scope is resolved; a pass pages from the later of it and the cursor.
     floor: Option<(i64, String)>,
 }
 

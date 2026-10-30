@@ -1707,15 +1707,19 @@ fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
     let resolved = store.kernel.tip().unwrap();
     assert_eq!(floor(&verifier, &repo), past(resolved));
 
-    // `other` pages from its floor and verifies the decisions committed behind `repo`'s.
-    for i in 0..3 {
-        store.decision(&other, &format!("o{i}"), &files[i].0, &files[i].1);
+    // `other` pages from its own floor and verifies the decisions committed behind `repo`'s. The
+    // rotation starts this pass with `repo`, whose floor then lies past them; the floors pin it.
+    for (i, (path, body)) in files.iter().enumerate().take(3) {
+        store.decision(&other, &format!("o{i}"), path, body);
     }
+    let before = store.kernel.tip().unwrap();
     let clock = Clock::open();
     let report = pass(&mut verifier, &clock);
     assert!(report.progressed && !report.failed);
     assert_eq!(clock.opens(), 3);
     assert_eq!(counters.get("attestation_committed"), 6);
+    assert_eq!(floor(&verifier, &repo), past(before));
+    assert_eq!(floor(&verifier, &other), past(before));
 
     // A decision committed during `repo`'s own run, after its target capture and while a decision
     // there is pending, waits for the next pass: the floor is the captured target's, not the tip's.
