@@ -44,7 +44,8 @@ pub const PRODUCER: &str = "verifier";
 /// The decision-event kind of the attestation's citation of the compared evidence.
 pub const CITATION_EVENT_KIND: &str = "verifier_citation";
 
-/// The version of the witness observation's detail.
+/// The version of the witness observation's detail. The applicability step reads a detail at
+/// another version as unavailable.
 pub const WITNESS_DETAIL_VERSION: u32 = 1;
 
 /// The ids one attestation of a model decision at one commit oid is written under: `source_id` is
@@ -93,7 +94,8 @@ impl Identity {
 pub enum Outcome {
     /// The attestation and every companion row committed.
     Committed(CommitReceipt),
-    /// The `MarkStale` on the model decision committed.
+    /// The `MarkStale` committed: on the model decision for [`attest`], or on the attestation for
+    /// [`super::applicability::mark_republished`].
     StaleCommitted(CommitReceipt),
     /// The key's receipt was already recorded with the same request digest; nothing was written.
     Replayed(CommitReceipt),
@@ -105,8 +107,10 @@ pub enum Outcome {
     Conflict,
     /// The model decision, its served sensitivity, its anchor, its cited descriptor or evidence
     /// row, or the store's incarnation differs from the classification, or the Kernel reports the
-    /// causality parent missing or at another revision; nothing committed, whether detected
-    /// before or inside the envelope.
+    /// causality parent missing or at another revision; for
+    /// [`super::applicability::mark_republished`], the attestation is retired, superseded, or
+    /// without an admission, the store's incarnation changed, or the lineage's live descriptor is
+    /// another one or none. Nothing committed, whether detected before or inside the envelope.
     Changed,
     /// A `Match` or `Mismatch` names no blob, the witness detail failed to serialize, the write
     /// set failed [`WriteSet::check`] before the commit, the Kernel refused the causality request
@@ -116,8 +120,10 @@ pub enum Outcome {
     /// The Kernel refused the commit or a read before it. A [`KernelError::Io`] from the commit
     /// can follow a durable commit, so a
     /// caller treats it as an unknown outcome. The next pass resolves an attestation by replaying
-    /// the key's receipt; a committed `MarkStale` leaves the model decision `Stale`, outside the
-    /// next pass's input, so a caller resolves it by reading the model decision's disposition.
+    /// the key's receipt; a committed `MarkStale` leaves its subject `Stale`, outside the next
+    /// pass's input, so a caller resolves it by reading the disposition of the marked subject: the
+    /// model decision for [`attest`], the attestation for
+    /// [`super::applicability::mark_republished`].
     Refused(KernelError),
 }
 
@@ -128,7 +134,8 @@ pub enum Skip {
     NotVerifiable,
     /// The verdict is `Unavailable`.
     Unavailable,
-    /// The model decision is already `Stale`.
+    /// The marked subject is already `Stale`: the model decision for [`attest`], the attestation
+    /// for [`super::applicability::mark_republished`].
     AlreadyStale,
 }
 
@@ -513,8 +520,9 @@ impl From<KernelError> for Stop {
     }
 }
 
-/// Commits `write` under `intent` after refusing a recorded `opposite` key, mapping the result to
-/// one outcome. A stopped envelope returns its error from the closure, so the commit rolls back.
+/// Commits `write` under `intent`, after refusing a recorded `opposite` key when one is given,
+/// mapping the result to one outcome. A stopped envelope returns its error from the closure, so
+/// the commit rolls back.
 pub(super) fn run(
     kernel: &KernelStore,
     budget: &EvalBudget,
@@ -649,9 +657,15 @@ fn intent(input: &VerifierInput, write: Write, blob_oid: &str) -> CommitIntent {
         "blob_oid": blob_oid,
         "verdict": verdict,
     });
+    verifier_intent(format!("{write_name}:{model}:{}", claim.oid()), &frozen)
+}
+
+/// The verifier's commit intent for `operation_key`, whose request digest is the SHA-256 of the
+/// frozen inputs `frozen`.
+pub(super) fn verifier_intent(operation_key: String, frozen: &serde_json::Value) -> CommitIntent {
     CommitIntent {
         producer: PRODUCER.into(),
-        operation_key: format!("{write_name}:{model}:{}", claim.oid()),
+        operation_key,
         request_digest: format!("{:x}", Sha256::digest(frozen.to_string())),
         actor: "agent:verifier".into(),
         cause: "deterministic attestation verifier".into(),

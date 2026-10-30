@@ -3,11 +3,11 @@
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
-use kernel::{CommitIntent, CommitReadTarget, KernelError, KernelStore, LiveDescriptor};
-use sha2::{Digest as _, Sha256};
+use kernel::{CommitReadTarget, KernelError, KernelStore, LiveDescriptor};
 
 use super::attest::{
-    Identity, Outcome, PRODUCER, Stop, WITNESS_DETAIL_VERSION, WitnessDetail, record_stale, run,
+    Identity, Outcome, Stop, WITNESS_DETAIL_VERSION, WitnessDetail, record_stale, run,
+    verifier_intent,
 };
 use super::classify::VERIFIER_SOURCE_KIND;
 
@@ -16,7 +16,9 @@ use super::classify::VERIFIER_SOURCE_KIND;
 pub enum Applicability {
     /// The live descriptor's digest is the witnessed digest.
     Current,
-    /// The lineage has no live descriptor, or the witness detail is absent or does not decode.
+    /// The id is outside the `verattest:` prefix, the lineage has no live descriptor, or the
+    /// witness or its detail is absent, does not decode, or has a version other than
+    /// [`WITNESS_DETAIL_VERSION`].
     Unavailable,
     /// The live descriptor's digest differs from the witnessed digest.
     Republished(Box<Republished>),
@@ -82,8 +84,10 @@ pub fn evaluate(
 /// Records one `MarkStale` on the attestation of `republished` under the classes of its latest
 /// admission, keyed by the attestation and the live descriptor revision. The envelope rereads the
 /// attestation and its lineage's live descriptor: a changed store returns `Changed`, an
-/// attestation already `Stale` returns `Skipped(AlreadyStale)`, a recorded key returns
-/// `Replayed`, and a committed mark returns `StaleCommitted`.
+/// attestation already `Stale` returns `Skipped(AlreadyStale)`, a key recorded with the same
+/// request digest returns `Replayed` and with another `Conflict`, a mark the Kernel leaves short
+/// of `Stale` returns `InvalidWriteSet`, a refused read or commit returns `Refused`, and a
+/// committed mark returns `StaleCommitted`.
 pub fn mark_republished(
     kernel: &KernelStore,
     target: CommitReadTarget,
@@ -96,19 +100,13 @@ pub fn mark_republished(
         live,
     } = republished;
     let (revision, digest) = (&live.detail.revision, &live.detail.artifact_digest);
-    let frozen = serde_json::json!([
-        attestation,
-        witnessed.artifact_digest,
-        live.object_id,
-        digest
-    ]);
-    let intent = CommitIntent {
-        producer: PRODUCER.into(),
-        operation_key: format!("applicability:{attestation}:{revision}"),
-        request_digest: format!("{:x}", Sha256::digest(frozen.to_string())),
-        actor: "agent:verifier".into(),
-        cause: "deterministic attestation verifier".into(),
-    };
+    let frozen = serde_json::json!({
+        "attestation_object_id": attestation,
+        "witnessed_digest": witnessed.artifact_digest,
+        "descriptor_object_id": live.object_id,
+        "artifact_digest": digest,
+    });
+    let intent = verifier_intent(format!("applicability:{attestation}:{revision}"), &frozen);
     let reason = format!(
         "verifier: the document at {} was republished at descriptor revision {revision} with \
          sha256 {digest}, which differs from the attested sha256 {}",
