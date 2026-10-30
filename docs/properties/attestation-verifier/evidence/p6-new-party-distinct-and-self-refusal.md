@@ -30,7 +30,7 @@ A store holding a `verifier` decision whose anchor and cited descriptor the read
 
 ### Q: Do the cited references exist at the branch tip under the cited names?
 
-- Sources examined: every `path:line` in the record, read at the #1172 branch tip.
+- Sources examined: every `path:line` in the record, read at the #1174 branch tip.
 - Findings: Each cited line is the first line of the named test, function, or constant, or the named line inside it.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
@@ -38,7 +38,7 @@ A store holding a `verifier` decision whose anchor and cited descriptor the read
 ### Q: Does anything beyond the plugin route reserve `verifier`?
 
 - Sources examined: OQ6-15 as resolved in the #1172 ticket; every `source_kind` field the daemon's routes deserialize (`crates/daemon/src/kernel_routes/commit.rs`, `crates/daemon/src/kernel_routes/ingest.rs`).
-- Findings: The plugin route's closed table is the reservation; no other route has a source-kind table. A plugin can still `mark_stale` or retire an attestation under its own source kind (gap G4), which the ticket documents in #1174.
+- Findings: The plugin route's closed table is the reservation; no other route has a source-kind table. A plugin can still move an attestation off `Active` under its own source kind through a `disposition` operation with `mark_stale`, `mark_disputed`, `explicit_reject`, `contradict`, or `quarantine`, or retire it through `retire_decision` (gap G4), which the ticket documents in #1174; none raises its maturity.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
@@ -46,5 +46,5 @@ A store holding a `verifier` decision whose anchor and cited descriptor the read
 
 - Sources examined: `record_disposition` (`crates/daemon/src/kernel_routes/commit.rs:790`) and the `RetireDecision` arm (`crates/daemon/src/kernel_routes/commit.rs:1011`), read at the #1174 branch; gap G4.
 - Findings: Both reach any live decision in the route's project scope through the scope filter and compare no `source_kind`, so a plugin can move an attestation to `Stale` or retire it under its own source kind. Either removes the attestation from `AutoInject`; neither raises its maturity or writes under `verifier`. `docs/memory-reviewer-operations.md` section 9.7 documents the exposure.
-- Missing evidence: no test submits a plugin `mark_stale` or retirement of an attestation.
+- Missing evidence: no test submits a plugin disposition or retirement of an attestation.
 - Conclusion: resolved with answer: yes. Closing the exposure is a repository-owner decision (OQ6-15, needs human input).

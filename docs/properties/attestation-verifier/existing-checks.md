@@ -62,8 +62,8 @@ rows #1174 added and every row pointing into a file #1174 changed at the
 | Pass effect counters | `crates/daemon/src/attestation_verifier/bounded_pass.rs:649` (`ProjectRun::outcome`), after `attest` at `:644` | each outcome increments its effect counter after the commit returns | unaudited |
 | Scope decision page | `crates/kernel/src/slice/read.rs:701` (`scope_decisions_after_within_budget`) | a scope's live decisions after a `(created_commit_seq, object_id)` pair in that order, under `SourceKindFilter::Except` all but one source kind, at most a row cap | unaudited |
 | Applicability evaluation | `crates/daemon/src/attestation_verifier/applicability.rs:43` (`evaluate`) | the witness detail decodes at `WITNESS_DETAIL_VERSION` and names a lineage whose live document descriptor at the pass sequence carries the witnessed digest (`Current`), another digest (`Republished`), or no live descriptor (`Unavailable`) | unaudited |
-| Applicability stale mark | `crates/daemon/src/attestation_verifier/applicability.rs:91` (`mark_republished`), key at `:107`, descriptor recheck at `:142`, `record_stale` at `:145` | one `MarkStale` on a live `Active` `verifier` attestation under its latest admission's classes with no evidence, keyed by the attestation and the descriptor revision; a `Stale` attestation is skipped and any other change is `changed` | unaudited |
-| Applicability step | `crates/daemon/src/attestation_verifier/bounded_pass.rs:683-684` (`ProjectRun::applicability`), page bound at `:690`, N bound at `:756`, cursor reset at `:686`; `:782` (`ProjectRun::applicable`), commit poll at `:772` | at most N `Active` attestations evaluated per project per pass from a process-local cursor that returns to the start on an empty page; at most N pages read per pass; the deadline is polled before each page and each commit | unaudited |
+| Applicability stale mark | `crates/daemon/src/attestation_verifier/applicability.rs:91` (`mark_republished`), key at `:109`, descriptor recheck at `:142`, `record_stale` at `:145` | one `MarkStale` on a live `Active` `verifier` attestation under its latest admission's classes with no evidence, keyed by the attestation and the descriptor revision; a `Stale` attestation is skipped and any other change is `changed` | unaudited |
+| Applicability step | `crates/daemon/src/attestation_verifier/bounded_pass.rs:683-684` (`ProjectRun::applicability`), cycle commit at `:688`, page bound at `:690`, N bound at `:756`, cycle end at `:767`; `:782` (`ProjectRun::applicable`), commit poll at `:799` | at most N `Active` attestations evaluated per project per pass from a process-local cursor that returns to the start on a page shorter than `PAGE_ROWS`, each cycle paging through the commit its first pass captured; at most N pages read per pass; the deadline is polled before each page and each commit | unaudited |
 | Source-kind decision page | `crates/kernel/src/slice/read.rs:701` (`scope_decisions_after_within_budget`), `SourceKindFilter::Only` at `:717` | a scope's live decisions of one source kind after a `(created_commit_seq, object_id)` pair in that order, at most a row cap | unaudited |
 | Lineage descriptor read | `crates/kernel/src/source_descriptor.rs:1293` (`live_source_descriptor_of_lineage_within_budget`) through `Envelope::lineage_descriptor` (`:959`) | the one live descriptor of a class in a lineage at a sequence, with the page read's row checks | unaudited |
 | Verifier block sanitizer | `crates/host-runtime/src/control.rs:2112` (`VERIFIER_COUNTERS`) through `sanitize_counters` | `metrics.verifier` keeps each allowlisted unsigned integer no greater than 2^53, the three applicability counters included, and drops every other field | unaudited |
@@ -239,12 +239,19 @@ rows #1174 added and every row pointing into a file #1174 changed at the
 | `a_witness_read_the_kernel_refuses_resolves_its_attestation_and_the_step_continues` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2116` | stale on byte change (refused read) | unaudited |
 | `an_attestation_row_the_standing_read_refuses_resolves_and_the_step_continues` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2164` | stale on byte change (refused standing row) | unaudited |
 | `the_applicability_step_pages_at_most_n_pages_of_rows_per_pass` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2200` | stale on byte change (page bound); pass bounds | unaudited |
+| `the_applicability_step_runs_after_the_decisions_step_reaches_n_verdicts` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2360` | stale on byte change (after the decisions bound) | unaudited |
+| `a_deadline_at_the_applicability_page_poll_leaves_the_attestation_for_the_next_pass` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2385` | stale on byte change (page poll); pass bounds | unaudited |
+| `a_rolled_back_stale_mark_counts_its_refusal_and_a_later_pass_marks` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2415` | stale on byte change (refused commit) | unaudited |
+| `evaluate_reads_the_witness_and_the_descriptor_at_the_targets_commit` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2460` | stale on byte change (historical snapshot) | unaudited |
+| `a_descriptor_retired_before_the_stale_mark_commits_refuses_it_as_changed` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2512` | stale on byte change (lineage recheck) | unaudited |
+| `an_attestation_retired_within_an_applicability_cycle_is_passed_over` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2555` | stale on byte change (cycle commit) | unaudited |
 | `the_source_page_walks_only_the_scopes_decisions_of_one_source_kind` | `crates/kernel/tests/kernel_scope_decisions.rs:140` | stale on byte change (page read) | unaudited |
 | `the_verifier_block_is_sanitized_field_by_field_and_documented` | `crates/host-runtime/src/control.rs:2179` | counters block on the wire | unaudited |
 
 ## Categories with no check found
 
-- A transient refusal of an applicability witness or descriptor read (`Busy`, `Io`) failing the pass: no test induces a transient Kernel error at that read; the row-caused half is tested and the transient half is covered by reading `ProjectRun::applicable`.
+- A transient refusal of an applicability witness or descriptor read (`Busy`, `Io`) failing the pass: no test induces a transient Kernel error at that read; the row-caused witness-read refusal is tested, no test induces a row-caused descriptor-read refusal through the step, and the transient half is covered by reading `ProjectRun::applicable`.
+- No test exercises a refused applicability page read, a store-wide batched-standing refusal, a stale-mark conflict, or an incarnation change between the applicability evaluation and the mark or before the step's incarnation recheck.
 - `p6-plugin-cannot-replace-a-foreign-source-decision`: no test submits a
   plugin replacement of a decision of another source kind.
 - `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard`:
@@ -261,7 +268,7 @@ rows #1174 added and every row pointing into a file #1174 changed at the
   descriptor revision through the Kernel, and
   `p6-document-republishes-only-on-digest-change-and-retires-on-missing`
   covers when source capture publishes one. No test exercises the Kernel
-  lineage read's deadline or future-snapshot refusals. The `evaluate`
+  lineage read's future-snapshot refusal; its deadline refusal is asserted under a cancelled budget in `a_replayed_stale_mark_key_writes_nothing_new`. The `evaluate`
   deadline arm of `ProjectRun::applicable` is covered only by the Kernel-level
   cancelled-budget refusal in `a_replayed_stale_mark_key_writes_nothing_new`,
   since the pass has no seam between the page read and `evaluate`. The

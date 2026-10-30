@@ -26,7 +26,7 @@ F13: a permanently transient head decision, as precondition coverage for `someti
 
 ### Q: Do the cited references exist at the branch tip under the cited names?
 
-- Sources examined: every `path:line` in the record and this file, read at the #1173 branch tip.
+- Sources examined: every `path:line` in the record and this file, read at the #1174 branch tip.
 - Findings: Each cited line is the first line of the named test, function, or constant, or the named line inside it.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

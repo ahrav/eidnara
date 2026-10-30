@@ -17,7 +17,7 @@ branch for F2 and F10.
 | F4 | Header over budget; header under budget with an over-budget delta base; hash mismatch on decode | constructible: large blobs, `write_delta_pack` in `crates/daemon/tests/support/git_repo.rs`, and a valid object stored under another id |
 | F5 | Partial clone or missing object; corrupt commit, tree, or blob | constructible: a deleted loose object stands in for a missing promisor object; a valid object stored under another id, an undecodable object written with `git hash-object --literally`, a loose object whose bytes are not zlib data, a commit or tree with a valid prefix and a malformed remainder, or `write_self_delta_pack`'s self-referencing ref-delta, for corruption |
 | F6 | Path absent; gitlink, symlink, or tree at the path; path beneath a gitlink | constructible: `git mktree --missing` in a bare fixture |
-| F7 | Deadline before the pass, between decisions, and during a read; budget cancellation | constructible for one claim: a cancelled or expired `EvalBudget`, and a stage-aware `Deadline` double; for the pass, a recording `PassClock` double that passes before decision k + 1 or before a blob read (#1173) |
+| F7 | Deadline before the pass, between decisions, and during a read; budget cancellation | constructible for one claim: a cancelled or expired `EvalBudget`, and a stage-aware `Deadline` double; for the pass, a recording `PassClock` double that passes before decision k + 1 or before a blob read (#1173), or at the applicability page poll or stale-mark commit poll (#1174) |
 | F8 | Worktree edit, HEAD move, repack between two verdicts; the repack clause excludes allocation-limit refusals of the commit, a tree, or the blob, whose verdict depends on pack layout | constructible: a linked worktree of the bare fixture, `git update-ref`, `git repack -a -d` |
 | F9 | `text eol`, `ident`, encoding, or clean filter attributes at the oid | partial: the LF and CRLF forms are constructible; `ident`, encoding, and clean filters stay false mismatches by the OQ6-8 decision |
 | F10 | Operation key replayed with the same and with a different verdict | constructible: the write-set fixture repeats a call, changes the blob id under the same key, and calls the opposite verdict for the same decision and oid; the applicability fixture repeats a stale mark under its key (#1174) |
@@ -69,7 +69,7 @@ branch for F2 and F10.
 | `p6-new-pass-bounds-and-accounting` | F7, F10, F11, F13 |
 | `p6-new-cursor-never-skips-unresolved` | F7, F13 |
 | `p6-new-pass-progress-under-transient-unavailable` | F13 |
-| `p6-new-attestation-stale-on-byte-change` | a second descriptor revision of the cited document with other bytes; F2 on the attestation; F10 |
+| `p6-new-attestation-stale-on-byte-change` | a second descriptor revision of the cited document with other bytes; F2 on the attestation; F7 at the stale mark's commit poll and the page poll; F10; F13 |
 | `p6-new-verdict-deterministic` | F8, F9 |
 | `p6-new-blob-read-bounded-at-oid` | F4, F5, F6, F7 |
 

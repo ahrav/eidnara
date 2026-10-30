@@ -140,11 +140,11 @@ the current line.
   the schema.
 - A stale mark the Kernel refuses counts under the write set's
   `commit_refused_` and `commit_conflict` counters; the three applicability
-  counters count evaluations, and `applicability_stale` only committed
+  counters do not partition evaluations: a replayed or already `Stale` mark and a deadline stop count in none, a row-caused standing refusal counts `applicability_unavailable` with no evaluation, and `applicability_stale` counts only committed
   marks.
 - The ticket names a "second pass writes nothing". Under N the step
   revisits attestations in a cycle of passes, so a second pass over a
-  `Stale` attestation passes over it before any read, and a direct retry of
+  `Stale` attestation passes over it after its page and standing reads, before any witness or descriptor read, and a direct retry of
   the same key replays its receipt.
 - The refinements R1 to R8 were applied by #1170; the R2 halves on
   effective maturity and visibility after `MarkStale` stay an open question
