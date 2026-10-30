@@ -111,10 +111,10 @@ before the fault and an equality assertion on the full result afterward.
 
 - Sources examined: `crates/daemon/src/query_route.rs:1`, `:69` through
   `:71`, `:1724` through `:1738`; `crates/retrieval/src/claims.rs:441`
-  `read_selected_claims`; `crates/kernel/src/claim_facts.rs:43` and `:427`.
+  `read_selected_claims`; `crates/kernel/src/claim_facts.rs:43` and `:633`.
 - Findings: the route's module doc states no payload read. Claim validation
   passes `max_causal_payload_bytes` of 1 MiB into `read_selected_claims`,
-  and the kernel's `claim_facts` applies that bound at `:427` when it reads
+  and the kernel's `claim_facts` applies that bound at `crates/kernel/src/claim_facts.rs:633` when it reads
   the causal decision record from the kernel store, under
   `Phase::ClaimValidation`. That is a kernel read of canonical decision
   payload, bounded in bytes, after `Phase::Revalidation` has judged every
