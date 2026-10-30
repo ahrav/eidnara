@@ -37,7 +37,7 @@ The numbering below follows the sentence's order.
 | --- | --- | --- |
 | C1 | `claim_causality.rs:36` is `:38` | applied: `MAX_DERIVATION_PARENTS` is `crates/kernel/src/claim_causality.rs:38` |
 | C2 | Two `checks.rs` arm ranges shifted by two lines | applied: the `FileExists` arm is `crates/kernel/src/applicability/checks.rs:285` and the `ConfigKey` arm `:296` at the branch tip; the specification's original ranges are not recoverable |
-| C3 | The specification's two `kernel_routes.rs` references name lines that call a sibling fixture | applied: the records cite the tests (`:1932`, `:5177` at the #1172 branch) and their `code_observation` fixture (`:887`) |
+| C3 | `kernel_routes.rs:1888, 5131` call a sibling fixture | applied: the records cite the tests (`:1875`, `:5120`) and their `code_observation` fixture (`:887`) |
 | C4 | A preamble wording | applied: the catalog's reachability section states no blanket claim and each record carries its own evidence |
 
 Line drift between `3a3b916b7` and the branch tip moved several references:

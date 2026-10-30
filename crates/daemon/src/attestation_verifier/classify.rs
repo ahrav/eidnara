@@ -36,9 +36,9 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     AdmissionFacts, AnchorCondition, CitingDescriptor, ClaimDecisionFacts, ClaimFactsError,
-    CommitReadTarget, Disposition, EvidenceLiveness, EvidenceLivenessError, GitCondition,
-    KernelError, KernelStore, LinkedEvidence, LiveDescriptor, ObjectRow, Sensitivity, SourceClass,
-    TaintClass,
+    CommitReadTarget, Disposition, EventKind, EvidenceLiveness, EvidenceLivenessError,
+    GitCondition, KernelError, KernelStore, LinkedEvidence, LiveDescriptor, ObjectRow, Sensitivity,
+    SourceClass, TaintClass,
 };
 
 use super::{Claim, Reason};
@@ -508,5 +508,16 @@ impl VerifierInput {
             repository_id,
             root,
         })
+    }
+}
+
+impl DocumentKind {
+    /// The admission event that lifts a subject on the document's witness, `CodeObserved` with
+    /// [`Self::witness_kind`] `code_present` and `ConfigObserved` with `config_present`.
+    pub fn event_kind(self) -> EventKind {
+        match self {
+            Self::Code => EventKind::CodeObserved,
+            Self::Config => EventKind::ConfigObserved,
+        }
     }
 }

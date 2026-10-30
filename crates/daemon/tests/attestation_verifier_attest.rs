@@ -19,7 +19,8 @@ use daemon::attestation_verifier::{Evaluation, Reason, Verdict, verify};
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass};
 use kernel::{
-    AdmissionEvent, AdmissionRequest, AnchorSpec, AnchorValue, ArtifactIngestRequest, CausalClass,
+    AdmissionEvent, AdmissionRequest, AnchorSpec, AnchorValue, ArtifactDeletionIdentity,
+    ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactIngestRequest, CausalClass,
     ClaimFactBounds, ClaimFacts, CommitIntent, DecisionEventPayload, DecisionEventSpec,
     DecisionPayload, DecisionSpec, Disposition, DomainSpec, EventKind, KernelError, KernelStore,
     Maturity, Outcome as AdmissionOutcome, ParentReference, ProviderEgress, Sensitivity,
@@ -59,7 +60,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// A repository whose one commit holds `DOC` at `DOC_PATH`.
+/// A repository whose one commit holds one document.
 struct Checkout {
     dir: tempfile::TempDir,
     head: String,
@@ -67,14 +68,20 @@ struct Checkout {
 }
 
 impl Checkout {
+    /// A commit holding `text` at `DOC_PATH`.
     fn new(text: &str) -> Self {
+        Self::at(DOC_PATH, text)
+    }
+
+    /// A commit holding `text` at `path`.
+    fn at(path: &str, text: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
-        std::fs::write(dir.path().join(DOC_PATH), text).unwrap();
-        git(dir.path(), &["add", DOC_PATH]);
+        std::fs::write(dir.path().join(path), text).unwrap();
+        git(dir.path(), &["add", path]);
         git(dir.path(), &["commit", "--quiet", "-m", "doc"]);
         let head = git(dir.path(), &["rev-parse", "HEAD"]);
-        let blob = git(dir.path(), &["rev-parse", &format!("HEAD:{DOC_PATH}")]);
+        let blob = git(dir.path(), &["rev-parse", &format!("HEAD:{path}")]);
         Self { dir, head, blob }
     }
 
@@ -118,7 +125,8 @@ impl Store {
         Self { root, kernel }
     }
 
-    /// Drops the store and opens its data home again.
+    /// Closes the store and opens its data home again. The store holds its data home's writer
+    /// lock while it is live, so a second open needs the first closed.
     fn reopen(self) -> Self {
         let Self { root, kernel } = self;
         drop(kernel);
@@ -165,13 +173,18 @@ impl Store {
             .unwrap()
     }
 
-    /// Retains `text` and publishes the document descriptor citing it.
+    /// Retains `text` and publishes the document descriptor at `DOC_PATH` citing it.
     fn document(&self, key: &str, text: &str) -> (Evidence, String) {
+        self.document_at(key, DOC_PATH, text)
+    }
+
+    /// Retains `text` and publishes the document descriptor at `path` citing it.
+    fn document_at(&self, key: &str, path: &str, text: &str) -> (Evidence, String) {
         let handle = self.retain(key, text);
         let identity = [
             ("project_id", "proj-a"),
             ("repository_id", REPOSITORY),
-            ("relative_path", DOC_PATH),
+            ("relative_path", path),
         ];
         let descriptor = self
             .kernel
@@ -678,18 +691,53 @@ fn an_unavailable_verdict_writes_nothing() {
         let evaluation = Evaluation {
             verdict: Verdict::Unavailable(reason),
             bytes_read: 0,
-            blob_oid: Some(checkout.blob.clone()),
+            blob_oid: None,
         };
         assert_eq!(
             attest_now(&store, &classification, &evaluation),
             Outcome::Skipped(Skip::Unavailable)
         );
     }
+    // A `Match` or `Mismatch` without the blob it was decided on is no write set.
+    for verdict in [Verdict::Match, Verdict::Mismatch] {
+        let evaluation = Evaluation {
+            verdict,
+            bytes_read: 0,
+            blob_oid: None,
+        };
+        assert_eq!(
+            attest_now(&store, &classification, &evaluation),
+            Outcome::InvalidWriteSet,
+            "{verdict:?}"
+        );
+    }
     assert_eq!(store.tip(), tip);
+    assert_eq!(store.write_set_rows(), 0);
 }
 
-/// AC9: a witness at another revision, a detail or citation naming another evidence row, or a
-/// witness kind other than the document's is refused before the commit.
+/// A write set built at a sequence before the model decision existed is `Changed`.
+#[test]
+fn a_write_set_built_before_the_model_decision_existed_is_changed() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let before = store.kernel.capture_commit_read_target().unwrap();
+    let model = store.model("later", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let write_set = WriteSet::new(
+        &store.kernel,
+        before,
+        input(&classification),
+        &checkout.blob,
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(write_set.unwrap_err(), Outcome::Changed);
+}
+
+/// AC9: a witness at another revision, a detail or citation naming another evidence row, a detail
+/// at another version, an id other than the pair's [`Identity`], a domain, sensitivity, or anchor
+/// other than the model decision's, a row-level evidence citation, or a witness kind other than
+/// the document's is refused before the commit.
 #[test]
 fn a_write_set_citing_other_evidence_or_another_revision_is_refused_before_the_commit() {
     let store = Store::open();
@@ -709,7 +757,8 @@ fn a_write_set_citing_other_evidence_or_another_revision_is_refused_before_the_c
     .unwrap();
     assert!(write_set.check());
     let detail = write_set.witness.payload.detail.clone().unwrap();
-    let mutations: [(&str, Mutation); 5] = [
+    assert!(detail.contains(&format!("\"witness_version\":{WITNESS_DETAIL_VERSION}")));
+    let mutations: [(&str, Mutation); 18] = [
         ("revision", |set, _, _| set.witness.source_revision = 2),
         ("source id", |set, _, _| {
             set.witness.source_id = "shared".into()
@@ -722,6 +771,45 @@ fn a_write_set_citing_other_evidence_or_another_revision_is_refused_before_the_c
         }),
         ("kind", |set, _, _| {
             set.witness.observation_kind = "config_present".into();
+        }),
+        ("attestation sensitivity", |set, _, _| {
+            set.attestation.sensitivity = Sensitivity::Sensitive;
+        }),
+        ("witness sensitivity", |set, _, _| {
+            set.witness.sensitivity = Sensitivity::Sensitive;
+        }),
+        ("anchor", |set, _, _| set.attestation.anchor_id = None),
+        ("attestation domain", |set, _, _| {
+            set.attestation.domain_id = "source".into();
+        }),
+        ("witness domain", |set, _, _| {
+            set.witness.domain_id = "source".into();
+        }),
+        ("object id", |set, _, _| {
+            set.attestation.object_id = "verattest:other".into();
+        }),
+        ("decision id", |set, _, _| {
+            set.attestation.decision_id = "verattestdec:other".into();
+        }),
+        ("shared source id", |set, _, _| {
+            set.attestation.source_id = "shared".into();
+            set.witness.source_id = "shared".into();
+        }),
+        ("witness observation id", |set, _, _| {
+            set.witness.observation_id = "verwitness:other".into();
+        }),
+        ("witness object id", |set, _, _| {
+            set.witness.object_id = "verwitnessobj:other".into();
+        }),
+        ("attestation evidence", |set, _, other| {
+            set.attestation.evidence_id = Some(other.into());
+        }),
+        ("witness evidence", |set, _, other| {
+            set.witness.evidence_id = Some(other.into());
+        }),
+        ("detail version", |set, detail, _| {
+            let version = format!("\"witness_version\":{WITNESS_DETAIL_VERSION}");
+            set.witness.payload.detail = Some(detail.replace(&version, "\"witness_version\":2"));
         }),
     ];
     let tip = store.tip();
@@ -929,6 +1017,97 @@ fn a_model_decision_changed_after_classification_aborts_the_set() {
     );
     assert_eq!(store.tip(), tip);
     assert_eq!(store.write_set_rows(), 0);
+
+    // F3: the compared evidence row deleted after classification aborts the set too.
+    let store = Store::open();
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("deleted_evidence", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    store
+        .kernel
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("delete-evidence"),
+            identity: ArtifactDeletionIdentity::EvidenceId(evidence.id.clone()),
+            kind: ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: 1,
+        })
+        .unwrap();
+    let tip = store.tip();
+    assert_eq!(
+        attest_now(&store, &classification, &evaluation),
+        Outcome::Changed
+    );
+    assert_eq!(store.tip(), tip);
+    assert_eq!(store.write_set_rows(), 0);
+}
+
+/// F1: attesting one model decision commits nothing the other's classification rechecks, so a
+/// second decision classified at the same sequence still commits on its older classification.
+#[test]
+fn an_unrelated_attestation_does_not_abort_an_older_classification() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let a = store.model("a", &checkout.head, &evidence, false);
+    let b = store.model("b", &checkout.head, &evidence, false);
+    let first = store.classification(&a, &checkout);
+    let second = store.classification(&b, &checkout);
+    assert_eq!(first.target, second.target);
+    assert!(matches!(
+        attest_now(&store, &first, &evaluate(&first)),
+        Outcome::Committed(_)
+    ));
+    let outcome = attest_now(&store, &second, &evaluate(&second));
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+    let attestation = store.facts(&Identity::of(&b, &checkout.head).object_id);
+    assert_eq!(
+        attestation.own_admission.unwrap().effective_maturity,
+        Maturity::Verified
+    );
+}
+
+/// AC6 for a configuration document: the witness is `config_present`, the admission
+/// `ConfigObserved` under `(TrustedLocalCode, CurrentConfig)`.
+#[test]
+fn a_match_on_a_configuration_document_commits_under_current_config() {
+    const CONFIG_PATH: &str = "config.toml";
+    const CONFIG: &str = "[store]\nowner = \"daemon\"\n";
+    let store = Store::open();
+    let checkout = Checkout::at(CONFIG_PATH, CONFIG);
+    let (evidence, _) = store.document_at("config", CONFIG_PATH, CONFIG);
+    let model = store.model("config", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    assert_eq!(evaluation.verdict, Verdict::Match);
+    let outcome = attest_now(&store, &classification, &evaluation);
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+    let ids = Identity::of(&model, &checkout.head);
+    let admission = store.facts(&ids.object_id).own_admission.unwrap();
+    assert_eq!(
+        (admission.source_class, admission.taint_class),
+        (SourceClass::TrustedLocalCode, TaintClass::CurrentConfig)
+    );
+    assert_eq!(admission.event_kind, EventKind::ConfigObserved);
+    assert_eq!(admission.outcome, AdmissionOutcome::Admit);
+    assert_eq!(admission.effective_maturity, Maturity::Verified);
+    assert_eq!(admission.disposition, Disposition::Active);
+    let kind: String = store
+        .sqlite()
+        .query_row(
+            "SELECT observation_kind FROM observations WHERE object_id=?1",
+            [&ids.witness_object_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind, "config_present");
+    assert_eq!(
+        witness_detail(&store, &ids.witness_object_id)["relative_path"],
+        CONFIG_PATH
+    );
 }
 
 /// F1: the source triple binds a witness to its own attestation, so attestation A's witness
@@ -977,8 +1156,8 @@ fn one_attestations_witness_cannot_promote_another() {
 }
 
 /// F11: a fault after the witness admission rolls the envelope back with no attestation,
-/// observation, causality, or citation row and the model decision unchanged; after a commit and a
-/// fresh open every companion row and the receipt remain.
+/// observation, causality, or citation row and the model decision unchanged; after a commit, a
+/// close, and a fresh open of the data home, every companion row and the receipt remain.
 #[test]
 fn a_rollback_after_the_admission_leaves_no_row_and_a_reopened_store_keeps_every_row() {
     let store = Store::open();
@@ -1038,21 +1217,35 @@ fn a_rollback_after_the_admission_leaves_no_row_and_a_reopened_store_keeps_every
         class: classification.class.clone(),
     };
     let Outcome::Replayed(replayed) = attest_now(&store, &reclassified, &evaluation) else {
-        panic!("the reopened store replays the receipt");
+        panic!("the store opened after the close replays the receipt");
     };
     assert_eq!(replayed.commit_seq, receipt.commit_seq);
 }
 
-/// AC15: the verifier's sources name no model client. Every `crate::` path they reference is in a
-/// closed allowlist of pure modules, and no model-client module or network crate appears; the
-/// scanner flags a source that names one.
+/// AC15: the verifier's sources name no model client. The test reads every `.rs` file under
+/// `src/attestation_verifier/` and `src/attestation_verifier.rs` at run time. Every `crate::` path
+/// they reference is in a closed allowlist of pure modules, and no model-client module or network
+/// crate appears; the scanner flags a source that names one.
 #[test]
 fn no_model_client_is_reachable_from_the_verifier_module() {
-    const SOURCES: [&str; 3] = [
-        include_str!("../src/attestation_verifier.rs"),
-        include_str!("../src/attestation_verifier/classify.rs"),
-        include_str!("../src/attestation_verifier/attest.rs"),
-    ];
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut paths = vec![src.join("attestation_verifier.rs")];
+    let mut pending = vec![src.join("attestation_verifier")];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                paths.push(path);
+            }
+        }
+    }
+    assert!(paths.len() >= 3, "{paths:?}");
+    let sources: Vec<String> = paths
+        .iter()
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect();
     const ALLOWED: [&str; 6] = [
         "crate::confined_path",
         "crate::git_reconcile::identity_field",
@@ -1093,8 +1286,13 @@ fn no_model_client_is_reachable_from_the_verifier_module() {
         );
         found
     }
-    for source in SOURCES {
-        assert_eq!(violations(source), Vec::<String>::new());
+    for (path, source) in paths.iter().zip(&sources) {
+        assert_eq!(
+            violations(source),
+            Vec::<String>::new(),
+            "{}",
+            path.display()
+        );
     }
     assert_eq!(
         violations("use crate::memory_reviewer::bedrock::Client;"),
@@ -1106,7 +1304,7 @@ fn no_model_client_is_reachable_from_the_verifier_module() {
     );
     assert!(!violations("let x = crate::history_summarizer::run();").is_empty());
     // The allowlisted paths are the ones the sources use, so the allowlist is not vacuous.
-    let all: String = SOURCES.concat();
+    let all: String = sources.concat();
     for allowed in ALLOWED {
         assert!(all.contains(allowed), "{allowed}");
     }

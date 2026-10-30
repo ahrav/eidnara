@@ -87,12 +87,16 @@ pub enum Outcome {
     /// The key is recorded under another request digest, or the opposite verdict's key for the
     /// same decision and oid is recorded.
     Conflict,
-    /// The model decision, its anchor, its cited descriptor, or the store's incarnation differs
-    /// from the classification; the envelope rolled back.
+    /// The model decision, its anchor, its cited descriptor or evidence row, or the store's
+    /// incarnation differs from the classification, or the causality parent is no longer live at
+    /// its revision; the envelope rolled back.
     Changed,
-    /// The write set failed its evidence, source-triple, or witness-kind check before the commit.
+    /// The write set failed [`WriteSet::check`] before the commit, or the `MarkStale` admission
+    /// returned a disposition other than `Stale`; nothing committed.
     InvalidWriteSet,
-    /// The Kernel refused the commit.
+    /// The Kernel refused the commit. A [`KernelError::Io`] can follow a durable commit, so a
+    /// caller treats it as an unknown outcome, which the next pass resolves by replaying the
+    /// key's receipt.
     Refused(KernelError),
 }
 
@@ -262,10 +266,13 @@ impl WriteSet {
         })
     }
 
-    /// Whether the rows cite only what was compared: the compared evidence row, the witness
-    /// detail's evidence id, and the citation event's evidence id are one id; the witness carries
-    /// the attestation's source triple under `verifier` and the document kind's witness kind; and
-    /// neither the attestation nor the witness cites evidence by its row.
+    /// Whether the rows cite only what was compared and stand for the model decision: the
+    /// compared evidence row, the witness detail's evidence id, and the citation event's evidence
+    /// id are one id; the attestation and the witness carry the model decision's domain and
+    /// sensitivity, the attestation its anchor; every id is the [`Identity`] of the model decision
+    /// and the claim's oid; the witness carries the attestation's source triple under `verifier`
+    /// and the document kind's witness kind; and neither the attestation nor the witness cites
+    /// evidence by its row.
     pub fn check(&self) -> bool {
         let detail = self
             .witness
@@ -274,10 +281,23 @@ impl WriteSet {
             .as_deref()
             .and_then(|detail| serde_json::from_str::<WitnessDetail>(detail).ok());
         let compared = self.input.evidence_id.as_str();
+        let model = &self.input.decision;
         let (attestation, witness) = (&self.attestation, &self.witness);
+        let named = Identity {
+            source_id: attestation.source_id.clone(),
+            object_id: attestation.object_id.clone(),
+            decision_id: attestation.decision_id.clone(),
+            witness_observation_id: witness.observation_id.clone(),
+            witness_object_id: witness.object_id.clone(),
+        };
         detail.is_some_and(|detail| {
             detail.witness_version == WITNESS_DETAIL_VERSION && detail.evidence_id == compared
         }) && self.citation.evidence_id.as_deref() == Some(compared)
+            && named == Identity::of(&model.object_id, self.input.claim.oid())
+            && (attestation.sensitivity, witness.sensitivity)
+                == (model.sensitivity, model.sensitivity)
+            && (&attestation.domain_id, &witness.domain_id) == (&model.domain_id, &model.domain_id)
+            && attestation.anchor_id == model.anchor_id
             && attestation.source_kind == VERIFIER_SOURCE_KIND
             && (
                 &witness.source_kind,
@@ -299,8 +319,8 @@ impl WriteSet {
             return Outcome::InvalidWriteSet;
         }
         let blob = &self.blob_oid;
-        let keyed = intent(&self.input, Verdict::Match, blob);
-        let opposite = intent(&self.input, Verdict::Mismatch, blob);
+        let keyed = intent(&self.input, Write::Attest, blob);
+        let opposite = intent(&self.input, Write::Stale, blob);
         run(
             kernel,
             budget,
@@ -332,10 +352,7 @@ impl WriteSet {
             source_class: Some(SourceClass::TrustedLocalCode),
             taint_class: Some(kind.taint_class()),
             event: AdmissionEvent {
-                kind: match kind.witness_kind() {
-                    "config_present" => EventKind::ConfigObserved,
-                    _ => EventKind::CodeObserved,
-                },
+                kind: kind.event_kind(),
                 trigger_object_id: Some(self.witness.object_id.clone()),
                 approval_object_id: None,
                 evidence_id: None,
@@ -361,7 +378,7 @@ impl WriteSet {
             })
             .map_err(|error| match error {
                 ClaimCausalityError::Kernel(error) => Stop::Kernel(error),
-                _ => Stop::Kernel(KernelError::InvalidInput),
+                _ => Stop::Outcome(Outcome::Changed),
             })?;
         envelope.append_decision_event(&self.attestation.decision_id, self.citation.clone())?;
         Ok(())
@@ -384,8 +401,8 @@ fn mark_stale(
         claim.oid(),
         hex(claim.digest()),
     );
-    let keyed = intent(input, Verdict::Mismatch, blob_oid);
-    let opposite = intent(input, Verdict::Match, blob_oid);
+    let keyed = intent(input, Write::Stale, blob_oid);
+    let opposite = intent(input, Write::Attest, blob_oid);
     run(
         kernel,
         budget,
@@ -415,7 +432,7 @@ fn mark_stale(
                 },
             })?;
             if marked.disposition != Disposition::Stale {
-                return Err(Stop::Kernel(KernelError::AdmissionPolicy));
+                return Err(Stop::Outcome(Outcome::InvalidWriteSet));
             }
             Ok(())
         },
@@ -459,6 +476,7 @@ fn run(
         Err(match stop {
             Stop::Outcome(outcome) => {
                 stopped = Some(outcome);
+                // The error only rolls the envelope back; once `stopped` is set it is not read.
                 KernelError::Conflict
             }
             Stop::Kernel(error) => error,
@@ -480,8 +498,9 @@ fn run(
 /// incarnation; the model decision live with no successor, still a decision with the same
 /// creating commit, source triple, and classes, under a source kind other than `verifier`; its
 /// anchor live as `reachable_from` the claim's oid; and the cited descriptor the live revision of
-/// its lineage, still citing the compared evidence. Returns the decision's scope and latest
-/// admission.
+/// its lineage, still citing the compared evidence. The live-descriptor read returns a descriptor
+/// only while the evidence row it cites is live, so a deleted evidence row reads as `Changed`.
+/// Returns the decision's scope and latest admission.
 fn recheck(
     envelope: &Envelope<'_>,
     kernel: &KernelStore,
@@ -516,9 +535,11 @@ fn recheck(
     if !same || (prior.source_class, prior.taint_class) != (model.source_class, model.taint_class) {
         return Err(changed());
     }
-    // The writer is held, so the committed tip is the state this envelope extends.
+    // The writer is held, so the committed tip, one before the envelope's sequence, is the state
+    // this envelope extends.
+    let extends = envelope.commit_seq() - 1;
     let anchor = match &model.anchor_id {
-        Some(anchor_id) => kernel.anchor_condition_as_of(anchor_id, kernel.tip()?, budget)?,
+        Some(anchor_id) => kernel.anchor_condition_as_of(anchor_id, extends, budget)?,
         None => None,
     };
     let anchored = matches!(
@@ -538,13 +559,20 @@ fn recheck(
     Ok((state.scope_id, prior))
 }
 
-/// The intent for `verdict` on `input`: the key names the verdict's write, the model decision,
-/// and the oid, and the request digest covers the frozen claim, the evidence it resolved through,
-/// the blob, and the verdict.
-fn intent(input: &VerifierInput, verdict: Verdict, blob_oid: &str) -> CommitIntent {
-    let (write, verdict) = match verdict {
-        Verdict::Match => ("attest", "match"),
-        _ => ("stale", "mismatch"),
+/// The write a verdict calls for: the attestation on `Match`, the `MarkStale` on `Mismatch`.
+#[derive(Clone, Copy)]
+enum Write {
+    Attest,
+    Stale,
+}
+
+/// The intent for `write` on `input`: the key names the write, the model decision, and the oid,
+/// and the request digest covers the frozen claim, the evidence it resolved through, the blob,
+/// and the verdict.
+fn intent(input: &VerifierInput, write: Write, blob_oid: &str) -> CommitIntent {
+    let (write, verdict) = match write {
+        Write::Attest => ("attest", "match"),
+        Write::Stale => ("stale", "mismatch"),
     };
     let claim = &input.claim;
     let model = &input.decision.object_id;

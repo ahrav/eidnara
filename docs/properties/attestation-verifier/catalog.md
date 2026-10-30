@@ -155,7 +155,7 @@ branch tip, so this part labels it `test-only`.
 ### p6-degraded-witness-event-denies-without-error
 
 Type: safety
-Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:329`), which has no production caller at this branch
+Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:349`), which has no production caller at this branch
 Status: active
 Exercised: yes - Kernel admission tests submit witness events with an unvalidated, foreign, other-revision, and invalidated trigger; the verifier write-set test rewrites its witness's kind at insert and the admission returns below `Verified` with no error
 Guarantee: A `CodeObserved` or `ConfigObserved` event whose trigger id is well-formed but fails validation is evaluated as `Other` and admitted with outcome `Deny` and no error; a malformed trigger id is refused by `identity` before validation.
@@ -163,14 +163,14 @@ Check: `always` - for every witness event whose well-formed trigger fails `valid
 Fault/timing angle: none
 Required faults and enabling state: F1: a trigger absent, from another source, of the other kind, invalidated, at another revision, or with retired backing evidence
 Confidence: high - [evidence](evidence/p6-degraded-witness-event-denies-without-error.md). Read `validate_trigger` (`crates/kernel/src/admission.rs:2807`), which returns `Ok(None)` for every failed lookup, and the call at `:1662` whose `None` evaluates `EventKind::Other` at `:1699`; `event_effect` (`:4245`) maps `Other` to `Deny`
-Existing check: `crates/kernel/tests/kernel_admission.rs:648`, `:677`, `:1323`, `:1339`; `crates/daemon/tests/attestation_verifier_attest.rs:750` (unaudited)
+Existing check: `crates/kernel/tests/kernel_admission.rs:648`, `:677`, `:1323`, `:1339`; `crates/daemon/tests/attestation_verifier_attest.rs:838` (unaudited)
 Impact: a writer that reads success as promotion would count a `Candidate` row as verified; #1172 asserts maturity itself (`p6-new-witness-degradation-never-silent`)
 Open questions: None.
 
 ### p6-witness-cannot-lift-an-inference-class-subject
 
 Type: safety
-Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:329`), which has no production caller at this branch
+Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:349`), which has no production caller at this branch
 Status: active
 Exercised: yes - admission unit tests evaluate every legal source and taint pair against its ceiling
 Guarantee: A subject admitted under `(ModelInference, AssistantInference)` has an automatic ceiling of `Candidate`: a witness event that raises support above that ceiling requires valid approval, and an admission whose classes differ from the subject's prior admission is refused.
@@ -185,7 +185,7 @@ Open questions: None.
 ### p6-trigger-must-match-subject-source-triple
 
 Type: safety
-Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:329`), which has no production caller at this branch
+Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:349`), which has no production caller at this branch
 Status: active
 Exercised: yes - Kernel admission tests submit triggers from another source, at another revision, of the other kind, invalidated, and with retired evidence; a verifier fixture admits one attestation identity's subject through another identity's witness and it stays at `Candidate`
 Guarantee: Under trusted classes whose ceiling admits `Verified`, a witness event promotes only when its trigger observation is live, of the event's kind, carries the subject's exact `(source_kind, source_id, source_revision)`, and has live backing evidence when it cites any.
@@ -193,7 +193,7 @@ Check: `always` - every admission row with a witness kind and outcome `admit` or
 Fault/timing angle: the trigger or its evidence invalidated in an earlier commit or earlier in the same envelope
 Required faults and enabling state: F1
 Confidence: high - [evidence](evidence/p6-trigger-must-match-subject-source-triple.md). Read the lookup predicate in `validate_trigger` (`crates/kernel/src/admission.rs:2807`); it compares the source triple and liveness and never compares evidence ids
-Existing check: `crates/kernel/tests/kernel_admission.rs:677`, `:1292`, `:1323`, `:1339`, `:4211`; `crates/daemon/tests/attestation_verifier_attest.rs:937` (unaudited)
+Existing check: `crates/kernel/tests/kernel_admission.rs:677`, `:1292`, `:1323`, `:1339`, `:4211`; `crates/daemon/tests/attestation_verifier_attest.rs:1116` (unaudited)
 Impact: one observation could validate every attestation's trigger if the triple were shared (D1)
 Open questions:
 - Does `validate_trigger` compare the observation's evidence with anything on the subject? - resolved with answer: evidence equality is the verifier's own check (`p6-new-witness-evidence-id-equals-attestation`).
@@ -201,7 +201,7 @@ Open questions:
 ### p6-trigger-sensitivity-composes-into-admission
 
 Type: safety
-Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:329`), which has no production caller at this branch
+Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:349`), which has no production caller at this branch
 Status: active
 Exercised: yes - Kernel admission tests admit objects through triggers of a stricter class and through triggers backed by stricter evidence
 Guarantee: An object admitted through a validated trigger serves at least as restrictively as the trigger observation and the trigger's backing evidence.
@@ -216,15 +216,15 @@ Open questions: None.
 ### p6-validated-witness-under-trusted-classes-promotes
 
 Type: reachability
-Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:329`), which has no production caller at this branch
+Reachability: test-only - the daemon emitters of `CodeObserved` are `observe_code` (`crates/daemon/src/lib.rs:14394`), inside the module the `test-support` or `direct-host-fixture` feature gates at `crates/daemon/src/lib.rs:14041`, and the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:349`), which has no production caller at this branch
 Status: active
 Exercised: yes - the `observe_code` fixture and the route tests that build a verified decision through the sibling `code_observation` fixture; the verifier write set admits an attestation at `Verified` through its `code_present` witness
 Guarantee: A fixture campaign constructs at least one subject under `(TrustedLocalCode, CurrentCode)` that a validated `CodeObserved` trigger promotes to `Verified`, the positive witness the S1 `always` records depend on.
 Check: `sometimes` - a coverage floor for fixtures, reworded by refinement R7: at least one committed admission with event `code_observed`, a validated non-null trigger, outcome `admit` or `promote`, effective maturity `verified`, and disposition `active`; a subject's first admission records `admit` (`crates/kernel/src/admission.rs:381`)
 Fault/timing angle: none
 Required faults and enabling state: a trusted-class subject and a matching `code_present` observation in one envelope
-Confidence: high - [evidence](evidence/p6-validated-witness-under-trusted-classes-promotes.md). Read `observe_code` (`crates/daemon/src/lib.rs:14394`) and the route test at `crates/daemon/tests/kernel_routes.rs:1932`, whose observation comes from `code_observation` (`:887`), a sibling fixture in the test file (reference correction 3)
-Existing check: `crates/daemon/src/lib.rs:14394` fixture; `crates/daemon/tests/kernel_routes.rs:1932`, `:5177` through `code_observation` at `:887`; `crates/daemon/tests/attestation_verifier_attest.rs:416` (unaudited)
+Confidence: high - [evidence](evidence/p6-validated-witness-under-trusted-classes-promotes.md). Read `observe_code` (`crates/daemon/src/lib.rs:14394`) and the route test at `crates/daemon/tests/kernel_routes.rs:1875`, whose observation comes from `code_observation` (`:887`), a sibling fixture in the test file (reference correction 3)
+Existing check: `crates/daemon/src/lib.rs:14394` fixture; `crates/daemon/tests/kernel_routes.rs:1875`, `:5120` through `code_observation` at `:887`; `crates/daemon/tests/attestation_verifier_attest.rs:429` (unaudited)
 Impact: without the positive witness the S1 `always` records pass vacuously
 Open questions: None.
 
@@ -233,13 +233,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - `record_admission` runs `validate_provenance` on every admission
 Status: active
-Exercised: partial - object-subject admissions under `(TrustedLocalCode, CurrentCode)` in `crates/daemon/tests/kernel_routes.rs:1932`, `:5177`, the `observe_code` fixture (`crates/daemon/src/lib.rs:14394`), and the verifier write set (`crates/daemon/tests/attestation_verifier_attest.rs:416`) pass `validate_provenance` with `None` provenance; no test covers the other legal class pairs
+Exercised: partial - object-subject admissions under `(TrustedLocalCode, CurrentCode)` in `crates/daemon/tests/kernel_routes.rs:1875`, `:5120`, the `observe_code` fixture (`crates/daemon/src/lib.rs:14394`), and the verifier write set (`crates/daemon/tests/attestation_verifier_attest.rs:429`) pass `validate_provenance` with `None` provenance; no test covers the other legal class pairs
 Guarantee: `validate_provenance` refuses `TrustedLocalCode` only for `unclassified` provenance, which only staging candidates carry, so an object subject with no provenance passes under trusted classes (N2, OQ6-2).
 Check: `always` - for every admission of a subject whose provenance kind is `None`, `validate_provenance` returns `Ok` for every legal class pair
 Fault/timing angle: none
 Required faults and enabling state: an object subject with no provenance under `(TrustedLocalCode, CurrentCode)`
 Confidence: high - [evidence](evidence/p6-object-subject-provenance-passes-trusted-classes.md). Read `validate_provenance` (`crates/kernel/src/admission.rs:2650`) and its call at `:1622`
-Existing check: `crates/daemon/tests/kernel_routes.rs:1932`, `:5177`; `crates/daemon/tests/attestation_verifier_attest.rs:416` (unaudited)
+Existing check: `crates/daemon/tests/kernel_routes.rs:1875`, `:5120`; `crates/daemon/tests/attestation_verifier_attest.rs:429` (unaudited)
 Impact: a refusal here would make every attestation admission fail with `AdmissionPolicy`
 Open questions: None.
 
@@ -314,7 +314,7 @@ Check: `always` - after a committed `MarkStale`, every later admission of the su
 Fault/timing angle: a witness event after `MarkStale` in the same or a later envelope
 Required faults and enabling state: `MarkStale` followed by a validated `CodeObserved` on the same subject
 Confidence: medium - [evidence](evidence/p6-mark-stale-withdraws-support-and-is-terminal-in-place.md). Read `event_effect` (`crates/kernel/src/admission.rs:4245`): `MarkStale` maps to `(current, Some(Stale), Deny)` and `CodeObserved` to `(Verified, None, Promote)`, and a `None` disposition keeps the prior one. The effective-maturity and visibility halves of R2 are not traced here
-Existing check: `crates/kernel/src/admission.rs:5437`; `crates/kernel/tests/kernel_admission.rs:1047`, `:2735`; `crates/daemon/tests/kernel_routes.rs:4455`; `crates/daemon/tests/attestation_verifier_attest.rs:582` (unaudited)
+Existing check: `crates/kernel/src/admission.rs:5437`; `crates/kernel/tests/kernel_admission.rs:1047`, `:2735`; `crates/daemon/tests/kernel_routes.rs:4398`; `crates/daemon/tests/attestation_verifier_attest.rs:595` (unaudited)
 Impact: a writer that reads `Promote` as success after `MarkStale` would count a stale row as verified
 Open questions:
 - After `MarkStale`, does a validated `CodeObserved` leave effective maturity and visibility unchanged? - unresolved, needs a Kernel test that applies `MarkStale` then a validated `CodeObserved` and reads effective maturity and visibility.
@@ -406,7 +406,7 @@ Check: `always` - `derive_classes(k)` is `None` for every `k` outside the table,
 Fault/timing angle: none
 Required faults and enabling state: a plugin write naming `verifier` or asserting `trusted_local_code`
 Confidence: high - [evidence](evidence/p6-plugin-source-kind-table-is-closed-and-classes-never-raised.md). Read `derive_classes` (`crates/daemon/src/kernel_routes/commit.rs:370`)
-Existing check: `crates/daemon/src/kernel_routes/commit.rs:1249`; `crates/daemon/tests/kernel_routes.rs:1202`, `:1148` (unaudited)
+Existing check: `crates/daemon/src/kernel_routes/commit.rs:1249`; `crates/daemon/tests/kernel_routes.rs:1145`, `:6778` (unaudited)
 Impact: a plugin able to write `verifier` rows could certify model output (C6)
 Open questions: None.
 
@@ -428,7 +428,7 @@ Open questions: None.
 ### p6-derived-reinjection-parents-live-at-write-and-existed-at-read
 
 Type: safety
-Reachability: test-only - `record_claim_causality` has no production caller; its one daemon caller, the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:351`), has no production caller at this branch
+Reachability: test-only - `record_claim_causality` has no production caller; its one daemon caller, the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:368`), has no production caller at this branch
 Status: active
 Exercised: yes - claim-causality tests record derived reinjections over live and mismatched parents, and retire a parent after the write to show the derivation survives (`crates/kernel/tests/kernel_claim_causality.rs:315`); the verifier write set records one naming the model decision at its revision
 Guarantee: A `DerivedReinjection` record is written only when every named parent is live at the named revision. A later read requires each parent row to have existed at the requested snapshot with the named revision, so a later retirement or supersession keeps `DerivedReinjection`; a missing historical parent row or a revision mismatch yields `Unknown(ParentUnavailable)` (`parents_existed`, `crates/kernel/src/claim_causality.rs:719`).
@@ -436,14 +436,14 @@ Check: `always` - every committed derived-reinjection record names parents live 
 Fault/timing angle: the parent superseded between selection and commit
 Required faults and enabling state: F2: a parent retired or superseded before the write
 Confidence: high - [evidence](evidence/p6-derived-reinjection-parents-live-at-write-and-existed-at-read.md). Read `record_claim_causality` (`crates/kernel/src/claim_causality.rs:218`) and `MAX_DERIVATION_PARENTS` (`:38`; reference correction 1: the specification cited `:36`)
-Existing check: `crates/kernel/tests/kernel_claim_causality.rs:229`, `:710`; `crates/daemon/tests/attestation_verifier_attest.rs:416` (unaudited)
+Existing check: `crates/kernel/tests/kernel_claim_causality.rs:229`, `:710`; `crates/daemon/tests/attestation_verifier_attest.rs:429` (unaudited)
 Impact: the attestation's link to the model decision (D4) depends on it
 Open questions: None.
 
 ### p6-direct-observation-requires-exact-evidence-digest
 
 Type: safety
-Reachability: test-only - `record_claim_causality` has no production caller; its one daemon caller, the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:351`), has no production caller at this branch
+Reachability: test-only - `record_claim_causality` has no production caller; its one daemon caller, the verifier write set (`crates/daemon/src/attestation_verifier/attest.rs:368`), has no production caller at this branch
 Status: active
 Exercised: yes - claim-causality tests record direct observations over exact, mismatched, and forged evidence
 Guarantee: A `DirectObservation` record requires live, exactly retained evidence whose digest matches the recorded one; copied strings and forged records grant nothing.
@@ -466,7 +466,7 @@ Check: `always` - every row citing document evidence through `evidence_id`, and 
 Fault/timing angle: none
 Required faults and enabling state: F14: document evidence cited through the row FK, the observation FK, or the admission event
 Confidence: high - [evidence](evidence/p6-document-evidence-cited-by-fk-serves-no-wider-than-explicit-search.md). Read the publisher's class at `crates/daemon/src/source_capture.rs:922`, the trigger fold in `validate_trigger` (`crates/kernel/src/admission.rs:2807`), and `surface_visibility` (`:4221`)
-Existing check: `crates/daemon/src/source_capture_tests.rs:1992`; `crates/kernel/tests/kernel_slice.rs:1454`, `:1527`; `crates/daemon/tests/attestation_verifier_attest.rs:557`; none for the trigger fold (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:1992`; `crates/kernel/tests/kernel_slice.rs:1454`, `:1527`; `crates/daemon/tests/attestation_verifier_attest.rs:570`; none for the trigger fold (unaudited)
 Impact: an attestation citing the evidence by FK would be `Verified` and never auto-injected (K7); D5 places the citation on a decision event
 Open questions: None.
 
@@ -548,8 +548,8 @@ Guarantee: Every attestation id, its decision id, its witness observation and ob
 Check: `always` - live verifier decisions grouped by `(model object id, oid)` count at most one; a repeat of the key replays its receipt, the key under another request digest is `Conflict`, and a recorded opposite-verdict key for the pair is `Conflict`
 Fault/timing angle: a retry after a crash or a replayed pass; a changed claim at the same oid
 Required faults and enabling state: F10: the operation key replayed with the same and with a different verdict
-Confidence: high - [evidence](evidence/p6-new-attestation-identity-unique-per-decision-oid.md). Read `Identity::of` (`crates/daemon/src/attestation_verifier/attest.rs:63`), `intent` (`:544`), whose request digest covers the frozen claim, the compared evidence, the blob, and the verdict, and `run` (`:439`), which refuses a recorded opposite key at `:451` before any write
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:791`, `:834`, `:937` (unaudited)
+Confidence: high - [evidence](evidence/p6-new-attestation-identity-unique-per-decision-oid.md). Read `Identity::of` (`crates/daemon/src/attestation_verifier/attest.rs:63`), `intent` (`:572`), whose request digest covers the frozen claim, the compared evidence, the blob, and the verdict, and `run` (`:456`), which refuses a recorded opposite key at `:468` before any write
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:879`, `:922`, `:1116` (unaudited)
 Impact: falsifier: an id containing pass time or randomness, or two live attestations for one pair
 Open questions:
 - Can a retired attestation's pair be attested again? - resolved with answer: no; the registry keeps the retired ids, and OQ6-7 accepts that re-attesting a pair after retirement is out of scope.
@@ -559,29 +559,29 @@ Open questions:
 Type: safety
 Reachability: test-only - `attestation_verifier::attest::attest` and `WriteSet::commit` have no production caller at this branch; #1173 wires them behind `verifier.enabled` and relabels the record `explicit-config-only`
 Status: active - converted by [#1172](https://github.com/ahrav/eidnara/issues/1172)
-Exercised: yes - a fixture store with an anchored model decision citing a `Sensitive` document descriptor by a decision event, and one citing it by its row, commits attestations and reads their rows, admissions, citation events, and served standing
+Exercised: yes - a fixture store with an anchored model decision citing a `Sensitive` document descriptor by a decision event, one citing it by its row, and one citing a `config.toml` descriptor commits attestations and reads their rows, admissions, citation events, and served standing; the `config.toml` attestation is admitted `ConfigObserved` under `(TrustedLocalCode, CurrentConfig)` on a `config_present` witness
 Guarantee: The attestation's classes are exactly `(TrustedLocalCode, CurrentCode|CurrentConfig)` by document kind; it carries the model decision's `anchor_id`, scope, domain, kind, and sensitivity, copies the summary, names the oid and digest in its rationale, carries `evidence_id: None`, and cites the compared evidence through exactly one decision event of kind `verifier_citation`.
 Check: `always` - `anchor_id` equals the model decision's, the one citation event's evidence equals the resolved and compared evidence, the decision row and the witness admission cite no evidence, and the classes are in the allowed pairs
 Fault/timing angle: none
 Required faults and enabling state: F14: the compared evidence is `Sensitive`; F15: a prose document classified `CurrentCode`
-Confidence: high - [evidence](evidence/p6-new-attestation-classes-and-cited-fields.md). Read `WriteSet::new` (`crates/daemon/src/attestation_verifier/attest.rs:169`), which builds the decision, witness, and citation specs, and the writes at `:326` and `:366`; the admission at `:329` takes the classes from `DocumentKind::taint_class`
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:416`, `:557` (unaudited)
+Confidence: high - [evidence](evidence/p6-new-attestation-classes-and-cited-fields.md). Read `WriteSet::new` (`crates/daemon/src/attestation_verifier/attest.rs:173`), which builds the decision, witness, and citation specs, and the writes at `:346` and `:383`; the admission at `:349` takes the classes from `DocumentKind::taint_class` and its event from `DocumentKind::event_kind` (`crates/daemon/src/attestation_verifier/classify.rs:517`); `WriteSet::check` (`crates/daemon/src/attestation_verifier/attest.rs:276`) requires the model decision's anchor, domain, and sensitivity before the commit
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:429`, `:570`, `:1076` (unaudited)
 Impact: falsifier: no citation event, or a different evidence row, at `Verified`
 Open questions:
-- Is a configuration document's attestation exercised? - unresolved, needs a test: the fixtures attest `ARCHITECTURE.md` only, so the `CurrentConfig` and `config_present` pair is covered by the document-kind rule's test and not by a committed write set.
+- Is a configuration document's attestation exercised? - resolved with answer: yes; `a_match_on_a_configuration_document_commits_under_current_config` commits a `config.toml` attestation and reads `(TrustedLocalCode, CurrentConfig)`, `ConfigObserved`, `config_present`, `admit`, `verified`, and `active`.
 
 ### p6-new-attestation-sibling-model-stays-candidate
 
 Type: safety
 Reachability: test-only - `attestation_verifier::attest::attest` and `WriteSet::commit` have no production caller at this branch; #1173 wires them behind `verifier.enabled` and relabels the record `explicit-config-only`
 Status: active - converted by [#1172](https://github.com/ahrav/eidnara/issues/1172)
-Exercised: yes - after a match the fixture compares the model decision's registry row and own admission with their values before the write, and reads the attestation's causality class; a superseded, retired, quarantined, or stale model decision, a retired anchor, and a retired descriptor abort the set
+Exercised: yes - after a match the fixture compares the model decision's registry row and own admission with their values before the write, and reads the attestation's causality class; a superseded, retired, quarantined, or stale model decision, a retired anchor, a retired descriptor, and a deleted evidence row abort the set as `changed`; a second model decision classified at the same sequence still commits after the first one's attestation
 Guarantee: The attestation is a new lineage linked by a `DerivedReinjection` record naming the model decision at its revision; the model decision stays live at `Candidate` with its classes and receives no `Replace`, `Correct`, or promoting event; a model decision superseded, retired, or re-disposed after the classification aborts the set.
 Check: `always` - after a match the model decision's registry row and own admission are unchanged, and the attestation is live with a causality record naming `(model object id, model revision)`; after a change to the model decision between the classification and the commit, no verifier row exists
-Fault/timing angle: the model decision, its anchor, or its descriptor changed between the classification and the commit
+Fault/timing angle: the model decision, its anchor, its descriptor, or its evidence row changed between the classification and the commit; an unrelated attestation committed in that window
 Required faults and enabling state: F2, F3
-Confidence: high - [evidence](evidence/p6-new-attestation-sibling-model-stays-candidate.md). Read `recheck` (`crates/daemon/src/attestation_verifier/attest.rs:485`), which compares the store's incarnation (`:495`), the model decision's registry row and latest admission, its anchor (`:521`), and its descriptor lineage (`:530`) inside the envelope, and the causality write at `:351`
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:416`, `:861` (unaudited)
+Confidence: high - [evidence](evidence/p6-new-attestation-sibling-model-stays-candidate.md). Read `recheck` (`crates/daemon/src/attestation_verifier/attest.rs:504`), which compares the store's incarnation (`:514`), the model decision's registry row and latest admission, its anchor (`:542`) at the sequence the envelope extends, and its descriptor lineage (`:551`), whose live read requires the cited evidence row live, inside the envelope, and the causality write at `:368`
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:429`, `:949`, `:1051` (unaudited)
 Impact: falsifier: a `Replace` on the model decision, or an attestation without causality
 Open questions:
 - What does the causality read report after the model decision is superseded? - resolved with answer: `Unknown(ParentUnavailable)` while the attestation keeps `Verified` (OQ6-12, accepted by the ticket); no test reads it.
@@ -596,8 +596,8 @@ Guarantee: An attestation reaches `Verified` only through a `CodeObserved` or `C
 Check: `always` - every `Verified` attestation has a witness admission row with a non-null trigger naming its own witness, and model maturities are unchanged across a write set
 Fault/timing angle: none
 Required faults and enabling state: F1: a trigger of another kind; a trigger carrying another attestation's source triple
-Confidence: high - [evidence](evidence/p6-new-attestation-verified-only-via-witness.md). Read the admission request at `crates/daemon/src/attestation_verifier/attest.rs:329`, the only admission of the attestation, whose trigger is the witness inserted at `:327`; the Kernel's trigger lookup compares the source triple (`crates/kernel/src/admission.rs:2807`)
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:416`, `:750`, `:937` (unaudited)
+Confidence: high - [evidence](evidence/p6-new-attestation-verified-only-via-witness.md). Read the admission request at `crates/daemon/src/attestation_verifier/attest.rs:349`, the only admission of the attestation, whose trigger is the witness inserted at `:347`; the Kernel's trigger lookup compares the source triple (`crates/kernel/src/admission.rs:2807`)
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:429`, `:838`, `:1116` (unaudited)
 Impact: falsifier: `Verified` from insert alone
 Open questions: None.
 
@@ -606,13 +606,13 @@ Open questions: None.
 Type: safety
 Reachability: test-only - `attestation_verifier::attest::attest` and `WriteSet::commit` have no production caller at this branch; #1173 wires them behind `verifier.enabled` and relabels the record `explicit-config-only`
 Status: active - converted by [#1172](https://github.com/ahrav/eidnara/issues/1172)
-Exercised: yes - mutated write sets with a witness at another revision, another source id, a detail naming other evidence, a citation naming other evidence, and the other witness kind are each refused before the commit with nothing written
-Guarantee: Before the write, the observation detail's evidence id, the citation event's evidence id, and the compared evidence row are equal, the observation's source triple equals the attestation's under `verifier`, the observation kind matches the document kind, and neither row cites evidence by its own `evidence_id`.
+Exercised: yes - mutated write sets with a witness at another revision, another source id, a detail naming other evidence, a detail at another `witness_version`, a citation naming other evidence, the other witness kind, another sensitivity or domain on either row, no anchor, an attestation object, decision, or source id or a witness observation or object id other than the pair's `Identity`, and a row-level `evidence_id` on either row are each refused before the commit with nothing written; a `Match` or `Mismatch` without a blob id is `invalid_write_set`
+Guarantee: Before the write, the observation detail's evidence id, the citation event's evidence id, and the compared evidence row are equal, the detail is at `WITNESS_DETAIL_VERSION`, the observation's source triple equals the attestation's under `verifier`, every id is the `Identity` of the model decision and the claim's oid, both rows carry the model decision's domain and sensitivity and the attestation its anchor, the observation kind matches the document kind, and neither row cites evidence by its own `evidence_id`.
 Check: `always` - `WriteSet::check` holds for every write set `WriteSet::commit` submits, and a write set that fails it returns `invalid_write_set` before the commit
 Fault/timing angle: none
 Required faults and enabling state: F1, F3: a detail or citation naming another live evidence row
-Confidence: high - [evidence](evidence/p6-new-witness-evidence-id-equals-attestation.md). Read `WriteSet::check` (`crates/daemon/src/attestation_verifier/attest.rs:269`), called first in `WriteSet::commit` (`:297`), and `recheck` (`:485`), which also requires the cited descriptor to still cite the compared evidence
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:694` (unaudited)
+Confidence: high - [evidence](evidence/p6-new-witness-evidence-id-equals-attestation.md). Read `WriteSet::check` (`crates/daemon/src/attestation_verifier/attest.rs:276`), called first in `WriteSet::commit` (`:317`), and `recheck` (`:504`), which also requires the cited descriptor to still cite the compared evidence
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:742`, `:683` (unaudited)
 Impact: falsifier: a `Verified` attestation citing E whose witness detail names E'
 Open questions: None.
 
@@ -626,8 +626,8 @@ Guarantee: The envelope aborts unless the returned admission has effective matur
 Check: `always` - a committed attestation's own admission has effective maturity `verified` and disposition `active`, and every other returned admission rolls the envelope back with `witness_degraded`; oracle amended by the write-set ticket
 Fault/timing angle: the witness changed between its insert and the admission in one envelope
 Required faults and enabling state: F1: a witness whose trigger fails validation inside the envelope
-Confidence: high - [evidence](evidence/p6-new-witness-degradation-never-silent.md). Read the assertion at `crates/daemon/src/attestation_verifier/attest.rs:345` after the admission at `:329`, whose failure stops the envelope through `run` (`:439`)
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:750`, `:416` (unaudited)
+Confidence: high - [evidence](evidence/p6-new-witness-degradation-never-silent.md). Read the assertion at `crates/daemon/src/attestation_verifier/attest.rs:362` after the admission at `:349`, whose failure stops the envelope through `run` (`:456`)
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:838`, `:429` (unaudited)
 Impact: falsifier: a committed attestation at `Candidate`
 Open questions:
 - Should repeated degradation stop the task? (needs human input)
@@ -637,29 +637,29 @@ Open questions:
 Type: safety
 Reachability: test-only - `attestation_verifier::attest::attest` and `WriteSet::commit` have no production caller at this branch; #1173 wires them behind `verifier.enabled` and relabels the record `explicit-config-only`
 Status: active - converted by [#1172](https://github.com/ahrav/eidnara/issues/1172)
-Exercised: yes - a storage fault refuses the citation event, the last write after the witness admission and the causality record, and the fixture finds no attestation, observation, causality, citation, or admission row and the model decision unchanged; after a commit and a fresh open every companion row exists and the key replays its receipt at the same commit
+Exercised: yes - a storage fault refuses the citation event, the last write after the witness admission and the causality record, and the fixture finds no attestation, observation, causality, citation, or admission row and the model decision unchanged; after a commit, a close, and a fresh open every companion row exists and the key replays its receipt at the same commit; a write set built at a sequence before the model decision existed is `changed`
 Guarantee: Attestation, causality record, citation event, witness observation, witness admission, and receipt commit in one transaction or none, and each call returns one `Outcome`.
 Check: `always` - a live attestation always has all five companions and its receipt, before and after a reopen
 Fault/timing angle: a fault after the admission inside the envelope; a restart after the commit
-Required faults and enabling state: F11: a fault-injected rollback after the admission; a crash after commit then a fresh open, simulated by dropping and reopening the store
-Confidence: high - [evidence](evidence/p6-new-attestation-write-set-one-outcome.md). Read `WriteSet::write`'s order, insert at `crates/daemon/src/attestation_verifier/attest.rs:326` through the citation at `:366`, all inside one `commit_within_budget` call in `run` (`:439`)
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:983` (unaudited)
+Required faults and enabling state: F11: a fault-injected rollback after the admission; a fresh open after the store is closed, which stands in for the crash after commit
+Confidence: high - [evidence](evidence/p6-new-attestation-write-set-one-outcome.md). Read `WriteSet::write`'s order, insert at `crates/daemon/src/attestation_verifier/attest.rs:346` through the citation at `:383`, all inside one `commit_within_budget` call in `run` (`:456`)
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:1162`, `:720` (unaudited)
 Impact: falsifier: an attestation at `Candidate` with no observation after a crash
 Open questions:
-- Does the reopen model a crash? - resolved with answer: partly; the store is dropped and opened again, so the test shows the commit is durable across a fresh open and does not kill the process mid-write.
+- Does the reopen model a crash? - resolved with answer: partly; the test records a fresh open after close. A live store holds its data home's writer lock, so an abandoned store (`std::mem::forget`) makes the second open fail with "held by another writer"; the test closes the store and opens it again, which shows the commit is durable across a fresh open and does not kill the process mid-write.
 
 ### p6-new-mismatch-stale-unavailable-silent
 
 Type: safety
 Reachability: test-only - `attestation_verifier::attest::attest` and `WriteSet::commit` have no production caller at this branch; #1173 wires them behind `verifier.enabled` and relabels the record `explicit-config-only`
 Status: active - converted by [#1172](https://github.com/ahrav/eidnara/issues/1172)
-Exercised: yes - a fixture whose commit holds other bytes than the cited document drives a `Mismatch` through the write set; a second run classifies the stale decision outside the input and the old classification replays; a decision already `Stale` at the commit is skipped; `Unavailable` verdicts write nothing
+Exercised: yes - a fixture whose commit holds other bytes than the cited document drives a `Mismatch` through the write set; a second run classifies the stale decision outside the input and the old classification replays; a decision already `Stale` at the commit is skipped; `Unavailable` verdicts with no blob id write nothing
 Guarantee: On `Mismatch` exactly one `MarkStale` is written on the model decision under its latest admission's classes, with `evidence_id: None` and a reason naming the oid, the cited sha256 digest, and the git blob id observed at the path, keyed `(verifier, stale:<model object id>:<oid>)`, and nothing else; a decision already `Stale` is skipped before any write; on `Unavailable` no Kernel write occurs.
 Check: `always` - after `Mismatch` the model decision is `Stale` with one new admission row and no verifier object exists for `(decision, oid)`; a second run writes nothing; after `Unavailable` the tip is unchanged
 Fault/timing angle: the model decision marked `Stale` between the classification and the commit
 Required faults and enabling state: a commit holding other bytes at the cited path; F5 and F6 verdicts driven into the write set as `Unavailable`
-Confidence: high - [evidence](evidence/p6-new-mismatch-stale-unavailable-silent.md). Read `attest` (`crates/daemon/src/attestation_verifier/attest.rs:113`), which returns `skipped(unavailable)` for every `Unavailable` verdict before any commit, and `mark_stale` (`:373`), whose skip is at `:399` and whose one admission is at `:404`
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:582`, `:645`, `:670` (unaudited)
+Confidence: high - [evidence](evidence/p6-new-mismatch-stale-unavailable-silent.md). Read `attest` (`crates/daemon/src/attestation_verifier/attest.rs:117`), which returns `skipped(unavailable)` for every `Unavailable` verdict before any commit, and `mark_stale` (`:390`), whose skip is at `:416` and whose one admission is at `:421`
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:595`, `:658`, `:683` (unaudited)
 Impact: falsifier: an attestation on `Mismatch`, or `MarkStale` on `Unavailable` or on the attestation
 Open questions:
 - Which two digests does the reason name? - resolved with answer: the cited sha256 and the git blob id at the path; the driver reports no content digest for a mismatch the header size decides, so the blob id is the observed value the reason carries.
@@ -669,13 +669,13 @@ Open questions:
 Type: safety
 Reachability: default-production - the plugin-route half: `kernel.commit` refuses `verifier` on every request; the `self_source` half and the model-client clause are test-only until #1173 wires the verifier behind `verifier.enabled`
 Status: active - the `self_source` half since [#1171](https://github.com/ahrav/eidnara/issues/1171), the plugin-route half and the model-client clause by [#1172](https://github.com/ahrav/eidnara/issues/1172)
-Exercised: yes - the plugin route refuses `source_kind = "verifier"` as `invalid_input` for a decision, an observation, and a `mark_stale`, and refuses `trusted_local_code`, `current_code`, and `current_config` asserted under `assistant` as `class_over_declared`, with no write; a fixture store classifies a committed attestation `self_source` and `attest` returns `skipped(not_verifiable)` with no commit; a source scan of the verifier module finds no model-client module or network crate, with a positive control
+Exercised: yes - the plugin route refuses `source_kind = "verifier"` as `invalid_input` for a decision, an observation, and a `mark_stale`, and refuses `trusted_local_code`, `current_code`, and `current_config` asserted under `assistant` as `class_over_declared`, with no write; a fixture store classifies a committed attestation `self_source` and `attest` returns `skipped(not_verifiable)` with no commit; a source scan of every `.rs` file under `src/attestation_verifier/` and `src/attestation_verifier.rs`, listed at test time, finds no model-client module or network crate, with a positive control
 Guarantee: `verifier` is outside the plugin table; every live `Active` `source_kind == "verifier"` decision is classified `self_source`, and every other `verifier` decision is outside the input set, so the write set is never entered for one; the verifier module names no model client.
 Check: `always` - `derive_classes("verifier")` is `None` and the route answers `invalid_input`; live `Active` attestations are `self_source` on the next pass, and other attestations are `NotInput`; every `crate::` path the verifier sources name is in a closed allowlist of model-free modules
 Fault/timing angle: none
 Required faults and enabling state: a store holding an attestation; a plugin write under `verifier`
-Confidence: high - [evidence](evidence/p6-new-party-distinct-and-self-refusal.md). Read the `self_source` check at `crates/daemon/src/attestation_verifier/classify.rs:331`, after the standing read (`:315`) and its `Active` filter (`:325`) and before the anchor read (`:338`); `derive_classes` (`crates/daemon/src/kernel_routes/commit.rs:370`) through `resolve_classes` (`:413`); `attest` (`crates/daemon/src/attestation_verifier/attest.rs:113`) returns before any commit for a classification that is not verifiable
-Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:590`; `crates/daemon/tests/kernel_routes.rs:1148`; `crates/daemon/tests/attestation_verifier_attest.rs:416`, `:1050` (unaudited)
+Confidence: high - [evidence](evidence/p6-new-party-distinct-and-self-refusal.md). Read the `self_source` check at `crates/daemon/src/attestation_verifier/classify.rs:331`, after the standing read (`:315`) and its `Active` filter (`:325`) and before the anchor read (`:338`); `derive_classes` (`crates/daemon/src/kernel_routes/commit.rs:370`) through `resolve_classes` (`:413`); `attest` (`crates/daemon/src/attestation_verifier/attest.rs:117`) returns before any commit for a classification that is not verifiable
+Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:590`; `crates/daemon/tests/kernel_routes.rs:6778`; `crates/daemon/tests/attestation_verifier_attest.rs:429`, `:1230` (unaudited)
 Impact: falsifier: the verifier attests its own attestation
 Open questions:
 - Does anything beyond the plugin route reserve `verifier`? - resolved with answer: no other daemon route has a source-kind table; `kernel.artifact.ingest` (`crates/daemon/src/kernel_routes/ingest.rs:142`) accepts any `source_kind` for an evidence object, which cannot be a decision or a witness trigger. A plugin can still `mark_stale` or retire an attestation through `kernel.commit` under its own source kind (OQ6-15, documented in #1174).

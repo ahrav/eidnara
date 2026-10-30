@@ -6,7 +6,7 @@ The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/i
 
 ## Evidence trail
 
-`derive_classes` (`crates/daemon/src/kernel_routes/commit.rs:370`) matches the four kinds and returns `None` otherwise; the caller maps `None` to `InvalidInput`. `a_plugin_write_is_capped_at_inference_classes` (`:1249`) and `a_plugin_route_cannot_declare_a_class_above_the_derived_one` (`crates/daemon/tests/kernel_routes.rs:1202`) cover the cap.
+`derive_classes` (`crates/daemon/src/kernel_routes/commit.rs:370`) matches the four kinds and returns `None` otherwise; the caller maps `None` to `InvalidInput`. `a_plugin_write_is_capped_at_inference_classes` (`:1249`) and `a_plugin_route_cannot_declare_a_class_above_the_derived_one` (`crates/daemon/tests/kernel_routes.rs:1145`) cover the cap.
 
 ## Failure scenario
 
