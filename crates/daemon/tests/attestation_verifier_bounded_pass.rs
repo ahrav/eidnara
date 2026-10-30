@@ -1685,13 +1685,14 @@ fn a_republished_document_marks_its_attestation_stale_once_and_leaves_the_model_
     assert_eq!(standing_of(&store, &model), model_standing);
 }
 
-/// AC18's silent cases: a republish with an equal digest counts current, a retired descriptor and
-/// an undecodable witness detail count unavailable, and none writes.
+/// AC18's silent cases: a republish with an equal digest counts current, a retired descriptor, an
+/// undecodable witness detail, and a witness detail at another `witness_version` count
+/// unavailable, and none writes.
 #[test]
 fn an_equal_republish_a_retired_descriptor_and_an_undecodable_witness_write_nothing() {
     use daemon::attestation_verifier::applicability::{Applicability, evaluate};
     let store = Store::open();
-    let files: Vec<_> = (0..3)
+    let files: Vec<_> = (0..4)
         .map(|i| (format!("doc{i}.md"), text(i, 1024)))
         .collect();
     let repo = Repo::new("silent", &files);
@@ -1704,7 +1705,7 @@ fn an_equal_republish_a_retired_descriptor_and_an_undecodable_witness_write_noth
     let counters = Counters::default();
     let mut verifier = Verifier::default();
     pass(&mut verifier, &store, &repo, &counters);
-    assert_eq!(counters.get("attestation_committed"), 3);
+    assert_eq!(counters.get("attestation_committed"), 4);
 
     republish(&store, &repo, "s0", &files[0].0, &files[0].1, 2);
     let descriptor: String = store
@@ -1733,6 +1734,18 @@ fn an_equal_republish_a_retired_descriptor_and_an_undecodable_witness_write_noth
         )
         .unwrap();
     assert_eq!(changed, 1);
+    let witness = Identity::of(&models[3], &repo.head).witness_object_id;
+    let changed = store
+        .sqlite()
+        .execute(
+            "UPDATE observations SET observation_payload=CAST(json_set(
+               CAST(observation_payload AS TEXT), '$.detail', replace(json_extract(
+               CAST(observation_payload AS TEXT), '$.detail'), '\"witness_version\":1',
+               '\"witness_version\":2')) AS BLOB) WHERE object_id=?1",
+            [&witness],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
     let target = store.kernel.capture_commit_read_target().unwrap();
     let standings: Vec<_> = models
         .iter()
@@ -1751,13 +1764,14 @@ fn an_equal_republish_a_retired_descriptor_and_an_undecodable_witness_write_noth
         [
             Applicability::Current,
             Applicability::Unavailable,
+            Applicability::Unavailable,
             Applicability::Unavailable
         ]
     );
     let rows = store.verifier_rows();
     let admissions = store.count("SELECT COUNT(*) FROM admission_decisions");
     pass(&mut verifier, &store, &repo, &counters);
-    assert_eq!(applicability_counts(&counters), [0, 1, 2]);
+    assert_eq!(applicability_counts(&counters), [0, 1, 3]);
     assert_eq!(store.verifier_rows(), rows);
     assert_eq!(
         store.count("SELECT COUNT(*) FROM admission_decisions"),
@@ -1982,6 +1996,37 @@ fn attested_and_republished(
     attestation(&model, repo)
 }
 
+/// A pass budget cancelled at the stale mark's commit poll refuses the commit at its deadline:
+/// the pass counts `commit_refused_deadline` once and writes no `MarkStale`, and the next open
+/// pass marks the attestation first.
+#[test]
+fn a_budget_cancelled_at_the_stale_mark_commit_counts_a_deadline_refusal() {
+    let store = Store::open();
+    let repo = Repo::new("cancelled", &[("doc.md".into(), text(0, 1024))]);
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let attested = attested_and_republished(&store, &repo, &mut verifier, &counters);
+    let clock = Clock::with_budget(|poll, _, budget| {
+        if poll == Poll::Commit {
+            budget.cancel();
+        }
+        false
+    });
+    let report = verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert!(report.failed);
+    assert_eq!(clock.polled(Poll::Commit), 1);
+    assert_eq!(counters.get("commit_refused_deadline"), 1);
+    assert_eq!(applicability_counts(&counters), [0, 0, 0]);
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM admission_decisions WHERE event_kind='mark_stale'"),
+        0
+    );
+
+    pass(&mut verifier, &store, &repo, &counters);
+    assert_eq!(applicability_counts(&counters), [1, 0, 0]);
+    assert_eq!(stale_marks(&store, &attested).len(), 1);
+}
+
 /// The stale mark's envelope rereads the lineage's live descriptor: a revision published between
 /// the evaluation and the commit refuses the mark as changed, and the next pass marks the
 /// attestation at the newer revision.
@@ -2058,8 +2103,8 @@ fn a_plugin_stale_mark_before_the_verifiers_commit_leaves_one_mark() {
     assert_eq!(marks[0].3, "plugin");
 }
 
-/// A witness read the Kernel refuses resolves its attestation under `applicability_unavailable`
-/// with the pass failed, so the attestation behind it is still evaluated, in this pass and the
+/// A witness read the Kernel refuses for its corrupt row resolves its attestation under
+/// `applicability_unavailable` with the pass healthy, so the attestation behind it is still evaluated, in this pass and the
 /// next.
 #[test]
 fn a_witness_read_the_kernel_refuses_resolves_its_attestation_and_the_step_continues() {
@@ -2106,13 +2151,13 @@ fn a_witness_read_the_kernel_refuses_resolves_its_attestation_and_the_step_conti
             &counters,
             &Clock::open(),
         );
-        assert!(report.failed, "pass {passes}");
+        assert!(!report.failed, "pass {passes}");
         assert_eq!(applicability_counts(&counters), [0, passes, passes]);
     }
 }
 
 /// An attestation row the batched standing read refuses reads each attestation's standing alone:
-/// the refused row resolves under `applicability_unavailable` with the pass failed, and the
+/// the refused row resolves under `applicability_unavailable` with the pass healthy, and the
 /// attestation beside it is still evaluated, in this pass and the next.
 #[test]
 fn an_attestation_row_the_standing_read_refuses_resolves_and_the_step_continues() {
@@ -2146,7 +2191,7 @@ fn an_attestation_row_the_standing_read_refuses_resolves_and_the_step_continues(
             &counters,
             &Clock::open(),
         );
-        assert!(report.failed, "pass {passes}");
+        assert!(!report.failed, "pass {passes}");
         assert_eq!(applicability_counts(&counters), [0, passes, passes]);
     }
 }

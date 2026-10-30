@@ -52,6 +52,14 @@
 //! degraded and `unavailable_skipped` otherwise. A terminal reason is kept per `(decision, oid)` for the process
 //! lifetime. All state is process-local: a restart rescans from the start, and the skips and the
 //! write set's receipt replay make the rescan write nothing.
+//!
+//! After its decisions, each project runs the applicability step over the attestations the
+//! verifier authored. The step pages them from its own cursor, at most [`MAX_VERDICTS`] pages of
+//! [`PAGE_ROWS`] rows, polls [`Poll::Decision`] before each page, and evaluates at most
+//! [`MAX_VERDICTS`] `Active` attestations through [`applicability::evaluate`]. Each evaluated
+//! attestation counts `applicability_current`, `applicability_unavailable`, or, once its
+//! `MarkStale` commits, `applicability_stale`. A page with no rows returns the cursor to the start,
+//! so the next pass scans the attestations again from the first.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -186,7 +194,8 @@ impl Counters {
 /// Where the pass polls its deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Poll {
-    /// Before a project, before each decision, and after a Kernel read or commit refusal.
+    /// Before a project, before each decision or applicability page, and after a Kernel read or
+    /// commit refusal.
     Decision,
     /// Before a root's repository identity derivation.
     Derive,
@@ -254,6 +263,7 @@ struct ProjectState {
     /// before the cursor is dropped when the cursor advances.
     resolved: BTreeSet<(i64, String)>,
     attempts: HashMap<String, u32>,
+    /// The last attestation the applicability step passed, by `(created_commit_seq, object_id)`.
     applicability: Option<(i64, String)>,
 }
 
@@ -707,8 +717,10 @@ impl ProjectRun<'_, '_> {
             for ((seq, object_id), standing) in page.into_iter().zip(standings) {
                 let standing = match standing {
                     Ok(standing) => standing,
+                    // The row's refusal recurs on every pass, so it resolves the attestation
+                    // with the pass healthy.
                     Err(error) if row_caused(&error) => {
-                        self.resolve("applicability_unavailable", true);
+                        self.count("applicability_unavailable", false);
                         self.state.applicability = Some((seq, object_id));
                         continue;
                     }
@@ -738,45 +750,53 @@ impl ProjectRun<'_, '_> {
     }
 
     /// Counts `counter` for one resolved attestation, marking the pass failed when `failed`.
-    fn resolve(&mut self, counter: &str, failed: bool) -> Step {
+    fn count(&mut self, counter: &str, failed: bool) {
         self.counters.add(counter, 1);
         self.report.failed |= failed;
-        Step::Resolved
     }
 
     fn applicable(&mut self, object_id: &str, target: CommitReadTarget) -> Step {
         let budget = self.clock.budget();
-        let republished = match applicability::evaluate(self.kernel, object_id, target, budget) {
-            Ok(Applicability::Current) => return self.resolve("applicability_current", false),
-            Ok(Applicability::Unavailable) => {
-                return self.resolve("applicability_unavailable", false);
-            }
-            Ok(Applicability::Republished(republished)) => republished,
-            Err(KernelError::Deadline) => return self.refused(true),
-            Err(_) => return self.resolve("applicability_unavailable", true),
-        };
-        if self.clock.passed(Poll::Commit) {
-            self.report.failed = true;
-            return Step::StopPass;
-        }
-        match applicability::mark_republished(self.kernel, target, &republished, budget) {
-            Outcome::StaleCommitted(_) => {
-                self.report.progressed = true;
-                self.resolve("applicability_stale", false)
-            }
-            Outcome::Replayed(_) | Outcome::Skipped(_) => Step::Resolved,
-            Outcome::Changed => self.resolve("commit_refused_changed", true),
-            Outcome::Conflict => self.resolve("commit_conflict", true),
-            // `mark_republished` commits as `StaleCommitted`; the other two belong to `attest`.
-            Outcome::Committed(_) | Outcome::InvalidWriteSet | Outcome::WitnessDegraded => {
-                self.resolve("commit_refused_invalid_write_set", true)
-            }
-            Outcome::Refused(KernelError::Deadline) => {
-                self.resolve("commit_refused_deadline", true);
-                Step::StopPass
-            }
-            Outcome::Refused(error) => self.resolve(refused_counter(error), true),
-        }
+        let (counter, failed) =
+            match applicability::evaluate(self.kernel, object_id, target, budget) {
+                Ok(Applicability::Current) => ("applicability_current", false),
+                Ok(Applicability::Unavailable) => ("applicability_unavailable", false),
+                Err(KernelError::Deadline) => return self.refused(true),
+                // A refusal one row can cause recurs on every pass, so it leaves the pass healthy; a
+                // transient refusal fails the pass so the task retries soon.
+                Err(error) => (
+                    "applicability_unavailable",
+                    !row_caused(&ClaimFactsError::Kernel(error)),
+                ),
+                Ok(Applicability::Republished(republished)) => {
+                    if self.clock.passed(Poll::Commit) {
+                        self.report.failed = true;
+                        return Step::StopPass;
+                    }
+                    match applicability::mark_republished(self.kernel, target, &republished, budget)
+                    {
+                        Outcome::StaleCommitted(_) => {
+                            self.report.progressed = true;
+                            ("applicability_stale", false)
+                        }
+                        Outcome::Replayed(_) | Outcome::Skipped(_) => return Step::Resolved,
+                        Outcome::Changed => ("commit_refused_changed", true),
+                        Outcome::Conflict => ("commit_conflict", true),
+                        // `mark_republished` commits as `StaleCommitted`; the other two belong to
+                        // `attest`.
+                        Outcome::Committed(_)
+                        | Outcome::InvalidWriteSet
+                        | Outcome::WitnessDegraded => ("commit_refused_invalid_write_set", true),
+                        Outcome::Refused(KernelError::Deadline) => {
+                            self.count("commit_refused_deadline", true);
+                            return Step::StopPass;
+                        }
+                        Outcome::Refused(error) => (refused_counter(error), true),
+                    }
+                }
+            };
+        self.count(counter, failed);
+        Step::Resolved
     }
 }
 

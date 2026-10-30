@@ -53,7 +53,7 @@ rows #1174 added and every row pointing into a file #1174 changed at the
 | Envelope recheck | `crates/daemon/src/attestation_verifier/attest.rs:567` (`recheck`): incarnation at `:576`, anchor at `:604`, descriptor at `:613`; served sensitivity at `:379` | the model decision, its anchor at the sequence the envelope extends read in the envelope's transaction, its descriptor with its cited evidence row live, and the class the Kernel serves it at are what the classification read; otherwise `changed` | unaudited |
 | Witness oracle | `crates/daemon/src/attestation_verifier/attest.rs:402` | the envelope commits only at effective maturity `Verified` and disposition `Active`; otherwise `witness_degraded` | unaudited |
 | Opposite-key refusal | `crates/daemon/src/attestation_verifier/attest.rs:530` in `run` (`:518`) | a recorded key for the other verdict on the same decision and oid is `conflict` | unaudited |
-| Stale path | `crates/daemon/src/attestation_verifier/attest.rs:441` (`mark_stale`), through `record_stale` (`:474`), skip at `:483`, admission at `:486` | one `MarkStale` under the latest admission's classes; an already `Stale` decision is skipped; a `MarkStale` returning another disposition is `invalid_write_set` | unaudited |
+| Stale path | `crates/daemon/src/attestation_verifier/attest.rs:441` (`mark_stale`), through `record_stale` (`:474`), skip at `:482`, admission at `:485` | one `MarkStale` under the latest admission's classes; an already `Stale` decision is skipped; a `MarkStale` returning another disposition is `invalid_write_set` | unaudited |
 | Verifier flag | `crates/daemon/src/config.rs:162` (default), `ConfigKey::VerifierEnabled` user-only; `crates/daemon/src/attestation_verifier/bounded_pass.rs:309` in `Verifier::pass` (`:286`) | the flag is off by default, a project tier cannot set it, and the pass reads it per project before any repository or Kernel read | unaudited |
 | Pass budgets | `crates/daemon/src/attestation_verifier/bounded_pass.rs:516` in `ProjectRun::decisions` (`:451`); `MAX_VERDICTS` at `:74` | a project stops at N verdicts or N × 256 KiB blob bytes per pass | unaudited |
 | Pass cursor | `crates/daemon/src/attestation_verifier/bounded_pass.rs:508` in `ProjectRun::decisions` (`:451`) | the cursor moves only over a resolved prefix; a resolved decision behind an unresolved one is remembered | unaudited |
@@ -233,6 +233,7 @@ rows #1174 added and every row pointing into a file #1174 changed at the
 | `a_replayed_stale_mark_key_writes_nothing_new` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1809` | stale on byte change (F10) | unaudited |
 | `a_commit_deadline_leaves_its_attestation_first_for_the_next_pass` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1894` | stale on byte change (N, commit deadline); pass bounds | unaudited |
 | `the_applicability_step_resumes_after_the_last_attestation_it_evaluated` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1939` | stale on byte change (cursor resume); pass bounds | unaudited |
+| `a_budget_cancelled_at_the_stale_mark_commit_counts_a_deadline_refusal` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2003` | stale on byte change (commit refused at the deadline) | unaudited |
 | `a_revision_published_before_the_stale_mark_commits_refuses_it_as_changed` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1989` | stale on byte change (descriptor recheck) | unaudited |
 | `a_plugin_stale_mark_before_the_verifiers_commit_leaves_one_mark` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2018` | stale on byte change (disposition recheck) | unaudited |
 | `a_witness_read_the_kernel_refuses_resolves_its_attestation_and_the_step_continues` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:2065` | stale on byte change (refused read) | unaudited |
@@ -259,7 +260,11 @@ rows #1174 added and every row pointing into a file #1174 changed at the
   descriptor revision through the Kernel, and
   `p6-document-republishes-only-on-digest-change-and-retires-on-missing`
   covers when source capture publishes one. No test exercises the Kernel
-  lineage read's deadline or future-snapshot refusals.
+  lineage read's deadline or future-snapshot refusals. The `evaluate`
+  deadline arm of `ProjectRun::applicable` is covered only by the Kernel-level
+  cancelled-budget refusal in `a_replayed_stale_mark_key_writes_nothing_new`,
+  since the pass has no seam between the page read and `evaluate`. The
+  per-row standing read refused for a store-wide reason has no test.
 - The write set: no test forces a non-`Stale` result from the `MarkStale`
   admission, a scope mismatch in the envelope, or an exhausted budget in
   `attest`, and no test terminates the process after a commit.
