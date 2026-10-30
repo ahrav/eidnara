@@ -96,9 +96,10 @@ pub enum Outcome {
     /// before or inside the envelope.
     Changed,
     /// A `Match` or `Mismatch` names no blob, the witness detail failed to serialize, the write
-    /// set failed [`WriteSet::check`] before the commit, the Kernel refused the causality request
-    /// as malformed, or the `MarkStale` admission returned a disposition other than `Stale`;
-    /// nothing committed.
+    /// set failed [`WriteSet::check`] before the commit, a set handed to [`WriteSet::commit`]
+    /// differs from the set the model decision's row yields, the Kernel refused the causality
+    /// request as malformed, or the `MarkStale` admission returned a disposition other than
+    /// `Stale`; the store stays at its tip.
     InvalidWriteSet,
     /// The Kernel refused the commit or a read before it. A [`KernelError::Io`] from the commit
     /// can follow a durable commit, so a
@@ -155,14 +156,7 @@ fn attest_match(
         opposite,
         Outcome::Committed,
         |envelope| {
-            let object_id = &input.decision.object_id;
-            let row = envelope
-                .decisions_for_objects(std::slice::from_ref(object_id))?
-                .into_iter()
-                .find(|row| &row.object_id == object_id)
-                .ok_or(Stop::Outcome(Outcome::Changed))?;
-            let write_set =
-                WriteSet::from_row(target, input, blob_oid, row).map_err(Stop::Outcome)?;
+            let write_set = WriteSet::at_tip(envelope, target, input, blob_oid)?;
             if !write_set.check() {
                 return Err(Stop::Outcome(Outcome::InvalidWriteSet));
             }
@@ -171,9 +165,10 @@ fn attest_match(
     )
 }
 
-/// The rows a `Match` writes, built from the classification and the model decision's row before
-/// the commit. [`WriteSet::commit`] checks them with [`WriteSet::check`] before it opens the
-/// envelope.
+/// The rows a `Match` writes, built from the classification and the model decision's row.
+/// [`WriteSet::commit`] checks them with [`WriteSet::check`] before it opens the envelope and
+/// commits them only while they equal the set the model decision's row at the committed tip
+/// yields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteSet {
     pub target: CommitReadTarget,
@@ -377,7 +372,9 @@ impl WriteSet {
             && witness.evidence_id.is_none()
     }
 
-    /// Commits the write set in one envelope after [`Self::check`] passes.
+    /// The write set must match the set rebuilt from the model decision's row at the committed
+    /// tip, except for `observed_at` and `recorded_at`; other differences produce
+    /// [`Outcome::InvalidWriteSet`].
     pub fn commit(&self, kernel: &KernelStore, budget: &EvalBudget) -> Outcome {
         if !self.check() {
             return Outcome::InvalidWriteSet;
@@ -391,8 +388,31 @@ impl WriteSet {
             keyed,
             opposite,
             Outcome::Committed,
-            |envelope| self.write(envelope, kernel),
+            |envelope| {
+                let mut built = Self::at_tip(envelope, self.target, &self.input, blob)?;
+                built.witness.observed_at = self.witness.observed_at;
+                built.citation.recorded_at = self.citation.recorded_at;
+                if built != *self {
+                    return Err(Stop::Outcome(Outcome::InvalidWriteSet));
+                }
+                self.write(envelope, kernel)
+            },
         )
+    }
+
+    fn at_tip(
+        envelope: &Envelope<'_>,
+        target: CommitReadTarget,
+        input: &VerifierInput,
+        blob_oid: &str,
+    ) -> Result<Self, Stop> {
+        let object_id = &input.decision.object_id;
+        let row = envelope
+            .decisions_for_objects(std::slice::from_ref(object_id))?
+            .into_iter()
+            .find(|row| &row.object_id == object_id)
+            .ok_or(Stop::Outcome(Outcome::Changed))?;
+        Self::from_row(target, input, blob_oid, row).map_err(Stop::Outcome)
     }
 
     fn write(&self, envelope: &mut Envelope<'_>, kernel: &KernelStore) -> Result<(), Stop> {

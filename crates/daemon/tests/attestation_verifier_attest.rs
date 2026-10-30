@@ -1922,3 +1922,59 @@ fn the_attestation_copies_the_model_decisions_kind_scope_and_summary() {
         )
     );
 }
+
+#[test]
+fn a_write_set_with_content_other_than_the_model_decisions_is_refused_in_the_envelope() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("content", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let budget = EvalBudget::unbounded();
+    let write_set = WriteSet::new(
+        &store.kernel,
+        classification.target,
+        input(&classification),
+        &checkout.blob,
+        &budget,
+    )
+    .unwrap();
+    let mutations: [(&str, Mutation); 6] = [
+        ("decision kind", |set, _, _| {
+            set.attestation.decision_kind = "SECURITY".into();
+        }),
+        ("summary", |set, _, _| {
+            set.attestation.payload.summary = "The plugin owns the store.".into();
+        }),
+        ("rationale", |set, _, _| {
+            set.attestation.payload.rationale = "{}".into();
+        }),
+        ("witness summary", |set, _, _| {
+            set.witness.payload.summary = "the bytes are present".into();
+        }),
+        ("witness classification", |set, _, _| {
+            set.witness.payload.classification = "config_present".into();
+        }),
+        ("citation summary", |set, _, _| {
+            set.citation.payload.summary = "cites another document".into();
+        }),
+    ];
+    let tip = store.tip();
+    for (name, mutate) in mutations {
+        let mut mutated = write_set.clone();
+        mutate(&mut mutated, "", "");
+        assert_ne!(mutated, write_set, "{name}");
+        assert!(mutated.check(), "{name}");
+        assert_eq!(
+            mutated.commit(&store.kernel, &budget),
+            Outcome::InvalidWriteSet,
+            "{name}"
+        );
+        assert_eq!(store.tip(), tip, "{name}");
+    }
+    assert_eq!(store.write_set_rows(), 0);
+    assert!(matches!(
+        write_set.commit(&store.kernel, &budget),
+        Outcome::Committed(_)
+    ));
+}
