@@ -30,8 +30,8 @@ production guards. References were verified at the #1170 branch.
 | Document publisher class | `crates/daemon/src/source_capture.rs:922` | documents publish at `Sensitive` | unaudited |
 | Causality parents | `crates/kernel/src/claim_causality.rs:218` (`record_claim_causality`), `:38` (`MAX_DERIVATION_PARENTS`) | live exact parents; bounded parent list | unaudited |
 | Verifier header gate | `crates/daemon/src/attestation_verifier.rs:313` (`header_verdict`), used at `:535` (`lookup`) and `:329` (`verdict`) | header over 256 KiB is `over_budget`; a claimed length above twice or below half the header size is `Mismatch`; both before any content read | unaudited |
-| Verifier object read | `crates/daemon/src/attestation_verifier.rs:479` (`Objects::read`), `:462` (`Objects::blob_header`) | own packs, then the loose store, then the object store, each under the allocation limit; kind and hash checked after decode, decoded length recorded first; allocation refusal is `over_budget`; slot exhaustion reopens the repository once | unaudited |
-| Verifier delta-chain walk | `crates/daemon/src/git_sources.rs:315` (`OwnPacks::header`), `:330` (`OwnPacks::decode`), `:447` (`entry_header`) | an own-pack entry whose ofs- and ref-delta walk revisits an entry, names a base outside its pack, or does not decode is `object_unreadable(class)` before any decode, and the object store never reads it | unaudited |
+| Verifier object read | `crates/daemon/src/attestation_verifier.rs:479` (`Objects::read`), `:462` (`Objects::blob_header`) | own packs, then the loose store, then the object store for an id no own index holds, each under the allocation limit; a loose read error is `object_unreadable`; kind and hash checked after decode, decoded length recorded first; allocation refusal is `over_budget`; slot exhaustion makes at most one reopen attempt per claim | unaudited |
+| Verifier delta-chain walk | `crates/daemon/src/git_sources.rs:315` (`OwnPacks::header`), `:330` (`OwnPacks::decode`), `:447` (`entry_header`) | an own-pack entry whose ofs- and ref-delta walk revisits an entry is `object_unreadable(class)` before any decode; an id whose every holding own pack names a base outside that pack, has an undecodable header, or fails the decode reads a valid loose copy or is `object_unreadable(class)`; the object store never reads an id an own index holds | unaudited |
 | Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:387` (`poll`), `:352` (`Deadline`) | polled before the open and before every object read | unaudited |
 | Verifier claim path | `crates/daemon/src/attestation_verifier.rs:71` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
 
@@ -120,6 +120,7 @@ production guards. References were verified at the #1170 branch.
 | `a_tree_above_the_allocation_limit_is_over_budget_loose_and_packed` | `crates/daemon/tests/attestation_verifier.rs:1240` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
 | `a_blob_only_in_an_alternate_with_more_packs_than_index_slots_matches` | `crates/daemon/tests/attestation_verifier.rs:1269` | blob read bounded | unaudited |
 | `an_own_pack_delta_whose_base_lies_in_another_pack_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1307` | blob read bounded | unaudited |
+| `a_valid_loose_copy_answers_for_an_own_pack_entry_that_does_not_resolve` | `crates/daemon/tests/attestation_verifier.rs:1358` | blob read bounded | unaudited |
 | `evidence_cited_in_refuses_a_deleted_evidence_row_that_live_decisions_still_cite` | `crates/kernel/tests/kernel_slice.rs:2248` | artifact deletion | unaudited |
 
 ## Categories with no check found
