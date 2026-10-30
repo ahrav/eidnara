@@ -1231,7 +1231,7 @@ Handler health is host-internal. Host invokes `Handler::health` on a dedicated c
 
 ### 9.4 Route and connection `Goodbye`
 
-Route close is pure-header `Goodbye` on nonzero channel and current epoch with correlation 0. Host stops new dispatch, settles/cancels route work within its close budget, calls route-gone exactly once, then permits cleanup-gated channel reuse. Duplicate route Goodbye is idempotent.
+Route close is pure-header `Goodbye` on nonzero channel and current epoch with correlation 0. Host stops new dispatch, settles/cancels route work within its close budget, calls route-gone exactly once, then permits cleanup-gated channel reuse. Request work that keeps running past the close budget (cancel, then abort) keeps that route closing and its channel reserved; the host settles the route's requests as `cancelled` and calls route-gone once that work stops, and every other route and connection keeps serving. Duplicate route Goodbye is idempotent.
 
 Connection close is Goodbye on channel 0, epoch 0, correlation 0, followed by joined ring teardown and setup-socket close. Unexpected setup-socket EOF has equivalent retirement effect but no peer drain guarantee. Any published request lacking an observed terminal at close is `outcome_unknown`; queued requests proven unpublished are `not_sent`.
 

@@ -1452,49 +1452,82 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
                     .await
                     .is_err()
                 {
-                    // If `tracker.wait()` times out, request code may still execute; do not run route-gone.
-                    // Running route-gone while request code executes races handler cleanup and channel finalization.
-                    // is terminating.
-                    shared.fatal.trip(
-                        &shared.shutdown,
-                        "dispatch task did not stop before route-gone".to_owned(),
+                    // Request code still runs, so route-gone and the route's terminals follow the
+                    // end of its tracked work.
+                    eprintln!(
+                        "eidnara-host: route {}/{} work outlived its close budget; route-gone runs when it stops",
+                        handle.channel, handle.epoch
                     );
+                    spawn_deferred_route_close(shared, handle, generation, entries, tracker);
                     return false;
                 }
-                // An aborted dispatch task never reaches its own `settle`; `settle` is
-                // first-terminal-wins, so a request settled before the abort is left alone.
-                let emit_remaining = async {
-                    for (key, settlement) in &entries {
-                        if settlement.is_settled() {
-                            continue;
-                        }
-                        settle(
-                            settlement,
-                            &shared.terminal_budget,
-                            &generation,
-                            handle,
-                            key.2,
-                            cancelled_terminal(),
-                        )
-                        .await;
-                    }
-                };
-                if timeout_at(post_abort_deadline, emit_remaining)
-                    .await
-                    .is_err()
-                {
-                    generation.token.cancel();
-                }
+                settle_stopped_route_work(
+                    shared,
+                    handle,
+                    &generation,
+                    &entries,
+                    post_abort_deadline,
+                )
+                .await;
             }
-            {
-                let mut pending = generation.pending.lock().expect("pending lock");
-                for (key, _) in &entries {
-                    pending.remove(key);
-                }
-            }
+            remove_route_pending(&generation, &entries);
             true
         }
     }
+}
+
+async fn settle_stopped_route_work<H: HostHandler>(
+    shared: &Arc<HostShared<H>>,
+    handle: RouteHandle,
+    generation: &Arc<GenerationCore>,
+    entries: &[(PendingKey, Arc<Settlement>)],
+    deadline: Instant,
+) {
+    // An aborted dispatch task never reaches its own `settle`; `settle` is
+    // first-terminal-wins, so a request settled before the abort is left alone.
+    let emit_remaining = async {
+        for (key, settlement) in entries {
+            if settlement.is_settled() {
+                continue;
+            }
+            settle(
+                settlement,
+                &shared.terminal_budget,
+                generation,
+                handle,
+                key.2,
+                cancelled_terminal(),
+            )
+            .await;
+        }
+    };
+    if timeout_at(deadline, emit_remaining).await.is_err() {
+        generation.token.cancel();
+    }
+}
+
+fn remove_route_pending(generation: &GenerationCore, entries: &[(PendingKey, Arc<Settlement>)]) {
+    let mut pending = generation.pending.lock().expect("pending lock");
+    for (key, _) in entries {
+        pending.remove(key);
+    }
+}
+
+fn spawn_deferred_route_close<H: HostHandler>(
+    shared: &Arc<HostShared<H>>,
+    handle: RouteHandle,
+    generation: Arc<GenerationCore>,
+    entries: Vec<(PendingKey, Arc<Settlement>)>,
+    tracker: TaskTracker,
+) {
+    let owner = Arc::clone(shared);
+    shared.spawn_lifecycle(async move {
+        tracker.wait().await;
+        let deadline = Instant::now() + owner.timing.route_close_budget;
+        settle_stopped_route_work(&owner, handle, &generation, &entries, deadline).await;
+        remove_route_pending(&generation, &entries);
+        finish_route_close(&owner, handle).await;
+    });
 }
 
 pub async fn close_generation<H: HostHandler>(

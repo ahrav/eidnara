@@ -181,12 +181,13 @@ async fn post_abort_completion_settles_once_without_wall_clock_sleeps() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn live_work_after_both_close_windows_refuses_cleanup() {
+async fn live_work_after_both_close_windows_defers_route_gone_until_it_stops() {
     let CloseFixture {
         shared,
         generation,
         mut queue,
         route,
+        settlement,
         decision,
         aborted,
         physical_work,
@@ -199,13 +200,38 @@ async fn live_work_after_both_close_windows_refuses_cleanup() {
     aborted.await.unwrap();
     assert!(
         !close.await.unwrap(),
-        "held physical work must refuse cleanup"
+        "held physical work defers route-gone past the close owner"
     );
     assert_eq!(Instant::now() - started, Duration::from_millis(200));
-    assert!(shared.shutdown.is_cancelled());
+    assert!(
+        !shared.shutdown.is_cancelled() && shared.fatal.take().is_none(),
+        "work outliving the close budget fails its route, not the host"
+    );
     assert!(queue.try_recv().is_err());
     assert!(!generation.pending.lock().unwrap().is_empty());
+    assert_eq!(
+        shared.registry.live_count(),
+        1,
+        "the held route keeps its channel"
+    );
+
     drop(physical_work);
+    shared.tracker.close();
+    shared.tracker.wait().await;
+    assert!(settlement.is_settled());
+    let terminal = queue.try_recv().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&terminal.bytes[crate::wire::HEADER_LEN..])
+            .unwrap()["code"],
+        "cancelled"
+    );
+    assert!(generation.pending.lock().unwrap().is_empty());
+    assert_eq!(
+        shared.registry.live_count(),
+        0,
+        "route-gone released the channel"
+    );
+    assert!(!shared.shutdown.is_cancelled());
 }
 
 #[tokio::test(start_paused = true)]
