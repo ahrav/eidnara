@@ -7,20 +7,21 @@
 //!
 //! On `Match` one envelope rechecks the model decision against the classification, then writes, in
 //! order: the attestation decision under `source_kind = "verifier"` with the model decision's
-//! anchor, scope, and sensitivity; its witness observation, `code_present` or `config_present` by
+//! anchor, scope, and served sensitivity; its witness observation, `code_present` or `config_present` by
 //! document kind, carrying the attestation's source triple and a versioned detail naming the
 //! compared evidence, digest, commit, blob, path, and descriptor; the witness admission under
 //! `(TrustedLocalCode, CurrentCode|CurrentConfig)`; a `DerivedReinjection` causality record naming
 //! the model decision at its revision; and one decision event citing the compared evidence. The
 //! envelope commits only when the witness admission returns effective maturity `Verified` with
 //! disposition `Active`. The attestation and its witness cite the evidence row through that event
-//! and the detail alone, so the attestation serves at the model decision's sensitivity.
+//! and the detail alone, so the attestation serves at the class the Kernel serves the model
+//! decision at.
 //!
 //! On `Mismatch` one envelope records a `MarkStale` on the model decision under the classes of its
 //! latest admission. `Unavailable` writes nothing.
 //!
-//! Every id derives from `(model object id, oid)` through [`Identity::of`], and the operation key
-//! names the same pair, so a retry converges on the same rows or replays the receipt.
+//! Every [`Identity`] field derives from `(model object id, oid)` through [`Identity::of`], and the
+//! operation key names the same pair, so a retry converges on the same rows or replays the receipt.
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{OccurrenceClass, lower_hex as hex};
@@ -46,10 +47,11 @@ pub const CITATION_EVENT_KIND: &str = "verifier_citation";
 /// The version of the witness observation's detail.
 pub const WITNESS_DETAIL_VERSION: u32 = 1;
 
-/// The ids one attestation of a model decision at one commit oid is written under. Each is a
-/// fixed hash of the pair under its own prefix, outside the Kernel's reserved descriptor,
+/// The ids one attestation of a model decision at one commit oid is written under: `source_id` is
+/// the SHA-256 hex of the pair, and the object, decision, witness observation, and witness object
+/// ids are that hash under their own prefixes, outside the Kernel's reserved descriptor,
 /// causality, and local-file namespaces. The Kernel derives the causality record's ids from the
-/// attestation's object id.
+/// attestation's object id and the commit sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub source_id: String,
@@ -73,6 +75,7 @@ impl Identity {
 }
 
 /// What one call of [`attest`] did.
+#[must_use = "a `Refused` outcome can follow a durable commit and needs resolving"]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// The attestation and every companion row committed.
@@ -87,15 +90,18 @@ pub enum Outcome {
     /// The key is recorded under another request digest, or the opposite verdict's key for the
     /// same decision and oid is recorded.
     Conflict,
-    /// The model decision, its anchor, its cited descriptor or evidence row, or the store's
-    /// incarnation differs from the classification, or the Kernel reports the causality parent
-    /// missing or at another revision; the envelope rolled back.
+    /// The model decision, its served sensitivity, its anchor, its cited descriptor or evidence
+    /// row, or the store's incarnation differs from the classification, or the Kernel reports the
+    /// causality parent missing or at another revision; nothing committed, whether detected
+    /// before or inside the envelope.
     Changed,
-    /// The write set failed [`WriteSet::check`] before the commit, the Kernel refused the
-    /// causality request as malformed, or the `MarkStale` admission returned a disposition other
-    /// than `Stale`; nothing committed.
+    /// A `Match` or `Mismatch` names no blob, the witness detail failed to serialize, the write
+    /// set failed [`WriteSet::check`] before the commit, the Kernel refused the causality request
+    /// as malformed, or the `MarkStale` admission returned a disposition other than `Stale`;
+    /// nothing committed.
     InvalidWriteSet,
-    /// The Kernel refused the commit. A [`KernelError::Io`] can follow a durable commit, so a
+    /// The Kernel refused the commit or a read before it. A [`KernelError::Io`] from the commit
+    /// can follow a durable commit, so a
     /// caller treats it as an unknown outcome. The next pass resolves an attestation by replaying
     /// the key's receipt; a committed `MarkStale` leaves the model decision `Stale`, outside the
     /// next pass's input, so a caller resolves it by reading the model decision's disposition.
@@ -114,7 +120,7 @@ pub enum Skip {
 }
 
 /// Performs the one write `evaluation`'s verdict calls for on the decision `classification`
-/// names, under `budget`'s writer wait. The caller computed `evaluation` for the classification's
+/// names, under `budget`, which bounds the model decision's row read and the writer wait. The caller computed `evaluation` for the classification's
 /// claim before the call.
 pub fn attest(
     kernel: &KernelStore,
@@ -170,8 +176,8 @@ impl WriteSet {
     ///
     /// # Errors
     ///
-    /// Returns [`Outcome::Changed`] when the row is absent at that sequence and
-    /// [`Outcome::Refused`] for a refused read.
+    /// Returns [`Outcome::Changed`] when the store's incarnation differs from `target`'s or the
+    /// row is absent at that sequence, and [`Outcome::Refused`] for a refused read.
     pub fn new(
         kernel: &KernelStore,
         target: CommitReadTarget,
@@ -180,12 +186,15 @@ impl WriteSet {
         budget: &EvalBudget,
     ) -> Result<Self, Outcome> {
         let model = &input.decision;
-        let row = kernel
-            .decisions_for_objects_as_of_within_budget(
-                std::slice::from_ref(&model.object_id),
-                target.through_commit,
-                budget,
-            )
+        let read = kernel.decisions_for_objects_as_of_within_budget(
+            std::slice::from_ref(&model.object_id),
+            target.through_commit,
+            budget,
+        );
+        kernel
+            .require_incarnation(target.incarnation)
+            .map_err(|_| Outcome::Changed)?;
+        let row = read
             .map_err(Outcome::Refused)?
             .into_iter()
             .find(|row| row.object_id == model.object_id)
@@ -234,7 +243,7 @@ impl WriteSet {
                 source_kind: VERIFIER_SOURCE_KIND.into(),
                 source_id: ids.source_id.clone(),
                 source_revision: 1,
-                sensitivity: model.sensitivity,
+                sensitivity: model.served_sensitivity,
             },
             witness: ObservationSpec {
                 observation_id: ids.witness_observation_id,
@@ -255,7 +264,7 @@ impl WriteSet {
                 source_kind: VERIFIER_SOURCE_KIND.into(),
                 source_id: ids.source_id,
                 source_revision: 1,
-                sensitivity: model.sensitivity,
+                sensitivity: model.served_sensitivity,
             },
             citation: DecisionEventSpec {
                 event_kind: CITATION_EVENT_KIND.into(),
@@ -270,11 +279,13 @@ impl WriteSet {
 
     /// Whether the rows cite only what was compared and stand for the model decision: the
     /// compared evidence row, the witness detail's evidence id, and the citation event's evidence
-    /// id are one id; the attestation and the witness carry the model decision's domain and
-    /// sensitivity, the attestation its anchor; every id is the [`Identity`] of the model decision
-    /// and the claim's oid; the witness carries the attestation's source triple under `verifier`
-    /// and the document kind's witness kind; and neither the attestation nor the witness cites
-    /// evidence by its row.
+    /// id are one id; the witness detail is at [`WITNESS_DETAIL_VERSION`] and names this write
+    /// set's blob and the claim's commit, digest, path, descriptor, lineage, and revision; the
+    /// citation is a [`CITATION_EVENT_KIND`] event; the attestation and the witness carry the
+    /// model decision's domain and served sensitivity and one scope, the attestation its anchor;
+    /// every id is the [`Identity`] of the model decision and the claim's oid; the witness carries
+    /// the attestation's source triple under `verifier` at revision 1 and the document kind's
+    /// witness kind; and neither the attestation nor the witness cites evidence by its row.
     pub fn check(&self) -> bool {
         let detail = self
             .witness
@@ -299,13 +310,20 @@ impl WriteSet {
                 && detail.blob_oid == self.blob_oid
                 && detail.commit_oid == claim.oid()
                 && detail.artifact_digest == hex(claim.digest())
+                && detail.relative_path == claim.relative_path()
+                && detail.descriptor_object_id == self.input.descriptor_object_id
+                && detail.lineage_id == self.input.lineage_id
+                && detail.descriptor_revision == self.input.descriptor_revision
         }) && self.citation.evidence_id.as_deref() == Some(compared)
-            && named == Identity::of(&model.object_id, self.input.claim.oid())
+            && self.citation.event_kind == CITATION_EVENT_KIND
+            && named == Identity::of(&model.object_id, claim.oid())
             && (attestation.sensitivity, witness.sensitivity)
-                == (model.sensitivity, model.sensitivity)
+                == (model.served_sensitivity, model.served_sensitivity)
+            && witness.scope_id == attestation.scope_id
             && (&attestation.domain_id, &witness.domain_id) == (&model.domain_id, &model.domain_id)
             && attestation.anchor_id == model.anchor_id
             && attestation.source_kind == VERIFIER_SOURCE_KIND
+            && attestation.source_revision == 1
             && (
                 &witness.source_kind,
                 &witness.source_id,
@@ -334,21 +352,23 @@ impl WriteSet {
             keyed,
             opposite,
             Outcome::Committed,
-            |envelope| self.write(envelope, kernel, budget),
+            |envelope| self.write(envelope, kernel),
         )
     }
 
-    fn write(
-        &self,
-        envelope: &mut Envelope<'_>,
-        kernel: &KernelStore,
-        budget: &EvalBudget,
-    ) -> Result<(), Stop> {
-        let (scope_id, prior) = recheck(envelope, kernel, self.target, &self.input, budget)?;
+    fn write(&self, envelope: &mut Envelope<'_>, kernel: &KernelStore) -> Result<(), Stop> {
+        let (scope_id, prior) = recheck(envelope, kernel, self.target, &self.input)?;
         if prior.disposition != Disposition::Active || scope_id != self.attestation.scope_id {
             return Err(Stop::Outcome(Outcome::Changed));
         }
         let model = &self.input.decision;
+        let served = envelope
+            .served_rows_for(&[model.object_id.as_str()], None)?
+            .remove(&model.object_id)
+            .map(|row| row.object.sensitivity);
+        if served != Some(self.attestation.sensitivity) {
+            return Err(Stop::Outcome(Outcome::Changed));
+        }
         let subject = &self.attestation.object_id;
         envelope.insert_decision(self.attestation.clone())?;
         envelope.insert_observation(self.witness.clone())?;
@@ -387,7 +407,16 @@ impl WriteSet {
                 ClaimCausalityError::Kernel(error) => Stop::Kernel(error),
                 ClaimCausalityError::ParentMissing
                 | ClaimCausalityError::ParentRevisionMismatch => Stop::Outcome(Outcome::Changed),
-                _ => Stop::Outcome(Outcome::InvalidWriteSet),
+                ClaimCausalityError::SubjectNotDecision
+                | ClaimCausalityError::SubjectRevisionMismatch
+                | ClaimCausalityError::EvidenceMissing
+                | ClaimCausalityError::ArtifactMismatch
+                | ClaimCausalityError::EvidenceNotExact
+                | ClaimCausalityError::NoParents
+                | ClaimCausalityError::TooManyParents
+                | ClaimCausalityError::DuplicateParent
+                | ClaimCausalityError::ParentIsSubject
+                | ClaimCausalityError::DuplicateSubject => Stop::Outcome(Outcome::InvalidWriteSet),
             })?;
         envelope.append_decision_event(&self.attestation.decision_id, self.citation.clone())?;
         Ok(())
@@ -419,7 +448,7 @@ fn mark_stale(
         opposite,
         Outcome::StaleCommitted,
         |envelope| {
-            let (_, prior) = recheck(envelope, kernel, target, input, budget)?;
+            let (_, prior) = recheck(envelope, kernel, target, input)?;
             match prior.disposition {
                 Disposition::Active => {}
                 Disposition::Stale => {
@@ -505,8 +534,9 @@ fn run(
 
 /// Rereads, in the envelope, what the classification found at `target`: the store's
 /// incarnation; the model decision live with no successor, still a decision with the same
-/// creating commit, source triple, and classes, under a source kind other than `verifier`; its
-/// anchor live as `reachable_from` the claim's oid; and the cited descriptor the live revision of
+/// creating commit, domain, source triple, and classes, under a source kind other than
+/// `verifier`; its anchor live as `reachable_from` the claim's oid at the committed tip the
+/// envelope extends; and the cited descriptor the live revision of
 /// its lineage, still citing the compared evidence. The live-descriptor read returns a descriptor
 /// only while the evidence row it cites is live, so a deleted evidence row reads as `Changed`.
 /// Returns the decision's scope and latest admission.
@@ -515,7 +545,6 @@ fn recheck(
     kernel: &KernelStore,
     target: CommitReadTarget,
     input: &VerifierInput,
-    budget: &EvalBudget,
 ) -> Result<(Option<String>, PriorDecision), Stop> {
     let changed = || Stop::Outcome(Outcome::Changed);
     // The envelope holds the writer, so no restore runs between this check and the commit.
@@ -538,17 +567,17 @@ fn recheck(
             object.source_revision,
         ) == (&model.source_kind, &model.source_id, model.source_revision)
         && object.source_kind != VERIFIER_SOURCE_KIND;
+    if !same {
+        return Err(changed());
+    }
     let (prior, _) = envelope
         .subject_admission(&model.object_id)?
         .ok_or_else(changed)?;
-    if !same || (prior.source_class, prior.taint_class) != (model.source_class, model.taint_class) {
+    if (prior.source_class, prior.taint_class) != (model.source_class, model.taint_class) {
         return Err(changed());
     }
-    // The writer is held, so the committed tip, one before the envelope's sequence, is the state
-    // this envelope extends.
-    let extends = envelope.commit_seq() - 1;
     let anchor = match &model.anchor_id {
-        Some(anchor_id) => kernel.anchor_condition_as_of(anchor_id, extends, budget)?,
+        Some(anchor_id) => envelope.anchor_condition(anchor_id)?,
         None => None,
     };
     let anchored = matches!(

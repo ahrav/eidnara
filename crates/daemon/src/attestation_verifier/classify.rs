@@ -38,7 +38,7 @@ use kernel::{
     AdmissionFacts, AnchorCondition, CitingDescriptor, ClaimDecisionFacts, ClaimFactsError,
     CommitReadTarget, Disposition, EventKind, EvidenceLiveness, EvidenceLivenessError,
     GitCondition, KernelError, KernelStore, LinkedEvidence, LiveDescriptor, ObjectRow, Sensitivity,
-    SourceClass, TaintClass,
+    ServedStanding, SourceClass, TaintClass,
 };
 
 use super::{Claim, Reason};
@@ -87,7 +87,12 @@ pub enum ClassifyError {
 }
 
 impl DecisionFacts {
-    fn new(object: ObjectRow, decision: ClaimDecisionFacts, admission: AdmissionFacts) -> Self {
+    fn new(
+        object: ObjectRow,
+        decision: ClaimDecisionFacts,
+        admission: AdmissionFacts,
+        served_sensitivity: Sensitivity,
+    ) -> Self {
         Self {
             object_id: object.object_id,
             decision_id: decision.decision_id,
@@ -97,6 +102,7 @@ impl DecisionFacts {
             source_revision: object.source_revision,
             created_commit_seq: object.created_commit_seq,
             sensitivity: object.sensitivity,
+            served_sensitivity,
             anchor_id: decision.anchor_id,
             evidence_id: decision.evidence_id,
             disposition: admission.disposition,
@@ -177,6 +183,9 @@ pub struct DecisionFacts {
     pub source_revision: i64,
     pub created_commit_seq: i64,
     pub sensitivity: Sensitivity,
+    /// The class the Kernel serves the decision at: the registry class folded with every
+    /// admission row's class and taint floor.
+    pub served_sensitivity: Sensitivity,
     pub anchor_id: Option<String>,
     /// The decision row's own `evidence_id`; event-level citations are separate.
     pub evidence_id: Option<String>,
@@ -331,7 +340,11 @@ fn class_of(
     if standing.object.source_kind == VERIFIER_SOURCE_KIND {
         return Ok(Class::Unverifiable(Unverifiable::SelfSource));
     }
-    let facts = DecisionFacts::new(standing.object, standing.decision, admission);
+    let ServedStanding::Served(served) = &standing.served else {
+        return Ok(Class::NotInput);
+    };
+    let served = served.sensitivity;
+    let facts = DecisionFacts::new(standing.object, standing.decision, admission, served);
     let unverifiable = |reason| Ok(Class::Unverifiable(reason));
     // An anchor retired by the sequence leaves the decision with no live anchor.
     let condition = match &facts.anchor_id {

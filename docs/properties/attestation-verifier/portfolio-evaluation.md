@@ -61,6 +61,7 @@ the current line.
 | G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1174 (U4 part pass). #1171 does not address it: the classifier reads no `artifact_reference`, and its claim comes from the descriptor detail and the evidence row |
 | G7 | The two records #1170 activates, `p6-new-verdict-deterministic` and `p6-new-blob-read-bounded-at-oid`, have no fresh-context four-lens evaluation | queued; owner U1 ([#1170](https://github.com/ahrav/eidnara/issues/1170)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
 | G8 | The two records #1171 activates, `p6-new-verifiability-pure-function-of-snapshot` and `p6-new-verifier-input-anchor-and-document-citation`, have no fresh-context four-lens evaluation | queued; owner U2 ([#1171](https://github.com/ahrav/eidnara/issues/1171)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
+| G9 | The nine records #1172 activates have no fresh-context four-lens evaluation | queued; owner U2 ([#1172](https://github.com/ahrav/eidnara/issues/1172)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
 
 ## Biases for a human
 
@@ -119,3 +120,8 @@ the current line.
 - The witness admission's degradation is constructed by a SQLite trigger on
   the test store that rewrites the witness's kind at insert; no production
   seam exists for it.
+- The Kernel can serve a model decision stricter than its registry class,
+  through an admission row's class or a `Personal` or `Unclassifiable` taint
+  floor. The attestation and its witness carry the served class the
+  classification read, and the envelope rereads it, so the attestation serves
+  no wider than the model decision.
