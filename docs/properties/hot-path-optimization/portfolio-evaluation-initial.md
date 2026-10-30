@@ -121,7 +121,7 @@ prepared fields. Coverage is not balanced inside those surfaces.
    protects accounting, and E3 witnesses overlap. None states that work which
    observes cancellation before its commit point cannot later commit. The
    unconditional form "Cancel means no effect" is not the existing contract:
-   cancellation is best effort in `docs/host-wire-protocol.md:793-796`.
+   cancellation is best effort in `docs/host-wire-protocol.md:794-797`.
 3. **Durability, UNCERTAIN only at the optimization bridge.** The relationship
    map retains `protected-transactions-pin-fence-durability`
    (`catalog.md:456-461`). That canonical record requires WAL and

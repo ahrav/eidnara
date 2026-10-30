@@ -8,14 +8,15 @@
 //! object_id)` order from a process-local cursor, excluding decisions the verifier authored. Each
 //! decision ends in one of:
 //!
-//! - a skip, before any repository read or Kernel write: `skipped_stale` when its latest own
-//!   admission is `Stale`, `skipped_attested` when the registry holds the attestation object id
+//! - a skip, before any claim verification read or Kernel write: `skipped_stale` when its latest
+//!   own admission is `Stale`, `skipped_attested` when the registry holds the attestation object id
 //!   [`Identity::of`] derives for the decision and its anchored oid, live or retired;
 //! - an unverifiable bucket `unverifiable_<reason>`, including `invalid_document_path` for
 //!   [`ClassifyError::InvalidDocumentPath`];
 //! - a verdict bucket (`match`, `mismatch`, `unavailable_<reason>`) and then, for `match` and
-//!   `mismatch`, one [`attest`] call whose [`Outcome`] increments one effect counter after it
-//!   returns.
+//!   `mismatch` while the commit poll allows it, one [`attest`] call whose [`Outcome`] increments
+//!   at most one effect counter after it returns; a replayed `MarkStale` and a skipped write set
+//!   increment none.
 //!
 //! `considered` counts every unverifiable and verdict bucket increment, so the buckets sum to it at
 //! every pass end. Per project per pass at most [`MAX_VERDICTS`] verdicts are computed and at most
@@ -27,14 +28,19 @@
 //! A project's decisions resolve their documents only against the project's own bound roots, at
 //! the first root in bound-root order whose repository identity the decision's document names;
 //! publication derives that identity from the publishing project's root, so a document another
-//! project's root publishes classifies `repository_unbound` here. Each root's repository identity
-//! is derived when the project's turn comes and kept for the process lifetime once derived. A
+//! project's root publishes classifies `repository_unbound` here. A root at its repository's top
+//! level binds both its Git identity and the project digest, since publication takes the digest
+//! when the repository had no derivable identity at capture time. Each root's repository identity
+//! is derived when the project's turn comes, before the skip checks, and kept for the process
+//! lifetime once derived, keyed by the root's path and project digest. A
 //! derivation the pass deadline cuts short passes over the project for this pass before any
 //! decision is read, so no decision is counted or attempted, and the next pass derives again. A
 //! root whose repository is unreadable, or whose walk spends its own share of the pass, binds no
 //! repository for this pass and is derived again on the next; the project's other roots proceed,
 //! and the decisions under it classify `repository_unbound`. At each pass start the state of a
-//! scope or root no longer bound is dropped.
+//! scope or root no longer bound is dropped. A page whose batched standing read refuses for a
+//! reason one row can cause (an invalid id, a corrupt row, a malformed field) falls back to each
+//! decision's own classification read, which is K-bounded.
 //!
 //! The cursor passes a decision only once it is resolved, and only while every decision before it
 //! is resolved too; resolved decisions above the cursor are remembered, so no pass reads them
@@ -47,7 +53,7 @@
 //! lifetime. All state is process-local: a restart rescans from the start, and the skips and the
 //! write set's receipt replay make the rescan write nothing.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -146,6 +152,21 @@ impl Counters {
         }
     }
 
+    /// Counts one considered decision under `bucket`, with the blob bytes it read, under one lock,
+    /// so a concurrent read of the block sees the buckets sum to `considered`.
+    fn consider(&self, bucket: &str, bytes_read: u64) {
+        debug_assert!(
+            COUNTERS.contains(&bucket),
+            "unknown verifier counter {bucket}"
+        );
+        let mut map = self.map();
+        for (name, amount) in [("considered", 1), (bucket, 1), ("bytes_read", bytes_read)] {
+            if let Some(value) = map.get_mut(name) {
+                *value = value.saturating_add(amount);
+            }
+        }
+    }
+
     /// The value of counter `name`; zero for a name outside [`COUNTERS`].
     pub fn get(&self, name: &str) -> u64 {
         self.map().get(name).copied().unwrap_or(0)
@@ -165,7 +186,7 @@ impl Counters {
 /// Where the pass polls its deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Poll {
-    /// Before a project and before each decision.
+    /// Before a project, before each decision, and after a Kernel read or commit refusal.
     Decision,
     /// Before a root's repository identity derivation.
     Derive,
@@ -220,7 +241,8 @@ pub struct Project {
 pub struct PassReport {
     /// Whether some decision was resolved or written.
     pub progressed: bool,
-    /// Whether a Kernel read or commit was refused, or a verdict was a transient `Unavailable`.
+    /// Whether the pass stopped at its deadline, a Kernel read or commit was refused, a repository
+    /// identity derivation failed, or a decision ended an attempt without a terminal outcome.
     pub failed: bool,
 }
 
@@ -228,7 +250,9 @@ pub struct PassReport {
 struct ProjectState {
     incarnation: Option<CommitReadIncarnation>,
     cursor: Option<(i64, String)>,
-    resolved: HashSet<String>,
+    /// Resolved decisions above the cursor, by `(created_commit_seq, object_id)`; every entry at or
+    /// before the cursor is dropped when the cursor advances.
+    resolved: BTreeSet<(i64, String)>,
     attempts: HashMap<String, u32>,
     applicability: Option<(i64, String)>,
 }
@@ -238,7 +262,9 @@ struct ProjectState {
 pub struct Verifier {
     projects: HashMap<String, ProjectState>,
     terminal: HashSet<(String, String)>,
-    repository_ids: HashMap<PathBuf, Option<String>>,
+    /// Each root's repository identities, keyed by its path and project digest, so a path bound
+    /// again to another project derives again.
+    repository_ids: HashMap<(PathBuf, String), Vec<String>>,
     rotation: usize,
 }
 
@@ -268,11 +294,11 @@ impl Verifier {
         let started = Instant::now();
         self.projects
             .retain(|scope_id, _| projects.iter().any(|project| project.scope_id == *scope_id));
-        self.repository_ids.retain(|path, _| {
+        self.repository_ids.retain(|(path, digest), _| {
             projects
                 .iter()
                 .flat_map(|project| &project.roots)
-                .any(|root| root.path == *path)
+                .any(|root| root.path == *path && root.digest == *digest)
         });
         let enabled: Vec<&Project> = projects
             .iter()
@@ -291,6 +317,7 @@ impl Verifier {
         self.rotation = self.rotation.wrapping_add(1);
         for project in enabled.iter().cycle().skip(start).take(enabled.len()) {
             if clock.passed(Poll::Decision) {
+                report.failed = true;
                 break;
             }
             let Some(roots) = self.roots(project, clock) else {
@@ -338,38 +365,44 @@ impl Verifier {
     ) -> Option<Vec<(PathBuf, String)>> {
         let mut bound = Vec::new();
         for root in &project.roots {
-            let id = match self.repository_ids.get(&root.path) {
-                Some(id) => id.clone(),
+            let key = (root.path.clone(), root.digest.clone());
+            let ids = match self.repository_ids.get(&key) {
+                Some(ids) => ids.clone(),
                 None if clock.passed(Poll::Derive) => return None,
-                None => match repository_id(root, clock.budget()) {
-                    Ok(id) => {
-                        self.repository_ids.insert(root.path.clone(), id.clone());
-                        id
+                None => match repository_ids(root, clock.budget()) {
+                    Ok(ids) => {
+                        self.repository_ids.insert(key, ids.clone());
+                        ids
                     }
                     Err(DerivationFailure::Budget) if clock.budget().is_exhausted() => return None,
-                    Err(DerivationFailure::Budget | DerivationFailure::Unreadable) => None,
+                    Err(DerivationFailure::Budget | DerivationFailure::Unreadable) => Vec::new(),
                 },
             };
-            bound.extend(id.map(|id| (root.path.clone(), id)));
+            bound.extend(ids.into_iter().map(|id| (root.path.clone(), id)));
         }
         Some(bound)
     }
 }
 
-/// The repository identity `root`'s documents are published under: the root commit identity when
-/// the root is its repository's top level, the project digest when the repository has no derivable
-/// identity, and `Some(None)` for a root nested inside a repository, whose document paths are
-/// relative to the root and do not name the repository tree's paths.
-fn repository_id(root: &Root, budget: &EvalBudget) -> Result<Option<String>, DerivationFailure> {
+/// The repository identities `root`'s documents can be published under: for a root at its
+/// repository's top level, the root commit identity and the project digest, which publication
+/// takes when the repository had no derivable identity at capture time; the project digest alone
+/// when the repository has no derivable identity now; and none for a root nested inside a
+/// repository, whose document paths are relative to the root and do not name the repository
+/// tree's paths.
+fn repository_ids(root: &Root, budget: &EvalBudget) -> Result<Vec<String>, DerivationFailure> {
     use crate::repository_identity::{MAX_ROOT_WALK_COMMITS, RepositoryIdentity, derive};
     let walk = budget
         .linked()
         .bounded_by(Instant::now() + REPOSITORY_WALK_BUDGET);
     Ok(match derive(&root.path, &walk, MAX_ROOT_WALK_COMMITS)? {
-        RepositoryIdentity::Git(id) => std::fs::symlink_metadata(root.path.join(".git"))
-            .is_ok()
-            .then_some(id),
-        RepositoryIdentity::Fallback => Some(root.digest.clone()),
+        RepositoryIdentity::Git(id)
+            if std::fs::symlink_metadata(root.path.join(".git")).is_ok() =>
+        {
+            vec![id, root.digest.clone()]
+        }
+        RepositoryIdentity::Git(_) => Vec::new(),
+        RepositoryIdentity::Fallback => vec![root.digest.clone()],
     })
 }
 
@@ -438,16 +471,21 @@ impl ProjectRun<'_, '_> {
                 .claim_standing_at_within_budget(&ids, target, PAGE_ROWS, budget)
             {
                 Ok(standings) => standings,
+                // A refusal one row can cause leaves each decision to its own classification read,
+                // whose refusal spends an attempt, so one bad row cannot hold the cursor.
+                Err(error) if row_caused(&error) => ids.iter().map(|_| None).collect(),
                 Err(error) => {
                     return self.refused(error == ClaimFactsError::Kernel(KernelError::Deadline));
                 }
             };
             for ((seq, object_id), standing) in page.into_iter().zip(standings) {
-                after = Some((seq, object_id.clone()));
-                let known = self.state.resolved.contains(&object_id);
+                let key = (seq, object_id.clone());
+                after = Some(key.clone());
+                let known = self.state.resolved.contains(&key);
                 let step = if known {
                     Step::Resolved
                 } else if self.clock.passed(Poll::Decision) {
+                    self.report.failed = true;
                     return Step::StopPass;
                 } else if standing
                     .as_ref()
@@ -462,11 +500,14 @@ impl ProjectRun<'_, '_> {
                 match step {
                     Step::Resolved => {
                         self.report.progressed |= !known;
+                        self.state.attempts.remove(&object_id);
                         if prefix {
-                            self.state.resolved.remove(&object_id);
-                            self.state.cursor = Some((seq, object_id));
+                            let mut above = self.state.resolved.split_off(&key);
+                            above.remove(&key);
+                            self.state.resolved = above;
+                            self.state.cursor = Some(key);
                         } else {
-                            self.state.resolved.insert(object_id);
+                            self.state.resolved.insert(key);
                         }
                     }
                     Step::Unresolved => prefix = false,
@@ -509,8 +550,8 @@ impl ProjectRun<'_, '_> {
         let classification = match classify(self.kernel, object_id, target, self.roots, budget) {
             Ok(classification) => classification,
             Err(ClassifyError::InvalidDocumentPath) => {
-                self.counters.add("considered", 1);
-                self.counters.add("unverifiable_invalid_document_path", 1);
+                self.counters
+                    .consider("unverifiable_invalid_document_path", 0);
                 return Step::Resolved;
             }
             Err(ClassifyError::Facts(ClaimFactsError::Kernel(KernelError::Deadline))) => {
@@ -525,14 +566,16 @@ impl ProjectRun<'_, '_> {
         let input = match &classification.class {
             Class::NotInput => return Step::Resolved,
             Class::Unverifiable(reason) => {
-                self.counters.add("considered", 1);
                 self.counters
-                    .add(&format!("unverifiable_{}", reason.as_str()), 1);
+                    .consider(&format!("unverifiable_{}", reason.as_str()), 0);
                 return Step::Resolved;
             }
             Class::Verifiable(input) => input,
         };
         let oid = input.claim.oid().to_owned();
+        if self.terminal.contains(&(object_id.to_owned(), oid.clone())) {
+            return Step::Resolved;
+        }
         let attestation = Identity::of(object_id, &oid).object_id;
         match self
             .kernel
@@ -545,9 +588,6 @@ impl ProjectRun<'_, '_> {
             Ok(_) => {}
             Err(error) => return self.refused(error == KernelError::Deadline),
         }
-        if self.terminal.contains(&(object_id.to_owned(), oid.clone())) {
-            return Step::Resolved;
-        }
         let evaluation = match &input.root {
             Ok(root) => verify(root, &input.claim, &Reads(self.clock)),
             Err(reason) => Evaluation {
@@ -558,14 +598,12 @@ impl ProjectRun<'_, '_> {
         };
         self.verdicts += 1;
         self.bytes_read = self.bytes_read.saturating_add(evaluation.bytes_read);
-        self.counters.add("considered", 1);
-        self.counters.add("bytes_read", evaluation.bytes_read);
         let bucket = match evaluation.verdict {
             Verdict::Match => "match".to_owned(),
             Verdict::Mismatch => "mismatch".to_owned(),
             Verdict::Unavailable(reason) => format!("unavailable_{}", reason.as_str()),
         };
-        self.counters.add(&bucket, 1);
+        self.counters.consider(&bucket, evaluation.bytes_read);
         match evaluation.verdict {
             Verdict::Unavailable(reason) if reason.is_terminal() => {
                 self.terminal.insert((object_id.to_owned(), oid));
@@ -622,6 +660,7 @@ impl ProjectRun<'_, '_> {
         let mut evaluated = 0;
         for _ in 0..MAX_VERDICTS {
             if self.clock.passed(Poll::Decision) {
+                self.report.failed = true;
                 return Step::StopPass;
             }
             let after = self.state.applicability.clone();
@@ -641,16 +680,43 @@ impl ProjectRun<'_, '_> {
                 Err(error) => return self.refused(error == KernelError::Deadline),
             };
             let ids: Vec<String> = page.iter().map(|(_, id)| id.clone()).collect();
-            let standings = match self
+            let standings: Vec<_> = match self
                 .kernel
                 .claim_standing_at_within_budget(&ids, target, PAGE_ROWS, budget)
             {
-                Ok(standings) => standings,
+                Ok(standings) => standings.into_iter().map(Ok).collect(),
+                // A refusal one row can cause reads each attestation's standing alone, so the
+                // refusing row resolves as unavailable and the rows after it are evaluated.
+                Err(error) if row_caused(&error) => ids
+                    .iter()
+                    .map(|id| {
+                        self.kernel
+                            .claim_standing_at_within_budget(
+                                std::slice::from_ref(id),
+                                target,
+                                PAGE_ROWS,
+                                budget,
+                            )
+                            .map(|mut standing| standing.pop().flatten())
+                    })
+                    .collect(),
                 Err(error) => {
                     return self.refused(error == ClaimFactsError::Kernel(KernelError::Deadline));
                 }
             };
             for ((seq, object_id), standing) in page.into_iter().zip(standings) {
+                let standing = match standing {
+                    Ok(standing) => standing,
+                    Err(error) if row_caused(&error) => {
+                        self.resolve("applicability_unavailable", true);
+                        self.state.applicability = Some((seq, object_id));
+                        continue;
+                    }
+                    Err(error) => {
+                        return self
+                            .refused(error == ClaimFactsError::Kernel(KernelError::Deadline));
+                    }
+                };
                 let active = standing
                     .as_ref()
                     .and_then(|standing| standing.own_admission.as_ref())
@@ -690,6 +756,7 @@ impl ProjectRun<'_, '_> {
             Err(_) => return self.resolve("applicability_unavailable", true),
         };
         if self.clock.passed(Poll::Commit) {
+            self.report.failed = true;
             return Step::StopPass;
         }
         match applicability::mark_republished(self.kernel, target, &republished, budget) {
@@ -711,6 +778,17 @@ impl ProjectRun<'_, '_> {
             Outcome::Refused(error) => self.resolve(refused_counter(error), true),
         }
     }
+}
+
+/// Whether the batched standing read refused for a reason one row can cause: an invalid id, a
+/// corrupt row, or a malformed field.
+fn row_caused(error: &ClaimFactsError) -> bool {
+    matches!(
+        error,
+        ClaimFactsError::NotADecision
+            | ClaimFactsError::MalformedRequiredField
+            | ClaimFactsError::Kernel(KernelError::InvalidInput | KernelError::CorruptCanonicalRow)
+    )
 }
 
 fn refused_counter(error: KernelError) -> &'static str {

@@ -13,7 +13,7 @@ C13; D6.
 
 ## Evidence trail
 
-- `docs/host-wire-protocol.md:794` opens section 7.8; `:796`: the envelope
+- `docs/host-wire-protocol.md:795` opens section 7.8; `:797`: the envelope
   is `method`, `session_id`, `project_root`; twelve method literals (#1157
   added `review.use_outcome`, making four `review.*` methods); "a strict body
   that carries a field named `v` answers `invalid_params` as any unknown

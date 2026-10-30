@@ -16,7 +16,7 @@ Package references are verified at `d7b330113`, the package tree of #859
 PR C's head; Rust references are verified at `0ff62b29a`.
 
 - Daemon predicate: `DaemonConfig::eidnara_folds`
-  (`crates/daemon/src/config.rs:185-189`) is `admission == Admitted &&
+  (`crates/daemon/src/config.rs:198-202`) is `admission == Admitted &&
   compaction_enabled && !model_chain.is_empty()`. The default config has an
   empty chain and `compaction_enabled: true` (`:142-144`).
 - Daemon resolution: `ConfigCache::effective_with_warnings` (`:310-380`)

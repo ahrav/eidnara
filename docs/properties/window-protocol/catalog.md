@@ -752,7 +752,7 @@ whose configuration withdraws fold authority submits its whole array, and a
 consumer whose half-cap suffix is answered under native authority declines
 that pass and submits its whole array on each later null pass while its
 latest transformed response names native authority
-(`docs/host-wire-protocol.md:983`, `:1010`).
+(`docs/host-wire-protocol.md:984`, `:1011`).
 Check: `always` - At capture and send, native membership is exactly
 `host[boundaryIndex..capturedLength)`, CK represents that same ordered suffix,
 and the first mid equals the declared mid; ids inside the window are unique;
@@ -763,7 +763,7 @@ supplied it is the whole array or the wire's newest half-cap suffix, whose
 head `windowStart` moves later past a tool result whose call is outside the
 suffix, or, when every newer slot is such a result, back to the message
 carrying the calls, which can carry the suffix past half the cap
-(`transform-session-client.ts:898-903`; `docs/host-wire-protocol.md:1024`;
+(`transform-session-client.ts:898-903`; `docs/host-wire-protocol.md:1025`;
 `packages/pi-plugin/src/transform/pi-transform.test.ts:488`). The
 implementation's folding cold window is `host[:lead] + host[head:]`, the
 cold lead slots (`coldLead`, one for a leading Pi compaction summary)
@@ -796,7 +796,7 @@ Authority qualifier, verified at `07ea883b5` (#1060): the record said "null
 submits the whole host array" while the wire document and `coldHead` narrowed
 a null window above half the cap to its newest suffix; the record is
 corrected. The wire now states the authority-conditional rule
-(`docs/host-wire-protocol.md:983`, `:1010`, `:1024`); Pi supplies the sizing
+(`docs/host-wire-protocol.md:984`, `:1011`, `:1025`); Pi supplies the sizing
 hook only while the session's project lets Eidnara fold
 (`packages/pi-plugin/src/index.ts:571`, `:586`,
 `packages/pi-plugin/src/transform/pi-transform.ts:268-275`; #1069) and
@@ -819,7 +819,7 @@ exist. Pi sets `coldLead: 1` for a leading compaction summary
 (`packages/pi-plugin/src/transform/pi-transform.ts:280`), and `coldSource`
 serves `host[:lead]` then `host[head:]` (`transform-session-client.ts:906-913`),
 while the wire text says "its newest half-cap suffix"
-(`docs/host-wire-protocol.md:983`, `:1010`). The guarantee states the wire
+(`docs/host-wire-protocol.md:984`, `:1011`). The guarantee states the wire
 rule; the lead-slot behavior is the open disagreement below. The
 knowledge-delivery records are in `docs/properties/fold-authority/` (KD-E03,
 KD-P06, KD-P08).
@@ -846,7 +846,7 @@ Open questions:
 - C7 states the trusted-producer assumption; the daemon does not prove host
   completeness.
 - The wire text names the folding null window as the newest half-cap
-  suffix (`docs/host-wire-protocol.md:983`, `:1010`) while the code serves
+  suffix (`docs/host-wire-protocol.md:984`, `:1011`) while the code serves
   the cold lead slots ahead of that suffix
   (`transform-session-client.ts:906-913`), so a folding Pi cold import that
   starts with a compaction summary is not wire-conformant at `07ea883b5`.
@@ -855,7 +855,7 @@ Open questions:
   (needs human input).
 - The wire text says the folding suffix is headed by the same pinned
   message on every pass until the first anchor exists
-  (`docs/host-wire-protocol.md:983`, `:1010`), while the client clears the pin
+  (`docs/host-wire-protocol.md:984`, `:1011`), while the client clears the pin
   when a response names native authority
   (`transform-session-client.ts:1673-1674`) and pins a fresh head on the
   first folding pass after that authority settles

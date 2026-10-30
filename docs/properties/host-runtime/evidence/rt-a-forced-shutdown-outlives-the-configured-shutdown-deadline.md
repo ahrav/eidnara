@@ -50,7 +50,7 @@ The justification is written out at `runtime.rs:1217-1222`:
 That reasoning is correct and the constraint is real. The factor of two is
 derived from a specific chain length, not chosen arbitrarily.
 
-The rule it contradicts, `docs/host-wire-protocol.md:759`:
+The rule it contradicts, `docs/host-wire-protocol.md:760`:
 
 > Every operation owns one absolute deadline; per-stage timers MUST NOT multiply
 > it.
@@ -170,7 +170,7 @@ grace period has the real number rather than the configured one.
 ### Q: does the `config.rs:214` wording "graceful-shutdown drain" exempt the forced path?
 
 - Sources examined: `config.rs:213-215`, `runtime.rs:1142-1148`,
-  `docs/host-wire-protocol.md:777-785`.
+  `docs/host-wire-protocol.md:778-786`.
 - Findings: the doc comment says "Whole graceful-shutdown drain".
   `shutdown_sequence`'s own doc (`:1142-1143`) says "Graceful shutdown in
   protocol order (§12). Returns whether every host task was reaped in time." So

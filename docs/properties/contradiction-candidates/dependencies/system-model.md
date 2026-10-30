@@ -131,7 +131,7 @@ edges). Descriptor retirement is `retire_capture_observation`
 is installed (`lib.rs:4000-4008`), with `SAMPLE_INTERVAL = 30 s` and
 `SAMPLE_RETRY_INTERVAL = 5 s` (`lifecycle.rs:16-18`).
 
-S7 routed reads. `docs/host-wire-protocol.md:823-827` and `:847-855`
+S7 routed reads. `docs/host-wire-protocol.md:824-828` and `:848-856`
 (`:855` is `review.use_outcome`, added by #1157).
 `crates/daemon/src/memory_reviewer/wire.rs:1-26`; strict request structs
 (`:33-60`, `deny_unknown_fields`); `bind_review` (`:203-220`) calls

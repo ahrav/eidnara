@@ -47,7 +47,7 @@ synthesis pass does not inherit them.
    transitions are at `:762-764`, and the exact quoted string "bounded backoff,
    reread file" is at **`:764`**. Lens A's own lead L4 cites "section 12"
    correctly; only the line number in the earlier section is wrong.
-2. Lens A's leads L1 and O17 cite `docs/host-wire-protocol.md:774` for the
+2. Lens A's leads L1 and O17 cite `docs/host-wire-protocol.md:775` for the
    shared queued-byte budget. That line is blank. The sentence "Data and
    reserved-control frames share one queued-byte budget; reserved admission is
    not a byte-budget bypass" is at **`:745`**. Off by one.

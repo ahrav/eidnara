@@ -26,6 +26,6 @@ Candidate: preserve plugin bytes while unifying the three fresh byte bases.
 
 ## Narrow nonapplicability and missing evidence
 
-Transport does not parse routed application bodies (`docs/host-wire-protocol.md:791`).
+Transport does not parse routed application bodies (`docs/host-wire-protocol.md:792`).
 Control-channel duplicate rules do not specify CK envelope identity.
 No runtime trace or replacement implementation is supplied.

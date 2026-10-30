@@ -154,7 +154,7 @@ Tickets #1062, #1063, and #1065; PRs #1069 (head `6d527babf`) and #1070
   host array" disagreed with wire section 7.10 and with `coldHead`, which
   narrowed a null window above half the cap to its newest suffix. #1060's
   property catalog directs a correction.
-- Wire: `docs/host-wire-protocol.md:983` (the `boundary` row), `:1010` (the
+- Wire: `docs/host-wire-protocol.md:984` (the `boundary` row), `:1011` (the
   window rules), and `:1024` (the cold-import rule) state that the half-cap
   suffix applies while the consumer's configuration lets Eidnara fold and
   that a consumer whose configuration withdraws fold authority submits its
@@ -175,7 +175,7 @@ Tickets #1062, #1063, and #1065; PRs #1069 (head `6d527babf`) and #1070
   Tool pairing moves the head: `windowStart` (`:898-903`) walks later past a
   tool result whose call is outside the suffix, or back to the message
   carrying the calls, which can carry the suffix past half the cap, as the
-  wire permits (`docs/host-wire-protocol.md:1024`) and
+  wire permits (`docs/host-wire-protocol.md:1025`) and
   `packages/pi-plugin/src/transform/pi-transform.test.ts:488` constructs.
   Pi spreads `measure` only under `inputs.eidnaraFolds`
   (`packages/pi-plugin/src/transform/pi-transform.ts:268-275`), set per run
@@ -213,7 +213,7 @@ Tickets #1062, #1063, and #1065; PRs #1069 (head `6d527babf`) and #1070
 ### Q: Is the folding null window a contiguous suffix?
 
 - Sources examined: `pi-transform.ts:280`;
-  `transform-session-client.ts:860-913`; `docs/host-wire-protocol.md:983`,
+  `transform-session-client.ts:860-913`; `docs/host-wire-protocol.md:984`,
   `:1010`.
 - Findings: No when lead slots exist. A leading Pi compaction summary is one
   lead slot, served ahead of the pinned suffix. The wire text describes only

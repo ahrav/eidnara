@@ -74,7 +74,7 @@ whatever `frame.deadline` says. For control frames that is set at construction:
 ```
 
 `CLIENT_FRAME_TIMEOUT` is 30 seconds (`:45`), matching
-`docs/host-wire-protocol.md:766`. So the client waits up to 30 seconds before
+`docs/host-wire-protocol.md:767`. So the client waits up to 30 seconds before
 retiring with `write_failed` at `crates/host-runtime/src/client.rs:1963`.
 
 The per-write ring bound is separate and shorter, and it ignores the frame
@@ -160,7 +160,7 @@ thread.
 
 ### Q: What is the host's probe interval and deadline?
 
-- Sources examined: `docs/host-wire-protocol.md:764-771` (the client-side budget
+- Sources examined: `docs/host-wire-protocol.md:765-772` (the client-side budget
   table, which lists no probe interval), `:261-262` (Ping and Pong required), the
   reference to "liveness policy (Section 9.3)" at `:294`.
 - Findings: the client's own budget table does not name a probe interval, and the
