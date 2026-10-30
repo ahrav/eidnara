@@ -24,20 +24,26 @@
 //! derivation, before each object read (through [`verify`]), and before each commit. Projects are
 //! visited in bound-root order from a start that rotates by one each pass.
 //!
-//! A project's decisions resolve their documents against the project's own roots. Each root's
-//! repository identity is derived when the project's turn comes and kept for the process lifetime
-//! once derived; a derivation the deadline or the environment cut short passes over the project
-//! for this pass before any decision is read, so no decision is counted or attempted, and the next
-//! pass derives again. At each pass start the state of a scope or root no longer bound is dropped.
+//! A project's decisions resolve their documents only against the project's own bound roots, at
+//! the first root in bound-root order whose repository identity the decision's document names;
+//! publication derives that identity from the publishing project's root, so a document another
+//! project's root publishes classifies `repository_unbound` here. Each root's repository identity
+//! is derived when the project's turn comes and kept for the process lifetime once derived. A
+//! derivation the pass deadline cuts short passes over the project for this pass before any
+//! decision is read, so no decision is counted or attempted, and the next pass derives again. A
+//! root whose repository is unreadable, or whose walk spends its own share of the pass, binds no
+//! repository for this pass and is derived again on the next; the project's other roots proceed,
+//! and the decisions under it classify `repository_unbound`. At each pass start the state of a
+//! scope or root no longer bound is dropped.
 //!
 //! The cursor passes a decision only once it is resolved, and only while every decision before it
 //! is resolved too; resolved decisions above the cursor are remembered, so no pass reads them
 //! again. A decision is resolved by a skip, an unverifiable class, a decision outside the
 //! verifier's input ([`Class::NotInput`]), a terminal `Unavailable` reason, a committed or replayed
-//! write, a `conflict`, an invalid write set, or K = [`MAX_ATTEMPTS`] attempts that ended in a
-//! transient `Unavailable` reason, a Kernel refusal, a changed decision, or a degraded witness.
-//! K transient attempts count `unavailable_skipped`, K degraded witnesses
-//! `witness_degraded_skipped`. A terminal reason is kept per `(decision, oid)` for the process
+//! write, a `conflict`, an invalid write set, or K = [`MAX_ATTEMPTS`] attempts in total, shared
+//! across transient `Unavailable` reasons, deadlines, Kernel refusals, a changed decision, and
+//! degraded witnesses. The K-th attempt counts `witness_degraded_skipped` when its witness
+//! degraded and `unavailable_skipped` otherwise. A terminal reason is kept per `(decision, oid)` for the process
 //! lifetime. All state is process-local: a restart rescans from the start, and the skips and the
 //! write set's receipt replay make the rescan write nothing.
 
@@ -55,6 +61,7 @@ use kernel::{
 use super::attest::{Identity, Outcome, attest};
 use super::classify::{BoundRoot, Class, ClassifyError, VERIFIER_SOURCE_KIND, classify};
 use super::{Deadline, Evaluation, MAX_BLOB_BYTES, Reason, Stage, Verdict, verify};
+use crate::repository_identity::DerivationFailure;
 
 /// N: the verdicts one pass computes per project.
 pub const MAX_VERDICTS: u64 = 8;
@@ -316,8 +323,9 @@ impl Verifier {
         report
     }
 
-    /// `project`'s roots with a repository identity, in bound-root order, or `None` when a
-    /// derivation this pass was cut short.
+    /// `project`'s roots with a repository identity, in bound-root order, or `None` when the pass
+    /// deadline cut a derivation short. A root whose derivation failed otherwise is left out and
+    /// derived again next pass.
     fn roots(
         &mut self,
         project: &Project,
@@ -328,11 +336,14 @@ impl Verifier {
             let id = match self.repository_ids.get(&root.path) {
                 Some(id) => id.clone(),
                 None if clock.passed(Poll::Derive) => return None,
-                None => {
-                    let id = repository_id(root, clock.budget())?;
-                    self.repository_ids.insert(root.path.clone(), id.clone());
-                    id
-                }
+                None => match repository_id(root, clock.budget()) {
+                    Ok(id) => {
+                        self.repository_ids.insert(root.path.clone(), id.clone());
+                        id
+                    }
+                    Err(DerivationFailure::Budget) if clock.budget().is_exhausted() => return None,
+                    Err(DerivationFailure::Budget | DerivationFailure::Unreadable) => None,
+                },
             };
             bound.extend(id.map(|id| (root.path.clone(), id)));
         }
@@ -343,21 +354,18 @@ impl Verifier {
 /// The repository identity `root`'s documents are published under: the root commit identity when
 /// the root is its repository's top level, the project digest when the repository has no derivable
 /// identity, and `Some(None)` for a root nested inside a repository, whose document paths are
-/// relative to the root and do not name the repository tree's paths. `None` when the deadline or
-/// the environment cut the derivation short.
-fn repository_id(root: &Root, budget: &EvalBudget) -> Option<Option<String>> {
+/// relative to the root and do not name the repository tree's paths.
+fn repository_id(root: &Root, budget: &EvalBudget) -> Result<Option<String>, DerivationFailure> {
     use crate::repository_identity::{MAX_ROOT_WALK_COMMITS, RepositoryIdentity, derive};
     let walk = budget
         .linked()
         .bounded_by(Instant::now() + REPOSITORY_WALK_BUDGET);
-    Some(
-        match derive(&root.path, &walk, MAX_ROOT_WALK_COMMITS).ok()? {
-            RepositoryIdentity::Git(id) => std::fs::symlink_metadata(root.path.join(".git"))
-                .is_ok()
-                .then_some(id),
-            RepositoryIdentity::Fallback => Some(root.digest.clone()),
-        },
-    )
+    Ok(match derive(&root.path, &walk, MAX_ROOT_WALK_COMMITS)? {
+        RepositoryIdentity::Git(id) => std::fs::symlink_metadata(root.path.join(".git"))
+            .is_ok()
+            .then_some(id),
+        RepositoryIdentity::Fallback => Some(root.digest.clone()),
+    })
 }
 
 struct ProjectRun<'a, 'r> {
@@ -473,10 +481,11 @@ impl ProjectRun<'_, '_> {
         Step::Resolved
     }
 
-    /// [`Self::retry`] for an attempt that may have ended at the deadline: an attempt that leaves
-    /// the decision unresolved stops the pass when `deadline` holds, and the K-th resolves it.
-    fn transient(&mut self, object_id: &str, skipped: &str, deadline: bool) -> Step {
-        match self.retry(object_id, skipped) {
+    /// [`Self::retry`] under `unavailable_skipped` for an attempt that may have ended at the
+    /// deadline: an attempt that leaves the decision unresolved stops the pass when `deadline`
+    /// holds, and the K-th resolves it.
+    fn transient(&mut self, object_id: &str, deadline: bool) -> Step {
+        match self.retry(object_id, "unavailable_skipped") {
             Step::Unresolved if deadline => Step::StopPass,
             step => step,
         }
@@ -492,12 +501,13 @@ impl ProjectRun<'_, '_> {
                 return Step::Resolved;
             }
             Err(ClassifyError::Facts(ClaimFactsError::Kernel(KernelError::Deadline))) => {
-                return self.refused(true);
+                return self.transient(object_id, true);
             }
+            // The next pass captures the new incarnation and resets the project's state.
             Err(ClassifyError::Facts(ClaimFactsError::IncarnationMismatch)) => {
                 return self.refused(false);
             }
-            Err(ClassifyError::Facts(_)) => return self.retry(object_id, "unavailable_skipped"),
+            Err(ClassifyError::Facts(_)) => return self.transient(object_id, false),
         };
         let input = match &classification.class {
             Class::NotInput => return Step::Resolved,
@@ -550,12 +560,13 @@ impl ProjectRun<'_, '_> {
             }
             Verdict::Unavailable(reason) => {
                 let deadline = matches!(reason, Reason::Deadline(_));
-                return self.transient(object_id, "unavailable_skipped", deadline);
+                return self.transient(object_id, deadline);
             }
             Verdict::Match | Verdict::Mismatch => {}
         }
-        if self.clock.passed(Poll::Commit) {
-            return self.transient(object_id, "unavailable_skipped", true);
+        let deadline = self.clock.passed(Poll::Commit);
+        if deadline {
+            return self.transient(object_id, deadline);
         }
         let outcome = attest(self.kernel, &classification, &evaluation, budget);
         self.outcome(object_id, evaluation.verdict, outcome)
@@ -578,7 +589,7 @@ impl ProjectRun<'_, '_> {
             }
             Outcome::Changed => {
                 self.counters.add("commit_refused_changed", 1);
-                return self.retry(object_id, "unavailable_skipped");
+                return self.transient(object_id, false);
             }
             // An `Io` refusal can follow a durable commit; the next attempt finds the attestation
             // in the registry or the decision `Stale` and skips it.
@@ -592,11 +603,7 @@ impl ProjectRun<'_, '_> {
                     },
                     1,
                 );
-                return self.transient(
-                    object_id,
-                    "unavailable_skipped",
-                    error == KernelError::Deadline,
-                );
+                return self.transient(object_id, error == KernelError::Deadline);
             }
         };
         self.counters.add(counter, 1);

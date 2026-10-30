@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use daemon::attestation_verifier::attest::{CITATION_EVENT_KIND, Identity, Outcome, attest};
 use daemon::attestation_verifier::bounded_pass::{
-    COUNTERS, Counters, IDLE_INTERVAL, MAX_VERDICTS, PASS_DEADLINE, PassClock, Poll, Project,
-    RETRY_INTERVAL, Root, Verifier,
+    COUNTERS, Counters, IDLE_INTERVAL, MAX_VERDICTS, PAGE_ROWS, PASS_DEADLINE, PassClock, Poll,
+    Project, RETRY_INTERVAL, Root, Verifier,
 };
 use daemon::attestation_verifier::classify::{BoundRoot, classify};
 use daemon::attestation_verifier::{MAX_BLOB_BYTES, Stage, verify};
@@ -1087,11 +1087,18 @@ fn a_worktree_root_verifies_under_its_git_identity_and_a_nested_root_binds_none(
     assert!(exists(&store, &attestation(&attested, &top)));
 }
 
-/// A derivation the environment cuts short passes over its project before any decision is read,
-/// so the project's decisions are neither counted nor attempted, and other projects proceed; once
-/// the repository reads again its decision verifies.
+/// Points `repo`'s worktree `.git` at a missing directory, so its root's derivation fails.
+fn break_gitfile(repo: &Repo) {
+    let git = repo.work.join(".git");
+    std::fs::rename(&git, repo.work.join("hidden.git")).unwrap();
+    std::fs::write(&git, "gitdir: /nonexistent/eidnara-repository\n").unwrap();
+}
+
+/// A root whose derivation the environment fails binds no repository for the pass and is derived
+/// again next pass: its decision counts `unavailable_repository_unbound` K passes, then
+/// `unavailable_skipped`, and the cursor passes it, while another project proceeds.
 #[test]
-fn a_failed_derivation_passes_over_the_project_without_counting_its_decisions() {
+fn a_failed_derivation_leaves_the_root_unbound_and_its_decision_is_skipped_after_k_passes() {
     let store = Store::open();
     let broken = Repo::new("broken", &[("doc.md".into(), text(0, 1024))]);
     let healthy = Repo::new("healthy", &[("doc.md".into(), text(1, 1024))]);
@@ -1105,27 +1112,133 @@ fn a_failed_derivation_passes_over_the_project_without_counting_its_decisions() 
         &text(0, 1024),
     );
     store.decision(&healthy, "h0", "doc.md", &text(1, 1024));
-    let git = broken.work.join(".git");
-    let hidden = broken.work.join("hidden.git");
-    std::fs::rename(&git, &hidden).unwrap();
-    std::fs::write(&git, "gitdir: /nonexistent/eidnara-repository\n").unwrap();
+    break_gitfile(&broken);
     let projects = [broken.project_at(&broken.work), healthy.project()];
     let counters = Counters::default();
     let mut verifier = Verifier::default();
-    for pass in 1..=4 {
-        let report = verifier.pass(&store.kernel, &projects, &on, &counters, &Clock::open());
+    for pass in 1..=3 {
+        let clock = Clock::open();
+        let report = verifier.pass(&store.kernel, &projects, &on, &counters, &clock);
         assert!(report.failed, "pass {pass}");
         assert_accounting(&counters);
-        assert_eq!(counters.get("considered"), 1, "pass {pass}");
-        assert_eq!(verifier.cursor(&broken.scope_id()), None);
+        assert_eq!(counters.get("unavailable_repository_unbound"), pass);
+        assert_eq!(clock.polled(Poll::Derive), if pass == 1 { 2 } else { 1 });
     }
-    assert_eq!(counters.get("unavailable_skipped"), 0);
-
-    std::fs::remove_file(&git).unwrap();
-    std::fs::rename(&hidden, &git).unwrap();
-    verifier.pass(&store.kernel, &projects, &on, &counters, &Clock::open());
-    assert_eq!(counters.get("attestation_committed"), 2);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert_eq!(counters.get("unavailable_skipped"), 1);
     assert_eq!(verifier.cursor(&broken.scope_id()).unwrap().1, waiting);
+}
+
+/// A broken root beside a healthy one in the same project leaves the healthy root bound, so a
+/// decision published under it verifies.
+#[test]
+fn a_broken_root_leaves_the_projects_healthy_root_bound() {
+    let store = Store::open();
+    let project = Repo::new("duo", &[("doc.md".into(), text(0, 1024))]);
+    let broken = Repo::new("duo-broken", &[]);
+    store.scope(&project);
+    let verified = store.decision(&project, "d0", "doc.md", &text(0, 1024));
+    break_gitfile(&broken);
+    let projects = [Project {
+        scope_id: project.scope_id(),
+        roots: vec![
+            Root {
+                path: broken.work.clone(),
+                digest: project.digest.clone(),
+            },
+            Root {
+                path: project.bare.clone(),
+                digest: project.digest.clone(),
+            },
+        ],
+    }];
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    verifier.pass(&store.kernel, &projects, &on, &counters, &Clock::open());
+    assert_accounting(&counters);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert!(exists(&store, &attestation(&verified, &project)));
+}
+
+/// A deadline at the derivation poll passes over the project before any decision is read and
+/// caches no identity; the next open pass derives and verifies.
+#[test]
+fn a_deadline_at_the_derivation_passes_over_the_project_and_the_next_pass_verifies() {
+    let store = Store::open();
+    let repo = Repo::new("derive", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let decision = store.decision(&repo, "v0", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::with(|poll, _| poll == Poll::Derive);
+    let report = verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert!(report.failed);
+    assert_eq!(counters.get("considered"), 0);
+    assert_eq!(clock.opens(), 0);
+    assert_eq!(verifier.cursor(&repo.scope_id()), None);
+
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(clock.polled(Poll::Derive), 1);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, decision);
+}
+
+/// A decision resolves only against its own project's roots: a document whose repository is bound
+/// only under another project counts `unavailable_repository_unbound` K passes, then
+/// `unavailable_skipped`.
+#[test]
+fn a_decision_resolves_only_against_its_own_projects_roots() {
+    let store = Store::open();
+    let a = Repo::new("own-a", &[("doc.md".into(), text(0, 1024))]);
+    let b = Repo::new("own-b", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&a);
+    store.scope(&b);
+    let foreign = store.decision_under(&a, &b.digest, "f0", "doc.md", &text(0, 1024));
+    let projects = [a.project(), b.project()];
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    for pass in 1..=3 {
+        let clock = Clock::open();
+        verifier.pass(&store.kernel, &projects, &on, &counters, &clock);
+        assert_accounting(&counters);
+        assert_eq!(clock.opens(), 0);
+        assert_eq!(counters.get("unavailable_repository_unbound"), pass);
+    }
+    assert_eq!(counters.get("unavailable_skipped"), 1);
+    assert_eq!(counters.get("match"), 0);
+    assert_eq!(verifier.cursor(&a.scope_id()).unwrap().1, foreign);
+}
+
+/// A project dropped from the bound set and bound again keeps its terminal reason: the third pass
+/// opens nothing and counts nothing.
+#[test]
+fn a_terminal_reason_survives_a_project_unbound_and_bound_again() {
+    let store = Store::open();
+    let repo = Repo::new("prune", &[]);
+    let other = Repo::new("prune-other", &[]);
+    store.scope(&repo);
+    store.decision(&repo, "a0", "absent.md", "gone\n");
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(clock.opens(), 1);
+    assert_eq!(counters.get("unavailable_path_absent"), 1);
+
+    verifier.pass(
+        &store.kernel,
+        &[other.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(verifier.cursor(&repo.scope_id()), None);
+
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(clock.opens(), 0);
+    assert_eq!(counters.get("considered"), 1);
 }
 
 /// With one project's flag on and another's off, the off project's scope gets no cursor, no
@@ -1164,7 +1277,7 @@ fn a_transient_head_ahead_of_a_page_boundary_counts_each_decision_once() {
     let repo = Repo::new("pages", &[("doc.md".into(), text(0, 1024))]);
     store.scope(&repo);
     store.decision_under(&repo, "git:unbound", "p0", "doc.md", &text(0, 1024));
-    let behind = 33;
+    let behind = PAGE_ROWS.get() + 1;
     let last = (0..behind)
         .map(|i| {
             let anchor = AnchorValue::ReachableFrom {
@@ -1186,7 +1299,7 @@ fn a_transient_head_ahead_of_a_page_boundary_counts_each_decision_once() {
             &Clock::open(),
         );
         assert_accounting(&counters);
-        assert_eq!(counters.get("unverifiable_no_citation"), behind);
+        assert_eq!(counters.get("unverifiable_no_citation"), behind as u64);
         assert_eq!(counters.get("unavailable_repository_unbound"), pass);
     }
     assert_eq!(counters.get("unavailable_skipped"), 1);
@@ -1211,6 +1324,7 @@ fn a_terminal_reason_is_not_read_again_after_an_incarnation_change() {
     let store = store.reopen();
     let clock = Clock::open();
     verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(clock.polled(Poll::Decision), 2);
     assert_eq!(clock.opens(), 0);
     assert_eq!(counters.get("considered"), 1);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, absent);
