@@ -497,7 +497,7 @@ Check: `always` - the verifier opens repositories only through `git_sources::ope
 Fault/timing angle: none
 Required faults and enabling state: F4: an over-budget delta base; a `refs/replace` entry with `core.useReplaceRefs = false`
 Confidence: high - [evidence](evidence/p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements.md). Read `open_isolated` (`crates/kernel/src/applicability/checkout.rs:639`) and `isolated_options` and `open_with_slots` (`crates/daemon/src/git_sources.rs:131`, `:148`); no `allocLimit` or `ignore_replacements` appears under `crates/kernel/src`
-Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`, and `crates/daemon/tests/attestation_verifier.rs:610`, `:521`, `:1162`, `:1256` for the daemon opener; none for the Kernel opener (unaudited)
+Existing check: `crates/daemon/tests/git_sources.rs:549`, `:827`, and `crates/daemon/tests/attestation_verifier.rs:594`, `:505`, `:1146`, `:1240` for the daemon opener; none for the Kernel opener (unaudited)
 Impact: a verifier on the Kernel opener would inflate a delta chain without a bound and could read a replaced object (C4)
 Open questions:
 - Which opener does the U1 driver use? - resolved with answer; this resolves the open question the portfolio evaluation tied to G3.
@@ -769,7 +769,7 @@ Check: `always` - equal claims against equal object-store contents give equal ve
 Fault/timing angle: a worktree edit, a HEAD move, or a repack between two evaluations of one claim
 Required faults and enabling state: F8: worktree edit, HEAD move, repack, excluding allocation-limit refusals; F9: an LF blob with a CRLF-form digest, and the reverse
 Confidence: high - [evidence](evidence/p6-new-verdict-deterministic.md). Read `verdict` (`crates/daemon/src/attestation_verifier.rs:329`), `Digests::of` (`:245`), and `lookup` (`:538`), which `verify` (`:381`) calls: the driver reads the commit, trees, header, and blob by object id and passes the observation to `verdict`, which decides every verdict
-Existing check: `crates/daemon/tests/attestation_verifier.rs:740`, `:218`, `:228`, `:292`, `:521`, `:821`, `:895`, `:967`, `:986`, `:1087` (unaudited)
+Existing check: `crates/daemon/tests/attestation_verifier.rs:724`, `:202`, `:212`, `:276`, `:505`, `:805`, `:879`, `:951`, `:970`, `:1071` (unaudited)
 Impact: a verdict that depended on worktree state would mark a correct finding stale after an unrelated edit
 Open questions:
 - How are line endings normalized? - resolved with answer.
@@ -787,7 +787,7 @@ Check: `always` - every claim's `bytes_read <= MAX_BLOB_BYTES`; every claim's po
 Fault/timing angle: the deadline crossing between object reads
 Required faults and enabling state: F4: header over budget, an over-budget delta base, bytes that do not hash to the id; F5: missing and corrupt commit, tree, and blob, including a valid prefix with a malformed remainder and a self-referencing ref-delta; F6: absent path, gitlink, symlink, tree, a path beneath a gitlink; F7: deadline before the open and before the header poll
 Confidence: high - [evidence](evidence/p6-new-blob-read-bounded-at-oid.md). Read `lookup` (`crates/daemon/src/attestation_verifier.rs:538`), `Objects::read` (`:485`), `Objects::blob_header` (`:468`), and `header_verdict` (`:313`); `MAX_BLOB_BYTES` (`:37`) is both the header budget and the allocation limit of the store, the own packs, and the loose store, and `OwnPacks::decode` (`crates/daemon/src/git_sources.rs:329`) bounds each ref-delta walk through `entry_header` (`:445`) before it decodes the object
-Existing check: `crates/daemon/tests/attestation_verifier.rs:557`, `:610`, `:694`, `:720`, `:382`, `:340`, `:501`, `:228`, `:269`, `:491`, `:521`, `:667`, `:1028`, `:1053`, `:798`, `:1131`, `:1162`, `:1213`, `:1240`, `:1256`, `:1285`, `:1323`, `:1374`, `:1394` (unaudited)
+Existing check: `crates/daemon/tests/attestation_verifier.rs:541`, `:594`, `:678`, `:704`, `:366`, `:324`, `:485`, `:212`, `:253`, `:475`, `:505`, `:651`, `:1012`, `:1037`, `:782`, `:1115`, `:1146`, `:1197`, `:1224`, `:1240`, `:1269`, `:1307`, `:1358`, `:1378` (unaudited)
 Impact: an unbounded read would let one claim allocate a delta chain or read a large blob inside the pass
 Open questions:
 - Does the allocation limit admit a blob of exactly 256 KiB? - resolved with answer.

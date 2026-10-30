@@ -105,40 +105,40 @@ into a file #1172 changed at the #1172 branch.
 | `detail_operation_and_parent_list_must_agree_with_the_registry` | `crates/kernel/tests/kernel_claim_causality.rs:710` | derived reinjection | unaudited |
 | `refused_selections_publish_nothing_and_encodings_are_dispositions` | `crates/daemon/tests/git_sources.rs:549` | header gate; daemon opener | unaudited |
 | `delta_packed_commit_against_an_oversized_base_is_refused` | `crates/daemon/tests/git_sources.rs:827` | header gate; daemon opener | unaudited |
-| `the_fixture_has_no_worktree` | `crates/daemon/tests/attestation_verifier.rs:218` | verdict deterministic | unaudited |
-| `committed_bytes_match_and_a_later_commit_mismatches` | `crates/daemon/tests/attestation_verifier.rs:228` | verdict deterministic; blob read bounded | unaudited |
-| `a_nested_path_walks_one_tree_per_component` | `crates/daemon/tests/attestation_verifier.rs:269` | blob read bounded | unaudited |
-| `line_endings_normalize_in_either_direction` | `crates/daemon/tests/attestation_verifier.rs:292` | verdict deterministic | unaudited |
-| `entries_that_hold_no_blob_are_named_by_kind` | `crates/daemon/tests/attestation_verifier.rs:340` | blob read bounded | unaudited |
-| `missing_or_corrupt_objects_are_unreadable_never_absent` | `crates/daemon/tests/attestation_verifier.rs:382` | blob read bounded | unaudited |
-| `a_directory_that_is_no_repository_is_unopenable` | `crates/daemon/tests/attestation_verifier.rs:491` | blob read bounded | unaudited |
-| `the_driver_writes_nothing` | `crates/daemon/tests/attestation_verifier.rs:501` | blob read bounded | unaudited |
-| `replacement_refs_are_ignored` | `crates/daemon/tests/attestation_verifier.rs:521` | verdict deterministic; Kernel checkout open record (daemon-opener half) | unaudited |
-| `the_header_gates_every_blob_read` | `crates/daemon/tests/attestation_verifier.rs:557` | blob read bounded | unaudited |
-| `a_blob_whose_delta_base_exceeds_the_allocation_limit_is_over_budget` | `crates/daemon/tests/attestation_verifier.rs:610` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
-| `a_passed_deadline_opens_no_repository` | `crates/daemon/tests/attestation_verifier.rs:694` | blob read bounded | unaudited |
-| `a_deadline_before_the_header_poll_reads_no_blob` | `crates/daemon/tests/attestation_verifier.rs:720` | blob read bounded | unaudited |
-| `verdicts_survive_a_worktree_edit_a_head_move_and_a_repack` | `crates/daemon/tests/attestation_verifier.rs:740` | verdict deterministic | unaudited |
-| `claim_paths_follow_the_document_path_rule` | `crates/daemon/tests/attestation_verifier.rs:798` | blob read bounded | unaudited |
-| `the_pure_verdict_compares_digests_after_the_header_gate` | `crates/daemon/tests/attestation_verifier.rs:821` | verdict deterministic | unaudited |
-| `normalized_digests_exist_only_for_a_reachable_length` | `crates/daemon/tests/attestation_verifier.rs:895` | verdict deterministic | unaudited |
-| `reasons_have_stable_names_and_a_terminal_split` | `crates/daemon/tests/attestation_verifier.rs:920` | reason names for #1173 counters | unaudited |
-| `a_delta_chain_that_revisits_an_entry_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:667` | blob read bounded | unaudited |
-| `a_raw_digest_match_needs_the_claimed_length` | `crates/daemon/tests/attestation_verifier.rs:967` | verdict deterministic | unaudited |
-| `an_empty_committed_file_matches_an_empty_claim` | `crates/daemon/tests/attestation_verifier.rs:986` | verdict deterministic | unaudited |
-| `an_unsupported_object_format_is_unopenable` | `crates/daemon/tests/attestation_verifier.rs:1009` | blob read bounded | unaudited |
-| `a_blob_mode_entry_naming_another_kind_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1028` | blob read bounded | unaudited |
-| `each_deadline_poll_precedes_its_read` | `crates/daemon/tests/attestation_verifier.rs:1053` | blob read bounded | unaudited |
-| `a_non_bare_root_answers_from_the_object_store_not_the_worktree` | `crates/daemon/tests/attestation_verifier.rs:1087` | verdict deterministic | unaudited |
-| `a_ref_delta_in_an_own_pack_decodes_against_its_base_in_that_pack` | `crates/daemon/tests/attestation_verifier.rs:1131` | blob read bounded | unaudited |
-| `objects_in_an_alternate_with_more_packs_than_index_slots_match` | `crates/daemon/tests/attestation_verifier.rs:1162` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
-| `a_delta_with_an_empty_body_that_names_itself_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1213` | blob read bounded | unaudited |
-| `an_own_pack_blob_whose_stream_does_not_decode_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1240` | blob read bounded | unaudited |
-| `a_tree_above_the_allocation_limit_is_over_budget_loose_and_packed` | `crates/daemon/tests/attestation_verifier.rs:1256` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
-| `a_blob_only_in_an_alternate_with_more_packs_than_index_slots_matches` | `crates/daemon/tests/attestation_verifier.rs:1285` | blob read bounded | unaudited |
-| `an_own_pack_delta_whose_base_lies_in_another_pack_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1323` | blob read bounded | unaudited |
-| `a_valid_loose_copy_answers_for_an_own_pack_entry_that_does_not_resolve` | `crates/daemon/tests/attestation_verifier.rs:1374` | blob read bounded | unaudited |
-| `a_valid_own_pack_copy_answers_after_a_newer_pack_whose_chain_revisits_an_entry` | `crates/daemon/tests/attestation_verifier.rs:1394` | blob read bounded | unaudited |
+| `the_fixture_has_no_worktree` | `crates/daemon/tests/attestation_verifier.rs:202` | verdict deterministic | unaudited |
+| `committed_bytes_match_and_a_later_commit_mismatches` | `crates/daemon/tests/attestation_verifier.rs:212` | verdict deterministic; blob read bounded | unaudited |
+| `a_nested_path_walks_one_tree_per_component` | `crates/daemon/tests/attestation_verifier.rs:253` | blob read bounded | unaudited |
+| `line_endings_normalize_in_either_direction` | `crates/daemon/tests/attestation_verifier.rs:276` | verdict deterministic | unaudited |
+| `entries_that_hold_no_blob_are_named_by_kind` | `crates/daemon/tests/attestation_verifier.rs:324` | blob read bounded | unaudited |
+| `missing_or_corrupt_objects_are_unreadable_never_absent` | `crates/daemon/tests/attestation_verifier.rs:366` | blob read bounded | unaudited |
+| `a_directory_that_is_no_repository_is_unopenable` | `crates/daemon/tests/attestation_verifier.rs:475` | blob read bounded | unaudited |
+| `the_driver_writes_nothing` | `crates/daemon/tests/attestation_verifier.rs:485` | blob read bounded | unaudited |
+| `replacement_refs_are_ignored` | `crates/daemon/tests/attestation_verifier.rs:505` | verdict deterministic; Kernel checkout open record (daemon-opener half) | unaudited |
+| `the_header_gates_every_blob_read` | `crates/daemon/tests/attestation_verifier.rs:541` | blob read bounded | unaudited |
+| `a_blob_whose_delta_base_exceeds_the_allocation_limit_is_over_budget` | `crates/daemon/tests/attestation_verifier.rs:594` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
+| `a_passed_deadline_opens_no_repository` | `crates/daemon/tests/attestation_verifier.rs:678` | blob read bounded | unaudited |
+| `a_deadline_before_the_header_poll_reads_no_blob` | `crates/daemon/tests/attestation_verifier.rs:704` | blob read bounded | unaudited |
+| `verdicts_survive_a_worktree_edit_a_head_move_and_a_repack` | `crates/daemon/tests/attestation_verifier.rs:724` | verdict deterministic | unaudited |
+| `claim_paths_follow_the_document_path_rule` | `crates/daemon/tests/attestation_verifier.rs:782` | blob read bounded | unaudited |
+| `the_pure_verdict_compares_digests_after_the_header_gate` | `crates/daemon/tests/attestation_verifier.rs:805` | verdict deterministic | unaudited |
+| `normalized_digests_exist_only_for_a_reachable_length` | `crates/daemon/tests/attestation_verifier.rs:879` | verdict deterministic | unaudited |
+| `reasons_have_stable_names_and_a_terminal_split` | `crates/daemon/tests/attestation_verifier.rs:904` | reason names for #1173 counters | unaudited |
+| `a_delta_chain_that_revisits_an_entry_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:651` | blob read bounded | unaudited |
+| `a_raw_digest_match_needs_the_claimed_length` | `crates/daemon/tests/attestation_verifier.rs:951` | verdict deterministic | unaudited |
+| `an_empty_committed_file_matches_an_empty_claim` | `crates/daemon/tests/attestation_verifier.rs:970` | verdict deterministic | unaudited |
+| `an_unsupported_object_format_is_unopenable` | `crates/daemon/tests/attestation_verifier.rs:993` | blob read bounded | unaudited |
+| `a_blob_mode_entry_naming_another_kind_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1012` | blob read bounded | unaudited |
+| `each_deadline_poll_precedes_its_read` | `crates/daemon/tests/attestation_verifier.rs:1037` | blob read bounded | unaudited |
+| `a_non_bare_root_answers_from_the_object_store_not_the_worktree` | `crates/daemon/tests/attestation_verifier.rs:1071` | verdict deterministic | unaudited |
+| `a_ref_delta_in_an_own_pack_decodes_against_its_base_in_that_pack` | `crates/daemon/tests/attestation_verifier.rs:1115` | blob read bounded | unaudited |
+| `objects_in_an_alternate_with_more_packs_than_index_slots_match` | `crates/daemon/tests/attestation_verifier.rs:1146` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
+| `a_delta_with_an_empty_body_that_names_itself_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1197` | blob read bounded | unaudited |
+| `an_own_pack_blob_whose_stream_does_not_decode_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1224` | blob read bounded | unaudited |
+| `a_tree_above_the_allocation_limit_is_over_budget_loose_and_packed` | `crates/daemon/tests/attestation_verifier.rs:1240` | blob read bounded; Kernel checkout open record (daemon-opener half) | unaudited |
+| `a_blob_only_in_an_alternate_with_more_packs_than_index_slots_matches` | `crates/daemon/tests/attestation_verifier.rs:1269` | blob read bounded | unaudited |
+| `an_own_pack_delta_whose_base_lies_in_another_pack_is_unreadable` | `crates/daemon/tests/attestation_verifier.rs:1307` | blob read bounded | unaudited |
+| `a_valid_loose_copy_answers_for_an_own_pack_entry_that_does_not_resolve` | `crates/daemon/tests/attestation_verifier.rs:1358` | blob read bounded | unaudited |
+| `a_valid_own_pack_copy_answers_after_a_newer_pack_whose_chain_revisits_an_entry` | `crates/daemon/tests/attestation_verifier.rs:1378` | blob read bounded | unaudited |
 | `evidence_cited_in_refuses_a_deleted_evidence_row_that_live_decisions_still_cite` | `crates/kernel/tests/kernel_slice.rs:2248` | artifact deletion | unaudited |
 | `the_evidence_keyed_read_returns_the_live_document_descriptor_citing_the_evidence` | `crates/kernel/tests/kernel_source_descriptors.rs:3252` | document descriptor; verifier input | unaudited |
 | `the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row` | `crates/kernel/tests/kernel_anchor_write.rs:869` | verifier input | unaudited |
@@ -153,7 +153,7 @@ into a file #1172 changed at the #1172 branch.
 | `classification_at_one_sequence_ignores_the_worktree_head_and_later_commits` | `crates/daemon/tests/attestation_verifier_classify.rs:950` | snapshot purity; F3 at the classification step | unaudited |
 | `the_repository_binds_to_the_first_matching_root_in_bound_order` | `crates/daemon/tests/attestation_verifier_classify.rs:1080` | verifier input (binding) | unaudited |
 | `the_document_kind_path_rule_is_a_closed_table` | `crates/daemon/tests/attestation_verifier_classify.rs:1119` | document kind for #1172's classes (F15) | unaudited |
-| `the_evaluation_names_the_blob_the_path_resolved_to` | `crates/daemon/tests/attestation_verifier.rs:1434` | the blob id the write set records | unaudited |
+| `the_evaluation_names_the_blob_the_path_resolved_to` | `crates/daemon/tests/attestation_verifier.rs:1418` | the blob id the write set records | unaudited |
 | `a_plugin_route_cannot_write_as_the_verifier_or_assert_trusted_local_code` | `crates/daemon/tests/kernel_routes.rs:6778` | plugin table; party (AC14) | unaudited |
 | `a_match_commits_the_attestation_with_every_companion_row` | `crates/daemon/tests/attestation_verifier_attest.rs:429` | classes and cited fields; sibling; verified via witness; degradation oracle; party (AC15); validated witness; derived reinjection (AC6, AC7, F14) | unaudited |
 | `the_attestation_serves_at_the_model_decisions_sensitivity` | `crates/daemon/tests/attestation_verifier_attest.rs:570` | classes and cited fields (F14); FK fold | unaudited |
