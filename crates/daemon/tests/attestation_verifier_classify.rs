@@ -1160,3 +1160,103 @@ fn the_document_kind_path_rule_is_a_closed_table() {
         assert_eq!(kind.witness_kind(), "code_present");
     }
 }
+
+#[test]
+fn a_corrupt_cited_descriptor_refuses_only_when_the_citation_walk_reaches_it() {
+    let store = Store::open();
+    let (document, _) = store.document("doc", "ARCHITECTURE.md", "# Architecture\n");
+    let (corrupt, _) = store.document("corrupt", "STRUCTURE.md", "# Structure\n");
+    // The citation walk reads the row-level citation before event citations.
+    let document_first = store.decision(
+        "document_first",
+        "assistant",
+        reachable_from(1),
+        &Cites {
+            row: Some(&document),
+            events: vec![&corrupt],
+        },
+    );
+    let corrupt_first = store.decision(
+        "corrupt_first",
+        "assistant",
+        reachable_from(2),
+        &Cites {
+            row: Some(&corrupt),
+            events: vec![&document],
+        },
+    );
+    for object_id in [&document_first, &corrupt_first] {
+        assert!(matches!(store.class(object_id), Class::Verifiable(_)));
+    }
+    store
+        .sqlite()
+        .execute(
+            "UPDATE observations SET observation_payload=x'00' WHERE evidence_id=?1",
+            [&corrupt.id],
+        )
+        .unwrap();
+    assert_eq!(
+        verifiable(store.class(&document_first)).evidence_id,
+        document.id
+    );
+    assert!(matches!(
+        classify(
+            &store.kernel,
+            &corrupt_first,
+            store.target(),
+            &[],
+            &EvalBudget::unbounded()
+        ),
+        Err(ClassifyError::Facts(ClaimFactsError::Kernel(
+            KernelError::CorruptCanonicalRow
+        )))
+    ));
+}
+
+#[test]
+fn row_level_evidence_with_no_row_at_the_sequence_refuses_after_the_membership_and_anchor_checks() {
+    let store = Store::open();
+    let (document, _) = store.document("doc", "ARCHITECTURE.md", "# Architecture\n");
+    let cites = Cites {
+        row: Some(&document),
+        events: Vec::new(),
+    };
+    let attestation = store.decision(
+        "attestation",
+        VERIFIER_SOURCE_KIND,
+        reachable_from(1),
+        &cites,
+    );
+    let unanchored = store.decision("unanchored", "assistant", None, &cites);
+    let anchored = store.decision("anchored", "assistant", reachable_from(2), &cites);
+    assert!(matches!(store.class(&anchored), Class::Verifiable(_)));
+    let target = store.target();
+    store.message("later", "a commit after the target");
+    store
+        .sqlite()
+        .execute(
+            "UPDATE evidence_meta SET created_commit_seq=?1 WHERE evidence_id=?2",
+            rusqlite::params![store.kernel.tip().unwrap(), document.id],
+        )
+        .unwrap();
+    assert_eq!(
+        store.classify_at(&attestation, target, &[]).class,
+        unverifiable(Unverifiable::SelfSource)
+    );
+    assert_eq!(
+        store.classify_at(&unanchored, target, &[]).class,
+        unverifiable(Unverifiable::NoAnchor)
+    );
+    assert!(matches!(
+        classify(
+            &store.kernel,
+            &anchored,
+            target,
+            &[],
+            &EvalBudget::unbounded()
+        ),
+        Err(ClassifyError::Facts(ClaimFactsError::Kernel(
+            KernelError::CorruptCanonicalRow
+        )))
+    ));
+}

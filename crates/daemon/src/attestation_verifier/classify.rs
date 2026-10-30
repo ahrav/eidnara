@@ -3,11 +3,12 @@
 //!
 //! [`classify`] reads one decision's registry row, decision row, and latest own admission, its
 //! anchor, its row-level and event-level citations, and the `repository_documents` descriptor
-//! citing each cited evidence row, every read at one commit sequence under one evaluation budget,
-//! and then confirms the store is still the target's incarnation. The result is a function of the
-//! Kernel snapshot at that sequence and of the bound roots the caller passes: the classifier reads
-//! no worktree, clock, or network, and opens no repository. It carries evidence ids and never
-//! evidence bytes, since document evidence is `Sensitive`.
+//! citing each cited evidence row, every read in one Kernel reader transaction at one commit
+//! sequence under one evaluation budget, and then confirms the store is still the target's
+//! incarnation. The result is a function of the Kernel snapshot at that sequence and of the bound
+//! roots the caller passes: the classifier reads no worktree, clock, or network, and opens no
+//! repository. It carries evidence ids and never evidence bytes, since document evidence is
+//! `Sensitive`.
 //!
 //! The first read decides membership: an object that is absent, not a decision, not live, or whose
 //! latest own admission is not `Active` is [`Class::NotInput`], and a remaining decision the
@@ -36,9 +37,8 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     AdmissionFacts, AnchorCondition, CitingDescriptor, ClaimDecisionFacts, ClaimFactsError,
-    CommitReadTarget, Disposition, EvidenceLiveness, EvidenceLivenessError, GitCondition,
-    KernelError, KernelStore, LinkedEvidence, LiveDescriptor, ObjectRow, Sensitivity, SourceClass,
-    TaintClass,
+    CommitReadTarget, Disposition, EvidenceLiveness, GitCondition, KernelError, KernelStore,
+    LinkedEvidence, LiveDescriptor, ObjectRow, Sensitivity, SnapshotRead, SourceClass, TaintClass,
 };
 
 use super::{Claim, Reason};
@@ -262,21 +262,20 @@ impl DocumentKind {
 /// document's repository to the first of `roots` with that repository identity. It reads the
 /// decision row's own `evidence_id` and at most [`MAX_EVENT_CITATIONS`] event-level citations.
 ///
-/// The standing read and the row-level evidence liveness read compare the store's incarnation
-/// with `target.incarnation` under their reader guards; the anchor, event-level citation, and
-/// descriptor reads take the sequence alone, and after the last read, whether it succeeded or
-/// refused, the incarnation is compared again. A
-/// restore only advances the store's restore generation, so an equal incarnation after the last
-/// read means every read saw the history `target` was captured from.
+/// Every read runs in one [`KernelStore::read_at`] transaction, which compares the store's
+/// incarnation with `target.incarnation` under its reader guard before the first read; a restore
+/// holds every reader guard, so none lands between two reads. After the transaction, whether it
+/// succeeded or refused, the incarnation is compared again, so a refusal raised before the guarded
+/// comparison still reports a restore that already completed.
 ///
 /// # Errors
 ///
 /// Returns the Kernel reads' refusals, including: `Facts(IncarnationMismatch)` when the store is not
-/// `target`'s incarnation at the first read or after the last, `Facts(Kernel(Deadline))` when the
-/// budget runs out, `Facts(Kernel(FutureSnapshot))` past the tip, and
+/// `target`'s incarnation at the guarded comparison or after the transaction,
+/// `Facts(Kernel(Deadline))` when the budget runs out, `Facts(Kernel(FutureSnapshot))` past the tip, and
 /// `Facts(Kernel(CorruptCanonicalRow))` for a stored decision, anchor, or descriptor that fails
-/// its row checks, `Facts(Kernel(InvalidInput))` for a negative sequence or an `object_id` the
-/// standing read refuses, `Facts(MalformedRequiredField)` for a decision or admission field this
+/// its row checks, `Facts(Kernel(InvalidInput))` for a negative sequence or, after the
+/// transaction's budget, tip, and incarnation checks pass, an `object_id` the standing read refuses, `Facts(MalformedRequiredField)` for a decision or admission field this
 /// build cannot interpret, and the store's other read errors (`Busy`, `Io`, `Conflict`). Returns [`ClassifyError::InvalidDocumentPath`] when a cited live document
 /// descriptor with a valid digest has a `relative_path` that passes the descriptor row checks and
 /// is outside the document path rule, and no cited row resolves to a verifiable document. `IncarnationMismatch` takes
@@ -288,9 +287,11 @@ pub fn classify(
     roots: &[BoundRoot<'_>],
     budget: &EvalBudget,
 ) -> Result<Classification, ClassifyError> {
-    let class = class_of(kernel, object_id, target, roots, budget);
+    let class = kernel.read_at(target, budget, |snapshot| {
+        class_of(snapshot, object_id, roots)
+    });
     // A restore advances the generation and never returns it, so this comparison detects a restore
-    // between any two reads above without holding a reader guard.
+    // that completed before a refusal the snapshot raised ahead of, or in place of, its own check.
     kernel
         .require_incarnation(target.incarnation)
         .map_err(|_| ClaimFactsError::IncarnationMismatch)?;
@@ -301,20 +302,15 @@ pub fn classify(
 }
 
 fn class_of(
-    kernel: &KernelStore,
+    snapshot: &SnapshotRead<'_>,
     object_id: &str,
-    target: CommitReadTarget,
     roots: &[BoundRoot<'_>],
-    budget: &EvalBudget,
 ) -> Result<Class, ClassifyError> {
-    let requested = target.through_commit;
-    let ids = [object_id.to_owned()];
-    let standing =
-        match kernel.claim_standing_at_within_budget(&ids, target, NonZeroUsize::MIN, budget) {
-            Ok(mut standings) => standings.pop().flatten(),
-            Err(ClaimFactsError::NotADecision) => None,
-            Err(error) => return Err(error.into()),
-        };
+    let standing = match snapshot.decision_standing(object_id) {
+        Ok(standing) => standing,
+        Err(ClaimFactsError::NotADecision) => None,
+        Err(error) => return Err(error.into()),
+    };
     let Some(standing) =
         standing.filter(|standing| standing.object.invalidated_commit_seq.is_none())
     else {
@@ -329,11 +325,12 @@ fn class_of(
     if standing.object.source_kind == VERIFIER_SOURCE_KIND {
         return Ok(Class::Unverifiable(Unverifiable::SelfSource));
     }
+    let evidence_liveness = standing.evidence_liveness;
     let facts = DecisionFacts::new(standing.object, standing.decision, admission);
     let unverifiable = |reason| Ok(Class::Unverifiable(reason));
     // An anchor retired by the sequence leaves the decision with no live anchor.
     let condition = match &facts.anchor_id {
-        Some(anchor_id) => kernel.anchor_condition_as_of(anchor_id, requested, budget)?,
+        Some(anchor_id) => snapshot.anchor_condition(anchor_id)?,
         None => None,
     };
     let oid = match condition {
@@ -341,20 +338,28 @@ fn class_of(
         Some(_) => return unverifiable(Unverifiable::AnchorNotGit),
         None => return unverifiable(Unverifiable::NoAnchor),
     };
-    let cited = citations(
-        kernel,
-        object_id,
-        facts.evidence_id.as_deref(),
-        target,
-        budget,
-    )?;
+    let own = facts.evidence_id.as_deref().zip(evidence_liveness);
+    let cited = citations(snapshot, object_id, own)?;
     if cited.is_empty() {
         return unverifiable(Unverifiable::NoCitation);
     }
+    // One statement answers every cited row in order; an entry's refusal applies only when the walk
+    // below reaches its row.
+    let ids: Vec<&str> = cited
+        .iter()
+        .map(|evidence| evidence.evidence_id.as_str())
+        .collect();
+    let found =
+        snapshot.source_descriptors_citing_evidence(OccurrenceClass::RepositoryDocuments, &ids)?;
     let mut first_reason = None;
     let mut invalid_path = false;
-    for evidence in cited {
-        let (descriptor, digest) = match resolve_citation(kernel, &evidence, requested, budget)? {
+    for (evidence, found) in cited.into_iter().zip(found) {
+        let resolution = if evidence.live {
+            resolve(found?)
+        } else {
+            Resolution::Reason(Unverifiable::EvidenceRetired)
+        };
+        let (descriptor, digest) = match resolution {
             Resolution::Document(descriptor, digest) => (descriptor, digest),
             Resolution::Reason(reason) => {
                 first_reason.get_or_insert(reason);
@@ -384,31 +389,19 @@ fn class_of(
 /// The decision row's own evidence first, then its newest event-level citations of other
 /// evidence, at most [`MAX_EVENT_CITATIONS`] of them, so no event citation displaces the row's.
 fn citations(
-    kernel: &KernelStore,
+    snapshot: &SnapshotRead<'_>,
     object_id: &str,
-    own: Option<&str>,
-    target: CommitReadTarget,
-    budget: &EvalBudget,
+    own: Option<(&str, EvidenceLiveness)>,
 ) -> Result<Vec<LinkedEvidence>, ClassifyError> {
     let mut cited = Vec::new();
-    if let Some(evidence_id) = own {
-        let liveness = kernel
-            .evidence_liveness_at_within_budget(&[evidence_id], target, budget)
-            .map_err(|error| match error {
-                EvidenceLivenessError::IncarnationMismatch => ClaimFactsError::IncarnationMismatch,
-                EvidenceLivenessError::Kernel(error) => error.into(),
-                // The read passes one id, under the per-read id limit.
-                EvidenceLivenessError::TooManyIds => KernelError::InvalidInput.into(),
-            })?;
+    if let Some((evidence_id, liveness)) = own {
         // The decision row's foreign key keeps its evidence row, created no later than the
         // decision, so a live decision's evidence is live or retired; any other answer is a
         // corrupt store.
-        let live = match liveness.first() {
-            Some(EvidenceLiveness::Live) => true,
-            Some(EvidenceLiveness::Retired) => false,
-            Some(EvidenceLiveness::Unknown) | None => {
-                return Err(KernelError::CorruptCanonicalRow.into());
-            }
+        let live = match liveness {
+            EvidenceLiveness::Live => true,
+            EvidenceLiveness::Retired => false,
+            EvidenceLiveness::Unknown => return Err(KernelError::CorruptCanonicalRow.into()),
         };
         cited.push(LinkedEvidence {
             evidence_id: evidence_id.to_owned(),
@@ -417,21 +410,11 @@ fn citations(
     }
     // One row more than the cap leaves the cap after the row's own evidence is dropped.
     let max = MAX_EVENT_CITATIONS.saturating_add(1);
-    let events = kernel.linked_decision_evidence_within_budget(
-        object_id,
-        target.through_commit,
-        max,
-        budget,
-    )?;
-    // The linked-evidence read bounds only its reader wait by the budget, so a budget that ran
-    // out during its query refuses here instead of yielding a reason from a late read.
-    if budget.is_exhausted() {
-        return Err(KernelError::Deadline.into());
-    }
+    let events = snapshot.linked_decision_evidence(object_id, max)?;
     cited.extend(
         events
             .into_iter()
-            .filter(|evidence| Some(evidence.evidence_id.as_str()) != own)
+            .filter(|evidence| Some(evidence.evidence_id.as_str()) != own.map(|(id, _)| id))
             .take(MAX_EVENT_CITATIONS.get()),
     );
     Ok(cited)
@@ -446,22 +429,9 @@ enum Resolution {
     NotDocument,
 }
 
-fn resolve_citation(
-    kernel: &KernelStore,
-    evidence: &LinkedEvidence,
-    requested: i64,
-    budget: &EvalBudget,
-) -> Result<Resolution, KernelError> {
-    if !evidence.live {
-        return Ok(Resolution::Reason(Unverifiable::EvidenceRetired));
-    }
-    let found = kernel.source_descriptor_citing_evidence(
-        OccurrenceClass::RepositoryDocuments,
-        &evidence.evidence_id,
-        requested,
-        budget,
-    )?;
-    Ok(match found {
+/// What the descriptor citing a live cited row makes of that row.
+fn resolve(found: CitingDescriptor) -> Resolution {
+    match found {
         CitingDescriptor::Live(descriptor) => {
             match crate::memory_capture::cite::digest_bytes(&descriptor.detail.artifact_digest) {
                 Some(digest) => Resolution::Document(descriptor, digest),
@@ -470,7 +440,7 @@ fn resolve_citation(
         }
         CitingDescriptor::Retired => Resolution::Reason(Unverifiable::DescriptorRetired),
         CitingDescriptor::Uncited => Resolution::NotDocument,
-    })
+    }
 }
 
 impl VerifierInput {
