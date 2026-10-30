@@ -2104,8 +2104,8 @@ fn a_plugin_stale_mark_before_the_verifiers_commit_leaves_one_mark() {
 }
 
 /// A witness read the Kernel refuses for its corrupt row resolves its attestation under
-/// `applicability_unavailable` with the pass healthy, so the attestation behind it is still evaluated, in this pass and the
-/// next.
+/// `applicability_unavailable` with the pass healthy, so the attestation behind it is still
+/// evaluated, in this pass and the next.
 #[test]
 fn a_witness_read_the_kernel_refuses_resolves_its_attestation_and_the_step_continues() {
     use daemon::attestation_verifier::applicability::evaluate;

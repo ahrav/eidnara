@@ -244,6 +244,7 @@ rows #1174 added and every row pointing into a file #1174 changed at the
 
 ## Categories with no check found
 
+- A transient refusal of an applicability witness or descriptor read (`Busy`, `Io`) failing the pass: no test induces a transient Kernel error at that read; the row-caused half is tested and the transient half is covered by reading `ProjectRun::applicable`.
 - `p6-plugin-cannot-replace-a-foreign-source-decision`: no test submits a
   plugin replacement of a decision of another source kind.
 - `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard`:

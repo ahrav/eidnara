@@ -49,8 +49,8 @@
 //! write, a `conflict`, an invalid write set, or K = [`MAX_ATTEMPTS`] attempts in total, shared
 //! across transient `Unavailable` reasons, deadlines, Kernel refusals, a changed decision, and
 //! degraded witnesses. The K-th attempt counts `witness_degraded_skipped` when its witness
-//! degraded and `unavailable_skipped` otherwise. A terminal reason is kept per `(decision, oid)` for the process
-//! lifetime. All state is process-local: a restart rescans from the start, and the skips and the
+//! degraded and `unavailable_skipped` otherwise. A terminal reason is kept per `(decision, oid)`
+//! for the process lifetime. All state is process-local: a restart rescans from the start, and the
 //! write set's receipt replay make the rescan write nothing.
 //!
 //! After its decisions, each project runs the applicability step over the attestations the
@@ -762,8 +762,8 @@ impl ProjectRun<'_, '_> {
                 Ok(Applicability::Current) => ("applicability_current", false),
                 Ok(Applicability::Unavailable) => ("applicability_unavailable", false),
                 Err(KernelError::Deadline) => return self.refused(true),
-                // A refusal one row can cause recurs on every pass, so it leaves the pass healthy; a
-                // transient refusal fails the pass so the task retries soon.
+                // A refusal one row can cause recurs on every pass, so it leaves the pass healthy;
+                // a transient refusal fails the pass so the task retries soon.
                 Err(error) => (
                     "applicability_unavailable",
                     !row_caused(&ClaimFactsError::Kernel(error)),
