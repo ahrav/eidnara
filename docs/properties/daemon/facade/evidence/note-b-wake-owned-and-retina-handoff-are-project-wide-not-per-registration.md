@@ -9,7 +9,7 @@ evidence. No tests were rerun.
 ## Discovery trigger
 
 `NoteEvaluatorRegistration` stores `retina_handoff` and `wake_owned` per entry
-(`crates/daemon/src/lib.rs:2985-2986`), and
+(`crates/daemon/src/lib.rs:2987-2988`), and
 `validated_note_evaluator_registration` returns a clone of the calling
 registration (`:3938-3966`), so `handle_note_evaluation_next` holds the caller's
 own policy in hand. It then ignores it and reads a project-wide aggregate

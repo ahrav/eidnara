@@ -121,7 +121,7 @@ question below.
   (`HistorySummarizerPublishRequest`, both payload fields are `Option`), `:9472-9481`,
   `:12671-12716`; every in-repo caller of `publish_history_summarizer_chunk`
   (`crates/daemon/src/history_summarizer.rs:529` and the two publication fences at
-  `crates/daemon/src/lib.rs:3310` and `:3347`).
+  `crates/daemon/src/lib.rs:3312` and `:3349`).
 - Findings: exactly one production construction site of the request exists,
   `history_summarizer.rs:513-526`, and it always supplies both payloads. The `Option`
   shape and the two early returns are therefore latent, not live. The store's

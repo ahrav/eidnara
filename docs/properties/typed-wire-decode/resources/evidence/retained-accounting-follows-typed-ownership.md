@@ -25,10 +25,10 @@ account for all surviving representations.
 5. `crates/daemon/src/wire.rs:243-365` includes canonical block text, replay
    shells, identities, and frontiers. A wire block handle points into a shell;
    the shell, not each handle, owns the block backing.
-6. `crates/daemon/src/lib.rs:1745-1799` retains native Values, messages, and
-   tail_delta in snapshot accounting. `:1803-1812` holds the typed request.
-7. `crates/daemon/src/lib.rs:23039-23072` distinguishes shared native raw
-   Values from equal-but-distinct allocations. `:23340-23353` keeps active
+6. `crates/daemon/src/lib.rs:1746-1800` retains native Values, messages, and
+   tail_delta in snapshot accounting. `:1804-1813` holds the typed request.
+7. `crates/daemon/src/lib.rs:23051-23084` distinguishes shared native raw
+   Values from equal-but-distinct allocations. `:23352-23365` keeps active
    lease charge after cache removal.
 
 These are ordinary production holders; tests need not enable an optional
@@ -74,7 +74,7 @@ Canonical bytes remain retained after the wire representation becomes typed.
 ### Q: Can all Value accounting disappear with original envelopes?
 
 - Sources examined: P:L95-L110; `retained_size.rs:157-260`;
-  `crates/daemon/src/lib.rs:1745-1766`.
+  `crates/daemon/src/lib.rs:1746-1767`.
 - Findings: Surviving payload Values and native/tail data have real owners.
 - Missing evidence: A candidate-wide ledger for all variants after removal.
 - Conclusion: resolved with answer on scope. Only original-envelope terms
@@ -83,7 +83,7 @@ Canonical bytes remain retained after the wire representation becomes typed.
 ### Q: Does sharing allow removal of a holder's charge?
 
 - Sources examined: `crates/daemon/src/retained_size.rs:263-271`;
-  `crates/daemon/src/lib.rs:23039-23072,23340-23353`.
+  `crates/daemon/src/lib.rs:23051-23084,23352-23365`.
 - Findings: Per-holder conservative charges coexist with local alias-aware
   accounting. Equal content is insufficient evidence of one allocation.
 - Missing evidence: Candidate observations of unchanged holder/release policy.

@@ -4,7 +4,7 @@ HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 Scope and P notation: [source register](../source-register.md).
 
 `Handler::handle` caps bytes, creates the meter, reserves admission scratch,
-probes the lane, dispatches, and settles at `crates/daemon/src/lib.rs:12153-12170`.
+probes the lane, dispatches, and settles at `crates/daemon/src/lib.rs:12164-12181`.
 The direct path walks `SkippedValue` before typed decoding; invalid typed
 decoding restarts into a metered `Value` parse at `:12921-12946`.
 Tree conversion calls `from_value` at `:8115-8125`.

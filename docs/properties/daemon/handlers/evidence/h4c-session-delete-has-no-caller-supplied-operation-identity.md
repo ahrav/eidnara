@@ -4,8 +4,8 @@
 
 Building the handler table for this lens, the Identity column filled in for every
 durable handler except one. `session.recomp` takes a `command_id`
-(`crates/daemon/src/lib.rs:6005-6010`), `agent_drops.append` takes a
-`command_id` (`:5783`), `state_import` takes an `import_id` (`:5639`), the
+(`crates/daemon/src/lib.rs:6016-6021`), `agent_drops.append` takes a
+`command_id` (`:5794`), `state_import` takes an `import_id` (`:5650`), the
 authority handlers take a generation fence, `state_sync` takes a sequence fence.
 `handle_session_delete_value` (`:6126-6161`) takes nothing, and it is the most
 destructive of the set.

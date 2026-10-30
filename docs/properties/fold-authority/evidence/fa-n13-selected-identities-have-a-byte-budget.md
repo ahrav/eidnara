@@ -45,8 +45,8 @@ All references are verified at `0ff62b29a`.
   fingerprint work (`:999-1006`). The variant is at `:648-651`.
 - The public `build_history_summarizer_chunk` builds with no selection
   (`:484-500`). Its production caller is reattachment
-  (`crates/daemon/src/lib.rs:5078-5084`), which reuses the stored
-  `selected_range_identities` (`:5072-5076`) rather than re-selecting.
+  (`crates/daemon/src/lib.rs:5089-5095`), which reuses the stored
+  `selected_range_identities` (`:5083-5087`) rather than re-selecting.
 - The reservation passes the assembled selection to `fire`
   (`crates/daemon/src/history_summarizer.rs:1866-1874`), inside the same
   store load and commit as the firing state.
@@ -70,7 +70,7 @@ All references are verified at `0ff62b29a`.
   bytes, then runs `assert_matches_oracle` (`:2179-2180`). The unbudgeted
   comparison build starts at the firing's own `from_ordinal` (`:1923-1929`).
 - `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix`
-  (`crates/daemon/src/lib.rs:36318`) sends 800 alternating user and
+  (`crates/daemon/src/lib.rs:36331`) sends 800 alternating user and
   assistant messages whose mids carry 100 control characters through a real
   transform. From the identities the pass stored it computes the oracle
   prefix with `identity_prefix_oracle`, requires it to end before the last
@@ -79,7 +79,7 @@ All references are verified at `0ff62b29a`.
   build), a prompt that ends at the prefix, and after release one published
   segment over the prefix, an Idle state, and `counters.published == 1`.
 - `an_indivisible_block_over_the_identity_budget_no_fires_and_reserves_nothing`
-  (`crates/daemon/src/lib.rs:36290`) sends 4,000 assistant messages whose
+  (`crates/daemon/src/lib.rs:36303`) sends 4,000 assistant messages whose
   mids carry 100 control characters (6 escaped bytes each) through a real
   transform; the one same-role block exceeds the budget. It asserts
   `assemble:IdentityBudget`, zero producer starts, and an Idle durable state
@@ -132,7 +132,7 @@ reservation and publication. #859 PR C constructs the last one.
 ### Q: Is `Exercised: yes` supported for the atomic-admission clause?
 
 - Sources examined: `crates/daemon/src/history_summarizer_chunk.rs:1776-1782`,
-  `:1835-1884`; `crates/daemon/src/lib.rs:36290-36314` at `0ff62b29a`;
+  `:1835-1884`; `crates/daemon/src/lib.rs:36303-36327` at `0ff62b29a`;
   portfolio evaluation I3 and W2.
 - Findings: At `d7b330113`, no: the oracle stopped at assembly, the handler
   test covered only the indivisible refusal, and the budget-edge fixtures

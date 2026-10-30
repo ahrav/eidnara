@@ -658,6 +658,21 @@
       },
       "additionalProperties": false
     },
+    "verifier": {
+      "default": {
+        "enabled": false
+      },
+      "description": "User-only attestation verifier.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "User-only: re-read the repository bytes a memory decision cites at its anchored commit, attest a decision whose bytes match and mark stale one whose bytes differ, in a bounded background pass (default: false). Project values are ignored with a warning.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "project_docs": {
       "description": "User-only repository documents Eidnara reads and, with source capture, retains.",
       "type": "object",

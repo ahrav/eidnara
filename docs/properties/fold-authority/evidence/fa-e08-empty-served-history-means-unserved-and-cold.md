@@ -35,7 +35,7 @@ Code references are verified at `0ff62b29a` unless another tree is named.
   `Some(&[])` is a known-empty history.
 - Reachability: hint admission and divergence run only past the native gate
   (`:3217-3218`), which needs a stored Eidnara authority and so a non-empty
-  chain (`crates/daemon/src/config.rs:181-185`); at `265df096` they ran by
+  chain (`crates/daemon/src/config.rs:185-189`); at `265df096` they ran by
   default.
 
 Gate results as recorded in the PR descriptions:

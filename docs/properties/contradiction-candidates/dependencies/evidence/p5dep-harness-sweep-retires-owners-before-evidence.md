@@ -56,8 +56,8 @@ lifecycle transitions; data integrity; C12; L1.
   `expire_harness_captures`, each guarded by `cancelled()`; `:363-435`
   `sweep_and_sample`; `:441-497` `run` loop with `SAMPLE_INTERVAL` 30 s and
   `SAMPLE_RETRY_INTERVAL` 5 s when a pass advanced (`:16-18`); spawned at
-  `crates/daemon/src/lib.rs:4000-4008` once the store is installed, with the
-  Kernel joining "only while it is ready" (`:3999`).
+  `crates/daemon/src/lib.rs:4003-4012` once the store is installed, with the
+  Kernel joining "only while it is ready" (`:4002`).
 - Tests: `local_file.rs:797`
   `a_harness_capture_pinned_after_it_was_selected_for_expiry_is_kept`; `:895`
   `a_refused_harness_capture_rolls_back_alone_inside_its_page_commit`; `:710`,

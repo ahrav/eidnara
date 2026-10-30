@@ -610,4 +610,5 @@ fn lookup(
 }
 
 pub mod attest;
+pub mod bounded_pass;
 pub mod classify;

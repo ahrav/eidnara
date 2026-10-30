@@ -5960,8 +5960,8 @@ their line references at that commit. Scope and CI findings come from
 line numbers win wherever the two differ.** All three are in the normative
 document and none changes a finding.
 
-- The client `Recovering` state is at `docs/host-wire-protocol.md:762-764`,
-  and the quoted string "bounded backoff, reread file" is at `:764`. Lens A's
+- The client `Recovering` state is at `docs/host-wire-protocol.md:790-792`,
+  and the quoted string "bounded backoff, reread file" is at `:792`. Lens A's
   earlier section cited `:12`, which is "This document is the direct-only wire
   authority". Lens A's own lead L4 cites section 12 correctly.
 - The shared queued-byte sentence is at `:745`, not `:746`. `:746` is blank.
@@ -6059,7 +6059,7 @@ holds it through allocation (`:1177`), frame encoding (`:1186`), and
 `data_tx.try_send` (`:1207`), with the `admission` and `pending` mutexes held too
 (`:1140-1141`). Enqueue order therefore equals allocation order, which is exactly
 what `docs/host-wire-protocol.md:656` obliges of a sender. The rewind path
-cannot break it either: `Correlations::restore` (`:1741-1747`) only rewinds when
+cannot break it either: `Correlations::restore` (`crates/host-runtime/src/client.rs:1741-1747`) only rewinds when
 `self.next == correlation.checked_add(1)`, or for the `u64::MAX` exhaustion case,
 and both call sites (`:1196`, `:1209`) precede any delivery to the writer.
 
@@ -6160,7 +6160,7 @@ were printed and confirmed.
    deleted `read_active_frame` and `read_exact_until` were what made the sentence
    true. `CLIENT_FRAME_TIMEOUT` (`:45`) survives as a real bound, but it bounds
    the *writer's* per-frame publication (`:1353`, `:1960`).
-2. `docs/host-wire-protocol.md:738` - "frame completion after first header
+2. `docs/host-wire-protocol.md:766` - "frame completion after first header
    byte | one 30 s absolute deadline; idle first-header wait is unbounded". The
    same mechanism, stated normatively for both managed clients, neither of which
    reads a byte stream any more.
@@ -6597,7 +6597,7 @@ enforcement this satisfies.
 Existing check: `max_correlation_is_used_once_then_exhausted` (`:2328`); status
 `unaudited`.
 Impact: A violation is a host-side generation close before dispatch
-(`docs/host-wire-protocol.md:882`, vector V44), taking every unrelated route
+(`docs/host-wire-protocol.md:910`, vector V44), taking every unrelated route
 down. I found no path that produces one.
 Open questions: None.
 
@@ -6971,7 +6971,7 @@ Verified `validate_inbound`'s arms are exactly `Response|Error`,
 `StreamData|StreamEnd`, `Push`, `Ping`, `Goodbye`, plus the catch-all, and that
 `Cancel` is therefore in the residue. Contract side at
 `docs/host-wire-protocol.md:269` and `:280`.
-Existing check: `inbound_validation_enforces_the_direct_profile_table` (`:2658`);
+Existing check: `inbound_validation_enforces_the_direct_profile_table` (`crates/host-runtime/src/client.rs:2658`);
 status `unaudited`. Verified: its body (`:2658-2751`) contains no `Cancel` case, so
 it does not assert this disposition; the `Cancel` gap is confirmed, not open.
 Impact: If a host ever emits `Cancel`, every route on the generation dies. If a

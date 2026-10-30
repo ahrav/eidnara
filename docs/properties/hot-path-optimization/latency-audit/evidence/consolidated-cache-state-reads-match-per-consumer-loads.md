@@ -266,25 +266,25 @@ the timing test, the durable-phase test, and the extended interleave test, the
 two `memory_classifier_run_task_bounds_*` tests failing under full-suite load on the base
 branch as well and passing in isolation.
 
-[pass-load]: ../../../../../crates/daemon/src/lib.rs#L8129
+[pass-load]: ../../../../../crates/daemon/src/lib.rs#L8140
 [meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6672-L6684
 [meta-select-live]: ../../../../../crates/memory-store/src/lib.rs#L4903-L4904
-[pass-state]: ../../../../../crates/daemon/src/lib.rs#L3515-L3519
-[delta]: ../../../../../crates/daemon/src/lib.rs#L4214
-[lookup]: ../../../../../crates/daemon/src/lib.rs#L4325
-[last-response]: ../../../../../crates/daemon/src/lib.rs#L4649-L4681
-[active-live]: ../../../../../crates/daemon/src/lib.rs#L4617-L4640
-[run-transform]: ../../../../../crates/daemon/src/lib.rs#L8230
+[pass-state]: ../../../../../crates/daemon/src/lib.rs#L3517-L3521
+[delta]: ../../../../../crates/daemon/src/lib.rs#L4224
+[lookup]: ../../../../../crates/daemon/src/lib.rs#L4335
+[last-response]: ../../../../../crates/daemon/src/lib.rs#L4660-L4692
+[active-live]: ../../../../../crates/daemon/src/lib.rs#L4628-L4651
+[run-transform]: ../../../../../crates/daemon/src/lib.rs#L8241
 [pass-timing]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
 [snapshot-live]: ../../../../../crates/daemon/src/transform.rs#L3041
 [scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4933-L4934
-[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8225-L8229
+[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8236-L8240
 [floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6772-L6787
 [epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6734-L6746
 [phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6752-L6766
 [select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4908-L4924
 [scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15763-L15982
 [counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15989-L16017
-[load-count]: ../../../../../crates/daemon/src/lib.rs#L25043-L25095
-[timing-test]: ../../../../../crates/daemon/src/lib.rs#L25101-L25113
-[phase-test]: ../../../../../crates/daemon/src/lib.rs#L25119-L25132
+[load-count]: ../../../../../crates/daemon/src/lib.rs#L25055-L25107
+[timing-test]: ../../../../../crates/daemon/src/lib.rs#L25113-L25125
+[phase-test]: ../../../../../crates/daemon/src/lib.rs#L25131-L25144

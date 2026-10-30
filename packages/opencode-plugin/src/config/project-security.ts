@@ -526,6 +526,17 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         }
     }
 
+    // The block holds only the user-level consent switch, as `source_capture` does.
+    if ("verifier" in projectRaw) {
+        const verifier = projectRaw.verifier;
+        delete projectRaw.verifier;
+        if (isPlainObject(verifier) && "enabled" in verifier) {
+            warnings.push(
+                "Ignoring verifier from project config (security: an unattended pass that writes attestations and stale marks requires user-level consent).",
+            );
+        }
+    }
+
     // The daemon reads the document list from the user tier only, so the strip removes the
     // block and warns when it sets the list, as the daemon's tier merge does.
     if ("project_docs" in projectRaw) {

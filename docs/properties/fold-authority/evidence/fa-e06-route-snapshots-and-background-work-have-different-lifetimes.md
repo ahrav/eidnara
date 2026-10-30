@@ -18,7 +18,7 @@ teardown, and no test combines the three.
 All references are verified at HEAD `0ff62b29a`.
 
 - A route binding captures its configuration at bind:
-  `SessionBinding.config: DaemonConfig` (`crates/daemon/src/lib.rs:227-241`).
+  `SessionBinding.config: DaemonConfig` (`crates/daemon/src/lib.rs:228-242`).
   `RouteBindings` keys bound routes by handle with a bind sequence
   (`:254-263`), and one session can hold several participating routes
   (`has_sibling`, `:351-357`).
@@ -47,11 +47,11 @@ Checks at HEAD:
 - `a_sibling_bound_during_the_change_keeps_it_pending` (`:778`): a sibling
   inserted between the plan and the reset.
 - `no_fire_reason_is_durable_change_gated_and_cleared_by_fire`
-  (`crates/daemon/src/lib.rs:41234`): the captured binding configuration has a
+  (`crates/daemon/src/lib.rs:41247`): the captured binding configuration has a
   chain while the handler's live configuration has none, so preparation
   reads the live one.
 - `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`
-  (`crates/daemon/src/config.rs:2350`): a configuration edit is visible to the
+  (`crates/daemon/src/config.rs:2379`): a configuration edit is visible to the
   live read after an mtime change.
 
 Citation corrections from `265df096` to HEAD: `lib.rs:211-251` (binding and

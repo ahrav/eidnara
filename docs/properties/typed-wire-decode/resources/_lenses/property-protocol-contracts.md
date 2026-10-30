@@ -4,9 +4,9 @@ HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 Scope and P notation: [source register](../source-register.md).
 
 The application uses `invalid_params` and `queue_full` at
-`crates/daemon/src/lib.rs:16125-16136`, beneath the host framing contract
+`crates/daemon/src/lib.rs:16137-16148`, beneath the host framing contract
 (`docs/host-wire-protocol.md:304-314`). Byte caps are inclusive at
-`crates/daemon/src/lib.rs:16144-16161`.
+`crates/daemon/src/lib.rs:16156-16173`.
 
 Candidate: freeze input bytes, capacities, pressure schedule, outcome, and
 boundary neighbours across the optimization. Recomputing capacity using the

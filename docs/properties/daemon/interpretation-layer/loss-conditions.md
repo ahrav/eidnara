@@ -61,7 +61,7 @@ content that is never a unit, so it is neither admitted nor lost.
 ## Document reader dispositions at HEAD
 
 The user-tier `project_docs.files` list names the documents
-(`crates/daemon/src/config.rs:1300`), admitted by `admit_document_paths`
+(`crates/daemon/src/config.rs:1328`), admitted by `admit_document_paths`
 (`crates/daemon/src/project_docs.rs:56`) and defaulting to
 `DEFAULT_PROJECT_DOC_FILES` (`project_docs.rs:19`). Admission requires each
 entry to be a well-formed Kernel identity value

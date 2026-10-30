@@ -74,7 +74,7 @@ The last clause is the contract this record tests.
 
 ### The settlement side
 
-`crates/daemon/src/lib.rs:12150-12205`, `settle_prepared_with`:
+`crates/daemon/src/lib.rs:12161-12216`, `settle_prepared_with`:
 
 - `:12168-12176` a `measure` failure becomes
   `PreparedSettlement::Error{code:"encode_failed"}`.

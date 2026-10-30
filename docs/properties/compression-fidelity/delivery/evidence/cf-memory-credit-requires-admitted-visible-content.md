@@ -10,9 +10,9 @@ evidence. Inspected 2026-09-19 at
 
 ## Evidence trail
 
-- [lib.rs:5372-5388,9257-9271](../../../../../crates/daemon/src/lib.rs#L5372-L5388)
+- [lib.rs:5372-5388,9257-9271](../../../../../crates/daemon/src/lib.rs#L5383-L5399)
   reads canonical memory only when enabled and pins one read for the pass.
-  The later [pass assembly](../../../../../crates/daemon/src/lib.rs#L9257-L9271)
+  The later [pass assembly](../../../../../crates/daemon/src/lib.rs#L9268-L9282)
   shares it with composition and producer preparation.
 - [canonical_memory.rs:147-174](../../../../../crates/daemon/src/canonical_memory.rs#L147-L174)
   captures the kernel tip, evaluates freshness, and reads the bound project's
@@ -40,7 +40,7 @@ evidence. Inspected 2026-09-19 at
   checks budget exclusion and withheld-versus-empty metadata. Status: unaudited.
 
 Reachability is **default-production**: memory defaults enabled at
-[config.rs:145](../../../../../crates/daemon/src/config.rs#L145). The pinned
+[config.rs:145](../../../../../crates/daemon/src/config.rs#L148). The pinned
 reader is called by normal transform execution, not only a test helper.
 
 ## Failure scenario

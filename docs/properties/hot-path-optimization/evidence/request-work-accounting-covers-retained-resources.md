@@ -167,16 +167,16 @@ all four unit permits, and exact scratch capacity. These are synthetic delivery
 tests, not actual runtime-stop or route-closing races.
 
 [receipt]: ../existing-checks.md#transform-unit-execution-receipt-2026-09-13
-[env]: ../../../../crates/daemon/src/lib.rs#L3580-L3619
+[env]: ../../../../crates/daemon/src/lib.rs#L3582-L3621
 [take]: ../../../../crates/daemon/src/metered_decode.rs#L211-L245
-[admit]: ../../../../crates/daemon/src/lib.rs#L8422-L8549
-[admit-pass]: ../../../../crates/daemon/src/lib.rs#L8477
-[hold-bound]: ../../../../crates/daemon/src/lib.rs#L12419
-[page-accept]: ../../../../crates/daemon/src/lib.rs#L10000-L10069
+[admit]: ../../../../crates/daemon/src/lib.rs#L8433-L8560
+[admit-pass]: ../../../../crates/daemon/src/lib.rs#L8488
+[hold-bound]: ../../../../crates/daemon/src/lib.rs#L12430
+[page-accept]: ../../../../crates/daemon/src/lib.rs#L10011-L10080
 [holds]: ../../../../crates/daemon/src/transform_unit.rs#L89-L167
-[release]: ../../../../crates/daemon/src/lib.rs#L1438-L1458
-[stage]: ../../../../crates/daemon/src/lib.rs#L1550-L1562
-[evict]: ../../../../crates/daemon/src/lib.rs#L1460-L1478
+[release]: ../../../../crates/daemon/src/lib.rs#L1439-L1459
+[stage]: ../../../../crates/daemon/src/lib.rs#L1551-L1563
+[evict]: ../../../../crates/daemon/src/lib.rs#L1461-L1479
 [tests]: ../../../../crates/daemon/src/transform_unit/tests.rs#L143-L837
 [meter-tests]: ../../../../crates/daemon/src/metered_decode.rs#L1188-L1310
 [host-tests]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L439
@@ -215,6 +215,6 @@ charges restores the exact pool capacity. The [rebased receipt][rebased-receipt]
 reports five meter passes, eleven blocking passes, and a final Bun pass. The
 earlier full workspace still has three failures; no workspace pass is claimed.
 
-[body-admission]: ../../../../crates/daemon/src/lib.rs#L16366
-[direct-gate]: ../../../../crates/daemon/src/lib.rs#L16040
+[body-admission]: ../../../../crates/daemon/src/lib.rs#L16378
+[direct-gate]: ../../../../crates/daemon/src/lib.rs#L16052
 [rebased-receipt]: ../existing-checks.md#rebased-working-tree-verification-2026-09-13

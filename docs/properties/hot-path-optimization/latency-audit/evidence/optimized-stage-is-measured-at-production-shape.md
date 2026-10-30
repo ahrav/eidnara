@@ -161,10 +161,10 @@ durable-text bound test is correctness coverage, not a performance claim.
 [meta-bound]: ../../../../../crates/daemon/src/transform_meta_bound.rs#L130-L171
 [fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12434-L12494
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L28083-L28292
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8189-L8206
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8203-L8269
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14519
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14594-L14616
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8200-L8217
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8214-L8280
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14531
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14606-L14628
 [tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
 [he-payload]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L217-L223
 [he-designated]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214

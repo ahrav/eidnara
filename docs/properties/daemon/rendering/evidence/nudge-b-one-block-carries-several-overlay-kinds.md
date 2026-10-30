@@ -145,7 +145,7 @@ Module defaults: `default_auto_search_enabled()` returns `true`
 Shipped setup path: the host sends `serializer_profile: "opencode-aisdk"`
 (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1339` (source-catalog path, not present at HEAD)) and
 `tool_present` derived from eidnara_reduce availability (`:1945`), which together
-satisfy `tagging_surface_active` (`crates/daemon/src/lib.rs:568-577`).
+satisfy `tagging_surface_active` (`crates/daemon/src/lib.rs:569-578`).
 
 So the three-overlay user-block state is default-production, given a 5-minute pause
 and a prompt that matches a history_segment.

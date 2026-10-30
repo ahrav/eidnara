@@ -7,7 +7,7 @@ renamed at U3, so every committed proof vector had to be regenerated. A
 proof transcript is the one place where a symmetric change is invisible to
 the code's own tests: if both the host and its in-crate client apply the same
 wrong transcript, every handshake still succeeds. The protocol's fixture rule
-at `docs/host-wire-protocol.md:955` requires an independent oracle for that
+at `docs/host-wire-protocol.md:983` requires an independent oracle for that
 reason. The audit checked that the crate's `compute_proof` is the shared
 transport transcript, that its output over the committed inputs equals what
 an implementation outside the crate produces, and that every field is folded

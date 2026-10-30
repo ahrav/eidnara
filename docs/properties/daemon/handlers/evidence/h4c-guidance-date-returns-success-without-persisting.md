@@ -5,7 +5,7 @@
 Part 3 recorded `intent-control-transition-write-is-silently-dropped`: a store
 function that returns `Ok(())` without writing when a guard fails. Scanning this
 lens's scope for the same shape, `guidance_date_for_session`
-(`crates/daemon/src/lib.rs:7725-7764`) has two returns that skip its only
+(`crates/daemon/src/lib.rs:7736-7775`) has two returns that skip its only
 `store.commit`, and its caller reports `ok: true` either way. The function's
 result type is `Result<String, MemoryStoreError>`, so nothing in the signature marks
 the difference between a persisted and an unpersisted date.

@@ -315,7 +315,7 @@ Open questions:
 
 Type: safety
 Reachability: explicit-config-only - `capture_after_response`
-(`crates/daemon/src/lib.rs:9279`) offers a pass only when the route's frozen
+(`crates/daemon/src/lib.rs:9290`) offers a pass only when the route's frozen
 `contradiction_candidates.enabled` and a memory store are both present.
 Status: active
 Exercised: partial - #1167, `crates/daemon/src/candidate_pass_tests.rs`:
@@ -645,7 +645,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - the daemon starts the MemoryReviewer
 cleanup loop whenever the memory store opens
-(`crates/daemon/src/lib.rs:4006`), and each pass runs the sweep through
+(`crates/daemon/src/lib.rs:4010`), and each pass runs the sweep through
 `pass_then_sweep` (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`),
 which returns before any table statement unless the user tier sets
 `contradiction_candidates.enabled`.
@@ -816,7 +816,7 @@ in the answer would be a disclosure path for Sensitive harness capture to the
 model.
 Open questions:
 - Resolved by #1168: the terminal is `not_live` and the method literal is
-  `review.candidates` (`docs/host-wire-protocol.md:833`); the item carries
+  `review.candidates` (`docs/host-wire-protocol.md:861`); the item carries
   `matched_terms` and `decision_terms` as counts, and no term list.
 - G7, sensitivity of descriptor-derived rows: the egress half stays open
   (needs human input). #1165 fixes the facts: a row holds ids, integers, and
@@ -906,13 +906,13 @@ enabled sweep runs;
 drives `pass_then_sweep`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) with the flag off and
 then on. The key is `/contradiction_candidates/enabled`
-(`crates/daemon/src/config.rs:1024`), user-only and default false
+(`crates/daemon/src/config.rs:1044`), user-only and default false
 (`contradiction_candidates_default_off_and_only_the_user_tier_enables_them`,
 `config.rs:2299`); a configuration resolved before a user-tier rewrite keeps
 its value (`config.rs:2320`), and a bound route keeps the value it was bound
 with
 (`a_route_keeps_the_candidate_flag_it_was_bound_with_and_health_reports_the_block`,
-`crates/daemon/src/lib.rs:21502`), which also shows the status block carrying
+`crates/daemon/src/lib.rs:21514`), which also shows the status block carrying
 the key with every counter zero. Pass arm (#1167):
 `a_route_without_consent_offers_no_pass_and_writes_no_row`
 (`crates/daemon/src/candidate_pass_tests.rs:253`) sets the offer's consent off

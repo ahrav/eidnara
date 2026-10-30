@@ -35,7 +35,7 @@ noting, but the pattern is unambiguous.
 
 ### Where paths leave through the response
 
-Site 1, built in the module. `crates/daemon/src/lib.rs:10446-10454`, inside
+Site 1, built in the module. `crates/daemon/src/lib.rs:10457-10465`, inside
 `resolve_facade_scope`:
 
     if requested_project.is_some_and(|requested| requested != authority_project) {

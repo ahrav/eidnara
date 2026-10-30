@@ -24,7 +24,7 @@ issues, no incident history, no git-history lens.
 
 Assumption (inferred): "default build" means the daemon built without the
 `test-support` feature and run with `DaemonConfig::default()`
-(`crates/daemon/src/config.rs:150-178`): `memory_enabled: true`,
+(`crates/daemon/src/config.rs:153-182`): `memory_enabled: true`,
 `source_capture_enabled: false`, `contradiction_candidates_enabled: false`.
 
 Every documented guarantee below is a claim under test. Every `file:line`
@@ -862,11 +862,11 @@ Impact: P5 U4's owner read "in the same family" inherits this contract; a
 P5 route that parsed its body before the project check, or accepted unknown
 fields, would break the family's stated order. `review.use_outcome` (#1157)
 joined the family after `3a3b916b7`: it reads the Kernel alone and has no
-`disabled` terminal (`host-wire-protocol.md:827`); this record does not
+`disabled` terminal (`host-wire-protocol.md:855`); this record does not
 cover it.
 Open questions:
 - D6: `kind` is stripped as an envelope key (`crates/daemon/src/kernel_routes/mod.rs:461`, `:467-470`) but the doc at
-  `host-wire-protocol.md:801` names three envelope fields. Is a body field
+  `host-wire-protocol.md:829` names three envelope fields. Is a body field
   `kind` meant to be accepted silently? (needs human input)
 
 ### p5dep-observational-routes-read-and-take-no-background-part

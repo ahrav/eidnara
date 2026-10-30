@@ -4,7 +4,7 @@ HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 Scope: [source register](../source-register.md).
 
 `DecodeFailure::Invalid` restarts into the tree lane; `Refused` exits at
-`crates/daemon/src/lib.rs:12931-12946`. `decode_metered` checks refusal before
+`crates/daemon/src/lib.rs:12942-12957`. `decode_metered` checks refusal before
 interpreting the serde result, then checks trailing bytes at
 `crates/daemon/src/metered_decode.rs:329-348`.
 

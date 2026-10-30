@@ -12,7 +12,7 @@ guarantee that three of the four do not implement.
 
 ### The stated contract
 
-`crates/daemon/src/lib.rs:10062-10067`
+`crates/daemon/src/lib.rs:10073-10078`
 
     /// Resolve the daemon-bound route root for a claim facade request.
     ///

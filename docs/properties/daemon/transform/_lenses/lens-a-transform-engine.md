@@ -27,7 +27,7 @@ references outside the stated 4b scope are load-bearing and are cited
 explicitly rather than paraphrased:
 
 - `crates/memory-store/src/lib.rs` — the commit transaction itself.
-- `crates/daemon/src/lib.rs:8322` — the only production caller.
+- `crates/daemon/src/lib.rs:8333` — the only production caller.
 - `crates/daemon/src/transform.rs:7511-8046` — the tag baseline cache and
   the speculative mint numbering, which is 4e's territory but which the commit
   predicate depends on.

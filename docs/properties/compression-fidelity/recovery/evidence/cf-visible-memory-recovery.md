@@ -23,7 +23,7 @@ Do not build a second fixture or a second three-way disposition oracle.
 
 ## Evidence trail
 
-- [Configuration, line 335](../../../../../packages/opencode-plugin/src/config/schema/eidnara.ts#L335)
+- [Configuration, line 335](../../../../../packages/opencode-plugin/src/config/schema/eidnara.ts#L340)
   defaults the plugin to enabled. The
   [registry, lines 34-59](../../../../../packages/opencode-plugin/src/plugin/tool-registry.ts#L34)
   registers search with a kernel client and session/project resolvers when

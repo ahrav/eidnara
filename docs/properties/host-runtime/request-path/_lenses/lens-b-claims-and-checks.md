@@ -296,9 +296,9 @@ Clustered by subject, the distribution is lopsided in a way worth naming:
 
 | Cluster | Tests | Where |
 | --- | --- | --- |
-| Channel-0 parse bounds, strictness, and classification | **17** | `control.rs:824-1027` |
+| Channel-0 parse bounds, strictness, and classification | **17** | `control.rs:824-1033` |
 | Route slot lifecycle, epoch advance, close and bind races | **12** | all of `routing.rs` |
-| Catalog and response-shape fidelity | **4** | `control.rs:1045`, `:1085`, `:1103`, `:1112` |
+| Catalog and response-shape fidelity | **4** | `control.rs:1051`, `:1091`, `:1109`, `:1118` |
 | Route-open parse and identity bounds | **2** | `control.rs:765`, `:780` |
 | Error-body length model | **2** | `dispatch.rs:1502`, `:1524` |
 

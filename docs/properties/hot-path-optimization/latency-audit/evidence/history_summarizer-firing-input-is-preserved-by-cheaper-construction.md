@@ -126,7 +126,7 @@ prefixes. No test crosses a binary upgrade during an in-flight firing.
   `0ff62b29a`. An `AwaitingProducer` firing with a live producer run reattaches
   (`handle_restart_load`, `:903-954`, arm `:912-939`): the daemon recomputes the
   fingerprint from the current snapshot as a digest
-  (`crates/daemon/src/lib.rs:5111-5113`), and `publish_validated_chunk`
+  (`crates/daemon/src/lib.rs:5122-5124`), and `publish_validated_chunk`
   compares it with the stored joined form, rejects it as
   `FingerprintMismatch`, and abandons the run with the failure backoff
   (`history_summarizer.rs:637-652`). A reserved `Publishing` firing takes
@@ -259,13 +259,13 @@ only the five values asserted by the retained tests.
 [trunc]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L744-L777
 [t-golden]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L1773-L1859
 [t-marker]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L1744-L1757
-[boundary-view]: ../../../../../crates/daemon/src/lib.rs#L16692-L16752
-[construction-corpus]: ../../../../../crates/daemon/src/lib.rs#L17677
-[firing-capture]: ../../../../../crates/daemon/src/lib.rs#L23982
-[frozen-lookup]: ../../../../../crates/daemon/src/lib.rs#L16799-L16857
+[boundary-view]: ../../../../../crates/daemon/src/lib.rs#L16704-L16764
+[construction-corpus]: ../../../../../crates/daemon/src/lib.rs#L17689
+[firing-capture]: ../../../../../crates/daemon/src/lib.rs#L23994
+[frozen-lookup]: ../../../../../crates/daemon/src/lib.rs#L16811-L16869
 [normalize]: ../../../../../crates/daemon/src/transform.rs#L2129-L2145
 [apply-normalized]: ../../../../../crates/daemon/src/transform.rs#L2898-L2911
-[handler-observers]: ../../../../../crates/daemon/src/lib.rs#L8412-L8424
+[handler-observers]: ../../../../../crates/daemon/src/lib.rs#L8423-L8435
 [identity-exclusion]: ../../../../../crates/daemon/src/wire.rs#L615-L617
 [assembly-identity]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L646-L658
 [fp]: ../../../../../crates/daemon/src/history_summarizer.rs#L155-L173
@@ -273,7 +273,7 @@ only the five values asserted by the retained tests.
 [fp-verify]: ../../../../../crates/daemon/src/history_summarizer.rs#L476-L487
 [fp-predicate]: ../../../../../crates/daemon/src/history_summarizer.rs#L637-L652
 [t-fp]: ../../../../../crates/daemon/src/history_summarizer.rs#L6232
-[fp-restart]: ../../../../../crates/daemon/src/lib.rs#L4942-L4944
+[fp-restart]: ../../../../../crates/daemon/src/lib.rs#L4953-L4955
 [diff-header]: ../../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L13-L58
 [diff-prod]: ../../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L100-L113

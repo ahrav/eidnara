@@ -25,7 +25,7 @@ or source changes establish new implementation evidence here.
 | B | `e451a2b470ae8663b4613ca04f019a30b6d7df53`. Plan's reported measurement baseline; a source identity, not a reproduced measurement. |
 | Host contract | `docs/host-wire-protocol.md:304-314`. Separates 64 MiB transport framing from terminal application-limit errors. |
 | A1 | `docs/properties/hot-path-optimization/latency-audit/catalog.md:137-231`. Admission ordering, footprint, error codes, and absence of dispatch effects. |
-| A2 | `docs/properties/hot-path-optimization/latency-audit/catalog.md:232-317`. Decode-lane compatibility, used to construct resource cases. |
+| A2 | `docs/properties/hot-path-optimization/latency-audit/catalog.md:232-317`. Decode-lane compatibility records, used to construct resource cases. |
 | A3 | `docs/properties/hot-path-optimization/latency-audit/catalog.md:319-350`. Independent pool-shortfall situation; existing evidence is partial. |
 | B1 | `docs/properties/hot-path-optimization/latency-audit/catalog.md:356-431`. Shared ownership and projection/served-byte obligations. |
 | W1 | `docs/properties/hot-path-optimization/latency-audit/catalog.md:125-130,1768-1823`. Explicit invalidation, with historical text retained. |
@@ -50,9 +50,9 @@ by P:L19 or P:L213. No checkout or branch switch is needed for this discovery.
 
 Verified corrections to leads:
 
-- Tree fallback is `crates/daemon/src/lib.rs:12931-12946`; the typed failure
+- Tree fallback is `crates/daemon/src/lib.rs:12942-12957`; the typed failure
   restart is line 12935, not the start of the direct-lane match.
-- Snapshot `tail_delta` accounting is `crates/daemon/src/lib.rs:1766`.
+- Snapshot `tail_delta` accounting is `crates/daemon/src/lib.rs:1767`.
 - Actual retained-original checks span `crates/daemon/src/wire.rs:1708-1792`.
 - A1-A3 tests often compute capacities from the candidate's `footprint_of`.
   Their existence does not provide a frozen absolute boundary artifact.

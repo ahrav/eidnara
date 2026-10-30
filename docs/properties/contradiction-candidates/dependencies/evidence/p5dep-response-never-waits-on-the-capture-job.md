@@ -15,7 +15,7 @@ never wait on the kernel or the job." Lens: concurrency; C9.
   once the pass has built its response; "When the response is handed to the
   wire writer, `CaptureHandoff::into_job` takes the store's single publication
   slot"; the 5 s budget's origin is "the handoff's acceptance".
-- `crates/daemon/src/lib.rs:9279-9325` `capture_after_response(offer)`:
+- `crates/daemon/src/lib.rs:9290-9336` `capture_after_response(offer)`:
   `self.source_capture.offer(offer)?` runs synchronously in the handler
   (this is the charge of the retained window to the supervisor's byte budget,
   not a kernel or job wait); returns `AfterResponse::new(move || { if let
@@ -42,8 +42,8 @@ never wait on the kernel or the job." Lens: concurrency; C9.
   `the_response_is_identical_whatever_capture_and_the_kernel_are_doing`;
   `:938` `capture_latency_measurement`; `:298`
   `capture_off_memory_off_or_a_subagent_session_runs_no_adapter`.
-- Reachability: `crates/daemon/src/config.rs:154` `source_capture_enabled:
-  false` by default; `:2268` JSON default; the module header's gate also
+- Reachability: `crates/daemon/src/config.rs:157` `source_capture_enabled:
+  false` by default; `:2296` JSON default; the module header's gate also
   requires `memory.enabled` and a non-subagent session.
 
 ## Failure scenario

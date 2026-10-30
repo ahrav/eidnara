@@ -88,6 +88,15 @@ describe("EidnaraConfigSchema", () => {
             expect(parse({ enabled: "yes" }).success).toBe(false);
             expect(parse({ enabled: true, extra: 1 }).success).toBe(false);
         });
+
+        it("keeps the verifier off unless the key enables it", () => {
+            const parse = (value: unknown) => EidnaraConfigSchema.safeParse({ verifier: value });
+            expect(EidnaraConfigSchema.parse({}).verifier).toEqual({ enabled: false });
+            expect(parse({}).data?.verifier).toEqual({ enabled: false });
+            expect(parse({ enabled: true }).data?.verifier).toEqual({ enabled: true });
+            expect(parse({ enabled: "yes" }).success).toBe(false);
+            expect(parse({ enabled: true, extra: 1 }).success).toBe(false);
+        });
     });
 
     describe("budget configuration", () => {
@@ -154,6 +163,9 @@ describe("EidnaraConfigSchema", () => {
                     enabled: false,
                 },
                 contradiction_candidates: {
+                    enabled: false,
+                },
+                verifier: {
                     enabled: false,
                 },
                 terse_text_compression: {

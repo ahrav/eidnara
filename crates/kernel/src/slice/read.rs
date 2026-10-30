@@ -691,3 +691,56 @@ fn classify_row_error(error: rusqlite::Error) -> KernelError {
         _ => crate::map_sqlite(error),
     }
 }
+
+impl KernelStore {
+    /// The decisions of scope `scope_id` live at `requested` whose registry `source_kind` is not `excluded_source_kind`, as `(created_commit_seq, object_id)` pairs in that order after the pair `after`, at most `max_rows`. A decision's creating commit never changes, so a caller that pages by the last pair it acted on revisits no decision and passes over none created at or before `requested`. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and the SQLite classification (`Busy`, `Conflict`, `Io`) for a read that fails.
+    pub fn scope_decisions_after_within_budget(
+        &self,
+        scope_id: &str,
+        excluded_source_kind: &str,
+        requested: i64,
+        after: Option<(i64, &str)>,
+        max_rows: std::num::NonZeroUsize,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Vec<(i64, String)>, KernelError> {
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(crate::map_sqlite)?;
+        snapshot_tip(&tx, requested)?;
+        let (after_seq, after_id) = after.unwrap_or((-1, ""));
+        let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
+        let rows = tx
+            .prepare_cached(
+                "SELECT d.created_commit_seq, d.object_id
+                 FROM decisions d JOIN object_registry o ON o.object_id=d.object_id
+                 WHERE d.scope_id=?1 AND o.source_kind<>?2 AND d.created_commit_seq<=?3
+                   AND (d.invalidated_commit_seq IS NULL OR ?3<d.invalidated_commit_seq)
+                   AND (d.created_commit_seq>?4 OR (d.created_commit_seq=?4 AND d.object_id>?5))
+                 ORDER BY d.created_commit_seq, d.object_id
+                 LIMIT ?6",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(
+                        rusqlite::params![
+                            scope_id,
+                            excluded_source_kind,
+                            requested,
+                            after_seq,
+                            after_id,
+                            limit
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?
+                    .collect()
+            })
+            .map_err(crate::map_sqlite)?;
+        tx.commit().map_err(crate::map_sqlite)?;
+        Ok(rows)
+    }
+}

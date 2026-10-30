@@ -64,7 +64,7 @@ outer retry matrix. Existing checks are
 [tiers]: ../../../../crates/daemon/src/decay_render.rs#L203-L240
 [tokenizer]: ../../../../crates/tokenizer/src/lib.rs#L123-L149
 [outer]: ../../../../crates/daemon/src/m0_compose.rs#L178-L215
-[validation]: ../../../../crates/daemon/src/lib.rs#L8247-L8250
+[validation]: ../../../../crates/daemon/src/lib.rs#L8258-L8261
 [hard]: ../../../../crates/daemon/src/transform.rs#L4081-L4108
 [refold]: ../../../../crates/daemon/src/transform.rs#L4348-L4381
 [core]: ../../../../crates/cache-stability/src/lib.rs#L221-L287

@@ -30,7 +30,7 @@ which makes the provenance of `source_kind` part of the dispute record.
   row stores them as its reporting session, and no other event reads them.
 - `management_binding` requires a non-empty `session_id` and refuses one
   that differs from the channel's bound session with `session_mismatch`
-  (`crates/daemon/src/lib.rs:6629-6664`). `kernel_request` then strips
+  (`crates/daemon/src/lib.rs:6640-6675`). `kernel_request` then strips
   `method`, `kind`, `session_id`, and `project_root` before parsing the
   body (`ENVELOPE_KEYS`, `mod.rs:461`; `parse_request_body`,
   `:463-474`), so the session reaches no Kernel row.

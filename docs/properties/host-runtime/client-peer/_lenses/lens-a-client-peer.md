@@ -24,7 +24,7 @@ the same four verified facts rather than on a preamble assertion:
    production lifecycle/serve executable"
    (`crates/daemon/Cargo.toml:18-19`). `ManagedConnector::connect` at
    `crates/daemon/src/history_summarizer_producer.rs:693` calls it as well, and is not
-   inside a test module. `docs/host-wire-protocol.md:808` names
+   inside a test module. `docs/host-wire-protocol.md:836` names
    `HistorySummarizerProducer` as a `host_runtime::Client` consumer.
 4. The doc comment "Thread-confined peer endpoint for integration tests" at
    `ring_transport.rs:626` is therefore **wrong about reachability**, confirming
@@ -60,7 +60,7 @@ Four distinct budgets bound the phases: a single 2-second absolute handshake
 deadline started **before** discovery (`:314`), a 30-second frame deadline
 (`:45`), a 30-second route-open deadline including backoff (`:47`), and a
 5-second shutdown deadline (`:51`). These match the protocol's own table at
-`docs/host-wire-protocol.md:736-743` exactly.
+`docs/host-wire-protocol.md:764-771` exactly.
 
 ### Retirement is the only involuntary transition, and it has four causes
 
@@ -258,7 +258,7 @@ production reader.
 **O17. The reserved control byte pool is separate, deliberately.**
 `CLIENT_CONTROL_QUEUED_BYTES` (`:76`) funds `control_budget` (`:399`, `:949`),
 distinct from `queue_budget` (`:398`). The comment at `:63-76` argues the case at
-length. `docs/host-wire-protocol.md:746` says the opposite: "Data and
+length. `docs/host-wire-protocol.md:774` says the opposite: "Data and
 reserved-control frames share one queued-byte budget; reserved admission is not a
 byte-budget bypass."
 
@@ -368,11 +368,11 @@ Status: active
 Exercised: partial - `max_correlation_is_used_once_then_exhausted` (`client.rs:2328`) and `data_capacity_spares_control_reserve_and_does_not_burn_correlation` (`:3155`) cover allocation and rewind in isolation
 Guarantee: The sequence of `Request` correlations the client places on the wire is strictly increasing, so a conforming host's per-generation watermark never closes the generation on this client.
 Check: `always` - for every pair of `Request` frames the writer completes in order, the second correlation is strictly greater than the first, across control (`0/0`) and routed identities alike, since both draw from one `Correlations` (`client.rs:393`). `always` because the host evaluates it on every ingress frame (`docs/host-wire-protocol.md:656`).
-Fault/timing angle: Two windows. First, `admit` must not release the `correlations` guard between allocation and enqueue; it does not (`:1176-1217`). Second, `restore` must never rewind past a frame already handed to the writer; its guard (`:1742-1744`) plus the fact that a failed `try_send` returns the frame (`:1207`) prevents that.
+Fault/timing angle: Two windows. First, `admit` must not release the `correlations` guard between allocation and enqueue; it does not (`crates/host-runtime/src/client.rs:1176-1217`). Second, `restore` must never rewind past a frame already handed to the writer; its guard (`crates/host-runtime/src/client.rs:1742-1744`) plus the fact that a failed `try_send` returns the frame (`crates/host-runtime/src/client.rs:1207`) prevents that.
 Required faults and enabling state: Concurrent `request`, `request_stream`, `open_route`, `host_status`, and `host_shutdown` callers, interleaved with encode failures (oversize body) and `data_tx` saturation to drive both `restore` sites. Record the correlation of each frame as the writer completes it.
 Confidence: high - [evidence](../../evidence/client-a-no-request-frame-carries-a-non-increasing-correlation.md). Verified guard scope by reading `admit` end to end, and verified both `restore` call sites precede any delivery to `data_tx`. Part 2a's `request-correlation-strictly-increases-per-generation` is the host-side enforcement this satisfies.
 Existing check: `max_correlation_is_used_once_then_exhausted` (`:2328`); status `unaudited`.
-Impact: A violation is a host-side generation close before dispatch (`docs/host-wire-protocol.md:882`, vector V44), taking every unrelated route down. I found no path that produces one.
+Impact: A violation is a host-side generation close before dispatch (`docs/host-wire-protocol.md:910`, vector V44), taking every unrelated route down. I found no path that produces one.
 Open questions: None.
 
 ### client-a-a-dropped-pong-is-never-observable-to-the-client
@@ -490,7 +490,7 @@ Check: `always` - for `header.ty == FrameType::Cancel` (`wire.rs:58`), `validate
 Fault/timing angle: None.
 Required faults and enabling state: A fake peer that sends a well-formed pure-header `Cancel` on a live route with a pending correlation. Assert the client retires rather than treating it as a no-op.
 Confidence: high - [evidence](../../evidence/client-a-a-host-originated-cancel-retires-the-generation.md). Verified `validate_inbound`'s arms are exactly `Response|Error`, `StreamData|StreamEnd`, `Push`, `Ping`, `Goodbye`, plus the catch-all, and that `Cancel` is therefore in the residue. Contract side at `docs/host-wire-protocol.md:269` and `:280`.
-Existing check: `inbound_validation_enforces_the_direct_profile_table` (`:2658`); status `unaudited`, and its coverage of `Cancel` specifically is unverified.
+Existing check: `inbound_validation_enforces_the_direct_profile_table` (`crates/host-runtime/src/client.rs:2658`); status `unaudited`, and its coverage of `Cancel` specifically is unverified.
 Impact: If a host ever emits `Cancel`, every route on the generation dies. If a host never does, the strictness is free and the finding is a documentation defect rather than a code defect. Which of those holds is the open question.
 Open questions:
 

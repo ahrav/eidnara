@@ -35,7 +35,7 @@ All references are verified at HEAD `0ff62b29a`.
 - A restart builds a new `Handler` over the reopened store, so the binding
   table is empty and the first bind is a first pass
   (`RouteBindings::insert` sets `first_pass_settled: false`,
-  `crates/daemon/src/lib.rs:318-330`).
+  `crates/daemon/src/lib.rs:319-331`).
 
 Witnesses in `crates/daemon/src/fold_authority_handler_tests.rs` (#903):
 

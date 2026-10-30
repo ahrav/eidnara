@@ -38,7 +38,7 @@ warnings` and `cargo +1.98 fmt --all -- --check` pass.
 ## What crosses the wire
 
 - Request: `base_revision` is mandatory; the daemon refuses its absence with
-  `transform_base_revision_missing` (`crates/daemon/src/lib.rs:8331-8336`).
+  `transform_base_revision_missing` (`crates/daemon/src/lib.rs:8342-8347`).
   `previous_output_revision` names the output the client applied.
 - Request: since #829 a body that carries `tail_delta` is refused with the
   terminal error `transform_tail_delta_retired` (`handle_transform_typed` in

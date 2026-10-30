@@ -10,7 +10,7 @@ advances a durable outbox cursor on it.
 
 ## Evidence trail
 
-Module side, `crates/daemon/src/lib.rs:10184-10255`.
+Module side, `crates/daemon/src/lib.rs:10195-10266`.
 
 - `:10185-10187` — `claim_route_root(channel, "claim.effects.apply")` is called
   and its `Ok` value discarded; only the error is propagated. So the route acts

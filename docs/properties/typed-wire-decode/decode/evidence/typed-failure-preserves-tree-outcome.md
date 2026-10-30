@@ -13,15 +13,15 @@ Plan baseline `e451a2b4` has the same decoder. HEAD's added
 
 ## Evidence trail
 
-- `crates/daemon/src/lib.rs:12921-12938` gates a direct attempt, returns
+- `crates/daemon/src/lib.rs:12932-12949` gates a direct attempt, returns
   Refused immediately, and restarts on Invalid before falling through.
-- `crates/daemon/src/lib.rs:12941-12951` decodes original bytes as Value.
+- `crates/daemon/src/lib.rs:12952-12962` decodes original bytes as Value.
   Invalid JSON becomes Null for normal dispatch classification.
-- `crates/daemon/src/lib.rs:8115-8123` maps invalid typed conversion of a
+- `crates/daemon/src/lib.rs:8126-8134` maps invalid typed conversion of a
   valid tree to `bad_request`. These two invalid-input classes are distinct.
-- `crates/daemon/src/lib.rs:15758-15765,15864-15949` preserves tree checks
+- `crates/daemon/src/lib.rs:15770-15777,15876-15961` preserves tree checks
   before a derived parser can skip malformed unknown data.
-- `crates/daemon/src/lib.rs:19986-20117` compares parsers; `:20140-20181`
+- `crates/daemon/src/lib.rs:19998-20129` compares parsers; `:20152-20193`
   compares body-entry outcomes with tree dispatch. Both checks are unaudited.
 - `crates/daemon/src/transform.rs:810-818,917-927` preserves the Option
   serializer_profile wrapper and maps missing/null to the empty typed string.

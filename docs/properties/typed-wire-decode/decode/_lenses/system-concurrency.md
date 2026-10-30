@@ -4,8 +4,8 @@ Provenance: HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 
 - `crates/daemon/src/wire.rs:33-36` owns `Vec<Arc<IngressMessage>>`, not
   references into the transport body. SharedWireBlock keeps another owner.
-- `crates/daemon/src/lib.rs:2946` stores the snapshot cache behind
-  `Arc<Mutex<_>>`; `:4351-4356` obtains a ready request under that lock.
+- `crates/daemon/src/lib.rs:2948` stores the snapshot cache behind
+  `Arc<Mutex<_>>`; `:4361-4366` obtains a ready request under that lock.
 - `crates/daemon/src/wire.rs:1796-1814` has compile-time `Send + 'static`
   assertions for ingress, projection, and TransformRequest, plus malformed
   decode comparison. The assertions are inventoried, not rerun.

@@ -12,7 +12,7 @@ at 90 percent by #903 and at 96 percent by #1068 (see "Update for #1060 at
 `07ea883b5`"). The emergency rerun caller under native authority is not a
 reachable state and has structural coverage through the shared gate. The
 Guarantee's wrapup ordering clause, "before snapshot or boundary work", is
-read from the handler (`crates/daemon/src/lib.rs:7450-7468`) and has no
+read from the handler (`crates/daemon/src/lib.rs:7461-7479`) and has no
 counter in `wrapup_is_refused_under_native_authority`, so the record stays
 partial until that clause is witnessed or dropped (needs human input).
 
@@ -21,7 +21,7 @@ partial until that clause is witnessed or dropped (needs human input).
 All references are verified at HEAD `0ff62b29a`.
 
 - The gate is the first statement of `Handler::prepare_history_summarizer`
-  (`crates/daemon/src/lib.rs:9428-9439`): when
+  (`crates/daemon/src/lib.rs:9439-9450`): when
   `pass.result.fold_authority.eidnara_folds` is false it returns
   `PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics::disabled(NATIVE_AUTHORITY))`.
   `NATIVE_AUTHORITY` is `"native_authority"` (`:26`). `disabled` sets
@@ -86,7 +86,7 @@ and boundary reads.
 ### Q: Does any test reach the emergency rerun caller under native authority?
 
 - Sources examined: the handler tests; `request` defaults
-  (`crates/daemon/src/lib.rs:24445-24447`, 45,000 of 50,000 tokens);
+  (`crates/daemon/src/lib.rs:24457-24459`, 45,000 of 50,000 tokens);
   `an_emergency_rerun_after_publication_keeps_the_change_pending`
   (`crates/daemon/src/fold_authority_handler_tests.rs:656`).
 - Findings: No. The default request is 90 percent, below the emergency
@@ -108,8 +108,8 @@ and boundary reads.
 
 ### Q: Can high usage construct the second caller under native authority?
 
-- Sources examined: `crates/daemon/src/lib.rs:8918-8942`, `:8957-8974`,
-  `:9082`, `:9433-9437` at `0ff62b29a`; the handler tests in
+- Sources examined: `crates/daemon/src/lib.rs:8929-8953`, `:8968-8985`,
+  `:9093`, `:9444-9448` at `0ff62b29a`; the handler tests in
   `fold_authority_handler_tests.rs` and `lib.rs`; portfolio evaluation H2.
 - Findings: No. Native preparation returns `Complete`, which settles in the
   first unit at any pressure; the rerun follows only a completed `Busy`
@@ -125,8 +125,8 @@ and boundary reads.
 
 ### Q: Do the window-cap firing and the archive that `main` added stay behind the gate?
 
-- Sources examined: `crates/daemon/src/lib.rs:5299`, `:5367`, `:5500-5530`,
-  `:9428-9438`; `git log 1d2cd55a0..74e347d9e` (the window-cap and archive
+- Sources examined: `crates/daemon/src/lib.rs:5310`, `:5378`, `:5511-5541`,
+  `:9439-9449`; `git log 1d2cd55a0..74e347d9e` (the window-cap and archive
   commits of #901 and #902).
 - Findings: Yes. `archive_window` and the window-cap cut run inside
   `prepare_history_summarizer_fire`, which only the gated
@@ -143,8 +143,8 @@ Ticket #1061; PR #1068 (head `f04c54e4d`). References are verified at
 `07ea883b5`.
 
 - The gate is the first statement of `prepare_history_summarizer_with`
-  (`crates/daemon/src/lib.rs:9653-9664`); `prepare_history_summarizer`
-  (`:9640-9651`) builds its inputs from the pass's applied authority
+  (`crates/daemon/src/lib.rs:9664-9675`); `prepare_history_summarizer`
+  (`:9651-9662`) builds its inputs from the pass's applied authority
   (`:9648`), and the non-emergency first unit does the same (`:9112`,
   `:9120`). The fire path is `prepare_history_summarizer_fire` (`:5463`),
   and `record_no_fire` is `:6074`.

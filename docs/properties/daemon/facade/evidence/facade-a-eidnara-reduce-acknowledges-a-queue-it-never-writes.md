@@ -10,7 +10,7 @@ handler's own choice of text and `isError` value.
 
 ## Evidence trail
 
-`crates/daemon/src/lib.rs:10482-10588`, `handle_eidnara_reduce_facade`.
+`crates/daemon/src/lib.rs:10493-10599`, `handle_eidnara_reduce_facade`.
 
 Reads only, no writes:
 

@@ -24,7 +24,7 @@ Lenses: state/persistence, lifecycle, failure recovery, system wildcard.
    serialized length. `transform.rs:2048-2089` includes synthetic outputs.
 7. `transform.rs:4923-4930` compares old/new served vectors and assigns the
    new vector into metadata. `divergence.rs:42-95` reports changed records.
-8. `crates/daemon/src/lib.rs:3684-3689`, verified from HEAD, constructs empty
+8. `crates/daemon/src/lib.rs:3686-3691`, verified from HEAD, constructs empty
    process-local snapshot/output/native/projection caches.
 
 ## Failure scenario

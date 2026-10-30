@@ -94,7 +94,7 @@ auto-search records need `auto_search_active`, which is
 `!req.is_subagent && req.auto_search_enabled` (`transform.rs:3519`) and defaults
 to `true` on the wire (`default_auto_search_enabled`, `:865-867`), in the shipped
 producer (`rust-mode-transform.ts:2010`) and in the schema
-(`assets/eidnara.schema.json:1607-1612`, `CONFIGURATION.md:682` (source-catalog path, not present at HEAD)).
+(`assets/eidnara.schema.json:839-844`, `CONFIGURATION.md:682` (source-catalog path, not present at HEAD)).
 
 The three `explicit-config-only` labels rest on a configuration that the shipped
 producer does not emit, and they are not equally solid.
@@ -1492,7 +1492,7 @@ rendering in this pass.
 Fault/timing angle: None.
 Required faults and enabling state: Default configuration is enough.
 `memory.auto_search.enabled` defaults to `true` (`CONFIGURATION.md:682` (source-catalog path, not present at HEAD),
-`assets/eidnara.schema.json:1607-1612`, `transform.rs:865-867`),
+`assets/eidnara.schema.json:839-844`, `transform.rs:865-867`),
 `auto_search_active` needs only a non-subagent request (`:3519`), the prompt
 must clear `DEFAULT_AUTO_SEARCH_MIN_PROMPT_CHARS` of 20 (`config.rs:40`,
 checked `:8806`), at least two non-stopword tokens must match

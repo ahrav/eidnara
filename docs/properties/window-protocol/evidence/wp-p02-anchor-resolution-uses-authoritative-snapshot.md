@@ -43,7 +43,7 @@ and moved by a line diff to `f2442b2f`; each cited test name was found there.
 - `a_declared_row_without_a_rendered_boundary_is_unknown`: reachable after a
   committed truncate whose pass then failed (#875 description).
 - #881 (head `1c66f16c`): the handler resolves once in `start_transform_pass`
-  (`crates/daemon/src/lib.rs:8683`, the call at `:8699`) and again from a
+  (`crates/daemon/src/lib.rs:8694`, the call at `:8710`) and again from a
   fresh snapshot on each CAS attempt; the pass's own load must have the same
   `row_version`. #881 also bounds the null-boundary stale-slice lookup to rows
   at or below the rendered boundary, a refinement of D10 its description
@@ -52,8 +52,8 @@ and moved by a line diff to `f2442b2f`; each cited test name was found there.
 - Review F4 on #831: the outer request kept the first cut while attempts
   re-resolved. #881 folds the served window into `served_request`
   (`crates/daemon/src/transform.rs:1540`), which the summarizer, native
-  attach, ready snapshot, and response read (`crates/daemon/src/lib.rs:8968`,
-  `:9015`); the two handler tests above assert the ready snapshot holds the
+  attach, ready snapshot, and response read (`crates/daemon/src/lib.rs:8979`,
+  `:9026`); the two handler tests above assert the ready snapshot holds the
   served window.
 
 Gate results of the runs cited here, as recorded in the PR descriptions:

@@ -57,7 +57,7 @@ store trigger, so both frozen plans stay readable; a new commit on the
 checked-out branch; a retry while the trigger still refuses completion, after
 which both plans still hold the submit-time head; then the trigger dropped and
 a drain that publishes the frozen plans. `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it`
-(`crates/daemon/src/lib.rs:24632`) does this for a repository with
+(`crates/daemon/src/lib.rs:24644`) does this for a repository with
 commits, a detached HEAD, an unborn HEAD, a plain directory, and a
 repository declaring SHA-256. The head-observation tests freeze a HEAD
 commit stored whole, as an offset delta, and as an id delta in a pack

@@ -31,7 +31,7 @@ record. No permanent prohibition on adding capabilities is inferred.
   performs kernel-client reads. The
   [client, lines 520-537](../../../../../packages/opencode-plugin/src/shared/kernel-client/client.ts#L520)
   sends `kernel.read`, not an `eidnara_search` facade request.
-- [Separate daemon facade, lines 11887-11945](../../../../../crates/daemon/src/lib.rs#L11887)
+- [Separate daemon facade, lines 11887-11945](../../../../../crates/daemon/src/lib.rs#L11898)
   calls `search_history_segments_and_notes_for_session` and emits history
   title/body or note snippets. A direct facade test is not a registered
   model-tool witness and does not expose exact native occurrence bytes.
@@ -53,7 +53,7 @@ record. No permanent prohibition on adding capabilities is inferred.
   names: the pinned Pi-unsupported expectation is invalidated and needs
   review. No fidelity scenario replays Pi history, so Pi still earns no
   P1-P5 coverage from this catalog.
-- [Default configuration, line 335](../../../../../packages/opencode-plugin/src/config/schema/eidnara.ts#L335)
+- [Default configuration, line 335](../../../../../packages/opencode-plugin/src/config/schema/eidnara.ts#L340)
   enables the plugin. The registry and startup paths are production evidence
   for the expected tool surface under the captured configuration.
 

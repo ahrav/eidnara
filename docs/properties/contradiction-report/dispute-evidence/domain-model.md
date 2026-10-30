@@ -74,7 +74,7 @@ exclusive-writer transaction per `kernel.commit` envelope
 Writer categories known today (FACT):
 
 - Ordinary: the `kernel.commit` route, dispatched at
-  `crates/daemon/src/lib.rs:14660`, is the only non-test producer of
+  `crates/daemon/src/lib.rs:14672`, is the only non-test producer of
   `MarkDisputed` and `Contradict` events (grep over `crates/` for
   `EventKind::MarkDisputed|EventKind::Contradict` outside `tests/` returns
   only `admission.rs` itself).

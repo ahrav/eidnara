@@ -91,7 +91,7 @@ kernel store, budget, units, memo, commit gate mutex (`:811`),
 `publish_locked` (`:883-975`): delete epoch, scope, budget,
 `publish_screened_between` for the window (`:907-915`), then
 `capture_documents` in its own batch (`:905-...`). `capture_after_response`
-(`crates/daemon/src/lib.rs:9246-9263`). The request owner runs the
+(`crates/daemon/src/lib.rs:9257-9274`). The request owner runs the
 `AfterResponse` after `settle_prepared` (`lib.rs:13660-13664`;
 `crates/daemon/src/dispatch.rs:24-35`, `:445-460`). `publish_batch`
 (`crates/daemon/src/harness_sources.rs:1292-1298`), `Published` (`:549-562`),
@@ -131,8 +131,8 @@ edges). Descriptor retirement is `retire_capture_observation`
 is installed (`lib.rs:4000-4008`), with `SAMPLE_INTERVAL = 30 s` and
 `SAMPLE_RETRY_INTERVAL = 5 s` (`lifecycle.rs:16-18`).
 
-S7 routed reads. `docs/host-wire-protocol.md:795-799` and `:819-827`
-(`:827` is `review.use_outcome`, added by #1157).
+S7 routed reads. `docs/host-wire-protocol.md:823-827` and `:847-855`
+(`:855` is `review.use_outcome`, added by #1157).
 `crates/daemon/src/memory_reviewer/wire.rs:1-26`; strict request structs
 (`:33-60`, `deny_unknown_fields`); `bind_review` (`:203-220`) calls
 `kernel_request` (`crates/daemon/src/kernel_routes/mod.rs:446-455`) which
@@ -141,8 +141,8 @@ before `parse_request_body` (`:463-474`, removes `ENVELOPE_KEYS` `:461`:
 `method`, `kind`, `session_id`, `project_root`). `authority_project`
 (`wire.rs:131-139`) maps NotModule to `disabled`, store error to
 `store_unavailable`. Observational harness `cli`
-(`crates/daemon/src/lib.rs:274-281`), excluded from background views
-(`:413-417`). `kernel.read` header `read.rs:1-4`.
+(`crates/daemon/src/lib.rs:275-282`), excluded from background views
+(`:414-418`). `kernel.read` header `read.rs:1-4`.
 
 S8 tool surface (re-verified at the #1164 branch tip; #1161 added
 `dispute`). `EIDNARA_MEMORY_ACTIONS =
@@ -218,7 +218,7 @@ C11 `storage/AGENTS.md`: single baseline; reject mismatches.
 baseline refuses to open; the activation gate binds `memstore_baseline_digest`.
 C12 `local_file.rs:240`: owners first, evidence second; cited evidence kept;
 descriptors retired.
-C13 `host-wire-protocol.md:799`, `:819`: strict bodies, project checked before
+C13 `host-wire-protocol.md:827`, `:847`: strict bodies, project checked before
 the body is read, `disabled`/`store_unavailable` terminals.
 C14 `types.ts:6-33`, `tools.ts:122-125`: closed action list; `get` and
 `candidates` are the reads; an omitted allowlist admits the default actions (all but
@@ -293,7 +293,7 @@ for `None` (`project.rs:212-214`). The superset claim holds; a P5 consumer
 that uses the Kernel API without the daemon filter would see unscoped rows
 the daemon never serves.
 
-D6 `host-wire-protocol.md:797` names the envelope as `method`, `session_id`,
+D6 `host-wire-protocol.md:825` names the envelope as `method`, `session_id`,
 `project_root`; `ENVELOPE_KEYS` (`kernel_routes/mod.rs:461`) also strips
 `kind`. A body field named `kind` is therefore not `invalid_params`. The doc
 is silent on `kind`; recorded as a lead, not a defect.

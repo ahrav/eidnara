@@ -31,8 +31,8 @@ the difference noted.
 ## Lens: architecture and data flow
 
 - Entry: the daemon's method match dispatches `"kernel.commit"` to
-  `HandlerCore::handle_kernel_commit` at `crates/daemon/src/lib.rs:14660`.
-  The plan cites `:14475` at its baseline; the arm moved to `:14660` at
+  `HandlerCore::handle_kernel_commit` at `crates/daemon/src/lib.rs:14672`.
+  The plan cites `:14487` at its baseline; the arm moved to `:14672` at
   HEAD. The arm carries no `#[cfg]` attribute, so the route is reachable in
   a default build.
 - `kernel_request` binds the route scope from the channel's management

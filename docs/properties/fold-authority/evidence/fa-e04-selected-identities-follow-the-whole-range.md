@@ -40,7 +40,7 @@ References are verified at `0ff62b29a` unless another tree is named.
 - Replaced clause: `admit` stops the chunk at the 256 KiB serialized budget
   (`:139-143`), so the range itself now shrinks to fit. That is FA-N13.
 - The identity map comes from the pass's projection
-  (`crates/daemon/src/lib.rs:5625-5629` passes `&projection.identity_by_mid`),
+  (`crates/daemon/src/lib.rs:5636-5640` passes `&projection.identity_by_mid`),
   and publication validates the selection against the stored rows (#905,
   FA-E09).
 - Witnesses: `BudgetCase::assert_matches_oracle`
@@ -59,8 +59,8 @@ References are verified at `0ff62b29a` unless another tree is named.
   that span; `assert_matches_oracle` compares it with the firing's selection
   exactly.
   `history_summarizer_boundary_construction_matches_owned_reference`
-  (`crates/daemon/src/lib.rs:18618`) asserts `MissingBlockIdentity` for the
-  `synthetic-call` message at budget 32,000 (`:18836-18841`).
+  (`crates/daemon/src/lib.rs:18630`) asserts `MissingBlockIdentity` for the
+  `synthetic-call` message at budget 32,000 (`:18848-18853`).
 - `budget_stop_and_tool_only_ranges_are_recorded`
   (`history_summarizer_chunk.rs:2814`), the spec's cited check
   (D`:1744` at `265df096`), still checks tool-only ranges and the budget

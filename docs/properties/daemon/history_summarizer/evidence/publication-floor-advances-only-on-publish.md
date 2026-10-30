@@ -12,7 +12,7 @@ rather than accepting.
 
 ### The claim
 
-`crates/daemon/src/lib.rs:8481-8489`:
+`crates/daemon/src/lib.rs:8492-8500`:
 
 > Emergency passes must return the freshest fold obtainable in this request: an
 > active run can publish between this request's transform and any of the arms

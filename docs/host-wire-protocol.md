@@ -724,6 +724,34 @@ drops the block whole, unknown fields are dropped, and fields are additive.
 | `retained_bytes` | unsigned integer | stored bytes of the candidate rows when the sweep last finished a full cycle of the table |
 | `pass_ms_last`, `pass_ms_max` | unsigned integer | wall time of the last and the longest pass |
 
+The `context` component MAY also carry a sanitized `metrics.verifier` object
+describing the attestation verifier's bounded background pass over each bound
+project's live memory decisions, which runs only while the user-only
+`verifier.enabled` (default false) is on; the daemon ignores a project-tier
+value with a warning, and each plugin strips it from the project tier before
+merging. The counters are process-local and start at zero when the daemon
+starts. Every field is a count, a byte total, or milliseconds; no field
+carries an identity, a path, a digest, an oid, a reason string, or a project.
+The block is sanitized field by field under the `kernel` integer rules: a
+non-object drops the block whole, unknown fields are dropped, and fields are
+additive. Each decision the pass considers lands in exactly one verdict or
+unverifiable bucket, so those buckets sum to `considered`; the effect counters
+increment only after the Kernel commit returns.
+
+| field | type | rule |
+| --- | --- | --- |
+| `considered` | unsigned integer | decisions counted in a verdict or unverifiable bucket |
+| `match`, `mismatch` | unsigned integer | verdicts: the cited bytes at the anchored commit hash to the cited digest, or differ from it |
+| `unavailable_path_absent`, `unavailable_not_a_blob`, `unavailable_object_unreadable`, `unavailable_over_budget`, `unavailable_deadline`, `unavailable_repository_unbound`, `unavailable_repository_unopenable` | unsigned integer | verdicts with no comparable bytes, by reason; `path_absent`, `not_a_blob`, and `over_budget` are never read again for the same decision and commit while the daemon runs, and every other reason is retried in at most three passes |
+| `unverifiable_no_anchor`, `unverifiable_anchor_not_git`, `unverifiable_no_citation`, `unverifiable_citation_not_document`, `unverifiable_evidence_retired`, `unverifiable_descriptor_retired`, `unverifiable_digest_missing`, `unverifiable_self_source`, `unverifiable_invalid_document_path` | unsigned integer | decisions outside the verifier's input, by reason |
+| `skipped_attested`, `skipped_stale` | unsigned integer | decisions skipped before any repository read or write: an attestation of the decision at its anchored commit exists, or the decision is already stale |
+| `attestation_committed`, `attestation_replayed`, `stale_committed` | unsigned integer | write sets committed, replayed from their receipt, and stale marks committed |
+| `commit_refused_changed`, `commit_refused_invalid_write_set`, `commit_refused_busy`, `commit_refused_deadline`, `commit_refused_io`, `commit_refused_other` | unsigned integer | write sets that wrote nothing, by reason: the decision changed after classification; the write set failed its check; the Kernel refused the commit as busy, past its deadline, on an I/O failure, or for another reason |
+| `commit_conflict` | unsigned integer | write sets whose key was recorded under another verdict; never retried |
+| `witness_degraded`, `witness_degraded_skipped`, `unavailable_skipped` | unsigned integer | write sets rolled back because the witness admission stayed below `verified`, and decisions passed over after three such passes, or after three passes of transient reasons and refusals |
+| `bytes_read` | unsigned integer | blob content bytes read |
+| `passes`, `last_pass_ms` | unsigned integer | passes whose flag check found a project enabled, and the wall time of the last one |
+
 The `model_execution` component MAY also carry a sanitized
 `metrics.aws_credentials` object: the host's cached observation of the
 selected AWS credential source, read from a shared cell with no credential

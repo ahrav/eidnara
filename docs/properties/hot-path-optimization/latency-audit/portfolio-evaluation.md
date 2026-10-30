@@ -116,8 +116,8 @@ media hash the derived content string instead (`:542-543`, `:569-570`,
 the correction; the catalog does not.
 
 One rationale over-claims: W7 says `prepare_history_summarizer_fire` "calls it every
-pass". The call at `crates/daemon/src/lib.rs:5051` runs only after the state
-load succeeds (`:5013-5025`), when no `pending_rewrite` is set (`:5036`),
+pass". The call at `crates/daemon/src/lib.rs:5062` runs only after the state
+load succeeds (`:5024-5036`), when no `pending_rewrite` is set (`:5047`),
 and when no live history_summarizer completion is pending (`:5042`); the handler
 skips `prepare_history_summarizer_fire` entirely for subagent passes (`:8234`). The
 check itself is a conditional on the call and stays `always`; the rationale
@@ -258,14 +258,14 @@ Anchor verification against HEAD. Every anchor below was read; none is off.
 | `crates/daemon/src/m1_compose.rs:231` | verified | `memory_update_count: 0`; field declared at `:96`; sole reader `transform.rs:4310` |
 | `crates/daemon/src/tail_hygiene.rs:542-543`, `:569-570`, `:584-585` | verified | empty or sentinel content excluded with derived content, not `block.bytes` |
 | `crates/daemon/src/tail_hygiene.rs:513-526`, `:601-604`, `:280-289` | verified | pre-match and kind-level exclusions hash `block.bytes`; `excluded_part` helper |
-| `crates/daemon/src/lib.rs:5051` | verified | `effective_config` after early returns at `:5013-5025`, `:5036`, `:5042` |
-| `crates/daemon/src/lib.rs:8234` | verified | `is_subagent` skips `prepare_history_summarizer_fire` |
-| `crates/daemon/src/lib.rs:4556-4565` | verified | `#[cfg(test)] fixed_config` short-circuit at `:4557-4560` |
+| `crates/daemon/src/lib.rs:5062` | verified | `effective_config` after early returns at `:5024-5036`, `:5047`, `:5053` |
+| `crates/daemon/src/lib.rs:8245` | verified | `is_subagent` skips `prepare_history_summarizer_fire` |
+| `crates/daemon/src/lib.rs:4567-4576` | verified | `#[cfg(test)] fixed_config` short-circuit at `:4568-4571` |
 | `crates/daemon/src/transform.rs:1254`, `:1331`, `:1162` | verified | key `post_attach_ms`, value `timings.post_attach`, field `post_attach` |
 | `packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts:1013-1042` | verified | 22 stage keys by field name; `post_attach` at `:1035` |
-| `crates/daemon/src/lib.rs:11805-11827` | verified | cap, footprint, `try_reserve_resident`, `Value` parse, dispatch |
-| `crates/daemon/src/lib.rs:15458-15470` | verified | `invalid_params` and `queue_full` helpers |
-| `crates/daemon/src/lib.rs:8036-8048`, `:8066` | verified | prompt freeze, route-channel insert, `ticket.accept()` |
+| `crates/daemon/src/lib.rs:11816-11838` | verified | cap, footprint, `try_reserve_resident`, `Value` parse, dispatch |
+| `crates/daemon/src/lib.rs:15470-15482` | verified | `invalid_params` and `queue_full` helpers |
+| `crates/daemon/src/lib.rs:8047-8059`, `:8077` | verified | prompt freeze, route-channel insert, `ticket.accept()` |
 | `crates/host-runtime/src/handler.rs:474-491` | verified | `try_reserve_resident` is `scratch.try_charge`; capacity doc |
 | `crates/host-runtime/src/handler.rs:465-472`, `:387-400` | verified | `output_from_writer` needs `Send + 'static`; Direct arm passes the charge unshrunk |
 | `crates/host-runtime/tests/support/mod.rs:441-455` | verified | `direct_fill` arm; no other `direct_fill` string in the tree |
@@ -278,15 +278,15 @@ Anchor verification against HEAD. Every anchor below was read; none is off.
 | `crates/host-runtime/src/frame_channel.rs:166-200`, `:248-275` | verified | `DirectFrame` owns a boxed `'static` serializer; `send_before` |
 | `crates/kernel/src/cas/ingest.rs:333-342`, `:591-608` | verified | lock then `check_budget`; walk, presence, projected cap |
 | `crates/daemon/src/token_cache.rs:135-137`, `:57` | verified | `u32` bypass; thread-local counters |
-| `crates/daemon/src/lib.rs:2243-2257` | verified | the declared-bytes sum, 14 terms |
-| `crates/daemon/src/config.rs:266-288` | verified | doc on repeated warnings; clone at `:288` |
+| `crates/daemon/src/lib.rs:2244-2258` | verified | the declared-bytes sum, 14 terms |
+| `crates/daemon/src/config.rs:270-292` | verified | doc on repeated warnings; clone at `:292` |
 | `crates/memory-store/src/lib.rs:6482-6496` | verified | `trace_pass_received` and its "never contends" doc |
 | `crates/memory-store/src/lib.rs:5900`, `:5914`, `:5921`, `:5928` | verified | the only `fail_next_*_for_test` seams; none for `pass_trace` |
 | `crates/daemon/src/conditional_note_evaluation.rs:163-192` | verified | doc at `:163-165`, `fn next_occurrence` at `:166` |
 | `crates/daemon/src/history_summarizer_chunk.rs:692`, `:742-748` | verified | truncation call and function head |
-| `crates/daemon/src/lib.rs:8131`, `:8194-8201`, `:8202`, `:8209-8214`, `:8224-8232` | verified | trace calls, commit call, roots insert, `#[cfg(test)]` hook |
-| `crates/daemon/src/lib.rs:8263`, `:8289`, `:8315`, `:8387-8394`, `:8398-8403` | verified | the three Emergency95 awaits; projection-cache store; guidance removal |
-| `crates/daemon/src/lib.rs:2906-2911` | verified | hook field is `#[cfg(test)]`, not `test-support` |
+| `crates/daemon/src/lib.rs:8142`, `:8205-8212`, `:8213`, `:8220-8225`, `:8235-8243` | verified | trace calls, commit call, roots insert, `#[cfg(test)]` hook |
+| `crates/daemon/src/lib.rs:8274`, `:8300`, `:8326`, `:8398-8405`, `:8409-8414` | verified | the three Emergency95 awaits; projection-cache store; guidance removal |
+| `crates/daemon/src/lib.rs:2908-2913` | verified | hook field is `#[cfg(test)]`, not `test-support` |
 | `packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts:77-107` | verified | seed at `:85`, catch at `:97-104` |
 | `packages/opencode-plugin/src/hooks/context/read-session-db.ts:37-67`, `:73-82` | verified | path-keyed connection cache; `isMidTurn` |
 | `packages/opencode-plugin/src/shared/with-timeout.ts:2`; `module-wire.ts:635-640`; `Cargo.toml:45` | verified | 2000 ms; paging measure; `raw_value` only |
@@ -300,10 +300,10 @@ New anchors this evaluation adds, all read at HEAD:
 `crates/host-runtime/src/panic_boundary.rs:11-13`, `:30-34`, `:36-50`,
 `:52-55`, `:60-72`; `crates/daemon/src/kernel_routes/mod.rs:462-468`;
 `crates/daemon/src/kernel_routes/ingest.rs:513-517`, `:716-722`, `:577`,
-`:797`; `crates/daemon/src/lib.rs:3808`, `:3859`;
+`:797`; `crates/daemon/src/lib.rs:3810`, `:3862`;
 `crates/host-runtime/src/routing.rs:591`;
 `crates/daemon/src/dispatch.rs:132-148`,
-`:237-249`; `crates/daemon/src/lib.rs:12014-12070`;
+`:237-249`; `crates/daemon/src/lib.rs:12025-12081`;
 `packages/opencode-plugin/src/hooks/context/read-session-db.test.ts:8`, `:22`.
 
 Constructibility per group, against the test infrastructure found:
@@ -1019,7 +1019,7 @@ None.
 | Gap | Closed by | Notes |
 | --- | --- | --- |
 | 1, finding 13 (panic redaction across the worker boundary), with finding 17 folded in | W12 `worker-thread-panics-stay-inside-the-redaction-boundary`, safety, `always`, default-production | Verified: the guard is the thread-local `CALLBACK_POLL_DEPTH` (`panic_boundary.rs:11-13`); the hook prints the redacted string only when the panicking thread's depth is non-zero and otherwise forwards the full panic to the previous hook (`:40-47`); `kernel_routes::blocking` (`mod.rs:462-468`) runs its closure on a `spawn_blocking` worker with no guard entry, so a panic there reaches the default hook. The terminal clause disagrees with HEAD for kernel routes: `blocking` maps the `JoinError` to a `store_unavailable` response by documented intent (`mod.rs:460-467`), while the host maps an in-handler panic to `internal_error` (`dispatch.rs:985-989`). Both sides are cited in the record and the choice is an open question (needs human input). The thread-local inventory (finding 17) is in the record's Fault/timing angle. |
-| 2, finding 12 (C3 and W6 vacuous under a default campaign) | C6 `side-channel-row-is-due-during-a-drain` and W13 `cron-schedule-is-evaluated-for-a-configured-project`, both reachability, `sometimes`, explicit-config-only | Witnesses were chosen over `always-or-unreached` because both enabling states are constructible from fixtures already in the tree: `fail_next_history_summarizer_side_channel_for_test` is set-valued (`memory-store/src/lib.rs:5905-5908`), the memory-store fixture publishes all three kinds (`:18712-18750`), and the daemon status test drives a pass drain against a pending row (`daemon/src/lib.rs:35555-35612`); the scheduler tests build a `MODULE`-authority project with a real cron on a real store and tick a `ManualClock` past its instant (`memory_classifier_scheduler.rs:586-600`, `:680-704`). Bias 4 is therefore answered in favour of the witnesses; a human may still prefer the exemption. |
+| 2, finding 12 (C3 and W6 vacuous under a default campaign) | C6 `side-channel-row-is-due-during-a-drain` and W13 `cron-schedule-is-evaluated-for-a-configured-project`, both reachability, `sometimes`, explicit-config-only | Witnesses were chosen over `always-or-unreached` because both enabling states are constructible from fixtures already in the tree: `fail_next_history_summarizer_side_channel_for_test` is set-valued (`memory-store/src/lib.rs:5905-5908`), the memory-store fixture publishes all three kinds (`:18712-18750`), and the daemon status test drives a pass drain against a pending row (`daemon/src/lib.rs:35568-35625`); the scheduler tests build a `MODULE`-authority project with a real cron on a real store and tick a `ManualClock` past its instant (`memory_classifier_scheduler.rs:586-600`, `:680-704`). Bias 4 is therefore answered in favour of the witnesses; a human may still prefer the exemption. |
 | 3, finding 16 (plugin cache versus a replaced database file) | P2 extended | Verified: the cache compares the path only (`read-session-db.ts:55`) and `openCodeDbExists` is re-checked per call (`:75`). P2's `Check:` and `Required faults and enabling state` now carry the file-identity clause; the evidence file has the construction and an investigation entry. Whether OpenCode replaces the file in place is not established by anything in this repository and is recorded as an open question (needs external input). Reachability stays unresolved. |
 
 ### Gaps remaining

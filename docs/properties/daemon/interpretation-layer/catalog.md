@@ -56,7 +56,7 @@ evidence, not proof.
 - `default-production`: runs under `DaemonConfig::default()`. Every transform
   request projects its window, so wire flattening (`wire.rs:540`) runs on the
   default path, and the m0 composer reads project documents with
-  `inject_docs: true` (`crates/daemon/src/config.rs:164`; the additive-only
+  `inject_docs: true` (`crates/daemon/src/config.rs:168`; the additive-only
   composer reads them at `crates/daemon/src/transform.rs:2820-2821`).
   Selection, reduced-call rendering, and to-do injection do not run under the
   default: `model_chain` defaults empty (`config.rs:149`), so `eidnara_folds()`
@@ -73,7 +73,7 @@ evidence, not proof.
   `transform.rs:11895`. Class-driven supersession (edit markers, the
   `todowrite` keep-one, zero-value drops) also needs `smart_drops`, which
   defaults false (`config.rs:168`) and reaches selection unchanged
-  (`crates/daemon/src/lib.rs:9585`, `transform.rs:4164-4165`), plus an
+  (`crates/daemon/src/lib.rs:9596`, `transform.rs:4164-4165`), plus an
   emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`,
   `:980`). Capture runs only when `source_capture_enabled` is
   set (`config.rs:154` defaults it false; `sc.rs:291-302` gates on it). The
@@ -81,7 +81,7 @@ evidence, not proof.
   non-empty model chain: `model_chain` defaults empty (`config.rs:149`),
   `eidnara_folds` requires it (`config.rs:190-194`),
   `prepare_history_summarizer_with` returns before the trigger estimate when
-  `eidnara_folds` is false (`crates/daemon/src/lib.rs:9815`), and the firing
+  `eidnara_folds` is false (`crates/daemon/src/lib.rs:9826`), and the firing
   assembler returns `NoModels` (`history_summarizer_chunk.rs:860-864`).
 - `test-only`: the subject is a CI step or an authoring-time artifact, not a
   daemon code path: the literal gate (`scripts/forbid-tool-literals.sh`, run
@@ -296,7 +296,7 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1254` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:254`, `:273`) at `history_summarizer_chunk.rs:1259` and `boundary.rs:1867`.
 Status: active
-Exercised: partial - `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:19641` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:19927-19932`, the input at `lib.rs:26292`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. No test gives one input both a description and a key argument, so the precedence between the first two arms is not asserted.
+Exercised: partial - `history_summarizer_chunk.rs:3312` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:19653` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:19927-19932`, the input at `lib.rs:26292`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. No test gives one input both a description and a key argument, so the precedence between the first two arms is not asserted.
 Guarantee: A non-empty string `description` renders `TC: {description}`; otherwise `extract_key_arg` supplies the argument, cut to 60 scalar values plus `…` for a path-like key, and renders `TC: {name}({key_arg})`; otherwise `TC: {name}`; the result passes through `normalize_text`.
 Check: `always` - `history_summarizer_chunk.rs:1290-1302`. `always` because the function is pure.
 Fault/timing angle: none.

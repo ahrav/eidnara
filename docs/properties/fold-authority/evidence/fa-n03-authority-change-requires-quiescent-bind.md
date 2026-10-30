@@ -27,7 +27,7 @@ All references are verified at HEAD `0ff62b29a`.
 - The change runs inside the attempt loop
   (`crates/daemon/src/transform.rs:2026-2067`). The reset call is wrapped by
   `ctx.sibling_fence.without_sibling` (`:2035-2037`).
-- `BindingFence::without_sibling` (`crates/daemon/src/lib.rs:301-313`) holds
+- `BindingFence::without_sibling` (`crates/daemon/src/lib.rs:302-314`) holds
   the `RouteBindings` mutex while it runs the reset and runs it only while the
   pass's bind sequence is present with no participating sibling
   (`RouteBindings::has_sibling`, `:351-357`). A sibling bind therefore lands
@@ -44,8 +44,8 @@ All references are verified at HEAD `0ff62b29a`.
 - `reset_session_for_recomp` (`:13248`) passes no replacement, so the adopted
   authority survives an ordinary reset. `reset_no_survivor` uses it
   (`crates/daemon/src/transform.rs:2192`).
-- A rerun transform (`rerun_transform`, `crates/daemon/src/lib.rs:9299`, which
-  runs with `PassState::Reload` at `:9311`) plans with `first_pass: false`
+- A rerun transform (`rerun_transform`, `crates/daemon/src/lib.rs:9310`, which
+  runs with `PassState::Reload` at `:9322`) plans with `first_pass: false`
   (`:9212-9215`), so an emergency rerun never changes authority.
 
 Witnesses:

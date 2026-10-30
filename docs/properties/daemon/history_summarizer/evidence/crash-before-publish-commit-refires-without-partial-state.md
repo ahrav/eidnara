@@ -68,7 +68,7 @@ gates reject it.
 
 ### Recovery entry point
 
-`crates/daemon/src/lib.rs:4614-4806` `maybe_spawn_reattach` is what runs this on
+`crates/daemon/src/lib.rs:4625-4817` `maybe_spawn_reattach` is what runs this on
 the next transform request:
 
 - `:4625-4631` load, and `Idle` reports `recovered`.

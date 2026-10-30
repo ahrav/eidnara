@@ -4,7 +4,7 @@
 
 My brief asked whether evaluation can select a note for an action its own
 preconditions forbid. The module side asserts only the phase *name*
-(`crates/daemon/src/lib.rs:14197-14202`) and never re-checks the phase's
+(`crates/daemon/src/lib.rs:14209-14214`) and never re-checks the phase's
 eligibility predicate, so I traced what else stands between a claim and a write.
 The answer is a store-side version fence, which makes this a positive invariant
 worth cataloging rather than the defect the question was hunting.

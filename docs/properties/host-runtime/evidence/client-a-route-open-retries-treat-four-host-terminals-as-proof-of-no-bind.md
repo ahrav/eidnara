@@ -61,7 +61,7 @@ Three things make this mostly safe:
    fresh correlation at `:1177`. So the watermark stays satisfied; see
    `client-a-no-request-frame-carries-a-non-increasing-correlation`.
 3. The absolute deadline at `:458` is checked at `:520` and clamps the sleep at
-   `:523`, so the loop terminates. `docs/host-wire-protocol.md:746` requires
+   `:523`, so the loop terminates. `docs/host-wire-protocol.md:774` requires
    exactly this: "Backoff counts the first attempt, and retry delay or a later stage
    never resets the owning deadline."
 

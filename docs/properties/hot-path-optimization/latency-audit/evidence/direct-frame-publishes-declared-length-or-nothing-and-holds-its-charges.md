@@ -161,7 +161,7 @@ deadline arm and the owned `into_parts` cases only.
 [res-write]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2519-L2531
 [commit-underfill]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2533-L2570
 [res-drop]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2587-L2594
-[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12127-L12182
+[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12138-L12193
 [e2]: ../../catalog.md#request-work-accounting-covers-retained-resources
 [wire63]: ../../../../host-wire-protocol.md#L314
 [hr-terminal]: ../../../host-runtime/catalog.md#req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame
@@ -171,8 +171,8 @@ deadline arm and the owned `into_parts` cases only.
 
 Every line anchor above is as of the recorded head of the investigation. At
 the #1040 head the direct path has a production sender: the daemon's
-`settle_prepared_via` (`crates/daemon/src/lib.rs:13445`) routes every
-transform and exact-length response through `settle_direct_with` (`:13412`)
+`settle_prepared_via` (`crates/daemon/src/lib.rs:13456`) routes every
+transform and exact-length response through `settle_direct_with` (`:13423`)
 and `RequestCtx::output_from_direct_write`
 (`crates/host-runtime/src/handler.rs:565`) to `reserve_direct`
 (`crates/host-runtime/src/dispatch.rs:574`); JSON and emitted bodies keep the

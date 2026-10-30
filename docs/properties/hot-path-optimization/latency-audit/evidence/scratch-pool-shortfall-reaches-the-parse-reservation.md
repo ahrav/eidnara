@@ -126,8 +126,8 @@ arrives needs a barrier inside the handler that the fixture does not expose.
 [marker]: ../../../../../crates/daemon/src/metered_decode.rs#L114-L121
 [shortfall]: ../../../../../crates/daemon/src/metered_decode.rs#L194-L199
 [count]: ../../../../../crates/daemon/src/metered_decode.rs#L128-L130
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20181-L20238
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20300-L20348
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20193-L20250
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20312-L20360
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [footprint]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15427-L15455

@@ -15,7 +15,7 @@ describe a precondition that a correct implementation can reach.
 
 1. `docs/properties/hot-path-optimization/latency-audit/catalog.md:319-350`
    treats A3 as partial: a held charge, not concurrent ring requests.
-2. `crates/daemon/src/lib.rs:20261-20276` exposes `TestPool::hold` backed by
+2. `crates/daemon/src/lib.rs:20273-20288` exposes `TestPool::hold` backed by
    real ByteBudget permits. This is stronger than inferring pressure from an
    error response or using an unbacked successful reservation.
 3. `:20414-20443` constructs pressure, reads ShortfallMarker, releases the

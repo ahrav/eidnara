@@ -20,9 +20,9 @@ The plan is worktree-only; its hash and external leads are in the catalog.
 - `crates/memory-store/src/lib.rs:232-264` repeats that structure for blocks.
 - `crates/memory-store/src/lib.rs:145-160,266-278` serializes retained
   original when present and otherwise clones typed fields into a mirror.
-- `crates/daemon/src/lib.rs:12924` decodes TransformRequest directly, but
+- `crates/daemon/src/lib.rs:12935` decodes TransformRequest directly, but
   that does not bypass the nested custom deserializers.
-- `crates/daemon/src/lib.rs:8116` uses from_value for the tree entry.
+- `crates/daemon/src/lib.rs:8127` uses from_value for the tree entry.
 - The compared wire definitions are unchanged from `e451a2b4`.
 
 The owning path is default-production: ordinary transform bodies reach these
@@ -44,7 +44,7 @@ Allocation counts cannot discriminate those causes without source evidence.
 
 The condition applies at wire construction and serialization on both entries.
 It does not require the complete handler to scan input only once. The probe
-and compatibility walk remain at `crates/daemon/src/lib.rs:15733-15765`.
+and compatibility walk remain at `crates/daemon/src/lib.rs:15745-15777`.
 The page and non-transform tree lane remains intentionally materialized.
 Internally tagged enums may buffer serde content under accepted KTD1.
 

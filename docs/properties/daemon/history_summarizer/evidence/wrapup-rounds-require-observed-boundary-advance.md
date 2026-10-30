@@ -64,7 +64,7 @@ bounds.
 
 ### The guard that survives the loop
 
-`crates/daemon/src/lib.rs:4594-4612` `try_claim_wrapup_session` returns
+`crates/daemon/src/lib.rs:4605-4623` `try_claim_wrapup_session` returns
 `Err(rounds)` when a wrapup is already live, and the caller reports "wrapup already
 in progress, {rounds} rounds done" (`:6680-6685` region). The `WrapupSessionGuard`'s
 `Drop` (`lib.rs:3198-3220`) releases it, so a panic in the loop does not wedge the
@@ -129,8 +129,8 @@ requires be stated in the code's own units. Two dependencies:
 ### Q: Can a fence rejection with no cooldown recur every round until the budget expires?
 
 - Sources examined: `crates/daemon/src/history_summarizer.rs:533-547` and `:1786-1801`
-  (abandon without cooldown); `crates/daemon/src/lib.rs:5519-5526`
-  (`FenceRejected` maps to `SnapshotStale`), `:6915-6930` (the post-assembly
+  (abandon without cooldown); `crates/daemon/src/lib.rs:5530-5537`
+  (`FenceRejected` maps to `SnapshotStale`), `:6926-6941` (the post-assembly
   generation re-check), `:6872-6887` (the backoff check), `:6249-6266` region for
   `ready_generation_matches` usage, and `lib.rs:3296-3322`
   (`WrapupSnapshotPublicationFence`).

@@ -5,7 +5,7 @@
 Building the configuration table's "takes effect" column. Every other key has
 one or two consumers. `transport_setup_deadline` has two, and they are serial on
 the same task, which means the configured value bounds a stage rather than an
-operation. `docs/host-wire-protocol.md:731` forbids exactly that.
+operation. `docs/host-wire-protocol.md:759` forbids exactly that.
 
 ## Evidence trail
 
@@ -56,7 +56,7 @@ whenever it is called.
 At the defaults in `config.rs:223` and `:227`, both 2 seconds, the host's total
 pre-service budget is 2 + 2 + 2 = 6 seconds.
 
-The documented client side, `docs/host-wire-protocol.md:737`:
+The documented client side, `docs/host-wire-protocol.md:765`:
 
 > | discovery, setup-socket authentication, descriptor transfer, and ring
 > attachment | one 2 s absolute handshake deadline |

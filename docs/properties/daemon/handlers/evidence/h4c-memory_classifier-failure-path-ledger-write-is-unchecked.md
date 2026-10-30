@@ -6,7 +6,7 @@ Superseding note: the `dream_task_commands` table and `record_dream_task_command
 
 `handle_memory_classifier_run_task` writes its ledger row twice, on two different exits, and
 handles the result differently each time. The success path at
-`crates/daemon/src/lib.rs:10016` matches the result, orders a purge after
+`crates/daemon/src/lib.rs:10027` matches the result, orders a purge after
 durability, and carries three comment blocks reasoning about exactly this. The
 failure path at `:9989`, twenty-seven lines earlier, binds the same call to `let _`.
 

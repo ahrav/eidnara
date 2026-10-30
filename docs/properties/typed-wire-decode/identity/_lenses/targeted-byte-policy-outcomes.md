@@ -7,7 +7,7 @@ plan's FlatBlock consumer table. W1 is invalidated; this is not measurement.
 
 Hash consistency alone does not prove policy equivalence. Verified consumers:
 
-- `crates/daemon/src/lib.rs:17275-17287`: original token counts and lengths.
+- `crates/daemon/src/lib.rs:17287-17299`: original token counts and lengths.
 - `crates/daemon/src/boundary.rs:966-1108`: token prefixes and suffix bounds.
 - `crates/daemon/src/transform.rs:5885-5913,4592-4602`: protected/publication floor.
 - `crates/daemon/src/transform.rs:6377-6408`: selection byte size.

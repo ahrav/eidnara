@@ -19,7 +19,7 @@ All references are verified at `07ea883b5`, the head of #1071, which holds
   (`crates/daemon/src/edit_recipe.rs:102`).
 - A native pass keeps the retained output as a `previous` source only when
   the caller offers that revision and the revert epoch matches
-  (`crates/daemon/src/lib.rs:2582-2589`, read at `:9740-9747`).
+  (`crates/daemon/src/lib.rs:2583-2590`, read at `:9751-9758`).
 - `a_repeated_native_pi_window_reconstructs_identical_rows`
   (`crates/daemon/src/pi_native_serving_tests.rs:778`) binds native with a
   live chain and repeats the closed-role window (`:312`). Its arm table

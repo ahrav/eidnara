@@ -15,7 +15,7 @@ The independent review corrects discovery's overbroad freeze of all boundaries.
 
 1. `docs/host-wire-protocol.md:304-314` separates the 64 MiB transport limit
    from application `invalid_params` at facade/transform caps.
-2. `crates/daemon/src/lib.rs:16144-16161` admits bodies at the byte cap and
+2. `crates/daemon/src/lib.rs:16156-16173` admits bodies at the byte cap and
    refuses larger ones, using route classification for the wider cap.
 3. `:16084-16093` checks a byte-derived footprint floor and precharges escape
    scratch. `:16099-16136` maps permanent refusal to `invalid_params` and
@@ -23,7 +23,7 @@ The independent review corrects discovery's overbroad freeze of all boundaries.
 4. `crates/daemon/src/metered_decode.rs:246-303` tries bounded batches down to
    the exact shortfall. Needed bytes above capacity are permanent; insufficient
    free capacity at an otherwise fitting step is transient.
-5. `crates/daemon/src/lib.rs:20188-20229` compares both lanes at
+5. `crates/daemon/src/lib.rs:20200-20241` compares both lanes at
    `footprint - 1` and `footprint`, computed during that same test run.
 6. `:20414-20470` holds a real charge and tests transient versus permanent
    classification. `:20533-20580` checks route/store effects around refusal.
@@ -86,7 +86,7 @@ This is not blanket invariance of the admitted set for every possible input.
 ### Q: Is witness retuning compatible with the requested freeze?
 
 - Sources examined: P:L18, P:L51, P:L70, P:L88, P:L164, P:L176;
-  `crates/daemon/src/lib.rs:20188-20199`.
+  `crates/daemon/src/lib.rs:20200-20211`.
 - Findings: The plan contains both preservation and retuning instructions.
   Dynamic-capacity tests cannot decide historical absolute stability.
 - Missing evidence: Owner disposition if an original case changes under KTD4.

@@ -24,6 +24,7 @@ pub(crate) mod divergence;
 pub mod edit_receipts;
 pub mod edit_recipe;
 pub mod fold_authority;
+pub mod verifier_task;
 use fold_authority::FoldAuthorityIntent;
 
 /// The no-fire reason of a session whose fold authority is the harness's native compaction.
@@ -2809,6 +2810,8 @@ pub struct HandlerCore {
     use_outcome_lifecycle: Arc<use_outcome_writer::LifecycleCounts>,
     /// The MemoryReviewer sampler's published block; `health()` and status read it and never touch the ledger.
     memory_reviewer_status: Arc<memory_reviewer::lifecycle::MemoryReviewerStatus>,
+    /// The attestation verifier task's counters, reported as `metrics.verifier`.
+    verifier_counters: Arc<attestation_verifier::bounded_pass::Counters>,
     /// `initialize` decodes the storage descriptor, and `activate` consumes it: malformed descriptors fail before publication, while storage opens after transport publication.
     pending_storage: Mutex<Option<StorageDescriptor>>,
     /// `spawn_gate` serializes the task-admission check against shutdown.
@@ -3832,6 +3835,7 @@ impl Handler {
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::clone(&kernel),
             memory_reviewer_status: Arc::default(),
+            verifier_counters: Arc::default(),
             memory_reviewer_host: Mutex::new(None),
             memory_reviewer_home: Arc::default(),
             memory_reviewer_acceptance_record: Arc::default(),
@@ -3999,6 +4003,7 @@ impl HandlerCore {
         let cancel = self.cancel.clone();
         let store_slot = Arc::clone(&self.store);
         let memory_reviewer_status = Arc::clone(&self.memory_reviewer_status);
+        let verifier_counters = Arc::clone(&self.verifier_counters);
         let source_capture = Arc::clone(&self.source_capture);
         let contradiction_candidates = Arc::clone(&self.contradiction_candidates);
         let candidates_enabled = self.candidates_enabled();
@@ -4047,6 +4052,12 @@ impl HandlerCore {
                             enabled: Arc::clone(&candidates_enabled),
                             sweep: Default::default(),
                         },
+                        cancel.clone(),
+                    ));
+                    task_admission.spawn(verifier_task::task(
+                        verifier_counters,
+                        Arc::clone(&kernel),
+                        Arc::clone(&bindings),
                         cancel.clone(),
                     ));
                 }
@@ -4375,6 +4386,7 @@ impl Handler {
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::clone(&kernel),
             memory_reviewer_status: Arc::default(),
+            verifier_counters: Arc::default(),
             memory_reviewer_host: Mutex::new(None),
             memory_reviewer_home: Arc::default(),
             memory_reviewer_acceptance_record: Arc::default(),
@@ -13741,6 +13753,7 @@ impl CompositeComponent for Handler {
             "memory_reviewer".to_owned(),
             self.memory_reviewer_status.reported().to_json(),
         );
+        metrics.insert("verifier".to_owned(), self.verifier_counters.to_json());
         metrics.insert(
             "epochs".to_owned(),
             json!({
@@ -26841,6 +26854,7 @@ mod tests {
             memory_auto_capture: false,
             source_capture_enabled: false,
             contradiction_candidates_enabled: false,
+            verifier_enabled: false,
             auto_search: crate::config::AutoSearchConfig::default(),
             terse_text_compression: crate::config::TerseTextCompressionConfig::default(),
             auto_promote: true,

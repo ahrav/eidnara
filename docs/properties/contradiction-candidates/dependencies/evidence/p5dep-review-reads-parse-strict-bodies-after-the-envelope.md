@@ -13,7 +13,7 @@ C13; D6.
 
 ## Evidence trail
 
-- `docs/host-wire-protocol.md:766` opens section 7.8; `:768`: the envelope
+- `docs/host-wire-protocol.md:794` opens section 7.8; `:796`: the envelope
   is `method`, `session_id`, `project_root`; twelve method literals (#1157
   added `review.use_outcome`, making four `review.*` methods); "a strict body
   that carries a field named `v` answers `invalid_params` as any unknown
@@ -82,7 +82,7 @@ there is `store_unavailable`.
 
 ### Q: D6. Is `kind` an intended envelope key?
 
-- Sources examined: `crates/daemon/src/kernel_routes/mod.rs:461-473`, `host-wire-protocol.md:801`, `:833`.
+- Sources examined: `crates/daemon/src/kernel_routes/mod.rs:461-473`, `host-wire-protocol.md:829`, `:861`.
 - Findings: the code strips `kind` with the three documented keys; the doc
   does not name it. A body with a `kind` field is accepted silently.
 - Missing evidence: author intent; whether the transport ever adds `kind`.

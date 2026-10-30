@@ -6,8 +6,9 @@ claim is exercised, not a verdict that it is adequate; adequacy belongs to
 `/low-level-systems:defensive-assertions-and-invariant-guards` for
 production guards. References were verified at the #1170 branch, and the
 rows #1171 added and every row pointing into a file #1171 changed were
-verified at the #1171 branch, and the rows #1172 added and every row pointing
-into a file #1172 changed at the #1172 branch.
+verified at the #1171 branch, the rows #1172 added and every row pointing
+into a file #1172 changed at the #1172 branch, and the rows #1173 added and
+every row pointing into a file #1173 changed at the #1173 branch.
 
 ## Production guards
 
@@ -51,6 +52,14 @@ into a file #1172 changed at the #1172 branch.
 | Witness oracle | `crates/daemon/src/attestation_verifier/attest.rs:369` | the envelope commits only at effective maturity `Verified` and disposition `Active`; otherwise `witness_degraded` | unaudited |
 | Opposite-key refusal | `crates/daemon/src/attestation_verifier/attest.rs:477` in `run` (`:465`) | a recorded key for the other verdict on the same decision and oid is `conflict` | unaudited |
 | Stale path | `crates/daemon/src/attestation_verifier/attest.rs:399` (`mark_stale`), skip at `:425`, admission at `:430` | one `MarkStale` under the latest admission's classes; an already `Stale` decision is skipped; a `MarkStale` returning another disposition is `invalid_write_set` | unaudited |
+| Verifier flag | `crates/daemon/src/config.rs:162` (default), `ConfigKey::VerifierEnabled` user-only; `crates/daemon/src/attestation_verifier/bounded_pass.rs:255` in `Verifier::pass` (`:240`) | the flag is off by default, a project tier cannot set it, and the pass reads it per project before any repository or Kernel read | unaudited |
+| Pass budgets | `crates/daemon/src/attestation_verifier/bounded_pass.rs:424` in `ProjectRun::run` (`:356`); `MAX_VERDICTS` at `:55` | a project stops at N verdicts or N × 256 KiB blob bytes per pass | unaudited |
+| Pass cursor | `crates/daemon/src/attestation_verifier/bounded_pass.rs:416` in `ProjectRun::run` (`:356`) | the cursor moves only over a resolved prefix; a resolved decision behind an unresolved one is remembered | unaudited |
+| Pass skips | `crates/daemon/src/attestation_verifier/bounded_pass.rs:404` (`skipped_stale`), `:480` (`skipped_attested`) in `ProjectRun::decision` (`:446`) | a `Stale` decision and one whose attestation id is registered are skipped before any repository read or write | unaudited |
+| Pass retry bound | `crates/daemon/src/attestation_verifier/bounded_pass.rs:434` (`retry`), `MAX_ATTEMPTS` at `:57` | a transient verdict, a refusal, a `changed` outcome, or a degraded witness resolves on its K-th attempt | unaudited |
+| Pass effect counters | `crates/daemon/src/attestation_verifier/bounded_pass.rs:530` (`ProjectRun::outcome`), after `attest` at `:525` | each outcome increments its effect counter after the commit returns | unaudited |
+| Scope decision page | `crates/kernel/src/slice/read.rs:701` (`scope_decisions_after_within_budget`) | a scope's live decisions after a `(created_commit_seq, object_id)` pair in that order, excluding one source kind, at most a row cap | unaudited |
+| Verifier block sanitizer | `crates/host-runtime/src/control.rs:2112` (`VERIFIER_COUNTERS`) through `sanitize_counters` | `metrics.verifier` keeps each allowlisted unsigned integer no greater than 2^53 and drops every other field | unaudited |
 
 ## Tests
 
@@ -73,7 +82,7 @@ into a file #1172 changed at the #1172 branch.
 | `an_event_that_names_a_disposition_keeps_its_own_outcome` | `crates/kernel/src/admission.rs:5437` | mark stale | unaudited |
 | `policy_revision_matches_policy_content` | `crates/kernel/src/admission.rs:5931` | policy digest | unaudited |
 | `the_served_fold_is_under_the_serving_digest` | `crates/kernel/src/admission.rs:5900` | policy digest | unaudited |
-| `observe_code` (fixture) | `crates/daemon/src/lib.rs:14394` | positive witness | unaudited |
+| `observe_code` (fixture) | `crates/daemon/src/lib.rs:14406` | positive witness | unaudited |
 | `reads_at_a_snapshot_return_what_was_visible_then` | `crates/daemon/tests/kernel_routes.rs:1875` | positive witness; object-subject provenance | unaudited |
 | `a_disposition_preview_reports_visibility_per_surface_and_writes_nothing` | `crates/daemon/tests/kernel_routes.rs:5120` | positive witness; object-subject provenance | unaudited |
 | `a_plugin_route_cannot_declare_a_class_above_the_derived_one` | `crates/daemon/tests/kernel_routes.rs:1145` | plugin table | unaudited |
@@ -171,6 +180,20 @@ into a file #1172 changed at the #1172 branch.
 | `one_attestations_witness_cannot_promote_another` | `crates/daemon/tests/attestation_verifier_attest.rs:1130` | identity; verified via witness; source triple (F1) | unaudited |
 | `a_rollback_after_the_admission_leaves_no_row_and_a_reopened_store_keeps_every_row` | `crates/daemon/tests/attestation_verifier_attest.rs:1176` | one outcome (F11) | unaudited |
 | `no_model_client_is_reachable_from_the_verifier_module` | `crates/daemon/tests/attestation_verifier_attest.rs:1244` | party (AC15) | unaudited |
+| `a_flag_off_pass_runs_nothing_and_a_reload_to_false_stops_the_next_pass` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:396` | flag off (AC10, AC13 reload, F12) | unaudited |
+| `each_pass_verifies_at_most_n_per_project_and_no_project_starves` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:448` | pass bounds (AC11, F13); blob read bounded (per pass) | unaudited |
+| `a_deadline_between_decisions_leaves_exactly_k_verdicts_and_the_cursor_before_the_next` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:515` | cursor (AC4, F7) | unaudited |
+| `a_rolled_back_commit_counts_its_refusal_and_a_replayed_commit_counts_its_replay` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:563` | pass accounting (AC12, F10, F11) | unaudited |
+| `a_concurrent_commit_completes_while_a_verifier_read_is_stalled` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:653` | writer never held across a read (AC13) | unaudited |
+| `a_transient_head_resolves_after_k_passes_and_a_terminal_reason_is_read_once` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:701` | progress under transient; cursor (F13) | unaudited |
+| `a_restart_rescan_writes_nothing_and_counts_skips` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:741` | cursor (restart) | unaudited |
+| `the_task_steps_only_under_the_flag_and_stops_on_cancellation` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:781` | flag off (task) | unaudited |
+| `the_health_block_names_exactly_the_documented_counters` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:831` | counters block and wire table | unaudited |
+| `a_witness_degraded_k_passes_is_skipped_and_the_pass_continues` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:864` | progress under transient; degradation (OQ6-11) | unaudited |
+| `the_page_walks_a_scopes_live_decisions_in_commit_order_after_the_cursor` | `crates/kernel/tests/kernel_scope_decisions.rs:65` | cursor (page order) | unaudited |
+| `every_fixture_row_matches_through_the_configuration_cache` | `crates/daemon/src/config.rs:3919` | flag off (project tier, Rust) | unaudited |
+| `verifier parity fixture` | `packages/opencode-plugin/src/config/index.test.ts:1101`, `packages/pi-plugin/src/config/index.test.ts:754` | flag off (project tier, both plugins) | unaudited |
+| `the_verifier_block_is_sanitized_field_by_field_and_documented` | `crates/host-runtime/src/control.rs:2176` | counters block on the wire | unaudited |
 
 ## Categories with no check found
 
@@ -185,7 +208,10 @@ into a file #1172 changed at the #1172 branch.
 - `p6-new-verifiability-pure-function-of-snapshot`: no test restores the store
   after the first read of a classification, so the incarnation recheck after the
   last read has no behavioral test; `classify` has no seam between its reads.
-- Every proposed `p6-new-*` record: its code does not exist at the branch tip.
+- `p6-new-attestation-stale-on-byte-change`, the one proposed record: its code
+  does not exist at the branch tip.
+- The terminal-reason memory of the bounded pass: it matters only after a
+  restore resets a project's cursor, and no pass test restores the store.
 - The `CurrentConfig` attestation: no write-set test commits a configuration
   document, so `config_present` and `ConfigObserved` are reached only through
   the document-kind rule.

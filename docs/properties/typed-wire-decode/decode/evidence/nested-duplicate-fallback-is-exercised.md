@@ -12,15 +12,15 @@ The accepted replacement is absent; this record imports no prior exercise.
 
 ## Evidence trail
 
-- `crates/daemon/src/lib.rs:12923-12951` routes Invalid typed decode into
+- `crates/daemon/src/lib.rs:12934-12962` routes Invalid typed decode into
   tree parsing, but also reaches Tree without attempting typed decoding.
-- `crates/daemon/src/lib.rs:19762-19964` constructs the current corpus.
-  Its duplicate nested key is IngressMessage.mid at `:19809-19812`.
-- `crates/daemon/src/lib.rs:20045-20052` expects exactly three tree-only
+- `crates/daemon/src/lib.rs:19774-19976` constructs the current corpus.
+  Its duplicate nested key is IngressMessage.mid at `:19821-19824`.
+- `crates/daemon/src/lib.rs:20057-20064` expects exactly three tree-only
   raw-parser cases, all duplicates in existing derived envelopes.
 - `crates/memory-store/src/lib.rs:131-133,255-257` currently collapses
   nested wire duplicates through Value before typed mirror conversion.
-- `crates/daemon/src/lib.rs:20140-20181` pins the observed direct-lane list
+- `crates/daemon/src/lib.rs:20152-20193` pins the observed direct-lane list
   but does not separately observe the new CK/block failure preconditions.
 
 The fallback branch is default-production and already has an ingress-mid

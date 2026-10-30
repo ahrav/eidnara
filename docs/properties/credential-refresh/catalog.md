@@ -40,9 +40,9 @@ non-empty summarizer chain or another operator selection.
   (`crates/daemon/src/bin/eidnara_host/serve.rs:92`, built at `:1313`,
   installed at `:1336`); a daemon without it never evaluates `covers`. Model
   folding needs an admitted, non-empty `model_chain`
-  (`crates/daemon/src/config.rs:181` `eidnara_folds`); a default
+  (`crates/daemon/src/config.rs:185` `eidnara_folds`); a default
   `DaemonConfig` leaves the chain empty and the summarizer answers
-  `no_fire: "no_models"` (`crates/daemon/src/lib.rs:5686`), so the N8 and N9
+  `no_fire: "no_models"` (`crates/daemon/src/lib.rs:5697`), so the N8 and N9
   paths are never entered.
 - `test-only`: N13 is a campaign. The gates, the outage judge, and the lineage
   oracle live in `crates/eval-core/src/qualification.rs`; the runner is

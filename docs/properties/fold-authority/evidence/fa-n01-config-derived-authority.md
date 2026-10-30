@@ -16,7 +16,7 @@ Package references are verified at `d7b330113`, the package tree of #859
 PR C's head; Rust references are verified at `0ff62b29a`.
 
 - Daemon predicate: `DaemonConfig::eidnara_folds`
-  (`crates/daemon/src/config.rs:181-185`) is `admission == Admitted &&
+  (`crates/daemon/src/config.rs:185-189`) is `admission == Admitted &&
   compaction_enabled && !model_chain.is_empty()`. The default config has an
   empty chain and `compaction_enabled: true` (`:142-144`).
 - Daemon resolution: `ConfigCache::effective_with_warnings` (`:310-380`)
@@ -28,7 +28,7 @@ PR C's head; Rust references are verified at `0ff62b29a`.
   `literal_chain_model` (`:1051-1054`); module precedence is
   `module_model_selected` (`:1084-1089`) applied in `apply_key` (`:868-883`).
   Production reaches it through `effective_for_project`
-  (`crates/daemon/src/lib.rs:4744`).
+  (`crates/daemon/src/lib.rs:4755`).
 - TypeScript predicate: `isCompactionEnabled`
   (`packages/opencode-plugin/src/config/agent-disable.ts:21-29`) is
   `compaction.enabled !== false && normalizeSummarizerChain(...).length > 0`.
@@ -51,7 +51,7 @@ PR C's head; Rust references are verified at `0ff62b29a`.
 - Negative controls: `the_pre_parsed_merge_seam_fails_the_fixture`
   (`config.rs:2573`), `jsonc_only_discovery_fails_the_fixture` (`:2588`), and
   "rejects a raw lenient read that skips the loader pipeline"
-  (`packages/opencode-plugin/src/config/index.test.ts:1179`).
+  (`packages/opencode-plugin/src/config/index.test.ts:1217`).
 
 Gate results of the runs cited, as recorded:
 

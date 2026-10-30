@@ -157,7 +157,7 @@ Channel-1 band arithmetic only.
 
 - Sources examined: a repository grep for `"claude-code-anthropic"`. It appears in
   `crates/daemon/src/healing.rs:35` and `:45` (the profile enum and parser), in
-  `crates/daemon/src/lib.rs:528` and `:552` (a profile-epoch comment and table
+  `crates/daemon/src/lib.rs:529` and `:553` (a profile-epoch comment and table
   entry), in `ARCHITECTURE.md:125` ("On verbatim-tail profiles (where
   `fold_is_only_reclaim` is true, e.g. `claude-code-anthropic`) ..."), and in
   roughly twenty Rust test fixtures. No TypeScript sender emits it; the only

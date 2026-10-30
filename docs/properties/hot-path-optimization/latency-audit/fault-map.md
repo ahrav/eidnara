@@ -181,14 +181,14 @@ deferred-punch bound, the durable-counter reconciliation action, the SOFT
 constants' status, and the plugin fail-open default remain owner gates named
 in the records' open questions.
 
-[handle]: ../../../../crates/daemon/src/lib.rs#L11920-L11938
+[handle]: ../../../../crates/daemon/src/lib.rs#L11931-L11949
 [capacity]: ../../../../crates/host-runtime/src/handler.rs#L486-L491
 [pools]: ../../../../crates/host-runtime/src/runtime.rs#L814-L822
 [paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12602-L12611
-[pageapply]: ../../../../crates/daemon/src/lib.rs#L9533-L9548
-[expand]: ../../../../crates/daemon/src/lib.rs#L4214-L4301
-[hook]: ../../../../crates/daemon/src/lib.rs#L8343-L8351
+[testentry]: ../../../../crates/daemon/src/lib.rs#L12613-L12622
+[pageapply]: ../../../../crates/daemon/src/lib.rs#L9544-L9559
+[expand]: ../../../../crates/daemon/src/lib.rs#L4224-L4311
+[hook]: ../../../../crates/daemon/src/lib.rs#L8354-L8362
 [timeout]: ../../../../packages/opencode-plugin/src/shared/with-timeout.ts#L2
 [fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L441-L455
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
@@ -204,7 +204,7 @@ in the records' open questions.
 [b3]: catalog.md#tag-baseline-cache-entry-is-never-mutated-by-a-pass
 [b4]: catalog.md#hygiene-digest-is-kind-prefixed-part-content
 [b5]: catalog.md#replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L24080-L24361
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L24092-L24373
 [c1]: catalog.md#consolidated-cache-state-reads-match-per-consumer-loads
 [c2]: catalog.md#pass-trace-writes-count-every-pass-outside-the-cache-cas
 [c3]: catalog.md#side-channel-drain-delivers-each-row-once-and-keeps-its-schedule

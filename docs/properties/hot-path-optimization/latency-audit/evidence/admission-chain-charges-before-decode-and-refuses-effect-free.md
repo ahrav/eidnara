@@ -317,11 +317,11 @@ passed 7 including the ring test;
 `cargo test -p daemon --locked --features test-support --test parse_charge_covers_typed_decode`
 passed.
 
-[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11920-L11938
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12678-L12719
-[refusal-live]: ../../../../../crates/daemon/src/lib.rs#L15863-L15871
-[toolarge-live]: ../../../../../crates/daemon/src/lib.rs#L15892-L15897
-[queuefull-live]: ../../../../../crates/daemon/src/lib.rs#L15899-L15904
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11931-L11949
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12689-L12730
+[refusal-live]: ../../../../../crates/daemon/src/lib.rs#L15875-L15883
+[toolarge-live]: ../../../../../crates/daemon/src/lib.rs#L15904-L15909
+[queuefull-live]: ../../../../../crates/daemon/src/lib.rs#L15911-L15916
 [meter]: ../../../../../crates/daemon/src/metered_decode.rs#L135-L144
 [need]: ../../../../../crates/daemon/src/metered_decode.rs#L246-L306
 [release]: ../../../../../crates/daemon/src/metered_decode.rs#L211-L217
@@ -331,17 +331,17 @@ passed.
 [ignored]: ../../../../../crates/daemon/src/metered_decode.rs#L670-L676
 [constants]: ../../../../../crates/daemon/src/metered_decode.rs#L58
 [step]: ../../../../../crates/daemon/src/metered_decode.rs#L66
-[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L20047-L20082
-[t-meter]: ../../../../../crates/daemon/src/lib.rs#L20088-L20121
-[t-small]: ../../../../../crates/daemon/src/lib.rs#L20125-L20142
-[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L20147-L20175
+[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L20059-L20094
+[t-meter]: ../../../../../crates/daemon/src/lib.rs#L20100-L20133
+[t-small]: ../../../../../crates/daemon/src/lib.rs#L20137-L20154
+[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L20159-L20187
 [t-count]: ../../../../../crates/daemon/src/metered_decode.rs#L1063-L1091
 [t-floor]: ../../../../../crates/daemon/src/metered_decode.rs#L1116-L1154
-[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L20283-L20295
-[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L20243-L20278
-[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19954-L20000
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20181-L20238
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20300-L20348
+[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L20295-L20307
+[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L20255-L20290
+[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19966-L20012
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20193-L20250
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20312-L20360
 [t-ring]: ../../../../../crates/daemon/tests/direct_host.rs#L437-L558
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L103-L163
 [preset]: ../../../../../crates/daemon/src/prompt_surface.rs#L108-L163
@@ -351,13 +351,13 @@ passed.
 [scratch]: ../../../../../crates/daemon/src/metered_decode.rs#L60-L61
 [escaped]: ../../../../../crates/daemon/src/metered_decode.rs#L815-L822
 [skipped-live]: ../../../../../crates/daemon/src/metered_decode.rs#L480-L609
-[bytecap-live]: ../../../../../crates/daemon/src/lib.rs#L15906-L15929
-[gate]: ../../../../../crates/daemon/src/lib.rs#L15521-L15533
+[bytecap-live]: ../../../../../crates/daemon/src/lib.rs#L15918-L15941
+[gate]: ../../../../../crates/daemon/src/lib.rs#L15533-L15545
 [t-probe-pool]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L310-L333
 [t-prefix]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L284-L308
-[admit]: ../../../../../crates/daemon/src/lib.rs#L15846-L15861
+[admit]: ../../../../../crates/daemon/src/lib.rs#L15858-L15873
 [t-held]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L237-L261
-[witness]: ../../../../../crates/daemon/src/lib.rs#L15514-L15519
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15526-L15531
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488
