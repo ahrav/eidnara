@@ -341,13 +341,8 @@ impl Verifier {
                         self.repository_ids.insert(root.path.clone(), id.clone());
                         id
                     }
-                    Err(failure) => {
-                        let pass_cut = clock.budget().is_exhausted();
-                        if pass_cut && matches!(failure, DerivationFailure::Budget) {
-                            return None;
-                        }
-                        None
-                    }
+                    Err(DerivationFailure::Budget) if clock.budget().is_exhausted() => return None,
+                    Err(DerivationFailure::Budget | DerivationFailure::Unreadable) => None,
                 },
             };
             bound.extend(id.map(|id| (root.path.clone(), id)));

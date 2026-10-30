@@ -1199,7 +1199,13 @@ fn a_pass_budget_exhausted_during_the_derivation_passes_over_the_project() {
     let identity = format!("git:{}", repo.head);
     let decision = store.decision_under(&repo, &identity, "w0", "doc.md", &text(0, 1024));
     // The worktree root's derivation walks its history; a bare root falls back before any walk.
-    let projects = [repo.project_at(&repo.work)];
+    // The second root shows the cut passes over the project's remaining roots.
+    let mut project = repo.project_at(&repo.work);
+    project.roots.push(Root {
+        path: repo.bare.clone(),
+        digest: repo.digest.clone(),
+    });
+    let projects = [project];
     let counters = Counters::default();
     let mut verifier = Verifier::default();
     let clock = Clock::with_budget(|poll, _, budget| {
@@ -1217,7 +1223,7 @@ fn a_pass_budget_exhausted_during_the_derivation_passes_over_the_project() {
 
     let clock = Clock::open();
     verifier.pass(&store.kernel, &projects, &on, &counters, &clock);
-    assert_eq!(clock.polled(Poll::Derive), 1);
+    assert_eq!(clock.polled(Poll::Derive), 2);
     assert_eq!(counters.get("attestation_committed"), 1);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, decision);
 }
@@ -1231,6 +1237,8 @@ fn a_classification_deadline_k_passes_is_skipped_and_the_cursor_passes_it() {
     let repo = Repo::new("classify", &[("doc.md".into(), text(0, 1024))]);
     store.scope(&repo);
     let head = store.decision(&repo, "k0", "doc.md", &text(0, 1024));
+    // A decision after the head shows the deadline stops the pass instead of charging it.
+    store.decision(&repo, "k1", "other.md", &text(1, 1024));
     let counters = Counters::default();
     let mut verifier = Verifier::default();
     for _ in 0..3 {
