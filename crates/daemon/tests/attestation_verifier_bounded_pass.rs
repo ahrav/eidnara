@@ -1577,3 +1577,60 @@ fn a_row_the_standing_read_refuses_is_skipped_after_k_passes() {
     assert_eq!(counters.get("unavailable_skipped"), 1);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, good);
 }
+
+/// A project whose pages ran out with every decision resolved pages from past that sequence on
+/// its next pass, and still verifies a decision committed after it, behind another project's
+/// decisions in commit order; a transient decision committed after it keeps the project paging
+/// from its cursor until the decision resolves.
+#[test]
+fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
+    let store = Store::open();
+    let files: Vec<_> = (0..4)
+        .map(|i| (format!("doc{i}.md"), text(i, 1024)))
+        .collect();
+    let repo = Repo::new("drained", &files);
+    let other = Repo::new("other", &files);
+    store.scope(&repo);
+    store.scope(&other);
+    let first = store.decision(&repo, "d0", &files[0].0, &files[0].1);
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let pass = |verifier: &mut Verifier, projects: &[Project]| {
+        let clock = Clock::open();
+        let report = verifier.pass(&store.kernel, projects, &on, &counters, &clock);
+        assert_accounting(&counters);
+        (report, clock.opens())
+    };
+    let both = [repo.project(), other.project()];
+    assert_eq!(pass(&mut verifier, &both).1, 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, first);
+    let (report, opens) = pass(&mut verifier, &both);
+    assert!(!report.progressed && !report.failed);
+    assert_eq!(opens, 0);
+
+    for i in 0..3 {
+        store.decision(&other, &format!("o{i}"), &files[i].0, &files[i].1);
+    }
+    let later = store.decision(&repo, "d1", &files[1].0, &files[1].1);
+    let unbound = store.decision_under(&repo, "git:unbound", "d2", &files[2].0, &files[2].1);
+    let last = store.decision(&repo, "d3", &files[3].0, &files[3].1);
+    assert_eq!(pass(&mut verifier, &[repo.project()]).1, 2);
+    assert!(exists(&store, &attestation(&later, &repo)));
+    assert!(exists(&store, &attestation(&last, &repo)));
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, later);
+    for attempt in 2..=3 {
+        pass(&mut verifier, &[repo.project()]);
+        assert_eq!(counters.get("unavailable_repository_unbound"), attempt);
+    }
+    assert_eq!(counters.get("unavailable_skipped"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, last);
+    assert!(!exists(&store, &attestation(&unbound, &repo)));
+    let (report, opens) = pass(&mut verifier, &both);
+    assert!(report.progressed && !report.failed);
+    assert_eq!(opens, 3);
+    assert_eq!(counters.get("attestation_committed"), 6);
+    let (report, opens) = pass(&mut verifier, &both);
+    assert!(!report.progressed && !report.failed);
+    assert_eq!(opens, 0);
+    assert_eq!(counters.get("considered"), 9);
+}
