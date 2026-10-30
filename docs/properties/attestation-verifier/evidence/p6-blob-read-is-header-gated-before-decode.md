@@ -6,7 +6,7 @@ The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/i
 
 ## Evidence trail
 
-`read_selection` (`crates/daemon/src/git_sources.rs:553`) reads every header with `try_find_header` (`:605`) and charges it before the second loop decodes any object with `find_object` (`:619`), maps an allocation refusal through `exceeds_allocation` (`:517`), charges the decoded length, and refuses a hash mismatch. The verifier reuses `open_with_slots`, `open`, `object_format`, `parse_oid`, `exceeds_allocation`, `exhausts_slots`, and `OwnPacks`; this ticket widens `exceeds_allocation` and `exhausts_slots` to `pub(crate)`.
+`read_selection` (`crates/daemon/src/git_sources.rs:551`) reads every header with `try_find_header` (`:603`) and charges it before the second loop decodes any object with `find_object` (`:617`), maps an allocation refusal through `exceeds_allocation` (`:515`), charges the decoded length, and refuses a hash mismatch. The verifier reuses `open_with_slots`, `open`, `object_format`, `parse_oid`, `exceeds_allocation`, `exhausts_slots`, and `OwnPacks`; this ticket widens `exceeds_allocation` and `exhausts_slots` to `pub(crate)`.
 
 ## Failure scenario
 

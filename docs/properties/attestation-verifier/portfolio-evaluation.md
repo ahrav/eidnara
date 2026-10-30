@@ -93,9 +93,8 @@ the current line.
   only cross-pack recursion. The driver decodes each object held in the
   repository's own packs itself, after `git_sources::OwnPacks` walks the
   entry's ofs- and ref-delta bases with a hop bound of the index's entry
-  count. An own-pack entry whose walk revisits an entry is
-  `object_unreadable(class)`; an id whose every holding own pack names a base
-  outside that pack or does not decode reads a valid loose copy or is
+  count. An id whose every holding own pack revisits an entry, names a base
+  outside that pack, or does not decode reads a valid loose copy or is
   `object_unreadable(class)`; the object store never reads an id an own index
   holds. An object in an alternate object directory, or in an
   own pack whose index or pack is not a regular file, reads through the object
