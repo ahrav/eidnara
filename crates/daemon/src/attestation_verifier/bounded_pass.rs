@@ -20,9 +20,15 @@
 //! `considered` counts every unverifiable and verdict bucket increment, so the buckets sum to it at
 //! every pass end. Per project per pass at most [`MAX_VERDICTS`] verdicts are computed and at most
 //! [`MAX_VERDICTS`] × [`MAX_BLOB_BYTES`] blob bytes are read; skips and unverifiable decisions do
-//! not count. The pass deadline is polled before each decision, before each object read (through
-//! [`verify`]), and before each commit. Projects are visited in bound-root order from a start that
-//! rotates by one each pass.
+//! not count. The pass deadline is polled before each decision, before each repository identity
+//! derivation, before each object read (through [`verify`]), and before each commit. Projects are
+//! visited in bound-root order from a start that rotates by one each pass.
+//!
+//! A project's decisions resolve their documents against the project's own roots. Each root's
+//! repository identity is derived when the project's turn comes and kept for the process lifetime
+//! once derived; a derivation the deadline or the environment cut short passes over the project
+//! for this pass before any decision is read, so no decision is counted or attempted, and the next
+//! pass derives again. At each pass start the state of a scope or root no longer bound is dropped.
 //!
 //! The cursor passes a decision only once it is resolved, and only while every decision before it
 //! is resolved too; resolved decisions above the cursor are remembered, so no pass reads them
@@ -123,6 +129,7 @@ impl Counters {
     }
 
     fn add(&self, name: &str, amount: u64) {
+        debug_assert!(COUNTERS.contains(&name), "unknown verifier counter {name}");
         if let Some(value) = self.map().get_mut(name) {
             *value = value.saturating_add(amount);
         }
@@ -149,6 +156,8 @@ impl Counters {
 pub enum Poll {
     /// Before a project and before each decision.
     Decision,
+    /// Before a root's repository identity derivation.
+    Derive,
     /// Before the object read [`verify`] names.
     Read(Stage),
     /// Before a write set's commit.
@@ -198,8 +207,6 @@ pub struct Project {
 /// What one pass did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PassReport {
-    /// Whether the pass body ran: some project's flag was on.
-    pub ran: bool,
     /// Whether some decision was resolved or written.
     pub progressed: bool,
     /// Whether a Kernel read or commit was refused, or a verdict was a transient `Unavailable`.
@@ -247,6 +254,14 @@ impl Verifier {
         clock: &dyn PassClock,
     ) -> PassReport {
         let started = Instant::now();
+        self.projects
+            .retain(|scope_id, _| projects.iter().any(|project| project.scope_id == *scope_id));
+        self.repository_ids.retain(|path, _| {
+            projects
+                .iter()
+                .flat_map(|project| &project.roots)
+                .any(|root| root.path == *path)
+        });
         let enabled: Vec<&Project> = projects
             .iter()
             .filter(|project| {
@@ -260,28 +275,23 @@ impl Verifier {
         if enabled.is_empty() {
             return report;
         }
-        report.ran = true;
-        let roots: Vec<(PathBuf, String)> = enabled
-            .iter()
-            .flat_map(|project| &project.roots)
-            .filter_map(|root| {
-                let id = self.repository_id(root, clock.budget())?;
-                Some((root.path.clone(), id))
-            })
-            .collect();
-        let bound: Vec<BoundRoot<'_>> = roots
-            .iter()
-            .map(|(root, repository_id)| BoundRoot {
-                root,
-                repository_id,
-            })
-            .collect();
         let start = self.rotation % enabled.len();
         self.rotation = self.rotation.wrapping_add(1);
         for project in enabled.iter().cycle().skip(start).take(enabled.len()) {
             if clock.passed(Poll::Decision) {
                 break;
             }
+            let Some(roots) = self.roots(project, clock) else {
+                report.failed = true;
+                continue;
+            };
+            let bound: Vec<BoundRoot<'_>> = roots
+                .iter()
+                .map(|(root, repository_id)| BoundRoot {
+                    root,
+                    repository_id,
+                })
+                .collect();
             let state = self.projects.entry(project.scope_id.clone()).or_default();
             let mut run = ProjectRun {
                 kernel,
@@ -306,29 +316,48 @@ impl Verifier {
         report
     }
 
-    /// The repository identity `root`'s documents are published under, derived once per root for
-    /// the process lifetime: the root commit identity when the root is its repository's top
-    /// level, the project digest when the repository has no derivable identity, and `None` for a
-    /// root nested inside a repository, whose document paths are relative to the root and do not
-    /// name the repository tree's paths. A derivation the environment cut short is derived again
-    /// the next pass.
-    fn repository_id(&mut self, root: &Root, budget: &EvalBudget) -> Option<String> {
-        use crate::repository_identity::{MAX_ROOT_WALK_COMMITS, RepositoryIdentity, derive};
-        if let Some(id) = self.repository_ids.get(&root.path) {
-            return id.clone();
+    /// `project`'s roots with a repository identity, in bound-root order, or `None` when a
+    /// derivation this pass was cut short.
+    fn roots(
+        &mut self,
+        project: &Project,
+        clock: &dyn PassClock,
+    ) -> Option<Vec<(PathBuf, String)>> {
+        let mut bound = Vec::new();
+        for root in &project.roots {
+            let id = match self.repository_ids.get(&root.path) {
+                Some(id) => id.clone(),
+                None if clock.passed(Poll::Derive) => return None,
+                None => {
+                    let id = repository_id(root, clock.budget())?;
+                    self.repository_ids.insert(root.path.clone(), id.clone());
+                    id
+                }
+            };
+            bound.extend(id.map(|id| (root.path.clone(), id)));
         }
-        let walk = budget
-            .linked()
-            .bounded_by(Instant::now() + REPOSITORY_WALK_BUDGET);
-        let id = match derive(&root.path, &walk, MAX_ROOT_WALK_COMMITS).ok()? {
+        Some(bound)
+    }
+}
+
+/// The repository identity `root`'s documents are published under: the root commit identity when
+/// the root is its repository's top level, the project digest when the repository has no derivable
+/// identity, and `Some(None)` for a root nested inside a repository, whose document paths are
+/// relative to the root and do not name the repository tree's paths. `None` when the deadline or
+/// the environment cut the derivation short.
+fn repository_id(root: &Root, budget: &EvalBudget) -> Option<Option<String>> {
+    use crate::repository_identity::{MAX_ROOT_WALK_COMMITS, RepositoryIdentity, derive};
+    let walk = budget
+        .linked()
+        .bounded_by(Instant::now() + REPOSITORY_WALK_BUDGET);
+    Some(
+        match derive(&root.path, &walk, MAX_ROOT_WALK_COMMITS).ok()? {
             RepositoryIdentity::Git(id) => std::fs::symlink_metadata(root.path.join(".git"))
                 .is_ok()
                 .then_some(id),
             RepositoryIdentity::Fallback => Some(root.digest.clone()),
-        };
-        self.repository_ids.insert(root.path.clone(), id.clone());
-        id
-    }
+        },
+    )
 }
 
 struct ProjectRun<'a, 'r> {
@@ -444,6 +473,15 @@ impl ProjectRun<'_, '_> {
         Step::Resolved
     }
 
+    /// [`Self::retry`] for an attempt that may have ended at the deadline: an attempt that leaves
+    /// the decision unresolved stops the pass when `deadline` holds, and the K-th resolves it.
+    fn transient(&mut self, object_id: &str, skipped: &str, deadline: bool) -> Step {
+        match self.retry(object_id, skipped) {
+            Step::Unresolved if deadline => Step::StopPass,
+            step => step,
+        }
+    }
+
     fn decision(&mut self, object_id: &str, target: CommitReadTarget) -> Step {
         let budget = self.clock.budget();
         let classification = match classify(self.kernel, object_id, target, self.roots, budget) {
@@ -511,17 +549,13 @@ impl ProjectRun<'_, '_> {
                 return Step::Resolved;
             }
             Verdict::Unavailable(reason) => {
-                let step = self.retry(object_id, "unavailable_skipped");
-                return match reason {
-                    Reason::Deadline(_) => Step::StopPass,
-                    _ => step,
-                };
+                let deadline = matches!(reason, Reason::Deadline(_));
+                return self.transient(object_id, "unavailable_skipped", deadline);
             }
             Verdict::Match | Verdict::Mismatch => {}
         }
         if self.clock.passed(Poll::Commit) {
-            self.retry(object_id, "unavailable_skipped");
-            return Step::StopPass;
+            return self.transient(object_id, "unavailable_skipped", true);
         }
         let outcome = attest(self.kernel, &classification, &evaluation, budget);
         self.outcome(object_id, evaluation.verdict, outcome)
@@ -558,15 +592,56 @@ impl ProjectRun<'_, '_> {
                     },
                     1,
                 );
-                let step = self.retry(object_id, "unavailable_skipped");
-                return if error == KernelError::Deadline {
-                    Step::StopPass
-                } else {
-                    step
-                };
+                return self.transient(
+                    object_id,
+                    "unavailable_skipped",
+                    error == KernelError::Deadline,
+                );
             }
         };
         self.counters.add(counter, 1);
         Step::Resolved
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::classify::Unverifiable;
+    use super::super::{EntryClass, ObjectClass};
+    use super::*;
+
+    #[test]
+    fn every_reason_and_unverifiable_class_names_a_counter() {
+        let reasons = [
+            Reason::PathAbsent,
+            Reason::NotABlob(EntryClass::Tree),
+            Reason::ObjectUnreadable(ObjectClass::Blob),
+            Reason::OverBudget,
+            Reason::Deadline(Stage::Blob),
+            Reason::RepositoryUnbound,
+            Reason::RepositoryUnopenable,
+        ];
+        let classes = [
+            Unverifiable::NoAnchor,
+            Unverifiable::AnchorNotGit,
+            Unverifiable::NoCitation,
+            Unverifiable::CitationNotDocument,
+            Unverifiable::EvidenceRetired,
+            Unverifiable::DescriptorRetired,
+            Unverifiable::DigestMissing,
+            Unverifiable::SelfSource,
+        ];
+        let names = reasons
+            .iter()
+            .map(|reason| format!("unavailable_{}", reason.as_str()))
+            .chain(
+                classes
+                    .iter()
+                    .map(|class| format!("unverifiable_{}", class.as_str())),
+            )
+            .chain(["unverifiable_invalid_document_path".to_owned()]);
+        for name in names {
+            assert!(COUNTERS.contains(&name.as_str()), "{name}");
+        }
     }
 }

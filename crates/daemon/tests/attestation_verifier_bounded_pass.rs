@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use daemon::attestation_verifier::attest::{CITATION_EVENT_KIND, Identity, Outcome, attest};
 use daemon::attestation_verifier::bounded_pass::{
-    COUNTERS, Counters, MAX_VERDICTS, PassClock, Poll, Project, Root, Verifier,
+    COUNTERS, Counters, IDLE_INTERVAL, MAX_VERDICTS, PASS_DEADLINE, PassClock, Poll, Project,
+    RETRY_INTERVAL, Root, Verifier,
 };
 use daemon::attestation_verifier::classify::{BoundRoot, classify};
 use daemon::attestation_verifier::{MAX_BLOB_BYTES, Stage, verify};
@@ -56,6 +57,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// A bound project whose root is a bare repository with one commit.
 struct Repo {
     _dir: tempfile::TempDir,
+    work: PathBuf,
     bare: PathBuf,
     head: String,
     digest: String,
@@ -68,7 +70,9 @@ impl Repo {
         std::fs::create_dir(&work).unwrap();
         git(&work, &["init", "--quiet", "--initial-branch=main"]);
         for (path, text) in files {
-            std::fs::write(work.join(path), text).unwrap();
+            let file = work.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
         }
         git(&work, &["add", "--all"]);
         git(&work, &["commit", "--quiet", "--allow-empty", "-m", name]);
@@ -79,6 +83,7 @@ impl Repo {
         );
         Self {
             bare: dir.path().join("bare.git"),
+            work,
             _dir: dir,
             head,
             digest: format!("{:x}", Sha256::digest(name.as_bytes())),
@@ -90,10 +95,14 @@ impl Repo {
     }
 
     fn project(&self) -> Project {
+        self.project_at(&self.bare)
+    }
+
+    fn project_at(&self, root: &Path) -> Project {
         Project {
             scope_id: self.scope_id(),
             roots: vec![Root {
-                path: self.bare.clone(),
+                path: root.to_path_buf(),
                 digest: self.digest.clone(),
             }],
         }
@@ -234,30 +243,45 @@ impl Store {
                 Ok(String::new())
             })
             .unwrap();
+        let anchor = AnchorValue::ReachableFrom {
+            oid: repo.head.clone(),
+            captures: Vec::new(),
+        };
+        self.model_decision(repo, name, path, Some(anchor), Some(&handle.evidence_id))
+    }
+
+    /// A model decision in `repo`'s project scope with `anchor`, citing `evidence_id`.
+    fn model_decision(
+        &self,
+        repo: &Repo,
+        name: &str,
+        path: &str,
+        anchor: Option<AnchorValue>,
+        evidence_id: Option<&str>,
+    ) -> String {
         let object_id = format!("mem_{name}");
         self.kernel
             .commit(intent(&format!("decision-{name}")), |envelope| {
                 let anchor_id = format!("anchor_{name}");
-                envelope.insert_anchor(AnchorSpec {
-                    anchor_id: anchor_id.clone(),
-                    object_id: format!("anchorobj_{name}"),
-                    domain_id: "memory".into(),
-                    source_kind: "assistant".into(),
-                    source_id: "memory_capture".into(),
-                    source_revision: 1,
-                    sensitivity: Sensitivity::Normal,
-                    value: AnchorValue::ReachableFrom {
-                        oid: repo.head.clone(),
-                        captures: Vec::new(),
-                    },
-                })?;
+                if let Some(value) = anchor.clone() {
+                    envelope.insert_anchor(AnchorSpec {
+                        anchor_id: anchor_id.clone(),
+                        object_id: format!("anchorobj_{name}"),
+                        domain_id: "memory".into(),
+                        source_kind: "assistant".into(),
+                        source_id: "memory_capture".into(),
+                        source_revision: 1,
+                        sensitivity: Sensitivity::Normal,
+                        value,
+                    })?;
+                }
                 envelope.insert_decision(DecisionSpec {
                     decision_id: format!("dec_{name}"),
                     object_id: object_id.clone(),
                     domain_id: "memory".into(),
                     proposition_id: None,
                     scope_id: Some(repo.scope_id()),
-                    anchor_id: Some(anchor_id),
+                    anchor_id: anchor.is_some().then_some(anchor_id),
                     evidence_id: None,
                     decision_kind: "ARCHITECTURE".into(),
                     payload: DecisionPayload {
@@ -269,17 +293,19 @@ impl Store {
                     source_revision: 1,
                     sensitivity: Sensitivity::Normal,
                 })?;
-                envelope.append_decision_event(
-                    &format!("dec_{name}"),
-                    DecisionEventSpec {
-                        event_kind: "memory_capture_citation".into(),
-                        payload: DecisionEventPayload {
-                            summary: "cites the document".into(),
+                if let Some(evidence_id) = evidence_id {
+                    envelope.append_decision_event(
+                        &format!("dec_{name}"),
+                        DecisionEventSpec {
+                            event_kind: "memory_capture_citation".into(),
+                            payload: DecisionEventPayload {
+                                summary: "cites the document".into(),
+                            },
+                            evidence_id: Some(evidence_id.to_owned()),
+                            recorded_at: 1,
                         },
-                        evidence_id: Some(handle.evidence_id.clone()),
-                        recorded_at: 1,
-                    },
-                )?;
+                    )?;
+                }
                 envelope.record_admission(AdmissionRequest {
                     candidate_id: None,
                     subject_object_id: Some(object_id.clone()),
@@ -328,11 +354,15 @@ impl<'a> Clock<'a> {
     }
 
     fn opens(&self) -> usize {
+        self.polled(Poll::Read(Stage::Open))
+    }
+
+    fn polled(&self, poll: Poll) -> usize {
         self.polls
             .lock()
             .unwrap()
             .iter()
-            .filter(|poll| **poll == Poll::Read(Stage::Open))
+            .filter(|polled| **polled == poll)
             .count()
     }
 }
@@ -411,19 +441,15 @@ fn a_flag_off_pass_runs_nothing_and_a_reload_to_false_stops_the_next_pass() {
     let flag = AtomicBool::new(false);
     let enabled = |_: &Path| flag.load(Ordering::SeqCst);
     let clock = Clock::open();
-    let report = verifier.pass(&store.kernel, &projects, &enabled, &counters, &clock);
-    assert!(!report.ran);
+    verifier.pass(&store.kernel, &projects, &enabled, &counters, &clock);
+    assert_eq!(counters.get("passes"), 0);
     assert!(clock.polls.lock().unwrap().is_empty());
     assert_eq!(counters.to_json(), Counters::default().to_json());
     assert_eq!(store.verifier_rows(), 0);
 
     flag.store(true, Ordering::SeqCst);
     let clock = Clock::open();
-    assert!(
-        verifier
-            .pass(&store.kernel, &projects, &enabled, &counters, &clock)
-            .ran
-    );
+    verifier.pass(&store.kernel, &projects, &enabled, &counters, &clock);
     assert_eq!(clock.opens(), N);
     assert_eq!(counters.get("attestation_committed"), MAX_VERDICTS);
     assert_eq!(counters.get("passes"), 1);
@@ -432,11 +458,7 @@ fn a_flag_off_pass_runs_nothing_and_a_reload_to_false_stops_the_next_pass() {
 
     flag.store(false, Ordering::SeqCst);
     let clock = Clock::open();
-    assert!(
-        !verifier
-            .pass(&store.kernel, &projects, &enabled, &counters, &clock)
-            .ran
-    );
+    verifier.pass(&store.kernel, &projects, &enabled, &counters, &clock);
     assert!(clock.polls.lock().unwrap().is_empty());
     assert_eq!(counters.get("passes"), 1);
     assert_eq!(store.verifier_rows(), rows);
@@ -663,7 +685,11 @@ fn a_concurrent_commit_completes_while_a_verifier_read_is_stalled() {
     let clock = Clock::with(move |poll, _| {
         if poll == Poll::Read(Stage::Blob) {
             stalled_tx.send(()).unwrap();
-            release_rx.lock().unwrap().recv().unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap();
         }
         false
     });
@@ -687,10 +713,11 @@ fn a_concurrent_commit_completes_while_a_verifier_read_is_stalled() {
                 })?;
                 Ok(String::new())
             });
-        assert!(committed.is_ok(), "{committed:?}");
-        assert!(Instant::now() < deadline);
+        let within = Instant::now() < deadline;
         release_tx.send(()).unwrap();
         pass.join().unwrap();
+        assert!(committed.is_ok(), "{committed:?}");
+        assert!(within);
     });
     assert_eq!(counters.get("attestation_committed"), 1);
 }
@@ -906,4 +933,369 @@ fn a_witness_degraded_k_passes_is_skipped_and_the_pass_continues() {
     assert_eq!(counters.get("attestation_committed"), 1);
     let cursor = verifier.cursor(&repo.scope_id()).unwrap();
     assert_eq!(cursor.1, "mem_w1");
+}
+
+/// Commits `object_id`'s write set outside any pass, as another writer would.
+fn attest_now(kernel: &KernelStore, repo: &Repo, object_id: &str) {
+    let budget = EvalBudget::unbounded();
+    let target = kernel.capture_commit_read_target().unwrap();
+    let classification = classify(kernel, object_id, target, &[repo.bound()], &budget).unwrap();
+    let daemon::attestation_verifier::classify::Class::Verifiable(input) = &classification.class
+    else {
+        panic!("{object_id} is verifiable");
+    };
+    let evaluation = verify(&repo.bare, &input.claim, &budget);
+    let outcome = attest(kernel, &classification, &evaluation, &budget);
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+}
+
+/// A head decision whose every attempt ends at the deadline, at its commit or during its read,
+/// counts `unavailable_skipped` once after K passes, the cursor passes it, and no later pass reads
+/// it.
+#[test]
+fn a_head_decision_that_meets_the_deadline_k_passes_is_skipped_and_read_no_more() {
+    for deadline in [Poll::Commit, Poll::Read(Stage::Blob)] {
+        let store = Store::open();
+        let repo = Repo::new("late", &[("doc.md".into(), text(0, 1024))]);
+        store.scope(&repo);
+        let head = store.decision(&repo, "l0", "doc.md", &text(0, 1024));
+        let counters = Counters::default();
+        let mut verifier = Verifier::default();
+        for pass in 1..=3 {
+            let clock = Clock::with(move |poll, _| poll == deadline);
+            verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+            assert_accounting(&counters);
+            assert_eq!(counters.get("considered"), pass, "{deadline:?}");
+        }
+        assert_eq!(counters.get("unavailable_skipped"), 1, "{deadline:?}");
+        assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, head);
+        assert_eq!(store.verifier_rows(), 0);
+
+        let clock = Clock::open();
+        verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+        assert_eq!(clock.opens(), 0);
+        assert_eq!(counters.get("considered"), 3);
+        assert_eq!(counters.get("unavailable_skipped"), 1);
+    }
+}
+
+/// F7 at the commit poll: the verdict counts, nothing commits, the cursor stays, and the next pass
+/// commits.
+#[test]
+fn a_deadline_at_the_commit_leaves_the_decision_unwritten_and_the_next_pass_commits() {
+    let store = Store::open();
+    let repo = Repo::new("commit", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let decision = store.decision(&repo, "c0", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::with(|poll, _| poll == Poll::Commit);
+    verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_accounting(&counters);
+    assert_eq!(counters.get("match"), 1);
+    assert_eq!(counters.get("attestation_committed"), 0);
+    assert_eq!(store.verifier_rows(), 0);
+    assert_eq!(verifier.cursor(&repo.scope_id()), None);
+
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, decision);
+}
+
+/// AC12's accounting with skips and unverifiable decisions ahead of N + 1 verifiable ones: they
+/// count in their buckets and outside N, and the cursor stops at the N-th verifiable decision.
+#[test]
+fn unverifiable_and_attested_decisions_count_outside_n() {
+    let store = Store::open();
+    let files: Vec<_> = (0..N + 3)
+        .map(|i| (format!("doc{i}.md"), text(i, 1024)))
+        .collect();
+    let repo = Repo::new("mixed", &files);
+    store.scope(&repo);
+    let reachable = AnchorValue::ReachableFrom {
+        oid: repo.head.clone(),
+        captures: Vec::new(),
+    };
+    store.model_decision(&repo, "u0", "", Some(reachable), None);
+    let exact = AnchorValue::Exact { value: "v1".into() };
+    store.model_decision(&repo, "u1", "", Some(exact), None);
+    store.model_decision(&repo, "u2", "", None, None);
+    let decisions: Vec<_> = files
+        .iter()
+        .enumerate()
+        .map(|(i, (path, body))| store.decision(&repo, &format!("m{i}"), path, body))
+        .collect();
+    for attested in &decisions[..2] {
+        attest_now(&store.kernel, &repo, attested);
+    }
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_accounting(&counters);
+    assert_eq!(counters.get("match"), MAX_VERDICTS);
+    assert_eq!(counters.get("unverifiable_no_citation"), 1);
+    assert_eq!(counters.get("unverifiable_anchor_not_git"), 1);
+    assert_eq!(counters.get("unverifiable_no_anchor"), 1);
+    assert_eq!(counters.get("skipped_attested"), 2);
+    assert_eq!(counters.get("considered"), MAX_VERDICTS + 3);
+    assert_eq!(clock.opens(), N);
+    assert_eq!(
+        verifier.cursor(&repo.scope_id()).unwrap().1,
+        decisions[N + 1]
+    );
+}
+
+/// A worktree root takes its repository's `git:` identity, so a document published under it
+/// verifies; a root nested inside the worktree binds no repository.
+#[test]
+fn a_worktree_root_verifies_under_its_git_identity_and_a_nested_root_binds_none() {
+    let store = Store::open();
+    let top = Repo::new("top", &[("doc.md".into(), text(0, 1024))]);
+    let nested = Repo::new("nested", &[("sub/doc.md".into(), text(1, 1024))]);
+    store.scope(&top);
+    store.scope(&nested);
+    let attested = store.decision_under(
+        &top,
+        &format!("git:{}", top.head),
+        "t0",
+        "doc.md",
+        &text(0, 1024),
+    );
+    store.decision_under(
+        &nested,
+        &format!("git:{}", nested.head),
+        "n0",
+        "doc.md",
+        &text(1, 1024),
+    );
+    let projects = [
+        top.project_at(&top.work),
+        nested.project_at(&nested.work.join("sub")),
+    ];
+    let counters = Counters::default();
+    Verifier::default().pass(&store.kernel, &projects, &on, &counters, &Clock::open());
+    assert_accounting(&counters);
+    assert_eq!(counters.get("match"), 1);
+    assert_eq!(counters.get("unavailable_repository_unbound"), 1);
+    assert!(exists(&store, &attestation(&attested, &top)));
+}
+
+/// A derivation the environment cuts short passes over its project before any decision is read,
+/// so the project's decisions are neither counted nor attempted, and other projects proceed; once
+/// the repository reads again its decision verifies.
+#[test]
+fn a_failed_derivation_passes_over_the_project_without_counting_its_decisions() {
+    let store = Store::open();
+    let broken = Repo::new("broken", &[("doc.md".into(), text(0, 1024))]);
+    let healthy = Repo::new("healthy", &[("doc.md".into(), text(1, 1024))]);
+    store.scope(&broken);
+    store.scope(&healthy);
+    let waiting = store.decision_under(
+        &broken,
+        &format!("git:{}", broken.head),
+        "b0",
+        "doc.md",
+        &text(0, 1024),
+    );
+    store.decision(&healthy, "h0", "doc.md", &text(1, 1024));
+    let git = broken.work.join(".git");
+    let hidden = broken.work.join("hidden.git");
+    std::fs::rename(&git, &hidden).unwrap();
+    std::fs::write(&git, "gitdir: /nonexistent/eidnara-repository\n").unwrap();
+    let projects = [broken.project_at(&broken.work), healthy.project()];
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    for pass in 1..=4 {
+        let report = verifier.pass(&store.kernel, &projects, &on, &counters, &Clock::open());
+        assert!(report.failed, "pass {pass}");
+        assert_accounting(&counters);
+        assert_eq!(counters.get("considered"), 1, "pass {pass}");
+        assert_eq!(verifier.cursor(&broken.scope_id()), None);
+    }
+    assert_eq!(counters.get("unavailable_skipped"), 0);
+
+    std::fs::remove_file(&git).unwrap();
+    std::fs::rename(&hidden, &git).unwrap();
+    verifier.pass(&store.kernel, &projects, &on, &counters, &Clock::open());
+    assert_eq!(counters.get("attestation_committed"), 2);
+    assert_eq!(verifier.cursor(&broken.scope_id()).unwrap().1, waiting);
+}
+
+/// With one project's flag on and another's off, the off project's scope gets no cursor, no
+/// attestation, and no repository identity derivation.
+#[test]
+fn a_flag_off_project_beside_an_enabled_one_is_left_untouched() {
+    let store = Store::open();
+    let enabled = Repo::new("enabled", &[("doc.md".into(), text(0, 1024))]);
+    let disabled = Repo::new("disabled", &[("doc.md".into(), text(1, 1024))]);
+    store.scope(&enabled);
+    store.scope(&disabled);
+    store.decision(&enabled, "e0", "doc.md", &text(0, 1024));
+    let untouched = store.decision(&disabled, "d0", "doc.md", &text(1, 1024));
+    let projects = [disabled.project(), enabled.project()];
+    let flag = |root: &Path| root == enabled.bare;
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &projects, &flag, &counters, &clock);
+    assert_eq!(clock.polled(Poll::Derive), 1);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert_eq!(verifier.cursor(&disabled.scope_id()), None);
+    assert!(!exists(&store, &attestation(&untouched, &disabled)));
+
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &projects, &flag, &counters, &clock);
+    assert_eq!(clock.polled(Poll::Derive), 0);
+    assert_eq!(verifier.cursor(&disabled.scope_id()), None);
+}
+
+/// A transient head ahead of more than one page of resolvable decisions: each is counted once,
+/// and after K passes the cursor lands on the last.
+#[test]
+fn a_transient_head_ahead_of_a_page_boundary_counts_each_decision_once() {
+    let store = Store::open();
+    let repo = Repo::new("pages", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    store.decision_under(&repo, "git:unbound", "p0", "doc.md", &text(0, 1024));
+    let behind = 33;
+    let last = (0..behind)
+        .map(|i| {
+            let anchor = AnchorValue::ReachableFrom {
+                oid: repo.head.clone(),
+                captures: Vec::new(),
+            };
+            store.model_decision(&repo, &format!("q{i}"), "", Some(anchor), None)
+        })
+        .last()
+        .unwrap();
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    for pass in 1..=3 {
+        verifier.pass(
+            &store.kernel,
+            &[repo.project()],
+            &on,
+            &counters,
+            &Clock::open(),
+        );
+        assert_accounting(&counters);
+        assert_eq!(counters.get("unverifiable_no_citation"), behind);
+        assert_eq!(counters.get("unavailable_repository_unbound"), pass);
+    }
+    assert_eq!(counters.get("unavailable_skipped"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, last);
+}
+
+/// A terminal reason survives a change of the store's incarnation: the rescan from the reset
+/// cursor does not read the decision again.
+#[test]
+fn a_terminal_reason_is_not_read_again_after_an_incarnation_change() {
+    let store = Store::open();
+    let repo = Repo::new("incarnation", &[]);
+    store.scope(&repo);
+    let absent = store.decision(&repo, "i0", "absent.md", "gone\n");
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(clock.opens(), 1);
+    assert_eq!(counters.get("unavailable_path_absent"), 1);
+
+    let store = store.reopen();
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(clock.opens(), 0);
+    assert_eq!(counters.get("considered"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, absent);
+}
+
+/// The task waits [`RETRY_INTERVAL`] after a pass that progressed and [`IDLE_INTERVAL`] after an
+/// idle one.
+#[tokio::test(start_paused = true)]
+async fn the_task_paces_passes_by_their_progress() {
+    let store = Store::open();
+    let repo = Repo::new("pace", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    store.decision(&repo, "p0", "doc.md", &text(0, 1024));
+    let Store { root, kernel } = store;
+    let kernel = Arc::new(kernel);
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let project = repo.project();
+    let task = tokio::spawn(run(
+        Arc::new(Counters::default()),
+        Arc::new({
+            let starts = Arc::clone(&starts);
+            move || {
+                starts.lock().unwrap().push(tokio::time::Instant::now());
+                Some(Arc::clone(&kernel))
+            }
+        }),
+        Arc::new(move || vec![project.clone()]),
+        Arc::new(|_: &Path| true),
+        cancel.clone(),
+    ));
+    while starts.lock().unwrap().len() < 3 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    cancel.cancel();
+    task.await.unwrap();
+    let starts = starts.lock().unwrap();
+    assert_eq!(starts[1] - starts[0], RETRY_INTERVAL);
+    assert_eq!(starts[2] - starts[1], IDLE_INTERVAL);
+    drop(root);
+}
+
+/// Cancelling the task while a pass is in flight raises the pass's budget, so the pass stops at its
+/// next poll and the task returns well before [`PASS_DEADLINE`].
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_an_in_flight_pass_returns_before_its_deadline() {
+    let store = Store::open();
+    let repo = Repo::new("cancel", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    store.decision(&repo, "x0", "doc.md", &text(0, 1024));
+    let Store { root, kernel } = store;
+    let kernel = Arc::new(kernel);
+    let counters = Arc::new(Counters::default());
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let entered_tx = Mutex::new(Some(entered_tx));
+    let project = repo.project();
+    let task = tokio::spawn(run(
+        Arc::clone(&counters),
+        Arc::new(move || Some(Arc::clone(&kernel))),
+        Arc::new(move || vec![project.clone()]),
+        Arc::new({
+            let cancel = cancel.clone();
+            move |_: &Path| {
+                if let Some(entered) = entered_tx.lock().unwrap().take() {
+                    entered.send(()).unwrap();
+                }
+                let stop = Instant::now() + Duration::from_secs(30);
+                while !cancel.is_cancelled() && Instant::now() < stop {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                true
+            }
+        }),
+        cancel.clone(),
+    ));
+    entered_rx.await.unwrap();
+    let cancelled = Instant::now();
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cancelled.elapsed() < PASS_DEADLINE / 2);
+    assert_eq!(counters.get("passes"), 1);
+    assert_eq!(counters.get("considered"), 0);
+    drop(root);
 }

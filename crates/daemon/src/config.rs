@@ -508,17 +508,17 @@ impl ConfigCache {
         effective
     }
 
-    /// The effective `verifier.enabled` for `project_root`, loaded as
-    /// [`Self::effective_for_project`] loads it. Tier warnings are left to the routes' loads,
-    /// which report them on every bind.
-    pub fn verifier_enabled(&mut self, project_root: &Path) -> bool {
-        self.effective_for_env(
-            std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
-            std::env::var("HOME").ok().as_deref(),
-            project_root,
-        )
-        .0
-        .verifier_enabled
+    /// The effective `verifier.enabled` for `project_root` under the user tier the environment's
+    /// `XDG_CONFIG_HOME` and `HOME` name. Tier warnings are left to the routes' loads.
+    pub fn verifier_enabled(
+        &mut self,
+        xdg_config_home: Option<&str>,
+        home: Option<&str>,
+        project_root: &Path,
+    ) -> bool {
+        self.effective_for_env(xdg_config_home, home, project_root)
+            .0
+            .verifier_enabled
     }
 
     /// The daemon-level `contradiction_candidates.enabled`: the user tier's value over the
@@ -3913,8 +3913,8 @@ mod verifier_parity {
         std::fs::write(dir.join("eidnara.jsonc"), tier.to_string()).unwrap();
     }
 
-    /// AC10, F12: the flag defaults false, a project-tier value is dropped with the user-only
-    /// warning, and the cache's per-pass reader returns the merged value.
+    /// AC10, F12: the flag defaults false, and a project-tier value is dropped with the user-only
+    /// warning.
     #[test]
     fn every_fixture_row_matches_through_the_configuration_cache() {
         let renamed = FIXTURE.replace("\"source_capture\"", "\"verifier\"");
@@ -3951,5 +3951,47 @@ mod verifier_parity {
                 row["name"]
             );
         }
+    }
+
+    /// AC13, F12: the pass's reader returns the user tier's value, observes a rewrite through the
+    /// same cache, and reads a project-tier value alone as false with the user-only warning.
+    #[test]
+    fn the_pass_reader_follows_the_user_tier_and_drops_a_project_tier_value() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let user = home.path().join("eidnara/eidnara.jsonc");
+        let backdate = |seconds| {
+            let mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+            filetime::set_file_mtime(&user, filetime::FileTime::from_system_time(mtime)).unwrap();
+        };
+        let mut cache = ConfigCache::default();
+        write_tier(
+            &home.path().join("eidnara"),
+            &serde_json::json!({ "verifier": { "enabled": true } }),
+        );
+        backdate(120);
+        assert!(cache.verifier_enabled(home.path().to_str(), None, project.path()));
+        // A past mtime outside the recent-change margin still differs from the memoized one.
+        write_tier(
+            &home.path().join("eidnara"),
+            &serde_json::json!({ "verifier": { "enabled": false } }),
+        );
+        backdate(60);
+        assert!(!cache.verifier_enabled(home.path().to_str(), None, project.path()));
+
+        let home = tempfile::tempdir().unwrap();
+        write_tier(
+            &project.path().join(".eidnara"),
+            &serde_json::json!({ "verifier": { "enabled": true } }),
+        );
+        let mut cache = ConfigCache::default();
+        assert!(!cache.verifier_enabled(home.path().to_str(), None, project.path()));
+        let (_, warnings) = cache.effective_for_env(home.path().to_str(), None, project.path());
+        assert!(
+            warnings.iter().any(|warning| warning.contains(
+                "ignoring /verifier/enabled from project tier; setting is user-tier only"
+            )),
+            "{warnings:?}"
+        );
     }
 }

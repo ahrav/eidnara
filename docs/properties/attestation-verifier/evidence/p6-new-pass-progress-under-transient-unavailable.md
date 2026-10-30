@@ -6,9 +6,9 @@ The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/i
 
 ## Evidence trail
 
-A verdict of a transient reason (`deadline`, `object_unreadable`, `repository_unopenable`, `repository_unbound`), a Kernel refusal of the classification or the commit, a `changed` decision, and a degraded witness each call `retry` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:435`), which counts one attempt per pass for the decision; the K-th (`MAX_ATTEMPTS`, `:56`, 3) resolves it under `unavailable_skipped`, or `witness_degraded_skipped` for a degraded witness, so the cursor passes it. A pass continues past an unresolved decision to the ones behind it within its budgets, and the task passes again after `RETRY_INTERVAL` (5 s) when a pass progressed or failed.
+A verdict of a transient reason (`deadline`, `object_unreadable`, `repository_unopenable`, `repository_unbound`), a Kernel refusal of the classification or the commit, a `changed` decision, and a degraded witness each call `retry` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:464`), which counts one attempt per pass for the decision; the K-th (`MAX_ATTEMPTS`, `:62`, 3) resolves it under `unavailable_skipped`, or `witness_degraded_skipped` for a degraded witness, so the cursor passes it. A pass continues past an unresolved decision to the ones behind it within its budgets, and the task passes again after `RETRY_INTERVAL` (5 s) when a pass progressed or failed.
 
-`a_transient_head_resolves_after_k_passes_and_a_terminal_reason_is_read_once` (`crates/daemon/tests/attestation_verifier_bounded_pass.rs:702`) places an unbound head before a `path_absent` decision and a verifiable one: the first pass counts `unavailable_repository_unbound = 1`, reads the `path_absent` decision once, and attests the verifiable one while the cursor stays before the head; the third pass counts `unavailable_skipped = 1` and moves the cursor past all three, and the next pass reports neither progress nor failure. `a_witness_degraded_k_passes_is_skipped_and_the_pass_continues` (`crates/daemon/tests/attestation_verifier_bounded_pass.rs:865`) degrades one decision's witness every pass: after three passes `witness_degraded = 3`, `witness_degraded_skipped = 1`, and a decision added behind it is attested.
+`a_transient_head_resolves_after_k_passes_and_a_terminal_reason_is_read_once` (`crates/daemon/tests/attestation_verifier_bounded_pass.rs:729`) places an unbound head before a `path_absent` decision and a verifiable one: the first pass counts `unavailable_repository_unbound = 1`, reads the `path_absent` decision once, and attests the verifiable one while the cursor stays before the head; the third pass counts `unavailable_skipped = 1` and moves the cursor past all three, and the next pass reports neither progress nor failure. `a_witness_degraded_k_passes_is_skipped_and_the_pass_continues` (`crates/daemon/tests/attestation_verifier_bounded_pass.rs:892`) degrades one decision's witness every pass: after three passes `witness_degraded = 3`, `witness_degraded_skipped = 1`, and a decision added behind it is attested.
 
 ## Failure scenario
 
@@ -33,7 +33,7 @@ F13: a permanently transient head decision, as precondition coverage for `someti
 
 ### Q: Does a repeated refusal or degradation stop the task?
 
-- Sources examined: OQ6-11 in [#1173](https://github.com/ahrav/eidnara/issues/1173); `ProjectRun::outcome` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:531`).
+- Sources examined: OQ6-11 in [#1173](https://github.com/ahrav/eidnara/issues/1173); `ProjectRun::outcome` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:565`).
 - Findings: The owner confirmed the K bound for a degraded witness, then `witness_degraded_skipped`, and the task continues. The pass applies the same bound to Kernel refusals and `changed` outcomes, counting `unavailable_skipped` at the K-th.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

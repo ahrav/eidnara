@@ -46,7 +46,7 @@ Line drift between `3a3b916b7` and the branch tip moved several references:
 `crates/kernel/tests/kernel_slice.rs` by one line, the `observe_code` fixture
 from `lib.rs:14043` at `3a3b916b7` to
 `crates/daemon/src/lib.rs:14407`, and the test-support guard
-the specification placed at `lib.rs:13690` (K9) to `:14041`. Each record cites
+the specification placed at `lib.rs:13690` (K9) to `:14054`. Each record cites
 the current line.
 
 ## Gaps

@@ -43,7 +43,7 @@ Existing paths have distinct classifications:
 | Certified inference, bundle validation, and live JobTable serving | `default-production` for payloads built by `scripts/build-host-payload.ts`, which stage the locked bundle and ORT library; the generation's bundle manifest and ORT digests bind them (`serve.rs:1071-1096`), and `lane_limits` (`serve.rs:1102-1107`) admits one text per inference call, the shape certification exercises. Only the macOS branch reports `unsupported` (`serve.rs:1056`). |
 | Claude accounting calls | `default-production`: `crates/daemon/Cargo.toml:32` and `crates/daemon/src/token_cache.rs:133` contradict the old tokenizer catalog's absent-caller premise. |
 | MemoryClassifier scheduler loop | `default-production` after store open: `crates/daemon/src/lib.rs:3649-3663`. |
-| Due review-user-memories slots | `explicit-config-only`: scheduled MODULE projects come from `lib.rs:13979-14027`. Actual scheduled model dispatch has only test-installed inputs (`lib.rs:3084-3105`, `:14041-14044`). |
+| Due review-user-memories slots | `explicit-config-only`: scheduled MODULE projects come from `lib.rs:13992-14040`. Actual scheduled model dispatch has only test-installed inputs (`lib.rs:3087-3108`, `:14054-14057`). |
 | Deterministic engine and manual-clock scenarios | `test-only`: `crates/host-runtime/tests/support/local_embeddings.rs:40-122` and `crates/daemon/src/memory_classifier_scheduler.rs:422-483`. |
 
 Each new record carries its own proposed-only reachability explanation. Searches
