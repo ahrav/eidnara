@@ -570,7 +570,7 @@ claim. Each is `unaudited`.
   `client_nonce` (`auth.rs:244-252`), so the peer's half is unenforceable by the
   host.
 - **The two-second budgets stated as coupled.**
-  `docs/host-wire-protocol.md:775` states the client's whole-handshake deadline
+  `docs/host-wire-protocol.md:776` states the client's whole-handshake deadline
   and the host's authentication deadline are "not independent". In code they are
   two separate fields with the same default, `auth_deadline` (`config.rs:223`) and
   `transport_setup_deadline` (`:227`), consumed in sequence, so a peer's single

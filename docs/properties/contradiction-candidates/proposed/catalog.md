@@ -816,7 +816,7 @@ in the answer would be a disclosure path for Sensitive harness capture to the
 model.
 Open questions:
 - Resolved by #1168: the terminal is `not_live` and the method literal is
-  `review.candidates` (`docs/host-wire-protocol.md:861`); the item carries
+  `review.candidates` (`docs/host-wire-protocol.md:862`); the item carries
   `matched_terms` and `decision_terms` as counts, and no term list.
 - G7, sensitivity of descriptor-derived rows: the egress half stays open
   (needs human input). #1165 fixes the facts: a row holds ids, integers, and

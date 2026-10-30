@@ -24,7 +24,7 @@ the same four verified facts rather than on a preamble assertion:
    production lifecycle/serve executable"
    (`crates/daemon/Cargo.toml:18-19`). `ManagedConnector::connect` at
    `crates/daemon/src/history_summarizer_producer.rs:693` calls it as well, and is not
-   inside a test module. `docs/host-wire-protocol.md:836` names
+   inside a test module. `docs/host-wire-protocol.md:837` names
    `HistorySummarizerProducer` as a `host_runtime::Client` consumer.
 4. The doc comment "Thread-confined peer endpoint for integration tests" at
    `ring_transport.rs:626` is therefore **wrong about reachability**, confirming
@@ -60,7 +60,7 @@ Four distinct budgets bound the phases: a single 2-second absolute handshake
 deadline started **before** discovery (`:314`), a 30-second frame deadline
 (`:45`), a 30-second route-open deadline including backoff (`:47`), and a
 5-second shutdown deadline (`:51`). These match the protocol's own table at
-`docs/host-wire-protocol.md:764-771` exactly.
+`docs/host-wire-protocol.md:765-772` exactly.
 
 ### Retirement is the only involuntary transition, and it has four causes
 
@@ -258,7 +258,7 @@ production reader.
 **O17. The reserved control byte pool is separate, deliberately.**
 `CLIENT_CONTROL_QUEUED_BYTES` (`:76`) funds `control_budget` (`:399`, `:949`),
 distinct from `queue_budget` (`:398`). The comment at `:63-76` argues the case at
-length. `docs/host-wire-protocol.md:774` says the opposite: "Data and
+length. `docs/host-wire-protocol.md:775` says the opposite: "Data and
 reserved-control frames share one queued-byte budget; reserved admission is not a
 byte-budget bypass."
 
@@ -372,7 +372,7 @@ Fault/timing angle: Two windows. First, `admit` must not release the `correlatio
 Required faults and enabling state: Concurrent `request`, `request_stream`, `open_route`, `host_status`, and `host_shutdown` callers, interleaved with encode failures (oversize body) and `data_tx` saturation to drive both `restore` sites. Record the correlation of each frame as the writer completes it.
 Confidence: high - [evidence](../../evidence/client-a-no-request-frame-carries-a-non-increasing-correlation.md). Verified guard scope by reading `admit` end to end, and verified both `restore` call sites precede any delivery to `data_tx`. Part 2a's `request-correlation-strictly-increases-per-generation` is the host-side enforcement this satisfies.
 Existing check: `max_correlation_is_used_once_then_exhausted` (`:2328`); status `unaudited`.
-Impact: A violation is a host-side generation close before dispatch (`docs/host-wire-protocol.md:910`, vector V44), taking every unrelated route down. I found no path that produces one.
+Impact: A violation is a host-side generation close before dispatch (`docs/host-wire-protocol.md:911`, vector V44), taking every unrelated route down. I found no path that produces one.
 Open questions: None.
 
 ### client-a-a-dropped-pong-is-never-observable-to-the-client

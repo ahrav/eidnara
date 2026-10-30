@@ -44,7 +44,7 @@ and moved by a line diff to `f2442b2f`; each cited test name was found there.
   with a table test, `a_boundary_that_does_not_decode_is_bad_request`
   (`revision_3.rs:231`), which covers a missing member, `5`, `1.5`, `"2"`, 2^63,
   and `v: 2` with a malformed boundary ("decoding precedes the revision check");
-  `docs/host-wire-protocol.md:1000` and `:1009` at `1c66f16c` document it.
+  `docs/host-wire-protocol.md:1001` and `:1010` at `1c66f16c` document it.
 - #883 (head `d7712d75`): `transform_revision_unsupported` serves raw and logs
   `daemon_revision_unsupported` with an upgrade hint; a revision 2 daemon's
   discovery answer declines with `discovery_declined` and an upgrade warning;

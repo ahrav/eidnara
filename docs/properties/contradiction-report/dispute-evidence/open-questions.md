@@ -388,7 +388,7 @@ No human input needed; record the choice in the route header.
 
 - KTD1: `kernel.commit` is the only route that writes an admission event
   from a plugin (`commit.rs:1-10`; dispatch `lib.rs:14529`); section 7.8 of
-  `docs/host-wire-protocol.md` lists no `kernel.*` method (`:767`), so the
+  `docs/host-wire-protocol.md` lists no `kernel.*` method (`:768`), so the
   route doc is the module header plus the `docs/properties` catalogs.
 - KTD4 and R4: `MarkDisputed` and `Contradict` request `Deny` with a more
   restrictive disposition (`admission.rs:4237-4238`); support is withdrawn

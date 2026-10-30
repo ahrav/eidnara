@@ -5960,7 +5960,7 @@ their line references at that commit. Scope and CI findings come from
 line numbers win wherever the two differ.** All three are in the normative
 document and none changes a finding.
 
-- The client `Recovering` state is at `docs/host-wire-protocol.md:790-792`,
+- The client `Recovering` state is at `docs/host-wire-protocol.md:791-793`,
   and the quoted string "bounded backoff, reread file" is at `:792`. Lens A's
   earlier section cited `:12`, which is "This document is the direct-only wire
   authority". Lens A's own lead L4 cites section 12 correctly.
@@ -6160,7 +6160,7 @@ were printed and confirmed.
    deleted `read_active_frame` and `read_exact_until` were what made the sentence
    true. `CLIENT_FRAME_TIMEOUT` (`:45`) survives as a real bound, but it bounds
    the *writer's* per-frame publication (`:1353`, `:1960`).
-2. `docs/host-wire-protocol.md:766` - "frame completion after first header
+2. `docs/host-wire-protocol.md:767` - "frame completion after first header
    byte | one 30 s absolute deadline; idle first-header wait is unbounded". The
    same mechanism, stated normatively for both managed clients, neither of which
    reads a byte stream any more.
@@ -6597,7 +6597,7 @@ enforcement this satisfies.
 Existing check: `max_correlation_is_used_once_then_exhausted` (`:2328`); status
 `unaudited`.
 Impact: A violation is a host-side generation close before dispatch
-(`docs/host-wire-protocol.md:910`, vector V44), taking every unrelated route
+(`docs/host-wire-protocol.md:911`, vector V44), taking every unrelated route
 down. I found no path that produces one.
 Open questions: None.
 
