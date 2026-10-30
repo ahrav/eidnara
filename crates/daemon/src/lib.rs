@@ -3,6 +3,7 @@
 // `deny(unsafe_code)` permits the one scoped `allow` in `vector_mapped`, which maps a pinned layer's int8 codes for the candidate scan.
 #![deny(unsafe_code)]
 
+pub mod attestation_verifier;
 pub mod boundary;
 pub mod canonical_memory;
 pub(crate) mod chunk_text;
