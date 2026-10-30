@@ -422,7 +422,7 @@ impl ProjectRun<'_, '_> {
         loop {
             let page = match self.kernel.scope_decisions_after_within_budget(
                 self.scope_id,
-                VERIFIER_SOURCE_KIND,
+                kernel::SourceKindFilter::Except(VERIFIER_SOURCE_KIND),
                 target.through_commit,
                 after.as_ref().map(|(seq, id)| (*seq, id.as_str())),
                 PAGE_ROWS,
@@ -630,9 +630,9 @@ impl ProjectRun<'_, '_> {
         let mut evaluated = 0;
         loop {
             let after = self.state.applicability.clone();
-            let page = match self.kernel.scope_decisions_of_source_after_within_budget(
+            let page = match self.kernel.scope_decisions_after_within_budget(
                 self.scope_id,
-                VERIFIER_SOURCE_KIND,
+                kernel::SourceKindFilter::Only(VERIFIER_SOURCE_KIND),
                 target.through_commit,
                 after.as_ref().map(|(seq, id)| (*seq, id.as_str())),
                 PAGE_ROWS,

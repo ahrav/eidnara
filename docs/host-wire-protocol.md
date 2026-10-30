@@ -726,16 +726,17 @@ drops the block whole, unknown fields are dropped, and fields are additive.
 
 The `context` component MAY also carry a sanitized `metrics.verifier` object
 describing the attestation verifier's bounded background pass over each bound
-project's memory decisions and attestations, which runs only while the user-only
-`verifier.enabled` (default false) is on; the daemon ignores a project-tier value
-with a warning, and each plugin strips it from the project tier before merging. The
-counters are process-local and start at zero at daemon start. Every field is a
-count, a byte total, or milliseconds; no field carries an identity, a path, a
-digest, an oid, a reason string, or a project. The block is sanitized field by
-field under the `kernel` integer rules: a non-object drops the block whole, unknown
-fields are dropped, and fields are additive. Each decision the pass considers lands
-in exactly one verdict or unverifiable bucket, so those buckets sum to
-`considered`; the effect counters increment only after the Kernel commit returns.
+project's live memory decisions, which runs only while the user-only
+`verifier.enabled` (default false) is on; the daemon ignores a project-tier
+value with a warning, and each plugin strips it from the project tier before
+merging. The counters are process-local and start at zero when the daemon
+starts. Every field is a count, a byte total, or milliseconds; no field
+carries an identity, a path, a digest, an oid, a reason string, or a project.
+The block is sanitized field by field under the `kernel` integer rules: a
+non-object drops the block whole, unknown fields are dropped, and fields are
+additive. Each decision the pass considers lands in exactly one verdict or
+unverifiable bucket, so those buckets sum to `considered`; the effect counters
+increment only after the Kernel commit returns.
 
 | field | type | rule |
 | --- | --- | --- |
@@ -744,11 +745,10 @@ in exactly one verdict or unverifiable bucket, so those buckets sum to
 | `unavailable_path_absent`, `unavailable_not_a_blob`, `unavailable_object_unreadable`, `unavailable_over_budget`, `unavailable_deadline`, `unavailable_repository_unbound`, `unavailable_repository_unopenable` | unsigned integer | verdicts with no comparable bytes, by reason; `path_absent`, `not_a_blob`, and `over_budget` are never read again for the same decision and commit while the daemon runs, and a decision with any other reason shares its attempts with its other non-terminal outcomes and is passed over after three attempts in total |
 | `unverifiable_no_anchor`, `unverifiable_anchor_not_git`, `unverifiable_no_citation`, `unverifiable_citation_not_document`, `unverifiable_evidence_retired`, `unverifiable_descriptor_retired`, `unverifiable_digest_missing`, `unverifiable_self_source`, `unverifiable_invalid_document_path` | unsigned integer | decisions outside the verifier's input, by reason |
 | `skipped_attested`, `skipped_stale` | unsigned integer | decisions skipped before any repository read or write: an attestation of the decision at its anchored commit exists, or the decision is already stale |
-| `attestation_committed`, `attestation_replayed`, `stale_committed` | unsigned integer | write sets committed, replayed from their receipt, and stale marks committed |
+| `attestation_committed`, `attestation_replayed`, `stale_committed`, `applicability_stale`, `applicability_current`, `applicability_unavailable` | unsigned integer | write sets committed, replayed from their receipt, and stale marks committed; then the live `active` attestations the applicability step evaluated after verification, at most eight per project per pass, by result: a stale mark committed because source capture republished the attested document with another digest; the document's live descriptor still carries the attested digest; or the document has no live descriptor or the witness detail does not decode, which writes nothing. A stale mark the Kernel refuses counts under a `commit_refused_` or `commit_conflict` field instead |
 | `commit_refused_changed`, `commit_refused_invalid_write_set`, `commit_refused_busy`, `commit_refused_deadline`, `commit_refused_io`, `commit_refused_other` | unsigned integer | write sets and applicability stale marks that wrote nothing, by reason: the decision changed after classification, or the attestation or its document's live descriptor changed after the applicability read; the write set failed its check; the Kernel refused the commit as busy, past its deadline, on an I/O failure, or for another reason |
 | `commit_conflict` | unsigned integer | write sets whose key was recorded under another verdict, which are never retried, and applicability stale marks whose key was recorded under another request |
 | `witness_degraded`, `witness_degraded_skipped`, `unavailable_skipped` | unsigned integer | write sets rolled back because the witness admission stayed below `verified`, and decisions passed over after three attempts in total; a decision's attempts are shared across the outcomes that spend one: a transient `unavailable_` reason; a deadline during classification, verification, or commit; a Kernel read refusal during classification; a changed decision; a busy, deadline, I/O, or other commit refusal; and a degraded witness. A refusal of the attestation-state read or the commit-target read, and a store incarnation change, stop the project or the pass without spending an attempt, and an invalid write set resolves the decision at once. The bucket names the third attempt's outcome: `witness_degraded_skipped` when its witness degraded, `unavailable_skipped` otherwise |
-| `applicability_stale`, `applicability_current`, `applicability_unavailable` | unsigned integer | live `active` attestations the applicability step evaluated, at most eight per project per pass, by result: a stale mark committed because source capture republished the attested document with another digest; the document's live descriptor still carries the attested digest; or the document has no live descriptor or the witness detail does not decode, which writes nothing. A stale mark the Kernel refuses counts under a `commit_refused_` or `commit_conflict` field instead |
 | `bytes_read` | unsigned integer | blob content bytes read |
 | `passes`, `last_pass_ms` | unsigned integer | passes whose flag check found a project enabled, and the wall time of the last one |
 

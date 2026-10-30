@@ -152,7 +152,7 @@ pub struct WriteSet {
     pub citation: DecisionEventSpec,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct WitnessDetail {
     pub(super) witness_version: u32,

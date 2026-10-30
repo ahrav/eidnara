@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 
 use claim_fixture::{DOMAIN, Fixture, decision, intent};
 use kernel::applicability::EvalBudget;
-use kernel::{KernelError, ScopeSpec, Sensitivity};
+use kernel::{KernelError, ScopeSpec, Sensitivity, SourceKindFilter};
 
 const SCOPE: &str = "project:a";
 
@@ -48,7 +48,7 @@ fn page(
         .store
         .scope_decisions_after_within_budget(
             SCOPE,
-            "verifier",
+            SourceKindFilter::Except("verifier"),
             requested,
             after,
             NonZeroUsize::new(max_rows).unwrap(),
@@ -116,7 +116,7 @@ fn the_page_walks_a_scopes_live_decisions_in_commit_order_after_the_cursor() {
     let refused = |requested, budget: &EvalBudget| {
         fixture.store.scope_decisions_after_within_budget(
             SCOPE,
-            "verifier",
+            SourceKindFilter::Except("verifier"),
             requested,
             None,
             NonZeroUsize::MIN,
@@ -155,9 +155,9 @@ fn the_source_page_walks_only_the_scopes_decisions_of_one_source_kind() {
     let source_page = |after: Option<(i64, &str)>, max_rows: usize| {
         fixture
             .store
-            .scope_decisions_of_source_after_within_budget(
+            .scope_decisions_after_within_budget(
                 SCOPE,
-                "verifier",
+                SourceKindFilter::Only("verifier"),
                 tip,
                 after,
                 NonZeroUsize::new(max_rows).unwrap(),

@@ -165,7 +165,7 @@ pub use slice::{
     DecisionEventSpec, DecisionPage, DecisionPayload, DecisionRow, DecisionSpec,
     DecisionWriteOutcome, LINKED_EVENT_WINDOW, LinkedEvidence, ObservationDependencySpec,
     ObservationPayload, ObservationRow, ObservationSpec, ObservationWriteOutcome, PagedDecision,
-    RetirementOutcome, SliceSnapshot,
+    RetirementOutcome, SliceSnapshot, SourceKindFilter,
 };
 pub use source_descriptor::{
     CitingDescriptor, LiveDescriptor, LiveDescriptorPage, MAX_DESCRIPTORS_PER_COMMIT,

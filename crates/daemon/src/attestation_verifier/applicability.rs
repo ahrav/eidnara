@@ -5,7 +5,7 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     AdmissionEvent, AdmissionRequest, CommitIntent, CommitReadTarget, Disposition, EventKind,
-    KernelError, KernelStore,
+    KernelError, KernelStore, LiveDescriptor,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -21,19 +21,15 @@ pub enum Applicability {
     /// The lineage has no live descriptor, or the witness detail is absent or does not decode.
     Unavailable,
     /// The live descriptor's digest differs from the witnessed digest.
-    Republished(Republished),
+    Republished(Box<Republished>),
 }
 
 /// An attestation whose document's live descriptor carries other bytes than it witnessed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Republished {
-    pub attestation_object_id: String,
-    pub lineage_id: String,
-    pub relative_path: String,
-    pub witnessed_digest: String,
-    pub descriptor_object_id: String,
-    pub descriptor_revision: String,
-    pub descriptor_digest: String,
+    attestation_object_id: String,
+    witnessed: WitnessDetail,
+    live: LiveDescriptor,
 }
 
 pub fn evaluate(
@@ -69,15 +65,11 @@ pub fn evaluate(
         Some(live) if live.detail.artifact_digest == detail.artifact_digest => {
             Applicability::Current
         }
-        Some(live) => Applicability::Republished(Republished {
+        Some(live) => Applicability::Republished(Box::new(Republished {
             attestation_object_id: attestation_object_id.to_owned(),
-            lineage_id: detail.lineage_id,
-            relative_path: detail.relative_path,
-            witnessed_digest: detail.artifact_digest,
-            descriptor_object_id: live.object_id,
-            descriptor_revision: live.detail.revision,
-            descriptor_digest: live.detail.artifact_digest,
-        }),
+            witnessed: detail,
+            live,
+        })),
     })
 }
 
@@ -87,31 +79,29 @@ pub fn mark_republished(
     republished: &Republished,
     budget: &EvalBudget,
 ) -> Outcome {
-    let attestation = &republished.attestation_object_id;
-    let frozen = serde_json::json!({
-        "attestation_object_id": attestation,
-        "lineage_id": republished.lineage_id,
-        "witnessed_digest": republished.witnessed_digest,
-        "descriptor_object_id": republished.descriptor_object_id,
-        "descriptor_digest": republished.descriptor_digest,
-    });
+    let Republished {
+        attestation_object_id: attestation,
+        witnessed,
+        live,
+    } = republished;
+    let (revision, digest) = (&live.detail.revision, &live.detail.artifact_digest);
+    let frozen = serde_json::json!([
+        attestation,
+        witnessed.artifact_digest,
+        live.object_id,
+        digest
+    ]);
     let intent = CommitIntent {
         producer: PRODUCER.into(),
-        operation_key: format!(
-            "applicability:{attestation}:{}",
-            republished.descriptor_revision
-        ),
+        operation_key: format!("applicability:{attestation}:{revision}"),
         request_digest: format!("{:x}", Sha256::digest(frozen.to_string())),
         actor: "agent:verifier".into(),
         cause: "deterministic attestation verifier".into(),
     };
     let reason = format!(
-        "verifier: the document at {} was republished at descriptor revision {} with sha256 {}, \
-         which differs from the attested sha256 {}",
-        republished.relative_path,
-        republished.descriptor_revision,
-        republished.descriptor_digest,
-        republished.witnessed_digest,
+        "verifier: the document at {} was republished at descriptor revision {revision} with \
+         sha256 {digest}, which differs from the attested sha256 {}",
+        witnessed.relative_path, witnessed.artifact_digest,
     );
     run(
         kernel,
@@ -143,11 +133,11 @@ pub fn mark_republished(
                 }
                 _ => return Err(changed()),
             }
-            let live = envelope.live_source_descriptor_of_lineage(
+            let current = envelope.live_source_descriptor_of_lineage(
                 OccurrenceClass::RepositoryDocuments,
-                &republished.lineage_id,
+                &witnessed.lineage_id,
             )?;
-            if live.map(|live| live.object_id) != Some(republished.descriptor_object_id.clone()) {
+            if current.map(|current| current.object_id).as_ref() != Some(&live.object_id) {
                 return Err(changed());
             }
             let marked = envelope.record_admission(AdmissionRequest {

@@ -693,7 +693,7 @@ fn classify_row_error(error: rusqlite::Error) -> KernelError {
 }
 
 impl KernelStore {
-    /// The decisions of scope `scope_id` live at `requested` whose registry `source_kind` is not `excluded_source_kind`, as `(created_commit_seq, object_id)` pairs in that order after the pair `after`, at most `max_rows`. A decision's creating commit never changes, so a caller that pages by the last pair it acted on revisits no decision and passes over none created at or before `requested`. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
+    /// The decisions of scope `scope_id` live at `requested` whose registry `source_kind` `source` admits, as `(created_commit_seq, object_id)` pairs in that order after the pair `after`, at most `max_rows`. A decision's creating commit never changes, so a caller that pages by the last pair it acted on revisits no decision and passes over none created at or before `requested`. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
     ///
     /// # Errors
     ///
@@ -701,64 +701,21 @@ impl KernelStore {
     pub fn scope_decisions_after_within_budget(
         &self,
         scope_id: &str,
-        excluded_source_kind: &str,
+        source: SourceKindFilter<'_>,
         requested: i64,
         after: Option<(i64, &str)>,
         max_rows: std::num::NonZeroUsize,
         budget: &crate::applicability::EvalBudget,
     ) -> Result<Vec<(i64, String)>, KernelError> {
-        self.scope_decision_page(
-            scope_id,
-            SourceKind::Except(excluded_source_kind),
-            requested,
-            after,
-            max_rows,
-            budget,
-        )
-    }
-
-    /// [`Self::scope_decisions_after_within_budget`] for the decisions whose registry `source_kind` is `source_kind`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Self::scope_decisions_after_within_budget`].
-    pub fn scope_decisions_of_source_after_within_budget(
-        &self,
-        scope_id: &str,
-        source_kind: &str,
-        requested: i64,
-        after: Option<(i64, &str)>,
-        max_rows: std::num::NonZeroUsize,
-        budget: &crate::applicability::EvalBudget,
-    ) -> Result<Vec<(i64, String)>, KernelError> {
-        self.scope_decision_page(
-            scope_id,
-            SourceKind::Only(source_kind),
-            requested,
-            after,
-            max_rows,
-            budget,
-        )
-    }
-
-    fn scope_decision_page(
-        &self,
-        scope_id: &str,
-        source_kind: SourceKind<'_>,
-        requested: i64,
-        after: Option<(i64, &str)>,
-        max_rows: std::num::NonZeroUsize,
-        budget: &crate::applicability::EvalBudget,
-    ) -> Result<Vec<(i64, String)>, KernelError> {
-        let (operator, source_kind) = match source_kind {
-            SourceKind::Except(kind) => ("<>", kind),
-            SourceKind::Only(kind) => ("=", kind),
-        };
         let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(crate::map_sqlite)?;
         snapshot_tip(&tx, requested)?;
+        let (operator, source_kind) = match source {
+            SourceKindFilter::Except(kind) => ("<>", kind),
+            SourceKindFilter::Only(kind) => ("=", kind),
+        };
         let (after_seq, after_id) = after.unwrap_or((-1, ""));
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
         let rows = tx
@@ -813,9 +770,9 @@ impl KernelStore {
     }
 }
 
-/// Which registry `source_kind` a scope decision page keeps.
-#[derive(Clone, Copy)]
-enum SourceKind<'a> {
+/// The registry `source_kind` a scope decision page keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKindFilter<'a> {
     Except(&'a str),
     Only(&'a str),
 }
