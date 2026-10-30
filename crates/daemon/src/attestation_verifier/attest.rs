@@ -155,11 +155,11 @@ fn attest_match(
         opposite,
         Outcome::Committed,
         |envelope| {
-            let model = &input.decision.object_id;
+            let object_id = &input.decision.object_id;
             let row = envelope
-                .decisions_for_objects(std::slice::from_ref(model))?
+                .decisions_for_objects(std::slice::from_ref(object_id))?
                 .into_iter()
-                .find(|row| &row.object_id == model)
+                .find(|row| &row.object_id == object_id)
                 .ok_or(Stop::Outcome(Outcome::Changed))?;
             let write_set =
                 WriteSet::from_row(target, input, blob_oid, row).map_err(Stop::Outcome)?;
@@ -599,6 +599,7 @@ fn recheck(
         && object.invalidated_commit_seq.is_none()
         && object.superseded_by.is_none()
         && object.created_commit_seq == model.created_commit_seq
+        && model.created_commit_seq <= target.through_commit
         && object.domain_id == model.domain_id
         && (
             &object.source_kind,

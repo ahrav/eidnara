@@ -1756,3 +1756,115 @@ fn a_match_commits_while_every_pooled_reader_is_held() {
         Maturity::Verified
     );
 }
+
+/// F2 on the stale path: a model decision superseded or retired after its classification leaves
+/// its `Mismatch` envelope `Changed` with no `MarkStale` row, the recheck's liveness predicates
+/// being what refuses it.
+#[test]
+fn a_mismatch_for_a_decision_superseded_or_retired_after_classification_is_changed() {
+    let store = Store::open();
+    let checkout = Checkout::new("# Other\n");
+    let (evidence, _) = store.document("doc", DOC);
+    let classified: Vec<_> = ["stale_superseded", "stale_retired"]
+        .iter()
+        .map(|name| {
+            let model = store.model(name, &checkout.head, &evidence, false);
+            let classification = store.classification(&model, &checkout);
+            let evaluation = evaluate(&classification);
+            assert_eq!(evaluation.verdict, Verdict::Mismatch);
+            (model, classification, evaluation)
+        })
+        .collect();
+    store
+        .kernel
+        .commit(intent("change"), |envelope| {
+            envelope.supersede_decision(
+                "mem_stale_superseded",
+                DecisionSpec {
+                    decision_id: "dec_stale_superseded_2".into(),
+                    object_id: "mem_stale_superseded_2".into(),
+                    ..model_spec(
+                        "stale_superseded",
+                        Some("anchor_stale_superseded".into()),
+                        &evidence,
+                        false,
+                        2,
+                    )
+                },
+            )?;
+            model_admission(envelope, "mem_stale_superseded_2", EventKind::Other)?;
+            envelope.retire_decision("mem_stale_retired")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip();
+    for (model, classification, evaluation) in &classified {
+        let admissions = store.admissions_of(model);
+        assert_eq!(
+            attest_now(&store, classification, evaluation),
+            Outcome::Changed,
+            "{model}"
+        );
+        assert_eq!(store.admissions_of(model), admissions, "{model}");
+    }
+    assert_eq!(store.tip(), tip);
+}
+
+/// A classification whose sequence precedes the model decision's creating commit is `Changed` on
+/// both verdicts with nothing written, as `WriteSet::new` is for a write set built there.
+#[test]
+fn a_classification_at_a_sequence_before_the_model_decision_is_changed() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let before = store.kernel.capture_commit_read_target().unwrap();
+    let model = store.model("early", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    let early = Classification {
+        target: before,
+        class: classification.class.clone(),
+    };
+    let tip = store.tip();
+    for evaluation in both_verdicts(&evaluation) {
+        assert_eq!(
+            attest_now(&store, &early, &evaluation),
+            Outcome::Changed,
+            "{:?}",
+            evaluation.verdict
+        );
+    }
+    assert_eq!(store.tip(), tip);
+    assert_eq!(store.write_set_rows(), 0);
+    assert!(matches!(
+        attest_now(&store, &classification, &evaluation),
+        Outcome::Committed(_)
+    ));
+}
+
+/// The attestation copies the model decision's decision kind and summary from the row its
+/// envelope reads.
+#[test]
+fn the_attestation_copies_the_model_decisions_kind_and_summary() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("copied", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let outcome = attest_now(&store, &classification, &evaluate(&classification));
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+    let attestation = Identity::of(&model, &checkout.head).object_id;
+    let rows = store
+        .kernel
+        .decisions_for_objects_as_of(&[model.clone(), attestation.clone()], store.tip())
+        .unwrap();
+    let row = |id: &str| rows.iter().find(|row| row.object_id == id).unwrap();
+    let (model_row, attested) = (row(&model), row(&attestation));
+    assert_eq!(attested.decision_kind, model_row.decision_kind);
+    assert_eq!(attested.payload.summary, model_row.payload.summary);
+    assert_eq!(attested.scope_id, model_row.scope_id);
+    assert_eq!(
+        model_row.payload.summary,
+        "The daemon owns the store (copied)."
+    );
+}
