@@ -704,11 +704,11 @@ const SCOPE_DECISIONS_AFTER_SQL: &str = "SELECT d.created_commit_seq, d.object_i
      LIMIT ?6";
 
 impl KernelStore {
-    /// The decisions of scope `scope_id` live at `requested` whose registry `source_kind` is not `excluded_source_kind`, as `(created_commit_seq, object_id)` pairs in that order after the pair `after`, at most `max_rows`. A decision's creating commit never changes, so a caller that pages by the last pair it acted on revisits no decision and passes over none created at or before `requested`. The read seeks the commit-sequence index `idx_decisions_known_as_of` at `after`'s sequence and walks it forward, so a page reads the decision rows of every scope from `after` through its last row, or through `requested` when it is short, whatever the scope's size. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
+    /// The decisions of scope `scope_id` live at `requested` whose registry `source_kind` is not `excluded_source_kind`, as `(created_commit_seq, object_id)` pairs in that order after the pair `after`, at most `max_rows`. A decision's creating commit never changes, so a caller that pages by the last pair it acted on revisits no decision and passes over none created at or before `requested`. The read seeks the commit-sequence index `idx_decisions_known_as_of` at `after`'s sequence and walks it forward, so a page reads the decision rows of every scope from `after`'s commit sequence through its last row's commit sequence, or through `requested` when it is short, whatever the scope's size. The wait for a pooled reader and the read itself stop at `budget`'s deadline or interrupt.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and the SQLite classification (`Busy`, `Conflict`, `Io`) for a read that fails.
+    /// Returns [`KernelError::Deadline`] when no reader frees or the read does not finish before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and the SQLite classification (`Busy`, `Conflict`, `Io`) for a read that fails.
     pub fn scope_decisions_after_within_budget(
         &self,
         scope_id: &str,
@@ -718,10 +718,8 @@ impl KernelStore {
         max_rows: std::num::NonZeroUsize,
         budget: &crate::applicability::EvalBudget,
     ) -> Result<Vec<(i64, String)>, KernelError> {
-        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(crate::map_sqlite)?;
+        let mut reader = self.reader_with_limit(&budget.acquire_limit())?;
+        let tx = reader.transaction(TransactionBehavior::Deferred)?;
         snapshot_tip(&tx, requested)?;
         let (after_seq, after_id) = after.unwrap_or((-1, ""));
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
@@ -743,7 +741,7 @@ impl KernelStore {
                     .collect()
             })
             .map_err(crate::map_sqlite)?;
-        tx.commit().map_err(crate::map_sqlite)?;
+        tx.commit()?;
         Ok(rows)
     }
 }
@@ -778,5 +776,7 @@ mod scope_decisions_plan_tests {
             "{plan}"
         );
         assert!(!plan.contains("idx_decisions_scope_fk"), "{plan}");
+        // Rows sort only inside one commit sequence, never across the whole read.
+        assert!(!plan.contains("TEMP B-TREE FOR ORDER BY"), "{plan}");
     }
 }

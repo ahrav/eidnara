@@ -254,8 +254,9 @@ struct ProjectState {
     /// before the cursor is dropped when the cursor advances.
     resolved: BTreeSet<(i64, String)>,
     attempts: HashMap<String, u32>,
-    /// A commit sequence at or before which every live decision of the scope is resolved.
-    paged_through: Option<i64>,
+    /// The page start just past a commit sequence at or before which every live decision of the
+    /// scope is resolved; a pass pages from the later of it and the cursor.
+    floor: Option<(i64, String)>,
 }
 
 /// The pass's process-local state.
@@ -281,6 +282,11 @@ impl Verifier {
     /// of its resolved prefix.
     pub fn cursor(&self, scope_id: &str) -> Option<(i64, String)> {
         self.projects.get(scope_id)?.cursor.clone()
+    }
+
+    /// The page start past the commit sequence a drained project `scope_id` paged through.
+    pub fn floor(&self, scope_id: &str) -> Option<(i64, String)> {
+        self.projects.get(scope_id)?.floor.clone()
     }
 
     /// One pass over `projects`, counting into `counters`.
@@ -443,11 +449,8 @@ impl ProjectRun<'_, '_> {
                 ..ProjectState::default()
             };
         }
-        let floor = self
-            .state
-            .paged_through
-            .map(|seq| (seq.saturating_add(1), String::new()));
-        let mut after = self.state.cursor.clone().max(floor);
+        let mut after = self.state.cursor.clone().max(self.state.floor.clone());
+        // Every decision before `after` is resolved, and so is each one this run reads while it holds.
         let mut prefix = true;
         loop {
             let page = match self.kernel.scope_decisions_after_within_budget(
@@ -458,15 +461,12 @@ impl ProjectRun<'_, '_> {
                 PAGE_ROWS,
                 budget,
             ) {
-                Ok(page) if page.is_empty() => {
-                    if prefix {
-                        self.state.paged_through = Some(target.through_commit);
-                    }
-                    return Step::Resolved;
-                }
+                Ok(page) if page.is_empty() => break,
                 Ok(page) => page,
                 Err(error) => return self.refused(error == KernelError::Deadline),
             };
+            // A page shorter than the row cap is the last one at the target.
+            let last = page.len() < PAGE_ROWS.get();
             let ids: Vec<String> = page.iter().map(|(_, id)| id.clone()).collect();
             let standings = match self
                 .kernel
@@ -527,7 +527,14 @@ impl ProjectRun<'_, '_> {
                     return Step::StopProject;
                 }
             }
+            if last {
+                break;
+            }
         }
+        if prefix {
+            self.state.floor = Some((target.through_commit.saturating_add(1), String::new()));
+        }
+        Step::Resolved
     }
 
     /// One more attempt at a decision that ended without a terminal outcome; the K-th resolves it
@@ -613,6 +620,7 @@ impl ProjectRun<'_, '_> {
         if self.terminal.contains(&(object_id.to_owned(), oid.clone())) {
             return Step::Resolved;
         }
+        // The pre-check passes over a decision whose page standing named no readable anchor.
         if let Some(step) = self.attested(object_id, &oid) {
             return step;
         }

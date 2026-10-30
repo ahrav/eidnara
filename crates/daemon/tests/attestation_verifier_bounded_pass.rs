@@ -1576,12 +1576,72 @@ fn a_row_the_standing_read_refuses_is_skipped_after_k_passes() {
     assert!(exists(&store, &attestation(&good, &repo)));
     assert_eq!(counters.get("unavailable_skipped"), 1);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, good);
+
+    // The refused page standing names no anchor, so a restart skips the attested decision at the
+    // check after its classification, before any repository read.
+    let store = store.reopen();
+    let tip = store.kernel.tip().unwrap();
+    let counters = Counters::default();
+    let clock = Clock::open();
+    Verifier::default().pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(counters.get("skipped_attested"), 1);
+    assert_eq!(counters.get("attestation_replayed"), 0);
+    assert_eq!(clock.opens(), 0);
+    assert_eq!(store.kernel.tip().unwrap(), tip);
 }
 
-/// A project whose pages ran out with every decision resolved pages from past that sequence on
-/// its next pass, and still verifies a decision committed after it, behind another project's
-/// decisions in commit order; a transient decision committed after it keeps the project paging
-/// from its cursor until the decision resolves.
+/// An anchor row the pre-check cannot read leaves its decision to classification, which refuses it
+/// and spends an attempt each pass until the K-th skips it, while the decision behind it verifies
+/// in the first pass.
+#[test]
+fn a_refused_anchor_read_leaves_the_decision_to_its_classification() {
+    let store = Store::open();
+    let repo = Repo::new(
+        "anchor",
+        &[
+            ("bad.md".into(), text(0, 1024)),
+            ("good.md".into(), text(1, 1024)),
+        ],
+    );
+    store.scope(&repo);
+    let bad = store.decision(&repo, "a0", "bad.md", &text(0, 1024));
+    let good = store.decision(&repo, "a1", "good.md", &text(1, 1024));
+    store
+        .sqlite()
+        .execute(
+            "UPDATE anchors SET anchor_kind='bogus' WHERE anchor_id='anchor_a0'",
+            [],
+        )
+        .unwrap();
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    for pass in 1..=3 {
+        let report = verifier.pass(
+            &store.kernel,
+            &[repo.project()],
+            &on,
+            &counters,
+            &Clock::open(),
+        );
+        assert!(report.failed, "pass {pass}");
+        assert_accounting(&counters);
+        assert_eq!(counters.get("attestation_committed"), 1, "pass {pass}");
+        let skipped = u64::from(pass == 3);
+        assert_eq!(counters.get("unavailable_skipped"), skipped, "pass {pass}");
+        if pass < 3 {
+            assert_eq!(verifier.cursor(&repo.scope_id()), None, "pass {pass}");
+        }
+    }
+    assert!(exists(&store, &attestation(&good, &repo)));
+    assert!(!exists(&store, &attestation(&bad, &repo)));
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, good);
+}
+
+/// A project whose pages ran out with every decision resolved records the target's sequence as its
+/// floor and pages from past it. A decision committed at the next sequence, decisions committed
+/// behind another project's, and a decision committed during a pass after its target capture are
+/// all read on a later pass, and a transient decision committed past the floor holds the project
+/// at its cursor until it resolves.
 #[test]
 fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
     let store = Store::open();
@@ -1595,18 +1655,35 @@ fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
     let first = store.decision(&repo, "d0", &files[0].0, &files[0].1);
     let counters = Counters::default();
     let mut verifier = Verifier::default();
-    let pass = |verifier: &mut Verifier, projects: &[Project]| {
-        let clock = Clock::open();
-        let report = verifier.pass(&store.kernel, projects, &on, &counters, &clock);
+    let pass = |verifier: &mut Verifier, projects: &[Project], clock: &Clock<'_>| {
+        let report = verifier.pass(&store.kernel, projects, &on, &counters, clock);
         assert_accounting(&counters);
-        (report, clock.opens())
+        report
     };
+    let floor = |verifier: &Verifier, repo: &Repo| verifier.floor(&repo.scope_id());
+    let past = |seq: i64| Some((seq + 1, String::new()));
     let both = [repo.project(), other.project()];
-    assert_eq!(pass(&mut verifier, &both).1, 1);
+    let clock = Clock::open();
+    let captured = store.kernel.tip().unwrap();
+    pass(&mut verifier, &both, &clock);
+    assert_eq!(clock.opens(), 1);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, first);
-    let (report, opens) = pass(&mut verifier, &both);
+    // The floor is the target captured before the attestation commit, which the page excludes.
+    assert_eq!(floor(&verifier, &repo), past(captured));
+    let report = pass(&mut verifier, &both, &Clock::open());
     assert!(!report.progressed && !report.failed);
-    assert_eq!(opens, 0);
+    let drained = store.kernel.tip().unwrap();
+    assert_eq!(floor(&verifier, &repo), past(drained));
+    assert_eq!(floor(&verifier, &other), past(drained));
+
+    // One commit lands at the floor's own sequence.
+    let next = store.model_decision(&repo, "n0", "", None, None);
+    assert_eq!(store.kernel.tip().unwrap(), drained + 1);
+    let report = pass(&mut verifier, &[repo.project()], &Clock::open());
+    assert!(report.progressed && !report.failed);
+    assert_eq!(counters.get("unverifiable_no_anchor"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, next);
+    assert_eq!(floor(&verifier, &repo), past(drained + 1));
 
     for i in 0..3 {
         store.decision(&other, &format!("o{i}"), &files[i].0, &files[i].1);
@@ -1614,25 +1691,51 @@ fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
     let later = store.decision(&repo, "d1", &files[1].0, &files[1].1);
     let unbound = store.decision_under(&repo, "git:unbound", "d2", &files[2].0, &files[2].1);
     let last = store.decision(&repo, "d3", &files[3].0, &files[3].1);
-    assert_eq!(pass(&mut verifier, &[repo.project()]).1, 2);
+    let clock = Clock::open();
+    pass(&mut verifier, &[repo.project()], &clock);
+    assert_eq!(clock.opens(), 2);
     assert!(exists(&store, &attestation(&later, &repo)));
     assert!(exists(&store, &attestation(&last, &repo)));
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, later);
+    assert_eq!(floor(&verifier, &repo), past(drained + 1));
     for attempt in 2..=3 {
-        pass(&mut verifier, &[repo.project()]);
+        let report = pass(&mut verifier, &[repo.project()], &Clock::open());
+        assert!(report.failed);
         assert_eq!(counters.get("unavailable_repository_unbound"), attempt);
     }
     assert_eq!(counters.get("unavailable_skipped"), 1);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, last);
     assert!(!exists(&store, &attestation(&unbound, &repo)));
-    let (report, opens) = pass(&mut verifier, &both);
+    let resolved = store.kernel.tip().unwrap();
+    assert_eq!(floor(&verifier, &repo), past(resolved));
+
+    // `repo` pages first and records its floor; `other` then pages from its old floor and verifies
+    // its three decisions, and a decision committed in `repo` at that first commit poll, after
+    // `repo`'s target capture, waits for the next pass.
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    let during = Mutex::new(None);
+    let clock = Clock::with(|poll, _| {
+        if poll == Poll::Commit && polls.fetch_add(1, Ordering::SeqCst) == 0 {
+            *during.lock().unwrap() = Some(store.model_decision(&repo, "m0", "", None, None));
+        }
+        false
+    });
+    let report = pass(&mut verifier, &both, &clock);
     assert!(report.progressed && !report.failed);
-    assert_eq!(opens, 3);
+    assert_eq!(clock.opens(), 3);
     assert_eq!(counters.get("attestation_committed"), 6);
-    let (report, opens) = pass(&mut verifier, &both);
+    let during = during.lock().unwrap().clone().unwrap();
+    assert!(floor(&verifier, &repo) < past(store.kernel.tip().unwrap()));
+    let report = pass(&mut verifier, &both, &Clock::open());
+    assert!(report.progressed && !report.failed);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, during);
+    assert_eq!(counters.get("unverifiable_no_anchor"), 2);
+    let clock = Clock::open();
+    let report = pass(&mut verifier, &both, &clock);
     assert!(!report.progressed && !report.failed);
-    assert_eq!(opens, 0);
-    assert_eq!(counters.get("considered"), 9);
+    assert_eq!(clock.opens(), 0);
+    assert_eq!(counters.get("considered"), 11);
+    assert_eq!(counters.get("skipped_attested"), 0);
 }
 
 /// An attested decision skips under `skipped_attested` at the oid its anchor names before it is

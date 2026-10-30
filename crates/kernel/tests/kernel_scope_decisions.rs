@@ -106,6 +106,8 @@ fn the_page_walks_a_scopes_live_decisions_in_commit_order_after_the_cursor() {
         ]
     );
     assert_eq!(page(&fixture, tip, None, 2), all[..2]);
+    // A cursor whose object id sorts after every later decision's still pages past its sequence.
+    assert_eq!(page(&fixture, tip, Some((first, &object(9))), 32), all[1..]);
     assert_eq!(
         page(&fixture, tip, Some((second, &object(1))), 32),
         all[2..]
