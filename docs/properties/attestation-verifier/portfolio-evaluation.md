@@ -56,12 +56,13 @@ the current line.
 | G1 | Document evidence is at least `Sensitive` and anything citing it by FK serves no wider than `ExplicitSearch` | added as `p6-document-evidence-cited-by-fk-serves-no-wider-than-explicit-search` |
 | G2 | `delete_artifact` bypasses the citation guard | added as `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard`; relabelled `test-only` because `delete_artifact` has no production caller |
 | G3 | The Kernel checkout open has no allocation limit and honors replacement refs | added as `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements` |
-| G4 | A plugin `RetireDecision` can retire an attestation | re-queued; owner #1174: the #1172 ticket resolves OQ6-15 as no new mechanism and documents the plugin `mark_stale` and retire exposure in U4 |
+| G4 | A plugin `RetireDecision` can retire an attestation | applied by #1174 as an open question with no new mechanism (OQ6-15): `p6-new-party-distinct-and-self-refusal` records that a plugin's `mark_stale` disposition and `retire_decision` operation reach an attestation in its project scope, and `docs/memory-reviewer-operations.md` section 9.7 documents the exposure; closing it needs the repository owner |
 | G5 | No record on the served form of an unpromoted trusted-class attestation (`ExplicitLabeled`) | closed by #1172 with no record: no verifier write commits an unpromoted attestation, because the envelope rolls back below `Verified` (`p6-new-witness-degradation-never-silent`), and the plugin route cannot write under `verifier` (`p6-new-party-distinct-and-self-refusal`), so the state has no producer |
-| G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1174 (U4 part pass). #1171 does not address it: the classifier reads no `artifact_reference`, and its claim comes from the descriptor detail and the evidence row |
-| G7 | The two records #1170 activates, `p6-new-verdict-deterministic` and `p6-new-blob-read-bounded-at-oid`, have no fresh-context four-lens evaluation | queued; owner U1 ([#1170](https://github.com/ahrav/eidnara/issues/1170)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
-| G8 | The two records #1171 activates, `p6-new-verifiability-pure-function-of-snapshot` and `p6-new-verifier-input-anchor-and-document-citation`, have no fresh-context four-lens evaluation | queued; owner U2 ([#1171](https://github.com/ahrav/eidnara/issues/1171)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
-| G9 | The nine records #1172 activates have no fresh-context four-lens evaluation | queued; owner U2 ([#1172](https://github.com/ahrav/eidnara/issues/1172)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
+| G6 | No record pinning that `artifact_reference` is a content-store path (D2) | closed by #1174 with no record: no verifier code reads `artifact_reference` (a search of `crates/daemon/src/attestation_verifier.rs` and `crates/daemon/src/attestation_verifier/` at the #1174 branch finds none); the classifier's claim comes from the descriptor detail and the evidence row's byte length, and the applicability step reads the descriptor detail, so the field carries no verifier guarantee |
+| G7 | The two records #1170 activates, `p6-new-verdict-deterministic` and `p6-new-blob-read-bounded-at-oid`, have no fresh-context four-lens evaluation | open question; owner: the repository owner. This file records no fresh-context four-lens evaluation through #1174; the decision is G10's |
+| G8 | The two records #1171 activates, `p6-new-verifiability-pure-function-of-snapshot` and `p6-new-verifier-input-anchor-and-document-citation`, have no fresh-context four-lens evaluation | open question; owner: the repository owner; the decision is G10's |
+| G9 | The nine records #1172 activates have no fresh-context four-lens evaluation | open question; owner: the repository owner; the decision is G10's |
+| G10 | The four N7 records #1173 activates and `p6-new-attestation-stale-on-byte-change`, which #1174 activates, have no fresh-context four-lens evaluation, like the records of G7 to G9 | open question (needs human input); owner: the repository owner, who decides whether one fresh-context evaluation of harness fit, coverage balance, implementability, and wildcard runs over the 18 converted records before the part is relied on, and who records each finding's disposition here |
 
 ## Biases for a human
 
@@ -126,3 +127,26 @@ the current line.
   floor. The attestation and its witness carry the served class the
   classification read, and the envelope rereads it, so the attestation serves
   no wider than the model decision.
+
+## Findings from the U4 applicability implementation
+
+- The applicability step reads the live descriptor of the witnessed lineage
+  at the pass sequence through a new budgeted Kernel read,
+  `live_source_descriptor_of_lineage_within_budget`, which shares its
+  query and row checks with the envelope's
+  `live_source_descriptor_of_lineage`, and pages the project's
+  attestations through `scope_decisions_of_source_after_within_budget`,
+  the source-kind complement of the pass's decision page. Neither changes
+  the schema.
+- A stale mark the Kernel refuses counts under the write set's
+  `commit_refused_` and `commit_conflict` counters; the three applicability
+  counters count evaluations, and `applicability_stale` only committed
+  marks.
+- The ticket names a "second pass writes nothing". Under N the step
+  revisits attestations in a cycle of passes, so a second pass over a
+  `Stale` attestation passes over it before any read, and a direct retry of
+  the same key replays its receipt.
+- The refinements R1 to R8 were applied by #1170; the R2 halves on
+  effective maturity and visibility after `MarkStale` stay an open question
+  on `p6-mark-stale-withdraws-support-and-is-terminal-in-place`, with no
+  owner change.

@@ -7,8 +7,10 @@ claim is exercised, not a verdict that it is adequate; adequacy belongs to
 production guards. References were verified at the #1170 branch, and the
 rows #1171 added and every row pointing into a file #1171 changed were
 verified at the #1171 branch, the rows #1172 added and every row pointing
-into a file #1172 changed at the #1172 branch, and the rows #1173 added and
-every row pointing into a file #1173 changed at the #1173 branch.
+into a file #1172 changed at the #1172 branch, the rows #1173 added and
+every row pointing into a file #1173 changed at the #1173 branch, and the
+rows #1174 added and every row pointing into a file #1174 changed at the
+#1174 branch.
 
 ## Production guards
 
@@ -50,16 +52,21 @@ every row pointing into a file #1173 changed at the #1173 branch.
 | Write-set check | `crates/daemon/src/attestation_verifier/attest.rs:285` (`WriteSet::check`), called at `:339` | the compared, detail, and citation evidence ids are one id; the detail is at `WITNESS_DETAIL_VERSION` and names the write set's blob and the claim's commit oid, digest, path, descriptor, lineage, and descriptor revision; the citation is a `verifier_citation` event; every id is the pair's `Identity`; both rows carry the model decision's domain and served sensitivity and one scope and the attestation its anchor; the witness carries the attestation's source triple at revision 1 and the document kind's witness kind; no row cites evidence by FK | unaudited |
 | Envelope recheck | `crates/daemon/src/attestation_verifier/attest.rs:539` (`recheck`): incarnation at `:548`, anchor at `:576`, descriptor at `:585`; served sensitivity at `:362` | the model decision, its anchor at the sequence the envelope extends read in the envelope's transaction, its descriptor with its cited evidence row live, and the class the Kernel serves it at are what the classification read; otherwise `changed` | unaudited |
 | Witness oracle | `crates/daemon/src/attestation_verifier/attest.rs:385` | the envelope commits only at effective maturity `Verified` and disposition `Active`; otherwise `witness_degraded` | unaudited |
-| Opposite-key refusal | `crates/daemon/src/attestation_verifier/attest.rs:506` in `run` (`:494`) | a recorded key for the other verdict on the same decision and oid is `conflict` | unaudited |
+| Opposite-key refusal | `crates/daemon/src/attestation_verifier/attest.rs:502` in `run` (`:490`) | a recorded key for the other verdict on the same decision and oid is `conflict` | unaudited |
 | Stale path | `crates/daemon/src/attestation_verifier/attest.rs:424` (`mark_stale`), skip at `:450`, admission at `:455` | one `MarkStale` under the latest admission's classes; an already `Stale` decision is skipped; a `MarkStale` returning another disposition is `invalid_write_set` | unaudited |
 | Verifier flag | `crates/daemon/src/config.rs:162` (default), `ConfigKey::VerifierEnabled` user-only; `crates/daemon/src/attestation_verifier/bounded_pass.rs:283` in `Verifier::pass` (`:260`) | the flag is off by default, a project tier cannot set it, and the pass reads it per project before any repository or Kernel read | unaudited |
-| Pass budgets | `crates/daemon/src/attestation_verifier/bounded_pass.rs:475` in `ProjectRun::run` (`:399`); `MAX_VERDICTS` at `:68` | a project stops at N verdicts or N × 256 KiB blob bytes per pass | unaudited |
-| Pass cursor | `crates/daemon/src/attestation_verifier/bounded_pass.rs:467` in `ProjectRun::run` (`:399`) | the cursor moves only over a resolved prefix; a resolved decision behind an unresolved one is remembered | unaudited |
+| Pass budgets | `crates/daemon/src/attestation_verifier/bounded_pass.rs:475` in `ProjectRun::decisions` (`:418`); `MAX_VERDICTS` at `:68` | a project stops at N verdicts or N × 256 KiB blob bytes per pass | unaudited |
+| Pass cursor | `crates/daemon/src/attestation_verifier/bounded_pass.rs:467` in `ProjectRun::decisions` (`:418`) | the cursor moves only over a resolved prefix; a resolved decision behind an unresolved one is remembered | unaudited |
 | Pass skips | `crates/daemon/src/attestation_verifier/bounded_pass.rs:455` (`skipped_stale`), `:542` (`skipped_attested`) in `ProjectRun::decision` (`:507`) | a `Stale` decision and one whose attestation id is registered are skipped before any repository read or write | unaudited |
 | Pass retry bound | `crates/daemon/src/attestation_verifier/bounded_pass.rs:485` (`retry`), `:500` (`transient`), `MAX_ATTEMPTS` at `:70` | a decision resolves on its K-th attempt in total, shared across transient verdicts, deadlines, classification and commit refusals, `changed` outcomes, and degraded witnesses | unaudited |
 | Pass effect counters | `crates/daemon/src/attestation_verifier/bounded_pass.rs:588` (`ProjectRun::outcome`), after `attest` at `:583` | each outcome increments its effect counter after the commit returns | unaudited |
 | Scope decision page | `crates/kernel/src/slice/read.rs:701` (`scope_decisions_after_within_budget`) | a scope's live decisions after a `(created_commit_seq, object_id)` pair in that order, excluding one source kind, at most a row cap | unaudited |
-| Verifier block sanitizer | `crates/host-runtime/src/control.rs:2112` (`VERIFIER_COUNTERS`) through `sanitize_counters` | `metrics.verifier` keeps each allowlisted unsigned integer no greater than 2^53 and drops every other field | unaudited |
+| Applicability evaluation | `crates/daemon/src/attestation_verifier/applicability.rs:39` (`evaluate`) | the witness detail decodes at `WITNESS_DETAIL_VERSION` and names a lineage whose live document descriptor at the pass sequence carries the witnessed digest (`Current`), another digest (`Republished`), or no live descriptor (`Unavailable`) | unaudited |
+| Applicability stale mark | `crates/daemon/src/attestation_verifier/applicability.rs:84` (`mark_republished`), key at `:100`, `Stale` skip at `:141`, descriptor recheck at `:150` | one `MarkStale` on a live `Active` `verifier` attestation under its latest admission's classes with no evidence, keyed by the attestation and the descriptor revision; a `Stale` attestation is skipped and any other change is `changed` | unaudited |
+| Applicability step | `crates/daemon/src/attestation_verifier/bounded_pass.rs:628` (`ProjectRun::applicability`), N bound at `:667`, cursor reset at `:642`; `:681` (`ProjectRun::applicable`), commit poll at `:695` | at most N `Active` attestations evaluated per project per pass from a process-local cursor that returns to the start on an empty page; the deadline is polled before each evaluation and each commit | unaudited |
+| Source-kind decision page | `crates/kernel/src/slice/read.rs:725` (`scope_decisions_of_source_after_within_budget`) through `scope_decision_page` (`:744`) | a scope's live decisions of one source kind after a `(created_commit_seq, object_id)` pair in that order, at most a row cap | unaudited |
+| Lineage descriptor read | `crates/kernel/src/source_descriptor.rs:1263` (`live_source_descriptor_of_lineage_within_budget`) through `lineage_descriptor` (`:1282`) | the one live descriptor of a class in a lineage at a sequence, with the page read's row checks | unaudited |
+| Verifier block sanitizer | `crates/host-runtime/src/control.rs:2112` (`VERIFIER_COUNTERS`) through `sanitize_counters` | `metrics.verifier` keeps each allowlisted unsigned integer no greater than 2^53, the three applicability counters included, and drops every other field | unaudited |
 
 ## Tests
 
@@ -220,6 +227,12 @@ every row pointing into a file #1173 changed at the #1173 branch.
 | `the_page_walks_a_scopes_live_decisions_in_commit_order_after_the_cursor` | `crates/kernel/tests/kernel_scope_decisions.rs:65` | cursor (page order) | unaudited |
 | `every_fixture_row_matches_through_the_configuration_cache` | `crates/daemon/src/config.rs:3919` | flag off (project tier, Rust) | unaudited |
 | `verifier parity fixture` | `packages/opencode-plugin/src/config/index.test.ts:1101`, `packages/pi-plugin/src/config/index.test.ts:754` | flag off (project tier, both plugins) | unaudited |
+| `a_republished_document_marks_its_attestation_stale_once_and_leaves_the_model_decision_unchanged` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1619` | stale on byte change (AC18); `MarkStale` under the attestation's classes | unaudited |
+| `an_equal_republish_a_retired_descriptor_and_an_undecodable_witness_write_nothing` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1683` | stale on byte change (silent cases) | unaudited |
+| `an_attestation_retired_before_its_stale_mark_commits_writes_nothing` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1741` | stale on byte change (F2) | unaudited |
+| `a_replayed_stale_mark_key_writes_nothing_new` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1779` | stale on byte change (F10) | unaudited |
+| `the_applicability_step_evaluates_at_most_n_per_pass_and_resumes_after_its_cursor` | `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1819` | stale on byte change (N, cursor, commit deadline); pass bounds | unaudited |
+| `the_source_page_walks_only_the_scopes_decisions_of_one_source_kind` | `crates/kernel/tests/kernel_scope_decisions.rs:140` | stale on byte change (page read) | unaudited |
 | `the_verifier_block_is_sanitized_field_by_field_and_documented` | `crates/host-runtime/src/control.rs:2179` | counters block on the wire | unaudited |
 
 ## Categories with no check found
@@ -235,8 +248,12 @@ every row pointing into a file #1173 changed at the #1173 branch.
 - `p6-new-verifiability-pure-function-of-snapshot`: no test restores the store
   after the first read of a classification, so the incarnation recheck after the
   last read has no behavioral test; `classify` has no seam between its reads.
-- `p6-new-attestation-stale-on-byte-change`, the one proposed record: its code
-  does not exist at the branch tip.
+- `p6-new-attestation-stale-on-byte-change`: no test drives source capture
+  itself to republish an attested document; the tests publish the second
+  descriptor revision through the Kernel, and
+  `p6-document-republishes-only-on-digest-change-and-retires-on-missing`
+  covers when source capture publishes one. No test exercises the Kernel
+  lineage read's deadline or future-snapshot refusals.
 - The write set: no test forces a non-`Stale` result from the `MarkStale`
   admission, a scope mismatch in the envelope, or an exhausted budget in
   `attest`, and no test terminates the process after a commit.

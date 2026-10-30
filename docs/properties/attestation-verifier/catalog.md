@@ -14,7 +14,9 @@ line of the function, constant, or test it cites, or the named line inside it.
 Each later ticket (#1171 to #1174) converts the records its change makes
 checkable and re-verifies every reference at its branch; #1171 re-verified
 every reference into the files it changed at its branch, and #1172 and
-#1173 did the same at theirs.
+#1173 did the same at theirs. #1174 converts the last proposed record,
+applies the remaining queued portfolio items, and re-verifies every
+reference into the files it changed at its branch.
 
 This ticket set amends the specification's proposed obligations in three
 ways. The reason set has no `range_outside_blob` and no `filter_unavailable`
@@ -76,18 +78,24 @@ user-only `verifier.enabled` key, over the Kernel page read
 `scope_decisions_after_within_budget` in `crates/kernel/src/slice/read.rs`,
 and the per-data-home task that paces it in `crates/daemon/src/verifier_task.rs`,
 outside the verifier module so that module stays free of the async runtime.
+#1174 lands N8: the applicability step in
+`crates/daemon/src/attestation_verifier/applicability.rs`, which reads an
+attestation's witness detail and its lineage's live document descriptor and
+marks the attestation `Stale` when the digests differ, run by the pass after
+verification from a second process-local cursor, over two Kernel reads: the
+source-kind page `scope_decisions_of_source_after_within_budget` in
+`crates/kernel/src/slice/read.rs` and the lineage-keyed
+`live_source_descriptor_of_lineage_within_budget` in
+`crates/kernel/src/source_descriptor.rs`.
 
 ## Status vocabulary
 
-`Status:` uses METHOD's `active` for the 23 existing-behavior records, the
-two N2 records #1170 made checkable, the two N1 records #1171 made
-checkable, the nine N3 to N6 records #1172 made checkable, and the four N7
-records #1173 made checkable. The other record uses `Status: proposed`, the
-value the specification assigns to a designed obligation whose code does not
-exist yet. A proposed record names
-the ticket that converts it, carries `Exercised: not yet` with that ticket
-named, and states the intended reachability. Every existing check named in
-this part has status `unaudited` in `existing-checks.md`.
+`Status:` uses METHOD's `active` for every record: the 23 existing-behavior
+records, the two N2 records #1170 made checkable, the two N1 records #1171
+made checkable, the nine N3 to N6 records #1172 made checkable, the four N7
+records #1173 made checkable, and the N8 record #1174 made checkable. Each
+converted record names the ticket that converted it. Every existing check
+named in this part has status `unaudited` in `existing-checks.md`.
 
 ## Reachability classes
 
@@ -148,16 +156,16 @@ this part has status `unaudited` in `existing-checks.md`.
 | `p6-new-pass-bounds-and-accounting` | safety | N7 | active | `always` | explicit-config-only |
 | `p6-new-cursor-never-skips-unresolved` | safety | N7 | active | `always` | explicit-config-only |
 | `p6-new-pass-progress-under-transient-unavailable` | liveness | N7 | active | `always` | explicit-config-only |
-| `p6-new-attestation-stale-on-byte-change` | safety | N8 | proposed | `always-or-unreached` | explicit-config-only |
+| `p6-new-attestation-stale-on-byte-change` | safety | N8 | active | `always-or-unreached` | explicit-config-only |
 | `p6-new-verdict-deterministic` | safety | N2 | active | `always` | explicit-config-only |
 | `p6-new-blob-read-bounded-at-oid` | safety | N2 | active | `always` | explicit-config-only |
 
-Counts: 41 records; 23 existing-behavior records with `unaudited` existing
-checks, 17 records #1170 to #1173 convert to active, and 1 proposed
-obligation (for #1174). Semantics distribution: `always` 38, `sometimes` 1,
+Counts: 41 records, all active; 23 existing-behavior records with
+`unaudited` existing checks, and 18 records #1170 to #1174 convert to
+active. Semantics distribution: `always` 38, `sometimes` 1,
 `always-or-unreached` 1, `unreachable` 1, `reachable` 0. Types: 39 safety, 1
-reachability, 1 liveness. Reachability among the 40 active records: 7
-test-only, 10 default-production, 23 explicit-config-only. The specification
+reachability, 1 liveness. Reachability: 7 test-only, 10 default-production,
+24 explicit-config-only. The specification
 labelled
 `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard`
 `default-production`; `delete_artifact` has no production caller at the
@@ -321,13 +329,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - plugin routes submit `MarkStale` with the shipped configuration
 Status: active
-Exercised: yes - admission unit and route tests apply `MarkStale` and read the disposition; the verifier's stale path applies it under the model decision's stored classes
+Exercised: yes - admission unit and route tests apply `MarkStale` and read the disposition; the verifier's stale path applies it under the model decision's stored classes, and its applicability step applies it under an attestation's stored `(TrustedLocalCode, CurrentCode)` classes, after which the next pass leaves the `Stale` attestation unwritten
 Guarantee: `MarkStale` sets disposition `Stale` in place with outcome `Deny`; a later event that names no disposition keeps `Stale`. After `MarkStale`, a validated `CodeObserved` returns `Outcome::Promote` when the subject's automatic ceiling admits `Verified` or approval is valid, and `Outcome::Deny` otherwise, while the disposition stays `Stale`; `Outcome` alone is never the oracle.
 Check: `always` - after a committed `MarkStale`, every later admission of the subject that names no disposition leaves the disposition `stale`; clause added by refinement R2
 Fault/timing angle: a witness event after `MarkStale` in the same or a later envelope
 Required faults and enabling state: `MarkStale` followed by a validated `CodeObserved` on the same subject
 Confidence: medium - [evidence](evidence/p6-mark-stale-withdraws-support-and-is-terminal-in-place.md). Read `event_effect` (`crates/kernel/src/admission.rs:4245`): `MarkStale` maps to `(current, Some(Stale), Deny)` and `CodeObserved` to `(Verified, None, Promote)`, and a `None` disposition keeps the prior one. The effective-maturity and visibility halves of R2 are not traced here
-Existing check: `crates/kernel/src/admission.rs:5437`; `crates/kernel/tests/kernel_admission.rs:1047`, `:2735`; `crates/daemon/tests/kernel_routes.rs:4398`; `crates/daemon/tests/attestation_verifier_attest.rs:597` (unaudited)
+Existing check: `crates/kernel/src/admission.rs:5437`; `crates/kernel/tests/kernel_admission.rs:1047`, `:2735`; `crates/daemon/tests/kernel_routes.rs:4398`; `crates/daemon/tests/attestation_verifier_attest.rs:597`; `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1619` (unaudited)
 Impact: a writer that reads `Promote` as success after `MarkStale` would count a stale row as verified
 Open questions:
 - After `MarkStale`, does a validated `CodeObserved` leave effective maturity and visibility unchanged? - unresolved, needs a Kernel test that applies `MarkStale` then a validated `CodeObserved` and reads effective maturity and visibility.
@@ -359,8 +367,9 @@ Fault/timing angle: none
 Required faults and enabling state: a missing file; a missing config key
 Confidence: high - [evidence](evidence/p6-failed-cheap-check-is-stale-and-handed-to-repair.md). Read the `FileExists` arm at `crates/kernel/src/applicability/checks.rs:285` and the `ConfigKey` arm at `:296` (reference correction 2: the specification's arm ranges were two lines off)
 Existing check: `crates/kernel/tests/kernel_applicability_engine.rs:283`; `crates/kernel/tests/kernel_read_repair.rs:141` (unaudited)
-Impact: no digest check kind exists (K3), so attestation staleness rests on OQ6-4
-Open questions: None.
+Impact: a failed check that did not stale its decision would leave a moved file's finding served
+Open questions:
+- Does attestation staleness use this path? - resolved with answer: no; OQ6-4 chose the push model ([#1174](https://github.com/ahrav/eidnara/issues/1174)), whose applicability step writes `MarkStale` from a descriptor comparison (`p6-new-attestation-stale-on-byte-change`); a digest check kind in this engine is a handoff to #657.
 
 ### p6-blob-read-is-header-gated-before-decode
 
@@ -435,7 +444,7 @@ Fault/timing angle: none
 Required faults and enabling state: a plugin replacement of a `verifier` decision
 Confidence: high - [evidence](evidence/p6-plugin-cannot-replace-a-foreign-source-decision.md). Read the plugin replacement at `crates/daemon/src/kernel_routes/commit.rs:1002`, `validate_successor` (`crates/kernel/src/slice/write.rs:1271`), and `refuse_succession_events` (`crates/kernel/src/admission.rs:2640`)
 Existing check: none
-Impact: an attestation replaced by a plugin would change party; retirement and `MarkStale` remain open to plugins (OQ6-15, gap G4)
+Impact: an attestation replaced by a plugin would change party; retirement and `MarkStale` remain open to plugins (OQ6-15, gap G4, recorded on `p6-new-party-distinct-and-self-refusal`)
 Open questions: None.
 
 ### p6-derived-reinjection-parents-live-at-write-and-existed-at-read
@@ -562,7 +571,7 @@ Guarantee: Every attestation id, its decision id, its witness observation and ob
 Check: `always` - live verifier decisions grouped by `(model object id, oid)` count at most one; a repeat of the key replays its receipt, the key under another request digest is `Conflict`, and a recorded opposite-verdict key for the pair is `Conflict`
 Fault/timing angle: a retry after a crash or a replayed pass; a changed claim at the same oid
 Required faults and enabling state: F10: the operation key replayed with the same and with a different verdict
-Confidence: high - [evidence](evidence/p6-new-attestation-identity-unique-per-decision-oid.md). Read `Identity::of` (`crates/daemon/src/attestation_verifier/attest.rs:65`), `intent` (`:606`), whose request digest covers the frozen claim, the compared evidence, the blob, and the verdict, and `run` (`:494`), which refuses a recorded opposite key at `:506` before any write
+Confidence: high - [evidence](evidence/p6-new-attestation-identity-unique-per-decision-oid.md). Read `Identity::of` (`crates/daemon/src/attestation_verifier/attest.rs:65`), `intent` (`:606`), whose request digest covers the frozen claim, the compared evidence, the blob, and the verdict, and `run` (`:490`), which refuses a recorded opposite key at `:502` before any write
 Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:895`, `:938`, `:1132` (unaudited)
 Impact: falsifier: an id containing pass time or randomness, or two live attestations for one pair
 Open questions:
@@ -640,7 +649,7 @@ Guarantee: The envelope aborts unless the returned admission has effective matur
 Check: `always` - a committed attestation's own admission has effective maturity `verified` and disposition `active`, and every other returned admission rolls the envelope back with `witness_degraded`; oracle amended by the write-set ticket
 Fault/timing angle: the witness changed between its insert and the admission in one envelope
 Required faults and enabling state: F1: a witness whose trigger fails validation inside the envelope
-Confidence: high - [evidence](evidence/p6-new-witness-degradation-never-silent.md). Read the assertion at `crates/daemon/src/attestation_verifier/attest.rs:385` after the admission at `:372`, whose failure stops the envelope through `run` (`:494`)
+Confidence: high - [evidence](evidence/p6-new-witness-degradation-never-silent.md). Read the assertion at `crates/daemon/src/attestation_verifier/attest.rs:385` after the admission at `:372`, whose failure stops the envelope through `run` (`:490`)
 Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:854`, `:431` (unaudited)
 Impact: falsifier: a committed attestation at `Candidate`
 Open questions:
@@ -656,7 +665,7 @@ Guarantee: Attestation, causality record, citation event, witness observation, w
 Check: `always` - a live attestation always has all five companions and its receipt, before and after a reopen
 Fault/timing angle: a fault after the admission inside the envelope; a restart after the commit
 Required faults and enabling state: F11: a fault-injected rollback after the admission, constructed; a process termination after the commit followed by a fresh open, not yet constructed (a clean close and fresh open shows durability across an open only)
-Confidence: high - [evidence](evidence/p6-new-attestation-write-set-one-outcome.md). Read `WriteSet::write`'s order, insert at `crates/daemon/src/attestation_verifier/attest.rs:369` through the citation at `:417`, all inside one `commit_within_budget` call in `run` (`:494`)
+Confidence: high - [evidence](evidence/p6-new-attestation-write-set-one-outcome.md). Read `WriteSet::write`'s order, insert at `crates/daemon/src/attestation_verifier/attest.rs:369` through the citation at `:417`, all inside one `commit_within_budget` call in `run` (`:490`)
 Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:1178`, `:727` (unaudited)
 Impact: falsifier: an attestation at `Candidate` with no observation after a crash
 Open questions:
@@ -692,7 +701,8 @@ Confidence: high - [evidence](evidence/p6-new-party-distinct-and-self-refusal.md
 Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:590`; `crates/daemon/tests/kernel_routes.rs:6778`; `crates/daemon/tests/attestation_verifier_attest.rs:431`, `:1246` (unaudited)
 Impact: falsifier: the verifier attests its own attestation
 Open questions:
-- Does anything beyond the plugin route reserve `verifier`? - resolved with answer: no other daemon route has a source-kind table; `kernel.artifact.ingest` (`crates/daemon/src/kernel_routes/ingest.rs:142`) accepts any `source_kind` for an evidence object, which cannot be a decision or a witness trigger. A plugin can still `mark_stale` or retire an attestation through `kernel.commit` under its own source kind (OQ6-15, documented in #1174).
+- Does anything beyond the plugin route reserve `verifier`? - resolved with answer: no other daemon route has a source-kind table; `kernel.artifact.ingest` (`crates/daemon/src/kernel_routes/ingest.rs:142`) accepts any `source_kind` for an evidence object, which cannot be a decision or a witness trigger. A plugin can still `mark_stale` or retire an attestation through `kernel.commit` under its own source kind (OQ6-15).
+- Can a plugin act on an attestation? - resolved with answer: yes, gap G4; a plugin's `mark_stale` disposition (`crates/daemon/src/kernel_routes/commit.rs:790`) and `retire_decision` operation (`:1011`) reach any live decision in its project scope, an attestation included, so either removes an attestation from `AutoInject`, and neither raises it; the exposure is recorded in `docs/memory-reviewer-operations.md` section 9.7 and stays open (needs human input).
 
 ### p6-new-flag-off-nothing-runs
 
@@ -714,13 +724,13 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only - the pass body runs only for a project whose user-only `verifier.enabled` is on (`crates/daemon/src/attestation_verifier/bounded_pass.rs:283`)
 Status: active - converted by [#1173](https://github.com/ahrav/eidnara/issues/1173)
-Exercised: yes - N + 2 verifiable 200 KiB decisions take two passes, N then 2, reading N × 200 KiB in the first; 3N `path_absent` decisions in one project leave another project's decision attested in the first pass; a fault-injected rollback after the admission and a key another writer committed first; each test checks the bucket sum at every pass end
-Guarantee: A pass computes at most N = 8 verdicts and reads at most N × 256 KiB of blob content per project, polls its deadline before each decision, each object read, and each commit, puts each considered decision in exactly one verdict or unverifiable bucket, and increments effect counters only after the commit returns.
-Check: `always` - per project per pass `verdicts <= N` and `bytes_read <= N × 256 KiB`; at every pass end `sum(verdict buckets) + sum(unverifiable buckets) == considered` and `attestation_committed <= match`; after a rollback `match = 1`, `attestation_committed = 0`, `commit_refused_<reason> = 1`; after a replayed key `attestation_replayed = 1` with one attestation
+Exercised: yes - N + 2 verifiable 200 KiB decisions take two passes, N then 2, reading N × 200 KiB in the first; 3N `path_absent` decisions in one project leave another project's decision attested in the first pass; a fault-injected rollback after the admission and a key another writer committed first; each test checks the bucket sum at every pass end; N + 1 republished attestations take two passes of the applicability step, N then 1
+Guarantee: A pass computes at most N = 8 verdicts, reads at most N × 256 KiB of blob content, and evaluates at most N attestations for applicability per project, polls its deadline before each decision, each object read, and each commit, puts each considered decision in exactly one verdict or unverifiable bucket, and increments effect counters only after the commit returns.
+Check: `always` - per project per pass `verdicts <= N`, `bytes_read <= N × 256 KiB`, and applicability evaluations `<= N`; at every pass end `sum(verdict buckets) + sum(unverifiable buckets) == considered` and `attestation_committed <= match`; after a rollback `match = 1`, `attestation_committed = 0`, `commit_refused_<reason> = 1`; after a replayed key `attestation_replayed = 1` with one attestation
 Fault/timing angle: a commit refused after the verdict; another writer committing the same key between the skip check and the commit
 Required faults and enabling state: F7 between decisions; F10: a replayed key; F11: a fault-injected rollback; F13: more than N candidates and a starving two-project pattern
-Confidence: high - [evidence](evidence/p6-new-pass-bounds-and-accounting.md). Read `ProjectRun::run` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:399`), whose budget stop is at `:475`, `ProjectRun::decision` (`:507`), which counts a verdict after `verify` (`:552`) and polls before the commit (`:580`), and `ProjectRun::outcome` (`:588`), which names the effect counter after `attest` (`:583`) returns
-Existing check: `crates/daemon/tests/attestation_verifier_bounded_pass.rs:475`, `:590`, `:542`, `:989`, `:1018` (unaudited)
+Confidence: high - [evidence](evidence/p6-new-pass-bounds-and-accounting.md). Read `ProjectRun::decisions` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:418`), whose budget stop is at `:475`, `ProjectRun::decision` (`:507`), which counts a verdict after `verify` (`:552`) and polls before the commit (`:580`), and `ProjectRun::outcome` (`:588`), which names the effect counter after `attest` (`:583`) returns
+Existing check: `crates/daemon/tests/attestation_verifier_bounded_pass.rs:475`, `:590`, `:542`, `:989`, `:1018`, `:1819` (unaudited)
 Impact: falsifier: a pass looping to exhaustion, double counting, or an effect counted before commit
 Open questions:
 - `Evaluation::bytes_read` counts blob content only; commit and tree payloads and delta materialization are excluded. Does the #1173 pass budget cover blob content or all decoded-object work? - resolved with answer: blob content, as the ticket's budgets name; commit and tree decoding are bounded by the allocation limit per object, the path cap per claim, and N and the deadline per pass.
@@ -735,7 +745,7 @@ Guarantee: The cursor, a `(created_commit_seq, object_id)` pair in the page read
 Check: `always` - every decision at or below the cursor has a terminal outcome, and a rescan of attested or `Stale` decisions leaves the tip unchanged
 Fault/timing angle: a deadline between decisions or during a read; a restart between passes
 Required faults and enabling state: F7, F13, a restart
-Confidence: high - [evidence](evidence/p6-new-cursor-never-skips-unresolved.md). Read `ProjectRun::run` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:399`), which moves the cursor only over a resolved prefix (`:467`), `retry` (`:485`), the skips before any repository read (`:455`, `:542`), and the page read `scope_decisions_after_within_budget` (`crates/kernel/src/slice/read.rs:701`)
+Confidence: high - [evidence](evidence/p6-new-cursor-never-skips-unresolved.md). Read `ProjectRun::decisions` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:418`), which moves the cursor only over a resolved prefix (`:467`), `retry` (`:485`), the skips before any repository read (`:455`, `:542`), and the page read `scope_decisions_after_within_budget` (`crates/kernel/src/slice/read.rs:701`)
 Existing check: `crates/daemon/tests/attestation_verifier_bounded_pass.rs:542`, `:733`, `:773`, `:989`, `:1352`, `:1389`; `crates/kernel/tests/kernel_scope_decisions.rs:65` (unaudited)
 Impact: falsifier: a `deadline` decision passed and never revisited, or a second `MarkStale`
 Open questions:
@@ -759,18 +769,19 @@ Open questions: None.
 ### p6-new-attestation-stale-on-byte-change
 
 Type: safety
-Reachability: explicit-config-only - intended; the behavior has no code at this branch
-Status: proposed - converts in [#1174](https://github.com/ahrav/eidnara/issues/1174)
-Exercised: not yet - the code lands in [#1174](https://github.com/ahrav/eidnara/issues/1174)
-Guarantee: When a pass evaluates an attestation whose lineage's live document descriptor has a digest different from the witnessed digest, the pass marks the attestation `Stale`; a lineage with no live descriptor, or an undecodable witness detail, writes nothing (a documented limitation).
-Check: `always-or-unreached` - whenever a pass evaluates such an attestation the result is `Stale`; unreached until #1174 lands
-Fault/timing angle: see the fault map
-Required faults and enabling state: source capture republishing the cited document's lineage with a different digest after the attestation
-Confidence: low - [evidence](evidence/p6-new-attestation-stale-on-byte-change.md). designed obligation from the specification ([#1169](https://github.com/ahrav/eidnara/issues/1169)); no code to read
-Existing check: none
-Impact: falsifier: a live descriptor with a different digest and the attestation left `Active`
+Reachability: explicit-config-only - the applicability step runs inside the pass, which runs only for a project whose user-only `verifier.enabled` is on (`crates/daemon/src/attestation_verifier/bounded_pass.rs:283`), and a republished document needs source capture, off by default (`crates/daemon/src/config.rs:160`)
+Status: active - converted by [#1174](https://github.com/ahrav/eidnara/issues/1174)
+Exercised: yes - after a `Match`, a pass over the unchanged document counts the attestation current; a republish at descriptor revision 2 with other bytes makes the next pass write one `MarkStale` on the attestation under `(TrustedLocalCode, CurrentCode)` with no evidence and a reason naming both digests and the revision, and a later pass writes nothing; a republish with equal bytes, a retired descriptor, and a witness detail rewritten to an undecodable value write nothing; an attestation retired between the page and its commit is `changed` with no `MarkStale` (F2); a second call under the same key replays its receipt (F10); N + 1 republished attestations take two passes, N then 1, and a deadline at the commit leaves them for the next pass
+Guarantee: When a pass evaluates a live `Active` attestation whose witnessed lineage has a live `repository_documents` descriptor with an `artifact_digest` other than the witnessed one, the pass commits exactly one `MarkStale` on the attestation under the classes of its latest admission, with `evidence_id: None`, a reason naming both digests and the descriptor revision, and the key `(verifier, applicability:<attestation object id>:<descriptor revision>)`; an equal digest, a lineage with no live descriptor, and an undecodable witness detail write nothing, and the model decision is never written.
+Check: `always-or-unreached` - whenever a pass evaluates such an attestation and its envelope recheck holds, the attestation is `Stale` after the pass with one `MarkStale` row for that revision; the step is unreached while the flag is off or source capture publishes no new revision, which is the documented limitation
+Fault/timing angle: the attestation retired, re-disposed, or superseded, or the lineage republished again, between the applicability read and the commit; a replayed key after an unknown commit outcome
+Required faults and enabling state: source capture republishing the cited document's lineage with a different digest after the attestation; F2: the attestation retired between the page and the commit; F10: the stale mark's key replayed
+Confidence: high - [evidence](evidence/p6-new-attestation-stale-on-byte-change.md). Read `evaluate` (`crates/daemon/src/attestation_verifier/applicability.rs:39`), which decodes the witness detail and reads the lineage's live descriptor at the pass sequence through `live_source_descriptor_of_lineage_within_budget` (`crates/kernel/src/source_descriptor.rs:1263`); `mark_republished` (`crates/daemon/src/attestation_verifier/applicability.rs:84`), its key (`:100`), and its envelope recheck of the attestation's liveness, disposition (`:141`), and live descriptor revision (`:150`); and the step `ProjectRun::applicability` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:628`), its N bound (`:667`) and cursor reset (`:642`), and `ProjectRun::applicable` (`:681`), which polls before the commit (`:695`)
+Existing check: `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1619`, `:1683`, `:1741`, `:1779`, `:1819`; `crates/kernel/tests/kernel_scope_decisions.rs:140` (unaudited)
+Impact: falsifier: bytes changed, a new descriptor revision published, and the attestation still `Active` after a pass evaluates it; or a second `MarkStale` for one revision
 Open questions:
-- Which mechanism carries applicability? - resolved with answer: OQ6-4 alternative 3, the push model inside the pass ([#1174](https://github.com/ahrav/eidnara/issues/1174)).
+- Which mechanism carries applicability? - resolved with answer: OQ6-4 alternative 3, the push model inside the pass ([#1174](https://github.com/ahrav/eidnara/issues/1174)); alternative 1, a digest check kind in the applicability engine, is a handoff to #657.
+- Should a retired descriptor or a disabled source capture stale an attestation? - resolved with answer: no; only a live descriptor with another digest stales it, because absence also follows from disabled capture ([#1174](https://github.com/ahrav/eidnara/issues/1174), trigger scope). The limitation is documented in `docs/memory-reviewer-operations.md` section 9.5.
 
 ### p6-new-verdict-deterministic
 
@@ -847,6 +858,14 @@ Open questions:
 - `p6-new-party-distinct-and-self-refusal` depends on
   `p6-plugin-source-kind-table-is-closed-and-classes-never-raised` and
   `p6-plugin-cannot-replace-a-foreign-source-decision`.
-- `p6-new-attestation-stale-on-byte-change` needs a check kind that
+- `p6-new-attestation-stale-on-byte-change` rests on
+  `p6-document-republishes-only-on-digest-change-and-retires-on-missing`,
+  which makes a new descriptor revision mean changed bytes, reads the
+  lineage and digest the witness detail of
+  `p6-new-witness-evidence-id-equals-attestation` records, and writes the
+  `MarkStale` `p6-mark-stale-withdraws-support-and-is-terminal-in-place`
+  describes. It runs in the pass under
+  `p6-new-pass-bounds-and-accounting`'s N. The applicability engine of
   `p6-object-applicability-payload-fails-closed` and
-  `p6-failed-cheap-check-is-stale-and-handed-to-repair` would carry.
+  `p6-failed-cheap-check-is-stale-and-handed-to-repair` is a separate path;
+  a digest check kind there is the #657 handoff.
