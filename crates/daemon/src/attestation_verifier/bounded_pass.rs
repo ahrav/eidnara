@@ -45,16 +45,17 @@
 //!
 //! The cursor passes a decision only once it is resolved, and only while every decision before it
 //! is resolved too; resolved decisions above the cursor are remembered, so no pass reads them
-//! again. A project whose pages ran out with every decision resolved records the commit sequence it
-//! paged through, and its next pass pages from past it. A decision is resolved by a skip, an
-//! unverifiable class, a decision outside the verifier's input ([`Class::NotInput`]), a terminal
-//! `Unavailable` reason, a committed or replayed write, a `conflict`, an invalid write set, or K =
-//! [`MAX_ATTEMPTS`] attempts in total, shared across transient `Unavailable` reasons, deadlines,
-//! Kernel refusals, a changed decision, and degraded witnesses. The K-th attempt counts
-//! `witness_degraded_skipped` when its witness degraded and `unavailable_skipped` otherwise. A
-//! terminal reason is kept per `(decision, oid)` for the process lifetime. All state is
-//! process-local: a restart rescans from the start, and the skips and the write set's receipt
-//! replay make the rescan write nothing.
+//! again. A project whose pages end at an empty page or a page shorter than [`PAGE_ROWS`], with
+//! every decision resolved, records as its floor the page start just past the target's commit
+//! sequence, and its next pass pages from the later of the floor and the cursor. A decision is
+//! resolved by a skip, an unverifiable class, a decision outside the verifier's input
+//! ([`Class::NotInput`]), a terminal `Unavailable` reason, a committed or replayed write, a
+//! `conflict`, an invalid write set, or K = [`MAX_ATTEMPTS`] attempts in total, shared across
+//! transient `Unavailable` reasons, deadlines, Kernel refusals, a changed decision, and degraded
+//! witnesses. The K-th attempt counts `witness_degraded_skipped` when its witness degraded and
+//! `unavailable_skipped` otherwise. A terminal reason is kept per `(decision, oid)` for the process
+//! lifetime. All state is process-local: a restart rescans from the start, and the skips and the
+//! write set's receipt replay make the rescan write nothing.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -450,7 +451,7 @@ impl ProjectRun<'_, '_> {
             };
         }
         let mut after = self.state.cursor.clone().max(self.state.floor.clone());
-        // Every decision before `after` is resolved, and so is each one this run reads while it holds.
+        // `prefix` holds while every decision before `after` is resolved.
         let mut prefix = true;
         loop {
             let page = match self.kernel.scope_decisions_after_within_budget(

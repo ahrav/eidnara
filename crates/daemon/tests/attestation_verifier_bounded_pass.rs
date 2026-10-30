@@ -1637,15 +1637,15 @@ fn a_refused_anchor_read_leaves_the_decision_to_its_classification() {
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, good);
 }
 
-/// A project whose pages ran out with every decision resolved records the target's sequence as its
-/// floor and pages from past it. A decision committed at the next sequence, decisions committed
-/// behind another project's, and a decision committed during a pass after its target capture are
-/// all read on a later pass, and a transient decision committed past the floor holds the project
-/// at its cursor until it resolves.
+/// A project whose pages ran out with every decision resolved records the page start just past the
+/// target's sequence as its floor. A decision committed at the floor's sequence, decisions committed
+/// behind another project's, and a decision committed during the project's own pass after its
+/// target capture are each read on a later pass, and a transient decision committed past the floor
+/// holds the project at its cursor until it resolves.
 #[test]
 fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
     let store = Store::open();
-    let files: Vec<_> = (0..4)
+    let files: Vec<_> = (0..5)
         .map(|i| (format!("doc{i}.md"), text(i, 1024)))
         .collect();
     let repo = Repo::new("drained", &files);
@@ -1655,22 +1655,23 @@ fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
     let first = store.decision(&repo, "d0", &files[0].0, &files[0].1);
     let counters = Counters::default();
     let mut verifier = Verifier::default();
-    let pass = |verifier: &mut Verifier, projects: &[Project], clock: &Clock<'_>| {
-        let report = verifier.pass(&store.kernel, projects, &on, &counters, clock);
+    let both = [repo.project(), other.project()];
+    let pass = |verifier: &mut Verifier, clock: &Clock<'_>| {
+        let report = verifier.pass(&store.kernel, &both, &on, &counters, clock);
         assert_accounting(&counters);
         report
     };
     let floor = |verifier: &Verifier, repo: &Repo| verifier.floor(&repo.scope_id());
     let past = |seq: i64| Some((seq + 1, String::new()));
-    let both = [repo.project(), other.project()];
     let clock = Clock::open();
     let captured = store.kernel.tip().unwrap();
-    pass(&mut verifier, &both, &clock);
+    pass(&mut verifier, &clock);
     assert_eq!(clock.opens(), 1);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, first);
-    // The floor is the target captured before the attestation commit, which the page excludes.
+    // The floor is just past the target captured before the attestation commit, which the page
+    // excludes.
     assert_eq!(floor(&verifier, &repo), past(captured));
-    let report = pass(&mut verifier, &both, &Clock::open());
+    let report = pass(&mut verifier, &Clock::open());
     assert!(!report.progressed && !report.failed);
     let drained = store.kernel.tip().unwrap();
     assert_eq!(floor(&verifier, &repo), past(drained));
@@ -1679,27 +1680,24 @@ fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
     // One commit lands at the floor's own sequence.
     let next = store.model_decision(&repo, "n0", "", None, None);
     assert_eq!(store.kernel.tip().unwrap(), drained + 1);
-    let report = pass(&mut verifier, &[repo.project()], &Clock::open());
+    let report = pass(&mut verifier, &Clock::open());
     assert!(report.progressed && !report.failed);
     assert_eq!(counters.get("unverifiable_no_anchor"), 1);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, next);
     assert_eq!(floor(&verifier, &repo), past(drained + 1));
 
-    for i in 0..3 {
-        store.decision(&other, &format!("o{i}"), &files[i].0, &files[i].1);
-    }
     let later = store.decision(&repo, "d1", &files[1].0, &files[1].1);
     let unbound = store.decision_under(&repo, "git:unbound", "d2", &files[2].0, &files[2].1);
     let last = store.decision(&repo, "d3", &files[3].0, &files[3].1);
     let clock = Clock::open();
-    pass(&mut verifier, &[repo.project()], &clock);
+    pass(&mut verifier, &clock);
     assert_eq!(clock.opens(), 2);
     assert!(exists(&store, &attestation(&later, &repo)));
     assert!(exists(&store, &attestation(&last, &repo)));
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, later);
     assert_eq!(floor(&verifier, &repo), past(drained + 1));
     for attempt in 2..=3 {
-        let report = pass(&mut verifier, &[repo.project()], &Clock::open());
+        let report = pass(&mut verifier, &Clock::open());
         assert!(report.failed);
         assert_eq!(counters.get("unavailable_repository_unbound"), attempt);
     }
@@ -1709,32 +1707,40 @@ fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
     let resolved = store.kernel.tip().unwrap();
     assert_eq!(floor(&verifier, &repo), past(resolved));
 
-    // `repo` pages first and records its floor; `other` then pages from its old floor and verifies
-    // its three decisions, and a decision committed in `repo` at that first commit poll, after
-    // `repo`'s target capture, waits for the next pass.
-    let polls = std::sync::atomic::AtomicUsize::new(0);
+    // `other` pages from its floor and verifies the decisions committed behind `repo`'s.
+    for i in 0..3 {
+        store.decision(&other, &format!("o{i}"), &files[i].0, &files[i].1);
+    }
+    let clock = Clock::open();
+    let report = pass(&mut verifier, &clock);
+    assert!(report.progressed && !report.failed);
+    assert_eq!(clock.opens(), 3);
+    assert_eq!(counters.get("attestation_committed"), 6);
+
+    // A decision committed during `repo`'s own run, after its target capture and while a decision
+    // there is pending, waits for the next pass: the floor is the captured target's, not the tip's.
+    let pending = store.decision(&repo, "p0", &files[4].0, &files[4].1);
     let during = Mutex::new(None);
-    let clock = Clock::with(|poll, _| {
-        if poll == Poll::Commit && polls.fetch_add(1, Ordering::SeqCst) == 0 {
+    let clock = Clock::with(|poll, opens| {
+        if poll == Poll::Read(Stage::Open) && opens == 1 {
             *during.lock().unwrap() = Some(store.model_decision(&repo, "m0", "", None, None));
         }
         false
     });
-    let report = pass(&mut verifier, &both, &clock);
+    let report = pass(&mut verifier, &clock);
     assert!(report.progressed && !report.failed);
-    assert_eq!(clock.opens(), 3);
-    assert_eq!(counters.get("attestation_committed"), 6);
+    assert_eq!(counters.get("attestation_committed"), 7);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, pending);
     let during = during.lock().unwrap().clone().unwrap();
-    assert!(floor(&verifier, &repo) < past(store.kernel.tip().unwrap()));
-    let report = pass(&mut verifier, &both, &Clock::open());
+    let report = pass(&mut verifier, &Clock::open());
     assert!(report.progressed && !report.failed);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, during);
     assert_eq!(counters.get("unverifiable_no_anchor"), 2);
     let clock = Clock::open();
-    let report = pass(&mut verifier, &both, &clock);
+    let report = pass(&mut verifier, &clock);
     assert!(!report.progressed && !report.failed);
     assert_eq!(clock.opens(), 0);
-    assert_eq!(counters.get("considered"), 11);
+    assert_eq!(counters.get("considered"), 12);
     assert_eq!(counters.get("skipped_attested"), 0);
 }
 
