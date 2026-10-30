@@ -341,8 +341,13 @@ impl Verifier {
                         self.repository_ids.insert(root.path.clone(), id.clone());
                         id
                     }
-                    Err(DerivationFailure::Budget) if clock.budget().is_exhausted() => return None,
-                    Err(DerivationFailure::Budget | DerivationFailure::Unreadable) => None,
+                    Err(failure) => {
+                        let pass_cut = clock.budget().is_exhausted();
+                        if pass_cut && matches!(failure, DerivationFailure::Budget) {
+                            return None;
+                        }
+                        None
+                    }
                 },
             };
             bound.extend(id.map(|id| (root.path.clone(), id)));
@@ -564,9 +569,8 @@ impl ProjectRun<'_, '_> {
             }
             Verdict::Match | Verdict::Mismatch => {}
         }
-        let deadline = self.clock.passed(Poll::Commit);
-        if deadline {
-            return self.transient(object_id, deadline);
+        if self.clock.passed(Poll::Commit) {
+            return self.transient(object_id, true);
         }
         let outcome = attest(self.kernel, &classification, &evaluation, budget);
         self.outcome(object_id, evaluation.verdict, outcome)

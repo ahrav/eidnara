@@ -330,10 +330,10 @@ impl Store {
     }
 }
 
-type Hook<'a> = Box<dyn Fn(Poll, usize) -> bool + Send + Sync + 'a>;
+type Hook<'a> = Box<dyn Fn(Poll, usize, &EvalBudget) -> bool + Send + Sync + 'a>;
 
-/// A clock that records every poll and asks `hook` with the poll and the repository opens polled
-/// so far, this one included.
+/// A clock that records every poll and asks `hook` with the poll, the repository opens polled so
+/// far, this one included, and the pass budget the hook may cancel.
 struct Clock<'a> {
     budget: EvalBudget,
     polls: Mutex<Vec<Poll>>,
@@ -342,6 +342,10 @@ struct Clock<'a> {
 
 impl<'a> Clock<'a> {
     fn with(hook: impl Fn(Poll, usize) -> bool + Send + Sync + 'a) -> Self {
+        Self::with_budget(move |poll, opens, _| hook(poll, opens))
+    }
+
+    fn with_budget(hook: impl Fn(Poll, usize, &EvalBudget) -> bool + Send + Sync + 'a) -> Self {
         Self {
             budget: EvalBudget::unbounded(),
             polls: Mutex::default(),
@@ -377,7 +381,7 @@ impl PassClock for Clock<'_> {
                 .filter(|poll| **poll == Poll::Read(Stage::Open))
                 .count()
         };
-        (self.hook)(poll, opens)
+        (self.hook)(poll, opens, &self.budget)
     }
 
     fn budget(&self) -> &EvalBudget {
@@ -1182,6 +1186,71 @@ fn a_deadline_at_the_derivation_passes_over_the_project_and_the_next_pass_verifi
     assert_eq!(clock.polled(Poll::Derive), 1);
     assert_eq!(counters.get("attestation_committed"), 1);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, decision);
+}
+
+/// A pass budget cancelled at the derivation poll, which still lets the derivation run, cuts the
+/// walk short with the pass budget exhausted: the project is passed over before any decision is
+/// read and no identity is cached, so the next open pass derives and attests.
+#[test]
+fn a_pass_budget_exhausted_during_the_derivation_passes_over_the_project() {
+    let store = Store::open();
+    let repo = Repo::new("walk", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let identity = format!("git:{}", repo.head);
+    let decision = store.decision_under(&repo, &identity, "w0", "doc.md", &text(0, 1024));
+    // The worktree root's derivation walks its history; a bare root falls back before any walk.
+    let projects = [repo.project_at(&repo.work)];
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::with_budget(|poll, _, budget| {
+        if poll == Poll::Derive {
+            budget.cancel();
+        }
+        false
+    });
+    let report = verifier.pass(&store.kernel, &projects, &on, &counters, &clock);
+    assert!(report.failed);
+    assert_eq!(clock.polled(Poll::Derive), 1);
+    assert_eq!(counters.get("considered"), 0);
+    assert_eq!(clock.opens(), 0);
+    assert_eq!(verifier.cursor(&repo.scope_id()), None);
+
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &projects, &on, &counters, &clock);
+    assert_eq!(clock.polled(Poll::Derive), 1);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, decision);
+}
+
+/// A decision whose classification meets the deadline, the pass budget cancelled at the decision
+/// poll right before it is classified, spends an attempt each pass; after K passes it counts
+/// `unavailable_skipped` once and the cursor passes it.
+#[test]
+fn a_classification_deadline_k_passes_is_skipped_and_the_cursor_passes_it() {
+    let store = Store::open();
+    let repo = Repo::new("classify", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let head = store.decision(&repo, "k0", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    for _ in 0..3 {
+        let decisions = std::sync::atomic::AtomicUsize::new(0);
+        // The first decision poll comes before the project, the second before the decision.
+        let clock = Clock::with_budget(move |poll, _, budget| {
+            if poll == Poll::Decision && decisions.fetch_add(1, Ordering::SeqCst) == 1 {
+                budget.cancel();
+            }
+            false
+        });
+        let report = verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+        assert!(report.failed);
+        assert_eq!(clock.opens(), 0);
+        assert_accounting(&counters);
+    }
+    assert_eq!(counters.get("considered"), 0);
+    assert_eq!(counters.get("unavailable_skipped"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, head);
+    assert_eq!(store.verifier_rows(), 0);
 }
 
 /// A decision resolves only against its own project's roots: a document whose repository is bound
