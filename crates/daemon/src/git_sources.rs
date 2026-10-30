@@ -309,9 +309,8 @@ impl OwnPacks {
     ///
     /// # Errors
     ///
-    /// `header` returns [`OwnPackError::Corruption`] immediately when `entry_header` fails. It also
-    /// returns corruption after exhausting the search if an opened index contains `id` and every
-    /// matching pack is unavailable or yields `None`.
+    /// `header` returns [`OwnPackError::Corruption`] after exhausting the search if an opened index
+    /// contains `id` and every matching pack is unavailable, fails `entry_header`, or yields `None`.
     pub(crate) fn header(
         &mut self,
         id: &gix::oid,
@@ -385,8 +384,7 @@ impl OwnPacks {
             let Some(data) = data else {
                 continue;
             };
-            let header = entry_header(index, data, id).map_err(|_| OwnPackError::Corruption)?;
-            if let Some(header) = header {
+            if let Ok(Some(header)) = entry_header(index, data, id) {
                 self.last = Some(position);
                 return Ok(Some((index, data, header)));
             }

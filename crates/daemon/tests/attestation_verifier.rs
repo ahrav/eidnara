@@ -1373,3 +1373,43 @@ fn a_valid_loose_copy_answers_for_an_own_pack_entry_that_does_not_resolve() {
         }
     );
 }
+
+#[test]
+fn a_valid_own_pack_copy_answers_after_a_newer_pack_whose_chain_revisits_an_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let commit = bare.commit_doc(DOC, None);
+    let blob = bare.git(&["rev-parse", &format!("{commit}:doc.md")], None);
+    let pack_dir = bare.root.join("objects").join("pack");
+    bare.git(
+        &["pack-objects", "-q", "objects/pack/pack"],
+        Some(format!("{blob}\n").as_bytes()),
+    );
+    let valid: Vec<_> = std::fs::read_dir(&pack_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let id = gix::ObjectId::from_hex(blob.as_bytes()).unwrap();
+    support::git_repo::write_self_delta_pack(&bare.root.join("objects"), id, DOC);
+    bare.git(&["prune-packed"], None);
+    assert!(!bare.loose_path(&blob).exists());
+    // The index of the self-referencing pack is the newest, so the walk reads it first.
+    let now = std::time::SystemTime::now();
+    for entry in std::fs::read_dir(&pack_dir).unwrap() {
+        let path = entry.unwrap().path();
+        let older = valid.contains(&path);
+        let time = if older {
+            now - std::time::Duration::from_secs(60)
+        } else {
+            now
+        };
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(time)).unwrap();
+    }
+    assert_eq!(
+        verify_within(&bare.root, &claim("doc.md", DOC, &commit)),
+        Evaluation {
+            verdict: Verdict::Match,
+            bytes_read: DOC.len() as u64,
+        }
+    );
+}
