@@ -10,7 +10,8 @@
 //!
 //! - a skip, before any claim verification read or Kernel write: `skipped_stale` when its latest
 //!   own admission is `Stale`, `skipped_attested` when the registry holds the attestation object id
-//!   [`Identity::of`] derives for the decision and its anchored oid, live or retired;
+//!   [`Identity::of`] derives for the decision and its anchored oid, live or retired, checked at the
+//!   anchor the page's standing read names before the decision is classified, and again after;
 //! - an unverifiable bucket `unverifiable_<reason>`, including `invalid_document_path` for
 //!   [`ClassifyError::InvalidDocumentPath`];
 //! - a verdict bucket (`match`, `mismatch`, `unavailable_<reason>`) and then, for `match` and
@@ -63,7 +64,8 @@ use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
 use kernel::{
-    ClaimFactsError, CommitReadIncarnation, CommitReadTarget, Disposition, KernelError, KernelStore,
+    AnchorCondition, ClaimFactsError, CommitReadIncarnation, CommitReadTarget, Disposition,
+    GitCondition, KernelError, KernelStore,
 };
 
 use super::attest::{Identity, Outcome, attest};
@@ -501,7 +503,8 @@ impl ProjectRun<'_, '_> {
                     self.counters.add("skipped_stale", 1);
                     Step::Resolved
                 } else {
-                    self.decision(&object_id, target)
+                    let anchor = standing.and_then(|standing| standing.decision.anchor_id);
+                    self.decision(&object_id, anchor.as_deref(), target)
                 };
                 match step {
                     Step::Resolved => {
@@ -551,9 +554,37 @@ impl ProjectRun<'_, '_> {
         }
     }
 
-    fn decision(&mut self, object_id: &str, target: CommitReadTarget) -> Step {
+    /// The skip of a decision whose attestation at `oid` the registry holds, or the stop a refused
+    /// registry read leaves; `None` when no attestation is registered.
+    fn attested(&mut self, object_id: &str, oid: &str) -> Option<Step> {
+        let attestation = [Identity::of(object_id, oid).object_id];
+        match self
+            .kernel
+            .object_states_within_budget(self.clock.budget(), &attestation)
+        {
+            Ok((_, states)) if states.first().is_some_and(Option::is_some) => {
+                self.counters.add("skipped_attested", 1);
+                Some(Step::Resolved)
+            }
+            Ok(_) => None,
+            Err(error) => Some(self.refused(error == KernelError::Deadline)),
+        }
+    }
+
+    fn decision(&mut self, object_id: &str, anchor: Option<&str>, at: CommitReadTarget) -> Step {
         let budget = self.clock.budget();
-        let classification = match classify(self.kernel, object_id, target, self.roots, budget) {
+        // The anchored oid alone names the attestation, so an attested decision skips before its
+        // classification reads; a refused anchor read leaves the decision to its classification.
+        if let Some(Ok(Some(AnchorCondition::Git(GitCondition::ReachableFrom { oid, .. })))) =
+            anchor.map(|id| {
+                self.kernel
+                    .anchor_condition_as_of(id, at.through_commit, budget)
+            })
+            && let Some(step) = self.attested(object_id, &oid)
+        {
+            return step;
+        }
+        let classification = match classify(self.kernel, object_id, at, self.roots, budget) {
             Ok(classification) => classification,
             Err(ClassifyError::InvalidDocumentPath) => {
                 self.counters
@@ -582,17 +613,8 @@ impl ProjectRun<'_, '_> {
         if self.terminal.contains(&(object_id.to_owned(), oid.clone())) {
             return Step::Resolved;
         }
-        let attestation = Identity::of(object_id, &oid).object_id;
-        match self
-            .kernel
-            .object_states_within_budget(budget, std::slice::from_ref(&attestation))
-        {
-            Ok((_, states)) if states.first().is_some_and(Option::is_some) => {
-                self.counters.add("skipped_attested", 1);
-                return Step::Resolved;
-            }
-            Ok(_) => {}
-            Err(error) => return self.refused(error == KernelError::Deadline),
+        if let Some(step) = self.attested(object_id, &oid) {
+            return step;
         }
         let evaluation = match &input.root {
             Ok(root) => verify(root, &input.claim, &Reads(self.clock)),

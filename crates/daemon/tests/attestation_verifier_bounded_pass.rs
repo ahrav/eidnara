@@ -1634,3 +1634,54 @@ fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
     assert_eq!(opens, 0);
     assert_eq!(counters.get("considered"), 9);
 }
+
+/// An attested decision skips under `skipped_attested` at the oid its anchor names before it is
+/// classified, so a restart counts it skipped after its cited descriptor retires, where its
+/// classification alone would count `unverifiable_descriptor_retired`.
+#[test]
+fn an_attested_decision_skips_before_its_classification_after_its_descriptor_retires() {
+    let store = Store::open();
+    let repo = Repo::new("retired", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let decision = store.decision(&repo, "s0", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    let clock = Clock::open();
+    Verifier::default().pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    let descriptor: String = store
+        .sqlite()
+        .query_row(
+            "SELECT object_id FROM observations WHERE evidence_id='srcev:s0'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store
+        .kernel
+        .commit(intent("retire-descriptor"), |envelope| {
+            envelope.retire_observation(&descriptor)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let target = store.kernel.capture_commit_read_target().unwrap();
+    let budget = EvalBudget::unbounded();
+    let classification = classify(&store.kernel, &decision, target, &[repo.bound()], &budget);
+    assert_eq!(
+        classification.unwrap().class,
+        daemon::attestation_verifier::classify::Class::Unverifiable(
+            daemon::attestation_verifier::classify::Unverifiable::DescriptorRetired
+        )
+    );
+
+    let store = store.reopen();
+    let tip = store.kernel.tip().unwrap();
+    let counters = Counters::default();
+    let clock = Clock::open();
+    Verifier::default().pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_accounting(&counters);
+    assert_eq!(counters.get("skipped_attested"), 1);
+    assert_eq!(counters.get("considered"), 0);
+    assert_eq!(counters.get("unverifiable_descriptor_retired"), 0);
+    assert_eq!(clock.opens(), 0);
+    assert_eq!(store.kernel.tip().unwrap(), tip);
+}
