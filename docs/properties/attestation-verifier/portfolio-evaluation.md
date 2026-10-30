@@ -135,8 +135,8 @@ the current line.
   `live_source_descriptor_of_lineage_within_budget`, which shares its
   query and row checks with the envelope's
   `live_source_descriptor_of_lineage`, and pages the project's
-  attestations through `scope_decisions_of_source_after_within_budget`,
-  the source-kind complement of the pass's decision page. Neither changes
+  attestations through `scope_decisions_after_within_budget` under
+  `SourceKindFilter::Only`, the complement of the pass's decision page. Neither changes
   the schema.
 - A stale mark the Kernel refuses counts under the write set's
   `commit_refused_` and `commit_conflict` counters; the three applicability

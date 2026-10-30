@@ -83,8 +83,8 @@ outside the verifier module so that module stays free of the async runtime.
 attestation's witness detail and its lineage's live document descriptor and
 marks the attestation `Stale` when the digests differ, run by the pass after
 verification from a second process-local cursor, over two Kernel reads: the
-source-kind page `scope_decisions_of_source_after_within_budget` in
-`crates/kernel/src/slice/read.rs` and the lineage-keyed
+decision page `scope_decisions_after_within_budget` in
+`crates/kernel/src/slice/read.rs`, under `SourceKindFilter::Only`, and the lineage-keyed
 `live_source_descriptor_of_lineage_within_budget` in
 `crates/kernel/src/source_descriptor.rs`.
 
@@ -776,7 +776,7 @@ Guarantee: When a pass evaluates a live `Active` attestation whose witnessed lin
 Check: `always-or-unreached` - whenever a pass evaluates such an attestation and its envelope recheck holds, the attestation is `Stale` after the pass with one `MarkStale` row for that revision; the step is unreached while the flag is off or source capture publishes no new revision, which is the documented limitation
 Fault/timing angle: the attestation retired, re-disposed, or superseded, or the lineage republished again, between the applicability read and the commit; a replayed key after an unknown commit outcome
 Required faults and enabling state: source capture republishing the cited document's lineage with a different digest after the attestation; F2: the attestation retired between the page and the commit; F10: the stale mark's key replayed
-Confidence: high - [evidence](evidence/p6-new-attestation-stale-on-byte-change.md). Read `evaluate` (`crates/daemon/src/attestation_verifier/applicability.rs:39`), which decodes the witness detail and reads the lineage's live descriptor at the pass sequence through `live_source_descriptor_of_lineage_within_budget` (`crates/kernel/src/source_descriptor.rs:1263`); `mark_republished` (`crates/daemon/src/attestation_verifier/applicability.rs:84`), its key (`:100`), and its envelope recheck of the attestation's liveness, disposition (`:141`), and live descriptor revision (`:150`); and the step `ProjectRun::applicability` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:628`), its N bound (`:667`) and cursor reset (`:642`), and `ProjectRun::applicable` (`:681`), which polls before the commit (`:695`)
+Confidence: high - [evidence](evidence/p6-new-attestation-stale-on-byte-change.md). Read `evaluate` (`crates/daemon/src/attestation_verifier/applicability.rs:35`), which decodes the witness detail and reads the lineage's live descriptor at the pass sequence through `live_source_descriptor_of_lineage_within_budget` (`crates/kernel/src/source_descriptor.rs:1263`); `mark_republished` (`crates/daemon/src/attestation_verifier/applicability.rs:76`), its key (`:96`), and its envelope recheck of the attestation's liveness, disposition (`:131`), and live descriptor revision (`:140`); and the step `ProjectRun::applicability` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:628`), its N bound (`:667`) and cursor reset (`:642`), and `ProjectRun::applicable` (`:681`), which polls before the commit (`:695`)
 Existing check: `crates/daemon/tests/attestation_verifier_bounded_pass.rs:1619`, `:1683`, `:1741`, `:1779`, `:1819`; `crates/kernel/tests/kernel_scope_decisions.rs:140` (unaudited)
 Impact: falsifier: bytes changed, a new descriptor revision published, and the attestation still `Active` after a pass evaluates it; or a second `MarkStale` for one revision
 Open questions:
