@@ -1842,14 +1842,60 @@ fn a_classification_at_a_sequence_before_the_model_decision_is_changed() {
     ));
 }
 
-/// The attestation copies the model decision's decision kind and summary from the row its
+/// The attestation copies the model decision's decision kind, scope, and summary from the row its
 /// envelope reads.
 #[test]
-fn the_attestation_copies_the_model_decisions_kind_and_summary() {
+fn the_attestation_copies_the_model_decisions_kind_scope_and_summary() {
     let store = Store::open();
     let checkout = Checkout::new(DOC);
     let (evidence, _) = store.document("doc", DOC);
-    let model = store.model("copied", &checkout.head, &evidence, false);
+    let model = "mem_copied".to_owned();
+    store
+        .kernel
+        .commit(intent("decision-copied"), |envelope| {
+            envelope.insert_scope(kernel::ScopeSpec {
+                scope_id: "scope_copied".into(),
+                object_id: "scopeobj_copied".into(),
+                domain_id: "memory".into(),
+                source_kind: "assistant".into(),
+                source_id: "memory_capture".into(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                terms: Vec::new(),
+            })?;
+            envelope.insert_anchor(AnchorSpec {
+                anchor_id: "anchor_copied".into(),
+                object_id: "anchorobj_copied".into(),
+                domain_id: "memory".into(),
+                source_kind: "assistant".into(),
+                source_id: "memory_capture".into(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                value: AnchorValue::ReachableFrom {
+                    oid: checkout.head.clone(),
+                    captures: Vec::new(),
+                },
+            })?;
+            envelope.insert_decision(DecisionSpec {
+                decision_kind: "SECURITY".into(),
+                scope_id: Some("scope_copied".into()),
+                ..model_spec("copied", Some("anchor_copied".into()), &evidence, false, 1)
+            })?;
+            envelope.append_decision_event(
+                "dec_copied",
+                DecisionEventSpec {
+                    event_kind: "memory_capture_citation".into(),
+                    payload: DecisionEventPayload {
+                        summary: "cites the document".into(),
+                    },
+                    evidence_id: Some(evidence.id.clone()),
+                    recorded_at: 1,
+                },
+            )?;
+            model_admission(envelope, &model, EventKind::Other)?;
+            Ok(String::new())
+        })
+        .unwrap();
     let classification = store.classification(&model, &checkout);
     let outcome = attest_now(&store, &classification, &evaluate(&classification));
     assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
@@ -1864,7 +1910,15 @@ fn the_attestation_copies_the_model_decisions_kind_and_summary() {
     assert_eq!(attested.payload.summary, model_row.payload.summary);
     assert_eq!(attested.scope_id, model_row.scope_id);
     assert_eq!(
-        model_row.payload.summary,
-        "The daemon owns the store (copied)."
+        (
+            model_row.decision_kind.as_str(),
+            model_row.scope_id.as_deref(),
+            model_row.payload.summary.as_str(),
+        ),
+        (
+            "SECURITY",
+            Some("scope_copied"),
+            "The daemon owns the store (copied).",
+        )
     );
 }
