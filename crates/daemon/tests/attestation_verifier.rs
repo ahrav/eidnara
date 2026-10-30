@@ -32,22 +32,6 @@ fn unbounded() -> EvalBudget {
     EvalBudget::unbounded()
 }
 
-/// The verdict and blob content bytes of one [`verifier::verify`] call; the blob id it reports
-/// is checked by `the_evaluation_names_the_blob_the_path_resolved_to`.
-#[derive(Debug, PartialEq, Eq)]
-struct Evaluation {
-    verdict: Verdict,
-    bytes_read: u64,
-}
-
-fn verify(root: &Path, claim: &Claim, deadline: &impl Deadline) -> Evaluation {
-    let evaluation = verifier::verify(root, claim, deadline);
-    Evaluation {
-        verdict: evaluation.verdict,
-        bytes_read: evaluation.bytes_read,
-    }
-}
-
 /// A bare repository driven through git plumbing with fixed identities and times.
 struct Bare {
     root: PathBuf,
@@ -1448,4 +1432,20 @@ fn the_evaluation_names_the_blob_the_path_resolved_to() {
     let absent = verifier::verify(&bare.root, &claim("other.md", DOC, &first), &unbounded());
     assert_eq!(absent.verdict, Verdict::Unavailable(Reason::PathAbsent));
     assert_eq!(absent.blob_oid, None);
+}
+
+/// The verdict and blob content bytes of one [`verifier::verify`] call; the blob id it reports
+/// is checked by `the_evaluation_names_the_blob_the_path_resolved_to`.
+#[derive(Debug, PartialEq, Eq)]
+struct Evaluation {
+    verdict: Verdict,
+    bytes_read: u64,
+}
+
+fn verify(root: &Path, claim: &Claim, deadline: &impl Deadline) -> Evaluation {
+    let evaluation = verifier::verify(root, claim, deadline);
+    Evaluation {
+        verdict: evaluation.verdict,
+        bytes_read: evaluation.bytes_read,
+    }
 }
