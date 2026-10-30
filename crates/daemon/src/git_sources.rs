@@ -270,8 +270,8 @@ fn indices_newest_first(pack_dir: &Path, skip: Option<&Path>) -> Vec<PathBuf> {
 
 /// The packs in a repository's own `objects/pack`. `OwnPacks` lists the packs once and caches each
 /// opened index and pack for delta-chain checks and decodes. A decode refuses an allocation above
-/// the limit the packs were opened with. [`OwnPacks::decode`] bounds the entry's ref-delta chain by
-/// the index's entry count before it decodes the entry.
+/// `alloc_limit`. `entry_header` bounds delta-chain hops by `index.num_objects()` before
+/// `decode_header` reads the delta body.
 pub(crate) struct OwnPacks {
     dir: PathBuf,
     hash: gix::hash::Kind,

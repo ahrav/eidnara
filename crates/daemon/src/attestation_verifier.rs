@@ -438,24 +438,36 @@ impl<'repo> Objects<'repo> {
         self.resized.as_ref().unwrap_or(self.repo)
     }
 
+    fn store_header(&mut self, id: gix::ObjectId) -> Option<(gix::object::Kind, u64)> {
+        let mut found = self.store().try_find_header(id);
+        if matches!(&found, Err(error) if git_sources::exhausts_slots(&error.0)) && self.resize() {
+            found = self.store().try_find_header(id);
+        }
+        found
+            .ok()
+            .flatten()
+            .map(|header| (header.kind(), header.size()))
+    }
+
+    fn store_find(
+        &mut self,
+        id: gix::ObjectId,
+    ) -> Result<gix::object::Kind, gix::object::find::existing::Error> {
+        let object = self.resized.as_ref().unwrap_or(self.repo).find_object(id)?;
+        self.data.clear();
+        self.data.extend_from_slice(&object.data);
+        Ok(object.kind)
+    }
+
     fn blob_header(&mut self, id: gix::ObjectId) -> Result<u64, Reason> {
         let unreadable = Reason::ObjectUnreadable(ObjectClass::Blob);
-        let header = match self.packs.header(&id).map_err(|_| unreadable)? {
-            Some(header) => Some((header.kind, header.object_size)),
-            None => match self.loose.try_header(&id) {
+        let packed = self.packs.header(&id);
+        let header = match packed {
+            Ok(Some(header)) => Some((header.kind, header.object_size)),
+            packed => match self.loose.try_header(&id) {
                 Ok(Some((size, kind))) => Some((kind, size)),
-                Ok(None) | Err(_) => {
-                    let mut found = self.store().try_find_header(id);
-                    if matches!(&found, Err(error) if git_sources::exhausts_slots(&error.0))
-                        && self.resize()
-                    {
-                        found = self.store().try_find_header(id);
-                    }
-                    found
-                        .ok()
-                        .flatten()
-                        .map(|header| (header.kind(), header.size()))
-                }
+                Ok(None) if packed.is_ok() => self.store_header(id),
+                Ok(None) | Err(_) => None,
             },
         };
         match header {
@@ -474,29 +486,21 @@ impl<'repo> Objects<'repo> {
         use gix::object::find::existing::Error as StoreFind;
         use gix::odb::pack::data::decode::Error as PackDecode;
         let unreadable = Reason::ObjectUnreadable(class);
-        let found = match self.packs.decode(&id, &mut self.data) {
+        let packed = self.packs.decode(&id, &mut self.data);
+        let found = match packed {
             Ok(Some(kind)) => kind,
             Err(OwnPackError::Decode(PackDecode::OutOfMemory)) => return Err(Reason::OverBudget),
-            Err(_) => return Err(unreadable),
-            Ok(None) => match self.loose.try_find(&id, &mut self.data) {
+            packed => match self.loose.try_find(&id, &mut self.data) {
                 Ok(Some(object)) => object.kind,
                 Err(gix::odb::loose::find::Error::OutOfMemory { .. }) => {
                     return Err(Reason::OverBudget);
                 }
-                Ok(None) | Err(_) => {
-                    let mut found = store_find(
-                        self.resized.as_ref().unwrap_or(self.repo),
-                        id,
-                        &mut self.data,
-                    );
+                Ok(None) if packed.is_ok() => {
+                    let mut found = self.store_find(id);
                     if matches!(&found, Err(StoreFind::Find(error)) if git_sources::exhausts_slots(error))
                         && self.resize()
                     {
-                        found = store_find(
-                            self.resized.as_ref().unwrap_or(self.repo),
-                            id,
-                            &mut self.data,
-                        );
+                        found = self.store_find(id);
                     }
                     found.map_err(|error| match error {
                         StoreFind::Find(error) if git_sources::exceeds_allocation(&error) => {
@@ -505,6 +509,7 @@ impl<'repo> Objects<'repo> {
                         _ => unreadable,
                     })?
                 }
+                Ok(None) | Err(_) => return Err(unreadable),
             },
         };
         *decoded = decoded.saturating_add(self.data.len() as u64);
@@ -520,17 +525,6 @@ impl<'repo> Objects<'repo> {
         }
         Ok(&self.data)
     }
-}
-
-fn store_find(
-    repo: &gix::Repository,
-    id: gix::ObjectId,
-    data: &mut Vec<u8>,
-) -> Result<gix::object::Kind, gix::object::find::existing::Error> {
-    let object = repo.find_object(id)?;
-    data.clear();
-    data.extend_from_slice(&object.data);
-    Ok(object.kind)
 }
 
 /// What the object store holds for `claim`, setting `bytes_read` to the blob content bytes decoded.

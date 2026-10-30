@@ -667,7 +667,7 @@ fn a_delta_chain_that_revisits_an_entry_is_unreadable() {
             }
         }
         assert_eq!(
-            verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+            verify_within(&bare.root, &claim("doc.md", DOC, &commit)),
             unavailable(Reason::ObjectUnreadable(class)),
             "{class:?}"
         );
@@ -1213,7 +1213,7 @@ fn a_delta_with_an_empty_body_that_names_itself_is_unreadable() {
             }
         }
         assert_eq!(
-            verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+            verify_within(&bare.root, &claim("doc.md", DOC, &commit)),
             unavailable(Reason::ObjectUnreadable(class)),
             "{class:?}"
         );
@@ -1336,9 +1336,40 @@ fn an_own_pack_delta_whose_base_lies_in_another_pack_is_unreadable() {
             }
         }
         assert_eq!(
-            verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+            verify_within(&bare.root, &claim("doc.md", DOC, &commit)),
             unavailable(Reason::ObjectUnreadable(class)),
             "{class:?}"
         );
     }
+}
+
+/// `verify` under an unbounded budget on its own thread; a call that runs past one minute fails
+/// the test instead of stalling the run.
+fn verify_within(root: &Path, claim: &Claim) -> Evaluation {
+    let (root, claim) = (root.to_path_buf(), claim.clone());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sender.send(verify(&root, &claim, &unbounded())));
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("verify returns within a minute")
+}
+
+#[test]
+fn a_valid_loose_copy_answers_for_an_own_pack_entry_that_does_not_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let commit = bare.commit_doc(DOC, None);
+    let blob = bare.git(&["rev-parse", &format!("{commit}:doc.md")], None);
+    let blob = gix::ObjectId::from_hex(blob.as_bytes()).unwrap();
+    let absent =
+        gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, b"absent").unwrap();
+    support::git_repo::write_ref_delta_pack(&bare.root.join("objects"), blob, absent, DOC);
+    assert!(bare.loose_path(&blob.to_string()).exists());
+    assert_eq!(
+        verify_within(&bare.root, &claim("doc.md", DOC, &commit)),
+        Evaluation {
+            verdict: Verdict::Match,
+            bytes_read: DOC.len() as u64,
+        }
+    );
 }
