@@ -337,7 +337,7 @@ Guarantee: Every `anchors` row committed through `insert_anchor` decodes with `A
 Check: `always` - after any commit that inserted an anchor, `validate_anchor_row(row)` is `Ok` for every stored row, which runs the engine's bound check and `AnchorCondition::decode` (and with it the unowned-column check); asserted at the end of each writing test because the writer is the only path that adds rows
 Fault/timing angle: none
 Required faults and enabling state: an uppercase oid, a 39-character oid, a captures payload above the bound, a non-half-open interval, an empty value, an unparseable range, duplicate captures, a capture naming another commit, a secret in a value or in any capture field including beside an absent `tree_oid` or `patch_id`, and a raw row with an unowned column
-Confidence: high - [evidence](evidence/p2-new-anchor-row-decodes-on-write.md). Read `validate_anchor` at `crates/kernel/src/anchor_write.rs:296` and `insert_anchor_inner` at `:409`; the typed `AnchorValue` (`:35`) makes an unowned column unrepresentable, and the round trip at `:149` compares the decoded condition to the request
+Confidence: high - [evidence](evidence/p2-new-anchor-row-decodes-on-write.md). Read `validate_anchor` at `crates/kernel/src/anchor_write.rs:297` and `insert_anchor_inner` at `:410`; the typed `AnchorValue` (`:36`) makes an unowned column unrepresentable, and the round trip at `:150` compares the decoded condition to the request
 Existing check: `crates/kernel/tests/kernel_anchor_write.rs:311`, `:459`, `:684`, `:383` (unaudited)
 Impact: a capture decision anchored to an undecodable row evaluates `Uncertain` forever and revalidation fails silently
 Open questions:
@@ -353,7 +353,7 @@ Guarantee: An `anchors` row and its `object_registry` row are visible together o
 Check: `always` - for every live `anchors` row there is an `object_registry` row of kind `anchor` with the same `object_id` and `created_commit_seq`, and every `decisions.anchor_id` names a row with `created_commit_seq <= decision.created_commit_seq`
 Fault/timing angle: a refusal inside the same envelope after the anchor insert
 Required faults and enabling state: `insert_decision` fails after `insert_anchor` succeeded inside one closure; a duplicate `anchor_id` within one envelope and across two commits
-Confidence: high - [evidence](evidence/p2-new-anchor-and-registry-share-one-envelope.md). Read `insert_anchor_inner` at `crates/kernel/src/anchor_write.rs:409` and `Envelope::guarded` at `crates/kernel/src/envelope.rs:348`
+Confidence: high - [evidence](evidence/p2-new-anchor-and-registry-share-one-envelope.md). Read `insert_anchor_inner` at `crates/kernel/src/anchor_write.rs:410` and `Envelope::guarded` at `crates/kernel/src/envelope.rs:348`
 Existing check: `crates/kernel/tests/kernel_anchor_write.rs:434`, `:732`, `:404`; `crates/daemon/tests/claim_sources.rs:1508` (unaudited)
 Impact: an orphan anchor is unreachable and inflates the registry; a decision inserted before its anchor is refused `NotFound` and fails the job
 Open questions: None.

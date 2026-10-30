@@ -1053,8 +1053,9 @@ fn no_model_client_is_reachable_from_the_verifier_module() {
         include_str!("../src/attestation_verifier/classify.rs"),
         include_str!("../src/attestation_verifier/attest.rs"),
     ];
-    const ALLOWED: [&str; 5] = [
+    const ALLOWED: [&str; 6] = [
         "crate::confined_path",
+        "crate::git_reconcile::identity_field",
         "crate::git_sources",
         "crate::project_docs",
         "crate::memory_capture::cite::digest_bytes",

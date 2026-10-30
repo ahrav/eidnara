@@ -359,6 +359,8 @@ fn each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is
     let (deleted, _) = store.document("deleted", "docs/deleted.md", "# Deleted\n");
     let (retired, retired_descriptor) = store.document("retired", "docs/retired.md", "# Old\n");
     let (stripped, _) = store.document("stripped", "docs/stripped.md", "# Stripped\n");
+    // `srcev:astripped` sorts before `srcev:retired`, so its reason is read first.
+    let (astripped, _) = store.document("astripped", "docs/astripped.md", "# A\n");
     let cases = [
         (
             store.decision(
@@ -453,6 +455,28 @@ fn each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is
             ),
             Unverifiable::DescriptorRetired,
         ),
+        (
+            store.decision(
+                "stripped_then_retired",
+                "assistant",
+                reachable_from(13),
+                &events(&[&astripped, &retired]),
+            ),
+            Unverifiable::DigestMissing,
+        ),
+        // The row-level citation is read before every event-level one.
+        (
+            store.decision(
+                "row_reason_first",
+                "assistant",
+                reachable_from(14),
+                &Cites {
+                    row: Some(&stripped),
+                    events: vec![&retired],
+                },
+            ),
+            Unverifiable::DigestMissing,
+        ),
     ];
     // The deleted evidence precedes the document in citation order; the document still resolves.
     let deleted_then_document = store.decision(
@@ -496,6 +520,7 @@ fn each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is
         })
         .unwrap();
     strip_digest(&store, &stripped);
+    strip_digest(&store, &astripped);
 
     let tip = store.kernel.tip().unwrap();
     for (object_id, reason) in &cases {
@@ -572,7 +597,10 @@ fn a_verifier_decision_is_self_source_before_any_anchor_or_citation_read() {
         reachable_from(1),
         &cites,
     );
-    let anchored = store.decision("model", "assistant", reachable_from(2), &cites);
+    // The anchor read's control cites a document the test leaves intact, so only its anchor read
+    // can refuse.
+    let (clean, _) = store.document("clean", "STRUCTURE.md", "# Structure\n");
+    let anchored = store.decision("model", "assistant", reachable_from(2), &events(&[&clean]));
     let cited = store.decision("cited", "assistant", reachable_from(3), &cites);
     let stale = store.decision(
         "stale_attestation",
@@ -789,24 +817,40 @@ fn a_decision_outside_the_input_set_counts_under_no_reason() {
         reachable_from(2),
         &events(&[&document]),
     );
+    let disputed = store.decision(
+        "disputed",
+        "assistant",
+        reachable_from(3),
+        &events(&[&document]),
+    );
+    let quarantined = store.decision(
+        "quarantined",
+        "assistant",
+        reachable_from(4),
+        &events(&[&document]),
+    );
     let before = store.target();
     store
         .kernel
         .commit(intent("stale"), |envelope| {
             admission(envelope, &stale, EventKind::MarkStale)?;
+            admission(envelope, &disputed, EventKind::MarkDisputed)?;
+            admission(envelope, &quarantined, EventKind::Quarantine)?;
             envelope.retire_decision(&retired)?;
             Ok(String::new())
         })
         .unwrap();
     for object_id in [
         stale.as_str(),
+        disputed.as_str(),
+        quarantined.as_str(),
         retired.as_str(),
         "mem_never",
         "memory-domain",
     ] {
         assert_eq!(store.class(object_id), Class::NotInput, "{object_id}");
     }
-    for object_id in [&stale, &retired] {
+    for object_id in [&stale, &disputed, &quarantined, &retired] {
         assert!(
             matches!(
                 store.classify_at(object_id, before, &[]).class,
@@ -857,7 +901,7 @@ fn a_decision_citing_a_message_and_a_document_is_verifiable_through_the_document
     assert!(descriptor.starts_with(&format!("srcdesc:{}:", input.lineage_id)));
     assert_eq!(input.repository_id, REPOSITORY);
     assert_eq!(input.root, Err(Reason::RepositoryUnbound));
-    assert_eq!(input.document_kind, DocumentKind::Code);
+    assert_eq!(input.document_kind(), DocumentKind::Code);
     let decision = &input.decision;
     assert_eq!(decision.object_id, object_id);
     assert_eq!(decision.decision_id, "dec_both");
@@ -875,17 +919,27 @@ fn a_decision_citing_a_message_and_a_document_is_verifiable_through_the_document
     assert!(!rendered.contains("The daemon owns the store."));
 }
 
-fn git(dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(["-c", "core.autocrlf=false"])
-        .args(args)
+/// A `git` command in `dir` with a cleared environment, so an inherited `GIT_DIR` or
+/// `GIT_INDEX_FILE` cannot redirect it to another repository.
+fn git_command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
         .current_dir(dir)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_AUTHOR_NAME", "fixture")
         .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
         .env("GIT_COMMITTER_NAME", "fixture")
-        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid");
+    command
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = git_command(dir)
+        .args(["-c", "core.autocrlf=false"])
+        .args(args)
         .output()
         .unwrap();
     assert!(output.status.success(), "git {args:?}");
@@ -948,9 +1002,8 @@ fn classification_at_one_sequence_ignores_the_worktree_head_and_later_commits() 
     );
     std::fs::write(checkout.path().join("ARCHITECTURE.md"), "# Edited\n").unwrap();
     git(checkout.path(), &["commit", "--quiet", "-am", "edit"]);
-    let reachable = Command::new("git")
+    let reachable = git_command(checkout.path())
         .args(["merge-base", "--is-ancestor", &head, "HEAD"])
-        .current_dir(checkout.path())
         .status()
         .unwrap();
     assert_eq!(
@@ -1051,7 +1104,7 @@ fn the_repository_binds_to_the_first_matching_root_in_bound_order() {
         bound(REPOSITORY, c),
     ]);
     assert_eq!(matched.root, Ok(b.to_path_buf()));
-    assert_eq!(matched.document_kind, DocumentKind::Config);
+    assert_eq!(matched.document_kind(), DocumentKind::Config);
     assert_eq!(
         input(&[bound(REPOSITORY, c), bound(REPOSITORY, b)]).root,
         Ok(c.to_path_buf())
@@ -1089,6 +1142,10 @@ fn the_document_kind_path_rule_is_a_closed_table() {
         "Cargo.TOML",
         "env",
         "config.json.md",
+        "Cargo.lock",
+        "pom.xml",
+        "app.properties",
+        "main.tf",
     ];
     for path in config {
         let kind = DocumentKind::of(path);

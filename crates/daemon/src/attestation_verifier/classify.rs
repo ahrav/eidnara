@@ -12,17 +12,22 @@
 //! The first read decides membership: an object that is absent, not a decision, not live, or whose
 //! latest own admission is not `Active` is [`Class::NotInput`], and a remaining decision the
 //! verifier authored is [`Unverifiable::SelfSource`], both before its anchor or citations are read.
-//! Every other decision is either [`Class::Verifiable`] or exactly one [`Unverifiable`] reason,
-//! checked in this order: the anchor (`no_anchor`, `anchor_not_git`), then the citations
+//! Every other decision that classifies is either [`Class::Verifiable`] or exactly one
+//! [`Unverifiable`] reason, checked in this order: the anchor (`no_anchor`, `anchor_not_git`), then the citations
 //! (`no_citation`, then per cited evidence row, the row-level `evidence_id` first and then at most
 //! [`MAX_EVENT_CITATIONS`] event-level citations in the linked-evidence order: `evidence_retired`,
 //! `descriptor_retired`, `digest_missing`, or no document descriptor). The first cited row that
 //! resolves to a live document descriptor with a digest and a `relative_path` inside the document
-//! path rule makes the decision verifiable. When no cited row does, a cited row whose descriptor's
-//! path is outside the rule makes the classification [`ClassifyError::InvalidDocumentPath`], ahead
-//! of every reason; otherwise the first cited row's reason other than "no document descriptor"
-//! names it, and `citation_not_document` names a decision whose every cited row has no document
-//! descriptor.
+//! path rule makes the decision verifiable. When no cited row does, a cited row whose descriptor
+//! has a digest and a path outside the rule makes the classification
+//! [`ClassifyError::InvalidDocumentPath`], ahead of every reason; otherwise the first cited row's
+//! reason other than "no document descriptor" names it, and `citation_not_document` names a
+//! decision whose every inspected row has no document descriptor. The reasons describe the
+//! inspected citations only: event-level citations past the cap, or older than the newest
+//! [`kernel::LINKED_EVENT_WINDOW`] × ([`MAX_EVENT_CITATIONS`] + 1) decision events the
+//! linked-evidence read walks, are not inspected, so a decision whose only document citation lies
+//! past them classifies `no_citation` or `citation_not_document`. A Kernel refusal or
+//! `InvalidDocumentPath` returns an error and no class, and counts under no reason.
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -41,11 +46,17 @@ use super::{Claim, Reason};
 /// The `source_kind` of every decision the verifier writes.
 pub const VERIFIER_SOURCE_KIND: &str = "verifier";
 
-/// The event-level citations one classification reads, newest first, besides the decision row's
-/// own `evidence_id`, which is always read first.
+/// The event-level citations one classification reads, newest first and ties in evidence id
+/// order, besides the decision row's own `evidence_id`, which is always read first. Citations
+/// past the cap are dropped before any is resolved, and the classification records no sign of
+/// the drop.
 pub const MAX_EVENT_CITATIONS: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 
 /// A bound project root and the repository identity its documents are published under.
+///
+/// A document descriptor's `relative_path` is relative to the root of the project that captured
+/// it, and the claim carries that path unchanged, so verifying the claim against `root` names the
+/// captured document when the capturing project's root is its repository's top level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoundRoot<'a> {
     pub root: &'a Path,
@@ -66,8 +77,10 @@ pub enum ClassifyError {
     /// A Kernel read refused, or the store left `target`'s incarnation during the reads.
     #[error(transparent)]
     Facts(#[from] ClaimFactsError),
-    /// A cited live document descriptor's stored `relative_path` is outside the document path
-    /// rule [`Claim::new`] enforces, and no other cited row resolves to a verifiable document.
+    /// A cited live document descriptor with a valid SHA-256 digest has a stored `relative_path`
+    /// outside the document path rule [`Claim::new`] enforces, and no other cited row resolves to
+    /// a verifiable document. A descriptor without a valid digest yields `digest_missing` before
+    /// its path is checked.
     /// The refusal concerns that decision's descriptors alone.
     #[error("the cited document descriptor's path is outside the document path rule")]
     InvalidDocumentPath,
@@ -99,9 +112,12 @@ impl From<KernelError> for ClassifyError {
     }
 }
 
+/// Where a decision stands with respect to the verifier's input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Class {
+    /// A live, `Active` decision the verifier can check, with its claim.
     Verifiable(Box<VerifierInput>),
+    /// A live, `Active` decision outside the verifier's input, for exactly one reason.
     Unverifiable(Unverifiable),
     /// The object is absent, not a decision, not live, or its latest own admission is missing or
     /// has a disposition other than `Active`; it counts under no reason.
@@ -111,15 +127,25 @@ pub enum Class {
 /// Why a live, `Active` decision is outside the verifier's input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unverifiable {
+    /// The decision names no anchor, or no anchor of its id is live at the sequence.
     NoAnchor,
+    /// The live anchor's condition is other than git `reachable_from`: `Exact`, git
+    /// `ReachableBetween`, or a non-git kind.
     AnchorNotGit,
+    /// The decision row has no `evidence_id` and the inspected events cite no evidence.
     NoCitation,
+    /// No inspected citation, the row-level one and at most [`MAX_EVENT_CITATIONS`] event-level
+    /// ones, has a document descriptor.
     CitationNotDocument,
+    /// The first cited row with a reason names evidence invalidated at the sequence.
     EvidenceRetired,
     /// Descriptors cited the evidence, and the cited revision is no longer live at the sequence:
     /// retired or superseded by a newer revision of its lineage.
     DescriptorRetired,
+    /// The first cited row with a reason has a live document descriptor whose `artifact_digest`
+    /// is not a lowercase hex SHA-256 digest.
     DigestMissing,
+    /// The verifier authored the decision: its `source_kind` is [`VERIFIER_SOURCE_KIND`].
     SelfSource,
 }
 
@@ -172,10 +198,16 @@ pub struct VerifierInput {
     pub lineage_id: String,
     pub descriptor_revision: String,
     pub repository_id: String,
-    pub document_kind: DocumentKind,
     /// The first bound root whose repository identity is the descriptor's, or
     /// `Err(Reason::RepositoryUnbound)` when no bound root has it.
     pub root: Result<PathBuf, Reason>,
+}
+
+impl VerifierInput {
+    /// The kind of the claimed document, from its path.
+    pub fn document_kind(&self) -> DocumentKind {
+        DocumentKind::of(self.claim.relative_path())
+    }
 }
 
 /// What a document is evidence of, from its path alone.
@@ -203,7 +235,9 @@ impl DocumentKind {
     /// `Config` for a path whose file name ends in a configuration extension, compared exactly;
     /// `Code` for every other path, prose documents such as `ARCHITECTURE.md` included.
     pub fn of(relative_path: &str) -> Self {
-        let name = relative_path.rsplit('/').next().unwrap_or(relative_path);
+        let name = relative_path
+            .rsplit_once('/')
+            .map_or(relative_path, |(_, name)| name);
         match name.rsplit_once('.') {
             Some((_, extension)) if CONFIG_EXTENSIONS.contains(&extension) => Self::Config,
             _ => Self::Code,
@@ -230,21 +264,24 @@ impl DocumentKind {
 /// document's repository to the first of `roots` with that repository identity. It reads the
 /// decision row's own `evidence_id` and at most [`MAX_EVENT_CITATIONS`] event-level citations.
 ///
-/// The first read compares the store's incarnation with `target.incarnation` under its reader
-/// guard; the anchor, citation, and descriptor reads that follow take the sequence alone, and
-/// after the last of them, whether it succeeded or refused, the incarnation is compared again. A
+/// The standing read and the row-level evidence liveness read compare the store's incarnation
+/// with `target.incarnation` under their reader guards; the anchor, event-level citation, and
+/// descriptor reads take the sequence alone, and after the last read, whether it succeeded or
+/// refused, the incarnation is compared again. A
 /// restore only advances the store's restore generation, so an equal incarnation after the last
 /// read means every read saw the history `target` was captured from.
 ///
 /// # Errors
 ///
-/// Returns the Kernel reads' refusals: `Facts(IncarnationMismatch)` when the store is not
+/// Returns the Kernel reads' refusals, including: `Facts(IncarnationMismatch)` when the store is not
 /// `target`'s incarnation at the first read or after the last, `Facts(Kernel(Deadline))` when the
 /// budget runs out, `Facts(Kernel(FutureSnapshot))` past the tip, and
-/// `Facts(Kernel(CorruptCanonicalRow))` for a stored anchor or descriptor that fails its row
-/// checks. Returns [`ClassifyError::InvalidDocumentPath`] when a cited live document
-/// descriptor's `relative_path` passes the descriptor row checks and is outside the document path
-/// rule, and no cited row resolves to a verifiable document. `IncarnationMismatch` takes
+/// `Facts(Kernel(CorruptCanonicalRow))` for a stored decision, anchor, or descriptor that fails
+/// its row checks, `Facts(Kernel(InvalidInput))` for a negative sequence or an `object_id` the
+/// standing read refuses, `Facts(MalformedRequiredField)` for a decision or admission field this
+/// build cannot interpret, and the store's other read errors (`Busy`, `Io`, `Conflict`). Returns [`ClassifyError::InvalidDocumentPath`] when a cited live document
+/// descriptor with a valid digest has a `relative_path` that passes the descriptor row checks and
+/// is outside the document path rule, and no cited row resolves to a verifiable document. `IncarnationMismatch` takes
 /// precedence over every other refusal, since a read of another incarnation decides nothing.
 pub fn classify(
     kernel: &KernelStore,
@@ -298,7 +335,7 @@ fn class_of(
     let unverifiable = |reason| Ok(Class::Unverifiable(reason));
     // An anchor retired by the sequence leaves the decision with no live anchor.
     let condition = match &facts.anchor_id {
-        Some(anchor_id) => kernel.anchor_condition_at(anchor_id, requested, budget)?,
+        Some(anchor_id) => kernel.anchor_condition_as_of(anchor_id, requested, budget)?,
         None => None,
     };
     let oid = match condition {
@@ -317,33 +354,31 @@ fn class_of(
         return unverifiable(Unverifiable::NoCitation);
     }
     let mut first_reason = None;
-    let mut invalid_path = None;
+    let mut invalid_path = false;
     for evidence in cited {
-        match resolve_citation(kernel, &evidence, requested, budget)? {
-            Resolution::Document(descriptor, digest) => {
-                match VerifierInput::new(
-                    &facts,
-                    evidence.evidence_id,
-                    *descriptor,
-                    digest,
-                    &oid,
-                    roots,
-                ) {
-                    Ok(input) => return Ok(Class::Verifiable(Box::new(input))),
-                    Err(error @ ClassifyError::InvalidDocumentPath) => {
-                        invalid_path.get_or_insert(error);
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
+        let (descriptor, digest) = match resolve_citation(kernel, &evidence, requested, budget)? {
+            Resolution::Document(descriptor, digest) => (descriptor, digest),
             Resolution::Reason(reason) => {
                 first_reason.get_or_insert(reason);
+                continue;
             }
-            Resolution::NotDocument => {}
+            Resolution::NotDocument => continue,
+        };
+        match VerifierInput::new(
+            &facts,
+            evidence.evidence_id,
+            *descriptor,
+            digest,
+            &oid,
+            roots,
+        ) {
+            Ok(input) => return Ok(Class::Verifiable(Box::new(input))),
+            Err(ClassifyError::InvalidDocumentPath) => invalid_path = true,
+            Err(error) => return Err(error),
         }
     }
-    if let Some(error) = invalid_path {
-        return Err(error);
+    if invalid_path {
+        return Err(ClassifyError::InvalidDocumentPath);
     }
     unverifiable(first_reason.unwrap_or(Unverifiable::CitationNotDocument))
 }
@@ -367,10 +402,19 @@ fn citations(
                 // The read passes one id, under the per-read id limit.
                 EvidenceLivenessError::TooManyIds => KernelError::InvalidInput.into(),
             })?;
-        // The decision row's foreign key keeps its evidence row, so a row not live is retired.
+        // The decision row's foreign key keeps its evidence row, created no later than the
+        // decision, so a live decision's evidence is live or retired; any other answer is a
+        // corrupt store.
+        let live = match liveness.first() {
+            Some(EvidenceLiveness::Live) => true,
+            Some(EvidenceLiveness::Retired) => false,
+            Some(EvidenceLiveness::Unknown) | None => {
+                return Err(KernelError::CorruptCanonicalRow.into());
+            }
+        };
         cited.push(LinkedEvidence {
             evidence_id: evidence_id.to_owned(),
-            live: liveness.first() == Some(&EvidenceLiveness::Live),
+            live,
         });
     }
     // One row more than the cap leaves the cap after the row's own evidence is dropped.
@@ -381,6 +425,11 @@ fn citations(
         max,
         budget,
     )?;
+    // The linked-evidence read bounds only its reader wait by the budget, so a budget that ran
+    // out during its query refuses here instead of yielding a reason from a late read.
+    if budget.is_exhausted() {
+        return Err(KernelError::Deadline.into());
+    }
     cited.extend(
         events
             .into_iter()
@@ -436,12 +485,8 @@ impl VerifierInput {
         roots: &[BoundRoot<'_>],
     ) -> Result<Self, ClassifyError> {
         let field = |name: &str| {
-            descriptor
-                .detail
-                .identity
-                .iter()
-                .find(|(field, _)| field == name)
-                .map(|(_, value)| value.clone())
+            crate::git_reconcile::identity_field(&descriptor, name)
+                .map(str::to_owned)
                 .ok_or(KernelError::CorruptCanonicalRow)
         };
         let relative_path = field("relative_path")?;
@@ -455,7 +500,6 @@ impl VerifierInput {
             .ok_or(Reason::RepositoryUnbound);
         Ok(Self {
             decision: decision.clone(),
-            document_kind: DocumentKind::of(&relative_path),
             claim,
             evidence_id,
             descriptor_object_id: descriptor.object_id,

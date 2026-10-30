@@ -207,7 +207,7 @@ impl WriteSet {
         };
         let detail = serde_json::to_string(&detail).map_err(|_| Outcome::InvalidWriteSet)?;
         let observed_at = crate::now_ms();
-        let kind = input.document_kind.witness_kind();
+        let kind = input.document_kind().witness_kind();
         Ok(Self {
             target,
             input: input.clone(),
@@ -288,7 +288,7 @@ impl WriteSet {
                 &attestation.source_id,
                 attestation.source_revision,
             )
-            && witness.observation_kind == self.input.document_kind.witness_kind()
+            && witness.observation_kind == self.input.document_kind().witness_kind()
             && attestation.evidence_id.is_none()
             && witness.evidence_id.is_none()
     }
@@ -325,7 +325,7 @@ impl WriteSet {
         let subject = &self.attestation.object_id;
         envelope.insert_decision(self.attestation.clone())?;
         envelope.insert_observation(self.witness.clone())?;
-        let kind = self.input.document_kind;
+        let kind = self.input.document_kind();
         let admission = envelope.record_admission(AdmissionRequest {
             candidate_id: None,
             subject_object_id: Some(subject.clone()),
@@ -518,7 +518,7 @@ fn recheck(
     }
     // The writer is held, so the committed tip is the state this envelope extends.
     let anchor = match &model.anchor_id {
-        Some(anchor_id) => kernel.anchor_condition_at(anchor_id, kernel.tip()?, budget)?,
+        Some(anchor_id) => kernel.anchor_condition_as_of(anchor_id, kernel.tip()?, budget)?,
         None => None,
     };
     let anchored = matches!(

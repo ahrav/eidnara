@@ -60,6 +60,7 @@ the current line.
 | G5 | No record on the served form of an unpromoted trusted-class attestation (`ExplicitLabeled`) | closed by #1172 with no record: no verifier write commits an unpromoted attestation, because the envelope rolls back below `Verified` (`p6-new-witness-degradation-never-silent`), and the plugin route cannot write under `verifier` (`p6-new-party-distinct-and-self-refusal`), so the state has no producer |
 | G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1174 (U4 part pass). #1171 does not address it: the classifier reads no `artifact_reference`, and its claim comes from the descriptor detail and the evidence row |
 | G7 | The two records #1170 activates, `p6-new-verdict-deterministic` and `p6-new-blob-read-bounded-at-oid`, have no fresh-context four-lens evaluation | queued; owner U1 ([#1170](https://github.com/ahrav/eidnara/issues/1170)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
+| G8 | The two records #1171 activates, `p6-new-verifiability-pure-function-of-snapshot` and `p6-new-verifier-input-anchor-and-document-citation`, have no fresh-context four-lens evaluation | queued; owner U2 ([#1171](https://github.com/ahrav/eidnara/issues/1171)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
 
 ## Biases for a human
 

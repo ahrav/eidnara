@@ -1205,7 +1205,7 @@ impl<'v> Narrowing<'v> {
 }
 
 impl KernelStore {
-    /// Equal texts can share one evidence row, so several live descriptors of `class` can cite `evidence_id`. The read returns the first in object id order at `requested`, using [`Self::live_source_descriptors`]' liveness predicate and row checks. A [`CitingDescriptor::Retired`] result runs no row checks, since it carries no row. The query walks the observation rows citing `evidence_id` through `idx_observations_evidence_fk`, so its work is proportional to that count; `budget`'s deadline and interrupt bound reader acquisition and query execution.
+    /// Equal texts can share one evidence row, so several live descriptors of `class` can cite `evidence_id`. The read returns the first in object id order at `requested`, using [`Self::live_source_descriptors`]' liveness predicate and row checks. A [`CitingDescriptor::Retired`] result runs no row checks, since it carries no row. The query walks the observation rows citing `evidence_id` through `idx_observations_evidence_fk`, so its work is proportional to that count, which ordinary observations a plugin writes citing the same evidence also raise; `budget`'s deadline and interrupt bound reader acquisition and query execution.
     ///
     /// # Errors
     ///
@@ -1234,26 +1234,36 @@ impl KernelStore {
         });
         let limit = budget.acquire_limit();
         limit.run(|| {
+            if requested < 0 {
+                return Err(KernelError::InvalidInput);
+            }
             let mut reader = self.reader_with_limit(&limit)?;
             let tx = reader.transaction(rusqlite::TransactionBehavior::Deferred)?;
-            crate::slice::snapshot_tip(&tx, requested)?;
+            if requested > crate::commit_read::tip(&tx).map_err(map_sqlite)? {
+                return Err(KernelError::FutureSnapshot);
+            }
             let found = tx
                 .query_row_cached(
                     &SQL,
                     rusqlite::params![class.code(), requested, evidence_id],
-                    |row| Ok((raw_descriptor(row)?, row.get::<_, bool>(14)?)),
+                    |row| Ok((raw_descriptor(row)?, row.get::<_, bool>("live")?)),
                 )
                 .optional()
                 .map_err(map_sqlite)?;
-            Ok(match found {
+            let citing = match found {
                 Some((raw, true)) => CitingDescriptor::Live(Box::new(checked(raw, class)?)),
                 Some((_, false)) => CitingDescriptor::Retired,
                 None => CitingDescriptor::Uncited,
-            })
+            };
+            tx.commit()?;
+            limit.check()?;
+            Ok(citing)
         })
     }
 }
 
+/// The result of [`KernelStore::source_descriptor_citing_evidence`]: a live descriptor takes
+/// precedence over retired ones, and live ties resolve to the first in object id order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CitingDescriptor {
     /// A descriptor of the class citing the evidence is live at the sequence, with live evidence.
