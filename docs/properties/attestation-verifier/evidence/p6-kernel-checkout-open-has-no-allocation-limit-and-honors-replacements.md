@@ -31,7 +31,7 @@ A delta-packed blob over an oversized base, read through each opener.
 
 ### Q: Which opener does the U1 driver use?
 
-- Sources examined: `lookup` (`crates/daemon/src/attestation_verifier.rs:541`) and `replacement_refs_are_ignored` (`crates/daemon/tests/attestation_verifier.rs:505`).
+- Sources examined: `lookup` (`crates/daemon/src/attestation_verifier.rs:535`) and `replacement_refs_are_ignored` (`crates/daemon/tests/attestation_verifier.rs:505`).
 - Findings: `git_sources::open_with_slots` with `MAX_BLOB_BYTES` as the limit and 32 index slots, reopening through `git_sources::open` when a store lookup needs more slots; its own-pack decodes and loose reads apply the same limit.
 - Missing evidence: none.
 - Conclusion: resolved with answer; this resolves the open question the portfolio evaluation tied to G3.
