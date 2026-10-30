@@ -2,7 +2,7 @@
 //!
 //! Object headers, the store's allocations, and decoded sizes are bounded independently; a selection is refused whole if any object is missing, corrupt, non-commit, repeated, or exceeds a bound. A non-UTF-8 message or a declared non-UTF-8 encoding is an explicit disposition rather than a converted or dropped row.
 
-use std::cell::Cell;
+use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
@@ -282,8 +282,8 @@ pub(crate) struct OwnPacks {
 
 struct OwnPack {
     path: PathBuf,
-    index: std::cell::OnceCell<Option<gix::odb::pack::index::File>>,
-    data: std::cell::OnceCell<Option<gix::odb::pack::data::File>>,
+    index: OnceCell<Option<gix::odb::pack::index::File>>,
+    data: OnceCell<Option<gix::odb::pack::data::File>>,
 }
 
 #[derive(Debug)]
@@ -305,17 +305,18 @@ impl OwnPacks {
 
     /// The header of `id`'s entry in the first own pack whose index holds it and whose entry
     /// decodes, trying the index that answered last, then the others newest first. `None` when no
-    /// own pack holds a decodable entry for `id`. Each index and pack must be a regular file.
+    /// opened own index contains `id`.
     ///
     /// # Errors
     ///
-    /// A pack whose index describes another pack, or whose delta chain revisits an entry, produces
-    /// [`PackCorruption`].
+    /// `header` returns [`OwnPackError::Corruption`] immediately when `entry_header` fails. It also
+    /// returns corruption after exhausting the search if an opened index contains `id` and every
+    /// matching pack is unavailable or yields `None`.
     pub(crate) fn header(
         &mut self,
         id: &gix::oid,
-    ) -> Result<Option<gix::odb::pack::data::decode::header::Outcome>, PackCorruption> {
-        Ok(self.locate(id)?.map(|(_, header)| header))
+    ) -> Result<Option<gix::odb::pack::data::decode::header::Outcome>, OwnPackError> {
+        Ok(self.locate(id)?.map(|(_, _, header)| header))
     }
 
     /// `OwnPacks::decode` decodes `id` into `out` from the pack selected by [`Self::header`],
@@ -324,28 +325,22 @@ impl OwnPacks {
     ///
     /// # Errors
     ///
-    /// `OwnPacks::decode` propagates [`Self::header`]'s errors as [`OwnPackError::Corruption`] and
-    /// returns [`OwnPackError::Decode`] when the entry does not decode within the allocation limit.
+    /// `OwnPacks::decode` propagates [`Self::header`]'s errors and returns
+    /// [`OwnPackError::Decode`] when the entry does not decode within the allocation limit.
     pub(crate) fn decode(
         &mut self,
         id: &gix::oid,
         out: &mut Vec<u8>,
     ) -> Result<Option<gix::object::Kind>, OwnPackError> {
         use gix::odb::pack::data::decode::entry::ResolvedBase;
-        let Some((position, _)) = self.locate(id).map_err(|_| OwnPackError::Corruption)? else {
-            return Ok(None);
-        };
-        let pack = &self.listed.as_ref().map_or(&[][..], Vec::as_slice)[position];
-        let (Some(Some(index)), Some(Some(data))) = (pack.index.get(), pack.data.get()) else {
+        let Some((index, data, _)) = self.locate(id)? else {
             return Ok(None);
         };
         let entry_at = |id: &gix::oid| {
             let position = index.lookup(id)?;
             data.entry(index.pack_offset_at_index(position)).ok()
         };
-        let Some(entry) = entry_at(id) else {
-            return Ok(None);
-        };
+        let entry = entry_at(id).ok_or(OwnPackError::Corruption)?;
         let resolve = |base: &gix::oid, _: &mut Vec<u8>| entry_at(base).map(ResolvedBase::InPack);
         data.decode_entry(
             entry,
@@ -358,19 +353,15 @@ impl OwnPacks {
         .map_err(OwnPackError::Decode)
     }
 
-    fn locate(
-        &mut self,
-        id: &gix::oid,
-    ) -> Result<Option<(usize, gix::odb::pack::data::decode::header::Outcome)>, PackCorruption>
-    {
+    fn locate(&mut self, id: &gix::oid) -> Result<Option<Located<'_>>, OwnPackError> {
         let (hash, alloc_limit) = (self.hash, self.alloc_limit);
         let listed = self.listed.get_or_insert_with(|| {
             indices_newest_first(&self.dir, None)
                 .into_iter()
                 .map(|path| OwnPack {
                     path,
-                    index: std::cell::OnceCell::new(),
-                    data: std::cell::OnceCell::new(),
+                    index: OnceCell::new(),
+                    data: OnceCell::new(),
                 })
                 .collect()
         });
@@ -378,12 +369,14 @@ impl OwnPacks {
         let order = last
             .into_iter()
             .chain((0..listed.len()).filter(|&position| Some(position) != last));
+        let mut held = false;
         for position in order {
             let pack = &listed[position];
             let index = pack.index.get_or_init(|| open_index(&pack.path, hash));
             let Some(index) = index.as_ref().filter(|index| index.lookup(id).is_some()) else {
                 continue;
             };
+            held = true;
             let data = pack.data.get_or_init(|| {
                 gix::odb::pack::data::File::at(pack.path.with_extension("pack"), hash)
                     .ok()
@@ -392,14 +385,25 @@ impl OwnPacks {
             let Some(data) = data else {
                 continue;
             };
-            if let Some(header) = entry_header(index, data, id)? {
+            let header = entry_header(index, data, id).map_err(|_| OwnPackError::Corruption)?;
+            if let Some(header) = header {
                 self.last = Some(position);
-                return Ok(Some((position, header)));
+                return Ok(Some((index, data, header)));
             }
         }
-        Ok(None)
+        if held {
+            Err(OwnPackError::Corruption)
+        } else {
+            Ok(None)
+        }
     }
 }
+
+type Located<'packs> = (
+    &'packs gix::odb::pack::index::File,
+    &'packs gix::odb::pack::data::File,
+    gix::odb::pack::data::decode::header::Outcome,
+);
 
 /// A pack of the repository holds the looked-up object in a form whose header cannot be decoded.
 #[derive(Debug, PartialEq, Eq)]
@@ -440,13 +444,12 @@ fn open_index(path: &Path, hash: gix::hash::Kind) -> Option<gix::odb::pack::inde
     gix::odb::pack::index::File::at(path, hash).ok()
 }
 
-/// Reads `id`'s header from `data` through `index`. Each ref-delta hop resolves its base in the same index; a well-formed chain visits each entry at most once, so more hops than the index holds entries means the chain revisits an entry.
 fn entry_header(
     index: &gix::odb::pack::index::File,
     data: &gix::odb::pack::data::File,
     id: &gix::oid,
 ) -> Result<Option<gix::odb::pack::data::decode::header::Outcome>, PackCorruption> {
-    use gix::odb::pack;
+    use gix::odb::pack::data::{decode::header::ResolvedBase, entry::Header};
     let Some(position) = index.lookup(id) else {
         return Ok(None);
     };
@@ -454,26 +457,32 @@ fn entry_header(
         return Err(PackCorruption::MismatchedIndex);
     }
     let entry_at = |position| data.entry(index.pack_offset_at_index(position)).ok();
-    let Some(entry) = entry_at(position) else {
+    let Some(first) = entry_at(position) else {
         return Ok(None);
     };
-    let remaining_hops = Cell::new(index.num_objects());
-    let revisited = Cell::new(false);
-    let in_pack = |base: &gix::oid| {
-        let Some(left) = remaining_hops.get().checked_sub(1) else {
-            revisited.set(true);
-            return None;
+    let mut entry = first.clone();
+    let mut hops: u32 = 0;
+    loop {
+        let base = match entry.header {
+            Header::OfsDelta { base_distance } => entry
+                .checked_base_pack_offset(base_distance)
+                .and_then(|offset| data.entry(offset).ok()),
+            Header::RefDelta { base_id } => index.lookup(base_id).and_then(entry_at),
+            Header::Commit | Header::Tree | Header::Blob | Header::Tag => break,
         };
-        remaining_hops.set(left);
-        let entry = entry_at(index.lookup(base)?)?;
-        Some(pack::data::decode::header::ResolvedBase::InPack(entry))
-    };
-    let header = data.decode_header(entry, &mut gix::zlib::Inflate::default(), &in_pack);
-    match header {
-        Ok(header) => Ok(Some(header)),
-        Err(_) if revisited.get() => Err(PackCorruption::CyclicDeltaChain),
-        Err(_) => Ok(None),
+        let Some(base) = base else {
+            return Ok(None);
+        };
+        hops += 1;
+        if hops > index.num_objects() {
+            return Err(PackCorruption::CyclicDeltaChain);
+        }
+        entry = base;
     }
+    let in_pack = |base: &gix::oid| entry_at(index.lookup(base)?).map(ResolvedBase::InPack);
+    Ok(data
+        .decode_header(first, &mut gix::zlib::Inflate::default(), &in_pack)
+        .ok())
 }
 
 /// The object store's lookup needed more pack index slots than [`open_with_slots`] received.

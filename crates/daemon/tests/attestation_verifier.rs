@@ -1192,3 +1192,153 @@ fn objects_in_an_alternate_with_more_packs_than_index_slots_match() {
     assert!(!alternate.loose_path(&blob).exists());
     assert_eq!(verify(&bare.root, &doc, &unbounded()), matched);
 }
+
+#[test]
+fn a_delta_with_an_empty_body_that_names_itself_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    for (index, (class, _, _)) in doc_objects().into_iter().enumerate() {
+        let bare = Bare::init(&dir.path().join(format!("repo-{index}.git")));
+        let mut commit = String::new();
+        for (stored, kind, bytes) in doc_objects() {
+            let id = if stored == class {
+                let kind = gix::objs::Kind::from_bytes(kind.as_bytes()).unwrap();
+                let id = gix::objs::compute_hash(gix::hash::Kind::Sha1, kind, &bytes).unwrap();
+                support::git_repo::write_empty_self_delta_pack(&bare.root.join("objects"), id);
+                id.to_string()
+            } else {
+                bare.literal(kind, &bytes)
+            };
+            if stored == ObjectClass::Commit {
+                commit = id;
+            }
+        }
+        assert_eq!(
+            verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+            unavailable(Reason::ObjectUnreadable(class)),
+            "{class:?}"
+        );
+    }
+}
+
+#[test]
+fn an_own_pack_blob_whose_stream_does_not_decode_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let blob = support::git_repo::write_truncated_blob_pack(&bare.root.join("objects"), DOC);
+    let tree = bare.tree(&[("100644", "blob", &blob.to_string(), "doc.md")]);
+    let commit = bare.commit(&tree, None, "truncated");
+    let polls = PassesAt::new(None);
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", DOC, &commit), &polls),
+        unavailable(Reason::ObjectUnreadable(ObjectClass::Blob))
+    );
+    // The header passed the gate, so the refusal came from the blob read.
+    assert_eq!(polls.polls.borrow().last(), Some(&Stage::Blob));
+}
+
+#[test]
+fn a_tree_above_the_allocation_limit_is_over_budget_loose_and_packed() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let blob = bare.blob(DOC);
+    let mut listing = format!("100644 blob {blob}\tdoc.md\n");
+    for index in 0..8000 {
+        listing.push_str(&format!("100644 blob {blob}\tf{index:05}\n"));
+    }
+    let tree = bare.git(&["mktree"], Some(listing.as_bytes()));
+    let size: u64 = bare.git(&["cat-file", "-s", &tree], None).parse().unwrap();
+    assert!(size > MAX_BLOB_BYTES, "{size}");
+    let commit = bare.commit(&tree, None, "wide");
+    let doc = claim("doc.md", DOC, &commit);
+    assert_eq!(
+        verify(&bare.root, &doc, &unbounded()),
+        unavailable(Reason::OverBudget)
+    );
+
+    bare.git(&["update-ref", "refs/heads/main", &commit], None);
+    bare.git(&["repack", "-adfq"], None);
+    bare.git(&["prune-packed"], None);
+    assert!(!bare.loose_path(&tree).exists());
+    assert_eq!(
+        verify(&bare.root, &doc, &unbounded()),
+        unavailable(Reason::OverBudget)
+    );
+}
+
+#[test]
+fn a_blob_only_in_an_alternate_with_more_packs_than_index_slots_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let alternate = Bare::init(&dir.path().join("alternate.git"));
+    let blob = alternate.blob(DOC);
+    let bare = fixture(dir.path());
+    std::fs::write(
+        bare.root.join("objects").join("info").join("alternates"),
+        format!("{}\n", alternate.root.join("objects").display()),
+    )
+    .unwrap();
+    let tree = bare.tree(&[("100644", "blob", &blob, "doc.md")]);
+    let commit = bare.commit(&tree, None, "doc");
+    alternate.git(
+        &["pack-objects", "-q", "objects/pack/pack"],
+        Some(format!("{blob}\n").as_bytes()),
+    );
+    for index in 0..40 {
+        let filler = alternate.blob(format!("filler {index}\n").as_bytes());
+        alternate.git(
+            &["pack-objects", "-q", "objects/pack/pack"],
+            Some(format!("{filler}\n").as_bytes()),
+        );
+    }
+    alternate.git(&["prune-packed"], None);
+    assert!(!alternate.loose_path(&blob).exists());
+    assert!(bare.loose_path(&commit).exists() && bare.loose_path(&tree).exists());
+    // The commit and tree read from the repository's loose store, so the blob's header is the
+    // first lookup that reaches the object store.
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+        Evaluation {
+            verdict: Verdict::Match,
+            bytes_read: DOC.len() as u64,
+        }
+    );
+}
+
+#[test]
+fn an_own_pack_delta_whose_base_lies_in_another_pack_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    for (index, (class, _, _)) in doc_objects().into_iter().enumerate() {
+        let bare = Bare::init(&dir.path().join(format!("repo-{index}.git")));
+        let base = gix::objs::compute_hash(
+            gix::hash::Kind::Sha1,
+            gix::objs::Kind::Blob,
+            format!("base {index}\n").as_bytes(),
+        )
+        .unwrap();
+        // The base's own pack holds it as a ref-delta on itself.
+        support::git_repo::write_empty_self_delta_pack(&bare.root.join("objects"), base);
+        let mut commit = String::new();
+        for (stored, kind, bytes) in doc_objects() {
+            let id = if stored == class {
+                let kind = gix::objs::Kind::from_bytes(kind.as_bytes()).unwrap();
+                let id = gix::objs::compute_hash(gix::hash::Kind::Sha1, kind, &bytes).unwrap();
+                support::git_repo::write_ref_delta_pack(
+                    &bare.root.join("objects"),
+                    id,
+                    base,
+                    &bytes,
+                );
+                id.to_string()
+            } else {
+                bare.literal(kind, &bytes)
+            };
+            if stored == ObjectClass::Commit {
+                commit = id;
+            }
+        }
+        assert_eq!(
+            verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+            unavailable(Reason::ObjectUnreadable(class)),
+            "{class:?}"
+        );
+    }
+}
