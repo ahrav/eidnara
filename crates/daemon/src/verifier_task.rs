@@ -59,14 +59,22 @@ fn bound_projects(bindings: &Mutex<crate::RouteBindings>) -> Vec<Project> {
 
 /// The production flag reader: each project root's effective `verifier.enabled`.
 fn enabled_reader() -> Arc<dyn Fn(&Path) -> bool + Send + Sync> {
+    enabled_reader_with(|key| std::env::var(key).ok())
+}
+
+/// Each project root's effective `verifier.enabled` under the user tier that `env`'s
+/// `XDG_CONFIG_HOME` and `HOME` name.
+fn enabled_reader_with(
+    env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+) -> Arc<dyn Fn(&Path) -> bool + Send + Sync> {
     let config = Mutex::new(crate::config::ConfigCache::default());
     Arc::new(move |root| {
         config
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .verifier_enabled(
-                std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
-                std::env::var("HOME").ok().as_deref(),
+                env("XDG_CONFIG_HOME").as_deref(),
+                env("HOME").as_deref(),
                 root,
             )
     })
@@ -189,5 +197,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             scopes
         );
+    }
+
+    /// The production reader reads the flag from the user tier its environment names: false with
+    /// no file, true under a user-tier `true`, and false for a project-tier `true` alone.
+    #[test]
+    fn the_flag_reader_follows_the_environments_user_tier() {
+        let xdg = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let config_home = xdg.path().to_str().unwrap().to_owned();
+        let reader =
+            enabled_reader_with(move |key| (key == "XDG_CONFIG_HOME").then(|| config_home.clone()));
+        assert!(!reader(project.path()));
+        std::fs::create_dir_all(project.path().join(".eidnara")).unwrap();
+        std::fs::write(
+            project.path().join(".eidnara/eidnara.jsonc"),
+            r#"{ "verifier": { "enabled": true } }"#,
+        )
+        .unwrap();
+        assert!(!reader(project.path()));
+
+        let enabled = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(enabled.path().join("eidnara")).unwrap();
+        std::fs::write(
+            enabled.path().join("eidnara/eidnara.jsonc"),
+            r#"{ "verifier": { "enabled": true } }"#,
+        )
+        .unwrap();
+        let config_home = enabled.path().to_str().unwrap().to_owned();
+        let reader =
+            enabled_reader_with(move |key| (key == "XDG_CONFIG_HOME").then(|| config_home.clone()));
+        assert!(reader(project.path()));
     }
 }

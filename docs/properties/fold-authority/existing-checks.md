@@ -40,8 +40,8 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `jsonc_only_discovery_fails_the_fixture` | `crates/daemon/src/config.rs:2618` | FA-N01, FA-E10 | #898 (#852); #859 PR A | unaudited |
 | `a_rejected_reload_keeps_the_last_admitted_configuration` | `crates/daemon/src/config.rs:2629` | FA-N01 | #898 (#852); #859 PR A | unaudited |
 | `a_first_load_rejection_keeps_the_tier_outside_the_authority_blocks` | `crates/daemon/src/config.rs:2694` | FA-N01 | #898 (#852); #859 PR A | unaudited |
-| `an_unresolved_configuration_withdraws_fold_authority_from_the_retained_documents` | `crates/daemon/src/config.rs:2771` | FA-N01 | #898 (#852); #859 PR A | unaudited |
-| `retained_project_documents_are_bounded_and_the_user_document_survives_churn` | `crates/daemon/src/config.rs:2771` | FA-N01 | #898 (#852); #859 PR A | unaudited |
+| `an_unresolved_configuration_withdraws_fold_authority_from_the_retained_documents` | `crates/daemon/src/config.rs:3763` | FA-N01 | #898 (#852); #859 PR A | unaudited |
+| `retained_project_documents_are_bounded_and_the_user_document_survives_churn` | `crates/daemon/src/config.rs:3793` | FA-N01 | #898 (#852); #859 PR A | unaudited |
 | `an_unresolved_configuration_adopts_nothing` | `crates/daemon/src/fold_authority_handler_tests.rs:203` | FA-N01, FA-N02 | #903 (#855); #859 PR A | unaudited |
 | `the_first_committing_pass_adopts_over_a_state_sync_row` | `crates/daemon/src/fold_authority_handler_tests.rs:135` | FA-N02 | #903 (#855); #859 PR A | unaudited |
 | `a_losing_first_adopter_converges_on_the_winner` | `crates/daemon/src/fold_authority_handler_tests.rs:163` | FA-N02 | #903 (#855); #859 PR A | unaudited |

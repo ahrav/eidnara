@@ -620,8 +620,9 @@ fn a_rolled_back_commit_counts_its_refusal_and_a_replayed_commit_counts_its_repl
         .iter()
         .filter(|name| name.starts_with("commit_refused_") && counters.get(name) > 0)
         .collect();
-    assert_eq!(refused.len(), 1, "{refused:?}");
-    assert_eq!(counters.get(refused[0]), 1);
+    // The trigger's abort reaches the commit as a refusal outside the named reasons.
+    assert_eq!(refused, [&"commit_refused_other"]);
+    assert_eq!(counters.get("commit_refused_other"), 1);
     assert_eq!(store.verifier_rows(), 0);
     assert_eq!(verifier.cursor(&repo.scope_id()), None);
     store
@@ -1489,4 +1490,90 @@ async fn cancelling_an_in_flight_pass_returns_before_its_deadline() {
     assert_eq!(counters.get("passes"), 1);
     assert_eq!(counters.get("considered"), 0);
     drop(root);
+}
+
+/// A top-level worktree root binds the project digest beside its Git identity, so a document
+/// published under the digest, as capture does before the repository has a derivable identity,
+/// verifies against the root.
+#[test]
+fn a_worktree_root_verifies_a_document_published_under_the_project_digest() {
+    let store = Store::open();
+    let repo = Repo::new("digest", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let decision = store.decision(&repo, "g0", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    Verifier::default().pass(
+        &store.kernel,
+        &[repo.project_at(&repo.work)],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_accounting(&counters);
+    assert_eq!(counters.get("match"), 1);
+    assert_eq!(counters.get("unavailable_repository_unbound"), 0);
+    assert!(exists(&store, &attestation(&decision, &repo)));
+}
+
+/// A root path bound again under another project digest derives its repository identity again.
+#[test]
+fn a_root_path_bound_under_another_project_derives_again() {
+    let store = Store::open();
+    let repo = Repo::new("rebound", &[]);
+    let other = Repo::new("rebound-other", &[]);
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(clock.polled(Poll::Derive), 1);
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(clock.polled(Poll::Derive), 0);
+    let mut rebound = other.project_at(&repo.bare);
+    rebound.roots[0].digest = other.digest.clone();
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[rebound], &on, &counters, &clock);
+    assert_eq!(clock.polled(Poll::Derive), 1);
+}
+
+/// A decision row the batched standing read refuses leaves the page to each decision's own
+/// classification: the bad row spends an attempt each pass and is skipped after K, while the
+/// decision behind it verifies in the first pass.
+#[test]
+fn a_row_the_standing_read_refuses_is_skipped_after_k_passes() {
+    let store = Store::open();
+    let repo = Repo::new(
+        "corrupt",
+        &[
+            ("bad.md".into(), text(0, 1024)),
+            ("good.md".into(), text(1, 1024)),
+        ],
+    );
+    store.scope(&repo);
+    let bad = store.decision(&repo, "c0", "bad.md", &text(0, 1024));
+    let good = store.decision(&repo, "c1", "good.md", &text(1, 1024));
+    store
+        .sqlite()
+        .execute(
+            "UPDATE admission_decisions SET disposition='unknown' WHERE subject_object_id=?1",
+            [&bad],
+        )
+        .unwrap();
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    for pass in 1..=3 {
+        let report = verifier.pass(
+            &store.kernel,
+            &[repo.project()],
+            &on,
+            &counters,
+            &Clock::open(),
+        );
+        assert!(report.failed, "pass {pass}");
+        assert_accounting(&counters);
+        assert_eq!(counters.get("attestation_committed"), 1, "pass {pass}");
+    }
+    assert!(exists(&store, &attestation(&good, &repo)));
+    assert_eq!(counters.get("unavailable_skipped"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, good);
 }

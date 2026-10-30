@@ -735,7 +735,7 @@ Guarantee: The cursor, a `(created_commit_seq, object_id)` pair in the page read
 Check: `always` - every decision at or below the cursor has a terminal outcome, and a rescan of attested or `Stale` decisions leaves the tip unchanged
 Fault/timing angle: a deadline between decisions or during a read; a restart between passes
 Required faults and enabling state: F7, F13, a restart
-Confidence: high - [evidence](evidence/p6-new-cursor-never-skips-unresolved.md). Read `ProjectRun::run` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:394`), which moves the cursor only over a resolved prefix (`:454`), `retry` (`:472`), the skips before any repository read (`:442`, `:529`), and the page read `scope_decisions_after_within_budget` (`crates/kernel/src/slice/read.rs:701`)
+Confidence: high - [evidence](evidence/p6-new-cursor-never-skips-unresolved.md). Read `ProjectRun::run` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:394`), which moves the cursor only over a resolved prefix (`:454`), `retry` (`:472`), the skips before any claim verification read (`:442`, `:529`), and the page read `scope_decisions_after_within_budget` (`crates/kernel/src/slice/read.rs:701`)
 Existing check: `crates/daemon/tests/attestation_verifier_bounded_pass.rs:542`, `:733`, `:773`, `:989`, `:1352`, `:1389`; `crates/kernel/tests/kernel_scope_decisions.rs:65` (unaudited)
 Impact: falsifier: a `deadline` decision passed and never revisited, or a second `MarkStale`
 Open questions:
