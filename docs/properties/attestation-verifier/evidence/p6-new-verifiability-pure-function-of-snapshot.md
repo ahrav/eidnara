@@ -12,7 +12,7 @@ The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/i
 - `anchor_condition_as_of`, called at `crates/daemon/src/attestation_verifier/classify.rs:351` and defined at `crates/kernel/src/anchor_write.rs:469`: the anchor row live at the sequence, decoded by `validate_anchor_row` (`:288`).
 - `evidence_liveness_at_within_budget` (`crates/daemon/src/attestation_verifier/classify.rs:411`): the liveness of the decision row's own evidence at the target, under a reader guard that compares the incarnation.
 - `linked_decision_evidence_within_budget` (`crates/daemon/src/attestation_verifier/classify.rs:435`): the event-level citations at the sequence, each with its evidence liveness at the sequence.
-- `source_descriptor_citing_evidence`, called at `crates/daemon/src/attestation_verifier/classify.rs:473` and defined at `crates/kernel/src/source_descriptor.rs:1193`: the document descriptor citing each cited evidence row, live at the sequence.
+- `source_descriptor_citing_evidence`, called at `crates/daemon/src/attestation_verifier/classify.rs:473` and defined at `crates/kernel/src/source_descriptor.rs:1223`: the document descriptor citing each cited evidence row, live at the sequence.
 
 After the last read, whether it succeeded or refused, `classify` compares the store's incarnation with `target.incarnation` again (`crates/daemon/src/attestation_verifier/classify.rs:306`) and returns `IncarnationMismatch` when they differ. The bound roots are an argument; the classifier maps the descriptor's `repository_id` to the first root with that identity and carries the root path, so it opens no repository.
 
