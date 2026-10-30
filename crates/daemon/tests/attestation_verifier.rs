@@ -683,7 +683,7 @@ fn a_delta_chain_that_revisits_an_entry_is_unreadable() {
             }
         }
         assert_eq!(
-            verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+            verify_within(&bare.root, &claim("doc.md", DOC, &commit)),
             unavailable(Reason::ObjectUnreadable(class)),
             "{class:?}"
         );
@@ -1104,6 +1104,329 @@ fn a_non_bare_root_answers_from_the_object_store_not_the_worktree() {
     assert_eq!(
         verify(&root, &claim("doc.md", edited, &oid), &unbounded()).verdict,
         Verdict::Mismatch
+    );
+}
+
+/// The entry type codes of every object `bare`'s packs hold, read from each pack at its index's
+/// offsets.
+fn pack_entry_types(bare: &Bare) -> Vec<u8> {
+    let pack_dir = bare.root.join("objects").join("pack");
+    let mut types = Vec::new();
+    for entry in std::fs::read_dir(&pack_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "idx") {
+            continue;
+        }
+        let index = gix::odb::pack::index::File::at(&path, gix::hash::Kind::Sha1).unwrap();
+        let pack = std::fs::read(path.with_extension("pack")).unwrap();
+        for entry in index.iter() {
+            let offset = usize::try_from(entry.pack_offset).unwrap();
+            types.push((pack[offset] >> 4) & 0b111);
+        }
+    }
+    types
+}
+
+#[test]
+fn a_ref_delta_in_an_own_pack_decodes_against_its_base_in_that_pack() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let base: Vec<u8> = (0..200)
+        .flat_map(|line| format!("line {line} of the architecture document\n").into_bytes())
+        .collect();
+    let mut edited = base.clone();
+    edited.extend_from_slice(b"one more line\n");
+    let first = bare.commit_doc(&base, None);
+    let second = bare.commit_doc(&edited, Some(&first));
+    bare.git(&["update-ref", "refs/heads/main", &second], None);
+    bare.git(
+        &["-c", "repack.useDeltaBaseOffset=false", "repack", "-adfq"],
+        None,
+    );
+    bare.git(&["prune-packed"], None);
+    // Type 7 is a ref-delta, whose base the entry names by object id.
+    let types = pack_entry_types(&bare);
+    assert!(types.contains(&7), "{types:?}");
+    for (commit, bytes) in [(&first, &base), (&second, &edited)] {
+        assert_eq!(
+            verify(&bare.root, &claim("doc.md", bytes, commit), &unbounded()),
+            Evaluation {
+                verdict: Verdict::Match,
+                bytes_read: bytes.len() as u64,
+            }
+        );
+    }
+}
+
+#[test]
+fn objects_in_an_alternate_with_more_packs_than_index_slots_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let alternate = Bare::init(&dir.path().join("alternate.git"));
+    let commit = alternate.commit_doc(DOC, None);
+    let bare = fixture(dir.path());
+    std::fs::write(
+        bare.root.join("objects").join("info").join("alternates"),
+        format!("{}\n", alternate.root.join("objects").display()),
+    )
+    .unwrap();
+    let doc = claim("doc.md", DOC, &commit);
+    let matched = Evaluation {
+        verdict: Verdict::Match,
+        bytes_read: DOC.len() as u64,
+    };
+    // The repository holds none of the claim's objects; its alternate holds them loose.
+    assert_eq!(verify(&bare.root, &doc, &unbounded()), matched);
+
+    // Forty-one packs in the alternate exceed the slots of the store the driver opens.
+    let tree = alternate.git(&["rev-parse", &format!("{commit}^{{tree}}")], None);
+    let blob = alternate.git(&["rev-parse", &format!("{commit}:doc.md")], None);
+    let listing = format!("{commit}\n{tree}\n{blob}\n");
+    alternate.git(
+        &["pack-objects", "-q", "objects/pack/pack"],
+        Some(listing.as_bytes()),
+    );
+    for index in 0..40 {
+        let filler = alternate.blob(format!("filler {index}\n").as_bytes());
+        alternate.git(
+            &["pack-objects", "-q", "objects/pack/pack"],
+            Some(format!("{filler}\n").as_bytes()),
+        );
+    }
+    alternate.git(&["prune-packed"], None);
+    let packs = std::fs::read_dir(alternate.root.join("objects").join("pack"))
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "idx")
+        })
+        .count();
+    assert_eq!(packs, 41);
+    assert!(!alternate.loose_path(&blob).exists());
+    assert_eq!(verify(&bare.root, &doc, &unbounded()), matched);
+}
+
+#[test]
+fn a_delta_with_an_empty_body_that_names_itself_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    for (index, (class, _, _)) in doc_objects().into_iter().enumerate() {
+        let bare = Bare::init(&dir.path().join(format!("repo-{index}.git")));
+        let mut commit = String::new();
+        for (stored, kind, bytes) in doc_objects() {
+            let id = if stored == class {
+                let kind = gix::objs::Kind::from_bytes(kind.as_bytes()).unwrap();
+                let id = gix::objs::compute_hash(gix::hash::Kind::Sha1, kind, &bytes).unwrap();
+                support::git_repo::write_empty_self_delta_pack(&bare.root.join("objects"), id);
+                id.to_string()
+            } else {
+                bare.literal(kind, &bytes)
+            };
+            if stored == ObjectClass::Commit {
+                commit = id;
+            }
+        }
+        assert_eq!(
+            verify_within(&bare.root, &claim("doc.md", DOC, &commit)),
+            unavailable(Reason::ObjectUnreadable(class)),
+            "{class:?}"
+        );
+    }
+}
+
+#[test]
+fn an_own_pack_blob_whose_stream_does_not_decode_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let blob = support::git_repo::write_truncated_blob_pack(&bare.root.join("objects"), DOC);
+    let tree = bare.tree(&[("100644", "blob", &blob.to_string(), "doc.md")]);
+    let commit = bare.commit(&tree, None, "truncated");
+    let polls = PassesAt::new(None);
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", DOC, &commit), &polls),
+        unavailable(Reason::ObjectUnreadable(ObjectClass::Blob))
+    );
+    // The header passed the gate, so the refusal came from the blob read.
+    assert_eq!(polls.polls.borrow().last(), Some(&Stage::Blob));
+}
+
+#[test]
+fn a_tree_above_the_allocation_limit_is_over_budget_loose_and_packed() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let blob = bare.blob(DOC);
+    let mut listing = format!("100644 blob {blob}\tdoc.md\n");
+    for index in 0..8000 {
+        listing.push_str(&format!("100644 blob {blob}\tf{index:05}\n"));
+    }
+    let tree = bare.git(&["mktree"], Some(listing.as_bytes()));
+    let size: u64 = bare.git(&["cat-file", "-s", &tree], None).parse().unwrap();
+    assert!(size > MAX_BLOB_BYTES, "{size}");
+    let commit = bare.commit(&tree, None, "wide");
+    let doc = claim("doc.md", DOC, &commit);
+    assert_eq!(
+        verify(&bare.root, &doc, &unbounded()),
+        unavailable(Reason::OverBudget)
+    );
+
+    bare.git(&["update-ref", "refs/heads/main", &commit], None);
+    bare.git(&["repack", "-adfq"], None);
+    bare.git(&["prune-packed"], None);
+    assert!(!bare.loose_path(&tree).exists());
+    assert_eq!(
+        verify(&bare.root, &doc, &unbounded()),
+        unavailable(Reason::OverBudget)
+    );
+}
+
+#[test]
+fn a_blob_only_in_an_alternate_with_more_packs_than_index_slots_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let alternate = Bare::init(&dir.path().join("alternate.git"));
+    let blob = alternate.blob(DOC);
+    let bare = fixture(dir.path());
+    std::fs::write(
+        bare.root.join("objects").join("info").join("alternates"),
+        format!("{}\n", alternate.root.join("objects").display()),
+    )
+    .unwrap();
+    let tree = bare.tree(&[("100644", "blob", &blob, "doc.md")]);
+    let commit = bare.commit(&tree, None, "doc");
+    alternate.git(
+        &["pack-objects", "-q", "objects/pack/pack"],
+        Some(format!("{blob}\n").as_bytes()),
+    );
+    for index in 0..40 {
+        let filler = alternate.blob(format!("filler {index}\n").as_bytes());
+        alternate.git(
+            &["pack-objects", "-q", "objects/pack/pack"],
+            Some(format!("{filler}\n").as_bytes()),
+        );
+    }
+    alternate.git(&["prune-packed"], None);
+    assert!(!alternate.loose_path(&blob).exists());
+    assert!(bare.loose_path(&commit).exists() && bare.loose_path(&tree).exists());
+    // The commit and tree read from the repository's loose store, so the blob's header is the
+    // first lookup that reaches the object store.
+    assert_eq!(
+        verify(&bare.root, &claim("doc.md", DOC, &commit), &unbounded()),
+        Evaluation {
+            verdict: Verdict::Match,
+            bytes_read: DOC.len() as u64,
+        }
+    );
+}
+
+#[test]
+fn an_own_pack_delta_whose_base_lies_in_another_pack_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    for (index, (class, _, _)) in doc_objects().into_iter().enumerate() {
+        let bare = Bare::init(&dir.path().join(format!("repo-{index}.git")));
+        let base = gix::objs::compute_hash(
+            gix::hash::Kind::Sha1,
+            gix::objs::Kind::Blob,
+            format!("base {index}\n").as_bytes(),
+        )
+        .unwrap();
+        // The base's own pack holds it as a ref-delta on itself.
+        support::git_repo::write_empty_self_delta_pack(&bare.root.join("objects"), base);
+        let mut commit = String::new();
+        for (stored, kind, bytes) in doc_objects() {
+            let id = if stored == class {
+                let kind = gix::objs::Kind::from_bytes(kind.as_bytes()).unwrap();
+                let id = gix::objs::compute_hash(gix::hash::Kind::Sha1, kind, &bytes).unwrap();
+                support::git_repo::write_ref_delta_pack(
+                    &bare.root.join("objects"),
+                    id,
+                    base,
+                    &bytes,
+                );
+                id.to_string()
+            } else {
+                bare.literal(kind, &bytes)
+            };
+            if stored == ObjectClass::Commit {
+                commit = id;
+            }
+        }
+        assert_eq!(
+            verify_within(&bare.root, &claim("doc.md", DOC, &commit)),
+            unavailable(Reason::ObjectUnreadable(class)),
+            "{class:?}"
+        );
+    }
+}
+
+/// `verify` under an unbounded budget on its own thread; a call that runs past one minute fails
+/// the test instead of stalling the run.
+fn verify_within(root: &Path, claim: &Claim) -> Evaluation {
+    let (root, claim) = (root.to_path_buf(), claim.clone());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sender.send(verify(&root, &claim, &unbounded())));
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("verify returns within a minute")
+}
+
+#[test]
+fn a_valid_loose_copy_answers_for_an_own_pack_entry_that_does_not_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let commit = bare.commit_doc(DOC, None);
+    let blob = bare.git(&["rev-parse", &format!("{commit}:doc.md")], None);
+    let blob = gix::ObjectId::from_hex(blob.as_bytes()).unwrap();
+    let absent =
+        gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, b"absent").unwrap();
+    support::git_repo::write_ref_delta_pack(&bare.root.join("objects"), blob, absent, DOC);
+    assert!(bare.loose_path(&blob.to_string()).exists());
+    assert_eq!(
+        verify_within(&bare.root, &claim("doc.md", DOC, &commit)),
+        Evaluation {
+            verdict: Verdict::Match,
+            bytes_read: DOC.len() as u64,
+        }
+    );
+}
+
+#[test]
+fn a_valid_own_pack_copy_answers_after_a_newer_pack_whose_chain_revisits_an_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = fixture(dir.path());
+    let commit = bare.commit_doc(DOC, None);
+    let blob = bare.git(&["rev-parse", &format!("{commit}:doc.md")], None);
+    let pack_dir = bare.root.join("objects").join("pack");
+    bare.git(
+        &["pack-objects", "-q", "objects/pack/pack"],
+        Some(format!("{blob}\n").as_bytes()),
+    );
+    let valid: Vec<_> = std::fs::read_dir(&pack_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let id = gix::ObjectId::from_hex(blob.as_bytes()).unwrap();
+    support::git_repo::write_self_delta_pack(&bare.root.join("objects"), id, DOC);
+    bare.git(&["prune-packed"], None);
+    assert!(!bare.loose_path(&blob).exists());
+    // The index of the self-referencing pack is the newest, so the walk reads it first.
+    let now = std::time::SystemTime::now();
+    for entry in std::fs::read_dir(&pack_dir).unwrap() {
+        let path = entry.unwrap().path();
+        let older = valid.contains(&path);
+        let time = if older {
+            now - std::time::Duration::from_secs(60)
+        } else {
+            now
+        };
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(time)).unwrap();
+    }
+    assert_eq!(
+        verify_within(&bare.root, &claim("doc.md", DOC, &commit)),
+        Evaluation {
+            verdict: Verdict::Match,
+            bytes_read: DOC.len() as u64,
+        }
     );
 }
 

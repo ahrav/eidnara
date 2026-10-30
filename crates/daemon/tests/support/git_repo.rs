@@ -296,3 +296,36 @@ pub fn write_self_delta_pack(objects: &Path, id: gix::ObjectId, result: &[u8]) {
     pack.extend_from_slice(&zlib(&delta));
     write_pack_and_index(objects, pack, &[(id, offset)]);
 }
+
+/// The zero-byte delta payload makes delta-header parsing reach end-of-input at the base-size field.
+pub fn write_empty_self_delta_pack(objects: &Path, id: gix::ObjectId) {
+    let mut pack = pack_header(1);
+    let offset = pack.len();
+    pack.extend_from_slice(&entry_header(7, 0));
+    pack.extend_from_slice(id.as_slice());
+    pack.extend_from_slice(&zlib(&[]));
+    write_pack_and_index(objects, pack, &[(id, offset)]);
+}
+
+/// Resolving the ref-delta for `id` requires `base` from outside this pack.
+pub fn write_ref_delta_pack(objects: &Path, id: gix::ObjectId, base: gix::ObjectId, result: &[u8]) {
+    let delta = insert_delta(result.len() as u64, result);
+    let mut pack = pack_header(1);
+    let offset = pack.len();
+    pack.extend_from_slice(&entry_header(7, delta.len() as u64));
+    pack.extend_from_slice(base.as_slice());
+    pack.extend_from_slice(&zlib(&delta));
+    write_pack_and_index(objects, pack, &[(id, offset)]);
+}
+
+pub fn write_truncated_blob_pack(objects: &Path, content: &[u8]) -> gix::ObjectId {
+    let id =
+        gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, content).unwrap();
+    let stream = zlib(content);
+    let mut pack = pack_header(1);
+    let offset = pack.len();
+    pack.extend_from_slice(&entry_header(3, content.len() as u64));
+    pack.extend_from_slice(&stream[..stream.len() / 2]);
+    write_pack_and_index(objects, pack, &[(id, offset)]);
+    id
+}
