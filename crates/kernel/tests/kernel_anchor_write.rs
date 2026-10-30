@@ -861,7 +861,7 @@ fn a_written_reachable_from_anchor_holds_through_descendants_and_not_after_a_rew
     }
 }
 
-/// `anchor_condition_at` returns every kind's condition as the engine's decoder reads the stored
+/// `anchor_condition_as_of` returns every kind's condition as the engine's decoder reads the stored
 /// row, at the requested sequence; an anchor created later, invalidated by then, or never written
 /// is `None`; a stored row the decoder refuses is `CorruptCanonicalRow`; and an exhausted budget,
 /// a future sequence, and a negative sequence are refused before any row is read.
@@ -884,30 +884,30 @@ fn the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row(
     let tip = store.tip().unwrap();
     for (anchor_id, seq, expected) in &written {
         assert_eq!(
-            store.anchor_condition_at(anchor_id, tip, &budget),
+            store.anchor_condition_as_of(anchor_id, tip, &budget),
             Ok(Some(expected.clone()))
         );
         assert_eq!(
-            store.anchor_condition_at(anchor_id, seq - 1, &budget),
+            store.anchor_condition_as_of(anchor_id, seq - 1, &budget),
             Ok(None),
             "an anchor is absent before its commit"
         );
     }
     assert_eq!(
-        store.anchor_condition_at("anchor-never", tip, &budget),
+        store.anchor_condition_as_of("anchor-never", tip, &budget),
         Ok(None)
     );
     assert_eq!(
-        store.anchor_condition_at(&written[0].0, tip + 1, &budget),
+        store.anchor_condition_as_of(&written[0].0, tip + 1, &budget),
         Err(KernelError::FutureSnapshot)
     );
     assert_eq!(
-        store.anchor_condition_at(&written[0].0, -1, &budget),
+        store.anchor_condition_as_of(&written[0].0, -1, &budget),
         Err(KernelError::InvalidInput)
     );
     let cancelled = EvalBudget::new(None, std::sync::Arc::new(true.into()));
     assert_eq!(
-        store.anchor_condition_at(&written[0].0, tip, &cancelled),
+        store.anchor_condition_as_of(&written[0].0, tip, &cancelled),
         Err(KernelError::Deadline)
     );
 
@@ -938,12 +938,12 @@ fn the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row(
         )
         .unwrap();
     assert_eq!(
-        store.anchor_condition_at(invalidated, tip - 1, &budget),
+        store.anchor_condition_as_of(invalidated, tip - 1, &budget),
         Ok(Some(condition.clone())),
         "an anchor is live before its invalidation"
     );
     assert_eq!(
-        store.anchor_condition_at(invalidated, tip, &budget),
+        store.anchor_condition_as_of(invalidated, tip, &budget),
         Ok(None),
         "an anchor is absent from its invalidation on"
     );
@@ -954,11 +954,11 @@ fn the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row(
         )
         .unwrap();
     assert_eq!(
-        store.anchor_condition_at(reachable_from, tip, &budget),
+        store.anchor_condition_as_of(reachable_from, tip, &budget),
         Err(KernelError::CorruptCanonicalRow)
     );
     assert_eq!(
-        store.anchor_condition_at(&written[0].0, tip, &budget),
+        store.anchor_condition_as_of(&written[0].0, tip, &budget),
         Ok(Some(written[0].2.clone())),
         "a corrupt neighbor leaves another anchor readable"
     );

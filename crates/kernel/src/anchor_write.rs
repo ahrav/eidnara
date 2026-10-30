@@ -1,5 +1,6 @@
 //! Typed anchor writes: one `anchors` row and its `object_registry` row per
-//! [`Envelope::insert_anchor`] call.
+//! [`Envelope::insert_anchor`] call, and [`KernelStore::anchor_condition_as_of`], the
+//! bounded read that decodes a stored row with the same [`validate_anchor_row`] check.
 //!
 //! [`validate_anchor`] builds the exact row the write stores and runs the
 //! applicability engine's own checks on it: the payload bound the engine
@@ -465,7 +466,7 @@ impl super::KernelStore {
     /// # Errors
     ///
     /// Returns [`KernelError::CorruptCanonicalRow`] for a stored row that fails [`validate_anchor_row`], [`KernelError::Deadline`] when the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, and [`KernelError::FutureSnapshot`] when `requested` exceeds the tip.
-    pub fn anchor_condition_at(
+    pub fn anchor_condition_as_of(
         &self,
         anchor_id: &str,
         requested: i64,
@@ -473,9 +474,14 @@ impl super::KernelStore {
     ) -> Result<Option<AnchorCondition>, KernelError> {
         let limit = budget.acquire_limit();
         limit.run(|| {
+            if requested < 0 {
+                return Err(KernelError::InvalidInput);
+            }
             let mut reader = self.reader_with_limit(&limit)?;
             let tx = reader.transaction(rusqlite::TransactionBehavior::Deferred)?;
-            super::slice::snapshot_tip(&tx, requested)?;
+            if requested > super::commit_read::tip(&tx).map_err(super::map_sqlite)? {
+                return Err(KernelError::FutureSnapshot);
+            }
             let row = rusqlite::OptionalExtension::optional(tx.query_row_cached(
                 "SELECT anchor_id,anchor_kind,exact_value,reachable_from_oid,
                         reachable_between_start_oid,reachable_between_end_oid,
@@ -503,8 +509,12 @@ impl super::KernelStore {
                 },
             ))
             .map_err(super::map_sqlite)?;
-            row.map(|row| validate_anchor_row(&row).map_err(|_| KernelError::CorruptCanonicalRow))
-                .transpose()
+            let condition = row
+                .map(|row| validate_anchor_row(&row).map_err(|_| KernelError::CorruptCanonicalRow))
+                .transpose()?;
+            tx.commit()?;
+            limit.check()?;
+            Ok(condition)
         })
     }
 }

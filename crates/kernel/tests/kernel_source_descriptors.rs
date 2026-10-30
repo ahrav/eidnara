@@ -3277,6 +3277,11 @@ fn the_evidence_keyed_read_returns_the_live_document_descriptor_citing_the_evide
     let (architecture, first, _) = fixture
         .publish("doc-architecture", &request(document("1"), &evidence, text))
         .unwrap();
+    assert_eq!(
+        read(docs, &evidence.0, first - 1),
+        Ok(Uncited),
+        "a descriptor created after the sequence has not cited the evidence by it"
+    );
     let found = read(docs, &evidence.0, first).unwrap();
     let Live(row) = &found else {
         panic!("expected a live descriptor, found {found:?}")
@@ -3433,4 +3438,51 @@ fn the_evidence_keyed_read_returns_the_live_document_descriptor_citing_the_evide
         Err(KernelError::CorruptCanonicalRow),
         "a stored class other than the requested one is refused"
     );
+}
+
+/// A newer revision of a cited lineage supersedes the cited revision: evidence the new revision
+/// also cites resolves to it, and evidence it no longer cites reads `Retired`.
+#[test]
+fn the_evidence_keyed_read_follows_document_supersession() {
+    use kernel::CitingDescriptor::{Live, Retired};
+    use kernel::applicability::EvalBudget;
+
+    let budget = EvalBudget::unbounded();
+    let docs = OccurrenceClass::RepositoryDocuments;
+    for same_evidence in [false, true] {
+        let fixture = Fixture::open();
+        let text = "# First\n";
+        let first = fixture.retain("first", text);
+        fixture
+            .publish("first", &request(document("1"), &first, text))
+            .unwrap();
+        let next_text = if same_evidence { text } else { "# Second\n" };
+        let next = if same_evidence {
+            first.clone()
+        } else {
+            fixture.retain("second", next_text)
+        };
+        let (successor, at, _) = fixture
+            .publish(
+                "second",
+                &SourceDescriptorRequest {
+                    expected_head: Some(1),
+                    ..request(document("2"), &next, next_text)
+                },
+            )
+            .unwrap();
+        let found = fixture
+            .store
+            .source_descriptor_citing_evidence(docs, &first.0, at, &budget)
+            .unwrap();
+        if same_evidence {
+            let Live(row) = found else {
+                panic!("expected the successor, found {found:?}")
+            };
+            assert_eq!(row.object_id, successor.object_id);
+            assert_eq!(row.detail.revision, "2");
+        } else {
+            assert_eq!(found, Retired);
+        }
+    }
 }
