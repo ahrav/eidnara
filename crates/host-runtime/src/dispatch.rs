@@ -1562,7 +1562,7 @@ fn spawn_deferred_route_close<H: HostHandler>(
         } else {
             "route-gone belongs to another owner or is still running"
         };
-        stderr_line(&format!(
+        stderr_line(format!(
             "eidnara-host: route {}/{} work stopped {} ms into its deferred close; {outcome}",
             handle.channel,
             handle.epoch,
@@ -1576,7 +1576,7 @@ fn spawn_deferred_route_close<H: HostHandler>(
             format!("{deferred_work} tasks and blocking jobs outlived their routes' close budget"),
         );
     }
-    stderr_line(&format!(
+    stderr_line(format!(
         "eidnara-host: route {}/{} work outlived its close budget; route-gone runs when it stops ({held} held, {deferred_work} across deferred closes)",
         handle.channel, handle.epoch
     ));
@@ -1601,10 +1601,13 @@ impl<H: HostHandler> Drop for DeferredWorkCharge<H> {
 /// held by deferred closes, below Tokio's default blocking-pool limit of 512 threads.
 pub(crate) const MAX_DEFERRED_WORK: usize = 64;
 
-/// `eprintln!` panics when stderr is closed; this write drops the error.
-fn stderr_line(line: &str) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "{line}");
+/// Stderr logging is best-effort and drops write errors. The blocking pool keeps stalled stderr
+/// writes off async worker threads.
+fn stderr_line(line: String) {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "{line}");
+    });
 }
 
 pub async fn close_generation<H: HostHandler>(
