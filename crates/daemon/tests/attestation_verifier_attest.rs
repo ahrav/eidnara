@@ -13,8 +13,7 @@ use daemon::attestation_verifier::attest::{
     attest,
 };
 use daemon::attestation_verifier::classify::{
-    BoundRoot, Class, Classification, MAX_EVENT_CITATIONS, Unverifiable, VERIFIER_SOURCE_KIND,
-    VerifierInput, classify,
+    BoundRoot, Class, Classification, Unverifiable, VERIFIER_SOURCE_KIND, VerifierInput, classify,
 };
 use daemon::attestation_verifier::{Claim, Evaluation, Reason, Verdict, verify};
 use kernel::applicability::EvalBudget;
@@ -2119,7 +2118,8 @@ fn a_row_level_citation_older_than_the_event_window_still_attests() {
     let checkout = Checkout::new(DOC);
     let (evidence, _) = store.document("doc", DOC);
     let model = store.model("row_cited", &checkout.head, &evidence, true);
-    let newer: Vec<kernel::ArtifactHandle> = (0..=MAX_EVENT_CITATIONS.get())
+    let window = daemon::attestation_verifier::classify::MAX_EVENT_CITATIONS.get();
+    let newer: Vec<kernel::ArtifactHandle> = (0..=window)
         .map(|index| {
             store.retain(
                 &format!("newer-{index}"),

@@ -185,7 +185,7 @@ into a file #1172 changed at the #1172 branch.
 | `a_classification_naming_another_live_anchor_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:1985` | sibling (row anchor recheck, both verdicts) | unaudited |
 | `a_classification_whose_claim_differs_from_the_cited_descriptor_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:2014` | sibling (claim against the cited descriptor, both verdicts) | unaudited |
 | `a_classification_citing_a_document_the_model_decision_does_not_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:2062` | sibling (compared evidence among the model decision's citations, both verdicts) | unaudited |
-| `a_row_level_citation_older_than_the_event_window_still_attests` | `crates/daemon/tests/attestation_verifier_attest.rs:2117` | sibling (row-level citation outside the event window, both verdicts) | unaudited |
+| `a_row_level_citation_older_than_the_event_window_still_attests` | `crates/daemon/tests/attestation_verifier_attest.rs:2116` | sibling (row-level citation outside the event window, both verdicts) | unaudited |
 
 ## Categories with no check found
 
