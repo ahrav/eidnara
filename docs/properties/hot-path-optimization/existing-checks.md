@@ -473,7 +473,7 @@ that no related check exists anywhere in the repository.
 [byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
 [permits]: ../../../crates/host-runtime/src/dispatch.rs#L974-L1001
 [handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L1021-L1177
-[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1459-L1515
+[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1459-L1612
 [reservations]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
 [saturation-test]: ../../../crates/host-runtime/tests/dispatch.rs#L318
 [cancel-test]: ../../../crates/host-runtime/tests/dispatch.rs#L381
