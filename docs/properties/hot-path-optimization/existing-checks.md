@@ -623,8 +623,8 @@ that no related check exists anywhere in the repository.
 [t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L879
 [t-task-output]: ../../../crates/host-runtime/src/handler.rs#L984
 [t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L901
-[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L696
-[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L732
+[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L772
+[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L808
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L16054
 [rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5664
 [foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5627
