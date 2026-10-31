@@ -220,7 +220,7 @@ sentence each and checked by two independent, uncoupled suites. That is already 
 live divergence on the queued-byte budget: the Rust client keeps a separate
 control byte pool (`client.rs:399`, `:949`, funded by
 `CLIENT_CONTROL_QUEUED_BYTES` at `:76`) while
-`docs/host-wire-protocol.md:745`'s shared-pool sentence still binds the
+`docs/host-wire-protocol.md:774`'s shared-pool sentence still binds the
 TypeScript side, so the two clients can have different self-teardown thresholds
 under identical load. The code carries a written rationale for the divergence at
 `client.rs:1336-1339` and `:63-70`; the document has not moved.

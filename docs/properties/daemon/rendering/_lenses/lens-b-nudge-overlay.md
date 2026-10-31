@@ -843,7 +843,7 @@ a hint decision with non-empty text, and the target block rendering in this pass
 Fault/timing angle: None.
 Required faults and enabling state: Default configuration is enough.
 `memory.auto_search.enabled` defaults to `true`
-(`CONFIGURATION.md:682`, `assets/eidnara.schema.json:1607-1612`,
+(`CONFIGURATION.md:682`, `assets/eidnara.schema.json:839-844`,
 `transform.rs:865-867`), `auto_search_active` needs only a non-subagent request
 (`:3519`), the prompt must clear `DEFAULT_AUTO_SEARCH_MIN_PROMPT_CHARS` of 20
 (`config.rs:40`, checked `:8806`), at least two non-stopword tokens must match
@@ -1019,8 +1019,8 @@ Open questions:
 
 4. **The auto-search hint is documented as searching memories, conversation, and
    commits; it searches only history_segments.**
-   Contract side: `assets/eidnara.schema.json:1607` — "transform-time
-   eidnara_search on each new user message"; `:1612` — "when relevant memories,
+   Contract side: `assets/eidnara.schema.json:839` — "transform-time
+   eidnara_search on each new user message"; `:844` — "when relevant memories,
    conversation, or commits are found". `packages/docs/src/content/docs/reference/configuration.md:119-120`
    repeats both. `README.md:200` says it "run[s] a background `eidnara_search` each
    turn".

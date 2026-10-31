@@ -5,7 +5,7 @@ Scope: [source register](../source-register.md).
 
 Untrusted bytes can be short on wire yet dense in heap nodes. Admission
 checks the footprint floor before scratch allocation at
-`crates/daemon/src/lib.rs:16084-16093`. Long escaped keys threaten probe
+`crates/daemon/src/lib.rs:16097-16106`. Long escaped keys threaten probe
 allocation before charge; an existing test targets that at
 `crates/daemon/tests/parse_charge_covers_typed_decode.rs:311-333`.
 

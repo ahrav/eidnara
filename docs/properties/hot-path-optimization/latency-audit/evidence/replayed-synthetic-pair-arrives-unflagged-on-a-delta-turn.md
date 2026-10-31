@@ -112,8 +112,8 @@ a shared-view design as well.
 [native-gate]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8406
 [todo-prefix]: ../../../../../crates/daemon/src/injection.rs#L187-L189
 [tail-reclaim]: ../../../../../crates/daemon/src/healing.rs#L130-L139
-[cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
-[cfg-compaction]: ../../../../../crates/daemon/src/config.rs#L121
+[cfg-models]: ../../../../../crates/daemon/src/config.rs#L122
+[cfg-compaction]: ../../../../../crates/daemon/src/config.rs#L124
 [plugin]: https://github.com/ahrav/eidnara/blob/9132344/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L759-L761
 
 ## Executed delta witness
@@ -161,7 +161,7 @@ The default-production reachability class and medium confidence remain.
 Test adequacy remains unaudited. No benchmark or measurement campaign ran;
 parent measurement and whole-repository landing gates remain separate.
 
-[witness]: ../../../../../crates/daemon/src/lib.rs#L23724
+[witness]: ../../../../../crates/daemon/src/lib.rs#L23737
 
 ## Third-turn prefix and production-prompt checks
 

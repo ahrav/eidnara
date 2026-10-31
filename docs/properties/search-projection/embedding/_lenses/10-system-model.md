@@ -96,7 +96,7 @@ current-occurrence boundaries without duplicating their records.
 `EvalBudget` already exists (`crates/kernel/src/applicability/checkout.rs:146-203`),
 but LocalEmbeddings does not consume it. The shared SQLite progress installer is
 crate-private (`crates/kernel/src/open.rs:1413-1421`). The existing scheduler
-starts with the opened store (`crates/daemon/src/lib.rs:3646-3660`), yet its task
+starts with the opened store (`crates/daemon/src/lib.rs:3649-3663`), yet its task
 body only dispatches review-user-memories (`memory_classifier_scheduler.rs:334-371`).
 Neither a shared RP2 supervisor slice nor a public budget bridge exists.
 An aborted future cannot be assumed to stop a native call. A finite physical

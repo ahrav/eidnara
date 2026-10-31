@@ -65,9 +65,9 @@ length-arithmetic helper.
 
 | Cluster | Tests | Sites |
 | --- | --- | --- |
-| Channel-0 parse bounds, strictness, and classification | **17** | `control.rs:824`, `:830`, `:838`, `:845`, `:851`, `:863`, `:876`, `:883`, `:908`, `:937`, `:964`, `:978`, `:990`, `:1010`, `:1020`, `:1027`, plus one in the same span |
+| Channel-0 parse bounds, strictness, and classification | **17** | `control.rs:824`, `:830`, `:838`, `:845`, `:851`, `:863`, `:876`, `:883`, `:914`, `:943`, `:970`, `:984`, `:996`, `:1016`, `:1026`, `:1033`, plus one in the same span |
 | Route slot lifecycle, epoch advance, close and bind races | **12** | `routing.rs:511`, `:530`, `:546`, `:570`, `:598`, `:619`, `:642`, `:671`, `:689`, `:728`, `:774`, `:801` |
-| Catalog and response-shape fidelity | **4** | `control.rs:1045`, `:1085`, `:1103`, `:1112` |
+| Catalog and response-shape fidelity | **4** | `control.rs:1051`, `:1091`, `:1109`, `:1118` |
 | Route-open parse and identity bounds | **2** | `control.rs:765`, `:780` |
 | Error-body length model | **2** | `dispatch.rs:1502`, `:1524` |
 | **Total in-crate** | **37** | |

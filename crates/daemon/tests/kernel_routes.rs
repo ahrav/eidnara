@@ -6770,3 +6770,124 @@ async fn a_dispute_row_records_its_reporter_and_links_the_sessions_latest_serve(
     assert_eq!(still_live, 1);
     daemon.handler.shutdown().await.unwrap();
 }
+
+/// AC14: the verifier's `source_kind` is outside the route's closed table, so every operation kind
+/// under it answers `invalid_input`, and a trusted class asserted under `assistant` answers
+/// `class_over_declared`; neither writes anything.
+#[tokio::test]
+async fn a_plugin_route_cannot_write_as_the_verifier_or_assert_trusted_local_code() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let before = write_counts(&daemon);
+    let tip = daemon.tip();
+    let operations = [
+        ("decision", insert_decision(2)),
+        (
+            "observation",
+            observation_implementing(3, "decision-object-1"),
+        ),
+        ("stale", disposition("decision-object-1", "mark_stale")),
+    ];
+    for (key, operation) in operations {
+        let mut request = commit_request(&daemon.project, SESSION, key, vec![operation], vec![]);
+        request["source_kind"] = json!("verifier");
+        assert_state(
+            &daemon.call(daemon.route, request).await,
+            "invalid",
+            Some("invalid_input"),
+        );
+    }
+    for (key, field, class) in [
+        ("trusted", "asserted_source_class", "trusted_local_code"),
+        ("current", "asserted_taint_class", "current_code"),
+        ("config", "asserted_taint_class", "current_config"),
+    ] {
+        let mut request = commit_request(
+            &daemon.project,
+            SESSION,
+            key,
+            vec![insert_decision(4)],
+            vec![],
+        );
+        request[field] = json!(class);
+        assert_state(
+            &daemon.call(daemon.route, request).await,
+            "invalid",
+            Some("class_over_declared"),
+        );
+    }
+    assert_eq!(write_counts(&daemon), before);
+    assert_eq!(daemon.tip(), tip);
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// AC14: a plugin commit cannot occupy the verifier's deterministic row ids, so a later
+/// attestation of the same `(decision, oid)` finds its ids free.
+#[tokio::test]
+async fn a_plugin_route_cannot_write_rows_under_the_verifier_id_prefixes() {
+    use daemon::attestation_verifier::attest::{ID_PREFIXES, Identity};
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let before = write_counts(&daemon);
+    let tip = daemon.tip();
+    let ids = Identity::of("decision-object-1", &"a".repeat(40));
+    for (prefix, id) in ID_PREFIXES.iter().zip([
+        &ids.object_id,
+        &ids.decision_id,
+        &ids.witness_observation_id,
+        &ids.witness_object_id,
+    ]) {
+        assert!(id.starts_with(prefix), "{id} under {prefix}");
+    }
+    let mut decision_object = decision_spec(2);
+    decision_object["object_id"] = json!(ids.object_id);
+    let mut decision_row = decision_spec(3);
+    decision_row["decision_id"] = json!(ids.decision_id);
+    let mut witness = observation_implementing(4, "decision-object-1");
+    witness["spec"]["observation_id"] = json!(ids.witness_observation_id);
+    let mut witness_object = observation_implementing(5, "decision-object-1");
+    witness_object["spec"]["object_id"] = json!(ids.witness_object_id);
+    let mut successor = decision_spec(6);
+    successor["object_id"] = json!(ids.object_id);
+    let operations = [
+        (
+            "object",
+            json!({"op": "insert_decision", "spec": decision_object}),
+        ),
+        (
+            "decision",
+            json!({"op": "insert_decision", "spec": decision_row}),
+        ),
+        ("witness", witness),
+        ("witness object", witness_object),
+        (
+            "successor",
+            json!({"op": "supersede_decision", "replaced_object_id": "decision-object-1", "spec": successor}),
+        ),
+    ];
+    for (key, operation) in operations {
+        let request = commit_request(&daemon.project, SESSION, key, vec![operation], vec![]);
+        assert_state(
+            &daemon.call(daemon.route, request).await,
+            "invalid",
+            Some("invalid_input"),
+        );
+    }
+    assert_eq!(write_counts(&daemon), before);
+    assert_eq!(daemon.tip(), tip);
+    daemon.handler.shutdown().await.unwrap();
+}

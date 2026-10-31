@@ -32,7 +32,7 @@ command_id)` is answered from that record without re-running the mutation.
   intentionally forgettable because the host session has a bounded replay
   horizon." A `DELETE` enforces it.
 
-`crates/daemon/src/lib.rs:15290-15311`, `facade_command_outcome`:
+`crates/daemon/src/lib.rs:15303-15324`, `facade_command_outcome`:
 
 - `:15298-15306` — the `Duplicate` arm re-parses the stored bytes and, if the
   result is an object, inserts `"replayed": true` and returns it through

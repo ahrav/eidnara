@@ -21,7 +21,7 @@ identifiers.
 - Eidnara-owned identifiers defined more than once: `synthetic_todo_`
   (`crates/daemon/src/injection.rs:20`, `crates/daemon/src/codec/opencode.rs:1074`);
   the `eidnara_note` actions (`crates/daemon/src/tool_vocabulary.rs:37`,
-  `crates/daemon/src/lib.rs:12855`, `:13172`, `:18608`,
+  `crates/daemon/src/lib.rs:12867`, `:13184`, `:18621`,
   `crates/daemon/src/conditional_note_evaluation.rs:1905`); the placeholder
   `tool` for a missing native tool name or call id
   (`crates/daemon/src/codec/opencode.rs:1382`; `codec/pi.rs:458`, `:862`,

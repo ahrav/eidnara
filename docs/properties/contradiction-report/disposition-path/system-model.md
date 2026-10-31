@@ -31,8 +31,8 @@ the difference noted.
 ## Lens: architecture and data flow
 
 - Entry: the daemon's method match dispatches `"kernel.commit"` to
-  `HandlerCore::handle_kernel_commit` at `crates/daemon/src/lib.rs:14660`.
-  The plan cites `:14475` at its baseline; the arm moved to `:14660` at
+  `HandlerCore::handle_kernel_commit` at `crates/daemon/src/lib.rs:14673`.
+  The plan cites `:14488` at its baseline; the arm moved to `:14673` at
   HEAD. The arm carries no `#[cfg]` attribute, so the route is reachable in
   a default build.
 - `kernel_request` binds the route scope from the channel's management
@@ -101,7 +101,7 @@ the difference noted.
 - The admission write path has no liveness check on `evidence_id`:
   `write_admission` passes it through `identity()` only
   (`admission.rs:1753-1758`) and relies on the FK. A FK violation maps to
-  `KernelError::Conflict` (`crates/kernel/src/lib.rs:218-230`), which the
+  `KernelError::Conflict` (`crates/kernel/src/lib.rs:223-235`), which the
   route reports as `invalid/already_exists` when raised inside `apply`
   (`commit.rs:1084-1092`).
 

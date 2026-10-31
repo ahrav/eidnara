@@ -473,10 +473,10 @@ by the decode/latency catalogs; they are not evidence for canonical block bytes.
 | `crates/daemon/src/history_summarizer.rs:326-334,397-419` | Fingerprint equality gate rejects mismatch, including at publish. | unaudited |
 | `crates/daemon/src/history_summarizer_chunk.rs:418-430` | Snapshot filters synthetic/system/out-of-range blocks before measuring length. | unaudited |
 | `crates/daemon/src/history_summarizer_chunk.rs:646-675` | Missing selected identity refuses firing; raw arrays exclude synthetic messages. | unaudited |
-| `crates/daemon/src/lib.rs:16443-16461` | Missing/malformed raw rows skip; ordinal bounds and first-per-ordinal selection apply. | unaudited |
-| `crates/daemon/src/lib.rs:13306` | `expect`: OpenCode sidecar metadata serializes for its cache key. | unaudited |
-| `crates/daemon/src/lib.rs:13630,13665` | `expect`: a compatible native cache has a snapshot. | unaudited |
-| `crates/daemon/src/lib.rs:13722-13738` | Enabled differential serializes full/incremental native output and asserts no `incremental native attachment cache drift`. | unaudited |
+| `crates/daemon/src/lib.rs:16456-16474` | Missing/malformed raw rows skip; ordinal bounds and first-per-ordinal selection apply. | unaudited |
+| `crates/daemon/src/lib.rs:13318` | `expect`: OpenCode sidecar metadata serializes for its cache key. | unaudited |
+| `crates/daemon/src/lib.rs:13642,13677` | `expect`: a compatible native cache has a snapshot. | unaudited |
+| `crates/daemon/src/lib.rs:13734-13750` | Enabled differential serializes full/incremental native output and asserts no `incremental native attachment cache drift`. | unaudited |
 | `crates/daemon/src/transform.rs:4929` | `expect`: divergence diagnostics serialize before the new durable receipt vector is assigned. | unaudited |
 | `crates/memory-store/src/lib.rs:1301-1319` | Frozen-pair decode clears retained originals for typed replay. | unaudited |
 | `crates/memory-store/src/lib.rs:11298-11321` | Raw history enters durable redaction before storage. | unaudited |
@@ -487,7 +487,7 @@ by the decode/latency catalogs; they are not evidence for canonical block bytes.
 | `crates/daemon/src/transform.rs:3957-3960,4614-4616,4782-4788` | Anchor failure selects Defer/reconcile and no-trim output view. | unaudited |
 | `crates/daemon/src/transform.rs:4592-4602` | Publication floor is backfilled only on an applicable initialized HARD/MigrateHard covered pass. | unaudited |
 | `crates/daemon/src/transform.rs:5898-5913` | Accumulated byte-token estimates stop at the protected floor target. | unaudited |
-| `crates/daemon/src/lib.rs:2055-2080` | Cached boundary token count requires matching block ID, byte length, and hash; otherwise exact bytes are tokenized. | unaudited |
+| `crates/daemon/src/lib.rs:2056-2081` | Cached boundary token count requires matching block ID, byte length, and hash; otherwise exact bytes are tokenized. | unaudited |
 | `crates/daemon/src/boundary.rs:398-409,1089-1099` | Empty/nonfinite/undersized token-index boundary cases have explicit results. | unaudited |
 | `crates/daemon/src/selection.rs:938-954,984-1011` | Numeric/idempotence guards, protection/reserve exclusion, and reclaim stop govern selection. | unaudited |
 | `crates/memory-store/src/lib.rs:9982,10364-10366` | Anchor hash crosses existing-identity validation and is assigned with anchor ID/base to durable metadata. | unaudited |

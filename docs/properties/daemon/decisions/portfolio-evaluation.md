@@ -10,11 +10,11 @@ behavior, test counts, or CI selection.
 
 | Subject | Current disposition | Evidence |
 | --- | --- | --- |
-| Adjacent-only model-chain premise | Invalidated; uniqueness guarantee and unaudited regression check retained | Full deduplication at `crates/daemon/src/config.rs:950-953`; non-adjacent-repeat check at `crates/daemon/src/config.rs:2185-2194` |
-| Silent malformed-file premise | Invalidated; path-bearing diagnostic guarantee retained | Tier warning storage at `crates/daemon/src/config.rs:362-393`, collection at `crates/daemon/src/config.rs:262-282`, and existing check at `crates/daemon/src/config.rs:2133-2182` |
-| Clamp diagnostics and threshold floor | Active; user-only inputs isolate range behavior from tier warnings | Clamps at `crates/daemon/src/config.rs:750-752` and `crates/daemon/src/config.rs:827-869`; zero rejection at `crates/daemon/src/config.rs:955-961` |
+| Adjacent-only model-chain premise | Invalidated; uniqueness guarantee and unaudited regression check retained | Full deduplication at `crates/daemon/src/config.rs:968-972`; non-adjacent-repeat check at `crates/daemon/src/config.rs:2213-2222` |
+| Silent malformed-file premise | Invalidated; path-bearing diagnostic guarantee retained | Tier warning storage at `crates/daemon/src/config.rs:366-397`, collection at `crates/daemon/src/config.rs:266-286`, and existing check at `crates/daemon/src/config.rs:2161-2210` |
+| Clamp diagnostics and threshold floor | Active; user-only inputs isolate range behavior from tier warnings | Clamps at `crates/daemon/src/config.rs:768-770` and `crates/daemon/src/config.rs:845-887`; zero rejection at `crates/daemon/src/config.rs:974-980` |
 | Model-map differential | Active; scheduler map tests exist, but do not compare both walks | The golden deserializes maps and resolves them (`crates/daemon/src/scheduler.rs:923-932`, `crates/daemon/src/scheduler.rs:1011-1013`, `crates/daemon/src/scheduler.rs:1087-1096`); the daemon adapter remains scalar (`crates/daemon/src/transform.rs:5447-5454`) |
-| Chunk-budget totality | Active; proof corrected to the final integer clamp, not cast saturation | `crates/daemon/src/config.rs:28-29`, `crates/daemon/src/config.rs:39-46`, and existing boundary check at `crates/daemon/src/config.rs:1449-1455` |
+| Chunk-budget totality | Active; proof corrected to the final integer clamp, not cast saturation | `crates/daemon/src/config.rs:28-29`, `crates/daemon/src/config.rs:39-46`, and existing boundary check at `crates/daemon/src/config.rs:1477-1483` |
 | Config-reader integration and CI | Existing coverage is inventoried as unaudited; the no-CI/no-integration premise is retired | Nondefault 500-token user-config check at `crates/daemon/tests/transform_canonical_memory.rs:448-539`; workspace nextest at `.github/workflows/ci.yml:413-417` |
 
 Counts are record and row censuses, not adequacy verdicts:

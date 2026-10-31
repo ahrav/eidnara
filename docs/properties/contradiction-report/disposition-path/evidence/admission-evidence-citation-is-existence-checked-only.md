@@ -29,7 +29,7 @@ daemon check is specified against it.
   foreign_keys=ON` at `schema.rs:250` and `crates/kernel/src/open.rs:1035`;
   `sqlite_runtime.rs:127-129` reports a disabled pragma as a violation.
 - `map_sqlite`: `ConstraintViolation => KernelError::Conflict`
-  (`crates/kernel/src/lib.rs:218-230`). The route's `run` turns a
+  (`crates/kernel/src/lib.rs:223-235`). The route's `run` turns a
   `Conflict` raised after entering the operation, with no recorded refusal,
   into `CommitFailure::StorageConstraint`, reported as
   `invalid/already_exists` (`commit.rs:1084-1092`, `:490`).

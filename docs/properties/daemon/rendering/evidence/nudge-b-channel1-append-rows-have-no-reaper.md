@@ -195,8 +195,8 @@ the test fixture uses `"word ".repeat(40_000)` per result (`:23556`).
 
 - Sources examined: `memory-store/src/lib.rs:7736-7760`,
   `ModuleStateSyncRequest::user_hints_replace_session` (`:3263-3268`),
-  `crates/daemon/src/lib.rs:9156-9163` (where the seeds are built from
-  `parsed.auto_search_hint_decisions`) and `:9251-9253`.
+  `crates/daemon/src/lib.rs:9168-9175` (where the seeds are built from
+  `parsed.auto_search_hint_decisions`) and `:9263-9265`.
 - Findings: safer, not safe. The reaper only runs when the host sets the flag, and
   the host must supply its complete decision list to do so. A host that never sets
   it, or a Rust-mode session where the module makes the decisions itself
@@ -205,7 +205,7 @@ the test fixture uses `"word ".repeat(40_000)` per result (`:23556`).
   correctness mechanism against replaying "unvalidated overlay bytes forever",
   which is a different concern from bounding.
 - Missing evidence: whether the shipped Rust-mode host ever sets the flag.
-  `crates/daemon/src/lib.rs:13771` passes
+  `crates/daemon/src/lib.rs:13784` passes
   `final_batch.user_hints_replace_session` through, so the value originates
   further out.
 - Conclusion: resolved with answer for this record's scope: the reaper exists but

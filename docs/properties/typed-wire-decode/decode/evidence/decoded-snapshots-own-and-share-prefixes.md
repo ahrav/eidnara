@@ -15,18 +15,18 @@ private-input-release context. Neither issue is execution evidence.
 
 - `crates/daemon/src/wire.rs:25-36` owns ingress shells through Arc.
 - `crates/daemon/src/wire.rs:89-114` keeps an Arc owner in SharedWireBlock.
-- `crates/daemon/src/lib.rs:1803-1828,2003-2007` stores and clones owned
+- `crates/daemon/src/lib.rs:1804-1829,2004-2008` stores and clones owned
   TransformRequest snapshots.
-- `crates/daemon/src/lib.rs:4351-4367` reattaches a projection prefix or
+- `crates/daemon/src/lib.rs:4362-4378` reattaches a projection prefix or
   clones ready-snapshot prefix handles, then appends new suffix messages.
-- `crates/daemon/src/lib.rs:4369-4400` similarly retains native prefix
+- `crates/daemon/src/lib.rs:4380-4412` similarly retains native prefix
   Values and installs the assembled request.
 - `crates/daemon/src/wire.rs:540-559` shares an existing typed shell only
   when original is absent and synthetic status matches. KTD1 removes the
   original condition, so newly decoded shells can share immediately.
 - `crates/daemon/src/wire.rs:1796-1814` checks Send plus static and malformed
   decode parity. `:1749-1792` checks repeated retention and owner drop.
-- `crates/daemon/src/lib.rs:22886-23004` tests native-prefix independence
+- `crates/daemon/src/lib.rs:22899-23017` tests native-prefix independence
   and ready-snapshot fallback after cache eviction.
 
 The owning retention and expansion paths are default-production. The new
@@ -51,7 +51,7 @@ Compare synthetic-status equality and inequality, because the latter must
 create a pass-local shell instead of mutating a cached one.
 
 HEAD Handler::handle holds RequestCtx through settlement
-(`crates/daemon/src/lib.rs:12153-12170`). The output ownership property does
+(`crates/daemon/src/lib.rs:12165-12182`). The output ownership property does
 not claim early production release of the private body or transport lease.
 
 ## What a test must construct

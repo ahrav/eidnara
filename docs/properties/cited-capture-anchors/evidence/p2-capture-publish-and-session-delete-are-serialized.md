@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`capture_commit_gate` is one `Mutex<()>` per daemon handler. `publish` holds it for the frozen-plan read and the Kernel commit (`crates/daemon/src/memory_capture.rs:1013`); the checkpoint and the explicit capture route hold it while enqueuing; the source-capture job receives it through `capture_after_response` (`crates/daemon/src/lib.rs:9166`); session deletion holds it for the whole sweep (`crates/daemon/src/lib.rs:6918`). Every holder runs on a blocking thread, so the gate is never held across an await.
+`capture_commit_gate` is one `Mutex<()>` per daemon handler. `publish` holds it for the frozen-plan read and the Kernel commit (`crates/daemon/src/memory_capture.rs:1013`); the checkpoint and the explicit capture route hold it while enqueuing; the source-capture job receives it through `capture_after_response` (`crates/daemon/src/lib.rs:9178`); session deletion holds it for the whole sweep (`crates/daemon/src/lib.rs:6930`). Every holder runs on a blocking thread, so the gate is never held across an await.
 
 ## Failure scenario
 
@@ -24,7 +24,7 @@ Hold the gate from a test thread, issue the competing operation, assert it has n
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/daemon/src/lib.rs:25045`, `:25383`, `:25588`, `:26136`, `:24794`; `crates/daemon/src/source_capture_tests.rs:1037`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/daemon/src/lib.rs:25058`, `:25396`, `:25601`, `:26149`, `:24807`; `crates/daemon/src/source_capture_tests.rs:1037`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

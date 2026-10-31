@@ -12,13 +12,13 @@ References were first verified at the #1157 branch tip (the commit that adds
 this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
 tip.
 
-- Hook: `crates/daemon/src/lib.rs:10126` in the settle step, after any rerun,
+- Hook: `crates/daemon/src/lib.rs:10138` in the settle step, after any rerun,
   when the final response committed and the check
-  (`crates/daemon/src/lib.rs:9813`) finds a live record to advance. The update
+  (`crates/daemon/src/lib.rs:9825`) finds a live record to advance. The update
   runs on a scoped thread beside the response build, and the settle joins it
-  before the response returns (`crates/daemon/src/lib.rs:10132`). A pass that
+  before the response returns (`crates/daemon/src/lib.rs:10144`). A pass that
   handed its serve to a tracked job sets `touch_delegated`
-  (`crates/daemon/src/lib.rs:9808`) and the job touches after its serve
+  (`crates/daemon/src/lib.rs:9820`) and the job touches after its serve
   attempt, whatever the serve answered,
   (`touch_after_serve` (`crates/daemon/src/use_outcome_writer.rs:356`)).
 - Update: `crates/kernel/src/use_outcome.rs:45-49` selects the live records with

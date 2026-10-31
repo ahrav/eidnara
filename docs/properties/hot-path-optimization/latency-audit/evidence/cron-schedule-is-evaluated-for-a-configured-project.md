@@ -113,11 +113,11 @@ route in `MODULE` authority. No existing test records the marker.
 [sched-fixture]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L929-L937
 [sched-scripted]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L939-L952
 [t-sched-cron]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L1027-L1051
-[sched-projects]: ../../../../../crates/daemon/src/lib.rs#L15071-L15140
-[sched-authority]: ../../../../../crates/daemon/src/lib.rs#L15095-L15100
-[sched-filter]: ../../../../../crates/daemon/src/lib.rs#L15119
-[sched-default]: ../../../../../crates/daemon/src/config.rs#L152
-[sched-accept]: ../../../../../crates/daemon/src/config.rs#L1232
+[sched-projects]: ../../../../../crates/daemon/src/lib.rs#L15084-L15153
+[sched-authority]: ../../../../../crates/daemon/src/lib.rs#L15108-L15113
+[sched-filter]: ../../../../../crates/daemon/src/lib.rs#L15132
+[sched-default]: ../../../../../crates/daemon/src/config.rs#L155
+[sched-accept]: ../../../../../crates/daemon/src/config.rs#L1255
 [valid]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L622-L632
 [occurrence]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L630-L632
 [note-due]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L642-L671

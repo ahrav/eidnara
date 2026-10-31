@@ -14,7 +14,7 @@ messages bytes. That historical report is not a simultaneous full-path bound.
 
 1. `crates/host-runtime/src/handler.rs:549-565` requires reservation before
    request allocation and retention while the bytes remain resident.
-2. `crates/daemon/src/lib.rs:12153-12170` runs the byte cap before meter
+2. `crates/daemon/src/lib.rs:12165-12182` runs the byte cap before meter
    creation, then holds the meter through dispatch and response settlement.
 3. `:16144-16161` probes bodies larger than the facade cap before that meter.
    `:15837-15860` deserializes probe keys through serde string handling.
@@ -26,7 +26,7 @@ messages bytes. That historical report is not a simultaneous full-path bound.
 5. `crates/daemon/src/served_json.rs:121-144` builds serialization bytes,
    object metadata, and another output buffer. The plan's new canonical
    block producer uses this serializer; its temporary overlap matters.
-6. `crates/daemon/src/lib.rs:2871-2889` computes retained cache charge from
+6. `crates/daemon/src/lib.rs:2874-2892` computes retained cache charge from
    an already built snapshot. Cache admission is not a preallocation proof.
 7. `crates/host-runtime/src/config.rs:15-41,481-502` defines and tests separate
    ingress, egress, and scratch slices. Ring accounting is separate again.
@@ -82,7 +82,7 @@ local alias accounting; introduce no new global deduplication or RSS policy.
 
 ### Q: Is above-cap probe ordering inconsistent with A1?
 
-- Sources examined: `crates/daemon/src/lib.rs:12153-12166,15837-15860,16144-16161`.
+- Sources examined: `crates/daemon/src/lib.rs:12165-12178,15850-15873,16157-16174`.
 - Findings: The larger-body probe precedes the meter, contrary to A1's
   charge-before-probe claim. Not retaining a key does not establish scratch size.
 - Missing evidence: Allocation amount and existing covering charge on this path.

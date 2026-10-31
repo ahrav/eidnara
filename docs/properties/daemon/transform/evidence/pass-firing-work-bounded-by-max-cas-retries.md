@@ -76,7 +76,7 @@ call from the engine at `:3391` is 4b's.
 
 ### Why the caller cannot absorb a spin
 
-- `daemon/src/lib.rs:8322` — `transform_with_projection_cached(&store,
+- `daemon/src/lib.rs:8334` — `transform_with_projection_cached(&store,
   &parsed, &producer_ctx, &self.serialized_outputs,
   projection_cache_input.as_ref())`, called through the `run_transform` closure
   and invoked at `:8338` inside an `async fn`. There is no `spawn_blocking`
@@ -169,7 +169,7 @@ For the unbounded loop, a bounded probe rather than a livelock demonstration:
 - Sources examined: `transform.rs:7639-7697` line by line; `:3391`;
   `memory-store/src/lib.rs:6255-6258` (the `mint_or_get_tags` gating), `:7483-7515`
   (`commit_transform`'s tag inserts), `:8727-8734` (`descend_lineage`'s tag
-  copy); `daemon/src/lib.rs:8322`, `:8338`, `:3659`.
+  copy); `daemon/src/lib.rs:8334`, `:8350`, `:3662`.
 - Findings: the loop has no attempt cap. In a default build the only two
   production tag writers are the transform commit and the lineage descent, and
   both also bump `row_version`, so a *single-writer* deployment cannot produce

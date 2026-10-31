@@ -11,8 +11,8 @@ creates the table whatever the flag.
 
 ## Evidence trail
 
-- `crates/daemon/src/config.rs:158` the default is false; `:1107` classes the
-  key `UserOnly` and `:520-523` pins that class at compile time;
+- `crates/daemon/src/config.rs:161` the default is false; `:1129` classes the
+  key `UserOnly` and `:538-541` pins that class at compile time;
   `contradiction_candidates_default_off_and_only_the_user_tier_enables_them`
   (`:2299`) checks both.
 - `crates/daemon/src/memory_reviewer/lifecycle.rs:458` the sweep reads the

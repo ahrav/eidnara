@@ -6,7 +6,7 @@ External leads: normative host protocol and plan R3-R5.
 
 ## Findings
 
-`docs/host-wire-protocol.md:12-14,763` freezes host wire literals while
+`docs/host-wire-protocol.md:12-14,791` freezes host wire literals while
 leaving routed bodies to handlers. Its channel-0 and LocalEmbeddings validation rules
 must not be imposed on CK identity by analogy.
 The plugin emits absent/true tool flags at

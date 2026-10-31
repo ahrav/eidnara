@@ -71,7 +71,7 @@ auto-search records need `auto_search_active`, which is
 `!req.is_subagent && req.auto_search_enabled` (`transform.rs:3519`) and defaults
 to `true` on the wire (`default_auto_search_enabled`, `:865-867`), in the shipped
 producer (`rust-mode-transform.ts:2010`) and in the schema
-(`assets/eidnara.schema.json:1607-1612`, `CONFIGURATION.md:682` (source-catalog path, not present at HEAD)).
+(`assets/eidnara.schema.json:839-844`, `CONFIGURATION.md:682` (source-catalog path, not present at HEAD)).
 
 The two `explicit-config-only` labels rest on a configuration that the shipped
 producer does not emit, and they are not equally solid.

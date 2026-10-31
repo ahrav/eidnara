@@ -12,7 +12,7 @@ compare-and-swap: the scope map calls it "cache state, module meta, tag rows, al
 committed behind one CAS"
 (`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:465` (source-catalog path, not present at HEAD)).
 Reading `handle_transform_unpaged_value` forward from its entry at
-`crates/daemon/src/lib.rs:8007`, three durable writes happen *before* the pass
+`crates/daemon/src/lib.rs:8019`, three durable writes happen *before* the pass
 engine is called at all, and two of them are unconditional side effects rather
 than traces.
 

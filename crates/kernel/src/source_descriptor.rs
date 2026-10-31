@@ -1204,6 +1204,102 @@ impl<'v> Narrowing<'v> {
     }
 }
 
+impl KernelStore {
+    /// Equal texts can share one evidence row, so several live descriptors of `class` can cite `evidence_id`. The read returns the first in object id order at `requested`, using [`Self::live_source_descriptors`]' liveness predicate and row checks. A [`CitingDescriptor::Retired`] result runs no row checks, since it carries no row. The query walks the observation rows citing `evidence_id` through `idx_observations_evidence_fk`, so its work is proportional to that count, which ordinary observations a plugin writes citing the same evidence also raise; `budget`'s deadline and interrupt bound reader acquisition and query execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Deadline`] when the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and [`KernelError::CorruptCanonicalRow`] when the live row fails the row checks, including a stored class other than `class`.
+    pub fn source_descriptor_citing_evidence(
+        &self,
+        class: OccurrenceClass,
+        evidence_id: &str,
+        requested: i64,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<CitingDescriptor, KernelError> {
+        self.read_as_of(requested, budget, |snapshot| {
+            snapshot
+                .source_descriptors_citing_evidence(class, &[evidence_id])?
+                .pop()
+                .unwrap_or(Err(KernelError::CorruptCanonicalRow))
+        })
+    }
+}
+
+impl crate::SnapshotRead<'_> {
+    /// [`KernelStore::source_descriptor_citing_evidence`] for each of `evidence_ids`, in request
+    /// order, from one statement. An entry is `Err(CorruptCanonicalRow)` when its live row fails
+    /// the descriptor row checks, including a stored class other than `class`; the other entries
+    /// still answer.
+    ///
+    /// # Errors
+    ///
+    /// The store's read errors.
+    pub fn source_descriptors_citing_evidence(
+        &self,
+        class: OccurrenceClass,
+        evidence_ids: &[&str],
+    ) -> Result<Vec<Result<CitingDescriptor, KernelError>>, KernelError> {
+        static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
+                "SELECT {DESCRIPTOR_COLUMNS},({live}) AS live,j.key AS cited
+                 FROM json_each(?3) j
+                 CROSS JOIN observations b INDEXED BY idx_observations_evidence_fk
+                   ON b.evidence_id=j.value
+                 CROSS JOIN object_registry o ON o.object_id=b.object_id
+                 CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
+                 WHERE b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
+                   AND o.object_id GLOB '{DESCRIPTOR_OBJECT_ID_PREFIX}*'
+                   AND o.source_kind=?1 AND o.object_kind='observation'
+                   AND o.created_commit_seq<=?2
+                 ORDER BY j.key,live DESC,o.object_id",
+                live = Descriptors::LiveAtEnd.predicate("?2", "0"),
+            )
+        });
+        let mut found: Vec<Option<Result<CitingDescriptor, KernelError>>> =
+            evidence_ids.iter().map(|_| None).collect();
+        let ids = serde_json::to_string(evidence_ids).map_err(|_| KernelError::InvalidInput)?;
+        let mut statement = self.tx.prepare_cached(&SQL).map_err(map_sqlite)?;
+        let mut rows = statement
+            .query(rusqlite::params![class.code(), self.requested, ids])
+            .map_err(map_sqlite)?;
+        while let Some(row) = rows.next().map_err(map_sqlite)? {
+            let cited: i64 = row.get("cited").map_err(map_sqlite)?;
+            let slot = usize::try_from(cited)
+                .ok()
+                .and_then(|index| found.get_mut(index))
+                .ok_or(KernelError::CorruptCanonicalRow)?;
+            // Rows arrive live first and then in object id order, so an entry's first row decides it.
+            if slot.is_some() {
+                continue;
+            }
+            let live: bool = row.get("live").map_err(map_sqlite)?;
+            *slot = Some(if live {
+                let raw = raw_descriptor(row).map_err(map_sqlite)?;
+                checked(raw, class).map(|descriptor| CitingDescriptor::Live(Box::new(descriptor)))
+            } else {
+                Ok(CitingDescriptor::Retired)
+            });
+        }
+        Ok(found
+            .into_iter()
+            .map(|entry| entry.unwrap_or(Ok(CitingDescriptor::Uncited)))
+            .collect())
+    }
+}
+
+/// The result of [`KernelStore::source_descriptor_citing_evidence`]: a live descriptor takes
+/// precedence over retired ones, and live ties resolve to the first in object id order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CitingDescriptor {
+    /// A descriptor of the class citing the evidence is live at the sequence, with live evidence.
+    Live(Box<LiveDescriptor>),
+    /// Descriptors of the class cited the evidence by the sequence, and each was retired, superseded, or left with invalidated evidence at it.
+    Retired,
+    /// Zero descriptors of the class cited the evidence by the sequence.
+    Uncited,
+}
+
 #[cfg(test)]
 mod narrowing_tests {
     use std::num::NonZeroUsize;

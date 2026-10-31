@@ -156,25 +156,25 @@ call. Unit tests built with `fixed_config` (`lib.rs:4276`, returned at
   per-pass merge stays, served from the memo while every source identity
   matches.
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4880-L4889
-[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L248-L249
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L5141
-[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5462-L5549
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5550
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5956
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L13073-L13074
-[tier-struct]: ../../../../../crates/daemon/src/config.rs#L256-L266
-[cache-struct]: ../../../../../crates/daemon/src/config.rs#L269-L275
-[eff-proj]: ../../../../../crates/daemon/src/config.rs#L471-L481
-[eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L515-L519
-[eff-warn]: ../../../../../crates/daemon/src/config.rs#L520-L638
-[eff-clone]: ../../../../../crates/daemon/src/config.rs#L636
-[tier-cached]: ../../../../../crates/daemon/src/config.rs#L725-L761
-[guidance]: ../../../../../crates/daemon/src/config.rs#L794-L858
-[merge]: ../../../../../crates/daemon/src/config.rs#L1085
-[raise-only]: ../../../../../crates/daemon/src/config.rs#L885-L887
-[t-mtime]: ../../../../../crates/daemon/src/config.rs#L2644-L2682
-[memo-head]: ../../../../../crates/daemon/src/config.rs#L371-L468
-[identity-head]: ../../../../../crates/daemon/src/config.rs#L312-L369
-[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L515-L638
-[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2701-L3106
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4892-L4901
+[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L249-L250
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L5153
+[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5474-L5561
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5562
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5968
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L13085-L13086
+[tier-struct]: ../../../../../crates/daemon/src/config.rs#L260-L270
+[cache-struct]: ../../../../../crates/daemon/src/config.rs#L273-L279
+[eff-proj]: ../../../../../crates/daemon/src/config.rs#L476-L486
+[eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L533-L537
+[eff-warn]: ../../../../../crates/daemon/src/config.rs#L538-L656
+[eff-clone]: ../../../../../crates/daemon/src/config.rs#L654
+[tier-cached]: ../../../../../crates/daemon/src/config.rs#L743-L779
+[guidance]: ../../../../../crates/daemon/src/config.rs#L812-L876
+[merge]: ../../../../../crates/daemon/src/config.rs#L1107
+[raise-only]: ../../../../../crates/daemon/src/config.rs#L903-L905
+[t-mtime]: ../../../../../crates/daemon/src/config.rs#L2674-L2712
+[memo-head]: ../../../../../crates/daemon/src/config.rs#L375-L473
+[identity-head]: ../../../../../crates/daemon/src/config.rs#L316-L373
+[eff-warn-head]: ../../../../../crates/daemon/src/config.rs#L533-L656
+[t-memo-head]: ../../../../../crates/daemon/src/config.rs#L2731-L3136

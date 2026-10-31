@@ -403,7 +403,7 @@ Open questions:
 
 Type: safety
 Reachability: explicit-config-only - firing assembly needs an Eidnara
-authority and a non-empty chain (`crates/daemon/src/config.rs:181-185`).
+authority and a non-empty chain (`crates/daemon/src/config.rs:185-189`).
 Status: invalidated
 Invalidated: #859 PR A (`fold-authority/m2-exit`, `fd0b52aa5`) charges each
 flushed block's serialized identities against a 256 KiB budget, so the
@@ -451,7 +451,7 @@ Existing check: `crates/daemon/src/history_summarizer_chunk.rs:2169`
 `a_generated_history_fires_the_longest_whole_block_prefix_within_the_identity_budget`
 (#859 PR C, mixed roles); `:1960`, `:1981`, `:1995` (exact selection through
 the oracle, `:1910-1914`);
-`crates/daemon/src/lib.rs:18618`
+`crates/daemon/src/lib.rs:18631`
 `history_summarizer_boundary_construction_matches_owned_reference` (missing
 identity at `:18836-18841`); `crates/daemon/src/history_summarizer_chunk.rs:2814`
 `budget_stop_and_tool_only_ranges_are_recorded` (range, not identities).
@@ -469,11 +469,11 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - the surviving late path needs a stored
 Eidnara authority with an empty live chain (`cfg` from `effective_config`,
-`crates/daemon/src/lib.rs:5406`), which requires removing the chain after
+`crates/daemon/src/lib.rs:5418`), which requires removing the chain after
 adoption; the default empty chain adopts native and stops at the gate.
 Status: invalidated
 Invalidated: PR #903 (#855) replaces it with the early `native_authority`
-gate of FA-N05 (`crates/daemon/src/lib.rs:9428-9439`). The trigger-then-
+gate of FA-N05 (`crates/daemon/src/lib.rs:9440-9451`). The trigger-then-
 `no_models` order, the change-gated `record_no_fire`, and the ignored commit
 error survive only as defense for a stored Eidnara authority whose live chain
 is empty (a stall that `session.status` reports since #904).
@@ -488,8 +488,8 @@ rejecting an empty chain; identical repeated no-fire reasons did not rewrite
 metadata; the commit error was ignored.
 Check: `always` - under an applied Eidnara authority with an empty live
 chain: a non-firing trigger returns `trigger_false` or `busy`
-(`crates/daemon/src/lib.rs:5553-5576`); a firing trigger returns `no_models`
-(`:5578-5584`); an unchanged stored reason causes zero commits and a failed
+(`crates/daemon/src/lib.rs:5565-5588`); a firing trigger returns `no_models`
+(`:5590-5596`); an unchanged stored reason causes zero commits and a failed
 commit leaves the pass result unchanged (`:5895-5912`). `always` because
 every such pass runs the path.
 Fault/timing angle: Chain removal after adoption, repeated turns, a lost
@@ -503,8 +503,8 @@ Read at HEAD. Corrections: callers `lib.rs:9014`, `:9150` are now `:9011`,
 `history_summarizer_chunk.rs:619-623` is `:908-912`;
 `history_summarizer.rs:1655-1657` is `:1840-1842`; the checks at
 `lib.rs:42058` and `:39354` are at `:41167` and `:37569`.
-Existing check: `crates/daemon/src/lib.rs:41234`
-`no_fire_reason_is_durable_change_gated_and_cleared_by_fire`; `:37597`
+Existing check: `crates/daemon/src/lib.rs:41248`
+`no_fire_reason_is_durable_change_gated_and_cleared_by_fire`; `:37611`
 `session_wrapup_no_models_is_terminal_and_retains_command`;
 `crates/daemon/src/fold_authority_handler_tests.rs:1062`
 `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix`.
@@ -521,7 +521,7 @@ Open questions:
 Type: reachability
 Reachability: explicit-config-only - unequal captured configurations on one
 session need a configuration edit between two binds
-(`SessionBinding.config`, `crates/daemon/src/lib.rs:227-241`).
+(`SessionBinding.config`, `crates/daemon/src/lib.rs:228-242`).
 Status: active
 Exercised: partial - PR #903 (#855) gate and #859 PR A's run at `fd0b52aa5`:
 `a_sibling_binding_keeps_the_change_pending_until_a_quiescent_bind` and
@@ -535,7 +535,7 @@ configurations while summarizer preparation reads the live configuration and
 an admitted firing outlives route teardown.
 Check: `sometimes` - within one campaign, observe two participating
 bindings on one session with unequal captured configurations, a preparation
-read (`effective_config`, `crates/daemon/src/lib.rs:5406`) that sees an edited
+read (`effective_config`, `crates/daemon/src/lib.rs:5418`) that sees an edited
 live chain, and a firing task spawned by `spawn_history_summarizer_firing`
 (`:6194`) still running after `unbind_route` (`:4487`) removed its route.
 `sometimes` because this is enabling state to reach, not an invariant.
@@ -551,8 +551,8 @@ live chain beside the captured `memory_enabled` (`lib.rs:5640`).
 Corrections: `lib.rs:211-251` is now `:227-263`; `:5722` is `:5428`;
 `:5924-5925` is `:5640`; `config.rs:2158` is `:2350`.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:245`,
-`:778`; `crates/daemon/src/lib.rs:41234`;
-`crates/daemon/src/config.rs:2350`
+`:778`; `crates/daemon/src/lib.rs:41248`;
+`crates/daemon/src/config.rs:2379`
 `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`.
 Impact: High. Route mode alone is not a session-wide authority fact, which
 is why FA-N02 stores one.
@@ -567,7 +567,7 @@ Reachability: explicit-config-only - corrected from `default-production`.
 At `265df096` the folding path ran whenever `compaction_enabled` held
 (default true). Since `8b1e04944` (#903) it runs only when the stored
 authority folds (`crates/daemon/src/transform.rs:3217-3218`), which needs a
-non-empty user-tier chain (`crates/daemon/src/config.rs:181-185`).
+non-empty user-tier chain (`crates/daemon/src/config.rs:185-189`).
 Status: active
 Exercised: yes - #906's recorded workspace gate runs
 `durable_scalars_join_retained_parts_by_generation`, which evaluates
@@ -736,11 +736,11 @@ Open questions:
 
 Type: safety
 Reachability: default-production - every daemon bind resolves configuration
-through `effective_for_project` (`crates/daemon/src/lib.rs:4744`).
+through `effective_for_project` (`crates/daemon/src/lib.rs:4756`).
 Status: invalidated
 Invalidated: PR #898 (#852) replaces the `.jsonc`-only discovery
-(`discover_tier`, `crates/daemon/src/config.rs:401-408`, now `.jsonc` then
-`.json`) and the array-only fallbacks (`chain_models`, `:1064-1082`, now a
+(`discover_tier`, `crates/daemon/src/config.rs:405-412`, now `.jsonc` then
+`.json`) and the array-only fallbacks (`chain_models`, `:1085-1104`, now a
 string or an array) under FA-N01. Surviving clauses: no variable
 substitution (`:470`), the 1 MiB bound and final-component symlink rejection
 (`:412`, `read_bounded_bytes` `:427-459`), user-tier-only chain keys
@@ -772,8 +772,8 @@ Corrections to the spec's `265df096` citations: defaults `config.rs:123-125`
 are now `:142-144`; `:274-404` is `:310-492`; `:325-370` is `:412-459`;
 `:675-691` is `:762-778`; `:772-824` is `:859-883`; the checks `:1317`,
 `:1424`, `:2045`, `:2158` are now `:1509`, `:1616`, `:2237`, `:2350`.
-Existing check: `crates/daemon/src/config.rs:1509`
-`tier_policy_ignores_project_models_and_rejects_project_lowering`; `:1616`
+Existing check: `crates/daemon/src/config.rs:1537`
+`tier_policy_ignores_project_models_and_rejects_project_lowering`; `:1644`
 `compaction_enabled_defaults_true_and_is_user_tier_only`; `:2237`
 `module_model_keys_replace_the_plugin_chain_only_when_the_module_model_is_set`;
 `:2350` `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`;
@@ -807,7 +807,7 @@ expansion enabled for user config" (`config/index.test.ts:689`), "leaves
 {env:} and {file:} tokens literal in project config and warns" (`:715`), and
 "keeps history_summarizer model selection user-owned when project config
 tries to override it" (`:760`) cover the surviving clauses; the fixture rows
-through `:1114` and `packages/pi-plugin/src/config/index.test.ts:765` pin the
+through `:1114` and `packages/pi-plugin/src/config/index.test.ts:810` pin the
 replaced ones. All ran green in PR #904's `bun run check:repo` gate.
 Guarantee: TypeScript discovers `.jsonc` before `.json`, expands user-tier
 variables before parsing, accepts string-or-array fallbacks, rejects the
@@ -822,12 +822,12 @@ Confidence: high -
 [evidence](evidence/fa-e11-typescript-expands-user-config-and-rejects-module-keys.md).
 The loader, screen, schema, and sanitizer were read at `0ff62b29a`.
 Corrections to the spec's `265df096` citations: `config/index.ts:108-115` is
-now `:141-147`; `config/project-security.ts:23-36` is `:23-39`; `:512-564`
-is `:515-567`; the checks `config/index.test.ts:695` and `:740` are now
+now `:141-147`; `config/project-security.ts:23-36` is `:23-39`; lines 512 to 564
+are `:515-578`; the checks `config/index.test.ts:695` and `:740` are now
 `:715` and `:760`.
 Existing check: `packages/opencode-plugin/src/config/config-paths.test.ts:66`;
 `packages/opencode-plugin/src/config/index.test.ts:689`, `:715`, `:760`,
-`:1114`; `packages/pi-plugin/src/config/index.test.ts:765`.
+`:1152`; `packages/pi-plugin/src/config/index.test.ts:810`.
 Impact: High. A plugin-only reading of a key changes the chain the daemon
 does not see.
 Open questions:
@@ -994,9 +994,9 @@ Open questions:
 
 Type: safety
 Reachability: default-production - the default configuration has an empty
-chain and `compaction_enabled: true` (`crates/daemon/src/config.rs:142-144`),
+chain and `compaction_enabled: true` (`crates/daemon/src/config.rs:145-147`),
 so every daemon bind resolves the predicate through
-`ConfigCache::effective_for_project` (`crates/daemon/src/lib.rs:4744`) and
+`ConfigCache::effective_for_project` (`crates/daemon/src/lib.rs:4756`) and
 every plugin boot through `loadPluginConfigDetailed`
 (`packages/opencode-plugin/src/index.ts:77`).
 Status: active
@@ -1004,11 +1004,11 @@ Exercised: yes - one 49-row fixture
 (`packages/opencode-plugin/src/config/__fixtures__/fold-authority-parity.json`)
 runs through the daemon's production file path in
 `every_fixture_row_matches_through_the_configuration_cache`
-(`crates/daemon/src/config.rs:2539`), green in #859 PR A's run at `fd0b52aa5`
+(`crates/daemon/src/config.rs:2569`), green in #859 PR A's run at `fd0b52aa5`
 (6,124 passed); through the OpenCode loader in "every row matches through the
-production loader" (`packages/opencode-plugin/src/config/index.test.ts:1114`)
+production loader" (`packages/opencode-plugin/src/config/index.test.ts:1152`)
 and the Pi loader in "every row matches through the Pi loader"
-(`packages/pi-plugin/src/config/index.test.ts:765`), both green in PR #904's
+(`packages/pi-plugin/src/config/index.test.ts:810`), both green in PR #904's
 `bun run check:repo` gate. PR #898 (#852) owns all three and their negative
 controls.
 Guarantee: Both production loaders derive the same ordered chain, the same
@@ -1041,8 +1041,8 @@ consumers found read the admission first
 (`crates/daemon/src/fold_authority.rs:105-113`;
 `packages/cli/src/commands/setup-opencode.ts:618-628`;
 `packages/cli/src/commands/doctor-opencode.ts:539-542`).
-Existing check: `crates/daemon/src/config.rs:2539`
-`every_fixture_row_matches_through_the_configuration_cache`; `:2546`
+Existing check: `crates/daemon/src/config.rs:2569`
+`every_fixture_row_matches_through_the_configuration_cache`; `:2576`
 `excluded_chain_values_warn_with_their_key`; `:2573`
 `the_pre_parsed_merge_seam_fails_the_fixture`; `:2588`
 `jsonc_only_discovery_fails_the_fixture`; `:2599`
@@ -1051,8 +1051,8 @@ Existing check: `crates/daemon/src/config.rs:2539`
 `:2711`
 `an_unresolved_configuration_withdraws_fold_authority_from_the_retained_documents`;
 `:2741` `retained_project_documents_are_bounded_and_the_user_document_survives_churn`;
-`packages/opencode-plugin/src/config/index.test.ts:1114`, `:1124`, `:1143`,
-`:1158`, `:1179`; `packages/pi-plugin/src/config/index.test.ts:765`.
+`packages/opencode-plugin/src/config/index.test.ts:1152`, `:1162`, `:1181`,
+`:1196`, `:1217`; `packages/pi-plugin/src/config/index.test.ts:810`.
 Impact: High. The daemon and the plugin select different fold authorities for
 one session.
 Open questions:
@@ -1102,7 +1102,7 @@ Confidence: high - [evidence](evidence/fa-n02-first-commit-adopts-authority.md).
 The field's serde default and skip (`crates/memory-store/src/lib.rs:2482-2487`),
 the SQL read and Serde error (`:13272-13315`), the planner's adopt arms
 (`fold_authority.rs:105-112`), the admission-aware intent
-(`crates/daemon/src/config.rs:181-185`), and the row-version fence
+(`crates/daemon/src/config.rs:185-189`), and the row-version fence
 (`transform.rs:2158-2163`) were read at HEAD; the witnesses were run in the
 cited gates. The competing adopter is a direct store commit from the
 pre-commit hook, not a second handler pass.
@@ -1151,7 +1151,7 @@ Check: `always-or-unreached` - whenever `eidnara_folds` changes from
 core and metadata, deleted identity rows, and observed summarizer Idle and no
 pending publication row (`crates/memory-store/src/lib.rs:13344-13355`, `:13373`,
 `:13400`), and the change ran under the bindings mutex with no participating
-sibling (`crates/daemon/src/lib.rs:301-313`). `always-or-unreached` because
+sibling (`crates/daemon/src/lib.rs:302-314`). `always-or-unreached` because
 most sessions never change authority. Falsifier: authority changes without
 the epoch-fenced reset; a blocked change alters the serving mode; an ordinary
 recomp reset changes authority.
@@ -1249,8 +1249,8 @@ Open questions:
 Type: safety
 Reachability: default-production - an empty chain is the default, so a fresh
 session adopts native (`DaemonConfig::eidnara_folds`,
-`crates/daemon/src/config.rs:182-186` at `07ea883b5`) and every non-subagent
-pass reaches the gate (`crates/daemon/src/lib.rs:9653-9664`).
+`crates/daemon/src/config.rs:186-190` at `07ea883b5`) and every non-subagent
+pass reaches the gate (`crates/daemon/src/lib.rs:9665-9676`).
 Status: active
 Exercised: partial - the preparation clause is covered from both callers
 and the wrapup refusal is witnessed; the wrapup ordering clause, "before
@@ -1284,8 +1284,8 @@ Guarantee: Under native authority the shared preparation entry returns
 before its store load, trigger evaluation, or firing, from both callers, and
 `session.wrapup` refuses before snapshot or boundary work.
 Check: `unreachable` - under an applied native authority,
-`prepare_history_summarizer_fire` (`crates/daemon/src/lib.rs:5463`) and
-`record_no_fire` (`:6074`) never execute from any caller (`:9098`, `:9120`,
+`prepare_history_summarizer_fire` (`crates/daemon/src/lib.rs:5475`) and
+`record_no_fire` (`:6086`) never execute from any caller (`:9110`, `:9132`,
 `:9292`), and the wrapup handler returns `reason = "native_authority"`
 (`:7460-7468`) before the transform snapshot read. `unreachable` because
 these are named code points that must not run. Falsifier: live
@@ -1529,7 +1529,7 @@ derived state. `apply_once` returns through `apply_additive_only` unless the
 session's stored authority folds (`crates/daemon/src/transform.rs:3217-3218`),
 the additive result carries `derived: None` (`:3162`), and a session adopts
 Eidnara folds only from a configuration with a non-empty user-tier chain
-(`DaemonConfig::eidnara_folds`, `crates/daemon/src/config.rs:181-185`).
+(`DaemonConfig::eidnara_folds`, `crates/daemon/src/config.rs:185-189`).
 Status: active
 Exercised: yes - #906's recorded `cargo test --workspace --all-features
 --locked` gate runs the promotion family:
@@ -1549,7 +1549,7 @@ state, including a successful no-write pass; losers publish nothing; caller
 cancellation after commit still promotes when the worker finishes; process
 death between commit and promotion leaves absence.
 Check: `always-or-unreached` - on every successful installation by
-`promote_derived` (`crates/daemon/src/lib.rs:2152-2188`): provenance, the
+`promote_derived` (`crates/daemon/src/lib.rs:2153-2189`): provenance, the
 installed state's `accepted_row_version` is the proposing pass's committed
 row version or, for a pass that wrote nothing, the row version it read,
 re-read as still current at acceptance
@@ -1583,13 +1583,13 @@ Confidence: high -
 Read at `0ff62b29a`: `ProposedDerivedState::accept`
 (`crates/daemon/src/derived_state.rs:70-92`), `DerivedState::supersedes`
 (`:30-33`), `TransformSnapshotCache::lease_derived` and `promote_derived`
-(`crates/daemon/src/lib.rs:2141-2186`), the generation check (`:2241-2249`),
-`remove` clearing derived state (`:2251-2257`), the lease taken before `begin`
+(`crates/daemon/src/lib.rs:2142-2187`), the generation check (`:2242-2250`),
+`remove` clearing derived state (`:2252-2258`), the lease taken before `begin`
 in `first_unit` (`:8899-8900`), and promotion before `finished()`
 (`:9247-9249`; `promote_derived_state` `:9252-9281`). The verification
 strategy's reference model `(epoch, accepted_version, derived_payload,
 lease)` is not built; the tests assert outcomes directly.
-Existing check: `crates/daemon/src/lib.rs:35180`
+Existing check: `crates/daemon/src/lib.rs:35194`
 `committing_and_no_write_passes_promote_under_a_charged_lease_and_a_restart_forgets`;
 `:35404` `a_pass_that_loses_every_compare_and_swap_publishes_nothing`;
 `:35442` `a_committed_pass_whose_boundary_read_fails_still_promotes`; `:35506`
@@ -1613,7 +1613,7 @@ Impact: High. Speculative or older-incarnation derived state steers later
 hint deferral, divergence reporting, and tail-hygiene decisions.
 Open questions:
 - Resolved: when the active-lease budget refuses (`MAX_ACTIVE_SNAPSHOT_LEASES`
-  8, `crates/daemon/src/lib.rs:890`), `lease_derived` returns `None` and the
+  8, `crates/daemon/src/lib.rs:891`), `lease_derived` returns `None` and the
   pass reads absence. Its accepted proposal carries no baseline parts, and
   since `96aad0baf` (#906 on `main`) promotion keeps the retained parts of
   the same revert epoch instead of replacing them with absence
@@ -1684,7 +1684,7 @@ Reachability: explicit-config-only - tail-hygiene refresh runs inside
 `apply_once` past the native gate (`crates/daemon/src/transform.rs:3217-3218`,
 join `:4963-4986`); `session.status` reports a tail-hygiene object only when
 the durable row holds a baseline, which only a folding pass writes
-(`crates/daemon/src/lib.rs:6881-6899`, write at
+(`crates/daemon/src/lib.rs:6893-6911`, write at
 `crates/daemon/src/transform.rs:4973`).
 Status: active
 Exercised: yes - #906's recorded workspace gate runs the join table
@@ -1726,7 +1726,7 @@ evaluates. Cases (1) and (2) are disjoint, so the code's order, which tests
 (2) first (`:1097`), is the same decision. Matching keys permit evaluation;
 they do not guarantee validity. `session.status` reports evaluable only when
 the durable baseline is evaluable, not invalidated, and parts are retained
-at the key (`crates/daemon/src/lib.rs:6881-6899`); it makes no prefix
+at the key (`crates/daemon/src/lib.rs:6893-6911`); it makes no prefix
 comparison. A row-version advance that leaves the generation unchanged keeps
 validity. `always-or-unreached` because both consumers see a baseline only
 on folding sessions.
@@ -1743,18 +1743,18 @@ Read `refresh_tail_hygiene_baseline`
 `:1136-1140` ahead of `same_measured_prefix` `:1141`), `parts_for`
 (`crates/daemon/src/derived_state.rs:18-28`), `prior_baseline_parts` and
 `carried_derived_state` (`crates/daemon/src/transform.rs:7943-7966`), and the
-status join (`crates/daemon/src/lib.rs:6881-6899`) at `0ff62b29a`. A
+status join (`crates/daemon/src/lib.rs:6893-6911`) at `0ff62b29a`. A
 non-bust pass does not write its joined result durably: it evaluates it for
 that pass's decisions (`crates/daemon/src/transform.rs:4976-4986`), so
 "invalidated until a bust" holds because parts appear only from a bust or a
 first refresh.
 Existing check: `crates/daemon/src/tail_hygiene.rs:2278`
 `durable_scalars_join_retained_parts_by_generation` (#906);
-`crates/daemon/src/lib.rs:35729`
+`crates/daemon/src/lib.rs:35743`
 `status_reads_hygiene_validity_joined_with_the_retained_parts` (#906);
 `crates/daemon/src/derived_state.rs:122`
 `newer_epochs_and_versions_supersede_and_keys_select_by_epoch_and_generation`
-(#906); `crates/daemon/src/lib.rs:35180`
+(#906); `crates/daemon/src/lib.rs:35194`
 `committing_and_no_write_passes_promote_under_a_charged_lease_and_a_restart_forgets`
 (restart then non-bust stays invalid; a render-config `HARD` restores it;
 #906); `crates/daemon/tests/derived_state_crash_cut.rs:76` (#906).
@@ -1855,8 +1855,8 @@ Type: safety
 Reachability: explicit-config-only - firing assembly runs only on a session
 whose stored authority is Eidnara, and Eidnara folds only with an admitted,
 non-empty summarizer chain (`DaemonConfig::eidnara_folds`,
-`crates/daemon/src/config.rs:181-185`); the default chain is empty
-(`:142`).
+`crates/daemon/src/config.rs:185-189`); the default chain is empty
+(`:145`).
 Status: active
 Exercised: yes - #859 PR C's recorded run at `0ff62b29a` (workspace tests,
 6,156 passed) ran
@@ -1916,7 +1916,7 @@ refusal (`:139-142`), the `IdentityBudget` return before any prompt work
 (`:999-1006`), and the reservation handing the assembled selection to `fire`
 (`crates/daemon/src/history_summarizer.rs:1866-1874`) were read at
 `0ff62b29a`. Reattachment reuses the stored selection and rebuilds only text
-(`crates/daemon/src/lib.rs:5072-5084`), so it never re-selects.
+(`crates/daemon/src/lib.rs:5084-5096`), so it never re-selects.
 Existing check: `crates/daemon/src/history_summarizer_chunk.rs:1960`
 `an_over_budget_selection_stops_at_the_longest_prefix_of_whole_blocks`;
 `:1981` `an_indivisible_first_block_over_the_identity_budget_no_fires`;
@@ -1925,7 +1925,7 @@ Existing check: `crates/daemon/src/history_summarizer_chunk.rs:1960`
 (#859 PR C); all four run through `BudgetCase::assert_matches_oracle`
 (`:1887`), which also asserts the store reserves nothing (`:1875-1883`), and
 compare with the shared `identity_prefix_oracle` (`:1369-1376`);
-`crates/daemon/src/lib.rs:36290`
+`crates/daemon/src/lib.rs:36304`
 `an_indivisible_block_over_the_identity_budget_no_fires_and_reserves_nothing`;
 `:36318` `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix`
 (#859 PR C).
@@ -1936,7 +1936,7 @@ Open questions:
 - Does any test reserve and publish a shrunk chunk with its exact selection?
   Resolved: yes, since #859 PR C,
   `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix`
-  (`crates/daemon/src/lib.rs:36318`).
+  (`crates/daemon/src/lib.rs:36332`).
 
 ### fa-n14-module-meta-is-message-independent
 
@@ -2057,7 +2057,7 @@ cut (`a_credential_that_crosses_the_detail_bound_is_redacted_whole`).
 `NoFire::new` (`crates/memory-store/src/summarizer_timeline.rs:94-95`) and
 `pending_rewrite_detail` (`crates/daemon/src/transform.rs:6841-6858`) keep a
 raw prefix; `record_no_fire` compares the stored form
-(`crates/daemon/src/lib.rs:5903-5907`).
+(`crates/daemon/src/lib.rs:5915-5919`).
 `MAX_PENDING_REWRITE_DETAIL_BYTES` and `MAX_LAST_RECUT_BYTES` (1,024 each)
 live in the store (`crates/memory-store/src/lib.rs:6104`, `:6106`), and the
 descent, reset, and revert-truncation writers cut `last_recut` to the stable
@@ -2247,7 +2247,7 @@ rows across repeats.
 Check: `always` - per repeat, the serialized reconstructed rows equal the
 first pass's, the output revision is fresh, the recipe keeps the retained
 output only when the offered revision and the revert epoch match
-(`crates/daemon/src/lib.rs:2582-2589`, `:9740-9747`), and `committed: false`
+(`crates/daemon/src/lib.rs:2583-2590`, `:9752-9759`), and `committed: false`
 holds only when metadata is unchanged. `always` because every repeat must
 reconstruct the same rows.
 Fault/timing angle: A repeat beside a render change or a lost retained
@@ -2752,7 +2752,7 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - every native pass reaches the native
-gate (`crates/daemon/src/lib.rs:9653-9664`).
+gate (`crates/daemon/src/lib.rs:9665-9676`).
 Status: active
 Exercised: yes - #1071: `pi-rust-delivery` (one provider request per
 completed turn, two pinned compaction requests, fixture
@@ -2870,7 +2870,7 @@ Open questions:
   authority qualifier. FA-N05 and FA-N06 constrain fold work and native state
   independently of output shape, and KD-P11 extends FA-N05's no-summarizer
   clause end to end. KD-E01 (repeat identity) depends on revision-qualified
-  retention (`crates/daemon/src/lib.rs:2582-2589`), and KD-E02 (memory HARD)
+  retention (`crates/daemon/src/lib.rs:2583-2590`), and KD-E02 (memory HARD)
   ends byte-stable replay on purpose. KD-P01, KD-P03, KD-P04, and FA-E02
   share Pi's boot latch; KD-P06 and KD-P09 read the per-project
   configuration (OQ-1). KD-P07 shares the shared client's fail-open with

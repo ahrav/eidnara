@@ -21,7 +21,7 @@ are golden-visible and `display_arg` had to reproduce them.
   Reachability classes).
 - Tests: `history_summarizer_chunk.rs:3312` (description and key-argument
   arms, on separate inputs), `:3251`;
-  `crates/daemon/src/lib.rs:19641`
+  `crates/daemon/src/lib.rs:19654`
   `history_summarizer_boundary_construction_matches_owned_reference`, which
   expects `TC: bash` (`lib.rs:19927-19932`) for a call whose input holds only
   `command` (`lib.rs:26292`), the bare-name arm;
@@ -55,7 +55,7 @@ One input holding both a non-empty `description` and a `filePath`, asserting
 ### Q: Why does confidence move from the source's `medium` to `high`?
 
 - Sources examined: the source record in #1105; the code and tests cited above.
-- Findings: the source left the locations unverified; this pass read `format_tool_summary` and every caller at `41d889ea4`, and `history_summarizer_chunk.rs:3312`, `crates/daemon/src/lib.rs:19641` (`:19639` at `41d889ea4`), and `crates/daemon/src/tool_vocabulary_tests.rs:66` exercise all three arms on separate inputs.
+- Findings: the source left the locations unverified; this pass read `format_tool_summary` and every caller at `41d889ea4`, and `history_summarizer_chunk.rs:3312`, `crates/daemon/src/lib.rs:19654` (`:19652` at `41d889ea4`), and `crates/daemon/src/tool_vocabulary_tests.rs:66` exercise all three arms on separate inputs.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where
   the record names one, stays open.
 - Conclusion: resolved with answer.

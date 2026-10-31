@@ -100,8 +100,8 @@ All references are verified at `0ff62b29a`.
   (both constants live in `crates/memory-store/src/lib.rs`; the daemon
   re-exports the second), applied by
   `abandon_with_detail` (`history_summarizer.rs:363-365`), `retain_backoff`
-  (`:451-453`), `record_no_fire` (`crates/daemon/src/lib.rs:5902`, which
-  compares the stored form at `:5903-5907`),
+  (`:451-453`), `record_no_fire` (`crates/daemon/src/lib.rs:5914`, which
+  compares the stored form at `:5915-5919`),
   `record_blocked_eligibility` (`:17557`), and
   `record_history_summarizer_connect_failure` (`:17616`). The chunk
   fingerprint and the retry record's `model_chain_digest` are SHA-256 hex

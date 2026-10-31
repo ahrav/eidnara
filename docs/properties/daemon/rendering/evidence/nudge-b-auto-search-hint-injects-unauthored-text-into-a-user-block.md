@@ -113,7 +113,7 @@ injected: pick rare tokens that appear in the history_segment you want surfaced.
 Config default: `memory.auto_search.enabled` is `true`.
 `CONFIGURATION.md:682` (source-catalog path, not present at HEAD) lists the default as `true`; `:644` says
 "**`temporal_awareness` and `memory.auto_search` are now ON by default** — set them
-`false` to opt out"; `assets/eidnara.schema.json:1607` and `:1612` say
+`false` to opt out"; `assets/eidnara.schema.json:839` and `:844` say
 "enabled by default (set enabled: false to opt out)";
 `packages/docs/src/content/docs/reference/configuration.md:119-122` (source-catalog path, not present at HEAD) repeats it;
 `packages/docs/src/content/docs/help/faq.md:29` (source-catalog path, not present at HEAD) lists
@@ -239,7 +239,7 @@ Existing checks are `:23075-23090` (empty decision suppresses future queries),
 
 ### Q: Do the docs describe the search accurately?
 
-- Sources examined: `assets/eidnara.schema.json:1607` and `:1612`;
+- Sources examined: `assets/eidnara.schema.json:839` and `:844`;
   `packages/docs/src/content/docs/reference/configuration.md:119-120` (source-catalog path, not present at HEAD);
   `README.md:200`; `transform.rs:8843-8961`; the comment at `:9111-9112`.
 - Findings: no. The schema says "transform-time eidnara_search" over "memories,

@@ -16,7 +16,7 @@ Lenses: state/persistence, failure recovery, versioning, resource boundaries.
 2. `crates/daemon/src/history_summarizer.rs:484` passes that string to store publication.
 3. `crates/memory-store/src/lib.rs:11298-11321` scans/prepares raw history;
    lines 12012-12020 decompress stored bytes into `raw_messages_json`.
-4. `crates/daemon/src/lib.rs:16443-16461`, read with `git show HEAD`, decodes
+4. `crates/daemon/src/lib.rs:16456-16474`, read with `git show HEAD`, decodes
    rows as `IngressMessages`, skips decode errors, keeps in-range ordinals,
    and keeps the first message at each ordinal.
 5. `crates/daemon/src/history_summarizer_chunk.rs:418-430` builds snapshot items only
@@ -94,7 +94,7 @@ assembly. A cross-binary in-flight recovery run remains missing evidence.
   `0ff62b29a`. An `AwaitingProducer` firing with a live producer run reattaches
   (`handle_restart_load`, `:903-954`, arm `:912-939`): the daemon recomputes the
   fingerprint from the current snapshot as a digest
-  (`crates/daemon/src/lib.rs:5111-5113`), and `publish_validated_chunk`
+  (`crates/daemon/src/lib.rs:5123-5125`), and `publish_validated_chunk`
   compares it with the stored joined form, rejects it as
   `FingerprintMismatch`, and abandons the run with the failure backoff
   (`history_summarizer.rs:637-652`). A reserved `Publishing` firing takes

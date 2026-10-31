@@ -815,7 +815,7 @@ Open questions: None.
    (`auth.rs:244-252`), so the peer's half of the MUST is unenforceable by the
    host.
 6. **The two-second budgets are stated as coupled and are configured
-   independently.** `host-wire-protocol.md:747` states the client's whole-
+   independently.** `host-wire-protocol.md:775` states the client's whole-
    handshake deadline and the host's authentication deadline are "not
    independent". In code they are two separate fields with the same default,
    `auth_deadline` and `transport_setup_deadline` (`config.rs:223`, `:227`),

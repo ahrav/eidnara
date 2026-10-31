@@ -43,16 +43,16 @@ They measure source density, not assertion strength or executed coverage.
 | `crates/daemon/src/metered_decode.rs:419-435` | Byte-derived node floor refuses without allocation; malformed suffix bytes can increase the floor, so it is not a valid-JSON outcome oracle. | unaudited |
 | `crates/daemon/src/metered_decode.rs:666-675` | Ignored subtrees traverse metered `deserialize_any` rather than bypassing node/string charges. | unaudited |
 | `crates/daemon/src/metered_decode.rs:783-905` | Scalar, text, unit, sequence, and map visitors charge before forwarding; text counts node and string bytes; `visit_str` also counts escape scratch. | unaudited |
-| `crates/daemon/src/lib.rs:12153-12170` | Byte cap precedes meter; admission precedes sub-cap lane probe; meter lives through settlement. | unaudited |
-| `crates/daemon/src/lib.rs:12921-12946,15758-15765` | Gate walk restarts needed count; invalid typed decode falls back; refused decode returns without dispatch. | unaudited |
-| `crates/daemon/src/lib.rs:16084-16103` | Footprint floor can refuse before decode; scratch precharge follows; permanent maps to `invalid_params`, transient to `queue_full`. | unaudited |
-| `crates/daemon/src/lib.rs:16125-16136` | Error messages: `request body needs more resident bytes than this host can hold`; `resident capacity for request parsing is exhausted`. | unaudited |
-| `crates/daemon/src/lib.rs:16144-16161` | Inclusive facade/transform caps; errors say `request body exceeds the 32 MiB transform limit` or `request body exceeds the 1 MiB limit`. | unaudited |
+| `crates/daemon/src/lib.rs:12165-12182` | Byte cap precedes meter; admission precedes sub-cap lane probe; meter lives through settlement. | unaudited |
+| `crates/daemon/src/lib.rs:12933-12958,15771-15778` | Gate walk restarts needed count; invalid typed decode falls back; refused decode returns without dispatch. | unaudited |
+| `crates/daemon/src/lib.rs:16097-16116` | Footprint floor can refuse before decode; scratch precharge follows; permanent maps to `invalid_params`, transient to `queue_full`. | unaudited |
+| `crates/daemon/src/lib.rs:16138-16149` | Error messages: `request body needs more resident bytes than this host can hold`; `resident capacity for request parsing is exhausted`. | unaudited |
+| `crates/daemon/src/lib.rs:16157-16174` | Inclusive facade/transform caps; errors say `request body exceeds the 32 MiB transform limit` or `request body exceeds the 1 MiB limit`. | unaudited |
 | `crates/daemon/src/wire.rs:218-237` | Reattachment rejects inconsistent frontiers, block bounds, or message/block metadata with `None`. | unaudited |
 | `crates/daemon/src/wire.rs:516-537` | Debug assertions align message/frontier/state lengths; invalid or duplicate mids return WireError. | unaudited |
 | `crates/daemon/src/retained_size.rs:72-134,224-271` | Recursive retained estimates and conservative per-holder charges; these are accounting mechanisms, not live-heap assertions. | unaudited |
-| `crates/daemon/src/lib.rs:2853-2864` | Projection lease uses checked byte addition and count/byte caps before snapshot clone. | unaudited |
-| `crates/daemon/src/lib.rs:2871-2899` | Projection cache refuses zero/oversized entries and evicts while over total cap; constructed snapshot already exists. | unaudited |
+| `crates/daemon/src/lib.rs:2856-2867` | Projection lease uses checked byte addition and count/byte caps before snapshot clone. | unaudited |
+| `crates/daemon/src/lib.rs:2874-2902` | Projection cache refuses zero/oversized entries and evicts while over total cap; constructed snapshot already exists. | unaudited |
 | `crates/host-runtime/src/handler.rs:549-565` | Resident reserve charges scratch without waiting; returned charge must cover live request allocations. | unaudited |
 | `crates/host-runtime/src/config.rs:137-151` | Host limits reject resident budgets below the interoperability minimum or above the semaphore/u32 capacity. | unaudited |
 | `crates/host-runtime/src/wire.rs:415-442` | Async charge rejects requests above capacity; try_charge uses exact semaphore acquisition and rejects non-u32 requests. | unaudited |
@@ -68,21 +68,21 @@ All locations in this table are `crates/daemon/src/metered_decode.rs` or
 | `crates/daemon/src/metered_decode.rs:1066` `a_capacity_bound_count_stops_at_the_value_that_crosses_it` | Permanent refusal stops within one node charge; exact-capacity comparison; undecodable empty input reaches nothing. | unaudited |
 | `crates/daemon/src/metered_decode.rs:1097` `footprint_of_counts_what_the_value_decode_charges` | Needed count equals walker footprint for raw-token and escaped cases. | unaudited |
 | `crates/daemon/src/metered_decode.rs:1119` `footprint_floor_counts_the_values_the_meter_visits` | Scalar floor equality; strings add coefficient and escape terms; dense floor threshold is inclusive. | unaudited |
-| `crates/daemon/src/lib.rs:19569` `request_byte_cap_widens_for_transform_class_only` | Route-sensitive 1/32 MiB caps; exact 32 MiB accepts and next byte refuses. | unaudited |
-| `crates/daemon/src/lib.rs:19649` `entry_probe_reads_the_route_and_the_page_envelope_as_dispatch_does` | Method/kind precedence, null page fields, duplicate discriminators, malformed and escaped route names. | unaudited |
-| `crates/daemon/src/lib.rs:19712` `tree_parse_witness_refuses_what_the_tree_refuses` | Compatibility walk rejects tree-invalid and reserved raw-token cases before direct decode. | unaudited |
-| `crates/daemon/src/lib.rs:19747` `raw_value_token_matches_serde_json` | First-key versus later-key raw-token parse behavior. | unaudited |
-| `crates/daemon/src/lib.rs:19986` `direct_and_tree_transform_decodes_agree_on_the_corpus` | Equal typed results when both accept, pinned acceptance classes, page assembly control; no peak measurement. | unaudited |
-| `crates/daemon/src/lib.rs:20140` `unpaged_transform_bodies_reach_the_same_outcome_through_both_entry_paths` | Comparable outcomes and expected direct-lane case list. | unaudited |
-| `crates/daemon/src/lib.rs:20188` `both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies` | Same needed bytes/outcomes at dynamically derived footprint neighbours. | unaudited |
-| `crates/daemon/src/lib.rs:20281` `decode_footprint_counts_values_and_retained_string_copies` | Separators in strings are not nodes; hard-coded three-copy lower bound at `crates/daemon/src/lib.rs:20294-20298`; dense and truncated prefix counts. Linked from R1 for explicit KTD4 disposition. | unaudited |
-| `crates/daemon/src/lib.rs:20321` `metered_decode_charges_incrementally_and_refuses_above_capacity` | Needed/charged bounds, immediate refusal release, restart reuses charges. | unaudited |
-| `crates/daemon/src/lib.rs:20358` `a_small_body_holds_no_more_than_twice_its_footprint` | Small bodies hold between footprint and twice footprint. | unaudited |
-| `crates/daemon/src/lib.rs:20380` `a_nearly_drained_pool_is_charged_in_a_bounded_number_of_acquisitions` | Transient refusal with fewer than 100 reserve attempts. | unaudited |
-| `crates/daemon/src/lib.rs:20414` `a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall` | Known holder, shortfall fields, zero charge after refusal, success after drop; eventual oversize is transient while held and permanent when free. | unaudited |
-| `crates/daemon/src/lib.rs:20476` `a_doomed_body_is_refused_without_touching_the_pool` | Zero reserve calls, `BodyLane::Unread`, zero needed, too-large outcome. | unaudited |
-| `crates/daemon/src/lib.rs:20516` `footprint_floor_never_exceeds_the_decoded_footprint` | Floor does not exceed walker count for valid corpus JSON. | unaudited |
-| `crates/daemon/src/lib.rs:20533` `a_refused_decode_has_no_dispatch_side_effect` | Expected refusal, no route binding/store row, then success with room. | unaudited |
+| `crates/daemon/src/lib.rs:19582` `request_byte_cap_widens_for_transform_class_only` | Route-sensitive 1/32 MiB caps; exact 32 MiB accepts and next byte refuses. | unaudited |
+| `crates/daemon/src/lib.rs:19662` `entry_probe_reads_the_route_and_the_page_envelope_as_dispatch_does` | Method/kind precedence, null page fields, duplicate discriminators, malformed and escaped route names. | unaudited |
+| `crates/daemon/src/lib.rs:19725` `tree_parse_witness_refuses_what_the_tree_refuses` | Compatibility walk rejects tree-invalid and reserved raw-token cases before direct decode. | unaudited |
+| `crates/daemon/src/lib.rs:19760` `raw_value_token_matches_serde_json` | First-key versus later-key raw-token parse behavior. | unaudited |
+| `crates/daemon/src/lib.rs:19999` `direct_and_tree_transform_decodes_agree_on_the_corpus` | Equal typed results when both accept, pinned acceptance classes, page assembly control; no peak measurement. | unaudited |
+| `crates/daemon/src/lib.rs:20153` `unpaged_transform_bodies_reach_the_same_outcome_through_both_entry_paths` | Comparable outcomes and expected direct-lane case list. | unaudited |
+| `crates/daemon/src/lib.rs:20201` `both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies` | Same needed bytes/outcomes at dynamically derived footprint neighbours. | unaudited |
+| `crates/daemon/src/lib.rs:20294` `decode_footprint_counts_values_and_retained_string_copies` | Separators in strings are not nodes; hard-coded three-copy lower bound at `crates/daemon/src/lib.rs:20307-20311`; dense and truncated prefix counts. Linked from R1 for explicit KTD4 disposition. | unaudited |
+| `crates/daemon/src/lib.rs:20334` `metered_decode_charges_incrementally_and_refuses_above_capacity` | Needed/charged bounds, immediate refusal release, restart reuses charges. | unaudited |
+| `crates/daemon/src/lib.rs:20371` `a_small_body_holds_no_more_than_twice_its_footprint` | Small bodies hold between footprint and twice footprint. | unaudited |
+| `crates/daemon/src/lib.rs:20393` `a_nearly_drained_pool_is_charged_in_a_bounded_number_of_acquisitions` | Transient refusal with fewer than 100 reserve attempts. | unaudited |
+| `crates/daemon/src/lib.rs:20427` `a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall` | Known holder, shortfall fields, zero charge after refusal, success after drop; eventual oversize is transient while held and permanent when free. | unaudited |
+| `crates/daemon/src/lib.rs:20489` `a_doomed_body_is_refused_without_touching_the_pool` | Zero reserve calls, `BodyLane::Unread`, zero needed, too-large outcome. | unaudited |
+| `crates/daemon/src/lib.rs:20529` `footprint_floor_never_exceeds_the_decoded_footprint` | Floor does not exceed walker count for valid corpus JSON. | unaudited |
+| `crates/daemon/src/lib.rs:20546` `a_refused_decode_has_no_dispatch_side_effect` | Expected refusal, no route binding/store row, then success with room. | unaudited |
 
 ## Allocation binaries
 
@@ -135,12 +135,12 @@ has moved; after #828 the surviving tests sit at
 | `crates/daemon/src/wire.rs:1749` `repeated_prefix_reattachment_shares_canonical_shells` | Pointer sharing, equivalent projection, copy-on-write, surviving block owner. | deleted by #828 with the mechanism it checked |
 | `crates/daemon/src/wire.rs:1796` `shared_ingress_is_send_and_preserves_decode_refusals` | Send + static types and shared/owned decode refusal equivalence. | unaudited; at `wire.rs:1125` after #828 |
 | `crates/daemon/src/wire.rs:1818` `incremental_projection_checks_effective_synthetic_status` | Sharing occurs only with compatible synthetic status. | deleted by #828 with the mechanism it checked |
-| `crates/daemon/src/lib.rs:20584` `transform_snapshot_cache_is_generation_safe_and_lru_bounded` | Snapshot lifecycle/LRU control; not a transient allocator peak. | unaudited |
-| `crates/daemon/src/lib.rs:20624` `snapshot_lease_budget_survives_cache_churn_and_releases_exact_charge` | Active owner remains charged across eviction and releases on drop. | unaudited |
-| `crates/daemon/src/lib.rs:20679` `snapshot_lease_budget_rejects_second_lease_on_bytes_alone` | Byte cap refuses a second otherwise count-admissible lease. | unaudited |
-| `crates/daemon/src/lib.rs:23008` `native_cache_charge_keeps_raw_allocation_floor_beside_sidecar_estimate` | Raw Value allocation floor and shared versus distinct native backing. | unaudited |
-| `crates/daemon/src/lib.rs:23311` `projection_cache_clones_are_charged_to_an_active_lease_budget` | Clone admission, cache removal with surviving charge, exact lease release. | deleted by #828 with the mechanism it checked |
-| `crates/daemon/src/lib.rs:24143` `projected_prefix_is_charged_to_the_projection_cache_not_native_lru` | Projection and native holder budgets are separate. | deleted by #828 with the mechanism it checked |
+| `crates/daemon/src/lib.rs:20597` `transform_snapshot_cache_is_generation_safe_and_lru_bounded` | Snapshot lifecycle/LRU control; not a transient allocator peak. | unaudited |
+| `crates/daemon/src/lib.rs:20637` `snapshot_lease_budget_survives_cache_churn_and_releases_exact_charge` | Active owner remains charged across eviction and releases on drop. | unaudited |
+| `crates/daemon/src/lib.rs:20692` `snapshot_lease_budget_rejects_second_lease_on_bytes_alone` | Byte cap refuses a second otherwise count-admissible lease. | unaudited |
+| `crates/daemon/src/lib.rs:23021` `native_cache_charge_keeps_raw_allocation_floor_beside_sidecar_estimate` | Raw Value allocation floor and shared versus distinct native backing. | unaudited |
+| `crates/daemon/src/lib.rs:23324` `projection_cache_clones_are_charged_to_an_active_lease_budget` | Clone admission, cache removal with surviving charge, exact lease release. | deleted by #828 with the mechanism it checked |
+| `crates/daemon/src/lib.rs:24156` `projected_prefix_is_charged_to_the_projection_cache_not_native_lru` | Projection and native holder budgets are separate. | deleted by #828 with the mechanism it checked |
 
 ## Host pool tests and highest integration seam
 
@@ -181,7 +181,7 @@ states that the managed client drops later terminals
 its settled result does not establish one-terminal emission.
 
 Confirmed discrepancy: above-facade-cap probing precedes meter creation at
-`crates/daemon/src/lib.rs:12153-12166,16144-16161`, contrary to A1's unqualified
+`crates/daemon/src/lib.rs:12165-12178,16157-16174`, contrary to A1's unqualified
 charge-before-probe claim at
 `docs/properties/hot-path-optimization/latency-audit/catalog.md:159-165`.
 Allocation size on that path is unmeasured, not a diagnosed budget exceedance.

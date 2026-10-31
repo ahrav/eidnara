@@ -31,7 +31,7 @@ details do not authorize a weaker acceptance threshold.
 - [transform.rs:8339-8392](../../../../../crates/daemon/src/transform.rs#L8339-L8392)
   enforces matched-term/rareness admission, the top-score threshold, and the
   result limit. Fidelity wording changes do not authorize broader searches.
-- [lib.rs:9257-9271](../../../../../crates/daemon/src/lib.rs#L9257-L9271)
+- [lib.rs:9257-9271](../../../../../crates/daemon/src/lib.rs#L9269-L9283)
   pins one canonical read for the pass. The
   [reader](../../../../../crates/daemon/src/canonical_memory.rs#L147-L211)
   applies freshness, scope, category, and budget selection before rendering.

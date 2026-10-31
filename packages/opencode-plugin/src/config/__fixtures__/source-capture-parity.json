@@ -1,10 +1,11 @@
 {
-    "description": "Shared source-capture consent parity fixture. The Rust daemon (crates/daemon/src/config.rs), the OpenCode plugin loader (packages/opencode-plugin/src/config/index.ts), and the Pi plugin loader (packages/pi-plugin/src/config/index.ts) load every row through their production loaders and must produce the same effective source_capture.enabled value.",
+    "description": "Shared source-capture consent parity fixture. The Rust daemon (crates/daemon/src/config.rs), the OpenCode plugin loader (packages/opencode-plugin/src/config/index.ts), and the Pi plugin loader (packages/pi-plugin/src/config/index.ts) load every row through their production loaders and must produce the same effective source_capture.enabled value. The same loaders read every row again with the source_capture block renamed to verifier, a user-only switch with the same default and tier rule, and must produce the same effective verifier.enabled value and the same warning count for verifier.",
     "contract": [
         "A row's user tier is written as eidnara.jsonc under the user config directory and its project tier as <project>/.eidnara/eidnara.jsonc; an empty object writes an empty document.",
         "expected_enabled is the effective source_capture.enabled. The key is user-only and defaults to false, so the project tier never changes it in either direction.",
         "A user-tier value that is not a boolean leaves the default, so capture stays off.",
-        "expected_project_warning is true when the project tier sets source_capture.enabled; every loader then reports, exactly once, that it ignored source_capture from the project tier. A project block that leaves the switch unset changes nothing and draws no warning."
+        "expected_project_warning is true when the project tier sets source_capture.enabled; every loader then reports, exactly once, that it ignored source_capture from the project tier. A project block that leaves the switch unset changes nothing and draws no warning.",
+        "Every row also holds for verifier after the source_capture block is renamed to verifier: the same expected_enabled, and expected_project_warning then counts the warning that names verifier."
     ],
     "rows": [
         {

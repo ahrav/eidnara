@@ -23,7 +23,7 @@ References are verified at `0ff62b29a` unless another tree is named.
   to `apply_additive_only` (`crates/daemon/src/transform.rs:3217-3218`),
   except a native subagent lineage switch, which reaches the protocol
   passthrough. Native is what an empty chain selects
-  (`crates/daemon/src/config.rs:181-185`, default chain `:142`), so the path
+  (`crates/daemon/src/config.rs:185-189`, default chain `:145`), so the path
   is default-production at HEAD. At `265df096` it ran only with
   `compaction.enabled: false`, hence the record's explicit-config label.
 - Output: `apply_additive_only` (`transform.rs:2710`) builds the served list

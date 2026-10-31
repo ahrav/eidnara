@@ -59,7 +59,7 @@ Verified at HEAD.
   the additive path pass `ctx.project_memory_rows()` to the renderer, so a
   withheld read renders no block because it has no rows, not because a
   separate flag suppresses it.
-- `crates/daemon/src/lib.rs:7994`: the read is taken once per pass through
+- `crates/daemon/src/lib.rs:8006`: the read is taken once per pass through
   `Handler::project_memory_read` (`lib.rs:4834`), which returns `None` when
   memory is disabled so the kernel store is not consulted, before the
   `run_transform` closure; every attempt of that pass clones the same value

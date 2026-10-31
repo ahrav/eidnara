@@ -3,8 +3,8 @@
 ## Discovery trigger
 
 `note_evaluation_body`'s allow list for `register` includes `policy_version`
-(`crates/daemon/src/lib.rs:10891`), and the closed schema rejects any key
-outside it (`:13894-13900`), so `policy_version` is a required part of the
+(`crates/daemon/src/lib.rs:10903`), and the closed schema rejects any key
+outside it (`:13907-13913`), so `policy_version` is a required part of the
 registration contract. The handler validates it with a range check. I traced the
 value to see what behaviour it selects and found no consumer.
 

@@ -14,7 +14,7 @@ the link between a marker and its test is the Observed column.
 | A family at another baseline | available; `crates/kernel/tests/fixtures/prior_kernel_baseline.sql` |
 | Two disposition events in one commit | available by SQL and through the admission API |
 | A CAS conflict inside a fold | available; the one-shot per-session attempt hook |
-| A fault between the memory-store commit of a fold and the Kernel write | available; the per-handler `use_outcome_fault` injection, taken at the hand-off (`crates/daemon/src/lib.rs:9747`) |
+| A fault between the memory-store commit of a fold and the Kernel write | available; the per-handler `use_outcome_fault` injection, taken at the hand-off (`crates/daemon/src/lib.rs:9759`) |
 | A stop between the stores on `session.delete` | available; `stop_after_retirement` |
 | A Kernel Starting or Unavailable at a read or write | available; the Kernel coordinator test states |
 | A config reload between bind and a later pass or wrapup | available |

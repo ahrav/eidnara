@@ -5,7 +5,7 @@
 //! durable facts. Coverage proves that a response addressed the batch, not that
 //! the model found every fact. Exact quotations prove provenance, not entailment.
 
-mod cite;
+pub(crate) mod cite;
 mod head;
 mod native;
 #[cfg(test)]

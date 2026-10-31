@@ -4,7 +4,7 @@
 
 The wire protocol states the no-reuse rule for both directions and names its own violation. The host
 enforces it on ingress with a watermark and does not enforce it on egress at all: the ping allocator
-is an unbounded `fetch_add` with no exhaustion branch. `docs/host-wire-protocol.md:748` even
+is an unbounded `fetch_add` with no exhaustion branch. `docs/host-wire-protocol.md:777` even
 records the defect as scheduled work - "Published `HistorySummarizerProducer` currently saturates at
 `u64::MAX`; compatibility work in the source module-host work MUST replace saturation with checked
 exhaustion and generation retirement."
@@ -41,7 +41,7 @@ if header.channel != 0 || header.corr == 0 {
 So a peer that correctly echoes a correlation-0 Ping produces a frame the host classifies as a
 protocol violation and closes the generation on. The ingress half of the same rule is enforced
 strictly for consumer requests at `:426-429` and `:469-472`, and
-`docs/host-wire-protocol.md:750` exempts `Pong` from the watermark because it "reference[s]
+`docs/host-wire-protocol.md:779` exempts `Pong` from the watermark because it "reference[s]
 existing identities".
 
 ## Failure scenario

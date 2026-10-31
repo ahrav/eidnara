@@ -33,7 +33,7 @@ differ from an empty page.
   (`crates/storage/src/lib.rs:191`), so the connection wait is the one wait
   the deadline ends
   (`crates/daemon/src/candidate_pass_tests.rs:2500`, asserted at `:2533-2537`).
-- `docs/host-wire-protocol.md:833` documents the three terminals, the kernel
+- `docs/host-wire-protocol.md:862` documents the three terminals, the kernel
   states, and the empty page.
 
 ## Failure scenario
