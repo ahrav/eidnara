@@ -33,7 +33,7 @@ F1: a witness whose trigger fails validation inside the envelope.
 
 ### Q: Should repeated degradation stop the task?
 
-- Sources examined: OQ6-11 as the owner confirmed it in [#1173](https://github.com/ahrav/eidnara/issues/1173); `ProjectRun::outcome` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:690`) and `retry` (`:567`); `a_witness_degraded_k_passes_is_skipped_and_the_pass_continues` (`crates/daemon/tests/attestation_verifier_bounded_pass.rs:897`).
+- Sources examined: OQ6-11 as the owner confirmed it in [#1173](https://github.com/ahrav/eidnara/issues/1173); `ProjectRun::outcome` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:719`) and `retry` (`:580`); `a_witness_degraded_k_passes_is_skipped_and_the_pass_continues` (`crates/daemon/tests/attestation_verifier_bounded_pass.rs:897`).
 - Findings: The write set returns `witness_degraded`; the pass counts it and retries the decision at most K = 3 passes, then counts `witness_degraded_skipped`, moves the cursor past it, and continues with the decisions behind it.
 - Missing evidence: none.
 - Conclusion: resolved with answer: no; the task continues.

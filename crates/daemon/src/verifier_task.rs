@@ -62,21 +62,17 @@ fn enabled_reader() -> Arc<dyn Fn(&Path) -> bool + Send + Sync> {
     enabled_reader_with(|key| std::env::var(key).ok())
 }
 
-/// Each project root's effective `verifier.enabled` under the user tier that `env`'s
-/// `XDG_CONFIG_HOME` and `HOME` name.
+/// The user tier's `verifier.enabled` under the `XDG_CONFIG_HOME` and `HOME` that `env` names; the
+/// key is user-tier only, so one read answers for every project root.
 fn enabled_reader_with(
     env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
 ) -> Arc<dyn Fn(&Path) -> bool + Send + Sync> {
     let config = Mutex::new(crate::config::ConfigCache::default());
-    Arc::new(move |root| {
+    Arc::new(move |_root| {
         config
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .verifier_enabled(
-                env("XDG_CONFIG_HOME").as_deref(),
-                env("HOME").as_deref(),
-                root,
-            )
+            .verifier_enabled(env("XDG_CONFIG_HOME").as_deref(), env("HOME").as_deref())
     })
 }
 

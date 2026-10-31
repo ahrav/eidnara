@@ -57,9 +57,9 @@
 //! transient `Unavailable` reasons, deadlines at classification, during an object read, or at the
 //! commit, Kernel refusals of the classification or the commit, a changed decision, and degraded
 //! witnesses. The K-th attempt counts `witness_degraded_skipped` when its witness degraded and
-//! `unavailable_skipped` otherwise. A terminal reason is kept per `(decision, oid)` for the process
-//! lifetime. All state is process-local: a restart rescans from the start, and the skips and the
-//! write set's receipt replay make the rescan write nothing.
+//! `unavailable_skipped` otherwise. A terminal reason is kept for the claim's path at its oid for
+//! the process lifetime. All state is process-local: a restart rescans from the start, and the
+//! skips and the write set's receipt replay keep the rescan idempotent.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -258,7 +258,9 @@ struct ProjectState {
     /// Resolved decisions above the cursor, by `(created_commit_seq, object_id)`; every entry at or
     /// before the cursor is dropped when the cursor advances.
     resolved: BTreeSet<(i64, String)>,
-    attempts: HashMap<String, u32>,
+    /// Attempts of unresolved decisions, by `(created_commit_seq, object_id)`. A cursor advance
+    /// drops the entries at or before the cursor, and a recorded floor drops those below it.
+    attempts: BTreeMap<(i64, String), u32>,
     /// The page start just past a commit sequence at or before which every live non-`verifier`
     /// decision of the scope is resolved; a pass pages from the later of it and the cursor.
     floor: Option<(i64, String)>,
@@ -268,6 +270,7 @@ struct ProjectState {
 #[derive(Default)]
 pub struct Verifier {
     projects: HashMap<String, ProjectState>,
+    /// Terminal `Unavailable` reasons, keyed by the claim's relative path and its oid.
     terminal: HashSet<(String, String)>,
     /// Each root's repository identities, keyed by its path and project digest, so a path bound
     /// again to another project derives again.
@@ -292,6 +295,12 @@ impl Verifier {
     /// The page start past the commit sequence a drained project `scope_id` paged through.
     pub fn floor(&self, scope_id: &str) -> Option<(i64, String)> {
         self.projects.get(scope_id)?.floor.clone()
+    }
+
+    pub fn attempts(&self, scope_id: &str) -> usize {
+        self.projects
+            .get(scope_id)
+            .map_or(0, |state| state.attempts.len())
     }
 
     /// One pass over `projects`, counting into `counters`.
@@ -529,16 +538,18 @@ impl ProjectRun<'_, '_> {
                     Step::Resolved
                 } else {
                     let anchor = standing.and_then(|standing| standing.decision.anchor_id);
-                    self.decision(&object_id, anchor.as_deref(), target)
+                    self.decision(&key, anchor.as_deref(), target)
                 };
                 match step {
                     Step::Resolved => {
                         self.report.progressed |= !known;
-                        self.state.attempts.remove(&object_id);
+                        self.state.attempts.remove(&key);
                         if prefix {
                             let mut above = self.state.resolved.split_off(&key);
                             above.remove(&key);
                             self.state.resolved = above;
+                            self.state.attempts = self.state.attempts.split_off(&key);
+                            self.state.attempts.remove(&key);
                             self.state.cursor = Some(key);
                         } else {
                             self.state.resolved.insert(key);
@@ -557,21 +568,23 @@ impl ProjectRun<'_, '_> {
             }
         }
         if prefix {
-            self.state.floor = Some((target.through_commit.saturating_add(1), String::new()));
+            let floor = (target.through_commit.saturating_add(1), String::new());
+            self.state.attempts = self.state.attempts.split_off(&floor);
+            self.state.floor = Some(floor);
         }
         Step::Resolved
     }
 
     /// One more attempt at a decision that ended without a terminal outcome; the K-th resolves it
     /// under `skipped`.
-    fn retry(&mut self, object_id: &str, skipped: &str) -> Step {
+    fn retry(&mut self, key: &(i64, String), skipped: &str) -> Step {
         self.report.failed = true;
-        let attempts = self.state.attempts.entry(object_id.to_owned()).or_insert(0);
+        let attempts = self.state.attempts.entry(key.clone()).or_insert(0);
         *attempts += 1;
         if *attempts < MAX_ATTEMPTS {
             return Step::Unresolved;
         }
-        self.state.attempts.remove(object_id);
+        self.state.attempts.remove(key);
         self.counters.add(skipped, 1);
         Step::Resolved
     }
@@ -579,8 +592,8 @@ impl ProjectRun<'_, '_> {
     /// [`Self::retry`] under `unavailable_skipped` for an attempt that may have ended at the
     /// deadline: an attempt that leaves the decision unresolved stops the pass when `deadline`
     /// holds, and the K-th resolves it.
-    fn transient(&mut self, object_id: &str, deadline: bool) -> Step {
-        match self.retry(object_id, "unavailable_skipped") {
+    fn transient(&mut self, key: &(i64, String), deadline: bool) -> Step {
+        match self.retry(key, "unavailable_skipped") {
             Step::Unresolved if deadline => Step::StopPass,
             step => step,
         }
@@ -594,7 +607,13 @@ impl ProjectRun<'_, '_> {
             .kernel
             .object_states_within_budget(self.clock.budget(), &attestation)
         {
-            Ok((_, states)) if states.first().is_some_and(Option::is_some) => {
+            Ok((_, states))
+                if states.first().is_some_and(|state| {
+                    state
+                        .as_ref()
+                        .is_some_and(|state| state.object.source_kind == VERIFIER_SOURCE_KIND)
+                }) =>
+            {
                 self.counters.add("skipped_attested", 1);
                 Some(Step::Resolved)
             }
@@ -603,7 +622,13 @@ impl ProjectRun<'_, '_> {
         }
     }
 
-    fn decision(&mut self, object_id: &str, anchor: Option<&str>, at: CommitReadTarget) -> Step {
+    fn decision(
+        &mut self,
+        key: &(i64, String),
+        anchor: Option<&str>,
+        at: CommitReadTarget,
+    ) -> Step {
+        let object_id = key.1.as_str();
         let budget = self.clock.budget();
         // The anchored oid alone names the attestation, so an attested decision skips before its
         // classification reads; a refused anchor read leaves the decision to its classification.
@@ -624,13 +649,13 @@ impl ProjectRun<'_, '_> {
                 return Step::Resolved;
             }
             Err(ClassifyError::Facts(ClaimFactsError::Kernel(KernelError::Deadline))) => {
-                return self.transient(object_id, true);
+                return self.transient(key, true);
             }
             // The next pass captures the new incarnation and resets the project's state.
             Err(ClassifyError::Facts(ClaimFactsError::IncarnationMismatch)) => {
                 return self.refused(false);
             }
-            Err(ClassifyError::Facts(_)) => return self.transient(object_id, false),
+            Err(ClassifyError::Facts(_)) => return self.transient(key, false),
         };
         let input = match &classification.class {
             Class::NotInput => return Step::Resolved,
@@ -642,7 +667,10 @@ impl ProjectRun<'_, '_> {
             Class::Verifiable(input) => input,
         };
         let oid = input.claim.oid().to_owned();
-        if self.terminal.contains(&(object_id.to_owned(), oid.clone())) {
+        if self
+            .terminal
+            .contains(&(input.claim.relative_path().to_owned(), oid.clone()))
+        {
             return Step::Resolved;
         }
         // The pre-check passes over a decision whose page standing named no readable anchor.
@@ -670,24 +698,25 @@ impl ProjectRun<'_, '_> {
         self.counters.consider(&bucket, evaluation.bytes_read);
         match evaluation.verdict {
             Verdict::Unavailable(reason) if reason.is_terminal() => {
-                self.terminal.insert((object_id.to_owned(), oid));
+                self.terminal
+                    .insert((input.claim.relative_path().to_owned(), oid));
                 return Step::Resolved;
             }
             Verdict::Unavailable(reason) => {
                 let deadline = matches!(reason, Reason::Deadline(_));
-                return self.transient(object_id, deadline);
+                return self.transient(key, deadline);
             }
             Verdict::Match | Verdict::Mismatch => {}
         }
         if self.clock.passed(Poll::Commit) {
-            return self.transient(object_id, true);
+            return self.transient(key, true);
         }
         let outcome = attest(self.kernel, &classification, &evaluation, budget);
-        self.outcome(object_id, evaluation.verdict, outcome)
+        self.outcome(key, evaluation.verdict, outcome)
     }
 
     /// Counts `outcome` under its effect counter, after the receipt or refusal returned.
-    fn outcome(&mut self, object_id: &str, verdict: Verdict, outcome: Outcome) -> Step {
+    fn outcome(&mut self, key: &(i64, String), verdict: Verdict, outcome: Outcome) -> Step {
         let counter = match outcome {
             Outcome::Committed(_) => "attestation_committed",
             Outcome::StaleCommitted(_) => "stale_committed",
@@ -699,11 +728,11 @@ impl ProjectRun<'_, '_> {
             Outcome::InvalidWriteSet => "commit_refused_invalid_write_set",
             Outcome::WitnessDegraded => {
                 self.counters.add("witness_degraded", 1);
-                return self.retry(object_id, "witness_degraded_skipped");
+                return self.retry(key, "witness_degraded_skipped");
             }
             Outcome::Changed => {
                 self.counters.add("commit_refused_changed", 1);
-                return self.transient(object_id, false);
+                return self.transient(key, false);
             }
             // An `Io` refusal can follow a durable commit; the next attempt finds the attestation
             // in the registry or the decision `Stale` and skips it.
@@ -717,7 +746,7 @@ impl ProjectRun<'_, '_> {
                     },
                     1,
                 );
-                return self.transient(object_id, error == KernelError::Deadline);
+                return self.transient(key, error == KernelError::Deadline);
             }
         };
         self.counters.add(counter, 1);
