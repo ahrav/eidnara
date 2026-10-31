@@ -536,8 +536,8 @@ that no related check exists anywhere in the repository.
 [t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L749
 [t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L805
 [t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L841
-[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L204
-[t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L174
+[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L215
+[t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L185
 [t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L874
 [t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L634
 [output-reservation]: ../../../crates/host-runtime/tests/dispatch.rs#L958
@@ -623,8 +623,8 @@ that no related check exists anywhere in the repository.
 [t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L878
 [t-task-output]: ../../../crates/host-runtime/src/handler.rs#L983
 [t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L900
-[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L652
-[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L688
+[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L662
+[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L698
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L16054
 [rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5664
 [foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5627

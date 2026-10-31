@@ -206,8 +206,8 @@ exclusion.
 [t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L748-L800
 [t-close]: ../../../../crates/host-runtime/tests/dispatch.rs#L804-L836
 [t-detached]: ../../../../crates/host-runtime/tests/dispatch.rs#L840-L868
-[t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L203-L259
-[t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L173-L201
+[t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L214-L270
+[t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L184-L212
 [t-panic]: ../../../../crates/host-runtime/tests/dispatch.rs#L873-L908
 [t-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L633-L636
 
