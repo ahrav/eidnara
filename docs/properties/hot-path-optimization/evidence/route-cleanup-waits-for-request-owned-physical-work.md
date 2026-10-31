@@ -207,13 +207,13 @@ exclusion.
 [close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1524-L1592
 [daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
-[t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L653
+[t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L653-L701
 [t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L748-L800
 [t-close]: ../../../../crates/host-runtime/tests/dispatch.rs#L804-L836
 [t-detached]: ../../../../crates/host-runtime/tests/dispatch.rs#L840-L868
-[t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L214-L270
-[t-deferred-budget]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L816-L849
-[t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L184-L212
+[t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L223-L279
+[t-deferred-budget]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L825-L858
+[t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L193-L221
 [t-panic]: ../../../../crates/host-runtime/tests/dispatch.rs#L873-L908
 [t-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L633-L636
 
