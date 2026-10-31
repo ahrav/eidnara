@@ -1882,15 +1882,20 @@ async fn shutdown_joins_a_deferred_close(after_windows: bool) {
     if let Some(observer) = observer.as_mut() {
         // `route.open` answers `target_unavailable` once shutdown has begun draining; seeing
         // that inside both 300 ms windows proves shutdown started before the close deferred.
-        loop {
-            match observer
-                .route_open(LINKED_MODULE_ID, ROOT, "opencode", "shutdown-observer")
-                .await
-            {
-                Err(code) if code == "target_unavailable" => break,
-                _ => tokio::time::sleep(Duration::from_millis(5)).await,
+        tokio::time::timeout_at(goodbye_sent + Duration::from_millis(600), async {
+            loop {
+                match observer
+                    .route_open(LINKED_MODULE_ID, ROOT, "opencode", "shutdown-observer")
+                    .await
+                {
+                    Err(code) if code == "target_unavailable" => break,
+                    Ok(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Err(err) => panic!("shutdown observer failed: {err}"),
+                }
             }
-        }
+        })
+        .await
+        .expect("shutdown must begin draining inside both 300 ms close windows");
         assert!(
             goodbye_sent.elapsed() < Duration::from_millis(600),
             "shutdown must begin draining inside both 300 ms close windows; it began after {:?}",

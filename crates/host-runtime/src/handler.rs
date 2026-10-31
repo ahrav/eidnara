@@ -910,6 +910,34 @@ mod tests {
         );
     }
 
+    /// `MAX_DEFERRED_WORK` counts route-tracker entries; a held `run_blocking` job holds two:
+    /// its closure's completion token and its join task's clone.
+    #[tokio::test]
+    async fn a_held_blocking_job_holds_two_route_tracker_entries() {
+        let ctx = request_context();
+        let route = ctx.work.route.clone();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (started, running) = std::sync::mpsc::channel();
+        let result = ctx.run_blocking(move || {
+            started.send(()).unwrap();
+            let _ = held.recv();
+        });
+        tokio::task::spawn_blocking(move || {
+            running
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(route.len(), 2);
+        drop(release);
+        result.await.unwrap();
+        route.close();
+        tokio::time::timeout(std::time::Duration::from_secs(5), route.wait())
+            .await
+            .expect("the job's entries drain once it returns");
+    }
+
     #[tokio::test]
     async fn stopping_submission_runtime_does_not_release_live_work_fences() {
         let ctx = request_context();

@@ -70,7 +70,7 @@ fn shared() -> Arc<HostShared<UnusedHandler>> {
         connection_permits: Arc::new(Semaphore::new(1)),
         tracker: TaskTracker::new(),
         deferred_closes: TaskTracker::new(),
-        deferred_work: std::sync::atomic::AtomicUsize::new(0),
+        deferred_trackers: Mutex::new(Vec::new()),
         abort_handles: Mutex::new(AbortRegistry::new()),
         shutdown_callback_ran: AtomicBool::new(false),
         shutdown: CancellationToken::new(),
@@ -236,8 +236,12 @@ async fn live_work_after_both_close_windows_defers_route_gone_until_it_stops() {
     );
 
     drop(physical_work);
-    shared.tracker.close();
-    shared.tracker.wait().await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
     assert!(settlement.is_settled());
     let terminal = queue.try_recv().unwrap();
     assert_eq!(
@@ -316,8 +320,12 @@ async fn a_deferred_close_and_the_forced_drain_run_route_gone_once() {
         .store(false, Ordering::SeqCst);
     shared.handler.route_gone_release.notify_one();
     forced.await.unwrap();
-    shared.tracker.close();
-    shared.tracker.wait().await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
     assert_eq!(
         shared.handler.route_gones_started.load(Ordering::SeqCst),
         1,
@@ -371,9 +379,13 @@ async fn deferred_work_past_its_limit_trips_the_fatal_latch() {
         );
         drop(held);
         drop(physical_work);
-        shared.tracker.close();
-        shared.tracker.wait().await;
-        assert_eq!(shared.deferred_work.load(Ordering::SeqCst), 0);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            shared.tracker.close();
+            shared.tracker.wait().await;
+        })
+        .await
+        .expect("the deferred close finishes once its work stops");
+        assert_eq!(shared.deferred_work(), 0);
     }
 }
 
@@ -382,17 +394,32 @@ async fn deferred_work_past_its_limit_trips_the_fatal_latch() {
 /// fresh terminal credit, and the generation keeps serving.
 #[tokio::test(start_paused = true)]
 async fn a_settle_aborted_before_queuing_is_settled_by_the_route_close() {
-    settle_aborted_before_queuing(false).await;
+    settle_aborted_before_queuing(Credits::Available).await;
 }
 
 /// The retried terminal waits for a terminal credit under the post-abort deadline; with every
-/// credit held, the close retires the generation instead of queuing an uncredited terminal.
+/// credit held until then, the close retires the generation at the deadline instead of queuing
+/// an uncredited terminal.
 #[tokio::test(start_paused = true)]
 async fn a_retried_terminal_without_a_credit_retires_the_generation() {
-    settle_aborted_before_queuing(true).await;
+    settle_aborted_before_queuing(Credits::HeldPastDeadline).await;
 }
 
-async fn settle_aborted_before_queuing(drain_credits: bool) {
+/// A credit that frees inside the post-abort window carries the retried terminal, and the
+/// generation keeps serving.
+#[tokio::test(start_paused = true)]
+async fn a_retried_terminal_takes_a_credit_that_frees_inside_the_window() {
+    settle_aborted_before_queuing(Credits::FreedInsideWindow).await;
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Credits {
+    Available,
+    HeldPastDeadline,
+    FreedInsideWindow,
+}
+
+async fn settle_aborted_before_queuing(credits_state: Credits) {
     let CloseFixture {
         shared,
         generation,
@@ -435,14 +462,40 @@ async fn settle_aborted_before_queuing(drain_credits: bool) {
         before,
         "the aborted winner's credit returned"
     );
-    let held = drain_credits.then(|| {
+    let held = (credits_state != Credits::Available).then(|| {
         let all = u32::try_from(credits.available_permits()).unwrap();
         credits.clone().try_acquire_many_owned(all).unwrap()
     });
     drop(reserve);
+    let close_shared = shared.clone();
+    let close =
+        tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+    // The fixture's dispatch task never ends, so the close aborts it after one 100 ms window
+    // and the post-abort window ends at 200 ms.
+    let started = Instant::now();
+    tokio::time::sleep(Duration::from_millis(150)).await;
     drop(physical_work);
-    assert!(settle_route_work(&shared, route, decision).await);
-    if drain_credits {
+    if credits_state == Credits::FreedInsideWindow {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(held);
+        assert!(close.await.unwrap());
+        assert!(!generation.token.is_cancelled());
+        let terminal = queue.try_recv().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&terminal.bytes[crate::wire::HEADER_LEN..])
+                .unwrap()["code"],
+            "cancelled"
+        );
+        assert_eq!(credits.available_permits(), before - 1);
+        return;
+    }
+    assert!(close.await.unwrap());
+    if credits_state == Credits::HeldPastDeadline {
+        assert_eq!(
+            Instant::now() - started,
+            Duration::from_millis(200),
+            "the retry waits until the post-abort deadline"
+        );
         assert!(generation.token.is_cancelled());
         assert!(
             queue.try_recv().is_err(),
@@ -497,13 +550,13 @@ async fn deferred_work_sums_across_deferred_closes() {
         work.push(physical_work);
     }
     assert_eq!(
-        shared.deferred_work.load(Ordering::SeqCst),
+        shared.deferred_work(),
         crate::dispatch::MAX_DEFERRED_WORK + 1
     );
     drop(held.remove(0));
     drop(work.remove(0));
     tokio::time::timeout(Duration::from_secs(1), async {
-        while shared.deferred_work.load(Ordering::SeqCst) != half + 1 {
+        while shared.deferred_work() != half + 1 {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
@@ -511,9 +564,54 @@ async fn deferred_work_sums_across_deferred_closes() {
     .expect("the released close returns exactly its share");
     drop(held);
     drop(work);
-    shared.tracker.close();
-    shared.tracker.wait().await;
-    assert_eq!(shared.deferred_work.load(Ordering::SeqCst), 0);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
+    assert_eq!(shared.deferred_work(), 0);
+}
+
+/// The limit counts live entries: entries a deferred route finished before a later deferral do
+/// not count against it.
+#[tokio::test(start_paused = true)]
+async fn deferred_work_counts_only_entries_still_held() {
+    let shared = shared();
+    let mut kept = Vec::new();
+    for (generation_id, extra, release_early) in [(1, 40, 39), (2, 30, 0)] {
+        let CloseFixture {
+            route,
+            decision,
+            aborted,
+            physical_work,
+            ..
+        } = fixture_on(shared.clone(), generation_id);
+        let CloseDecision::Owner { tracker, .. } = &decision else {
+            panic!("the fixture hands close ownership to the caller");
+        };
+        let mut held: Vec<_> = (0..extra).map(|_| tracker.token()).collect();
+        let close_shared = shared.clone();
+        let close =
+            tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+        aborted.await.unwrap();
+        assert!(!close.await.unwrap());
+        held.truncate(extra - release_early);
+        kept.push((held, physical_work));
+    }
+    assert!(
+        shared.fatal.take().is_none(),
+        "40 + 30 entries at deferral, {} still held",
+        shared.deferred_work()
+    );
+    assert_eq!(shared.deferred_work(), 2 + 31);
+    drop(kept);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("both deferred closes finish once their work stops");
 }
 
 /// After its work stops, a deferred close emits under one fresh close budget and retires the
@@ -538,8 +636,12 @@ async fn a_deferred_close_emits_under_one_fresh_close_budget() {
     let _reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
     let stopped = Instant::now();
     drop(physical_work);
-    shared.tracker.close();
-    shared.tracker.wait().await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
     assert_eq!(Instant::now() - stopped, Duration::from_millis(100));
     assert!(generation.token.is_cancelled());
     assert_eq!(shared.registry.live_count(), 0);
@@ -783,8 +885,12 @@ async fn a_request_losing_the_registration_race_retires_on_a_failed_return() {
         budget.try_charge(1).unwrap(),
     );
     crate::dispatch::dispatch_request(&shared, &generation, frame).await;
-    shared.tracker.close();
-    shared.tracker.wait().await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
     assert!(
         generation.token.is_cancelled(),
         "the failed return is a transport fault, not a rejectable request"
@@ -984,8 +1090,12 @@ async fn a_request_cancelled_by_route_close_before_its_copy_retires_on_a_failed_
     // test runtime cannot poll before this test yields, so the route closes first.
     crate::dispatch::dispatch_request(&shared, &generation, frame).await;
     let _decision = shared.registry.begin_close(route);
-    shared.tracker.close();
-    shared.tracker.wait().await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
     assert!(
         generation.token.is_cancelled(),
         "the failed return is a transport fault, not a cancellable request"

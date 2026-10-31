@@ -59,7 +59,9 @@ impl Settlement {
     }
 
     /// A settle aborted after it took the credit returned that credit to the generation; the
-    /// retried terminal waits for a fresh one, and a closed credit pool retires the generation.
+    /// retried terminal waits here for a fresh one. The wait has no deadline of its own:
+    /// `settle_stopped_route_work` runs it under its emission deadline, which retires the
+    /// generation when it passes first. `Err` reports a closed credit pool.
     pub(crate) async fn reattach_credit(&self, generation: &GenerationCore) -> Result<(), ()> {
         let missing = self
             .credit
@@ -1522,16 +1524,34 @@ async fn settle_stopped_route_work<H: HostHandler>(
     deadline: Instant,
 ) {
     // Aborting a dispatch task can interrupt settlement before terminal emission completes;
-    // `queued` marks the requests whose terminal reached the writer.
+    // `queued` marks the requests whose terminal reached the writer. Requests that still hold
+    // their terminal credit go first, so their credits return before an aborted winner waits
+    // for a fresh one.
     let emit_remaining = async {
+        let mut retries = Vec::new();
         for (key, settlement) in entries {
             let _order = settlement.order.lock().await;
             if settlement.queued.load(Ordering::SeqCst) {
                 continue;
             }
-            if settlement.won.swap(true, Ordering::SeqCst)
-                && settlement.reattach_credit(generation).await.is_err()
-            {
+            if settlement.won.swap(true, Ordering::SeqCst) {
+                retries.push((key, settlement));
+                continue;
+            }
+            emit_won_terminal(
+                settlement,
+                &shared.terminal_budget,
+                generation,
+                handle,
+                key.2,
+                cancelled_terminal(),
+            )
+            .await;
+            settlement.queued.store(true, Ordering::SeqCst);
+        }
+        for (key, settlement) in retries {
+            let _order = settlement.order.lock().await;
+            if settlement.reattach_credit(generation).await.is_err() {
                 generation.token.cancel();
                 settlement.queued.store(true, Ordering::SeqCst);
                 continue;
@@ -1574,10 +1594,9 @@ fn spawn_deferred_route_close<H: HostHandler>(
     let owner = Arc::clone(shared);
     let deferred_at = Instant::now();
     let held = tracker.len();
-    let deferred_work = shared.deferred_work.fetch_add(held, Ordering::SeqCst) + held;
+    let deferred_work = shared.defer_route_work(&tracker);
     let task = shared.deferred_closes.track_future(async move {
         tracker.wait().await;
-        owner.deferred_work.fetch_sub(held, Ordering::SeqCst);
         let stopped_after = deferred_at.elapsed();
         // Terminal emission receives a fresh `route_close_budget` after tracked work stops.
         let deadline = Instant::now() + owner.timing.route_close_budget;
@@ -1611,7 +1630,7 @@ fn spawn_deferred_route_close<H: HostHandler>(
     ));
 }
 
-/// `MAX_DEFERRED_WORK` limits the total route-tracker entries held by deferred closes. A running
+/// `MAX_DEFERRED_WORK` limits the live route-tracker entries held by deferred closes. A running
 /// `run_blocking` job holds two entries (its closure's completion token and its join task's
 /// clone) and an unfinished dispatch task holds one, so about 32 stalled blocking jobs fit, well
 /// below Tokio's default blocking-pool limit of 512 threads.

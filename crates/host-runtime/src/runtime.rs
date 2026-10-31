@@ -122,10 +122,8 @@ pub struct HostShared<H> {
     /// the deferred closes for work that outlived the close budget; graceful shutdown joins them
     /// before it fences read loops and sends connection `Goodbye`.
     pub deferred_closes: TaskTracker,
-    /// Sum of the route-tracker entry counts each deferred close observed when it deferred. A
-    /// close subtracts its share when its whole tracker drains, so the sum can exceed the live
-    /// entry count while some of a deferred route's entries have already finished.
-    pub deferred_work: std::sync::atomic::AtomicUsize,
+    /// Route trackers of deferred route closes; `deferred_work` sums their live entry counts.
+    pub deferred_trackers: Mutex<Vec<TaskTracker>>,
     abort_handles: Mutex<AbortRegistry>,
     /// The shutdown-callback latch prevents abandon cleanup from spawning a second callback while the graceful callback still runs.
     shutdown_callback_ran: AtomicBool,
@@ -224,6 +222,29 @@ impl<H: HostHandler> HostShared<H> {
     ) {
         let fence = self.deferred_closes.token();
         (fence, self.registry.begin_close_owned(handle, gen_id))
+    }
+
+    /// Registers a deferred route's tracker and returns the live route-tracker entries across
+    /// every deferred close, pruning trackers that have drained.
+    pub(crate) fn defer_route_work(&self, tracker: &TaskTracker) -> usize {
+        let mut trackers = self
+            .deferred_trackers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        trackers.retain(|held| !held.is_empty());
+        trackers.push(tracker.clone());
+        trackers.iter().map(TaskTracker::len).sum()
+    }
+
+    /// Live route-tracker entries across every deferred close.
+    #[cfg(test)]
+    pub(crate) fn deferred_work(&self) -> usize {
+        self.deferred_trackers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(TaskTracker::len)
+            .sum()
     }
 
     fn abort_all(&self) {
@@ -870,7 +891,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
         connection_permits: Arc::new(Semaphore::new(config.limits.max_connections)),
         tracker: TaskTracker::new(),
         deferred_closes: TaskTracker::new(),
-        deferred_work: std::sync::atomic::AtomicUsize::new(0),
+        deferred_trackers: Mutex::new(Vec::new()),
         abort_handles: Mutex::new(AbortRegistry::new()),
         shutdown_callback_ran: AtomicBool::new(false),
         shutdown: shutdown.clone(),
