@@ -1,14 +1,30 @@
 use super::*;
 use crate::connection::{PendingEntry, PendingKey};
-use crate::dispatch::{Settlement, Terminal, settle, settle_route_work};
+use crate::dispatch::{Settlement, Terminal, settle, settle_route_work, settle_stopped_route_work};
 use crate::frame_channel::{SenderQueue, frame_sender};
 use crate::handler::{
     BindOutcome, RequestCtx, RequestOutcome, RouteClass, RouteHandle, RouteIdentity, RouteTarget,
 };
 use crate::routing::CloseDecision;
 use crate::wire::FrameId;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-struct UnusedHandler;
+struct UnusedHandler {
+    route_gones: AtomicUsize,
+    route_gones_started: AtomicUsize,
+    /// `true` parks every route-gone callback until the test sends `false`.
+    hold_route_gone: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for UnusedHandler {
+    fn default() -> Self {
+        Self {
+            route_gones: AtomicUsize::new(0),
+            route_gones_started: AtomicUsize::new(0),
+            hold_route_gone: tokio::sync::watch::Sender::new(false),
+        }
+    }
+}
 impl HostHandler for UnusedHandler {
     fn manifests(&self) -> Vec<crate::ManifestSnapshot> {
         Vec::new()
@@ -22,7 +38,15 @@ impl HostHandler for UnusedHandler {
     async fn handle(&self, _: RequestCtx) -> RequestOutcome {
         unreachable!()
     }
-    async fn route_gone(&self, _: RouteHandle) {}
+    async fn route_gone(&self, _: RouteHandle) {
+        self.route_gones_started.fetch_add(1, Ordering::SeqCst);
+        let _ = self
+            .hold_route_gone
+            .subscribe()
+            .wait_for(|held| !*held)
+            .await;
+        self.route_gones.fetch_add(1, Ordering::SeqCst);
+    }
     async fn health(&self) -> HealthReport {
         HealthReport::ok()
     }
@@ -31,7 +55,7 @@ impl HostHandler for UnusedHandler {
 
 fn shared() -> Arc<HostShared<UnusedHandler>> {
     Arc::new(HostShared {
-        handler: Arc::new(UnusedHandler),
+        handler: Arc::new(UnusedHandler::default()),
         limits: HostLimits::default(),
         timing: HostTiming {
             route_close_budget: Duration::from_millis(100),
@@ -56,6 +80,8 @@ fn shared() -> Arc<HostShared<UnusedHandler>> {
         handshake_permits: Arc::new(Semaphore::new(1)),
         connection_permits: Arc::new(Semaphore::new(1)),
         tracker: TaskTracker::new(),
+        deferred_closes: TaskTracker::new(),
+        deferred_trackers: Mutex::new(Vec::new()),
         abort_handles: Mutex::new(AbortRegistry::new()),
         shutdown_callback_ran: AtomicBool::new(false),
         shutdown: CancellationToken::new(),
@@ -90,12 +116,25 @@ struct CloseFixture {
     physical_work: tokio_util::task::task_tracker::TaskTrackerToken,
 }
 
+/// Waits for the close owner to abort the fixture's dispatch task, bounded so a close that skips
+/// the abort fails here.
+async fn observe_abort(aborted: tokio::sync::oneshot::Receiver<()>) {
+    tokio::time::timeout(Duration::from_secs(1), aborted)
+        .await
+        .expect("the close owner aborts the dispatch task")
+        .unwrap();
+}
+
 fn fixture() -> CloseFixture {
-    let shared = shared();
+    fixture_on(shared(), 1)
+}
+
+/// A fixture whose route lives on `shared`, on a generation numbered `generation_id`.
+fn fixture_on(shared: Arc<HostShared<UnusedHandler>>, generation_id: u64) -> CloseFixture {
     let token = CancellationToken::new();
     let (writer, queue) = frame_sender(8, token.clone(), Duration::from_secs(30));
     let generation = Arc::new(GenerationCore {
-        id: 1,
+        id: generation_id,
         token,
         read_cancel: CancellationToken::new(),
         read_tasks: TaskTracker::new(),
@@ -114,7 +153,7 @@ fn fixture() -> CloseFixture {
         .reserve(&generation, RouteClass::General)
         .unwrap();
     shared.registry.install_bound(route);
-    let (tracker, _, cancelled) = shared.registry.route_tracker(route, 1).unwrap();
+    let (tracker, _, cancelled) = shared.registry.route_tracker(route, generation_id).unwrap();
     let key = (route.channel, route.epoch, 1);
     let settlement = Settlement::with_credit(None);
     generation.pending.lock().unwrap().insert(
@@ -122,6 +161,7 @@ fn fixture() -> CloseFixture {
         PendingEntry {
             cancel: cancelled.clone(),
             settlement: settlement.clone(),
+            _pending_permit: shared.pending_permits.clone().try_acquire_owned().unwrap(),
         },
     );
     let (aborted_tx, aborted) = tokio::sync::oneshot::channel();
@@ -132,7 +172,7 @@ fn fixture() -> CloseFixture {
     });
     shared
         .registry
-        .register_dispatch(route, 1, outer.abort_handle())
+        .register_dispatch(route, generation_id, outer.abort_handle())
         .unwrap();
     let physical_work = tracker.token();
     let decision = shared.registry.begin_close(route);
@@ -164,7 +204,7 @@ async fn post_abort_completion_settles_once_without_wall_clock_sleeps() {
         ..
     } = fixture();
     let close = tokio::spawn(async move { settle_route_work(&shared, route, decision).await });
-    aborted.await.unwrap();
+    observe_abort(aborted).await;
     assert!(!settlement.is_settled());
     assert!(queue.try_recv().is_err());
     drop(physical_work);
@@ -181,12 +221,13 @@ async fn post_abort_completion_settles_once_without_wall_clock_sleeps() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn live_work_after_both_close_windows_refuses_cleanup() {
+async fn live_work_after_both_close_windows_defers_route_gone_until_it_stops() {
     let CloseFixture {
         shared,
         generation,
         mut queue,
         route,
+        settlement,
         decision,
         aborted,
         physical_work,
@@ -196,16 +237,624 @@ async fn live_work_after_both_close_windows_refuses_cleanup() {
     let close_shared = shared.clone();
     let close =
         tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
-    aborted.await.unwrap();
+    observe_abort(aborted).await;
     assert!(
         !close.await.unwrap(),
-        "held physical work must refuse cleanup"
+        "held physical work defers route-gone past the close owner"
     );
     assert_eq!(Instant::now() - started, Duration::from_millis(200));
-    assert!(shared.shutdown.is_cancelled());
+    assert!(
+        !shared.shutdown.is_cancelled() && shared.fatal.take().is_none(),
+        "work outliving the close budget fails its route, not the host"
+    );
     assert!(queue.try_recv().is_err());
     assert!(!generation.pending.lock().unwrap().is_empty());
+    assert_eq!(
+        shared.registry.live_count(),
+        1,
+        "the held route keeps its channel"
+    );
+
     drop(physical_work);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
+    assert!(settlement.is_settled());
+    let terminal = queue.try_recv().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&terminal.bytes[crate::wire::HEADER_LEN..])
+            .unwrap()["code"],
+        "cancelled"
+    );
+    assert!(generation.pending.lock().unwrap().is_empty());
+    assert_eq!(
+        shared.registry.live_count(),
+        0,
+        "route-gone released the channel"
+    );
+    assert!(!shared.shutdown.is_cancelled());
+}
+
+/// Forced shutdown's drain and the deferred close both own a route whose work outlived the close
+/// budget; when the work stops, route-gone runs once, the channel stays held until it returns,
+/// and the deferred close still delivers the request's `cancelled` terminal.
+#[tokio::test(start_paused = true)]
+async fn a_deferred_close_and_the_forced_drain_run_route_gone_once() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        route,
+        settlement,
+        decision,
+        aborted,
+        physical_work,
+        ..
+    } = fixture();
+    shared.handler.hold_route_gone.send_replace(true);
+    let close_shared = shared.clone();
+    let close =
+        tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+    observe_abort(aborted).await;
+    assert!(!close.await.unwrap());
+    let forced_shared = shared.clone();
+    let forced =
+        tokio::spawn(async move { crate::dispatch::force_close_all_routes(&forced_shared).await });
+    // The paused clock auto-advances once every task is idle, so this sleep returns after the
+    // forced drain has parked on the route tracker beside the deferred close.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        !forced.is_finished(),
+        "the forced drain waits on the route tracker"
+    );
+    assert_eq!(shared.handler.route_gones_started.load(Ordering::SeqCst), 0);
+
+    drop(physical_work);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while shared.handler.route_gones_started.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("route-gone starts once the work stops");
+    // One owner holds the claim inside route-gone; the other returns once it loses the claim,
+    // ending either the forced drain or the deferred close.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !forced.is_finished() && !shared.deferred_closes.is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the owner that lost the claim returns");
+    assert_eq!(
+        shared.registry.live_count(),
+        1,
+        "the owner that lost the route-gone claim keeps the channel while route-gone runs"
+    );
+    shared.handler.hold_route_gone.send_replace(false);
+    tokio::time::timeout(Duration::from_secs(1), forced)
+        .await
+        .expect("the forced drain returns once route-gone is released")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
+    assert_eq!(
+        shared.handler.route_gones_started.load(Ordering::SeqCst),
+        1,
+        "route-gone must run once across both owners"
+    );
+    assert_eq!(shared.handler.route_gones.load(Ordering::SeqCst), 1);
+    assert_eq!(shared.registry.live_count(), 0);
+    assert!(settlement.is_settled());
+    let terminal = queue.try_recv().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&terminal.bytes[crate::wire::HEADER_LEN..])
+            .unwrap()["code"],
+        "cancelled"
+    );
+    assert!(generation.pending.lock().unwrap().is_empty());
+    assert!(!generation.token.is_cancelled());
+    assert!(shared.fatal.take().is_none());
+}
+
+/// Deferred closes trip the fatal latch once the route-tracker entries they wait on exceed
+/// `MAX_DEFERRED_WORK`; at the limit the host keeps serving.
+#[tokio::test(start_paused = true)]
+async fn deferred_work_past_its_limit_trips_the_fatal_latch() {
+    for (extra, fatal) in [
+        (crate::dispatch::MAX_DEFERRED_WORK - 1, false),
+        (crate::dispatch::MAX_DEFERRED_WORK, true),
+    ] {
+        let CloseFixture {
+            shared,
+            route,
+            decision,
+            aborted,
+            physical_work,
+            ..
+        } = fixture();
+        let CloseDecision::Owner { tracker, .. } = &decision else {
+            panic!("the fixture hands close ownership to the caller");
+        };
+        let held: Vec<_> = (0..extra).map(|_| tracker.token()).collect();
+        let close_shared = shared.clone();
+        let close =
+            tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+        observe_abort(aborted).await;
+        assert!(!close.await.unwrap());
+        assert_eq!(
+            shared.fatal.take().is_some(),
+            fatal,
+            "{} held entries against a limit of {}",
+            extra + 1,
+            crate::dispatch::MAX_DEFERRED_WORK
+        );
+        drop(held);
+        drop(physical_work);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            shared.tracker.close();
+            shared.tracker.wait().await;
+        })
+        .await
+        .expect("the deferred close finishes once its work stops");
+        assert_eq!(shared.deferred_work(), 0);
+    }
+}
+
+/// A dispatch task aborted inside `settle`, after it wins and before its terminal is queued,
+/// leaves the request to its route close: the close queues one `cancelled` terminal carrying a
+/// fresh terminal credit, and the generation keeps serving.
+#[tokio::test(start_paused = true)]
+async fn a_settle_aborted_before_queuing_is_settled_by_the_route_close() {
+    settle_aborted_before_queuing(Credits::Available).await;
+}
+
+/// The retried terminal waits for a terminal credit until the post-abort deadline; with every
+/// credit held until then, the close drops that one terminal instead of queuing an uncredited
+/// frame, and the connection keeps serving.
+#[tokio::test(start_paused = true)]
+async fn a_retried_terminal_without_a_credit_is_dropped_and_the_connection_keeps_serving() {
+    settle_aborted_before_queuing(Credits::HeldPastDeadline).await;
+}
+
+/// A credit that frees inside the post-abort window carries the retried terminal, and the
+/// generation keeps serving.
+#[tokio::test(start_paused = true)]
+async fn a_retried_terminal_takes_a_credit_that_frees_inside_the_window() {
+    settle_aborted_before_queuing(Credits::FreedInsideWindow).await;
+}
+
+/// A credit that frees inside the window lets the retry start emitting; a retry whose emission
+/// is still blocked at the deadline retires the generation.
+#[tokio::test(start_paused = true)]
+async fn a_retried_terminal_whose_emission_stalls_retires_the_generation() {
+    settle_aborted_before_queuing(Credits::FreedWithEmissionBlocked).await;
+}
+
+/// A retry whose credit arrives with the deadline already reached is dropped, and the credit
+/// it took goes back to the connection.
+#[tokio::test(start_paused = true)]
+async fn a_retry_credited_at_the_deadline_is_dropped_and_returns_its_credit() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        route,
+        key,
+        settlement,
+        physical_work,
+        ..
+    } = fixture();
+    let credits = generation.terminal_credits.clone();
+    settlement.reattach_credit(&generation).await.unwrap();
+    let reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
+    let mut winner = Box::pin(settle(
+        &settlement,
+        &shared.terminal_budget,
+        &generation,
+        route,
+        key.2,
+        cancelled_terminal_for_test(),
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(winner.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(winner);
+    drop(reserve);
+    let before = credits.available_permits();
+    let entries = vec![(key, settlement.clone())];
+    settle_stopped_route_work(&shared, route, &generation, &entries, Instant::now()).await;
+    assert!(queue.try_recv().is_err(), "no terminal after the deadline");
+    assert!(!generation.token.is_cancelled());
+    assert!(!generation.writer.is_retired());
+    assert_eq!(
+        credits.available_permits(),
+        before,
+        "the dropped retry returned the credit it took"
+    );
+    drop(physical_work);
+}
+
+fn cancelled_terminal_for_test() -> Terminal {
+    Terminal::Error {
+        code: "handler_error".to_owned(),
+        message: "handler failed".to_owned(),
+        retry_after_ms: None,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Credits {
+    Available,
+    HeldPastDeadline,
+    FreedInsideWindow,
+    FreedWithEmissionBlocked,
+}
+
+async fn settle_aborted_before_queuing(credits_state: Credits) {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        route,
+        key,
+        settlement,
+        decision,
+        physical_work,
+        ..
+    } = fixture();
+    // The request carries a real terminal credit, as an admitted request does.
+    let credits = generation.terminal_credits.clone();
+    let before = credits.available_permits();
+    settlement.reattach_credit(&generation).await.unwrap();
+    assert_eq!(credits.available_permits(), before - 1);
+    // Holding the whole terminal reserve parks the winner in its budget wait.
+    let reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
+    let mut winner = Box::pin(settle(
+        &settlement,
+        &shared.terminal_budget,
+        &generation,
+        route,
+        key.2,
+        Terminal::Error {
+            code: "handler_error".to_owned(),
+            message: "handler failed".to_owned(),
+            retry_after_ms: None,
+        },
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(winner.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(settlement.is_settled());
+    drop(winner);
+    assert_eq!(
+        credits.available_permits(),
+        before,
+        "the aborted winner's credit returned"
+    );
+    let held = (credits_state != Credits::Available).then(|| {
+        let all = u32::try_from(credits.available_permits()).unwrap();
+        credits.clone().try_acquire_many_owned(all).unwrap()
+    });
+    drop(reserve);
+    let close_shared = shared.clone();
+    let close =
+        tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+    // The fixture's dispatch task never ends, so the close aborts it after one 100 ms window
+    // and the post-abort window ends at 200 ms.
+    let started = Instant::now();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    drop(physical_work);
+    if credits_state == Credits::FreedWithEmissionBlocked {
+        let blocked = shared.terminal_budget.try_charge(1 << 20).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(held);
+        assert!(close.await.unwrap());
+        assert_eq!(Instant::now() - started, Duration::from_millis(200));
+        assert!(generation.token.is_cancelled());
+        assert!(queue.try_recv().is_err());
+        drop(blocked);
+        return;
+    }
+    if credits_state == Credits::FreedInsideWindow {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(held);
+        assert!(close.await.unwrap());
+        assert!(!generation.token.is_cancelled());
+        let terminal = queue.try_recv().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&terminal.bytes[crate::wire::HEADER_LEN..])
+                .unwrap()["code"],
+            "cancelled"
+        );
+        assert_eq!(credits.available_permits(), before - 1);
+        return;
+    }
+    assert!(close.await.unwrap());
+    if credits_state == Credits::HeldPastDeadline {
+        assert_eq!(
+            Instant::now() - started,
+            Duration::from_millis(200),
+            "the retry waits until the post-abort deadline"
+        );
+        assert!(
+            !generation.token.is_cancelled(),
+            "one missing credit leaves the connection serving"
+        );
+        assert!(
+            !generation.writer.is_retired(),
+            "one missing credit leaves the writer accepting output"
+        );
+        assert!(
+            queue.try_recv().is_err(),
+            "no uncredited terminal was queued"
+        );
+        drop(held);
+        return;
+    }
+    assert!(!generation.token.is_cancelled());
+    let terminal = queue.try_recv().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&terminal.bytes[crate::wire::HEADER_LEN..])
+            .unwrap()["code"],
+        "cancelled"
+    );
+    assert!(queue.try_recv().is_err(), "one terminal for the request");
+    assert_eq!(
+        credits.available_permits(),
+        before - 1,
+        "the retried terminal carries a credit until its block returns"
+    );
+    drop(terminal);
+    assert_eq!(credits.available_permits(), before);
+}
+
+/// The drain emits a request that still holds its terminal credit before it retries an aborted
+/// winner that needs a fresh one, so under credit pressure the credited terminal goes out, its
+/// returned credit carries the retry, and the generation keeps serving.
+#[tokio::test(start_paused = true)]
+async fn the_drain_emits_credited_requests_before_retrying_aborted_winners() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        route,
+        key,
+        settlement,
+        physical_work,
+        ..
+    } = fixture();
+    let credits = generation.terminal_credits.clone();
+    // The aborted winner: it took its credit, parked in the budget wait, and was dropped.
+    settlement.reattach_credit(&generation).await.unwrap();
+    let reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
+    let mut winner = Box::pin(settle(
+        &settlement,
+        &shared.terminal_budget,
+        &generation,
+        route,
+        key.2,
+        Terminal::Error {
+            code: "handler_error".to_owned(),
+            message: "handler failed".to_owned(),
+            retry_after_ms: None,
+        },
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(winner.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(winner);
+    drop(reserve);
+    // A second request on the route that still holds its credit.
+    let credited_key = (route.channel, route.epoch, 2);
+    let credited = Settlement::with_credit(Some(credits.clone().try_acquire_owned().unwrap()));
+    // Every other credit is held, so only the credited request's own credit can free one.
+    let all = u32::try_from(credits.available_permits()).unwrap();
+    let held = credits.clone().try_acquire_many_owned(all).unwrap();
+    let entries = vec![(key, settlement.clone()), (credited_key, credited.clone())];
+    let drain_shared = shared.clone();
+    let drain_generation = generation.clone();
+    let drain = tokio::spawn(async move {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        settle_stopped_route_work(&drain_shared, route, &drain_generation, &entries, deadline)
+            .await;
+    });
+    let first = tokio::time::timeout(Duration::from_millis(500), queue.recv())
+        .await
+        .expect("the credited request's terminal is queued first")
+        .unwrap();
+    let first_header = crate::wire::decode_header(&first.bytes).unwrap();
+    assert_eq!(first_header.corr, credited_key.2);
+    // Its block returns, which frees the credit the retry waits for.
+    drop(first);
+    let second = tokio::time::timeout(Duration::from_millis(500), queue.recv())
+        .await
+        .expect("the retried terminal takes the freed credit")
+        .unwrap();
+    assert_eq!(
+        crate::wire::decode_header(&second.bytes).unwrap().corr,
+        key.2
+    );
+    tokio::time::timeout(Duration::from_secs(1), drain)
+        .await
+        .expect("the drain returns")
+        .unwrap();
+    assert!(!generation.token.is_cancelled());
+    drop((second, held, physical_work));
+}
+
+/// `MAX_DEFERRED_WORK` bounds the sum across deferred closes on one host, and a close that
+/// finishes returns exactly its own share.
+#[tokio::test(start_paused = true)]
+async fn deferred_work_sums_across_deferred_closes() {
+    let shared = shared();
+    let half = crate::dispatch::MAX_DEFERRED_WORK / 2;
+    let mut held = Vec::new();
+    let mut work = Vec::new();
+    for (generation_id, extra, fatal) in [(1, half - 1, false), (2, half, true)] {
+        let CloseFixture {
+            route,
+            decision,
+            aborted,
+            physical_work,
+            ..
+        } = fixture_on(shared.clone(), generation_id);
+        let CloseDecision::Owner { tracker, .. } = &decision else {
+            panic!("the fixture hands close ownership to the caller");
+        };
+        held.push((0..extra).map(|_| tracker.token()).collect::<Vec<_>>());
+        let close_shared = shared.clone();
+        let close =
+            tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+        observe_abort(aborted).await;
+        assert!(!close.await.unwrap());
+        assert_eq!(shared.fatal.take().is_some(), fatal);
+        work.push(physical_work);
+    }
+    assert_eq!(
+        shared.deferred_work(),
+        crate::dispatch::MAX_DEFERRED_WORK + 1
+    );
+    drop(held.remove(0));
+    drop(work.remove(0));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while shared.deferred_work() != half + 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the released close returns exactly its share");
+    drop(held);
+    drop(work);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
+    assert_eq!(shared.deferred_work(), 0);
+}
+
+/// The limit counts live entries: entries a deferred route finished before a later deferral do
+/// not count against it.
+#[tokio::test(start_paused = true)]
+async fn deferred_work_counts_only_entries_still_held() {
+    let shared = shared();
+    let mut kept = Vec::new();
+    for (generation_id, extra, release_early) in [(1, 40, 39), (2, 30, 0)] {
+        let CloseFixture {
+            route,
+            decision,
+            aborted,
+            physical_work,
+            ..
+        } = fixture_on(shared.clone(), generation_id);
+        let CloseDecision::Owner { tracker, .. } = &decision else {
+            panic!("the fixture hands close ownership to the caller");
+        };
+        let mut held: Vec<_> = (0..extra).map(|_| tracker.token()).collect();
+        let close_shared = shared.clone();
+        let close =
+            tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+        observe_abort(aborted).await;
+        assert!(!close.await.unwrap());
+        held.truncate(extra - release_early);
+        kept.push((held, physical_work));
+    }
+    assert!(
+        shared.fatal.take().is_none(),
+        "40 + 30 entries at deferral, {} still held",
+        shared.deferred_work()
+    );
+    assert_eq!(shared.deferred_work(), 2 + 31);
+    drop(kept);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while shared.deferred_work() != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("both deferred closes drain once their work stops");
+
+    // The next deferral prunes the drained trackers.
+    let CloseFixture {
+        route,
+        decision,
+        aborted,
+        physical_work,
+        ..
+    } = fixture_on(shared.clone(), 3);
+    let close_shared = shared.clone();
+    let close =
+        tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+    observe_abort(aborted).await;
+    assert!(!close.await.unwrap());
+    assert_eq!(
+        shared
+            .deferred_trackers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "drained trackers were pruned at the next deferral"
+    );
+    drop(physical_work);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("every deferred close finishes once its work stops");
+}
+
+/// After its work stops, a deferred close emits under one fresh close budget and retires the
+/// generation when that budget runs out.
+#[tokio::test(start_paused = true)]
+async fn a_deferred_close_emits_under_one_fresh_close_budget() {
+    let CloseFixture {
+        shared,
+        generation,
+        queue,
+        route,
+        decision,
+        aborted,
+        physical_work,
+        ..
+    } = fixture();
+    let close_shared = shared.clone();
+    let close =
+        tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+    observe_abort(aborted).await;
+    assert!(!close.await.unwrap());
+    let _reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
+    // Separating the deferral instant from the stop instant shows the budget starts when the
+    // work stops.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let stopped = Instant::now();
+    drop(physical_work);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
+    assert_eq!(Instant::now() - stopped, Duration::from_millis(100));
+    assert!(generation.token.is_cancelled());
+    assert_eq!(shared.registry.live_count(), 0);
+    drop(queue);
 }
 
 #[tokio::test(start_paused = true)]
@@ -226,7 +875,10 @@ async fn post_abort_emission_shares_the_close_deadline() {
     let _terminal = shared.terminal_budget.try_charge(1 << 20).unwrap();
     let started = Instant::now();
     let close = tokio::spawn(async move { settle_route_work(&shared, route, decision).await });
-    aborted.await.unwrap();
+    observe_abort(aborted).await;
+    // Spending half of the post-abort window before the work stops separates a shared deadline
+    // (done at 200 ms) from a fresh emission budget (250 ms).
+    tokio::time::sleep(Duration::from_millis(50)).await;
     drop(physical_work);
     assert!(close.await.unwrap());
     assert!(
@@ -259,7 +911,7 @@ async fn post_abort_snapshot_does_not_resettle_rejection() {
         let close_shared = shared.clone();
         let close =
             tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
-        aborted.await.unwrap();
+        observe_abort(aborted).await;
         assert!(cancelled.is_cancelled());
         shared.registry.freeze_admission();
         let never_started = tokio::spawn(std::future::pending::<()>());
@@ -442,8 +1094,12 @@ async fn a_request_losing_the_registration_race_retires_on_a_failed_return() {
         budget.try_charge(1).unwrap(),
     );
     crate::dispatch::dispatch_request(&shared, &generation, frame).await;
-    shared.tracker.close();
-    shared.tracker.wait().await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
     assert!(
         generation.token.is_cancelled(),
         "the failed return is a transport fault, not a rejectable request"
@@ -520,6 +1176,7 @@ async fn a_pure_header_frame_with_a_failed_return_wake_ends_the_read_loop() {
         PendingEntry {
             cancel: cancelled.clone(),
             settlement,
+            _pending_permit: shared.pending_permits.clone().try_acquire_owned().unwrap(),
         },
     );
     let mut leases = leases_whose_return_wake_fails();
@@ -642,8 +1299,12 @@ async fn a_request_cancelled_by_route_close_before_its_copy_retires_on_a_failed_
     // test runtime cannot poll before this test yields, so the route closes first.
     crate::dispatch::dispatch_request(&shared, &generation, frame).await;
     let _decision = shared.registry.begin_close(route);
-    shared.tracker.close();
-    shared.tracker.wait().await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        shared.tracker.close();
+        shared.tracker.wait().await;
+    })
+    .await
+    .expect("deferred closes finish once their work stops");
     assert!(
         generation.token.is_cancelled(),
         "the failed return is a transport fault, not a cancellable request"

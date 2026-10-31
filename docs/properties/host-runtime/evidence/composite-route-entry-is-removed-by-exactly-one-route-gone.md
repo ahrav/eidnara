@@ -101,6 +101,17 @@ All three trip the fatal latch, so the map entry outlives the route only for as
 long as the incarnation is terminating. That is a weaker bound than the record's
 `Impact:` assumes ("for the host's lifetime") but it is a bound.
 
+> Dated note, 2026-10-31 (#1201): the graceful close path had a latch trip
+> this list did not name: `settle_route_work`'s post-abort wait expiring with
+> work still running. That trip is gone; the route passes to a deferred close
+> that runs route-gone once the work stops, bounded by `MAX_DEFERRED_WORK`, so
+> on that path the composite entry outlives the route while the host keeps
+> serving. Exception 2, the forced-drain trip in `force_close_all_routes`, is
+> unchanged. A `run_route_gone` caller that loses the claim now returns `false`
+> and leaves finalization to the owner that claimed route-gone. The record's
+> `dispatch.rs` line references cite e447c927; its `runtime.rs` references
+> cite the #1201 head.
+
 **Existing coverage, both spans re-verified.**
 
 | Site | Test | What it pins |
@@ -227,7 +238,7 @@ from the client's side or from the latch, not from a subsequent request.
   `:262-265`), `dispatch.rs:1103` onward (`open_route`), `:1140-1175` (the bind
   task, its watchdog, and `lifecycle_join`'s three arms), `:1177-1240`
   (the `Accept`/`CloseWins`/`Reject` arms), `:1252-1278` (`run_route_gone`),
-  `runtime.rs:179-209` (`lifecycle_join`), `panic_boundary.rs:1-66` (the whole
+  `runtime.rs:182-210` (`lifecycle_join`), `panic_boundary.rs:1-66` (the whole
   file), `routing.rs:377-390` (`mark_gone_started`).
 - Findings: **yes, resolved.** The chain is: `handler.bind` is invoked inside
   `panic_boundary::redact_sync` at `dispatch.rs:1148`, and `redact_sync`
@@ -236,10 +247,10 @@ from the client's side or from the latch, not from a subsequent request.
   process panic hook installed at `:38-49` prints a redacted line instead of the
   payload, then calls the closure directly. The same is true of the async
   `redact` at `:59-66`, which guards each individual poll. So a panic propagates
-  out of the `spawn_lifecycle` task. `lifecycle_join` (`runtime.rs:179-209`)
-  observes `Ok(Err(join_err))`, tests `join_err.is_panic()` at `:187`, trips the
-  fatal latch at `:192-193`, and returns `Err(LifecycleFailure { stopped: true })`
-  at `:194`. `dispatch.rs:1164` matches `Ok(None) | Err(LifecycleFailure {
+  out of the `spawn_lifecycle` task. `lifecycle_join` (`runtime.rs:182-210`)
+  observes `Ok(Err(join_err))`, tests `join_err.is_panic()` at `runtime.rs:190`, trips the
+  fatal latch at `:195-196`, and returns `Err(LifecycleFailure { running: None })`
+  at `:197`. `dispatch.rs:1164` matches `Ok(None) | Err(LifecycleFailure {
   stopped: true })`, calls `take_rejected_bind` at `:1165` and `run_route_gone` at
   `:1166`. So the panicking-`bind` outcome does produce exactly one `route_gone`,
   and the comment at `composite.rs:262-265` is correct on all three outcomes it

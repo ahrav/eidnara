@@ -72,7 +72,8 @@ Missing case accounting remains missing evidence even if assertions pass.
 
 This ranking routes work to `/testing:test-strategy`; it does not choose final
 test forms or set a benchmark acceptance policy. No new global duration or
-per-job bound is invented. Existing close budgets preserve the fatal branch.
+per-job bound is invented. Existing close budgets defer route-gone past the
+budget, and forced shutdown keeps the fatal branch.
 Lost responses require per-operation reconciliation under existing CAS/receipt
 semantics, not an exactly-one-effect assertion for each transform.
 The [fixed baseline identity][reference] settles semantic acceptance; choosing
@@ -82,8 +83,8 @@ policy, M5 allocation acceptance, and final external scope remain owner gates.
 
 [caps]: ../../../crates/daemon/src/kernel_routes/read.rs#L23-L26
 [fold]: ../../../crates/kernel/src/admission.rs#L3310-L3373
-[dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L784-L1034
-[close]: ../../../crates/host-runtime/src/dispatch.rs#L1242-L1324
+[dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
+[close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522
 [scopes]: ../../../crates/storage/src/lib.rs#L1210-L1292
 [snapshot]: ../../../crates/storage/src/lib.rs#L5749-L5786
 [history]: ../../../crates/daemon/src/decay_render.rs#L296-L338

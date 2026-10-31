@@ -81,7 +81,7 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | --- | --- | --- |
 | [Admission permits][permits] | Pending and handler-task capacity are acquired separately before dispatch. | unaudited |
 | [Handler completion fence][handler-fence] | Both the outer task and callback are tracked. | unaudited |
-| [Close gate][close-gate] | Unstopped dispatch after the post-abort wait trips fatal state and refuses cleanup. | unaudited |
+| [Close gate][close-gate] | Dispatch still running after the post-abort wait hands the route to a deferred close, which settles the route's requests and runs route-gone once the work stops. | unaudited |
 | [Retained reservations][reservations] | Staging and decode ownership release their respective charges. | unaudited |
 | [Parse admission][parse-admission] | Parse residency is charged inside the decode as values are built; a footprint above the capacity and a pool held by other requests have different refusals. | unaudited |
 | [ByteCharge ownership][byte-charge] | Owned permits hold bytes through transfer and release them on drop. | unaudited |
@@ -95,7 +95,7 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [`cancel_waits_for_the_request_blocking_work`][t-cancel-work] | Cancel during held blocking work settles nothing and releases no charge until the work is released, then one `cancelled` terminal and one release. | unaudited |
 | [`route_close_waits_for_the_request_blocking_work`][t-close-work] | Goodbye during held blocking work runs no route-gone until the work is released, then the `cancelled` terminal, exactly one route-gone, and one release. | unaudited |
 | [`route_close_waits_for_blocking_work_the_handler_did_not_await`][t-detached-work] | A handler answers without awaiting its work; route-gone still waits for the work, and the charge releases once. | unaudited |
-| [`live_work_after_both_close_windows_refuses_cleanup`][t-fatal-work] | Paused time and an observed dispatch abort establish both close windows; a retained completion token refuses cleanup. | unaudited |
+| [`live_work_after_both_close_windows_defers_route_gone_until_it_stops`][t-fatal-work] | Paused time and an observed dispatch abort establish both close windows; a retained completion token keeps the route closing with the fatal latch clear, and releasing it yields one `cancelled` terminal, an empty pending map, and a released channel. | unaudited |
 | [`post_abort_completion_settles_once_without_wall_clock_sleeps`][t-late-work] | An abort-drop signal precedes token release; fallback emits exactly one cancelled terminal. | unaudited |
 | [`a_blocking_work_panic_settles_as_one_internal_error`][t-panic-work] | A panic inside `run_blocking` settles as one `internal_error` terminal and releases the held charge once. | unaudited |
 | [`blocking_work_panic_payload_is_redacted_from_process_stderr`][t-stderr-work] | A child process panicking inside `run_blocking` writes the fixed diagnostic and not the payload to stderr. | unaudited |
@@ -254,24 +254,26 @@ exercise the restored implementation but still fail on the two baseline
 deadlines; the negative control does not establish every derived-cache oracle.
 
 The owner approves existing fatal shutdown when a unit exceeds the close budget,
-including the risk that started work delays process exit. The owner also
+including the risk that started work delays process exit. (Dated note,
+2026-10-31, #1201: route close now defers route-gone until such work stops;
+fatal shutdown remains on forced shutdown and past `MAX_DEFERRED_WORK`.) The owner also
 approves late cancellation after durable commit and skipped later Emergency95
 units with recomputed or superseded derived state. Neither decision asserts
 that every duration, fault, or recovery path has been tested.
 
-[u-abort]: ../../../crates/daemon/src/transform_unit/tests.rs#L144
-[u-page]: ../../../crates/daemon/src/transform_unit/tests.rs#L257
-[u-stale]: ../../../crates/daemon/src/transform_unit/tests.rs#L345
-[u-cap]: ../../../crates/daemon/src/transform_unit/tests.rs#L505
-[u-cancel]: ../../../crates/daemon/src/transform_unit/tests.rs#L726
-[u-emergency]: ../../../crates/daemon/src/transform_unit/tests.rs#L772
-[u-host-close]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L365
-[u-host-cancel]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L370
-[u-panic]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L375
-[u-child]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L406
-[u-failure]: ../../../crates/daemon/src/transform_unit/tests.rs#L867
-[u-meter]: ../../../crates/daemon/src/metered_decode.rs#L1189
-[u-meter-spent]: ../../../crates/daemon/src/metered_decode.rs#L1232
+[u-abort]: ../../../crates/daemon/src/transform_unit/tests.rs#L154
+[u-page]: ../../../crates/daemon/src/transform_unit/tests.rs#L267
+[u-stale]: ../../../crates/daemon/src/transform_unit/tests.rs#L355
+[u-cap]: ../../../crates/daemon/src/transform_unit/tests.rs#L515
+[u-cancel]: ../../../crates/daemon/src/transform_unit/tests.rs#L748
+[u-emergency]: ../../../crates/daemon/src/transform_unit/tests.rs#L794
+[u-host-close]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L422
+[u-host-cancel]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L427
+[u-panic]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L465
+[u-child]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L496
+[u-failure]: ../../../crates/daemon/src/transform_unit/tests.rs#L917
+[u-meter]: ../../../crates/daemon/src/metered_decode.rs#L1488
+[u-meter-spent]: ../../../crates/daemon/src/metered_decode.rs#L1531
 
 ## Guarded store
 
@@ -469,13 +471,13 @@ that no related check exists anywhere in the repository.
 [configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L345
 [row-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2002
 [byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
-[permits]: ../../../crates/host-runtime/src/dispatch.rs#L824-L856
-[handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L872-L940
-[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
+[permits]: ../../../crates/host-runtime/src/dispatch.rs#L981-L1008
+[handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L1028-L1184
+[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1649
 [reservations]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
-[saturation-test]: ../../../crates/host-runtime/tests/dispatch.rs#L294
-[cancel-test]: ../../../crates/host-runtime/tests/dispatch.rs#L357
-[simultaneous-test]: ../../../crates/host-runtime/tests/dispatch.rs#L452
+[saturation-test]: ../../../crates/host-runtime/tests/dispatch.rs#L318
+[cancel-test]: ../../../crates/host-runtime/tests/dispatch.rs#L381
+[simultaneous-test]: ../../../crates/host-runtime/tests/dispatch.rs#L476
 [upload-cap-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L910
 [upload-finish-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L965
 [upload-keep-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1103
@@ -528,20 +530,20 @@ that no related check exists anywhere in the repository.
 [parse-admission]: ../../../crates/daemon/src/lib.rs#L16379-L16392
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
-[route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1079
-[stream-cancel]: ../../../crates/host-runtime/tests/dispatch.rs#L503
-[handler-panic]: ../../../crates/host-runtime/tests/dispatch.rs#L551
-[t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L725
-[t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L781
-[t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L830
-[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L180
-[t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L150
-[t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L872
-[t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L610
-[output-reservation]: ../../../crates/host-runtime/tests/dispatch.rs#L956
-[egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1032
-[reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1216
-[general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1313
+[route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1135
+[stream-cancel]: ../../../crates/host-runtime/tests/dispatch.rs#L527
+[handler-panic]: ../../../crates/host-runtime/tests/dispatch.rs#L575
+[t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L749
+[t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L805
+[t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L841
+[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L224
+[t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L194
+[t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L874
+[t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L634
+[output-reservation]: ../../../crates/host-runtime/tests/dispatch.rs#L958
+[egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1034
+[reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1262
+[general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1384
 [request-cap]: ../../../crates/daemon/src/lib.rs#L19899
 [parse-nodes]: ../../../crates/daemon/src/lib.rs#L20631-L20637
 [parse-copies]: ../../../crates/daemon/src/lib.rs#L20638-L20647
@@ -615,14 +617,14 @@ that no related check exists anywhere in the repository.
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5277
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
 [pass-probe]: ../../../crates/daemon/src/lib.rs#L25999
-[t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1494
-[t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L877
-[t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1464
-[t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L841
-[t-task-output]: ../../../crates/host-runtime/src/handler.rs#L918
-[t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L863
-[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L208
-[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L236
+[t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1956
+[t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L943
+[t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1542
+[t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L879
+[t-task-output]: ../../../crates/host-runtime/src/handler.rs#L984
+[t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L901
+[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L861
+[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L897
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L16054
 [rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5664
 [foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5627
