@@ -1080,4 +1080,18 @@ impl crate::SnapshotRead<'_> {
             evidence_liveness,
         }))
     }
+
+    /// The serving facts of the object `object_id` at this snapshot, from the serving view
+    /// [`KernelStore::claim_standing_at_within_budget`] reads, or `None` when the view serves no
+    /// row for it.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` for an `object_id` the claim reads refuse, `CorruptCanonicalRow` for a stored
+    /// row that fails its checks, and the store's read errors.
+    pub fn served_facts(&self, object_id: &str) -> Result<Option<ServedFacts>, ClaimFactsError> {
+        let ids = [object_id.to_owned()];
+        check_claim_ids(&ids, NonZeroUsize::MIN)?;
+        Ok(load_served(self.tx, self.requested, &ids)?.remove(object_id))
+    }
 }

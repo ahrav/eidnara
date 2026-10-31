@@ -44,8 +44,8 @@
 //! `cause`.
 //!
 //! Refusals: a dispute with neither field, an empty value, a malformed
-//! reference, evidence on another event, or a reason over its cap or holding
-//! a secret-scanner detection answers `invalid_input`; a nonexistent,
+//! reference, evidence on another event, a capped or secret-bearing reason,
+//! or an inserted row id under a verifier prefix answers `invalid_input`; a nonexistent,
 //! retired, uncited, or foreign evidence id answers `not_found`; an asserted
 //! class above the derivation answers `class_over_declared`; a Kernel
 //! admission refusal answers `admission_policy`; an identity reused with
@@ -1145,7 +1145,7 @@ impl HandlerCore {
         // The preview and the commit refuse malformed evidence by the same
         // name, before any transaction runs.
         for operation in &mut parsed.operations {
-            if let Err(reason) = operation.compose_reason(classes.1) {
+            if let Err(reason) = operation.validate(classes.1) {
                 return state_only(KernelOutcome::invalid(reason));
             }
         }
@@ -1381,5 +1381,39 @@ mod tests {
             serde_json::from_str::<CommitResult>("[\"a\"]").unwrap_or_default(),
             CommitResult::default()
         );
+    }
+}
+// Placed after the test module so the cited lines above keep their numbers.
+#[allow(clippy::items_after_test_module)]
+impl Operation {
+    /// The per-operation checks that run before any transaction: the row ids
+    /// must lie outside the verifier's prefixes, and a disposition's reason
+    /// must compose.
+    fn validate(&mut self, reporter_taint: TaintClass) -> Result<(), InvalidReason> {
+        if self.names_verifier_ids() {
+            return Err(InvalidReason::InvalidInput);
+        }
+        self.compose_reason(reporter_taint)
+    }
+
+    /// Whether the operation names a row id under one of the verifier's prefixes
+    /// ([`crate::attestation_verifier::attest::ID_PREFIXES`]). The verifier derives
+    /// those ids from `(model decision, oid)`, so a row a caller placed under them
+    /// would occupy an attestation's ids for good.
+    fn names_verifier_ids(&self) -> bool {
+        let reserved = |id: &str| {
+            crate::attestation_verifier::attest::ID_PREFIXES
+                .iter()
+                .any(|prefix| id.starts_with(prefix))
+        };
+        match self {
+            Self::InsertDecision { spec } | Self::SupersedeDecision { spec, .. } => {
+                reserved(&spec.object_id) || reserved(&spec.decision_id)
+            }
+            Self::InsertObservation { spec } => {
+                reserved(&spec.object_id) || reserved(&spec.observation_id)
+            }
+            Self::RetireDecision { .. } | Self::Disposition { .. } => false,
+        }
     }
 }

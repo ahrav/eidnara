@@ -6,7 +6,8 @@ claim is exercised, not a verdict that it is adequate; adequacy belongs to
 `/low-level-systems:defensive-assertions-and-invariant-guards` for
 production guards. References were verified at the #1170 branch, and the
 rows #1171 added and every row pointing into a file #1171 changed were
-verified at the #1171 branch.
+verified at the #1171 branch, and the rows #1172 added and every row pointing
+into a file #1172 changed at the #1172 branch.
 
 ## Production guards
 
@@ -31,20 +32,27 @@ verified at the #1171 branch.
 | Document caps | `crates/daemon/src/project_docs.rs:23` (`MAX_PROJECT_DOC_BYTES`); `crates/daemon/src/harness_sources.rs:642` (`MAX_SOURCE_UNIT_BYTES`); unit cap applied at `crates/daemon/src/source_capture.rs:1297` | 256 KiB read, 64 KiB published | unaudited |
 | Document publisher class | `crates/daemon/src/source_capture.rs:922` | documents publish at `Sensitive` | unaudited |
 | Causality parents | `crates/kernel/src/claim_causality.rs:218` (`record_claim_causality`), `:38` (`MAX_DERIVATION_PARENTS`) | live exact parents; bounded parent list | unaudited |
-| Verifier header gate | `crates/daemon/src/attestation_verifier.rs:313` (`header_verdict`), used at `:535` (`lookup`) and `:329` (`verdict`) | header over 256 KiB is `over_budget`; a claimed length above twice or below half the header size is `Mismatch`; both before any content read | unaudited |
-| Verifier object read | `crates/daemon/src/attestation_verifier.rs:479` (`Objects::read`), `:462` (`Objects::blob_header`) | own packs, then the loose store, then the object store for an id no own index holds, each under the allocation limit; a loose read error is `object_unreadable`; kind and hash checked after decode, decoded length recorded first; allocation refusal is `over_budget`; slot exhaustion makes at most one reopen attempt per claim | unaudited |
+| Verifier header gate | `crates/daemon/src/attestation_verifier.rs:313` (`header_verdict`), used at `:538` (`lookup`) and `:329` (`verdict`) | header over 256 KiB is `over_budget`; a claimed length above twice or below half the header size is `Mismatch`; both before any content read | unaudited |
+| Verifier object read | `crates/daemon/src/attestation_verifier.rs:485` (`Objects::read`), `:468` (`Objects::blob_header`) | own packs, then the loose store, then the object store for an id no own index holds, each under the allocation limit; a loose read error is `object_unreadable`; kind and hash checked after decode, decoded length recorded first; allocation refusal is `over_budget`; slot exhaustion makes at most one reopen attempt per claim | unaudited |
 | Verifier delta-chain walk | `crates/daemon/src/git_sources.rs:314` (`OwnPacks::header`), `:329` (`OwnPacks::decode`), `:445` (`entry_header`) | an own-pack entry whose ofs- and ref-delta walk revisits an entry is refused before any decode; an id whose every holding own pack revisits an entry, names a base outside that pack, or has an undecodable header, or whose located entry fails the decode, reads a valid loose copy or is `object_unreadable(class)`; the object store never reads an id an own index holds | unaudited |
-| Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:387` (`poll`), `:352` (`Deadline`) | polled before the open and before every object read | unaudited |
+| Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:393` (`poll`), `:352` (`Deadline`) | polled before the open and before every object read | unaudited |
 | Verifier claim path | `crates/daemon/src/attestation_verifier.rs:71` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
 | Evidence-keyed descriptor read | `crates/kernel/src/source_descriptor.rs:1213` (`source_descriptor_citing_evidence`) running the statement of `SnapshotRead::source_descriptors_citing_evidence` (`:1238`) through `checked` (`:795`) | the live descriptor of a class citing an evidence id at a sequence, first in object id order, with the page read's row checks; `Retired` and `Uncited` otherwise; one statement answers several ids in request order, and a live row that fails the checks refuses only its own entry | unaudited |
 | Anchor-condition read | `crates/kernel/src/anchor_write.rs:469` (`anchor_condition_as_of`) running `SnapshotRead::anchor_condition` (`:488`) through `validate_anchor_row` (`:288`) | the anchor live at a sequence decodes as the engine decodes it; an undecodable row is `CorruptCanonicalRow` | unaudited |
 | Snapshot read | `crates/kernel/src/snapshot_read.rs:34` (`read_at`), incarnation guard at `:44`; `SnapshotRead::decision_standing` at `crates/kernel/src/claim_facts.rs:1005` | every read of one call in one reader transaction at the target's sequence; tip, budget, and incarnation refused before the first read; the standing read's registry, decision, and own-admission rows with its row checks, a supporting approval's validity from the authority-chain check as a second statement, and the row-level evidence's liveness at the sequence | unaudited |
-| Classifier self-source check | `crates/daemon/src/attestation_verifier/classify.rs:325` in `class_of` (`:304`) | after the `Active` filter (`:319`), both on the standing read, a live `Active` `verifier` decision is `self_source` before any anchor or citation read | unaudited |
-| Classifier reason order | `crates/daemon/src/attestation_verifier/classify.rs:304` (`class_of`) | one class per decision: `NotInput` for a decision not live or not `Active`, then `self_source`, then the anchor reasons, then the citation reasons in citation order | unaudited |
-| Classifier citation order and cap | `crates/daemon/src/attestation_verifier/classify.rs:391` (`citations`), `MAX_EVENT_CITATIONS` at `:53` | the row-level `evidence_id` first, then at most 32 event-level citations of other evidence from the newest `LINKED_EVENT_WINDOW` × 33 decision events | unaudited |
-| Classifier incarnation recheck | `crates/daemon/src/attestation_verifier/classify.rs:297` in `classify` (`:283`) | after the `read_at` transaction, successful or refused, a store that is not the target's incarnation is `IncarnationMismatch` | unaudited |
-| Classifier claim and binding | `crates/daemon/src/attestation_verifier/classify.rs:447` (`VerifierInput::new`), path refusal at `:463`, root match at `:466` | the claim's path and digest from the descriptor, its length from the evidence row, its oid from the anchor; a stored path outside the document path rule is `InvalidDocumentPath` when no cited row resolves to a verifiable document; the first bound root with the repository identity, else `repository_unbound` | unaudited |
-| Document kind rule | `crates/daemon/src/attestation_verifier/classify.rs:235` (`DocumentKind::of`) | configuration extensions are `CurrentConfig` with `config_present`; every other path is `CurrentCode` with `code_present` | unaudited |
+| Classifier self-source check | `crates/daemon/src/attestation_verifier/classify.rs:337` in `class_of` (`:316`) | after the `Active` filter (`:331`), both on the standing read, a live `Active` `verifier` decision is `self_source` before any anchor or citation read | unaudited |
+| Classifier reason order | `crates/daemon/src/attestation_verifier/classify.rs:316` (`class_of`) | one class per decision: `NotInput` for a decision not live or not `Active`, then `self_source`, then the anchor reasons, then the citation reasons in citation order | unaudited |
+| Classifier citation order and cap | `crates/daemon/src/attestation_verifier/classify.rs:411` (`citations`), `MAX_EVENT_CITATIONS` at `:54` | the row-level `evidence_id` first, then at most 32 event-level citations of other evidence from the newest `LINKED_EVENT_WINDOW` × 33 decision events | unaudited |
+| Classifier incarnation recheck | `crates/daemon/src/attestation_verifier/classify.rs:309` in `classify` (`:295`) | after the `read_at` transaction, successful or refused, a store that is not the target's incarnation is `IncarnationMismatch` | unaudited |
+| Classifier claim and binding | `crates/daemon/src/attestation_verifier/classify.rs:467` (`VerifierInput::new`), path refusal at `:483`, root match at `:486` | the claim's path and digest from the descriptor, its length from the evidence row, its oid from the anchor; a stored path outside the document path rule is `InvalidDocumentPath` when no cited row resolves to a verifiable document; the first bound root with the repository identity, else `repository_unbound` | unaudited |
+| Document kind rule | `crates/daemon/src/attestation_verifier/classify.rs:247` (`DocumentKind::of`), `:505` (`DocumentKind::event_kind`) | configuration extensions are `CurrentConfig` with `config_present` and `ConfigObserved`; every other path is `CurrentCode` with `code_present` and `CodeObserved` | unaudited |
+| Attestation identity | `crates/daemon/src/attestation_verifier/attest.rs:65` (`Identity::of`), `:700` (`intent`), `:735` (`ID_PREFIXES`), refused on the plugin route at `crates/daemon/src/kernel_routes/commit.rs:1403` | every id and the `source_id` hash `(model object id, oid)`; the key names the verdict's write, the decision, and the oid | unaudited |
+| Write-set check | `crates/daemon/src/attestation_verifier/attest.rs:323` (`WriteSet::check`), called in the `attest_match` envelope at `:160` and in `WriteSet::commit` at `:379` | the compared, detail, and citation evidence ids are one id; the detail is at `WITNESS_DETAIL_VERSION` and names the write set's blob and the claim's commit oid, digest, path, descriptor, lineage, and descriptor revision; the citation is a `verifier_citation` event; every id is the pair's `Identity`; both rows carry the model decision's domain and served sensitivity and one scope and the attestation its anchor; the witness carries the attestation's source triple at revision 1 and the document kind's witness kind; no row cites evidence by FK | unaudited |
+| Write-set row comparison | `crates/daemon/src/attestation_verifier/attest.rs:395` in `WriteSet::commit` (`:378`), against `WriteSet::at_tip` (`:403`) | a caller's write set equals, apart from the witness and citation timestamps, the set the model decision's row at the committed tip yields; otherwise `invalid_write_set` | unaudited |
+| Envelope recheck | `crates/daemon/src/attestation_verifier/attest.rs:602` (`recheck`): incarnation at `:611`, row anchor at `:644`, anchor at `:648`, descriptor at `:658`, the model decision's citations at `:677`; served sensitivity at `:425` | the model decision, its anchor at the sequence the envelope extends read in the envelope's transaction, its descriptor with its cited evidence row live, the classification's revision, and the claim's path, digest, and byte length, and the class the Kernel serves it at are what the classification read; otherwise `changed` | unaudited |
+| Witness oracle | `crates/daemon/src/attestation_verifier/attest.rs:448` | the envelope commits only at effective maturity `Verified` and disposition `Active`; otherwise `witness_degraded` | unaudited |
+| Opposite-key refusal | `crates/daemon/src/attestation_verifier/attest.rs:565` in `run` (`:553`) | a recorded key for the other verdict on the same decision and oid is `conflict` | unaudited |
+| Stale path | `crates/daemon/src/attestation_verifier/attest.rs:487` (`mark_stale`), skip at `:513`, admission at `:518` | one `MarkStale` under the latest admission's classes; an already `Stale` decision is skipped; a `MarkStale` returning another disposition is `invalid_write_set` | unaudited |
 
 ## Tests
 
@@ -150,8 +158,52 @@ verified at the #1171 branch.
 | `classification_at_one_sequence_ignores_the_worktree_head_and_later_commits` | `crates/daemon/tests/attestation_verifier_classify.rs:950` | snapshot purity; F3 at the classification step | unaudited |
 | `the_repository_binds_to_the_first_matching_root_in_bound_order` | `crates/daemon/tests/attestation_verifier_classify.rs:1080` | verifier input (binding) | unaudited |
 | `the_document_kind_path_rule_is_a_closed_table` | `crates/daemon/tests/attestation_verifier_classify.rs:1119` | document kind for #1172's classes (F15) | unaudited |
+| `the_evaluation_names_the_blob_the_path_resolved_to` | `crates/daemon/tests/attestation_verifier.rs:1418` | the blob id the write set records | unaudited |
+| `a_plugin_route_cannot_write_as_the_verifier_or_assert_trusted_local_code` | `crates/daemon/tests/kernel_routes.rs:6778` | plugin table; party (AC14) | unaudited |
+| `a_plugin_route_cannot_write_rows_under_the_verifier_id_prefixes` | `crates/daemon/tests/kernel_routes.rs:6834` | party (AC14, the verifier's id prefixes) | unaudited |
+| `a_match_commits_the_attestation_with_every_companion_row` | `crates/daemon/tests/attestation_verifier_attest.rs:431` | classes and cited fields; sibling; verified via witness; degradation oracle; party (AC15); validated witness; derived reinjection (AC6, AC7, F14) | unaudited |
+| `the_attestation_serves_at_the_model_decisions_sensitivity` | `crates/daemon/tests/attestation_verifier_attest.rs:572` | classes and cited fields (F14); FK fold | unaudited |
+| `a_mismatch_marks_the_model_decision_stale_once` | `crates/daemon/tests/attestation_verifier_attest.rs:597` | stale path (AC8); mark stale | unaudited |
+| `a_mismatch_on_a_decision_already_stale_is_skipped` | `crates/daemon/tests/attestation_verifier_attest.rs:660` | stale path | unaudited |
+| `an_unavailable_verdict_writes_nothing` | `crates/daemon/tests/attestation_verifier_attest.rs:685` | stale path (`Unavailable`, with and without a blob id); witness evidence equality (no blob id) | unaudited |
+| `a_write_set_built_before_the_model_decision_existed_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:727` | one outcome (`changed`) | unaudited |
+| `a_write_set_citing_other_evidence_or_another_revision_is_refused_before_the_commit` | `crates/daemon/tests/attestation_verifier_attest.rs:749` | witness evidence equality (AC9) | unaudited |
+| `a_witness_admitted_below_verified_aborts_the_envelope` | `crates/daemon/tests/attestation_verifier_attest.rs:854` | degradation (AC9); degraded witness | unaudited |
+| `a_replay_returns_the_receipt_and_a_different_verdict_conflicts` | `crates/daemon/tests/attestation_verifier_attest.rs:895` | identity (F10) | unaudited |
+| `a_match_after_the_stale_path_for_the_same_oid_conflicts` | `crates/daemon/tests/attestation_verifier_attest.rs:938` | identity (F10) | unaudited |
+| `a_model_decision_changed_after_classification_aborts_the_set` | `crates/daemon/tests/attestation_verifier_attest.rs:965` | sibling (F2, F3, deleted evidence) | unaudited |
+| `an_unrelated_attestation_does_not_abort_an_older_classification` | `crates/daemon/tests/attestation_verifier_attest.rs:1067` | sibling (an unrelated attestation committed in the window) | unaudited |
+| `a_match_on_a_configuration_document_commits_under_current_config` | `crates/daemon/tests/attestation_verifier_attest.rs:1092` | classes and cited fields (`CurrentConfig`) | unaudited |
+| `one_attestations_witness_cannot_promote_another` | `crates/daemon/tests/attestation_verifier_attest.rs:1132` | identity; verified via witness; source triple (F1) | unaudited |
+| `a_rollback_after_the_admission_leaves_no_row_and_a_reopened_store_keeps_every_row` | `crates/daemon/tests/attestation_verifier_attest.rs:1178` | one outcome (F11) | unaudited |
+| `no_model_client_is_reachable_from_the_verifier_module` | `crates/daemon/tests/attestation_verifier_attest.rs:1246` | party (AC15) | unaudited |
+| `the_attestation_serves_at_the_model_decisions_folded_class` | `crates/daemon/tests/attestation_verifier_attest.rs:1409` | classes and cited fields (served sensitivity over a `Personal` taint floor, F14) | unaudited |
+| `a_served_class_other_than_the_kernels_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:1444` | sibling (served-sensitivity recheck) | unaudited |
+| `a_write_set_naming_another_document_or_revision_is_refused_before_the_commit` | `crates/daemon/tests/attestation_verifier_attest.rs:1479` | witness evidence equality (AC9: path, descriptor, lineage, revision, scope, citation kind, source revision, source kind) | unaudited |
+| `a_classification_from_another_incarnation_or_with_other_classes_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:1552` | sibling (incarnation and class recheck, both verdicts) | unaudited |
+| `a_mismatch_for_a_decision_re_disposed_after_classification_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:1595` | stale path (F2, other disposition) | unaudited |
+| `a_descriptor_republished_after_classification_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:1623` | sibling (F3, a newer live descriptor revision, both verdicts) | unaudited |
+| `a_match_after_a_stale_path_under_another_blob_conflicts` | `crates/daemon/tests/attestation_verifier_attest.rs:1689` | identity (F10, opposite key under another digest) | unaudited |
+| `the_attestation_copies_the_model_decisions_kind_scope_and_summary` | `crates/daemon/tests/attestation_verifier_attest.rs:1858` | classes and cited fields (decision kind, scope, and summary copied from the model decision's row) | unaudited |
+| `a_write_set_with_content_other_than_the_model_decisions_is_refused_in_the_envelope` | `crates/daemon/tests/attestation_verifier_attest.rs:1937` | classes and cited fields (a caller-edited decision kind, summary, rationale, or payload text is `invalid_write_set`) | unaudited |
+| `the_identity_depends_on_the_model_and_the_oid` | `crates/daemon/tests/attestation_verifier_attest.rs:1717` | identity (known answer, oid dependence) | unaudited |
+| `a_classification_naming_another_live_anchor_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:1995` | sibling (row anchor recheck, both verdicts) | unaudited |
+| `a_classification_whose_claim_differs_from_the_cited_descriptor_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:2024` | sibling (claim against the cited descriptor, both verdicts) | unaudited |
+| `a_classification_citing_a_document_the_model_decision_does_not_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:2072` | sibling (compared evidence among the model decision's citations, both verdicts) | unaudited |
+| `a_row_level_citation_older_than_the_event_window_still_attests` | `crates/daemon/tests/attestation_verifier_attest.rs:2126` | sibling (row-level citation outside the event window, both verdicts) | unaudited |
 | `a_corrupt_cited_descriptor_refuses_only_when_the_citation_walk_reaches_it` | `crates/daemon/tests/attestation_verifier_classify.rs:1165` | verifier input (per-entry refusal in citation order) | unaudited |
 | `row_level_evidence_with_no_row_at_the_sequence_refuses_after_the_membership_and_anchor_checks` | `crates/daemon/tests/attestation_verifier_classify.rs:1217` | party, `self_source` half; verifier input (refusal order) | unaudited |
+| `a_classification_naming_another_descriptor_revision_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:2197` | sibling (descriptor revision recheck, both verdicts) | unaudited |
+| `a_match_commits_while_every_pooled_reader_is_held` | `crates/daemon/tests/attestation_verifier_attest.rs:1732` | one outcome (the envelope reads on the writer connection while every pooled reader is held) | unaudited |
+| `a_mismatch_for_a_decision_superseded_or_retired_after_classification_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:1774` | sibling (F2 on the stale path) | unaudited |
+| `a_classification_at_a_sequence_before_the_model_decision_is_changed` | `crates/daemon/tests/attestation_verifier_attest.rs:1826` | sibling; one outcome (a classification before the creating commit, both verdicts) | unaudited |
+| `a_mismatch_marks_stale_under_the_model_decisions_own_classes` | `crates/daemon/tests/attestation_verifier_attest.rs:2225` | stale path (AC8, the latest admission's classes under a `Personal` taint) | unaudited |
+| `the_committed_rationale_and_detail_name_the_compared_claim` | `crates/daemon/tests/attestation_verifier_attest.rs:2254` | classes and cited fields (the committed rationale and detail) | unaudited |
+| `an_occupied_attestation_id_refuses_the_write_set` | `crates/daemon/tests/attestation_verifier_attest.rs:2289` | identity (D1, an occupied id is `refused(conflict)`) | unaudited |
+| `the_request_digest_is_pinned` | `crates/daemon/tests/attestation_verifier_attest.rs:2325` | identity (the request digest's tagged layout) | unaudited |
+| `an_envelope_reads_the_decisions_live_at_the_tip_it_extends` | `crates/kernel/tests/kernel_slice.rs:2550` | sibling (the envelope's decision-row read at the committed tip) | unaudited |
+| `an_envelope_reads_the_decisions_cited_evidence_at_the_tip_it_extends` | `crates/kernel/tests/kernel_slice.rs:2595` | sibling (the envelope's linked-evidence read at the committed tip) | unaudited |
+| `an_envelope_reads_the_anchors_live_at_the_tip_it_extends` | `crates/kernel/tests/kernel_anchor_write.rs:971` | sibling (the envelope's anchor read at the committed tip) | unaudited |
 
 ## Categories with no check found
 
@@ -167,8 +219,10 @@ verified at the #1171 branch.
   while a classification holds its reader; the restore waits for the reader
   guard, and the tests cover a target of another incarnation refused before
   the closure runs and after the transaction.
-- Every proposed `p6-new-*` record: its code does not exist at the branch tip,
-  except the `self_source` half of `p6-new-party-distinct-and-self-refusal`.
+- The five proposed `p6-new-*` records (`p6-new-flag-off-nothing-runs`, `p6-new-pass-bounds-and-accounting`, `p6-new-cursor-never-skips-unresolved`, `p6-new-pass-progress-under-transient-unavailable`, `p6-new-attestation-stale-on-byte-change`): their code does not exist at the branch tip; #1173 and #1174 land it.
+- The write set: no test forces a non-`Stale` result from the `MarkStale`
+  admission, a scope mismatch in the envelope, or an exhausted budget in
+  `attest`, and no test terminates the process after a commit.
 
 ## Quiet areas
 

@@ -56,11 +56,12 @@ the current line.
 | G1 | Document evidence is at least `Sensitive` and anything citing it by FK serves no wider than `ExplicitSearch` | added as `p6-document-evidence-cited-by-fk-serves-no-wider-than-explicit-search` |
 | G2 | `delete_artifact` bypasses the citation guard | added as `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard`; relabelled `test-only` because `delete_artifact` has no production caller |
 | G3 | The Kernel checkout open has no allocation limit and honors replacement refs | added as `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements` |
-| G4 | A plugin `RetireDecision` can retire an attestation | queued; owner #1172 with OQ6-15 |
-| G5 | No record on the served form of an unpromoted trusted-class attestation (`ExplicitLabeled`) | queued; owner #1172 |
+| G4 | A plugin `RetireDecision` can retire an attestation | re-queued; owner #1174: the #1172 ticket resolves OQ6-15 as no new mechanism and documents the plugin `mark_stale` and retire exposure in U4 |
+| G5 | No record on the served form of an unpromoted trusted-class attestation (`ExplicitLabeled`) | closed by #1172 with no record: no verifier write commits an unpromoted attestation, because the envelope rolls back below `Verified` (`p6-new-witness-degradation-never-silent`), and the plugin route cannot write under `verifier` (`p6-new-party-distinct-and-self-refusal`), so the state has no producer |
 | G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1174 (U4 part pass). #1171 does not address it: the classifier reads no `artifact_reference`, and its claim comes from the descriptor detail and the evidence row |
 | G7 | The two records #1170 activates, `p6-new-verdict-deterministic` and `p6-new-blob-read-bounded-at-oid`, have no fresh-context four-lens evaluation | queued; owner U1 ([#1170](https://github.com/ahrav/eidnara/issues/1170)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
 | G8 | The two records #1171 activates, `p6-new-verifiability-pure-function-of-snapshot` and `p6-new-verifier-input-anchor-and-document-citation`, have no fresh-context four-lens evaluation | queued; owner U2 ([#1171](https://github.com/ahrav/eidnara/issues/1171)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
+| G9 | The nine records #1172 activates have no fresh-context four-lens evaluation | queued; owner U2 ([#1172](https://github.com/ahrav/eidnara/issues/1172)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
 
 ## Biases for a human
 
@@ -102,3 +103,25 @@ the current line.
   store, outside that walk.
 - A raw digest match counts only when the header size equals the claimed
   length, so a claim with the right digest and a wrong length is `Mismatch`.
+
+## Findings from the U2 write-set implementation
+
+- The Kernel derives the causality record's ids from the attestation's
+  object id and the commit sequence, so the causality id is a function of
+  `(model object id, oid)` and the commit, not of the pair alone.
+- The ticket keys the two verdicts' writes separately, `attest:` and
+  `stale:`. The write set refuses a recorded key for the other verdict on
+  the same decision and oid as `Conflict` inside the envelope, so "the same
+  key with the opposite verdict" reads as the same `(decision, oid)` pair.
+- The stale reason names the cited sha256 and the git blob id: a mismatch the
+  header size decides reads no content, so the blob id is the observed value
+  every mismatch carries. `Evaluation` gains `blob_oid` for this and for the
+  witness detail.
+- The witness admission's degradation is constructed by a SQLite trigger on
+  the test store that rewrites the witness's kind at insert; no production
+  seam exists for it.
+- The Kernel can serve a model decision stricter than its registry class,
+  through an admission row's class or a `Personal` or `Unclassifiable` taint
+  floor. The attestation and its witness carry the served class the
+  classification read, and the envelope rereads it, so the attestation serves
+  no wider than the model decision.
