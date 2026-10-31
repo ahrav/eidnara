@@ -277,3 +277,44 @@ fn the_registry_source_page_walks_a_scopes_live_decisions_of_one_source_kind_in_
         Err(ClaimFactsError::Kernel(KernelError::Deadline))
     );
 }
+
+/// A row bound past `i64::MAX` is clamped in the statement text, so a caller that passes
+/// `usize::MAX` for an unbounded page gets the page from both page reads.
+#[test]
+fn a_row_bound_past_i64_max_reads_the_page() {
+    let fixture = Fixture::open();
+    fixture
+        .store
+        .commit(intent("scopes"), |envelope| {
+            envelope.insert_scope(scope(SCOPE))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let seq = commit(&fixture, "rows", &[1, 2], SCOPE, "assistant");
+    commit(&fixture, "verifier", &[3], SCOPE, "verifier");
+    let tip = fixture.tip();
+    assert_eq!(
+        page(&fixture, tip, None, usize::MAX),
+        vec![(seq, object(1)), (seq, object(2))]
+    );
+    let target = fixture.store.capture_commit_read_target().unwrap();
+    let rows = fixture
+        .store
+        .read_at(target, &EvalBudget::unbounded(), |snapshot| {
+            let mut rows = Vec::new();
+            snapshot.scope_source_decisions_after(
+                SCOPE,
+                "verifier",
+                tip,
+                None,
+                NonZeroUsize::new(usize::MAX).unwrap(),
+                |source_id, object_id| {
+                    rows.push((source_id, object_id));
+                    ControlFlow::Continue(())
+                },
+            )?;
+            Ok::<_, ClaimFactsError>(rows)
+        })
+        .unwrap();
+    assert_eq!(rows, vec![("source-3".to_string(), object(3))]);
+}

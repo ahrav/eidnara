@@ -820,7 +820,10 @@ const SCOPE_SOURCE_DECISIONS_AFTER_SQL: &str = "SELECT o.source_id, o.object_id
 /// parameter while it prepares the statement and expires the prepared statement when the
 /// parameter is bound again, so a bound `LIMIT` prepares the cached statement anew at each
 /// execution.
+/// SQLite parses integer literals above `i64::MAX` as real values, causing `LIMIT` to report a
+/// datatype mismatch.
 fn limited(sql: &str, max_rows: std::num::NonZeroUsize) -> String {
+    let max_rows = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
     format!("{sql} LIMIT {max_rows}")
 }
 
