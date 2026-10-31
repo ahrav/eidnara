@@ -393,6 +393,11 @@ async fn a_settle_aborted_before_queuing_is_settled_by_the_route_close() {
         physical_work,
         ..
     } = fixture();
+    // The request carries a real terminal credit, as an admitted request does.
+    let credits = generation.terminal_credits.clone();
+    let before = credits.available_permits();
+    settlement.reattach_credit(&generation);
+    assert_eq!(credits.available_permits(), before - 1);
     // Holding the whole terminal reserve parks the winner in its budget wait.
     let reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
     let mut winner = Box::pin(settle(
@@ -425,6 +430,13 @@ async fn a_settle_aborted_before_queuing_is_settled_by_the_route_close() {
         "cancelled"
     );
     assert!(queue.try_recv().is_err(), "one terminal for the request");
+    assert_eq!(
+        credits.available_permits(),
+        before - 1,
+        "the retried terminal carries a credit until its block returns"
+    );
+    drop(terminal);
+    assert_eq!(credits.available_permits(), before);
 }
 
 /// `MAX_DEFERRED_WORK` bounds the sum across deferred closes on one host, and a close that

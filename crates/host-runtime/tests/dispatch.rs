@@ -1847,6 +1847,7 @@ async fn shutdown_joins_a_deferred_close(after_windows: bool) {
         .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
         .await
         .expect("route goodbye");
+    let goodbye_sent = tokio::time::Instant::now();
     if after_windows {
         assert_silent(&mut client, PAST_BOTH_CLOSE_WINDOWS, "route goodbye").await;
     } else {
@@ -1869,6 +1870,11 @@ async fn shutdown_joins_a_deferred_close(after_windows: bool) {
             .await
             .expect("probe terminal");
         assert_eq!(frame.error_code(), "unknown_channel");
+        assert!(
+            goodbye_sent.elapsed() < Duration::from_millis(600),
+            "shutdown must start inside both 300 ms close windows; the probe took {:?}",
+            goodbye_sent.elapsed()
+        );
     }
 
     let shutdown = tokio::spawn(host.shutdown());

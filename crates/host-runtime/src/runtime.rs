@@ -207,6 +207,21 @@ impl<H: HostHandler> HostShared<H> {
         }
     }
 
+    /// Starts a route `Goodbye` close. The `deferred_closes` token is taken before the route
+    /// turns Closing, so a graceful shutdown that finds the route Closing also waits for this
+    /// close and any deferred close it hands off to.
+    pub(crate) fn begin_goodbye_close(
+        &self,
+        handle: crate::handler::RouteHandle,
+        gen_id: u64,
+    ) -> (
+        tokio_util::task::task_tracker::TaskTrackerToken,
+        crate::routing::CloseDecision,
+    ) {
+        let fence = self.deferred_closes.token();
+        (fence, self.registry.begin_close_owned(handle, gen_id))
+    }
+
     fn abort_all(&self) {
         self.abort_handles.lock().expect("abort lock").abort_all();
     }

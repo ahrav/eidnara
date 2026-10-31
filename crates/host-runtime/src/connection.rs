@@ -509,8 +509,8 @@ pub(crate) async fn read_loop<H: HostHandler>(
                             channel: header.channel,
                             epoch: header.epoch,
                         };
-                        let close_fence = shared.deferred_closes.token();
-                        let decision = shared.registry.begin_close_owned(handle, generation.id);
+                        let (close_fence, decision) =
+                            shared.begin_goodbye_close(handle, generation.id);
                         // Duplicate, stale, and mid-bind Goodbyes require no cleanup.
                         // Spawning for duplicate, stale, or mid-bind Goodbyes would allow client-pipelined no-op tasks.
                         // Clients could pipeline unbounded no-op tasks because pure-header frames have zero capacity cost.

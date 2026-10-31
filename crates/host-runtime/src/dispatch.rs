@@ -30,8 +30,10 @@ use crate::wire::{FrameId, encode_owned_frame, pure_header_flags, response_flags
 /// `won` flips exactly once when handler completion, cancellation, route close, or teardown arrives first.
 pub struct Settlement {
     won: AtomicBool,
-    /// `queued` is set once the winning terminal has reached the writer, or the attempt has
-    /// retired the generation.
+    /// `queued` is read and written under `order`. It is set once the winning terminal has
+    /// reached the writer, or the attempt has retired the generation. `won` set with `queued`
+    /// clear after the route's tasks stopped marks a winning `settle` aborted before queuing;
+    /// the route close emits `cancelled` for that request.
     queued: AtomicBool,
     order: tokio::sync::Mutex<()>,
     /// `streamed` is set once any `StreamData` item reaches the writer.
@@ -56,6 +58,18 @@ impl Settlement {
         })
     }
 
+    /// A settle aborted after it took the credit returned that credit to the generation; the
+    /// retried terminal takes a fresh one when the pool has one.
+    pub(crate) fn reattach_credit(&self, generation: &GenerationCore) {
+        let mut slot = self
+            .credit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_none() {
+            *slot = generation.terminal_credits.clone().try_acquire_owned().ok();
+        }
+    }
+
     fn take_credit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.credit
             .lock()
@@ -63,6 +77,7 @@ impl Settlement {
             .take()
     }
 
+    /// Reports `won`; whether the terminal reached the writer is `queued`.
     pub fn is_settled(&self) -> bool {
         self.won.load(Ordering::SeqCst)
     }
@@ -1340,9 +1355,7 @@ pub async fn open_route<H: HostHandler>(
             }
             BindInstall::CloseWins => {
                 // (protocol AE8).
-                if run_route_gone(&shared, handle).await {
-                    shared.registry.finalize_close(handle);
-                }
+                finish_route_close(&shared, handle).await;
             }
         },
         crate::handler::BindOutcome::Reject { code, message } => {
@@ -1505,7 +1518,9 @@ async fn settle_stopped_route_work<H: HostHandler>(
             if settlement.queued.load(Ordering::SeqCst) {
                 continue;
             }
-            settlement.won.store(true, Ordering::SeqCst);
+            if settlement.won.swap(true, Ordering::SeqCst) {
+                settlement.reattach_credit(generation);
+            }
             emit_won_terminal(
                 settlement,
                 &shared.terminal_budget,
@@ -1545,13 +1560,9 @@ fn spawn_deferred_route_close<H: HostHandler>(
     let deferred_at = Instant::now();
     let held = tracker.len();
     let deferred_work = shared.deferred_work.fetch_add(held, Ordering::SeqCst) + held;
-    let charge = DeferredWorkCharge {
-        owner: Arc::clone(shared),
-        held,
-    };
     let task = shared.deferred_closes.track_future(async move {
         tracker.wait().await;
-        drop(charge);
+        owner.deferred_work.fetch_sub(held, Ordering::SeqCst);
         let stopped_after = deferred_at.elapsed();
         // Terminal emission receives a fresh `route_close_budget` after tracked work stops.
         let deadline = Instant::now() + owner.timing.route_close_budget;
@@ -1573,7 +1584,7 @@ fn spawn_deferred_route_close<H: HostHandler>(
     if deferred_work > MAX_DEFERRED_WORK {
         shared.fatal.trip(
             &shared.shutdown,
-            format!("{deferred_work} tasks and blocking jobs outlived their routes' close budget"),
+            format!("{deferred_work} route-tracker entries outlived their routes' close budget"),
         );
     }
     stderr_line(format!(
@@ -1582,32 +1593,27 @@ fn spawn_deferred_route_close<H: HostHandler>(
     ));
 }
 
-/// `DeferredWorkCharge` releases the deferred close's share of `deferred_work` when tracked
-/// work stops or the deferred-close task is dropped.
-struct DeferredWorkCharge<H: HostHandler> {
-    owner: Arc<HostShared<H>>,
-    held: usize,
-}
-
-impl<H: HostHandler> Drop for DeferredWorkCharge<H> {
-    fn drop(&mut self) {
-        self.owner
-            .deferred_work
-            .fetch_sub(self.held, Ordering::SeqCst);
-    }
-}
-
 /// `MAX_DEFERRED_WORK` limits the total route-tracker entries (tasks and `run_blocking` jobs)
 /// held by deferred closes, below Tokio's default blocking-pool limit of 512 threads.
 pub(crate) const MAX_DEFERRED_WORK: usize = 64;
 
-/// Stderr logging is best-effort and drops write errors. The blocking pool keeps stalled stderr
-/// writes off async worker threads.
+/// Stderr logging is best-effort: one detached thread writes at a time, and a line that arrives
+/// while it is busy is dropped.
 fn stderr_line(line: String) {
-    tokio::task::spawn_blocking(move || {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr().lock(), "{line}");
-    });
+    static WRITING: AtomicBool = AtomicBool::new(false);
+    if WRITING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("eidnara-host-stderr".to_owned())
+        .spawn(move || {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "{line}");
+            WRITING.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        WRITING.store(false, Ordering::Release);
+    }
 }
 
 pub async fn close_generation<H: HostHandler>(
