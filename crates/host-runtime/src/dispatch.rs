@@ -1521,7 +1521,7 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
     }
 }
 
-async fn settle_stopped_route_work<H: HostHandler>(
+pub(crate) async fn settle_stopped_route_work<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     handle: RouteHandle,
     generation: &Arc<GenerationCore>,

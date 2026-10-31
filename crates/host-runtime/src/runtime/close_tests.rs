@@ -1,6 +1,6 @@
 use super::*;
 use crate::connection::{PendingEntry, PendingKey};
-use crate::dispatch::{Settlement, Terminal, settle, settle_route_work};
+use crate::dispatch::{Settlement, Terminal, settle, settle_route_work, settle_stopped_route_work};
 use crate::frame_channel::{SenderQueue, frame_sender};
 use crate::handler::{
     BindOutcome, RequestCtx, RequestOutcome, RouteClass, RouteHandle, RouteIdentity, RouteTarget,
@@ -529,6 +529,82 @@ async fn settle_aborted_before_queuing(credits_state: Credits) {
     );
     drop(terminal);
     assert_eq!(credits.available_permits(), before);
+}
+
+/// The drain emits a request that still holds its terminal credit before it retries an aborted
+/// winner that needs a fresh one, so under credit pressure the credited terminal goes out, its
+/// returned credit carries the retry, and the generation keeps serving.
+#[tokio::test(start_paused = true)]
+async fn the_drain_emits_credited_requests_before_retrying_aborted_winners() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        route,
+        key,
+        settlement,
+        physical_work,
+        ..
+    } = fixture();
+    let credits = generation.terminal_credits.clone();
+    // The aborted winner: it took its credit, parked in the budget wait, and was dropped.
+    settlement.reattach_credit(&generation).await.unwrap();
+    let reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
+    let mut winner = Box::pin(settle(
+        &settlement,
+        &shared.terminal_budget,
+        &generation,
+        route,
+        key.2,
+        Terminal::Error {
+            code: "handler_error".to_owned(),
+            message: "handler failed".to_owned(),
+            retry_after_ms: None,
+        },
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(winner.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(winner);
+    drop(reserve);
+    // A second request on the route that still holds its credit.
+    let credited_key = (route.channel, route.epoch, 2);
+    let credited = Settlement::with_credit(Some(credits.clone().try_acquire_owned().unwrap()));
+    // Every other credit is held, so only the credited request's own credit can free one.
+    let all = u32::try_from(credits.available_permits()).unwrap();
+    let held = credits.clone().try_acquire_many_owned(all).unwrap();
+    let entries = vec![(key, settlement.clone()), (credited_key, credited.clone())];
+    let drain_shared = shared.clone();
+    let drain_generation = generation.clone();
+    let drain = tokio::spawn(async move {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        settle_stopped_route_work(&drain_shared, route, &drain_generation, &entries, deadline)
+            .await;
+    });
+    let first = tokio::time::timeout(Duration::from_millis(500), queue.recv())
+        .await
+        .expect("the credited request's terminal is queued first")
+        .unwrap();
+    let first_header = crate::wire::decode_header(&first.bytes).unwrap();
+    assert_eq!(first_header.corr, credited_key.2);
+    // Its block returns, which frees the credit the retry waits for.
+    drop(first);
+    let second = tokio::time::timeout(Duration::from_millis(500), queue.recv())
+        .await
+        .expect("the retried terminal takes the freed credit")
+        .unwrap();
+    assert_eq!(
+        crate::wire::decode_header(&second.bytes).unwrap().corr,
+        key.2
+    );
+    tokio::time::timeout(Duration::from_secs(1), drain)
+        .await
+        .expect("the drain returns")
+        .unwrap();
+    assert!(!generation.token.is_cancelled());
+    drop((second, held, physical_work));
 }
 
 /// `MAX_DEFERRED_WORK` bounds the sum across deferred closes on one host, and a close that
