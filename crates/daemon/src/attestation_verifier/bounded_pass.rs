@@ -321,14 +321,19 @@ impl Verifier {
         clock: &dyn PassClock,
     ) -> PassReport {
         let started = Instant::now();
+        let bound_scopes: HashSet<&str> = projects
+            .iter()
+            .map(|project| project.scope_id.as_str())
+            .collect();
+        let bound_roots: HashSet<(&Path, &str)> = projects
+            .iter()
+            .flat_map(|project| &project.roots)
+            .map(|root| (root.path.as_path(), root.digest.as_str()))
+            .collect();
         self.projects
-            .retain(|scope_id, _| projects.iter().any(|project| project.scope_id == *scope_id));
-        self.repository_ids.retain(|(path, digest), _| {
-            projects
-                .iter()
-                .flat_map(|project| &project.roots)
-                .any(|root| root.path == *path && root.digest == *digest)
-        });
+            .retain(|scope_id, _| bound_scopes.contains(scope_id.as_str()));
+        self.repository_ids
+            .retain(|(path, digest), _| bound_roots.contains(&(path.as_path(), digest.as_str())));
         let enabled: Vec<&Project> = projects
             .iter()
             .filter(|project| {

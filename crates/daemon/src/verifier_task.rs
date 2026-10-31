@@ -2,6 +2,7 @@
 //! while the Kernel is ready, over the bindings' participating per-root view and each root's
 //! effective `verifier.enabled`, and paces the passes.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -37,24 +38,36 @@ pub(crate) fn task(
 /// binding's scope and source capture's repository identity derive from, so a spelling bound
 /// through a symlink reads the scope's repository after the link is retargeted.
 fn bound_projects(bindings: &Mutex<crate::RouteBindings>) -> Vec<Project> {
-    let bindings = bindings
+    // The snapshot frees the route mutex before the roster is built.
+    let bound: Vec<crate::kernel_routes::ProjectBinding> = bindings
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .latest_per_root()
+        .into_values()
+        .map(|(_, binding)| binding.kernel_project.clone())
+        .collect();
     let mut projects: Vec<Project> = Vec::new();
-    for (_, (_, binding)) in bindings.latest_per_root() {
-        let project = &binding.kernel_project;
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    for project in bound {
         let root = Root {
             path: project.root().to_path_buf(),
             digest: project.digest().to_owned(),
         };
         let scope_id = project.scope_id();
-        match projects.iter_mut().find(|known| known.scope_id == scope_id) {
-            Some(known) if known.roots.contains(&root) => {}
-            Some(known) => known.roots.push(root),
-            None => projects.push(Project {
-                scope_id,
-                roots: vec![root],
-            }),
+        match positions.get(&scope_id) {
+            Some(&position) => {
+                let roots = &mut projects[position].roots;
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+            None => {
+                positions.insert(scope_id.clone(), projects.len());
+                projects.push(Project {
+                    scope_id,
+                    roots: vec![root],
+                });
+            }
         }
     }
     projects
