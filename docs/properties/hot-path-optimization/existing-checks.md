@@ -473,7 +473,7 @@ that no related check exists anywhere in the repository.
 [byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
 [permits]: ../../../crates/host-runtime/src/dispatch.rs#L981-L1008
 [handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L1028-L1184
-[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1636
+[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1648
 [reservations]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
 [saturation-test]: ../../../crates/host-runtime/tests/dispatch.rs#L318
 [cancel-test]: ../../../crates/host-runtime/tests/dispatch.rs#L381
@@ -623,8 +623,8 @@ that no related check exists anywhere in the repository.
 [t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L879
 [t-task-output]: ../../../crates/host-runtime/src/handler.rs#L984
 [t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L901
-[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L772
-[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L808
+[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L775
+[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L811
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L16054
 [rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5664
 [foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5627

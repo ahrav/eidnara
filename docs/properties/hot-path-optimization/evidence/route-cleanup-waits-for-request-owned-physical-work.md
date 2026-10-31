@@ -125,8 +125,9 @@ that task's own `settle`, so when the work then finishes inside the post-abort
 budget the [route drain emits][close-fallback] `cancelled` before route-gone for
 each collected pending entry whose terminal has not reached the writer
 (`Settlement::queued`), including a request whose own winning settle was aborted
-before queuing; an entry whose terminal was already queued, including admission
-rejection, is left alone. Post-abort waiting and fallback emission share one
+before queuing, which receives its terminal only when a terminal credit frees
+before the deadline; an entry whose terminal was already queued, including
+admission rejection, is left alone. Post-abort waiting and fallback emission share one
 absolute deadline. Undeliverable fallback output retires the generation;
 logical settlement does not guarantee a received terminal on a retired link.
 The host cannot stop a thread that has started, so the
@@ -198,8 +199,8 @@ exclusion.
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
 [ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L1087-L1091
 [cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L1194
-[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1466-L1636
-[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1524-L1579
+[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1466-L1648
+[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1524-L1591
 [daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
 [t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L653
