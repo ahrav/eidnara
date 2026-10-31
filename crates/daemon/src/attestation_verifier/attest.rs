@@ -660,6 +660,7 @@ fn recheck(
             let field = |name: &str| crate::git_reconcile::identity_field(&descriptor, name);
             descriptor.object_id == input.descriptor_object_id
                 && descriptor.detail.evidence_id == input.evidence_id
+                && descriptor.detail.revision == input.descriptor_revision
                 && field("relative_path") == Some(claim.relative_path())
                 && field("repository_id") == Some(input.repository_id.as_str())
                 && crate::memory_capture::cite::digest_bytes(&descriptor.detail.artifact_digest)
@@ -722,3 +723,13 @@ fn intent(input: &VerifierInput, write: Write, blob_oid: &str) -> CommitIntent {
         cause: "deterministic attestation verifier".into(),
     }
 }
+
+/// The id prefixes [`Identity::of`] writes under, in field order: object, decision, witness
+/// observation, witness object. The plugin commit route refuses rows under them, so no caller can
+/// occupy an attestation's ids before the verifier writes them.
+pub const ID_PREFIXES: [&str; 4] = [
+    "verattest:",
+    "verattestdec:",
+    "verwitness:",
+    "verwitnessobj:",
+];
