@@ -560,7 +560,7 @@ Guarantee: Every attestation id, its decision id, its witness observation and ob
 Check: `always` - live verifier decisions grouped by `(model object id, oid)` count at most one; a repeat of the key replays its receipt, the key under another request digest is `Conflict`, and a recorded opposite-verdict key for the pair is `Conflict`
 Fault/timing angle: a retry after a crash or a replayed pass; a changed claim at the same oid
 Required faults and enabling state: F10: the operation key replayed with the same and with a different verdict
-Confidence: high - [evidence](evidence/p6-new-attestation-identity-unique-per-decision-oid.md). Read `Identity::of` (`crates/daemon/src/attestation_verifier/attest.rs:65`), `intent` (`:700`), whose request digest covers the frozen claim, the compared evidence, the blob, and the verdict, and `run` (`:553`), which refuses a recorded opposite key at `:565` before any write
+Confidence: high - [evidence](evidence/p6-new-attestation-identity-unique-per-decision-oid.md). Read `Identity::of` (`crates/daemon/src/attestation_verifier/attest.rs:65`), `intent` (`:700`), whose request digest is a tagged, length-prefixed sha256 (`REQUEST_DIGEST_FORMAT`, `:745`) over the frozen claim, the compared evidence, the blob, and the verdict, and `run` (`:553`), which refuses a recorded opposite key at `:565` before any write
 Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:895`, `:938`, `:1132`, `:2289`, `:2325` (unaudited)
 Impact: falsifier: an id containing pass time or randomness, or two live attestations for one pair
 Open questions:
