@@ -106,11 +106,15 @@ struct CloseFixture {
 }
 
 fn fixture() -> CloseFixture {
-    let shared = shared();
+    fixture_on(shared(), 1)
+}
+
+/// A fixture whose route lives on `shared`, on a generation numbered `generation_id`.
+fn fixture_on(shared: Arc<HostShared<UnusedHandler>>, generation_id: u64) -> CloseFixture {
     let token = CancellationToken::new();
     let (writer, queue) = frame_sender(8, token.clone(), Duration::from_secs(30));
     let generation = Arc::new(GenerationCore {
-        id: 1,
+        id: generation_id,
         token,
         read_cancel: CancellationToken::new(),
         read_tasks: TaskTracker::new(),
@@ -129,7 +133,7 @@ fn fixture() -> CloseFixture {
         .reserve(&generation, RouteClass::General)
         .unwrap();
     shared.registry.install_bound(route);
-    let (tracker, _, cancelled) = shared.registry.route_tracker(route, 1).unwrap();
+    let (tracker, _, cancelled) = shared.registry.route_tracker(route, generation_id).unwrap();
     let key = (route.channel, route.epoch, 1);
     let settlement = Settlement::with_credit(None);
     generation.pending.lock().unwrap().insert(
@@ -148,7 +152,7 @@ fn fixture() -> CloseFixture {
     });
     shared
         .registry
-        .register_dispatch(route, 1, outer.abort_handle())
+        .register_dispatch(route, generation_id, outer.abort_handle())
         .unwrap();
     let physical_work = tracker.token();
     let decision = shared.registry.begin_close(route);
@@ -288,8 +292,10 @@ async fn a_deferred_close_and_the_forced_drain_run_route_gone_once() {
     while shared.handler.route_gones_started.load(Ordering::SeqCst) == 0 {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
+    // One owner holds the claim inside route-gone; the other returns once it loses the claim,
+    // ending either the forced drain or the deferred close.
+    while !forced.is_finished() && !shared.deferred_closes.is_empty() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
     assert_eq!(
         shared.registry.live_count(),
@@ -309,6 +315,7 @@ async fn a_deferred_close_and_the_forced_drain_run_route_gone_once() {
         1,
         "route-gone must run once across both owners"
     );
+    assert_eq!(shared.handler.route_gones.load(Ordering::SeqCst), 1);
     assert_eq!(shared.registry.live_count(), 0);
     assert!(settlement.is_settled());
     let terminal = queue.try_recv().unwrap();
@@ -362,21 +369,24 @@ async fn deferred_work_past_its_limit_trips_the_fatal_latch() {
     }
 }
 
-/// A `settle` future dropped after it wins, before its terminal is queued, retires the
-/// generation.
+/// A dispatch task aborted inside `settle`, after it wins and before its terminal is queued,
+/// leaves the request to its route close: the close queues one `cancelled` terminal and the
+/// generation keeps serving.
 #[tokio::test(start_paused = true)]
-async fn a_won_settle_dropped_before_queuing_retires_the_generation() {
+async fn a_settle_aborted_before_queuing_is_settled_by_the_route_close() {
     let CloseFixture {
         shared,
         generation,
+        mut queue,
         route,
         key,
         settlement,
+        decision,
         physical_work,
         ..
     } = fixture();
     // Holding the whole terminal reserve parks the winner in its budget wait.
-    let _reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
+    let reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
     let mut winner = Box::pin(settle(
         &settlement,
         &shared.terminal_budget,
@@ -384,8 +394,8 @@ async fn a_won_settle_dropped_before_queuing_retires_the_generation() {
         route,
         key.2,
         Terminal::Error {
-            code: "cancelled".to_owned(),
-            message: "request cancelled".to_owned(),
+            code: "handler_error".to_owned(),
+            message: "handler failed".to_owned(),
             retry_after_ms: None,
         },
     ));
@@ -395,10 +405,92 @@ async fn a_won_settle_dropped_before_queuing_retires_the_generation() {
     })
     .await;
     assert!(settlement.is_settled());
-    assert!(!generation.token.is_cancelled());
     drop(winner);
-    assert!(generation.token.is_cancelled());
+    drop(reserve);
     drop(physical_work);
+    assert!(settle_route_work(&shared, route, decision).await);
+    assert!(!generation.token.is_cancelled());
+    let terminal = queue.try_recv().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&terminal.bytes[crate::wire::HEADER_LEN..])
+            .unwrap()["code"],
+        "cancelled"
+    );
+    assert!(queue.try_recv().is_err(), "one terminal for the request");
+}
+
+/// `MAX_DEFERRED_WORK` bounds the sum across deferred closes on one host, and a close that
+/// finishes returns exactly its own share.
+#[tokio::test(start_paused = true)]
+async fn deferred_work_sums_across_deferred_closes() {
+    let shared = shared();
+    let half = crate::dispatch::MAX_DEFERRED_WORK / 2;
+    let mut held = Vec::new();
+    let mut work = Vec::new();
+    for (generation_id, extra, fatal) in [(1, half - 1, false), (2, half, true)] {
+        let CloseFixture {
+            route,
+            decision,
+            aborted,
+            physical_work,
+            ..
+        } = fixture_on(shared.clone(), generation_id);
+        let CloseDecision::Owner { tracker, .. } = &decision else {
+            panic!("the fixture hands close ownership to the caller");
+        };
+        held.push((0..extra).map(|_| tracker.token()).collect::<Vec<_>>());
+        let close_shared = shared.clone();
+        let close =
+            tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+        aborted.await.unwrap();
+        assert!(!close.await.unwrap());
+        assert_eq!(shared.fatal.take().is_some(), fatal);
+        work.push(physical_work);
+    }
+    assert_eq!(
+        shared.deferred_work.load(Ordering::SeqCst),
+        crate::dispatch::MAX_DEFERRED_WORK + 1
+    );
+    drop(held.remove(0));
+    drop(work.remove(0));
+    while shared.deferred_work.load(Ordering::SeqCst) != half + 1 {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    drop(held);
+    drop(work);
+    shared.tracker.close();
+    shared.tracker.wait().await;
+    assert_eq!(shared.deferred_work.load(Ordering::SeqCst), 0);
+}
+
+/// After its work stops, a deferred close emits under one fresh close budget and retires the
+/// generation when that budget runs out.
+#[tokio::test(start_paused = true)]
+async fn a_deferred_close_emits_under_one_fresh_close_budget() {
+    let CloseFixture {
+        shared,
+        generation,
+        queue,
+        route,
+        decision,
+        aborted,
+        physical_work,
+        ..
+    } = fixture();
+    let close_shared = shared.clone();
+    let close =
+        tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+    aborted.await.unwrap();
+    assert!(!close.await.unwrap());
+    let _reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
+    let stopped = Instant::now();
+    drop(physical_work);
+    shared.tracker.close();
+    shared.tracker.wait().await;
+    assert_eq!(Instant::now() - stopped, Duration::from_millis(100));
+    assert!(generation.token.is_cancelled());
+    assert_eq!(shared.registry.live_count(), 0);
+    drop(queue);
 }
 
 #[tokio::test(start_paused = true)]

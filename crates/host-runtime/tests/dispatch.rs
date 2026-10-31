@@ -1568,8 +1568,8 @@ async fn detached_blocking_work_observes_route_cancellation() {
     );
 }
 
-/// Twice the 50 ms `route_close_budget` these tests configure, with a wide margin for a loaded
-/// scheduler: by then the close owner has handed the held route to its deferred close.
+/// Longer than both close windows of every `route_close_budget` these tests configure (at most
+/// 300 ms), with a margin for a loaded scheduler.
 const PAST_BOTH_CLOSE_WINDOWS: Duration = Duration::from_secs(1);
 
 /// Waits for route-gone on `channel` and asserts that it fired exactly once.
@@ -1629,11 +1629,11 @@ async fn a_dropped_connection_with_work_past_the_close_budget_keeps_the_host_ser
         .route_open(LINKED_MODULE_ID, ROOT, "opencode", "slow-pass")
         .await
         .expect("a new connection opens a route while the old route's work is held");
-    assert!(
+    assert_eq!(
         successor
             .route_open(LINKED_MODULE_ID, ROOT, "opencode", "slow-pass-third")
-            .await
-            .is_err(),
+            .await,
+        Err("target_unavailable".to_owned()),
         "the held route keeps its slot, so a third route exceeds max_routes = 2"
     );
     let corr = successor.next_corr();
@@ -1830,9 +1830,25 @@ async fn shutdown_joins_a_deferred_close(after_windows: bool) {
     if after_windows {
         assert_silent(&mut client, PAST_BOTH_CLOSE_WINDOWS, "route goodbye").await;
     } else {
-        // 100 ms lets the read loop take the `Goodbye` and start its close, well inside the
-        // first 300 ms window.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The read loop turns the route Closing as it takes the `Goodbye`, so a request on the
+        // route answered `unknown_channel` shows the close has begun, inside its first window.
+        let probe = client.next_corr();
+        client
+            .send_frame(
+                TY_REQUEST,
+                FLAGS_INTERACTIVE,
+                channel,
+                epoch,
+                probe,
+                &mode_body(serde_json::json!({"mode": "echo"})),
+            )
+            .await
+            .expect("send");
+        let (_, frame) = client
+            .frames_until_corr(probe, BUDGET)
+            .await
+            .expect("probe terminal");
+        assert_eq!(frame.error_code(), "unknown_channel");
     }
 
     let shutdown = tokio::spawn(host.shutdown());

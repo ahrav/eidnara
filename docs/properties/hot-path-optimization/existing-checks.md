@@ -259,19 +259,19 @@ approves late cancellation after durable commit and skipped later Emergency95
 units with recomputed or superseded derived state. Neither decision asserts
 that every duration, fault, or recovery path has been tested.
 
-[u-abort]: ../../../crates/daemon/src/transform_unit/tests.rs#L144
-[u-page]: ../../../crates/daemon/src/transform_unit/tests.rs#L257
-[u-stale]: ../../../crates/daemon/src/transform_unit/tests.rs#L345
-[u-cap]: ../../../crates/daemon/src/transform_unit/tests.rs#L505
-[u-cancel]: ../../../crates/daemon/src/transform_unit/tests.rs#L726
-[u-emergency]: ../../../crates/daemon/src/transform_unit/tests.rs#L772
-[u-host-close]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L365
-[u-host-cancel]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L370
-[u-panic]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L375
-[u-child]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L406
-[u-failure]: ../../../crates/daemon/src/transform_unit/tests.rs#L867
-[u-meter]: ../../../crates/daemon/src/metered_decode.rs#L1189
-[u-meter-spent]: ../../../crates/daemon/src/metered_decode.rs#L1232
+[u-abort]: ../../../crates/daemon/src/transform_unit/tests.rs#L154
+[u-page]: ../../../crates/daemon/src/transform_unit/tests.rs#L267
+[u-stale]: ../../../crates/daemon/src/transform_unit/tests.rs#L355
+[u-cap]: ../../../crates/daemon/src/transform_unit/tests.rs#L515
+[u-cancel]: ../../../crates/daemon/src/transform_unit/tests.rs#L748
+[u-emergency]: ../../../crates/daemon/src/transform_unit/tests.rs#L794
+[u-host-close]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L422
+[u-host-cancel]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L427
+[u-panic]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L465
+[u-child]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L496
+[u-failure]: ../../../crates/daemon/src/transform_unit/tests.rs#L917
+[u-meter]: ../../../crates/daemon/src/metered_decode.rs#L1488
+[u-meter-spent]: ../../../crates/daemon/src/metered_decode.rs#L1531
 
 ## Guarded store
 
@@ -471,11 +471,11 @@ that no related check exists anywhere in the repository.
 [byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
 [permits]: ../../../crates/host-runtime/src/dispatch.rs#L948-L975
 [handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L995-L1151
-[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1434-L1490
+[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1435-L1491
 [reservations]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
-[saturation-test]: ../../../crates/host-runtime/tests/dispatch.rs#L294
-[cancel-test]: ../../../crates/host-runtime/tests/dispatch.rs#L357
-[simultaneous-test]: ../../../crates/host-runtime/tests/dispatch.rs#L452
+[saturation-test]: ../../../crates/host-runtime/tests/dispatch.rs#L318
+[cancel-test]: ../../../crates/host-runtime/tests/dispatch.rs#L381
+[simultaneous-test]: ../../../crates/host-runtime/tests/dispatch.rs#L476
 [upload-cap-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L910
 [upload-finish-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L965
 [upload-keep-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1103
@@ -529,15 +529,15 @@ that no related check exists anywhere in the repository.
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
 [route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1135
-[stream-cancel]: ../../../crates/host-runtime/tests/dispatch.rs#L503
-[handler-panic]: ../../../crates/host-runtime/tests/dispatch.rs#L551
-[t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L725
-[t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L781
-[t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L830
-[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L200
-[t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L170
+[stream-cancel]: ../../../crates/host-runtime/tests/dispatch.rs#L527
+[handler-panic]: ../../../crates/host-runtime/tests/dispatch.rs#L575
+[t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L749
+[t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L805
+[t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L841
+[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L204
+[t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L174
 [t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L874
-[t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L610
+[t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L634
 [output-reservation]: ../../../crates/host-runtime/tests/dispatch.rs#L958
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1034
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1262
@@ -615,14 +615,14 @@ that no related check exists anywhere in the repository.
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5277
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
 [pass-probe]: ../../../crates/daemon/src/lib.rs#L25986
-[t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1885
+[t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1901
 [t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L911
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1542
 [t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L875
 [t-task-output]: ../../../crates/host-runtime/src/handler.rs#L952
 [t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L897
-[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L405
-[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L438
+[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L497
+[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L530
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L16054
 [rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5664
 [foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5627

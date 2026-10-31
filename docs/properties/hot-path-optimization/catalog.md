@@ -351,8 +351,9 @@ Open questions:
   `RequestCtx::run_blocking` enters the work in request, route, and host
   ledgers, and the daemon keeps no drain of its own. (answered)
 - May work exceed the close budget or commit before cancellation settles? The
-  owner explicitly approves both on 2026-09-13. Existing fatal shutdown remains
-  the outcome for unquiesced work; started work can delay process exit. Full-cap
+  owner explicitly approves both on 2026-09-13. Route close defers route-gone
+  until unquiesced work stops; fatal shutdown remains the outcome on forced
+  shutdown and past `MAX_DEFERRED_WORK`. Started work can delay process exit. Full-cap
   paged and slow-disk durations are unmeasured. Later Emergency95 units may skip
   on cancellation, with derived state recomputed or superseded. (answered)
 - `kernel_routes::blocking`
@@ -773,7 +774,7 @@ them without creating implementation tickets.
 [memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L141-L212
 [memory-default]: ../../../crates/daemon/src/config.rs#L122
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L877-L1237
-[close]: ../../../crates/host-runtime/src/dispatch.rs#L1434-L1490
+[close]: ../../../crates/host-runtime/src/dispatch.rs#L1435-L1491
 [read-callback]: ../../../crates/storage/src/lib.rs#L346
 [write-callback]: ../../../crates/storage/src/lib.rs#L439
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2380

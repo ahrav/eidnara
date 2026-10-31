@@ -509,20 +509,22 @@ pub(crate) async fn read_loop<H: HostHandler>(
                             channel: header.channel,
                             epoch: header.epoch,
                         };
+                        let close_fence = shared.deferred_closes.token();
                         let decision = shared.registry.begin_close_owned(handle, generation.id);
                         // Duplicate, stale, and mid-bind Goodbyes require no cleanup.
                         // Spawning for duplicate, stale, or mid-bind Goodbyes would allow client-pipelined no-op tasks.
                         // Clients could pipeline unbounded no-op tasks because pure-header frames have zero capacity cost.
                         if matches!(decision, CloseDecision::Owner { .. }) {
                             let shared_task = Arc::clone(shared);
-                            let close = shared.deferred_closes.track_future(async move {
+                            let close = async move {
+                                let _close_fence = close_fence;
                                 crate::dispatch::close_route_decision(
                                     &shared_task,
                                     handle,
                                     decision,
                                 )
                                 .await;
-                            });
+                            };
                             shared.spawn_tracked(generation.read_tasks.track_future(close));
                         }
                     }

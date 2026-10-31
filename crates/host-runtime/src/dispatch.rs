@@ -30,6 +30,9 @@ use crate::wire::{FrameId, encode_owned_frame, pure_header_flags, response_flags
 /// `won` flips exactly once when handler completion, cancellation, route close, or teardown arrives first.
 pub struct Settlement {
     won: AtomicBool,
+    /// `queued` is set once the winning terminal has reached the writer, or the attempt has
+    /// retired the generation.
+    queued: AtomicBool,
     order: tokio::sync::Mutex<()>,
     /// `streamed` is set once any `StreamData` item reaches the writer.
     /// A streamed response may terminate only with `StreamEnd` or `Error` (protocol §8.3).
@@ -46,6 +49,7 @@ impl Settlement {
     pub fn with_credit(credit: Option<tokio::sync::OwnedSemaphorePermit>) -> Arc<Self> {
         Arc::new(Self {
             won: AtomicBool::new(false),
+            queued: AtomicBool::new(false),
             order: tokio::sync::Mutex::new(()),
             streamed: AtomicBool::new(false),
             credit: std::sync::Mutex::new(credit),
@@ -425,12 +429,8 @@ pub async fn settle(
     if settlement.won.swap(true, Ordering::SeqCst) {
         return false;
     }
-    // A future dropped after winning, before its terminal is queued, leaves the correlation
-    // with no terminal; the guard then retires the generation, and the client reports the
-    // request as `outcome_unknown`.
-    let retire_if_dropped = generation.token.clone().drop_guard();
     emit_won_terminal(settlement, budget, generation, route, corr, terminal).await;
-    retire_if_dropped.disarm();
+    settlement.queued.store(true, Ordering::SeqCst);
     true
 }
 
@@ -1237,11 +1237,10 @@ pub async fn dispatch_request<H: HostHandler>(
 }
 
 fn remove_pending(generation: &GenerationCore, key: PendingKey) {
-    let removed = generation
-        .pending
-        .lock()
-        .expect("pending lock")
-        .remove(&key);
+    let removed = {
+        let mut pending = generation.pending.lock().expect("pending lock");
+        pending.remove(&key)
+    };
     drop(removed);
 }
 
@@ -1376,6 +1375,8 @@ pub async fn open_route<H: HostHandler>(
 }
 
 /// Runs the handler's `route_gone` callback once per route under the lifecycle deadline.
+/// `true` tells the caller to finalize the route.
+#[must_use]
 async fn run_route_gone<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: RouteHandle) -> bool {
     if !shared.registry.mark_gone_started(handle) {
         return false;
@@ -1404,9 +1405,7 @@ async fn run_route_gone<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: Rou
 /// A bind that observed its handle without publishing the route still owes route-gone before the handle closes.
 async fn close_unpublished_bind<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: RouteHandle) {
     shared.registry.take_rejected_bind(handle);
-    if run_route_gone(shared, handle).await {
-        shared.registry.finalize_close(handle);
-    }
+    finish_route_close(shared, handle).await;
 }
 
 pub(crate) async fn close_route_decision<H: HostHandler>(
@@ -1422,10 +1421,12 @@ pub(crate) async fn close_route_decision<H: HostHandler>(
 pub(crate) async fn finish_route_close<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     handle: RouteHandle,
-) {
-    if run_route_gone(shared, handle).await {
+) -> bool {
+    let finalize = run_route_gone(shared, handle).await;
+    if finalize {
         shared.registry.finalize_close(handle);
     }
+    finalize
 }
 
 /// Returns whether the caller owes `finish_route_close`. It returns `false` when another owner
@@ -1496,14 +1497,16 @@ async fn settle_stopped_route_work<H: HostHandler>(
     entries: &[(PendingKey, Arc<Settlement>)],
     deadline: Instant,
 ) {
-    // An aborted dispatch task never reaches its own `settle`; `settle` is
-    // first-terminal-wins, so a request settled before the abort is left alone.
+    // Aborting a dispatch task can interrupt settlement before terminal emission completes;
+    // `queued` marks the requests whose terminal reached the writer.
     let emit_remaining = async {
         for (key, settlement) in entries {
-            if settlement.is_settled() {
+            let _order = settlement.order.lock().await;
+            if settlement.queued.load(Ordering::SeqCst) {
                 continue;
             }
-            settle(
+            settlement.won.store(true, Ordering::SeqCst);
+            emit_won_terminal(
                 settlement,
                 &shared.terminal_budget,
                 generation,
@@ -1512,6 +1515,7 @@ async fn settle_stopped_route_work<H: HostHandler>(
                 cancelled_terminal(),
             )
             .await;
+            settlement.queued.store(true, Ordering::SeqCst);
         }
     };
     if timeout_at(deadline, emit_remaining).await.is_err() {
@@ -1540,23 +1544,31 @@ fn spawn_deferred_route_close<H: HostHandler>(
     let owner = Arc::clone(shared);
     let deferred_at = Instant::now();
     let held = tracker.len();
+    let deferred_work = shared.deferred_work.fetch_add(held, Ordering::SeqCst) + held;
+    let charge = DeferredWorkCharge {
+        owner: Arc::clone(shared),
+        held,
+    };
     let task = shared.deferred_closes.track_future(async move {
         tracker.wait().await;
+        drop(charge);
         let stopped_after = deferred_at.elapsed();
         // Terminal emission receives a fresh `route_close_budget` after tracked work stops.
         let deadline = Instant::now() + owner.timing.route_close_budget;
         settle_stopped_route_work(&owner, handle, &generation, &entries, deadline).await;
         remove_route_pending(&generation, &entries);
-        finish_route_close(&owner, handle).await;
-        owner.deferred_work.fetch_sub(held, Ordering::SeqCst);
+        let outcome = if finish_route_close(&owner, handle).await {
+            "route-gone ran"
+        } else {
+            "route-gone belongs to another owner or is still running"
+        };
         stderr_line(&format!(
-            "eidnara-host: route {}/{} work stopped {} ms into its deferred close; route-gone ran",
+            "eidnara-host: route {}/{} work stopped {} ms into its deferred close; {outcome}",
             handle.channel,
             handle.epoch,
             stopped_after.as_millis()
         ));
     });
-    let deferred_work = shared.deferred_work.fetch_add(held, Ordering::SeqCst) + held;
     shared.spawn_lifecycle(task);
     if deferred_work > MAX_DEFERRED_WORK {
         shared.fatal.trip(
@@ -1568,6 +1580,21 @@ fn spawn_deferred_route_close<H: HostHandler>(
         "eidnara-host: route {}/{} work outlived its close budget; route-gone runs when it stops ({held} held, {deferred_work} across deferred closes)",
         handle.channel, handle.epoch
     ));
+}
+
+/// `DeferredWorkCharge` releases the deferred close's share of `deferred_work` when tracked
+/// work stops or the deferred-close task is dropped.
+struct DeferredWorkCharge<H: HostHandler> {
+    owner: Arc<HostShared<H>>,
+    held: usize,
+}
+
+impl<H: HostHandler> Drop for DeferredWorkCharge<H> {
+    fn drop(&mut self) {
+        self.owner
+            .deferred_work
+            .fetch_sub(self.held, Ordering::SeqCst);
+    }
 }
 
 /// `MAX_DEFERRED_WORK` limits the total route-tracker entries (tasks and `run_blocking` jobs)
@@ -1622,9 +1649,7 @@ pub async fn force_close_all_routes<H: HostHandler>(shared: &Arc<HostShared<H>>)
                 );
                 return;
             }
-            if run_route_gone(&shared, handle).await {
-                shared.registry.finalize_close(handle);
-            }
+            finish_route_close(&shared, handle).await;
         });
     }
     while drains.join_next().await.is_some() {}

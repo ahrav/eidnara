@@ -72,7 +72,8 @@ Missing case accounting remains missing evidence even if assertions pass.
 
 This ranking routes work to `/testing:test-strategy`; it does not choose final
 test forms or set a benchmark acceptance policy. No new global duration or
-per-job bound is invented. Existing close budgets preserve the fatal branch.
+per-job bound is invented. Existing close budgets defer route-gone past the
+budget, and forced shutdown keeps the fatal branch.
 Lost responses require per-operation reconciliation under existing CAS/receipt
 semantics, not an exactly-one-effect assertion for each transform.
 The [fixed baseline identity][reference] settles semantic acceptance; choosing
