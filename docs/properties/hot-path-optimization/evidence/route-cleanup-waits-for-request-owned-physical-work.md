@@ -126,9 +126,10 @@ budget the [route drain emits][close-fallback] `cancelled` before route-gone for
 each collected pending entry whose terminal has not reached the writer
 (`Settlement::queued`), including a request whose own winning settle was aborted
 before queuing, which receives its terminal only when a terminal credit frees
-before the deadline; an entry whose terminal was already queued, including
+before the deadline and otherwise stays `outcome_unknown` while the generation
+keeps serving; an entry whose terminal was already queued, including
 admission rejection, is left alone. Post-abort waiting and fallback emission share one
-absolute deadline. Undeliverable fallback output retires the generation;
+absolute deadline. Credited fallback output that misses it retires the generation;
 logical settlement does not guarantee a received terminal on a retired link.
 The host cannot stop a thread that has started, so the
 seam's contract asks the work to terminate on its own or to observe the

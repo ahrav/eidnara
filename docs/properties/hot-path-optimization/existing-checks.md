@@ -617,14 +617,14 @@ that no related check exists anywhere in the repository.
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5277
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
 [pass-probe]: ../../../crates/daemon/src/lib.rs#L25999
-[t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1949
+[t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1956
 [t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L943
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1542
 [t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L879
 [t-task-output]: ../../../crates/host-runtime/src/handler.rs#L984
 [t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L901
-[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L775
-[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L811
+[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L798
+[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L834
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L16054
 [rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5664
 [foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5627
