@@ -69,7 +69,7 @@ branch for F2 and F10.
 | `p6-new-pass-bounds-and-accounting` | F7, F10, F11, F13 |
 | `p6-new-cursor-never-skips-unresolved` | F7, F13 |
 | `p6-new-pass-progress-under-transient-unavailable` | F13 |
-| `p6-new-attestation-stale-on-byte-change` | a second descriptor revision of the cited document with other bytes; F2 on the attestation; F7 at the stale mark's commit poll and the page poll; F10; F13 |
+| `p6-new-attestation-stale-on-byte-change` | a second descriptor revision of the cited document with other bytes; F2 on the attestation; F7 at the stale mark's commit poll and the page poll; F10; F13; a restore at the stale mark's commit poll |
 | `p6-new-verdict-deterministic` | F8, F9 |
 | `p6-new-blob-read-bounded-at-oid` | F4, F5, F6, F7 |
 

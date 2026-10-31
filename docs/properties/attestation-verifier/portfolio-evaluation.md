@@ -130,14 +130,18 @@ the current line.
 
 ## Findings from the U4 applicability implementation
 
-- The applicability step reads the live descriptor of the witnessed lineage
-  at the pass sequence through a new budgeted Kernel read,
-  `live_source_descriptor_of_lineage_within_budget`, which shares its
-  query and row checks with the envelope's
-  `live_source_descriptor_of_lineage`, and pages the project's
-  attestations through `scope_decisions_after_within_budget` under
-  `SourceKindFilter::Only`, the complement of the pass's decision page. Neither changes
-  the schema.
+- The applicability step reads each page in one Kernel read transaction: it
+  pages the project's attestations by registry `(source_id, object_id)`
+  through `SnapshotRead::scope_source_decisions_after`, which seeks the
+  existing registry index `idx_objects_source`, so a page's reads follow the
+  store's verifier entries and not its other decisions; it reads each
+  attestation's standing and witness as the page reaches it; and it reads the
+  witnessed lineage's live descriptor through
+  `SnapshotRead::live_source_descriptor_digest_of_lineage`, which shares the
+  envelope read's lineage range and liveness predicate, and through the
+  checked `SnapshotRead::live_source_descriptor_of_lineage` when the evidence
+  digest differs from the witnessed one. None of the reads changes the
+  schema.
 - A stale mark the Kernel refuses counts under the write set's
   `commit_refused_` and `commit_conflict` counters; the three applicability
   counters do not partition evaluations: a replayed or already `Stale` mark and a deadline stop count in none, a row-caused standing refusal counts `applicability_unavailable` with no evaluation, and `applicability_stale` counts only committed

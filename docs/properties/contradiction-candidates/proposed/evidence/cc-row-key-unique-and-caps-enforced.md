@@ -19,7 +19,7 @@ one row per key and bounded counts.
   replay takes the evidence row the stored descriptor cites, and a receipt
   whose observation cites no row, or a row other than the one its detail
   names, or a receipt whose result names another unit's descriptor, is `CorruptCanonicalRow`
-  (`crates/kernel/src/source_descriptor.rs:911-943`;
+  (`crates/kernel/src/source_descriptor.rs:926-958`;
   `a_replay_whose_descriptor_cites_no_evidence_row_is_refused_as_corrupt`,
   `a_replay_whose_descriptor_cites_another_units_evidence_is_refused_as_corrupt`,
   `a_replay_whose_receipt_names_another_units_descriptor_is_refused_as_corrupt`,

@@ -41,7 +41,7 @@ carry no descriptor or summary text.
   refuses any other key set.
 - Equivalence tests: `crates/kernel/tests/kernel_claim_facts.rs:954`
   compares the standing read with claim facts field by field and refusal by
-  refusal; `crates/kernel/tests/kernel_source_descriptors.rs:3188` answers
+  refusal; `crates/kernel/tests/kernel_source_descriptors.rs:3275` answers
   liveness per requested position; `crates/memory-store/tests/contradiction_candidates.rs:1819`
   walks every page limit; `crates/daemon/src/candidate_pass_tests.rs:2877`
   shows a page body is the canonical `serde_json` encoding of its value;
