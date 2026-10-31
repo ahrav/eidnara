@@ -303,6 +303,12 @@ impl Verifier {
             .map_or(0, |state| state.attempts.len())
     }
 
+    pub fn remembered(&self, scope_id: &str) -> usize {
+        self.projects
+            .get(scope_id)
+            .map_or(0, |state| state.resolved.len())
+    }
+
     /// One pass over `projects`, counting into `counters`.
     pub fn pass(
         &mut self,
@@ -341,7 +347,7 @@ impl Verifier {
                 report.failed = true;
                 break;
             }
-            let Some(roots) = self.roots(project, clock) else {
+            let Some(roots) = self.roots(project, clock, &mut report) else {
                 report.failed = true;
                 continue;
             };
@@ -388,6 +394,7 @@ impl Verifier {
         &mut self,
         project: &Project,
         clock: &dyn PassClock,
+        report: &mut PassReport,
     ) -> Option<Vec<(PathBuf, String)>> {
         let mut bound = Vec::new();
         for root in &project.roots {
@@ -401,7 +408,10 @@ impl Verifier {
                         ids
                     }
                     Err(DerivationFailure::Budget) if clock.budget().is_exhausted() => return None,
-                    Err(DerivationFailure::Budget | DerivationFailure::Unreadable) => Vec::new(),
+                    Err(DerivationFailure::Budget | DerivationFailure::Unreadable) => {
+                        report.failed = true;
+                        Vec::new()
+                    }
                 },
             };
             bound.extend(ids.into_iter().map(|id| (root.path.clone(), id)));
@@ -570,6 +580,7 @@ impl ProjectRun<'_, '_> {
         if prefix {
             let floor = (target.through_commit.saturating_add(1), String::new());
             self.state.attempts = self.state.attempts.split_off(&floor);
+            self.state.resolved = self.state.resolved.split_off(&floor);
             self.state.floor = Some(floor);
         }
         Step::Resolved

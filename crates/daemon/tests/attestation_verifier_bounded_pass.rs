@@ -2019,3 +2019,70 @@ fn a_transient_decision_retired_before_it_resolves_leaves_no_attempt() {
     assert_eq!(verifier.floor(&repo.scope_id()), floor);
     assert_eq!(verifier.attempts(&repo.scope_id()), 1);
 }
+
+/// A resolved decision remembered behind a transient head is dropped once the floor passes it, so
+/// a batch retired before its head resolves leaves no memory behind.
+#[test]
+fn a_resolved_decision_retired_behind_a_transient_head_is_forgotten_at_the_floor() {
+    let store = Store::open();
+    let repo = Repo::new("forgotten", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let head = store.decision_under(&repo, "git:unbound", "f0", "other.md", &text(1, 1024));
+    let tail = store.decision(&repo, "f1", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(counters.get("unavailable_repository_unbound"), 1);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert_eq!(verifier.remembered(&repo.scope_id()), 1);
+    assert_eq!(verifier.attempts(&repo.scope_id()), 1);
+
+    store
+        .kernel
+        .commit(intent("retire-f0-f1"), |envelope| {
+            envelope.retire_decision(&head)?;
+            envelope.retire_decision(&tail)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert!(verifier.floor(&repo.scope_id()).is_some());
+    assert_eq!(verifier.remembered(&repo.scope_id()), 0);
+    assert_eq!(verifier.attempts(&repo.scope_id()), 0);
+}
+
+/// A root whose derivation fails marks the pass failed even when the project has no decision to
+/// count the failure through, so the task retries at [`RETRY_INTERVAL`] instead of idling.
+#[test]
+fn a_failed_derivation_without_decisions_fails_the_pass() {
+    let store = Store::open();
+    let broken = Repo::new("broken-idle", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&broken);
+    break_gitfile(&broken);
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::open();
+    let report = verifier.pass(
+        &store.kernel,
+        &[broken.project_at(&broken.work)],
+        &on,
+        &counters,
+        &clock,
+    );
+    assert_eq!(clock.polled(Poll::Derive), 1);
+    assert_eq!(counters.get("considered"), 0);
+    assert!(report.failed);
+    assert!(!report.progressed);
+}
