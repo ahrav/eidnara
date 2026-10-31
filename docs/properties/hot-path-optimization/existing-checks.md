@@ -254,7 +254,9 @@ exercise the restored implementation but still fail on the two baseline
 deadlines; the negative control does not establish every derived-cache oracle.
 
 The owner approves existing fatal shutdown when a unit exceeds the close budget,
-including the risk that started work delays process exit. The owner also
+including the risk that started work delays process exit. (Dated note,
+2026-10-31, #1201: route close now defers route-gone until such work stops;
+fatal shutdown remains on forced shutdown and past `MAX_DEFERRED_WORK`.) The owner also
 approves late cancellation after durable commit and skipped later Emergency95
 units with recomputed or superseded derived state. Neither decision asserts
 that every duration, fault, or recovery path has been tested.
@@ -469,9 +471,9 @@ that no related check exists anywhere in the repository.
 [configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L345
 [row-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2002
 [byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
-[permits]: ../../../crates/host-runtime/src/dispatch.rs#L963-L990
-[handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L1010-L1166
-[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1448-L1504
+[permits]: ../../../crates/host-runtime/src/dispatch.rs#L974-L1001
+[handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L1021-L1177
+[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1459-L1515
 [reservations]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
 [saturation-test]: ../../../crates/host-runtime/tests/dispatch.rs#L318
 [cancel-test]: ../../../crates/host-runtime/tests/dispatch.rs#L381
@@ -615,14 +617,14 @@ that no related check exists anywhere in the repository.
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5277
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
 [pass-probe]: ../../../crates/daemon/src/lib.rs#L25986
-[t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1920
+[t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1939
 [t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L911
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1542
 [t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L875
 [t-task-output]: ../../../crates/host-runtime/src/handler.rs#L952
 [t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L897
-[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L521
-[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L554
+[t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L550
+[t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L586
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L16054
 [rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5664
 [foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5627

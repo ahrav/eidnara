@@ -196,10 +196,10 @@ exclusion.
 [failed]: ../../../../crates/host-runtime/src/handler.rs#L467-L475
 [cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L502-L537
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
-[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L1069-L1073
-[cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L1176
-[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1448-L1504
-[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1506-L1539
+[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L1080-L1084
+[cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L1187
+[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1459-L1515
+[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1517-L1554
 [daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
 [t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L653
