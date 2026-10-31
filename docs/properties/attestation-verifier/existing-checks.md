@@ -4,7 +4,9 @@ Every check below has status `unaudited`. A listed check is evidence that a
 claim is exercised, not a verdict that it is adequate; adequacy belongs to
 `/testing:invariant-test-review` for tests and
 `/low-level-systems:defensive-assertions-and-invariant-guards` for
-production guards. References were verified at the #1170 branch.
+production guards. References were verified at the #1170 branch, and the
+rows #1171 added and every row pointing into a file #1171 changed were
+verified at the #1171 branch.
 
 ## Production guards
 
@@ -34,6 +36,15 @@ production guards. References were verified at the #1170 branch.
 | Verifier delta-chain walk | `crates/daemon/src/git_sources.rs:314` (`OwnPacks::header`), `:329` (`OwnPacks::decode`), `:445` (`entry_header`) | an own-pack entry whose ofs- and ref-delta walk revisits an entry is refused before any decode; an id whose every holding own pack revisits an entry, names a base outside that pack, or has an undecodable header, or whose located entry fails the decode, reads a valid loose copy or is `object_unreadable(class)`; the object store never reads an id an own index holds | unaudited |
 | Verifier deadline polls | `crates/daemon/src/attestation_verifier.rs:387` (`poll`), `:352` (`Deadline`) | polled before the open and before every object read | unaudited |
 | Verifier claim path | `crates/daemon/src/attestation_verifier.rs:71` (`Claim::new`) via `crates/daemon/src/confined_path.rs:10` (`MAX_COMPONENTS`) | at most 16 ordinary components | unaudited |
+| Evidence-keyed descriptor read | `crates/kernel/src/source_descriptor.rs:1213` (`source_descriptor_citing_evidence`) running the statement of `SnapshotRead::source_descriptors_citing_evidence` (`:1238`) through `checked` (`:795`) | the live descriptor of a class citing an evidence id at a sequence, first in object id order, with the page read's row checks; `Retired` and `Uncited` otherwise; one statement answers several ids in request order, and a live row that fails the checks refuses only its own entry | unaudited |
+| Anchor-condition read | `crates/kernel/src/anchor_write.rs:469` (`anchor_condition_as_of`) running `SnapshotRead::anchor_condition` (`:488`) through `validate_anchor_row` (`:288`) | the anchor live at a sequence decodes as the engine decodes it; an undecodable row is `CorruptCanonicalRow` | unaudited |
+| Snapshot read | `crates/kernel/src/snapshot_read.rs:34` (`read_at`), incarnation guard at `:44`; `SnapshotRead::decision_standing` at `crates/kernel/src/claim_facts.rs:1005` | every read of one call in one reader transaction at the target's sequence; tip, budget, and incarnation refused before the first read; the standing read's registry, decision, and own-admission rows with its row checks, a supporting approval's validity from the authority-chain check as a second statement, and the row-level evidence's liveness at the sequence | unaudited |
+| Classifier self-source check | `crates/daemon/src/attestation_verifier/classify.rs:325` in `class_of` (`:304`) | after the `Active` filter (`:319`), both on the standing read, a live `Active` `verifier` decision is `self_source` before any anchor or citation read | unaudited |
+| Classifier reason order | `crates/daemon/src/attestation_verifier/classify.rs:304` (`class_of`) | one class per decision: `NotInput` for a decision not live or not `Active`, then `self_source`, then the anchor reasons, then the citation reasons in citation order | unaudited |
+| Classifier citation order and cap | `crates/daemon/src/attestation_verifier/classify.rs:391` (`citations`), `MAX_EVENT_CITATIONS` at `:53` | the row-level `evidence_id` first, then at most 32 event-level citations of other evidence from the newest `LINKED_EVENT_WINDOW` × 33 decision events | unaudited |
+| Classifier incarnation recheck | `crates/daemon/src/attestation_verifier/classify.rs:297` in `classify` (`:283`) | after the `read_at` transaction, successful or refused, a store that is not the target's incarnation is `IncarnationMismatch` | unaudited |
+| Classifier claim and binding | `crates/daemon/src/attestation_verifier/classify.rs:447` (`VerifierInput::new`), path refusal at `:463`, root match at `:466` | the claim's path and digest from the descriptor, its length from the evidence row, its oid from the anchor; a stored path outside the document path rule is `InvalidDocumentPath` when no cited row resolves to a verifiable document; the first bound root with the repository identity, else `repository_unbound` | unaudited |
+| Document kind rule | `crates/daemon/src/attestation_verifier/classify.rs:235` (`DocumentKind::of`) | configuration extensions are `CurrentConfig` with `config_present`; every other path is `CurrentCode` with `code_present` | unaudited |
 
 ## Tests
 
@@ -123,6 +134,24 @@ production guards. References were verified at the #1170 branch.
 | `a_valid_loose_copy_answers_for_an_own_pack_entry_that_does_not_resolve` | `crates/daemon/tests/attestation_verifier.rs:1358` | blob read bounded | unaudited |
 | `a_valid_own_pack_copy_answers_after_a_newer_pack_whose_chain_revisits_an_entry` | `crates/daemon/tests/attestation_verifier.rs:1378` | blob read bounded | unaudited |
 | `evidence_cited_in_refuses_a_deleted_evidence_row_that_live_decisions_still_cite` | `crates/kernel/tests/kernel_slice.rs:2248` | artifact deletion | unaudited |
+| `the_evidence_keyed_read_returns_the_live_document_descriptor_citing_the_evidence` | `crates/kernel/tests/kernel_source_descriptors.rs:3252` | document descriptor; verifier input | unaudited |
+| `the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row` | `crates/kernel/tests/kernel_anchor_write.rs:869` | verifier input | unaudited |
+| `the_decision_standing_equals_the_standing_read_without_its_serving_facts_at_every_snapshot` | `crates/kernel/tests/kernel_snapshot_read.rs:143` | snapshot purity; verifier input (standing read) | unaudited |
+| `one_descriptor_statement_answers_each_cited_row_as_its_single_call_read` | `crates/kernel/tests/kernel_snapshot_read.rs:198` | verifier input (descriptor statement, per-entry refusal) | unaudited |
+| `read_at_refuses_before_and_after_its_closure_runs` | `crates/kernel/tests/kernel_snapshot_read.rs:276` | snapshot purity (incarnation, tip, budget) | unaudited |
+| `each_unverifiable_decision_classifies_under_exactly_one_reason_and_nothing_is_written` | `crates/daemon/tests/attestation_verifier_classify.rs:355` | verifier input (AC16); citation order | unaudited |
+| `a_descriptor_without_a_digest_is_digest_missing` | `crates/daemon/tests/attestation_verifier_classify.rs:572` | verifier input | unaudited |
+| `a_verifier_decision_is_self_source_before_any_anchor_or_citation_read` | `crates/daemon/tests/attestation_verifier_classify.rs:590` | party, `self_source` half | unaudited |
+| `a_stored_path_outside_the_document_path_rule_is_refused_for_that_decision` | `crates/daemon/tests/attestation_verifier_classify.rs:667` | verifier input (invalid stored path) | unaudited |
+| `a_target_of_another_incarnation_is_refused` | `crates/daemon/tests/attestation_verifier_classify.rs:713` | snapshot purity (incarnation) | unaudited |
+| `the_row_level_citation_is_read_before_the_capped_event_citations` | `crates/daemon/tests/attestation_verifier_classify.rs:747` | verifier input (citation cap) | unaudited |
+| `a_decision_outside_the_input_set_counts_under_no_reason` | `crates/daemon/tests/attestation_verifier_classify.rs:805` | verifier input; snapshot purity | unaudited |
+| `a_decision_citing_a_message_and_a_document_is_verifiable_through_the_document` | `crates/daemon/tests/attestation_verifier_classify.rs:872` | verifier input | unaudited |
+| `classification_at_one_sequence_ignores_the_worktree_head_and_later_commits` | `crates/daemon/tests/attestation_verifier_classify.rs:950` | snapshot purity; F3 at the classification step | unaudited |
+| `the_repository_binds_to_the_first_matching_root_in_bound_order` | `crates/daemon/tests/attestation_verifier_classify.rs:1080` | verifier input (binding) | unaudited |
+| `the_document_kind_path_rule_is_a_closed_table` | `crates/daemon/tests/attestation_verifier_classify.rs:1119` | document kind for #1172's classes (F15) | unaudited |
+| `a_corrupt_cited_descriptor_refuses_only_when_the_citation_walk_reaches_it` | `crates/daemon/tests/attestation_verifier_classify.rs:1165` | verifier input (per-entry refusal in citation order) | unaudited |
+| `row_level_evidence_with_no_row_at_the_sequence_refuses_after_the_membership_and_anchor_checks` | `crates/daemon/tests/attestation_verifier_classify.rs:1217` | party, `self_source` half; verifier input (refusal order) | unaudited |
 
 ## Categories with no check found
 
@@ -134,10 +163,21 @@ production guards. References were verified at the #1170 branch.
   replacement ref through it.
 - The trigger fold of `Sensitive` document evidence: no test promotes through
   a trigger whose observation cites document evidence.
-- Every proposed `p6-new-*` record: its code does not exist at the branch tip.
+- `p6-new-verifiability-pure-function-of-snapshot`: no test starts a restore
+  while a classification holds its reader; the restore waits for the reader
+  guard, and the tests cover a target of another incarnation refused before
+  the closure runs and after the transaction.
+- Every proposed `p6-new-*` record: its code does not exist at the branch tip,
+  except the `self_source` half of `p6-new-party-distinct-and-self-refusal`.
 
 ## Quiet areas
 
+- A document descriptor superseded by a revision citing other evidence: the
+  classifier reads the cited revision, no longer live, as
+  `descriptor_retired` even while a newer revision of its lineage is live;
+  the Kernel test covers a retired descriptor and no test supersedes one
+  under a citing decision. Whether the reason should cover this case is an
+  open question for the owner.
 - A commit above 256 KiB, or a commit or tree on an oversized delta base: the
   verifier maps its allocation refusal to `over_budget`, and no test
   constructs one.

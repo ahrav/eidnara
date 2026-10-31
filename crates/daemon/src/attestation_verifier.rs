@@ -603,3 +603,5 @@ fn lookup(
         digests: Digests::of(blob, claim.byte_length),
     })
 }
+
+pub mod classify;

@@ -302,8 +302,8 @@ impl KernelStore {
         Ok(target)
     }
 
-    /// Must run under a reader guard because a restore holds every guard while advancing
-    /// `restore_generation` and swapping the database.
+    /// Pairing this value with database reads or writes requires a reader or writer guard, because a restore holds every guard while advancing
+    /// `restore_generation` and swapping the database; an unguarded comparison with an earlier incarnation detects only a restore that already completed.
     pub(crate) fn incarnation(&self) -> CommitReadIncarnation {
         CommitReadIncarnation {
             open_nonce: self.open_nonce,
@@ -313,8 +313,9 @@ impl KernelStore {
         }
     }
 
-    /// Callers must hold a reader or writer guard so a restore cannot occur between this check
-    /// and the guarded write.
+    /// A caller that acts on the check, such as with a guarded write, holds a reader or writer
+    /// guard so a restore cannot occur between the check and the act. An unguarded call detects
+    /// any restore that completed before the call, because the generation only increases.
     pub fn require_incarnation(&self, expected: CommitReadIncarnation) -> Result<(), KernelError> {
         if self.incarnation() != expected {
             return Err(KernelError::InvalidInput);

@@ -12,7 +12,8 @@ and four reference corrections, and re-verifies every reference against the
 #1170 branch, based on `84743e366`. A reference `path:line` names the first
 line of the function, constant, or test it cites, or the named line inside it.
 Each later ticket (#1171 to #1174) converts the records its change makes
-checkable and re-verifies every reference at its branch.
+checkable and re-verifies every reference at its branch; #1171 re-verified
+every reference into the files it changed at its branch.
 
 This ticket set amends the specification's proposed obligations in three
 ways. The reason set has no `range_outside_blob` and no `filter_unavailable`
@@ -48,19 +49,29 @@ Existing surfaces, read at the branch tip:
 7. S7, claim causality: `crates/kernel/src/claim_causality.rs`.
 
 New behavior: N1 verifiability; N2 verdict; N3 attestation; N4 witness; N5
-stale path; N6 party; N7 bounded pass; N8 applicability. This ticket lands N2
+stale path; N6 party; N7 bounded pass; N8 applicability. #1170 lands N2
 in `crates/daemon/src/attestation_verifier.rs`: the `Claim`, `Observed`,
 `Verdict`, and `Reason` domain, the pure `verdict` and `header_verdict`
 functions, and the `verify` driver over `git_sources::open_with_slots`.
+#1171 lands N1 in `crates/daemon/src/attestation_verifier/classify.rs`:
+`classify`, the closed `Unverifiable` reasons, the `DocumentKind` path rule,
+and the `VerifierInput` a write set consumes, over two Kernel reads, the
+evidence-keyed descriptor read in `crates/kernel/src/source_descriptor.rs`
+and the anchor-condition read in `crates/kernel/src/anchor_write.rs`, which
+it runs with its standing and linked-evidence reads in one
+`KernelStore::read_at` transaction (`crates/kernel/src/snapshot_read.rs`).
 
 ## Status vocabulary
 
-`Status:` uses METHOD's `active` for the 23 existing-behavior records and for
-the two N2 records this ticket made checkable. The other 16 records use
-`Status: proposed`, the value the specification assigns to a designed
-obligation whose code does not exist yet. A proposed record names the ticket
-that converts it, carries `Exercised: not yet` with that ticket named, and
-states the intended reachability. Every existing check named in this part has
+`Status:` uses METHOD's `active` for the 23 existing-behavior records, the
+two N2 records #1170 made checkable, and the two N1 records #1171 made
+checkable. The other 14 records use `Status: proposed`, the value the
+specification assigns to a designed obligation whose code does not exist yet.
+A proposed record names the ticket that converts it, carries
+`Exercised: not yet` with that ticket named, and states the intended
+reachability. `p6-new-party-distinct-and-self-refusal` stays proposed with
+`Exercised: partial`: its `self_source` half is checkable since #1171, and its
+plugin-route half converts with #1172. Every existing check named in this part has
 status `unaudited` in `existing-checks.md`.
 
 ## Reachability classes
@@ -74,7 +85,8 @@ status `unaudited` in `existing-checks.md`.
 - `test-only`: no production caller at the branch tip. Each record states its
   own evidence: no production `CodeObserved` emitter, no production caller of
   the applicability engine, `read_selection`, `record_claim_causality`,
-  `delete_artifact`, or `attestation_verifier::verify`.
+  `delete_artifact`, `attestation_verifier::verify`, or
+  `attestation_verifier::classify::classify`.
 
 ## Index
 
@@ -103,8 +115,8 @@ status `unaudited` in `existing-checks.md`.
 | `p6-document-evidence-cited-by-fk-serves-no-wider-than-explicit-search` | safety | S5, S1 | active | `always` | explicit-config-only |
 | `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard` | safety | S2 | active | `always` | test-only |
 | `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements` | safety | S4 | active | `always` | test-only |
-| `p6-new-verifiability-pure-function-of-snapshot` | safety | N1 | proposed | `always` | explicit-config-only |
-| `p6-new-verifier-input-anchor-and-document-citation` | safety | N1 | proposed | `always` | explicit-config-only |
+| `p6-new-verifiability-pure-function-of-snapshot` | safety | N1 | active | `always` | test-only |
+| `p6-new-verifier-input-anchor-and-document-citation` | safety | N1 | active | `always` | test-only |
 | `p6-new-attestation-identity-unique-per-decision-oid` | safety | N3 | proposed | `always` | explicit-config-only |
 | `p6-new-attestation-classes-and-cited-fields` | safety | N3 | proposed | `always` | explicit-config-only |
 | `p6-new-attestation-sibling-model-stays-candidate` | safety | N3 | proposed | `always` | explicit-config-only |
@@ -123,11 +135,11 @@ status `unaudited` in `existing-checks.md`.
 | `p6-new-blob-read-bounded-at-oid` | safety | N2 | active | `always` | test-only |
 
 Counts: 41 records; 23 existing-behavior records with `unaudited` existing
-checks, 2 records this ticket converts to active, and 16 proposed
-obligations (2 for #1171, 8 for #1172, 1 shared by #1171 and #1172,
-4 for #1173, 1 for #1174). Semantics distribution: `always` 37, `sometimes` 2,
+checks, 4 records #1170 and #1171 convert to active, and 14 proposed
+obligations (8 for #1172, 1 shared by #1171 and #1172, 4 for #1173, 1 for
+#1174). Semantics distribution: `always` 38, `sometimes` 1,
 `always-or-unreached` 1, `unreachable` 1, `reachable` 0. Types: 39 safety, 1
-reachability, 1 liveness. Reachability among the 25 active records: 14
+reachability, 1 liveness. Reachability among the 27 active records: 16
 test-only, 8 default-production, 3 explicit-config-only. The specification
 labelled
 `p6-artifact-deletion-invalidates-cited-evidence-without-the-citation-guard`
@@ -360,7 +372,7 @@ Check: `always` - every live document descriptor's digest equals the sha256 of i
 Fault/timing angle: none
 Required faults and enabling state: a document edited between passes; a document between 64 KiB and 256 KiB
 Confidence: high - [evidence](evidence/p6-document-descriptor-identity-digest-and-revision.md). Read the document step in `crates/daemon/src/source_capture.rs` (unit cap at `:1297`, digest comparison at `:1325`), `MAX_PROJECT_DOC_BYTES` (`crates/daemon/src/project_docs.rs:23`), and `MAX_SOURCE_UNIT_BYTES` (`crates/daemon/src/harness_sources.rs:642`, equal to `MAX_CAPTURE_SOURCE_BYTES` at `crates/memory-store/src/memory_capture.rs:19`)
-Existing check: `crates/daemon/src/project_docs.rs:446`; `crates/kernel/tests/kernel_source_descriptors.rs:1180`, `:2007`; `crates/daemon/src/source_capture_tests.rs:1992` (unaudited)
+Existing check: `crates/daemon/src/project_docs.rs:446`; `crates/kernel/tests/kernel_source_descriptors.rs:1180`, `:2007`, and `:3252` for the evidence-keyed read, which applies the page read's row checks to the descriptor it returns; `crates/daemon/src/source_capture_tests.rs:1992` (unaudited)
 Impact: the verifier's claim is this descriptor's path, digest, and byte length (D2); a wrong digest would make every verdict meaningless
 Open questions: None.
 
@@ -489,33 +501,38 @@ Open questions:
 ### p6-new-verifiability-pure-function-of-snapshot
 
 Type: safety
-Reachability: explicit-config-only - intended; the behavior has no code at this branch
-Status: proposed - converts in [#1171](https://github.com/ahrav/eidnara/issues/1171)
-Exercised: not yet - the code lands in [#1171](https://github.com/ahrav/eidnara/issues/1171)
-Guarantee: Classification is a function of the Kernel snapshot at one commit sequence and the verifier's identity; it reads no worktree, clock, or network.
-Check: `always` - two classifications at one snapshot are identical
-Fault/timing angle: see the fault map
-Required faults and enabling state: two classifications at one commit sequence with a worktree edit between
-Confidence: low - [evidence](evidence/p6-new-verifiability-pure-function-of-snapshot.md). designed obligation from the specification ([#1169](https://github.com/ahrav/eidnara/issues/1169)); no code to read
-Existing check: none
-Impact: falsifier: classification reads HEAD or the clock
-Open questions: None.
+Reachability: test-only - `attestation_verifier::classify::classify` has no production caller at this branch; #1173 wires it behind `verifier.enabled` and relabels the record `explicit-config-only`
+Status: active - converted by [#1171](https://github.com/ahrav/eidnara/issues/1171)
+Exercised: partial - a fixture store classifies four decisions twice at one commit sequence around a worktree edit, a HEAD move to an orphan commit from which the anchor oid is unreachable, and later Kernel changes that retire a cited descriptor, invalidate an anchor, and delete cited evidence cited at event and at row level, each changing one decision's classification at the tip; a target of another incarnation is refused, and `read_at` refuses it before its closure runs; `classify` under a cancelled budget returns `Deadline` (`crates/daemon/tests/attestation_verifier_classify.rs:862`), and the deadline branch of the shared `AcquireLimit` is exercised through `claim_standing_at_within_budget` (`crates/kernel/tests/kernel_claim_standing.rs:205`); no test runs `classify` under a deadline-bounded budget, and no test starts a restore while a classification holds its reader
+Guarantee: The `Class` of a classification that completes is a function of the Kernel snapshot at one commit sequence, the bound roots the caller passes, and the verifier's identity; every read runs at that sequence in one Kernel reader transaction, the result carries it, and the classifier reads no worktree, clock, or network and opens no repository; the budget's deadline and interrupt decide only whether the reads complete.
+Check: `always` - two classifications of one decision at one `CommitReadTarget` with equal bound roots that both complete are equal, the result carries that target, and a store that is not the target's incarnation under the transaction's reader guard or after the transaction is refused with `IncarnationMismatch`
+Fault/timing angle: a worktree edit, a HEAD move, or a Kernel commit between two classifications at one sequence; a restore before or after the classification's reader transaction
+Required faults and enabling state: F8 at the classification step, and later commits that retire the cited descriptor, invalidate the anchor, and delete the cited evidence, so the tip classifications differ (F3)
+Confidence: high - [evidence](evidence/p6-new-verifiability-pure-function-of-snapshot.md). Read `classify` (`crates/daemon/src/attestation_verifier/classify.rs:283`), which runs `class_of` (`:304`) in one `read_at` transaction (`:290`) and compares the incarnation again after it at `:297`; `class_of` reads `decision_standing` (`:309`), which carries the row-level evidence's liveness, `anchor_condition` (`:333`), the linked evidence in `citations` (`:391`), and `source_descriptors_citing_evidence` (`:353`) through the transaction's `SnapshotRead`, each at `target.through_commit`; `read_at` compares the incarnation under its reader guard at `crates/kernel/src/snapshot_read.rs:44`; `read_as_of` polls the budget's `AcquireLimit` before the first read (`crates/kernel/src/snapshot_read.rs:58`), and `AcquireLimit::should_stop` (`crates/kernel/src/open.rs:1598`) reads `Instant::now()` when the limit carries a deadline, so the budget decides whether the reads complete; the evidence file lists every poll site
+Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:950`, `:872`, `:805`, `:713`; `crates/kernel/tests/kernel_snapshot_read.rs:276`, `:198`, `:143` (unaudited)
+Impact: a classification that read HEAD or the clock would change between a pass's selection and its write set, so the write set's recheck at the classification's target would compare against another snapshot
+Open questions:
+- Is a restore between two of the classifier's reads detected? - resolved with answer: yes; every read runs in one `read_at` transaction, which compares the incarnation under its reader guard before the first read, and a restore holds every reader guard, so none lands between two reads; `classify` compares the incarnation again after the transaction, so a refusal raised before the guarded comparison still reports a completed restore. `a_target_of_another_incarnation_is_refused` and `read_at_refuses_before_and_after_its_closure_runs` check the refusal.
 
 ### p6-new-verifier-input-anchor-and-document-citation
 
 Type: safety
-Reachability: explicit-config-only - intended; the behavior has no code at this branch
-Status: proposed - converts in [#1171](https://github.com/ahrav/eidnara/issues/1171)
-Exercised: not yet - the code lands in [#1171](https://github.com/ahrav/eidnara/issues/1171)
-Guarantee: A decision is verifier input only when live, `Active`, with a live `reachable_from` anchor and a row- or event-level citation resolving to a live `repository_documents` descriptor with a digest; otherwise it carries exactly one reason from {`no_anchor`, `anchor_not_git`, `no_citation`, `citation_not_document`, `evidence_retired`, `descriptor_retired`, `digest_missing`, `self_source`}. The resolved claim carries path, digest, byte length, and oid, and no range.
-Check: `always` - `verifiable XOR exactly one reason` for every considered decision
-Fault/timing angle: see the fault map
-Required faults and enabling state: a `messages`-only citation, no anchor, an `Exact` anchor, and a retired descriptor
-Confidence: low - [evidence](evidence/p6-new-verifier-input-anchor-and-document-citation.md). designed obligation from the specification ([#1169](https://github.com/ahrav/eidnara/issues/1169)); no code to read
-Existing check: none
+Reachability: test-only - `attestation_verifier::classify::classify` has no production caller at this branch; #1173 wires it behind `verifier.enabled` and relabels the record `explicit-config-only`
+Status: active - converted by [#1171](https://github.com/ahrav/eidnara/issues/1171)
+Exercised: yes - a fixture store in the memory-capture shape constructs every reason, a verifiable decision citing a `messages` and a `repository_documents` descriptor, and decisions outside the input set
+Guarantee: A decision is verifier input only when live, `Active`, with a live `reachable_from` anchor and a row- or event-level citation resolving to a live `repository_documents` descriptor with a digest; otherwise it carries exactly one reason from {`no_anchor`, `anchor_not_git`, `no_citation`, `citation_not_document`, `evidence_retired`, `descriptor_retired`, `digest_missing`, `self_source`}, or, when not live or not `Active`, no reason. A classification that returns an error, `InvalidDocumentPath` or a Kernel refusal, carries no class and counts under no reason. The resolved claim carries the descriptor's path and digest, the evidence row's byte length, and the anchor's oid, and no range, and binds the first bound root whose repository identity equals the descriptor's, or `repository_unbound` when none does.
+Check: `always` - `verifiable XOR exactly one reason` for every live `Active` decision whose classification succeeds; a decision citing only `messages` evidence is never verifiable; a verifiable claim's root is the first bound root with the descriptor's repository identity, else `repository_unbound`
+Fault/timing angle: an anchor, evidence row, or descriptor invalidated before the classification's sequence (F3)
+Required faults and enabling state: a `messages`-only citation, no anchor, an `Exact`, a `ReachableBetween`, and a non-git anchor, a deleted evidence artifact, a retired descriptor, a descriptor without a digest, no citation, two reasons on one decision in citation order, a path outside the document path rule cited before a valid document, a row-level document citation, a deleted row-level citation, and event citations at the cap, one past the cap, and one past the cap with the row's own evidence among them
+Confidence: high - [evidence](evidence/p6-new-verifier-input-anchor-and-document-citation.md). Read `class_of` (`crates/daemon/src/attestation_verifier/classify.rs:304`): the `Active` filter at `:319`, then the self-source check at `:325`, the anchor match after `:333`, the citation list from `citations` (`:391`), which reads the row-level `evidence_id` first and then at most `MAX_EVENT_CITATIONS` (`:53`, 32) event-level citations, the one descriptor statement over the cited rows (`:353`), and the loop through `resolve` (`:433`), which returns at the first live document descriptor with a digest and a path inside the document path rule, otherwise `InvalidDocumentPath` when a cited live document descriptor with a digest has a path outside the rule, and otherwise the first cited row's reason; and the Kernel reads `source_descriptor_citing_evidence` (`crates/kernel/src/source_descriptor.rs:1213`), whose statement `SnapshotRead::source_descriptors_citing_evidence` (`:1238`) runs, and `anchor_condition_as_of` (`crates/kernel/src/anchor_write.rs:469`), whose read `SnapshotRead::anchor_condition` (`:488`) runs
+Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:355`, `:572`, `:667`, `:747`, `:805`, `:872`, `:1080`; `crates/kernel/tests/kernel_source_descriptors.rs:3252`, `:3446`; `crates/kernel/tests/kernel_anchor_write.rs:869`; `crates/daemon/tests/attestation_verifier_classify.rs:1165`, `:1217`; `crates/kernel/tests/kernel_snapshot_read.rs:198`, `:143` (unaudited)
 Impact: falsifier: a `messages`-citing decision classified verifiable
 Open questions:
-- Is `ReachableBetween.start_oid` a legal input? - unresolved, needs the #1173 decision on OQ6-10.
+- Is `ReachableBetween.start_oid` a legal input? - resolved with answer: no; the #1171 ticket records OQ6-10 as decided, `ReachableBetween` is `anchor_not_git` because no producer emits it.
+- Which reason names a decision whose cited document descriptor was superseded by a revision citing other evidence? - resolved with answer: `descriptor_retired`; the evidence-keyed read finds descriptors of the class that cited the evidence, none live at the sequence. The reason covers a cited revision that is no longer live, including one whose lineage has a newer live revision, because C8 requires a live descriptor citing the cited evidence.
+- Should `descriptor_retired` stay the reason when a newer revision of the cited lineage is live, given the ticket defines it as "a document lineage with no live revision"? This includes a revert: the new revision has the cited digest but a new evidence id, because the evidence id hashes the occurrence and its revision, so the evidence-keyed read does not reach it. (needs human input)
+- Which citations does the classification inspect? - resolved with answer: the row-level `evidence_id` and at most `MAX_EVENT_CITATIONS` event-level citations drawn from the newest `LINKED_EVENT_WINDOW` × (`MAX_EVENT_CITATIONS` + 1) decision events; a decision whose only document citation lies past either bound classifies `no_citation` or `citation_not_document`, and the reasons name the inspected citations.
+- Which descriptor resolves when several live document descriptors cite one evidence row? - resolved with answer: the first in object id order; equal texts share one evidence row, so the digest and byte length agree.
 
 ### p6-new-attestation-identity-unique-per-decision-oid
 
@@ -641,15 +658,15 @@ Open questions: None.
 ### p6-new-party-distinct-and-self-refusal
 
 Type: safety
-Reachability: explicit-config-only - intended; the behavior has no code at this branch
-Status: proposed - converts in [#1172](https://github.com/ahrav/eidnara/issues/1172) (plugin half) and [#1171](https://github.com/ahrav/eidnara/issues/1171) (`self_source` half)
-Exercised: not yet - the code lands in [#1172](https://github.com/ahrav/eidnara/issues/1172) (plugin half) and [#1171](https://github.com/ahrav/eidnara/issues/1171) (`self_source` half)
-Guarantee: `verifier` is outside the plugin table; every `source_kind == "verifier"` decision is classified `self_source`; no model client is invoked.
-Check: `always` - `derive_classes("verifier")` is `None`, attestations are `self_source` on the next pass, and model-client calls are zero
+Reachability: explicit-config-only - intended; the `self_source` half has code at this branch with no production caller, and #1173 wires it behind `verifier.enabled`
+Status: proposed - converts in [#1172](https://github.com/ahrav/eidnara/issues/1172) with the plugin-route half; the `self_source` half is checkable since [#1171](https://github.com/ahrav/eidnara/issues/1171)
+Exercised: partial - the `self_source` half: a fixture store classifies a `verifier` decision `self_source` while an undecodable anchor and an undecodable cited descriptor refuse two assistant decisions, so the check precedes every anchor and citation read, and classifies a `verifier` decision marked `Stale` outside the input set; the plugin-route half and the model-client clause land with [#1172](https://github.com/ahrav/eidnara/issues/1172)
+Guarantee: `verifier` is outside the plugin table; every live `Active` `source_kind == "verifier"` decision is classified `self_source`, and every other `verifier` decision is outside the input set; no model client is invoked.
+Check: `always` - `derive_classes("verifier")` is `None`; live `Active` attestations are `self_source` on the next pass, and other attestations are `NotInput`; model-client calls are zero
 Fault/timing angle: see the fault map
 Required faults and enabling state: a store holding an attestation; a plugin write under `verifier`
-Confidence: low - [evidence](evidence/p6-new-party-distinct-and-self-refusal.md). designed obligation from the specification ([#1169](https://github.com/ahrav/eidnara/issues/1169)); no code to read
-Existing check: none
+Confidence: medium - [evidence](evidence/p6-new-party-distinct-and-self-refusal.md). Read the `self_source` check at `crates/daemon/src/attestation_verifier/classify.rs:325`, after the standing read (`:309`) and its `Active` filter (`:319`) and before the anchor read (`:333`); the plugin-route half has no code at this branch
+Existing check: `crates/daemon/tests/attestation_verifier_classify.rs:590`, `:1217` for the `self_source` half (unaudited)
 Impact: falsifier: the verifier attests its own attestation
 Open questions:
 - Does anything beyond the plugin route reserve `verifier`? (needs human input)
@@ -779,6 +796,10 @@ Open questions:
   loose store, under the allocation limit, and any other object reads through
   the object store (`try_find_header` for the blob header, `find_object` for
   content) under the same limit.
+- `p6-new-verifier-input-anchor-and-document-citation` builds the claim from
+  the descriptor `p6-document-descriptor-identity-digest-and-revision`
+  describes, read by evidence id, and `p6-new-verifiability-pure-function-of-snapshot`
+  fixes the sequence the write set (#1172) rechecks the model decision at.
 - `p6-new-verdict-deterministic` consumes the claim
   `p6-document-descriptor-identity-digest-and-revision` describes: path,
   digest, and byte length of a document descriptor, plus the anchor's oid.

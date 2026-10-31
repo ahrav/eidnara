@@ -691,3 +691,18 @@ fn classify_row_error(error: rusqlite::Error) -> KernelError {
         _ => crate::map_sqlite(error),
     }
 }
+
+impl crate::SnapshotRead<'_> {
+    /// [`KernelStore::linked_decision_evidence_within_budget`] in this transaction.
+    ///
+    /// # Errors
+    ///
+    /// The store's read errors.
+    pub fn linked_decision_evidence(
+        &self,
+        decision_object_id: &str,
+        max: std::num::NonZeroUsize,
+    ) -> Result<Vec<LinkedEvidence>, KernelError> {
+        linked_evidence(self.tx, decision_object_id, self.requested, max).map_err(crate::map_sqlite)
+    }
+}
