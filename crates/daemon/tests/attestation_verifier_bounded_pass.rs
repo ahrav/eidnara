@@ -2086,3 +2086,75 @@ fn a_failed_derivation_without_decisions_fails_the_pass() {
     assert!(report.failed);
     assert!(!report.progressed);
 }
+
+/// Two decisions citing one absent path at one oid are each read and counted once: a terminal
+/// reason is kept per decision, path, and oid, so the second decision is not resolved by the
+/// first's reason.
+#[test]
+fn two_decisions_citing_one_absent_path_are_each_counted() {
+    let store = Store::open();
+    let repo = Repo::new("shared-absent", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    store.decision(&repo, "s0", "absent.md", "gone\n");
+    store.model_decision(
+        &repo,
+        "s1",
+        "absent.md",
+        Some(AnchorValue::ReachableFrom {
+            oid: repo.head.clone(),
+            captures: Vec::new(),
+        }),
+        Some("srcev:s0"),
+    );
+    let counters = Counters::default();
+    let clock = Clock::open();
+    Verifier::default().pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_accounting(&counters);
+    assert_eq!(clock.opens(), 2);
+    assert_eq!(counters.get("unavailable_path_absent"), 2);
+    assert_eq!(counters.get("considered"), 2);
+}
+
+/// Retired decisions behind a transient first row are dropped while the resolved prefix still
+/// holds at that row, so the attempts and the remembered decisions follow the live decisions
+/// after the cursor.
+#[test]
+fn retired_decisions_behind_a_transient_first_row_are_dropped() {
+    let store = Store::open();
+    let repo = Repo::new("behind", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let head = store.decision_under(&repo, "git:unbound", "b0", "other.md", &text(1, 1024));
+    let tail = store.decision(&repo, "b1", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(verifier.attempts(&repo.scope_id()), 1);
+    assert_eq!(verifier.remembered(&repo.scope_id()), 1);
+
+    store
+        .kernel
+        .commit(intent("retire-b0-b1"), |envelope| {
+            envelope.retire_decision(&head)?;
+            envelope.retire_decision(&tail)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    store.decision_under(&repo, "git:unbound", "b2", "third.md", &text(2, 1024));
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(counters.get("unavailable_repository_unbound"), 2);
+    assert_eq!(verifier.floor(&repo.scope_id()), None);
+    assert_eq!(verifier.attempts(&repo.scope_id()), 1);
+    assert_eq!(verifier.remembered(&repo.scope_id()), 0);
+}
