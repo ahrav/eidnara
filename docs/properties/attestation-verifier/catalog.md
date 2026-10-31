@@ -872,12 +872,14 @@ Open questions:
   `p6-plugin-source-kind-table-is-closed-and-classes-never-raised` and
   `p6-plugin-cannot-replace-a-foreign-source-decision`.
 - `p6-new-attestation-stale-on-byte-change` rests on
-  `p6-document-republishes-only-on-digest-change-and-retires-on-missing`,
-  for the live descriptor's digest, staling only on a digest other than the witnessed one, since a recreated document can publish a new revision with the witnessed bytes, reads the
-  lineage and digest the witness detail of
-  `p6-new-witness-evidence-id-equals-attestation` records, and writes the
-  `MarkStale` `p6-mark-stale-withdraws-support-and-is-terminal-in-place`
-  describes. It runs in the pass under
+  `p6-document-republishes-only-on-digest-change-and-retires-on-missing`
+  for the live descriptor's digest, and marks an attestation `Stale` only on
+  a digest other than the witnessed one, since a recreated document can
+  publish a new revision with the witnessed bytes. It reads the lineage and
+  digest the witness detail of `p6-new-witness-evidence-id-equals-attestation`
+  records, and writes the `MarkStale`
+  `p6-mark-stale-withdraws-support-and-is-terminal-in-place` describes. It
+  runs in the pass under
   `p6-new-pass-bounds-and-accounting`'s N. The applicability engine of
   `p6-object-applicability-payload-fails-closed` and
   `p6-failed-cheap-check-is-stale-and-handed-to-repair` is a separate path;
