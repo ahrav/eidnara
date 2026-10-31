@@ -166,7 +166,7 @@ pub use slice::{
     DecisionEventSpec, DecisionPage, DecisionPayload, DecisionRow, DecisionSpec,
     DecisionWriteOutcome, LINKED_EVENT_WINDOW, LinkedEvidence, ObservationDependencySpec,
     ObservationPayload, ObservationRow, ObservationSpec, ObservationWriteOutcome, PagedDecision,
-    RetirementOutcome, SliceSnapshot, SourceKindFilter,
+    RetirementOutcome, SliceSnapshot,
 };
 pub use snapshot_read::SnapshotRead;
 pub use source_descriptor::{

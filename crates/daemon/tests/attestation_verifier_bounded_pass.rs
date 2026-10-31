@@ -44,6 +44,9 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .current_dir(dir)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // Fixed dates fix each head oid, so the attestation ids and their page order replay.
+        .env("GIT_AUTHOR_DATE", "@1 +0000")
+        .env("GIT_COMMITTER_DATE", "@1 +0000")
         .env("GIT_AUTHOR_NAME", "fixture")
         .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
         .env("GIT_COMMITTER_NAME", "fixture")
@@ -416,6 +419,14 @@ fn text(index: usize, bytes: usize) -> String {
 
 fn attestation(object_id: &str, repo: &Repo) -> String {
     Identity::of(object_id, &repo.head).object_id
+}
+
+/// `attested` in the applicability page's order: an attestation's `source_id` is the hash its
+/// object id carries after the `verattest:` prefix, so object id order is page order.
+fn page_order(attested: &[String]) -> Vec<String> {
+    let mut ordered = attested.to_vec();
+    ordered.sort();
+    ordered
 }
 
 fn exists(store: &Store, object_id: &str) -> bool {
@@ -1852,17 +1863,6 @@ fn a_replayed_stale_mark_key_writes_nothing_new() {
         evaluate(&store.kernel, &attested, target, &cancelled),
         Err(KernelError::Deadline)
     );
-    assert!(matches!(
-        store
-            .kernel
-            .live_source_descriptor_of_lineage_within_budget(
-                OccurrenceClass::RepositoryDocuments,
-                "lineage",
-                target.through_commit,
-                &cancelled,
-            ),
-        Err(KernelError::Deadline)
-    ));
     let first = mark_republished(&store.kernel, target, &republished, &budget);
     assert!(matches!(first, Outcome::StaleCommitted(_)), "{first:?}");
     let admissions = store.count("SELECT COUNT(*) FROM admission_decisions");
@@ -1909,7 +1909,8 @@ fn documents(count: usize) -> Vec<(String, String)> {
 }
 
 /// The applicability step evaluates at most N attestations per project per pass, and a deadline at
-/// a stale mark's commit leaves that attestation to be the first the next pass evaluates.
+/// a stale mark's commit leaves the cursor before that attestation, so the next pass evaluates it
+/// first.
 #[test]
 fn a_commit_deadline_leaves_its_attestation_first_for_the_next_pass() {
     let store = Store::open();
@@ -1919,6 +1920,7 @@ fn a_commit_deadline_leaves_its_attestation_first_for_the_next_pass() {
     let mut verifier = Verifier::default();
     let attested = attest_n_plus_one(&store, &repo, &files, &mut verifier, &counters);
     assert_eq!(applicability_counts(&counters), [0, MAX_VERDICTS, 0]);
+    assert_eq!(verifier.applicability_cursor(&repo.scope_id()), None);
 
     for (i, (path, body)) in files.iter().enumerate() {
         let changed = format!("{body}changed\n");
@@ -1932,20 +1934,28 @@ fn a_commit_deadline_leaves_its_attestation_first_for_the_next_pass() {
         store.count("SELECT COUNT(*) FROM admission_decisions WHERE event_kind='mark_stale'"),
         0
     );
+    assert_eq!(verifier.applicability_cursor(&repo.scope_id()), None);
 
     pass(&mut verifier, &store, &repo, &counters);
     assert_eq!(
         applicability_counts(&counters),
         [MAX_VERDICTS, MAX_VERDICTS, 0]
     );
-    assert_eq!(stale_marks(&store, &attested[0]).len(), 1);
-    assert!(stale_marks(&store, &attested[N]).is_empty());
+    // The cut attestation, first in page order, is among the N the next pass marks.
+    let ordered = page_order(&attested);
+    for (i, attestation) in ordered.iter().enumerate() {
+        assert_eq!(
+            stale_marks(&store, attestation).len(),
+            usize::from(i < N),
+            "{i}"
+        );
+    }
     pass(&mut verifier, &store, &repo, &counters);
     assert_eq!(
         applicability_counts(&counters),
         [MAX_VERDICTS + 1, MAX_VERDICTS, 0]
     );
-    assert_eq!(stale_marks(&store, &attested[N]).len(), 1);
+    assert_eq!(stale_marks(&store, &ordered[N]).len(), 1);
     pass(&mut verifier, &store, &repo, &counters);
     assert_eq!(
         applicability_counts(&counters),
@@ -1970,21 +1980,34 @@ fn the_applicability_step_resumes_after_the_last_attestation_it_evaluated() {
         applicability_counts(&counters),
         [0, current + MAX_VERDICTS, 0]
     );
-    let (path, body) = &files[N];
-    republish(
-        &store,
-        &repo,
-        &format!("c{N}"),
-        path,
-        &format!("{body}changed\n"),
-        2,
-    );
+    let cursor = verifier
+        .applicability_cursor(&repo.scope_id())
+        .expect("the pass stopped after its N-th evaluation");
+    assert!(attested.contains(&cursor), "{cursor}");
+    for (i, (path, body)) in files.iter().enumerate() {
+        let changed = format!("{body}changed\n");
+        republish(&store, &repo, &format!("c{i}"), path, &changed, 2);
+    }
     pass(&mut verifier, &store, &repo, &counters);
     assert_eq!(
         applicability_counts(&counters),
         [1, current + MAX_VERDICTS, 0]
     );
-    assert_eq!(stale_marks(&store, &attested[N]).len(), 1);
+    let marked: Vec<&String> = attested
+        .iter()
+        .filter(|attestation| !stale_marks(&store, attestation).is_empty())
+        .collect();
+    assert_eq!(marked.len(), 1, "{marked:?}");
+    assert_ne!(marked[0], &cursor);
+    assert_eq!(verifier.applicability_cursor(&repo.scope_id()), None);
+    pass(&mut verifier, &store, &repo, &counters);
+    assert_eq!(
+        applicability_counts(&counters),
+        [MAX_VERDICTS + 1, current + MAX_VERDICTS, 0]
+    );
+    for attestation in &attested {
+        assert_eq!(stale_marks(&store, attestation).len(), 1, "{attestation}");
+    }
 }
 
 /// One model decision attested by a pass, then its document republished at revision 2 with other
@@ -2127,7 +2150,12 @@ fn a_witness_read_the_kernel_refuses_resolves_its_attestation_and_the_step_conti
     let counters = Counters::default();
     let mut verifier = Verifier::default();
     pass(&mut verifier, &store, &repo, &counters);
-    let witness = Identity::of(&models[0], &repo.head).witness_object_id;
+    let attested: Vec<String> = models
+        .iter()
+        .map(|model| attestation(model, &repo))
+        .collect();
+    let first = page_order(&attested).remove(0);
+    let witness = Identity::of_attestation(&first).unwrap().witness_object_id;
     let changed = store
         .sqlite()
         .execute(
@@ -2138,12 +2166,7 @@ fn a_witness_read_the_kernel_refuses_resolves_its_attestation_and_the_step_conti
     assert_eq!(changed, 1);
     let target = store.kernel.capture_commit_read_target().unwrap();
     let budget = EvalBudget::unbounded();
-    let refused = evaluate(
-        &store.kernel,
-        &attestation(&models[0], &repo),
-        target,
-        &budget,
-    );
+    let refused = evaluate(&store.kernel, &first, target, &budget);
     assert!(
         matches!(refused, Err(ref error) if *error != KernelError::Deadline),
         "{refused:?}"
@@ -2156,10 +2179,10 @@ fn a_witness_read_the_kernel_refuses_resolves_its_attestation_and_the_step_conti
     }
 }
 
-/// An attestation row the batched standing read refuses reads each attestation's standing alone:
-/// each refused row resolves under `applicability_unavailable` with the pass healthy, the
-/// attestation between them is still evaluated, and a refused last row moves the cursor past it,
-/// in this pass and the next.
+/// Each attestation's standing is its own read in the page's read transaction: the first and last
+/// rows of the page, whose standing reads refuse, each resolve under `applicability_unavailable`
+/// with the pass healthy, and the attestation between them is still evaluated, in this pass and
+/// the next.
 #[test]
 fn an_attestation_row_the_standing_read_refuses_resolves_and_the_step_continues() {
     let store = Store::open();
@@ -2175,12 +2198,17 @@ fn an_attestation_row_the_standing_read_refuses_resolves_and_the_step_continues(
     let mut verifier = Verifier::default();
     pass(&mut verifier, &store, &repo, &counters);
     assert_eq!(counters.get("attestation_committed"), 3);
-    for index in [0, 2] {
+    let attested: Vec<String> = models
+        .iter()
+        .map(|model| attestation(model, &repo))
+        .collect();
+    let ordered = page_order(&attested);
+    for refused in [&ordered[0], &ordered[2]] {
         let changed = store
             .sqlite()
             .execute(
                 "UPDATE admission_decisions SET disposition='unknown' WHERE subject_object_id=?1",
-                [&attestation(&models[index], &repo)],
+                [refused],
             )
             .unwrap();
         assert_eq!(changed, 1);
@@ -2223,7 +2251,8 @@ fn the_applicability_step_pages_at_most_n_pages_of_rows_per_pass() {
                             rationale: "{}".into(),
                         },
                         source_kind: "verifier".into(),
-                        source_id: object_id.clone(),
+                        // `-` sorts before every hexadecimal digit.
+                        source_id: format!("-{object_id}"),
                         source_revision: 1,
                         sensitivity: Sensitivity::Normal,
                     })?;
@@ -3076,20 +3105,17 @@ fn an_attestation_retired_within_an_applicability_cycle_is_passed_over() {
     );
     store
         .kernel
-        .commit(intent("retire-last"), |envelope| {
-            envelope.retire_decision(&attested[N])?;
+        .commit(intent("retire-every-attestation"), |envelope| {
+            for attestation in &attested {
+                envelope.retire_decision(attestation)?;
+            }
             Ok(String::new())
         })
         .unwrap();
-    let (path, body) = &files[N];
-    republish(
-        &store,
-        &repo,
-        &format!("c{N}"),
-        path,
-        &format!("{body}changed\n"),
-        2,
-    );
+    for (i, (path, body)) in files.iter().enumerate() {
+        let changed = format!("{body}changed\n");
+        republish(&store, &repo, &format!("c{i}"), path, &changed, 2);
+    }
     let report = pass(&mut verifier, &store, &repo, &counters);
     assert!(!report.failed, "{report:?}");
     assert_eq!(counters.get("commit_refused_changed"), 0);
@@ -3097,5 +3123,444 @@ fn an_attestation_retired_within_an_applicability_cycle_is_passed_over() {
         applicability_counts(&counters),
         [0, current + MAX_VERDICTS, 0]
     );
-    assert!(stale_marks(&store, &attested[N]).is_empty());
+    assert_eq!(verifier.applicability_cursor(&repo.scope_id()), None);
+    for attestation in &attested {
+        assert!(stale_marks(&store, attestation).is_empty(), "{attestation}");
+    }
+}
+
+/// Each applicability cycle evaluates every live `Active` attestation of its project once, across
+/// pages, and none of another project's: with every document of two projects republished, passes
+/// over one project mark each of its attestations once, at most N per pass, and leave the other
+/// project's attestations `Active`.
+#[test]
+fn an_applicability_cycle_marks_each_of_its_projects_attestations_once_and_no_other_projects() {
+    let store = Store::open();
+    let files = documents(PAGE_ROWS.get() + N + 1);
+    let ours = Repo::new("ours", &files);
+    let theirs = Repo::new("theirs", &files);
+    let mut attested = [Vec::new(), Vec::new()];
+    for (side, (repo, prefix)) in [(&ours, "o"), (&theirs, "t")].into_iter().enumerate() {
+        store.scope(repo);
+        for (i, (path, body)) in files.iter().enumerate() {
+            let model = store.decision(repo, &format!("{prefix}{i}"), path, body);
+            attested[side].push(attestation(&model, repo));
+        }
+    }
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let both = [ours.project(), theirs.project()];
+    for _ in 0..files.len() {
+        verifier.pass(&store.kernel, &both, &on, &counters, &Clock::open());
+    }
+    assert_eq!(
+        counters.get("attestation_committed"),
+        2 * files.len() as u64
+    );
+    for (repo, prefix) in [(&ours, "o"), (&theirs, "t")] {
+        for (i, (path, body)) in files.iter().enumerate() {
+            let changed = format!("{body}changed\n");
+            republish(&store, repo, &format!("{prefix}{i}"), path, &changed, 2);
+        }
+    }
+
+    let before = applicability_counts(&counters);
+    let mut marked = 0;
+    for _ in 0..=files.len().div_ceil(N) {
+        pass(&mut verifier, &store, &ours, &counters);
+        let [stale, current, unavailable] = applicability_counts(&counters);
+        assert!(stale - marked <= MAX_VERDICTS, "{stale} after {marked}");
+        assert_eq!([current, unavailable], [before[1], before[2]]);
+        marked = stale;
+    }
+    assert_eq!(marked - before[0], files.len() as u64);
+    for attestation in &attested[0] {
+        assert_eq!(stale_marks(&store, attestation).len(), 1, "{attestation}");
+    }
+    for attestation in &attested[1] {
+        assert!(stale_marks(&store, attestation).is_empty(), "{attestation}");
+    }
+}
+
+/// A drained project whose store committed nothing since the previous pass reads no decisions page:
+/// the page would start past the target's commit. The pass takes one reader for its target and one
+/// for its applicability page; a commit since the previous pass adds the decisions page's reader.
+#[test]
+fn an_idle_pass_over_a_drained_project_reads_no_decisions_page() {
+    let store = Store::open();
+    let repo = Repo::new("idle", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    store.decision(&repo, "i0", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    pass(&mut verifier, &store, &repo, &counters);
+    pass(&mut verifier, &store, &repo, &counters);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert!(verifier.floor(&repo.scope_id()).is_some());
+    let readers = |verifier: &mut Verifier| {
+        let before = store.kernel.controlled_acquisitions_for_test();
+        pass(verifier, &store, &repo, &counters);
+        store.kernel.controlled_acquisitions_for_test() - before
+    };
+    let [_, current, _] = applicability_counts(&counters);
+    assert_eq!(readers(&mut verifier), 2);
+    store
+        .kernel
+        .commit(intent("unrelated"), |envelope| {
+            envelope.insert_domain(DomainSpec {
+                domain_id: "unrelated".into(),
+                object_id: "unrelated-domain".into(),
+                name: "unrelated".into(),
+                source_kind: "test".into(),
+                source_id: "unrelated".into(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(readers(&mut verifier), 3);
+    assert_eq!(readers(&mut verifier), 2);
+    assert_eq!(applicability_counts(&counters), [0, current + 3, 0]);
+}
+
+/// Rewrites the stored detail of the live descriptor citing `evidence_id` to another
+/// `descriptor_version`, which the descriptor row checks refuse, and leaves its evidence digest.
+fn corrupt_live_descriptor(store: &Store, evidence_id: &str) {
+    let changed = store
+        .sqlite()
+        .execute(
+            "UPDATE observations SET observation_payload=CAST(json_set(
+               CAST(observation_payload AS TEXT), '$.detail', replace(json_extract(
+               CAST(observation_payload AS TEXT), '$.detail'), '\"descriptor_version\":1',
+               '\"descriptor_version\":99')) AS BLOB)
+              WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL
+                AND observation_kind='source_descriptor'",
+            [evidence_id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+/// A live descriptor whose evidence digest is the witnessed one counts current without its row
+/// checks, and one whose digest differs runs them before any stale mark: a descriptor the row
+/// checks refuse counts unavailable with no mark and the pass healthy.
+#[test]
+fn the_descriptor_row_checks_run_only_for_a_digest_that_differs_and_before_any_mark() {
+    use daemon::attestation_verifier::applicability::{Applicability, evaluate};
+    let store = Store::open();
+    let files = documents(2);
+    let repo = Repo::new("checked", &files);
+    store.scope(&repo);
+    let attested: Vec<String> = files
+        .iter()
+        .enumerate()
+        .map(|(i, (path, body))| {
+            attestation(&store.decision(&repo, &format!("d{i}"), path, body), &repo)
+        })
+        .collect();
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    pass(&mut verifier, &store, &repo, &counters);
+    assert_eq!(counters.get("attestation_committed"), 2);
+
+    corrupt_live_descriptor(&store, "srcev:d0");
+    let (path, body) = &files[1];
+    republish(&store, &repo, "d1", path, &format!("{body}changed\n"), 2);
+    corrupt_live_descriptor(&store, "srcev:d1:r2");
+    let target = store.kernel.capture_commit_read_target().unwrap();
+    let budget = EvalBudget::unbounded();
+    // The row checks refuse the first descriptor too, through the citing read.
+    assert_eq!(
+        store.kernel.source_descriptor_citing_evidence(
+            OccurrenceClass::RepositoryDocuments,
+            "srcev:d0",
+            target.through_commit,
+            &budget,
+        ),
+        Err(KernelError::CorruptCanonicalRow)
+    );
+    assert_eq!(
+        evaluate(&store.kernel, &attested[0], target, &budget),
+        Ok(Applicability::Current)
+    );
+    assert_eq!(
+        evaluate(&store.kernel, &attested[1], target, &budget),
+        Err(KernelError::CorruptCanonicalRow)
+    );
+
+    let before = applicability_counts(&counters);
+    let report = pass(&mut verifier, &store, &repo, &counters);
+    assert!(!report.failed, "{report:?}");
+    assert_eq!(
+        applicability_counts(&counters),
+        [before[0], before[1] + 1, before[2] + 1]
+    );
+    for attestation in &attested {
+        assert!(stale_marks(&store, attestation).is_empty(), "{attestation}");
+    }
+}
+
+/// The evaluation bound N holds across the pages of one pass: with one `Active` attestation on a
+/// full first page and N on the second, the pass evaluates N in all and stops at the (N + 1)-th.
+#[test]
+fn the_evaluation_bound_holds_across_the_pages_of_a_pass() {
+    let store = Store::open();
+    let files = documents(N + 1);
+    let repo = Repo::new("two-pages", &files);
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let attested = attest_n_plus_one(&store, &repo, &files, &mut verifier, &counters);
+    assert_eq!(verifier.applicability_cursor(&repo.scope_id()), None);
+    let ordered = page_order(&attested);
+    let first = Identity::of_attestation(&ordered[0]).unwrap().source_id;
+    let rows = PAGE_ROWS.get();
+    store
+        .kernel
+        .commit(intent("stale-after-first"), |envelope| {
+            // These source ids extend the first attestation's, so they sort between it and the
+            // second.
+            for i in 0..rows - 1 {
+                let object_id = format!("stale_{i}");
+                envelope.insert_decision(DecisionSpec {
+                    decision_id: format!("dec_stale_{i}"),
+                    object_id: object_id.clone(),
+                    domain_id: "memory".into(),
+                    proposition_id: None,
+                    scope_id: Some(repo.scope_id()),
+                    anchor_id: None,
+                    evidence_id: None,
+                    decision_kind: "ARCHITECTURE".into(),
+                    payload: DecisionPayload {
+                        summary: format!("stale attestation {i}"),
+                        rationale: "{}".into(),
+                    },
+                    source_kind: "verifier".into(),
+                    source_id: format!("{first}-{i:02}"),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                for kind in [EventKind::Other, EventKind::MarkStale] {
+                    envelope.record_admission(AdmissionRequest {
+                        candidate_id: None,
+                        subject_object_id: Some(object_id.clone()),
+                        source_class: Some(SourceClass::ModelInference),
+                        taint_class: Some(TaintClass::AssistantInference),
+                        event: AdmissionEvent {
+                            kind,
+                            trigger_object_id: None,
+                            approval_object_id: None,
+                            evidence_id: None,
+                            reason: "fixture".into(),
+                        },
+                    })?;
+                }
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+
+    let [_, current, _] = applicability_counts(&counters);
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_accounting(&counters);
+    assert_eq!(
+        applicability_counts(&counters),
+        [0, current + MAX_VERDICTS, 0]
+    );
+    assert_eq!(clock.polled(Poll::Decision), 1 + 2);
+    assert_eq!(
+        verifier.applicability_cursor(&repo.scope_id()).as_ref(),
+        Some(&ordered[N - 1])
+    );
+}
+
+/// A restore between a page's read transaction and its stale marks refuses the first mark as
+/// changed and stops the project with one refusal counted; the next pass, on the restored store,
+/// marks every attestation of the page.
+#[test]
+fn a_restore_before_a_pages_stale_marks_stops_the_project_after_one_refusal() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = Store::open();
+    let files = documents(2);
+    let repo = Repo::new("restored", &files);
+    store.scope(&repo);
+    let attested: Vec<String> = files
+        .iter()
+        .enumerate()
+        .map(|(i, (path, body))| {
+            attestation(&store.decision(&repo, &format!("x{i}"), path, body), &repo)
+        })
+        .collect();
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    pass(&mut verifier, &store, &repo, &counters);
+    assert_eq!(counters.get("attestation_committed"), 2);
+    for (i, (path, body)) in files.iter().enumerate() {
+        republish(
+            &store,
+            &repo,
+            &format!("x{i}"),
+            path,
+            &format!("{body}changed\n"),
+            2,
+        );
+    }
+    let destination = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = store
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+
+    let kernel = &store.kernel;
+    let restored = AtomicBool::new(false);
+    let clock = Clock::with(|poll, _| {
+        if poll == Poll::Commit && !restored.swap(true, Ordering::SeqCst) {
+            kernel.restore(&backup.destination_path).unwrap();
+        }
+        false
+    });
+    let report = verifier.pass(kernel, &[repo.project()], &on, &counters, &clock);
+    assert!(restored.load(Ordering::SeqCst));
+    assert!(report.failed, "{report:?}");
+    assert_eq!(clock.polled(Poll::Commit), 1);
+    assert_eq!(counters.get("commit_refused_changed"), 1);
+    assert_eq!(applicability_counts(&counters)[0], 0);
+
+    let report = pass(&mut verifier, &store, &repo, &counters);
+    assert!(report.progressed && !report.failed, "{report:?}");
+    assert_eq!(applicability_counts(&counters)[0], 2);
+    for attestation in &attested {
+        assert_eq!(stale_marks(&store, attestation).len(), 1, "{attestation}");
+    }
+}
+
+/// A stale mark refused as changed with the store's incarnation unchanged resolves only its own
+/// attestation: the step goes on to mark the next republished attestation of the page in the same
+/// pass.
+#[test]
+fn a_changed_mark_leaves_the_rest_of_its_page_to_be_marked_in_the_same_pass() {
+    let store = Store::open();
+    let files = documents(2);
+    let repo = Repo::new("changed-then-marked", &files);
+    store.scope(&repo);
+    let attested: Vec<String> = files
+        .iter()
+        .enumerate()
+        .map(|(i, (path, body))| {
+            attestation(&store.decision(&repo, &format!("v{i}"), path, body), &repo)
+        })
+        .collect();
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    pass(&mut verifier, &store, &repo, &counters);
+    assert_eq!(counters.get("attestation_committed"), 2);
+    for (i, (path, body)) in files.iter().enumerate() {
+        republish(
+            &store,
+            &repo,
+            &format!("v{i}"),
+            path,
+            &format!("{body}changed\n"),
+            2,
+        );
+    }
+    let ordered = page_order(&attested);
+    let first = attested.iter().position(|id| *id == ordered[0]).unwrap();
+    let (path, body) = &files[first];
+
+    let republished = AtomicBool::new(false);
+    // The second commit poll follows the first attestation's refused mark, so the refusal precedes
+    // the mark this pass still makes.
+    let refused_first = AtomicBool::new(false);
+    let clock = Clock::with(|poll, _| {
+        if poll == Poll::Commit {
+            if !republished.swap(true, Ordering::SeqCst) {
+                republish(
+                    &store,
+                    &repo,
+                    &format!("v{first}"),
+                    path,
+                    &format!("{body}again\n"),
+                    3,
+                );
+            } else {
+                refused_first.store(
+                    counters.get("commit_refused_changed") == 1,
+                    Ordering::SeqCst,
+                );
+            }
+        }
+        false
+    });
+    let report = verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert!(report.failed, "{report:?}");
+    assert_eq!(clock.polled(Poll::Commit), 2);
+    assert!(refused_first.load(Ordering::SeqCst));
+    assert_eq!(counters.get("commit_refused_changed"), 1);
+    assert_eq!(applicability_counts(&counters)[0], 1);
+    assert!(stale_marks(&store, &ordered[0]).is_empty());
+    assert_eq!(stale_marks(&store, &ordered[1]).len(), 1);
+}
+
+/// A stale mark the Kernel rolls back resolves only its own attestation: with every mark refused,
+/// one pass attempts the mark of each republished attestation of the page and counts each refusal.
+#[test]
+fn a_rolled_back_stale_mark_leaves_the_rest_of_its_page_to_their_own_marks() {
+    let store = Store::open();
+    let files = documents(2);
+    let repo = Repo::new("rolled-back-page", &files);
+    store.scope(&repo);
+    let attested: Vec<String> = files
+        .iter()
+        .enumerate()
+        .map(|(i, (path, body))| {
+            attestation(&store.decision(&repo, &format!("q{i}"), path, body), &repo)
+        })
+        .collect();
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    pass(&mut verifier, &store, &repo, &counters);
+    assert_eq!(counters.get("attestation_committed"), 2);
+    for (i, (path, body)) in files.iter().enumerate() {
+        republish(
+            &store,
+            &repo,
+            &format!("q{i}"),
+            path,
+            &format!("{body}changed\n"),
+            2,
+        );
+    }
+    store
+        .sqlite()
+        .execute_batch(
+            "CREATE TRIGGER fail_stale BEFORE INSERT ON admission_decisions
+              WHEN NEW.event_kind='mark_stale'
+              BEGIN SELECT RAISE(ABORT, 'fault at the stale mark'); END;",
+        )
+        .unwrap();
+    let clock = Clock::open();
+    let report = verifier.pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert!(report.failed && !report.progressed, "{report:?}");
+    assert_eq!(clock.polled(Poll::Commit), 2);
+    assert_eq!(
+        [
+            "commit_refused_busy",
+            "commit_refused_io",
+            "commit_refused_other"
+        ]
+        .map(|name| counters.get(name))
+        .iter()
+        .sum::<u64>(),
+        2
+    );
+    for attestation in &attested {
+        assert!(stale_marks(&store, attestation).is_empty(), "{attestation}");
+    }
 }

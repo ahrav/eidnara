@@ -2960,7 +2960,7 @@ fn a_writer_reads_one_identity_value_past_its_decoys() {
         .unwrap();
 }
 
-/// The lineage read: `live_source_descriptor_of_lineage` returns the one live revision of exactly the named lineage among neighboring lineages of the class, the revision that supersedes it, and `None` once the commit retires it or for a lineage with no descriptor; `live_source_descriptors_of_lineages` returns the same row for each lineage it names, in input order, a repeated lineage included, and refuses a corrupt row as the single read does.
+/// The lineage read: `live_source_descriptor_of_lineage` returns the one live revision of exactly the named lineage among neighboring lineages of the class, the revision that supersedes it, and `None` once the commit retires it or for a lineage with no descriptor; `live_source_descriptors_of_lineages` returns the same row for each lineage it names, in input order, a repeated lineage included, and refuses a corrupt row as the single read does; `live_source_descriptor_digest_of_lineage` returns the checked row's evidence digest, `None` where the checked read returns `None`, and the stored digest of a row the checks refuse; and both single reads refuse a lineage range holding two live rows.
 #[test]
 fn a_writer_reads_the_live_revision_of_one_lineage() {
     let fixture = Fixture::open();
@@ -3122,7 +3122,7 @@ fn a_writer_reads_the_live_revision_of_one_lineage() {
         .unwrap();
     assert_eq!(
         row.map(|row| row.object_id),
-        Some(second.object_id),
+        Some(second.object_id.clone()),
         "a superseding revision is the live one"
     );
     let connection = rusqlite::Connection::open_with_flags(
@@ -3177,6 +3177,93 @@ fn a_writer_reads_the_live_revision_of_one_lineage() {
             );
             Ok(String::new())
         })
+        .unwrap();
+    // The digest read names the evidence digest of the row the checked read returns, `None` where
+    // it returns `None`, and the stored evidence digest of a row the checks refuse.
+    let target = fixture.store.capture_commit_read_target().unwrap();
+    fixture
+        .store
+        .read_at(
+            target,
+            &kernel::applicability::EvalBudget::unbounded(),
+            |snapshot| {
+                for id in &lineages {
+                    let digest = snapshot.live_source_descriptor_digest_of_lineage(
+                        OccurrenceClass::RawToolSpans,
+                        id,
+                    )?;
+                    match snapshot
+                        .live_source_descriptor_of_lineage(OccurrenceClass::RawToolSpans, id)
+                    {
+                        Ok(row) => {
+                            assert_eq!(digest, row.map(|row| row.detail.artifact_digest), "{id}");
+                        }
+                        Err(error) => {
+                            assert_eq!(error, kernel::KernelError::CorruptCanonicalRow);
+                            assert_eq!(*id, lineage("call-c"));
+                            assert_eq!(digest, Some(evidence.1.clone()));
+                        }
+                    }
+                }
+                assert_eq!(
+                    snapshot.live_source_descriptor_digest_of_lineage(
+                        OccurrenceClass::RepositoryDocuments,
+                        &lineage("call-a")
+                    )?,
+                    None,
+                    "the digest read is per class"
+                );
+                Ok::<_, kernel::ClaimFactsError>(())
+            },
+        )
+        .unwrap();
+    // A second live row in call-a's lineage range, sorting before the live revision, so a read that
+    // kept the last of two rows would return that revision: both reads refuse the range.
+    let connection = rusqlite::Connection::open(fixture.root.path().join("kernel.sqlite")).unwrap();
+    let copy = kernel::descriptor_object_id(&lineage("call-a"), "0");
+    connection
+        .execute(
+            "INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,source_id,
+               source_revision,created_commit_seq,invalidated_commit_seq,superseded_by,
+               sensitivity_class)
+             SELECT ?2,object_kind,domain_id,source_kind,source_id,source_revision,
+               created_commit_seq,invalidated_commit_seq,superseded_by,sensitivity_class
+             FROM object_registry WHERE object_id=?1",
+            [&second.object_id, &copy],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO observations(observation_id,object_id,proposition_id,scope_id,anchor_id,
+               evidence_id,observation_kind,observation_payload,observed_at,created_commit_seq,
+               invalidated_commit_seq,superseded_by,sensitivity_class)
+             SELECT observation_id||'x',?2,proposition_id,scope_id,anchor_id,evidence_id,
+               observation_kind,observation_payload,observed_at,created_commit_seq,
+               invalidated_commit_seq,superseded_by,sensitivity_class
+             FROM observations WHERE object_id=?1",
+            [&second.object_id, &copy],
+        )
+        .unwrap();
+    drop(connection);
+    let target = fixture.store.capture_commit_read_target().unwrap();
+    fixture
+        .store
+        .read_at(
+            target,
+            &kernel::applicability::EvalBudget::unbounded(),
+            |snapshot| {
+                let class = OccurrenceClass::RawToolSpans;
+                assert_eq!(
+                    snapshot.live_source_descriptor_digest_of_lineage(class, &lineage("call-a")),
+                    Err(kernel::KernelError::CorruptCanonicalRow)
+                );
+                assert_eq!(
+                    snapshot.live_source_descriptor_of_lineage(class, &lineage("call-a")),
+                    Err(kernel::KernelError::CorruptCanonicalRow)
+                );
+                Ok::<_, kernel::ClaimFactsError>(())
+            },
+        )
         .unwrap();
 }
 

@@ -3,7 +3,9 @@
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
-use kernel::{CommitReadTarget, KernelError, KernelStore, LiveDescriptor};
+use kernel::{
+    ClaimFactsError, CommitReadTarget, KernelError, KernelStore, LiveDescriptor, SnapshotRead,
+};
 
 use super::attest::{
     Identity, Outcome, Stop, WITNESS_DETAIL_VERSION, WitnessDetail, record_stale, run,
@@ -14,7 +16,7 @@ use super::classify::VERIFIER_SOURCE_KIND;
 /// How an attestation's witnessed document stands against its lineage's live descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Applicability {
-    /// The live descriptor's digest is the witnessed digest.
+    /// The live descriptor's evidence digest is the witnessed digest.
     Current,
     /// The id is outside the `verattest:` prefix, the lineage has no live descriptor, or the
     /// witness or its detail is absent, does not decode, or has a version other than
@@ -32,29 +34,49 @@ pub struct Republished {
     live: LiveDescriptor,
 }
 
-/// The applicability of attestation `attestation_object_id` at `target`: its witness detail's
-/// digest compared with the digest of its lineage's live document descriptor, both read at
-/// `target`'s commit under `budget`.
+/// The applicability of attestation `attestation_object_id` at `target`, read by [`evaluate_in`] in
+/// one [`KernelStore::read_at`] transaction under `budget`.
 ///
 /// # Errors
 ///
-/// Returns the Kernel's refusal of either read, [`KernelError::Deadline`] among them when
-/// `budget` runs out.
+/// Returns the refusals of [`evaluate_in`] and of [`KernelStore::read_at`], among them
+/// [`KernelError::Deadline`] when `budget` runs out, with `read_at`'s refusal of another store
+/// incarnation as [`KernelError::InvalidInput`], the refusal [`KernelStore::require_incarnation`]
+/// returns.
 pub fn evaluate(
     kernel: &KernelStore,
     attestation_object_id: &str,
     target: CommitReadTarget,
     budget: &EvalBudget,
 ) -> Result<Applicability, KernelError> {
+    kernel
+        .read_at(target, budget, |snapshot| {
+            evaluate_in(snapshot, attestation_object_id).map_err(ClaimFactsError::from)
+        })
+        .map_err(|error| match error {
+            ClaimFactsError::Kernel(error) => error,
+            _ => KernelError::InvalidInput,
+        })
+}
+
+/// The applicability of attestation `attestation_object_id` in `snapshot`: its witness detail's
+/// digest compared with the evidence digest of its lineage's live document descriptor. An equal
+/// digest is `Current`. A digest that differs is compared again on the descriptor
+/// [`SnapshotRead::live_source_descriptor_of_lineage`] reads with its row checks, so each
+/// `Republished` result, and each stale mark it leads to, rests on a row that passed them.
+///
+/// # Errors
+///
+/// Returns the refusals of the witness read and of both descriptor reads, among them
+/// [`KernelError::CorruptCanonicalRow`] for a descriptor row the checks refuse.
+pub fn evaluate_in(
+    snapshot: &SnapshotRead<'_>,
+    attestation_object_id: &str,
+) -> Result<Applicability, KernelError> {
     let Some(identity) = Identity::of_attestation(attestation_object_id) else {
         return Ok(Applicability::Unavailable);
     };
-    let requested = target.through_commit;
-    let witness = kernel.observation_for_object_as_of_within_budget(
-        &identity.witness_object_id,
-        requested,
-        budget,
-    )?;
+    let witness = snapshot.observation_for_object(&identity.witness_object_id)?;
     let Some(detail) = witness
         .and_then(|row| row.payload.detail)
         .and_then(|detail| serde_json::from_str::<WitnessDetail>(&detail).ok())
@@ -62,12 +84,15 @@ pub fn evaluate(
     else {
         return Ok(Applicability::Unavailable);
     };
-    let live = kernel.live_source_descriptor_of_lineage_within_budget(
-        OccurrenceClass::RepositoryDocuments,
-        &detail.lineage_id,
-        requested,
-        budget,
-    )?;
+    let class = OccurrenceClass::RepositoryDocuments;
+    match snapshot.live_source_descriptor_digest_of_lineage(class, &detail.lineage_id)? {
+        None => return Ok(Applicability::Unavailable),
+        Some(digest) if digest == detail.artifact_digest => {
+            return Ok(Applicability::Current);
+        }
+        Some(_) => {}
+    }
+    let live = snapshot.live_source_descriptor_of_lineage(class, &detail.lineage_id)?;
     Ok(match live {
         None => Applicability::Unavailable,
         Some(live) if live.detail.artifact_digest == detail.artifact_digest => {
