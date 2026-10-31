@@ -295,6 +295,11 @@ export interface EidnaraConfig {
      */
     contradiction_candidates?: { enabled: boolean };
     /**
+     * User-only consent for the daemon to run the attestation verifier's bounded background pass
+     * over the project's live memory decisions. The daemon reads this key itself. Defaults to off.
+     */
+    verifier?: { enabled: boolean };
+    /**
      * User-only list of repository documents the daemon reads for the prompt block and, when
      * `source_capture.enabled` is set, retains. The daemon reads and validates this key itself;
      * a project value is ignored.
@@ -595,6 +600,17 @@ export const EidnaraConfigSchema = z
             })
             .default({ enabled: false })
             .describe("User-only write-time contradiction candidates."),
+        verifier: z
+            .strictObject({
+                enabled: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "User-only: re-read the repository bytes a memory decision cites at its anchored commit, attest a decision whose bytes match and mark stale one whose bytes differ, in a bounded background pass (default: false). Project values are ignored with a warning.",
+                    ),
+            })
+            .default({ enabled: false })
+            .describe("User-only attestation verifier."),
         project_docs: z
             .strictObject({
                 files: z

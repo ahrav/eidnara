@@ -72,7 +72,7 @@ The production publication chain reaches `publish_history_summarizer_chunk` thro
   through an optional `HistorySummarizerPublicationFence`, otherwise directly to
   `MemoryStore::publish_history_summarizer_chunk`, at `history_summarizer.rs:431-434` and `:500-517`;
 - both production fence implementations call the same store method at
-  `crates/daemon/src/lib.rs:3245-3268` and `:3280-3305`.
+  `crates/daemon/src/lib.rs:3248-3271` and `:3283-3308`.
 
 `MemoryStore::publish_history_summarizer_chunk` runs one fenced transaction
 (`crates/memory-store/src/lib.rs:8783-8798`). In that transaction it:
@@ -98,7 +98,7 @@ behind the original concern. However, every workspace caller of that standalone
 wrapper is test-only: store tests begin at `memory-store/src/lib.rs:13301-13302`,
 history_summarizer tests at `daemon/src/history_summarizer.rs:1731-1732`, transform tests at
 `daemon/src/transform.rs:11924-11925`, and module tests at
-`daemon/src/lib.rs:15516-15517`.
+`daemon/src/lib.rs:15529-15530`.
 
 The other direct history_segment insertion sites are state import
 (`memory-store/src/lib.rs:6799-6843`) and whole-set replacement (`:8345-8365`), not
@@ -157,7 +157,7 @@ standalone `append_history_segments` wrapper would model a different path.
 ### Q: Does production history_summarizer publication evade the row-version CAS?
 
 - Sources examined: `history_summarizer.rs:431-517`, `:1624-1647`;
-  `daemon/src/lib.rs:3245-3305`; `memory-store/src/lib.rs:8783-8940`.
+  `daemon/src/lib.rs:3248-3308`; `memory-store/src/lib.rs:8783-8940`.
 - Finding: no. HistorySegment append and row-version increment share one fenced
   transaction, so a stale transform CAS rejects.
 - Missing evidence: none.

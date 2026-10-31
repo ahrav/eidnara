@@ -180,8 +180,8 @@ The frozen copy is a test-only function kept because the change replaces
 [t-extreme]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L2568
 [t-vixie]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L2582
 [sched-due]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735-L737
-[sched-default]: ../../../../../crates/daemon/src/config.rs#L152
-[sched-accept]: ../../../../../crates/daemon/src/config.rs#L1226-L1244
+[sched-default]: ../../../../../crates/daemon/src/config.rs#L155
+[sched-accept]: ../../../../../crates/daemon/src/config.rs#L1249-L1267
 [jump-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L254-L366
 [advance-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L567-L606
 [diff-head]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L2078-L2565

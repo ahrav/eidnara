@@ -72,8 +72,8 @@ contract, and there is no comment on the phase gate.
 In-repo callers of `publish_history_summarizer_chunk`:
 
 - `crates/daemon/src/history_summarizer.rs:529`, the direct call.
-- `crates/daemon/src/lib.rs:3310`, inside `WrapupSnapshotPublicationFence`.
-- `crates/daemon/src/lib.rs:3347`, inside `ReattachSnapshotPublicationFence`.
+- `crates/daemon/src/lib.rs:3313`, inside `WrapupSnapshotPublicationFence`.
+- `crates/daemon/src/lib.rs:3350`, inside `ReattachSnapshotPublicationFence`.
 
 All three receive a `HistorySummarizerPublishRequest` built at `history_summarizer.rs:513-526`,
 which is only reached from `publish_validated_chunk`, which is only called from

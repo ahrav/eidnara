@@ -17,7 +17,7 @@ error or the trigger-false arm with an empty live chain.
 
 At `265df096` (spec citations): preparation loaded the row, evaluated the
 trigger, and only then rejected an empty chain with `no_models`
-(`crates/daemon/src/lib.rs:5792-5819`, `:5840-5872` at that tree), wrote the
+(`crates/daemon/src/lib.rs:5804-5831`, `:5852-5884` at that tree), wrote the
 reason through a change-gated `record_no_fire` whose commit result was
 discarded (`:6161-6173`), and had no compaction gate on this path.
 
@@ -25,8 +25,8 @@ At HEAD `0ff62b29a`:
 
 - Replaced: `prepare_history_summarizer` returns `native_authority` first
   whenever the pass's applied authority is native
-  (`crates/daemon/src/lib.rs:9428-9439`). An empty binding chain gives
-  native intent (`crates/daemon/src/config.rs:181-185`), so a fresh session
+  (`crates/daemon/src/lib.rs:9440-9451`). An empty binding chain gives
+  native intent (`crates/daemon/src/config.rs:185-189`), so a fresh session
   with the default empty chain adopts native and never reaches the late
   check.
 - Surviving: under an applied Eidnara authority, `prepare_history_summarizer_fire`
@@ -50,8 +50,8 @@ At HEAD `0ff62b29a`:
 Checks at HEAD:
 
 - `no_fire_reason_is_durable_change_gated_and_cleared_by_fire`
-  (`crates/daemon/src/lib.rs:41234`). The binding carries
-  `default_test_config()` with a chain (`binding`, `:19680-19698`), while
+  (`crates/daemon/src/lib.rs:41248`). The binding carries
+  `default_test_config()` with a chain (`binding`, `:19693-19711`), while
   the handler's live configuration has an empty chain. The pass adopts
   Eidnara and then records `no_models`; a repeat leaves `row_version`
   unchanged.

@@ -59,7 +59,7 @@ kernel without `openat2`.
 ### Q: What does U8 change?
 
 - Sources examined: `crates/daemon/src/project_docs.rs:56`, `:177-270`;
-  `crates/daemon/src/config.rs:1300`; the U8 tests.
+  `crates/daemon/src/config.rs:1328`; the U8 tests.
 - Findings: the document list is the user-tier `project_docs.files` key,
   admitted entry by entry with the default kept on any refusal. Each read opens
   the parent and then the final component with `openat2` beneath the root, so a

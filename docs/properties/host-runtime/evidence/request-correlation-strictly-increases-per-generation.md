@@ -37,7 +37,7 @@ gen.pending.lock().expect("pending lock").insert(
 
 The return value is dropped. Nothing at that site distinguishes a fresh key from a collision.
 
-`docs/host-wire-protocol.md:750` is the contract, and it states the reason the host cannot rely
+`docs/host-wire-protocol.md:779` is the contract, and it states the reason the host cannot rely
 on the sender: "Sender-side no-reuse alone cannot stop a buggy client: a reused correlation on a
 different route keys a distinct pending entry and would dispatch a mutating handler operation
 twice. The host therefore enforces the monotonic allocation rule on ingress with a per-generation

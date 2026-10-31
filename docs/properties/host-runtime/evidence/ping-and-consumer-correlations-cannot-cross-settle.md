@@ -56,7 +56,7 @@ The pings map is written from three sites, all in the liveness path: the probe i
 `connection.rs:505`, `:1357`, `:1371`, `:1381`, `:1403`, `:1427` - and none of them is in
 `dispatch.rs`.
 
-`docs/host-wire-protocol.md:748` states the contract this satisfies: "The two directions are
+`docs/host-wire-protocol.md:777` states the contract this satisfies: "The two directions are
 independent namespaces: a host `Ping` correlation MAY be numerically equal to a pending consumer
 correlation on the same connection, and neither affects the other. Matching is direction-scoped by
 frame type - `Response`, `Error`, `StreamData`, and `StreamEnd` settle only consumer-originated

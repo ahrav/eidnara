@@ -518,7 +518,7 @@ Open questions: None.
 ## Contract-vs-code leads
 
 **L1. §11's no-multiplication rule versus two multiplying sites.**
-`docs/host-wire-protocol.md:731` states: "Every operation owns one absolute
+`docs/host-wire-protocol.md:760` states: "Every operation owns one absolute
 deadline; per-stage timers MUST NOT multiply it." Two sites multiply.
 `runtime.rs:1223` computes
 `shared.timing.lifecycle_callback_deadline.saturating_mul(2)` and awaits it
@@ -531,7 +531,7 @@ resolved in favour of the document: the code's reasons are sound, and the
 likelier defect is in the rule's scope.
 
 **L2. §11:747's coupling warning under-counts the host's stages.**
-`docs/host-wire-protocol.md:747` warns that the client's 2 s whole-handshake
+`docs/host-wire-protocol.md:776` warns that the client's 2 s whole-handshake
 deadline and the host's 2 s authentication deadline "are not independent," and
 tells a deployment to raise the client value. It names one host stage. The host
 has three (`connection.rs:125`, `:158`, `:177`), totalling 6 s at defaults.
@@ -540,7 +540,7 @@ Part 2c recorded this with the figure 4 s
 Nothing in `HostConfig::validate` relates any of the four values.
 
 **L3. The host `shutdown_deadline` and the documented client shutdown deadline
-disagree by 2×.** `docs/host-wire-protocol.md:741` gives the managed client
+disagree by 2×.** `docs/host-wire-protocol.md:770` gives the managed client
 "one 5 s absolute deadline" for shutdown and cleanup. `config.rs:228` gives the
 host 10 s, and the forced path adds up to 60 s more (`runtime.rs:1223`). A
 conforming client therefore abandons cleanup while the host is still draining

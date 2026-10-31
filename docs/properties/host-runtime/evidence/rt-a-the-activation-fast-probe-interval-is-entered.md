@@ -74,7 +74,7 @@ the hardcoded literal - so even if that test happened to enter the branch, it
 could not tell. No test in the repository constructs a component report carrying
 `storage_state` or `local_embeddings_state`. The only occurrences of those keys are the
 host's own literals at `runtime.rs:1065` and `:1069`, and
-`control.rs:1071` in a control-response test.
+`control.rs:1077` in a control-response test.
 
 ## Failure scenario
 
@@ -159,7 +159,7 @@ post-publication activation path this situation belongs to.
 - Sources examined: repository-wide search for `storage_state` and
   `local_embeddings_state`.
 - Findings: `runtime.rs:1065` and `:1069` are the host's literals.
-  `control.rs:1071` asserts on
+  `control.rs:1077` asserts on
   `response["metrics"]["components"]["context"]["metrics"]["storage_state"]`
   inside a `control.rs` unit test, which exercises the response shape, not the
   health loop's predicate. No integration test sets the value to `"starting"` and

@@ -12,7 +12,7 @@ External leads: plan mutation paths and issue 438, read as design context.
   mutable access. Unchanged siblings retain independent originals at HEAD.
 - `crates/daemon/src/transform.rs:171-191` builds its fallback digest index
   in a request-local `OnceCell`; it is not a shared global identity registry.
-- `crates/daemon/src/lib.rs:2947-2948,3687-3688` owns output/native caches
+- `crates/daemon/src/lib.rs:2950-2951,3690-3691` owns output/native caches
   behind mutexes. These line references come from HEAD, not the dirty worktree.
 
 ## Contract and candidate

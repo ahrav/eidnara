@@ -73,7 +73,7 @@ effect.
 `serializer_profile: "opencode-aisdk"`. A repository-wide grep for
 `"claude-code-anthropic"` finds it only in Rust tests, in
 `ARCHITECTURE.md:125`, and in the profile-epoch table
-(`crates/daemon/src/lib.rs:552`). No TypeScript sender emits it.
+(`crates/daemon/src/lib.rs:553`). No TypeScript sender emits it.
 
 ### The host owns the lease and its reaper
 

@@ -4,7 +4,7 @@
 
 The lens's second task asks, per handler, whether a repeat is distinguishable from
 a first delivery. `handle_todo_state_set_value`
-(`crates/daemon/src/lib.rs:5935-5974`) collapses both of the store's outcome
+(`crates/daemon/src/lib.rs:5947-5986`) collapses both of the store's outcome
 variants into one response literal, and the discarded variant carries a
 `row_version` the caller could have used.
 

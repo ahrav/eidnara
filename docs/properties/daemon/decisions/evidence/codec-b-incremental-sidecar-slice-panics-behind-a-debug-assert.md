@@ -51,7 +51,7 @@ rather than panicking. So `:252` is advisory and `:251` is load-bearing.
 
 Both in-tree callers, traced:
 
-`crates/daemon/src/lib.rs:12550-12563`:
+`crates/daemon/src/lib.rs:12562-12575`:
 
 ```
 12550: fn validated_native_prefix(
@@ -70,7 +70,7 @@ Both in-tree callers, traced:
 12563: }
 ```
 
-`crates/daemon/src/lib.rs:12565-12585`:
+`crates/daemon/src/lib.rs:12577-12597`:
 
 ```
 12565: fn native_sidecar(

@@ -6,14 +6,14 @@ HEAD `3a3b916b7`. Surface S7.
 
 Plan R6: "An owner observational read lists candidates per decision." P3
 #1145 U4 uses the observational route family. The doc's
-search-lifecycle paragraph (`host-wire-protocol.md:837`, "sends them
+search-lifecycle paragraph (`host-wire-protocol.md:865`, "sends them
 over a route bound with harness `cli`") and the `review.*` tests describe
 routes bound with harness `cli`. Lens: security
 boundaries; lifecycle.
 
 ## Evidence trail
 
-- `crates/daemon/src/lib.rs:274-278` `SessionBinding::is_observational()`:
+- `crates/daemon/src/lib.rs:275-279` `SessionBinding::is_observational()`:
   `self.harness == OBSERVATIONAL_HARNESS`; doc: "authorizes and resolves its
   project like any route and is excluded from every background view".
 - `lib.rs:280-281` `OBSERVATIONAL_HARNESS = "cli"`; "`harness` is scoping
@@ -35,7 +35,7 @@ boundaries; lifecycle.
   and read depend on `ReviewScope { kernel, ledger, project }` only.
 - Tests: `crates/daemon/tests/memory_reviewer_wire.rs:260`
   `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`;
-  `crates/daemon/src/lib.rs:35931`
+  `crates/daemon/src/lib.rs:35945`
   `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`
   (doc at `:35929`: alone on a dormant MODULE project it enrolls the project in
   no worker, scheduler, or maintenance view; beside a live harness it neither

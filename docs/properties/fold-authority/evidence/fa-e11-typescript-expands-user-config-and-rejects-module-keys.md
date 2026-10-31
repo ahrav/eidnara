@@ -38,7 +38,7 @@ Clauses and their disposition at HEAD:
 - "Rejects the module keys as unknown": replaced. The summarizer schema
   declares `module_model`, `module_fallback_models`, and
   `context_limit_tokens` (`config/schema/eidnara.ts:121-141`), so
-  `assertKnownConfigKeys` (`:782-790`) no longer throws for them.
+  `assertKnownConfigKeys` (`:798-806`) no longer throws for them.
 - "Project sanitizer strips model, fallback, disallowed-tool, hidden-agent
   escalation, disable, and cost-cap fields": preserved and extended.
   `HISTORY_SUMMARIZER_USER_ONLY_FIELDS` (`config/project-security.ts:24-31`)
@@ -53,7 +53,7 @@ Clauses and their disposition at HEAD:
 
 Spec citations at `265df096` that moved: `config/index.ts:108-115` (the
 substitution call) is now `:141-147`; `config/project-security.ts:23-36` is
-`:23-39`; `:512-564` is `:515-567`. The existing checks moved:
+`:23-39`; lines 512 to 564 are `:515-578`. The existing checks moved:
 `config/index.test.ts:695` ("leaves {env:} and {file:} tokens literal in
 project config and warns") is now `:715`, and `:740` ("keeps
 history_summarizer model selection user-owned when project config tries to
@@ -91,7 +91,7 @@ the project tier; each sanitizer field in the project tier.
   `model` and `module_model` in the project tier and expects `admitted`, an
   empty chain, and `false`; "every row matches through the production
   loader" (`config/index.test.ts:1114`) and the Pi row test
-  (`packages/pi-plugin/src/config/index.test.ts:765`) pass it.
+  (`packages/pi-plugin/src/config/index.test.ts:810`) pass it.
 - Missing evidence: A warning assertion for the stripped module keys.
 - Conclusion: resolved with answer; the fixture row witnesses the effect.
 

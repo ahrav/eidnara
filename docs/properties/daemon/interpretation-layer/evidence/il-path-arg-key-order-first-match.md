@@ -55,7 +55,7 @@ Covered by `tool_vocabulary_tests.rs:66`.
 - Conclusion: needs human input.
 
 ### Q: Which of the three sites run under `DaemonConfig::default()`?
-- Sources examined: `crates/daemon/src/config.rs:149`, `:168`, `:190-194`;
+- Sources examined: `crates/daemon/src/config.rs:152`, `:172`, `:194-198`;
   `crates/daemon/src/transform.rs:2854`, `:3352-3353`;
   `crates/daemon/src/selection.rs:958`, `:980`.
 - Findings: wire extraction only. `apply_additive_only` projects the window

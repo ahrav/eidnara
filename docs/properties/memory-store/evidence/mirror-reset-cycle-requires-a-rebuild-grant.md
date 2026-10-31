@@ -63,7 +63,7 @@ control row.
 | `crates/memory-store/tests/claim_mirror.rs:331`, `:454`, `:498` | test |
 
 The facade dispatch table exposes only `claim.mirror.replace` and
-`claim.mirror.apply` (`crates/daemon/src/lib.rs:10052-10053`). There is no
+`claim.mirror.apply` (`crates/daemon/src/lib.rs:10064-10065`). There is no
 handler for a rebuild grant.
 
 **The other writer cannot supply the row either.**
@@ -133,7 +133,7 @@ entry point, not a behavioural assertion.
    with `mirror-clear-without-a-grant-is-never-entered`, which asserts the
    opposite outcome under a grant-free campaign.
 2. Drive the system only through production entry points — the facade dispatch at
-   `daemon/src/lib.rs:10052-10053` and the authority lifecycle methods — and
+   `daemon/src/lib.rs:10064-10065` and the authority lifecycle methods — and
    assert each marker is reached at least once per campaign.
 3. On the current tree both markers stay cold, which is the finding. The test
    should therefore be written to fail, and its failure is the evidence, rather
@@ -141,7 +141,7 @@ entry point, not a behavioural assertion.
 4. Complementary assertion that needs no instrumentation: from a seeded mirror,
    using only facade calls, attempt a non-identical `claim.mirror.replace` and
    assert the error code. `claim_mirror_error` maps `ResetRequired` at
-   `daemon/src/lib.rs:13844-13860`; confirm the code a caller sees and record it,
+   `daemon/src/lib.rs:13857-13873`; confirm the code a caller sees and record it,
    because that string is the only production signal that the mirror is stuck.
 5. Also assert the intent ledger survives a delete, as
    `tests/claim_mirror.rs:457` does, since `claim_mirror.rs:1126-1127` promises it.
@@ -151,7 +151,7 @@ entry point, not a behavioural assertion.
 ### Q: Is `begin_claim_store_rebuild` meant to be reachable in production?
 
 - Sources examined: `grep` for the symbol across `crates/` and `packages/`;
-  `daemon/src/lib.rs:10040-10060` (facade dispatch); `claim_mirror.rs:219`,
+  `daemon/src/lib.rs:10052-10072` (facade dispatch); `claim_mirror.rs:219`,
   `:754`, `:1126-1127` (the doc comments that name it).
 - Findings: no production caller and no facade method. Three doc comments describe
   the grant as the precondition for two operations, so the protocol was designed

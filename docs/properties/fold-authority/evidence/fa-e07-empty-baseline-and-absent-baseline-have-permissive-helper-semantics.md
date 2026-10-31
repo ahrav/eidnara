@@ -43,7 +43,7 @@ Code references are verified at `0ff62b29a` unless another tree is named.
   `ctx.compaction_enabled` held (`transform.rs:3050-3052` there; default
   true, `config.rs:125` there). Since `8b1e04944` (#903) it enters only when
   the stored authority folds (`crates/daemon/src/transform.rs:3217-3218`),
-  which needs a non-empty chain (`crates/daemon/src/config.rs:181-185`).
+  which needs a non-empty chain (`crates/daemon/src/config.rs:185-189`).
 
 Gate results as recorded in the PR descriptions:
 

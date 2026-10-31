@@ -85,7 +85,7 @@ accompanying vector (`claim_mirror.rs:332-347`), so a payload cannot present a r
 whose stamps disagree with the vector it arrives under.
 
 Production reachability is `claim.mirror.apply` at
-`crates/daemon/src/lib.rs:10053` calling `:10326`, outside any test module.
+`crates/daemon/src/lib.rs:10065` calling `:10338`, outside any test module.
 
 ## Failure scenario
 

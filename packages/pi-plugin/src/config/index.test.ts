@@ -751,6 +751,51 @@ describe("source-capture parity fixture", () => {
     });
 });
 
+describe("verifier parity fixture", () => {
+    interface VerifierRow {
+        name: string;
+        user: Record<string, unknown>;
+        project: Record<string, unknown>;
+        expected_enabled: boolean;
+        expected_project_warning: boolean;
+    }
+    // The source-capture rows apply to `verifier` with the block renamed.
+    const fixture = JSON.parse(
+        readFileSync(
+            join(
+                import.meta.dir,
+                "../../../opencode-plugin/src/config/__fixtures__/source-capture-parity.json",
+            ),
+            "utf-8",
+        ).replaceAll('"source_capture"', '"verifier"'),
+    ) as { rows: VerifierRow[] };
+
+    it("every row matches through the Pi loader", () => {
+        expect(fixture.rows.length).toBeGreaterThan(0);
+        for (const row of fixture.rows) {
+            const cwd = makeTempRoot("eidnara-pi-cwd-");
+            const home = makeTempRoot("eidnara-pi-home-");
+            withHome(home);
+            writeUserConfig(home, JSON.stringify(row.user));
+            writeProjectConfig(cwd, JSON.stringify(row.project));
+
+            const result = loadPiConfigDetailed({ cwd });
+
+            expect({
+                name: row.name,
+                enabled: result.config.verifier?.enabled,
+                warned: result.warnings.filter((warning) =>
+                    warning.includes("Ignoring verifier from project config"),
+                ).length,
+            }).toEqual({
+                name: row.name,
+                enabled: row.expected_enabled,
+                warned: row.expected_project_warning ? 1 : 0,
+            });
+        }
+    });
+});
+
 describe("fold-authority parity fixture", () => {
     interface ParityRow {
         name: string;

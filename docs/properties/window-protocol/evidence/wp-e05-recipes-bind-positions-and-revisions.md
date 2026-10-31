@@ -28,7 +28,7 @@ and moved by a line diff to `f2442b2f`; each cited test name was found there.
   check:repo ok`, which runs the plugin suite (`package.json` `check:repo`
   calls `bun run test`).
 - `NativeOutputStore::remove` with `RetainedNativeOutput::into_previous`
-  (`crates/daemon/src/lib.rs:2317`, `f2442b2f`) returns the previous output
+  (`crates/daemon/src/lib.rs:2318`, `f2442b2f`) returns the previous output
   only when both `revert_epoch` and `previous_output_revision` match;
   otherwise the recipe uses literals.
 - `native_previous_keeps_bind_the_applied_revision` asserts a matching

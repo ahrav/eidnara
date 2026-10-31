@@ -73,7 +73,7 @@ the leased contents and charge survive until drop.
 ### Q: What is the ready-snapshot budget at `f2442b2f`?
 
 - Sources examined: #876 and #878 descriptions;
-  `crates/daemon/src/lib.rs:782-784` at `f8940a26` and `f2442b2f`, `:780-782`
+  `crates/daemon/src/lib.rs:783-785` at `f8940a26` and `f2442b2f`, `:781-783`
   at `f6b3d7bd`.
 - Findings: #876 raised the budget to 256 MiB; #878 returned it to 64 MiB,
   which its description calls unchanged relative to the pre-M1 value.

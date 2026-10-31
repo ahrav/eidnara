@@ -1,7 +1,7 @@
 # Part 4d property catalog: the facade surface, note evaluation, and response assembly
 
-Scope: about 9,000 lines. `crates/daemon/src/lib.rs:10042-11917` and
-`:11919-16001` are the facade regions, which include the claim intent ledger
+Scope: about 9,000 lines. `crates/daemon/src/lib.rs:10054-11929` and
+`:11931-16014` are the facade regions, which include the claim intent ledger
 handlers at `:10082-10182` and the `note.evaluation.*` protocol at
 `:10880-11481`; `crates/daemon/src/dispatch.rs` (whole) is response assembly;
 `crates/daemon/src/conditional_note_evaluation.rs` (1,851 lines, of which 951-1851

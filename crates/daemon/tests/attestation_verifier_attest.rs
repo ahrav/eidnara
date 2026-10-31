@@ -1262,8 +1262,9 @@ fn no_model_client_is_reachable_from_the_verifier_module() {
         .iter()
         .map(|path| std::fs::read_to_string(path).unwrap())
         .collect();
-    const ALLOWED: [&str; 6] = [
+    const ALLOWED: [&str; 7] = [
         "crate::confined_path",
+        "crate::repository_identity",
         "crate::git_reconcile::identity_field",
         "crate::git_sources",
         "crate::project_docs",

@@ -6,7 +6,7 @@ External leads: plan R6 and latency-audit W5.
 
 ## Findings
 
-`crates/daemon/src/lib.rs:16443-16461` silently skips rows that no longer
+`crates/daemon/src/lib.rs:16456-16474` silently skips rows that no longer
 decode. Exact expected recovered IDs and ordinals are therefore necessary.
 `crates/daemon/src/history_summarizer.rs:152-157,326-334` uses a length-based durable
 fingerprint and rejects mismatches.

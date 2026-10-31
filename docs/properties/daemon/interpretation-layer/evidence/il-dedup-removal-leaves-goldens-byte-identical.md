@@ -67,7 +67,7 @@ the PR base; none exists.
 - Conclusion: resolved with answer.
 
 ### Q: Does the record run under `DaemonConfig::default()`, as the source's label says?
-- Sources examined: `crates/daemon/src/config.rs:149`, `:190-194`;
+- Sources examined: `crates/daemon/src/config.rs:152`, `:194-198`;
   `crates/daemon/src/transform.rs:3352-3353`, `:3366-3372`, `:4135`.
 - Findings: no. The default `model_chain` is empty, so `eidnara_folds()` is
   false and `apply_once` hands the request to `apply_additive_only`, which

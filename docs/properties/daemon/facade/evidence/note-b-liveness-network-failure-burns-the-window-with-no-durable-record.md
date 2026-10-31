@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `CheckOutcome` has four variants and both the due and liveness phases accept all
-four (`crates/daemon/src/lib.rs:14099-14100` maps both phases through the same
+four (`crates/daemon/src/lib.rs:14112-14113` maps both phases through the same
 `check` closure). Comparing `reduce_due` and `reduce_liveness` arm by arm showed
 they diverge on two of the four, and the divergence on `NetworkFailed` costs a
 24-hour window.

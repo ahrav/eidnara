@@ -45,8 +45,8 @@ Line drift between `3a3b916b7` and the branch tip moved several references:
 `crates/daemon/src/source_capture_tests.rs` by 28 lines,
 `crates/kernel/tests/kernel_slice.rs` by one line, the `observe_code` fixture
 from `lib.rs:14043` at `3a3b916b7` to
-`crates/daemon/src/lib.rs:14394`, and the test-support guard
-the specification placed at `lib.rs:13690` (K9) to `:14041`. Each record cites
+`crates/daemon/src/lib.rs:14407`, and the test-support guard
+the specification placed at `lib.rs:13690` (K9) to `:14054`. Each record cites
 the current line.
 
 ## Gaps
@@ -86,8 +86,9 @@ the current line.
   as a deviation from AC3's literal wording.
 - `over_budget` from the allocation limit depends on the pack layout of the
   commit, a tree on the path, or the blob, so a repack can change it, while
-  the ticket classes `over_budget` as terminal. The question is recorded for the #1173 owner as
-  `needs human input` (`p6-new-verdict-deterministic`).
+  the ticket classes `over_budget` as terminal. The question was recorded for the #1173 owner,
+  who kept it terminal per decision, path, and oid for the process lifetime
+  (`p6-new-verdict-deterministic`).
 - The verifier maps an allocation refusal on any object, including a commit
   or tree, to `over_budget`. No test constructs a commit or tree above
   256 KiB.

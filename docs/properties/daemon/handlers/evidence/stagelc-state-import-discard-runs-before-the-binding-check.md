@@ -12,7 +12,7 @@ relative to the first discard turned out to be inverted.
 All lines read back at `HEAD` = `b5dc778e`;
 `git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty.
 
-`handle_state_import_value` is `crates/daemon/src/lib.rs:5591-5774`. The
+`handle_state_import_value` is `crates/daemon/src/lib.rs:5603-5786`. The
 statement order that matters:
 
 - `:5592-5595` — `raw_session_id` is taken straight from

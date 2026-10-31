@@ -22,7 +22,7 @@ Code references are verified at `0ff62b29a`.
   (`crates/daemon/src/derived_state.rs:18-28`) returns parts only when a
   durable baseline exists, the retained revert epoch matches, and
   `parts.baseline_generation == baseline.baseline_generation`. The cache
-  holds one entry per session id (`crates/daemon/src/lib.rs:2017`), which is
+  holds one entry per session id (`crates/daemon/src/lib.rs:2018`), which is
   the session-identity key.
 - Evaluation: `prior_baseline_parts` (`crates/daemon/src/transform.rs:7943-7949`)
   feeds `refresh_tail_hygiene_baseline` on both branches (`:4963-4986`). The
@@ -35,7 +35,7 @@ Code references are verified at `0ff62b29a`.
 - Status: `session.status` builds `tail_hygiene` only when the durable row
   has a baseline and sets `generation_invalidated` when the retained parts do
   not join, and `evaluable` to the durable flag and not invalidated
-  (`crates/daemon/src/lib.rs:6881-6899`).
+  (`crates/daemon/src/lib.rs:6893-6911`).
 - Carry: a pass carries prior parts forward only when its revert epoch
   equals the loaded one (`crates/daemon/src/transform.rs:7951-7966`), and a
   bust pass replaces them with its measured parts (`:5141-5144`).
@@ -113,7 +113,7 @@ followed by a non-bust pass and then a bust.
 ### Q: Do matching parts always evaluate, and missing parts always invalidate?
 
 - Sources examined: `crates/daemon/src/tail_hygiene.rs:1080-1165`,
-  `:2210`, `:2327-2349`; `crates/daemon/src/lib.rs:6881-6899` at
+  `:2210`, `:2327-2349`; `crates/daemon/src/lib.rs:6893-6911` at
   `0ff62b29a`; portfolio evaluation I2.
 - Findings: No. A bust or first refresh rebuilds whatever the prior parts; a
   non-bust over an invalidated baseline stays invalid despite matching
@@ -124,8 +124,8 @@ followed by a non-bust pass and then a bust.
 
 ### Q: Does `main`'s `96aad0baf` change the join?
 
-- Sources examined: `git show 96aad0baf`; `crates/daemon/src/lib.rs:2152-2188`,
-  `:35260`, `:35293`; `crates/memory-store/src/lib.rs:2096-2100`, `:29877`.
+- Sources examined: `git show 96aad0baf`; `crates/daemon/src/lib.rs:2153-2189`,
+  `:35274`, `:35307`; `crates/memory-store/src/lib.rs:2096-2100`, `:29877`.
 - Findings: The join rule is unchanged; `parts_for` still checks the
   baseline generation on read. A promotion without parts now keeps the
   replaced state's parts of the same revert epoch, so a lease-refused pass

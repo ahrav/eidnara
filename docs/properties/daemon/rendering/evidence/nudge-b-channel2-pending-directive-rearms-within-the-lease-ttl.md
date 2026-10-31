@@ -164,8 +164,8 @@ file inherits it.
 
 - Sources examined: none newly. The parent record's evidence file investigated
   this and its finding is inherited unchanged: `"claude-code-anthropic"` appears in
-  `crates/daemon/src/healing.rs:35` and `:45`, in `crates/daemon/src/lib.rs:528`
-  and `:552`, in `ARCHITECTURE.md:125`, and in roughly twenty Rust test fixtures,
+  `crates/daemon/src/healing.rs:35` and `:45`, in `crates/daemon/src/lib.rs:529`
+  and `:553`, in `ARCHITECTURE.md:125`, and in roughly twenty Rust test fixtures,
   while no TypeScript sender in this repository emits it and the only shipped sender
   emits `opencode-aisdk`
   (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1339` (source-catalog path, not present at HEAD)).

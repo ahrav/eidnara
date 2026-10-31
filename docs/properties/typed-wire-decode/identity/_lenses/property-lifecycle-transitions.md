@@ -6,7 +6,7 @@ External leads: plan KTD2 and latency-audit W5.
 
 ## Findings
 
-`crates/daemon/src/lib.rs:3684-3689` starts process-local caches empty.
+`crates/daemon/src/lib.rs:3687-3692` starts process-local caches empty.
 `crates/memory-store/src/lib.rs:1279-1319,1600,1736` retains synthetic
 messages, ingress identities, and served receipts in durable metadata.
 Restart does not make that durable state empty.
