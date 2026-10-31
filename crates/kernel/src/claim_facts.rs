@@ -392,27 +392,47 @@ pub(crate) type WantedOccurrences<'a> = HashMap<&'a str, Vec<(OccurrenceClass, &
 /// own admission row the serving view selects, with the columns of
 /// [`admission_sql`].
 fn standing_sql() -> String {
-    let selection = served_own_decision_sql("a");
-    let approval_valid = supporting_approval_valid_sql("d.approval_object_id");
     format!(
-        "SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
+        "SELECT {columns}
+         FROM json_each(:ids) j
+         LEFT JOIN object_registry o
+           ON o.object_id=j.value AND o.created_commit_seq<=:governing_as_of
+         {joins}
+         ORDER BY j.key",
+        columns = standing_columns(
+            "j.value",
+            &supporting_approval_valid_sql("d.approval_object_id")
+        ),
+        joins = standing_joins(),
+    )
+}
+
+/// The columns [`standing_from`] reads over the registry row `o` and the joins of
+/// [`standing_joins`], with `requested_id` as the requested id and `approval_valid` as the
+/// supporting approval's validity.
+fn standing_columns(requested_id: &str, approval_valid: &str) -> String {
+    format!(
+        "o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
                 o.source_revision,o.created_commit_seq,o.invalidated_commit_seq,
                 o.superseded_by,o.sensitivity_class,
-                j.value,dec.object_id IS NOT NULL,{agrees},
+                {requested_id},dec.object_id IS NOT NULL,{agrees},
                 dec.decision_id,dec.decision_kind,dec.proposition_id,dec.scope_id,
                 dec.anchor_id,dec.evidence_id,
                 d.admission_decision_id,d.commit_seq,d.event_kind,d.maturity,
                 d.effective_maturity,d.disposition,d.visibility,d.outcome,d.source_class,
                 d.taint_class,d.policy_revision,d.sensitivity_class,d.evidence_id,
-                d.approval_object_id,{approval_valid},d.trigger_object_id,d.elevated_support
-         FROM json_each(:ids) j
-         LEFT JOIN object_registry o
-           ON o.object_id=j.value AND o.created_commit_seq<=:governing_as_of
-         LEFT JOIN decisions dec ON dec.object_id=o.object_id
-         LEFT JOIN admission_decisions d
-           ON o.object_id IS NOT NULL AND d.admission_decision_id={selection}
-         ORDER BY j.key",
+                d.approval_object_id,{approval_valid},d.trigger_object_id,d.elevated_support",
         agrees = lifecycle_agrees_sql("dec", "o"),
+    )
+}
+
+/// The decision row and the own admission row the serving view selects, joined to `o`.
+fn standing_joins() -> String {
+    format!(
+        "LEFT JOIN decisions dec ON dec.object_id=o.object_id
+         LEFT JOIN admission_decisions d
+           ON o.object_id IS NOT NULL AND d.admission_decision_id={selection}",
+        selection = served_own_decision_sql("a"),
     )
 }
 
@@ -955,4 +975,123 @@ fn load_descriptor(
         )
         .optional()
         .map_err(map_sqlite)
+}
+
+/// A decision's registry row, decision row, and latest own admission at a snapshot, the fields of
+/// [`ClaimStanding`] other than its serving facts, and the liveness of the evidence the decision
+/// row cites itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionStanding {
+    pub object: ObjectRow,
+    pub decision: ClaimDecisionFacts,
+    pub own_admission: Option<AdmissionFacts>,
+    /// The liveness of `decision.evidence_id` at the snapshot, as
+    /// [`KernelStore::evidence_liveness_at_within_budget`] reports it; `None` when the decision
+    /// row cites no evidence.
+    pub evidence_liveness: Option<crate::EvidenceLiveness>,
+}
+
+impl crate::SnapshotRead<'_> {
+    /// The registry row, decision row, and latest own admission of the decision `object_id`, as
+    /// [`KernelStore::claim_standing_at_within_budget`] reads them with the same row checks, and
+    /// the liveness of the evidence its decision row cites. One statement keyed by the registry row
+    /// reads them with a constant in the approval-validity column; a supporting approval's validity
+    /// comes from the same authority-chain check as a second statement, so the connection's
+    /// statement cache keys on short texts.
+    ///
+    /// # Errors
+    ///
+    /// The refusals of [`KernelStore::claim_standing_at_within_budget`] for one id.
+    pub fn decision_standing(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<DecisionStanding>, ClaimFactsError> {
+        static SQL: LazyLock<String> = LazyLock::new(|| {
+            format!(
+                "SELECT {columns},
+                        (SELECT m.invalidated_commit_seq IS NULL
+                                OR m.invalidated_commit_seq>:governing_as_of
+                         FROM evidence_meta m
+                         WHERE m.evidence_id=dec.evidence_id
+                           AND m.created_commit_seq<=:governing_as_of)
+                 FROM object_registry o
+                 {joins}
+                 WHERE o.object_id=:object_id AND o.created_commit_seq<=:governing_as_of",
+                columns = standing_columns("o.object_id", "0"),
+                joins = standing_joins(),
+            )
+        });
+        static APPROVAL_SQL: LazyLock<String> = LazyLock::new(|| {
+            format!(
+                "SELECT {}",
+                supporting_approval_valid_sql(":approval_object_id")
+            )
+        });
+        check_claim_ids(&[object_id.to_owned()], NonZeroUsize::MIN)?;
+        let mut statement = self.tx.prepare_cached(&SQL).map_err(map_sqlite)?;
+        // The evidence subquery is the statement's last column.
+        let evidence_column = statement.column_count() - 1;
+        let mut rows = statement
+            .query(rusqlite::named_params! {
+                ":object_id": object_id,
+                ":governing_as_of": self.requested,
+            })
+            .map_err(map_sqlite)?;
+        let Some(row) = rows.next().map_err(map_sqlite)? else {
+            return Ok(None);
+        };
+        let Some(mut standing) = standing_from(row, self.requested, &mut HashMap::new())? else {
+            return Ok(None);
+        };
+        let evidence_live: Option<bool> = column(row, evidence_column)?;
+        let evidence_liveness =
+            standing
+                .decision
+                .evidence_id
+                .as_ref()
+                .map(|_| match evidence_live {
+                    Some(true) => crate::EvidenceLiveness::Live,
+                    Some(false) => crate::EvidenceLiveness::Retired,
+                    None => crate::EvidenceLiveness::Unknown,
+                });
+        if let Some(approval) = standing
+            .own_admission
+            .as_mut()
+            .and_then(|admission| admission.supporting_approval.as_mut())
+        {
+            approval.valid_at_snapshot = self
+                .tx
+                .prepare_cached(&APPROVAL_SQL)
+                .and_then(|mut statement| {
+                    statement.query_row(
+                        rusqlite::named_params! {
+                            ":approval_object_id": approval.object_id,
+                            ":governing_as_of": self.requested,
+                        },
+                        |row| row.get(0),
+                    )
+                })
+                .map_err(map_sqlite)?;
+        }
+        Ok(Some(DecisionStanding {
+            object: standing.object,
+            decision: standing.decision,
+            own_admission: standing.own_admission,
+            evidence_liveness,
+        }))
+    }
+
+    /// The serving facts of the object `object_id` at this snapshot, from the serving view
+    /// [`KernelStore::claim_standing_at_within_budget`] reads, or `None` when the view serves no
+    /// row for it.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` for an `object_id` the claim reads refuse, `CorruptCanonicalRow` for a stored
+    /// row that fails its checks, and the store's read errors.
+    pub fn served_facts(&self, object_id: &str) -> Result<Option<ServedFacts>, ClaimFactsError> {
+        let ids = [object_id.to_owned()];
+        check_claim_ids(&ids, NonZeroUsize::MIN)?;
+        Ok(load_served(self.tx, self.requested, &ids)?.remove(object_id))
+    }
 }

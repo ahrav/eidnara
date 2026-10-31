@@ -38,7 +38,7 @@ interrupt." Lens: failure recovery; C7, C8; D2.
   `set_progress_handler(.., SQL_BUDGET_PROGRESS_STEPS)` when the limit has
   control.
 - `claim_facts.rs:248` `limit.run`; `:313` `reader_with_limit(limit)`;
-  `:326` `limit.check()`; `:548`, `:552` `limit.check()` per claim inside
+  `:326` `limit.check()`; `:568`, `:572` `limit.check()` per claim inside
   `load_claims_served_in_tx`. So claim facts have acquisition, per-claim, and
   in-statement (progress handler) poll points.
 - `slice/read.rs:134` `decision_page_within_budget`: `self.lock_reader_within
