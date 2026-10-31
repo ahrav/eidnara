@@ -607,7 +607,9 @@ impl RequestCtx {
     /// The calling runtime submits work immediately, without polling the returned future.
     /// Calling this method outside a Tokio runtime panics.
     /// Started work must terminate on its own or observe [`cancel_signal`] at safe points.
-    /// Work held beyond the close budget causes fatal refusal rather than concurrent cleanup.
+    /// Work that outlives its route's close budget keeps that route closing with its channel
+    /// reserved; the route's `cancelled` terminals and route-gone follow the end of the work, and
+    /// the host stops with `HostError::LifecycleFatal` once such held work exceeds a fixed bound.
     /// The handler task is the intended caller.
     /// A surviving task can submit work after request cancellation has drained its ledger.
     /// Route close and host shutdown still join that late work.
@@ -636,12 +638,13 @@ impl WorkLedgers {
             value: RedactedValue(Some(work)),
             completion: (self.host.token(), self.request.token(), self.route.token()),
         };
+        let join_work = (captured.completion.0.clone(), captured.completion.2.clone());
         if self.route.is_closed() {
+            drop(join_work);
             drop(captured);
             drop(result_tx);
             return blocking_result(result_rx, BlockingWorkFailed::RouteClosing);
         }
-        let join_work = (captured.completion.0.clone(), captured.completion.2.clone());
         let blocking = tokio::task::spawn_blocking(move || {
             let mut captured = captured;
             let work = captured
@@ -906,6 +909,34 @@ mod tests {
             seen.load(std::sync::atomic::Ordering::SeqCst),
             "refused capture dropped without redaction"
         );
+    }
+
+    /// `MAX_DEFERRED_WORK` counts route-tracker entries; a held `run_blocking` job holds two:
+    /// its closure's completion token and its join task's clone.
+    #[tokio::test]
+    async fn a_held_blocking_job_holds_two_route_tracker_entries() {
+        let ctx = request_context();
+        let route = ctx.work.route.clone();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (started, running) = std::sync::mpsc::channel();
+        let result = ctx.run_blocking(move || {
+            started.send(()).unwrap();
+            let _ = held.recv();
+        });
+        tokio::task::spawn_blocking(move || {
+            running
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(route.len(), 2);
+        drop(release);
+        result.await.unwrap();
+        route.close();
+        tokio::time::timeout(std::time::Duration::from_secs(5), route.wait())
+            .await
+            .expect("the job's entries drain once it returns");
     }
 
     #[tokio::test]

@@ -30,6 +30,11 @@ use crate::wire::{FrameId, encode_owned_frame, pure_header_flags, response_flags
 /// `won` flips exactly once when handler completion, cancellation, route close, or teardown arrives first.
 pub struct Settlement {
     won: AtomicBool,
+    /// `queued` is read and written under `order`. It is set once the winning terminal has
+    /// reached the writer, or the attempt has retired the generation. `won` set with `queued`
+    /// clear after the route's tasks stopped marks a winning `settle` aborted before queuing;
+    /// the route close emits `cancelled` for that request.
+    queued: AtomicBool,
     order: tokio::sync::Mutex<()>,
     /// `streamed` is set once any `StreamData` item reaches the writer.
     /// A streamed response may terminate only with `StreamEnd` or `Error` (protocol §8.3).
@@ -46,10 +51,41 @@ impl Settlement {
     pub fn with_credit(credit: Option<tokio::sync::OwnedSemaphorePermit>) -> Arc<Self> {
         Arc::new(Self {
             won: AtomicBool::new(false),
+            queued: AtomicBool::new(false),
             order: tokio::sync::Mutex::new(()),
             streamed: AtomicBool::new(false),
             credit: std::sync::Mutex::new(credit),
         })
+    }
+
+    /// A settle aborted after it took the credit returned that credit to the generation; the
+    /// retried terminal waits here for a fresh one. The wait has no deadline of its own:
+    /// `settle_stopped_route_work` bounds it with its emission deadline and drops that one
+    /// terminal when the deadline passes first. `Err` reports a retired generation, which has
+    /// no use for the terminal, or a closed credit pool.
+    pub(crate) async fn reattach_credit(&self, generation: &GenerationCore) -> Result<(), ()> {
+        let missing = self
+            .credit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none();
+        if missing {
+            if generation.token.is_cancelled() || generation.writer.is_retired() {
+                return Err(());
+            }
+            let credit = tokio::select! {
+                biased;
+                () = generation.token.cancelled() => return Err(()),
+                credit = generation.terminal_credits.clone().acquire_owned() => {
+                    credit.map_err(|_| ())?
+                }
+            };
+            *self
+                .credit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(credit);
+        }
+        Ok(())
     }
 
     fn take_credit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
@@ -59,6 +95,7 @@ impl Settlement {
             .take()
     }
 
+    /// Reports `won`; whether the terminal reached the writer is `queued`.
     pub fn is_settled(&self) -> bool {
         self.won.load(Ordering::SeqCst)
     }
@@ -425,6 +462,19 @@ pub async fn settle(
     if settlement.won.swap(true, Ordering::SeqCst) {
         return false;
     }
+    emit_won_terminal(settlement, budget, generation, route, corr, terminal).await;
+    settlement.queued.store(true, Ordering::SeqCst);
+    true
+}
+
+async fn emit_won_terminal(
+    settlement: &Settlement,
+    budget: &crate::wire::ByteBudget,
+    generation: &GenerationCore,
+    route: RouteHandle,
+    corr: u64,
+    terminal: Terminal,
+) {
     // The credit rides the terminal frame to its block and returns with the block.
     let credit = settlement.take_credit();
     let (ty, flags, body) = match terminal {
@@ -442,7 +492,7 @@ pub async fn settle(
                 .await
                 else {
                     generation.token.cancel();
-                    return true;
+                    return;
                 };
                 if emit_reserved_frame(
                     generation,
@@ -458,7 +508,7 @@ pub async fn settle(
                 {
                     generation.token.cancel();
                 }
-                return true;
+                return;
             }
             if emit_reserved_frame(
                 generation,
@@ -474,7 +524,7 @@ pub async fn settle(
             {
                 generation.token.cancel();
             }
-            return true;
+            return;
         }
         Terminal::Error {
             code,
@@ -485,7 +535,7 @@ pub async fn settle(
                 charged_error_body(budget, generation, &code, &message, retry_after_ms).await
             else {
                 generation.token.cancel();
-                return true;
+                return;
             };
             if emit_reserved_frame(
                 generation,
@@ -501,7 +551,7 @@ pub async fn settle(
             {
                 generation.token.cancel();
             }
-            return true;
+            return;
         }
         Terminal::StreamEnd => (
             FrameType::StreamEnd,
@@ -523,7 +573,6 @@ pub async fn settle(
     {
         generation.token.cancel();
     }
-    true
 }
 
 /// `StreamSink` serializes stream-item emission for each request.
@@ -966,6 +1015,7 @@ pub async fn dispatch_request<H: HostHandler>(
         PendingEntry {
             cancel: cancel.clone(),
             settlement: Arc::clone(&settlement),
+            _pending_permit: pending_permit,
         },
     );
 
@@ -977,7 +1027,6 @@ pub async fn dispatch_request<H: HostHandler>(
     // Without the handler fence, route close could see the tracker empty while request code still runs.
     let handler_fence = route_tracker.clone();
     let outer = shared.spawn_tracked(route_tracker.track_future(async move {
-        let _pending_permit = pending_permit;
         let rejection = match start_rx.await {
             Ok(None) => None,
             Ok(Some(rejection)) => Some(rejection),
@@ -1221,11 +1270,11 @@ pub async fn dispatch_request<H: HostHandler>(
 }
 
 fn remove_pending(generation: &GenerationCore, key: PendingKey) {
-    generation
-        .pending
-        .lock()
-        .expect("pending lock")
-        .remove(&key);
+    let removed = {
+        let mut pending = generation.pending.lock().expect("pending lock");
+        pending.remove(&key)
+    };
+    drop(removed);
 }
 
 fn cancelled_terminal() -> Terminal {
@@ -1324,9 +1373,7 @@ pub async fn open_route<H: HostHandler>(
             }
             BindInstall::CloseWins => {
                 // (protocol AE8).
-                if run_route_gone(&shared, handle).await {
-                    shared.registry.finalize_close(handle);
-                }
+                finish_route_close(&shared, handle).await;
             }
         },
         crate::handler::BindOutcome::Reject { code, message } => {
@@ -1359,11 +1406,11 @@ pub async fn open_route<H: HostHandler>(
 }
 
 /// Runs the handler's `route_gone` callback once per route under the lifecycle deadline.
-/// Returns whether the host is still running afterwards: a deadline overrun trips the fatal
-/// latch, and a panic surfaces through the lifecycle join.
+/// `true` tells the caller to finalize the route.
+#[must_use]
 async fn run_route_gone<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: RouteHandle) -> bool {
     if !shared.registry.mark_gone_started(handle) {
-        return true;
+        return false;
     }
     let handler = Arc::clone(&shared.handler);
     let deadline = shared.timing.lifecycle_callback_deadline;
@@ -1389,9 +1436,7 @@ async fn run_route_gone<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: Rou
 /// A bind that observed its handle without publishing the route still owes route-gone before the handle closes.
 async fn close_unpublished_bind<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: RouteHandle) {
     shared.registry.take_rejected_bind(handle);
-    if run_route_gone(shared, handle).await {
-        shared.registry.finalize_close(handle);
-    }
+    finish_route_close(shared, handle).await;
 }
 
 pub(crate) async fn close_route_decision<H: HostHandler>(
@@ -1407,12 +1452,17 @@ pub(crate) async fn close_route_decision<H: HostHandler>(
 pub(crate) async fn finish_route_close<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     handle: RouteHandle,
-) {
-    if run_route_gone(shared, handle).await {
+) -> bool {
+    let finalize = run_route_gone(shared, handle).await;
+    if finalize {
         shared.registry.finalize_close(handle);
     }
+    finalize
 }
 
+/// Returns whether the caller owes `finish_route_close`. It returns `false` when another owner
+/// runs route-gone: the bind task, an earlier close, or the deferred close this call spawns for
+/// work that outlives both close windows.
 pub(crate) async fn settle_route_work<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     handle: RouteHandle,
@@ -1446,54 +1496,184 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
                 }
                 // A task observes abort only when it yields.
                 // A future that never yields prevents its task from observing abort.
-                // Shutdown must still terminate; trip the fatal latch when the task does not stop within the post-abort budget.
                 let post_abort_deadline = Instant::now() + shared.timing.route_close_budget;
                 if timeout_at(post_abort_deadline, tracker.wait())
                     .await
                     .is_err()
                 {
-                    // If `tracker.wait()` times out, request code may still execute; do not run route-gone.
-                    // Running route-gone while request code executes races handler cleanup and channel finalization.
-                    // is terminating.
-                    shared.fatal.trip(
-                        &shared.shutdown,
-                        "dispatch task did not stop before route-gone".to_owned(),
-                    );
+                    // Request code still runs, so route-gone and the route's terminals follow the
+                    // end of its tracked work.
+                    spawn_deferred_route_close(shared, handle, generation, entries, tracker);
                     return false;
                 }
-                // An aborted dispatch task never reaches its own `settle`; `settle` is
-                // first-terminal-wins, so a request settled before the abort is left alone.
-                let emit_remaining = async {
-                    for (key, settlement) in &entries {
-                        if settlement.is_settled() {
-                            continue;
-                        }
-                        settle(
-                            settlement,
-                            &shared.terminal_budget,
-                            &generation,
-                            handle,
-                            key.2,
-                            cancelled_terminal(),
-                        )
-                        .await;
-                    }
-                };
-                if timeout_at(post_abort_deadline, emit_remaining)
-                    .await
-                    .is_err()
-                {
-                    generation.token.cancel();
-                }
+                settle_stopped_route_work(
+                    shared,
+                    handle,
+                    &generation,
+                    &entries,
+                    post_abort_deadline,
+                )
+                .await;
             }
-            {
-                let mut pending = generation.pending.lock().expect("pending lock");
-                for (key, _) in &entries {
-                    pending.remove(key);
-                }
-            }
+            remove_route_pending(&generation, &entries);
             true
         }
+    }
+}
+
+pub(crate) async fn settle_stopped_route_work<H: HostHandler>(
+    shared: &Arc<HostShared<H>>,
+    handle: RouteHandle,
+    generation: &Arc<GenerationCore>,
+    entries: &[(PendingKey, Arc<Settlement>)],
+    deadline: Instant,
+) {
+    // Aborting a dispatch task can interrupt settlement before terminal emission completes;
+    // `queued` marks the requests whose terminal reached the writer. Requests that still hold
+    // their terminal credit go first, so a retry's wait for a fresh credit cannot delay them
+    // under the shared deadline.
+    let emit_credited = async {
+        let mut retries = Vec::new();
+        for (key, settlement) in entries {
+            let _order = settlement.order.lock().await;
+            if settlement.queued.load(Ordering::SeqCst) {
+                continue;
+            }
+            if settlement.won.swap(true, Ordering::SeqCst) {
+                retries.push((key, settlement));
+                continue;
+            }
+            emit_won_terminal(
+                settlement,
+                &shared.terminal_budget,
+                generation,
+                handle,
+                key.2,
+                cancelled_terminal(),
+            )
+            .await;
+            settlement.queued.store(true, Ordering::SeqCst);
+        }
+        retries
+    };
+    let Ok(retries) = timeout_at(deadline, emit_credited).await else {
+        generation.token.cancel();
+        return;
+    };
+    for (key, settlement) in retries {
+        let _order = settlement.order.lock().await;
+        // A retry whose credit does not free by the deadline leaves that request without a
+        // terminal: its route is already closed, and the connection keeps serving its other
+        // routes instead of retiring for one request.
+        let credited = timeout_at(deadline, settlement.reattach_credit(generation)).await;
+        if !matches!(credited, Ok(Ok(()))) || Instant::now() >= deadline {
+            drop(settlement.take_credit());
+            settlement.queued.store(true, Ordering::SeqCst);
+            continue;
+        }
+        let emitted = timeout_at(
+            deadline,
+            emit_won_terminal(
+                settlement,
+                &shared.terminal_budget,
+                generation,
+                handle,
+                key.2,
+                cancelled_terminal(),
+            ),
+        )
+        .await;
+        settlement.queued.store(true, Ordering::SeqCst);
+        if emitted.is_err() {
+            generation.token.cancel();
+            return;
+        }
+    }
+}
+
+fn remove_route_pending(generation: &GenerationCore, entries: &[(PendingKey, Arc<Settlement>)]) {
+    let removed: Vec<PendingEntry> = {
+        let mut pending = generation.pending.lock().expect("pending lock");
+        entries
+            .iter()
+            .filter_map(|(key, _)| pending.remove(key))
+            .collect()
+    };
+    drop(removed);
+}
+
+fn spawn_deferred_route_close<H: HostHandler>(
+    shared: &Arc<HostShared<H>>,
+    handle: RouteHandle,
+    generation: Arc<GenerationCore>,
+    entries: Vec<(PendingKey, Arc<Settlement>)>,
+    tracker: TaskTracker,
+) {
+    let owner = Arc::clone(shared);
+    let deferred_at = Instant::now();
+    let held = tracker.len();
+    let deferred_work = shared.defer_route_work(&tracker);
+    let task = shared.deferred_closes.track_future(async move {
+        tracker.wait().await;
+        let stopped_after = deferred_at.elapsed();
+        // Terminal emission receives a fresh `route_close_budget` after tracked work stops.
+        let deadline = Instant::now() + owner.timing.route_close_budget;
+        settle_stopped_route_work(&owner, handle, &generation, &entries, deadline).await;
+        remove_route_pending(&generation, &entries);
+        let outcome = if finish_route_close(&owner, handle).await {
+            "route-gone ran"
+        } else {
+            "route-gone belongs to another owner or is still running"
+        };
+        stderr_line(format!(
+            "eidnara-host: route {}/{} work stopped {} ms into its deferred close; {outcome}",
+            handle.channel,
+            handle.epoch,
+            stopped_after.as_millis()
+        ));
+    });
+    // `spawn_lifecycle` keeps forced shutdown's `abort_all` from dropping this owner. During
+    // forced shutdown `force_drain` may retake the same Closing route; `mark_gone_started`
+    // gives route-gone to one owner, and the other leaves finalization to it.
+    shared.spawn_lifecycle(task);
+    if deferred_work > MAX_DEFERRED_WORK {
+        shared.fatal.trip(
+            &shared.shutdown,
+            format!("{deferred_work} route-tracker entries outlived their routes' close budget"),
+        );
+    }
+    stderr_line(format!(
+        "eidnara-host: route {}/{} work outlived its close budget; route-gone runs when it stops ({held} held, {deferred_work} across deferred closes)",
+        handle.channel, handle.epoch
+    ));
+}
+
+/// `MAX_DEFERRED_WORK` limits the live route-tracker entries held by deferred closes. A running
+/// `run_blocking` job holds two entries (its closure's completion token and its join task's
+/// clone) and an unfinished dispatch task holds one, so about 32 stalled blocking jobs fit, well
+/// below Tokio's default blocking-pool limit of 512 threads.
+pub(crate) const MAX_DEFERRED_WORK: usize = 64;
+
+/// Stderr logging is best-effort: one long-lived writer thread drains a bounded queue, and a
+/// line that finds the queue full behind a stalled stderr is dropped. The caller never blocks.
+fn stderr_line(line: String) {
+    use std::sync::{OnceLock, mpsc};
+    static QUEUE: OnceLock<Option<mpsc::SyncSender<String>>> = OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<String>(64);
+        std::thread::Builder::new()
+            .name("eidnara-host-stderr".to_owned())
+            .spawn(move || {
+                use std::io::Write;
+                for line in rx {
+                    let _ = writeln!(std::io::stderr().lock(), "{line}");
+                }
+            })
+            .ok()
+            .map(|_| tx)
+    });
+    if let Some(queue) = queue {
+        let _ = queue.try_send(line);
     }
 }
 
@@ -1539,9 +1719,7 @@ pub async fn force_close_all_routes<H: HostHandler>(shared: &Arc<HostShared<H>>)
                 );
                 return;
             }
-            if run_route_gone(&shared, handle).await {
-                shared.registry.finalize_close(handle);
-            }
+            finish_route_close(&shared, handle).await;
         });
     }
     while drains.join_next().await.is_some() {}

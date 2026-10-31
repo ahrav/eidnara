@@ -29,12 +29,13 @@ The present claim concerns tracked callbacks; moving work must extend that gate.
 - [dispatch.rs:937-954][cancel] aborts and awaits the callback when cancellation
   wins before settling the cancelled terminal.
 - [dispatch.rs:1237-1268][close] closes the tracker, waits, aborts, and waits
-  again. Failure to stop trips fatal state and returns false, not cleanup.
+  again. At this baseline, failure to stop trips fatal state and returns false,
+  not cleanup; the live close gate below defers such a route instead.
 - [The wire contract:767-781][wire] requires best-effort cancellation and
   cleanup-gated reuse, and preserves unknown outcomes after unobserved terminals.
 - [daemon/lib.rs:8138-8202][transform] invokes the transform synchronously;
   no off-worker transform completion protocol is demonstrated by this site.
-- [tests/dispatch.rs:832-887][overlap] starts a hanging callback, sends route
+- [The baseline route-close test][overlap] starts a hanging callback, sends route
   Goodbye, then checks cancellation and one cleanup callback. It is unaudited.
 
 ## Failure scenario
@@ -115,23 +116,30 @@ cancelled terminal. Work registered before that drain completes must stop
 first; subsequent submissions remain covered by route close and host shutdown,
 not by the completed request drain. Route close keeps its shape: the
 [close gate][close-gate-live] closes the route tracker, waits the route-close
-budget, aborts the dispatch tasks, waits the budget again, and trips fatal
-rather than running route-gone if work is still live; the join task is entered
+budget, aborts the dispatch tasks, waits the budget again, and hands a route
+whose work is still live to a deferred close that runs route-gone only after the
+work stops; the join task is entered
 in that tracker, so held blocking work, awaited or not, is inside the gate.
 The abort drops the dispatch task at its wait on the request ledger, before
 that task's own `settle`, so when the work then finishes inside the post-abort
-budget the [route drain settles][close-fallback] each collected pending entry
-that is still unsettled as `cancelled` before route-gone; `settle` is
-first-terminal-wins, including admission rejection, so a request with an earlier
-terminal is left alone. Post-abort waiting and fallback emission share one
-absolute deadline. Undeliverable fallback output retires the generation;
+budget the [route drain emits][close-fallback] `cancelled` before route-gone for
+each collected pending entry whose terminal has not reached the writer
+(`Settlement::queued`), including a request whose own winning settle was aborted
+before queuing, which receives its terminal only when a terminal credit frees
+before the deadline and otherwise stays `outcome_unknown` while the generation
+keeps serving; an entry whose terminal was already queued, including
+admission rejection, is left alone. Post-abort waiting and fallback emission share one
+absolute deadline. Credited fallback output that misses it retires the generation.
+A deferred close runs the same drain under one fresh close budget taken when its
+work stops, and the same credit and retirement rules apply against that budget
+([deferred-budget test][t-deferred-budget]);
 logical settlement does not guarantee a received terminal on a retired link.
 The host cannot stop a thread that has started, so the
 seam's contract asks the work to terminate on its own or to observe the
 request's [cancel signal][cancel-signal] at its safe points; the signal is an
 observation-only view of the token, so a handler cannot cancel its own request
-through it; work held past the budget follows the fatal path, which is E1's
-stated outcome for unquiesced work. Captures dropped by the closure release
+through it; work held past the budget keeps its route closing until it stops,
+and forced shutdown keeps the fatal path. Captures dropped by the closure release
 on its return or unwind. Captures moved into the result, including charges,
 remain owned by the channel or receiver until their final owner drops them.
 The counted-charge test explicitly drops its charge on the blocking thread;
@@ -164,8 +172,9 @@ terminal, exactly one route-gone, and one release. The [detached test][t-detache
 has the handler answer without awaiting its work, and shows route-gone waiting
 for release despite the earlier response. The
 [budget test][t-fatal] uses paused time, observes dispatch abort, and retains
-a completion token through both close windows; cleanup is refused at the
-shared deadline. The [late-release test][t-late] observes the dispatch future's
+a completion token through both close windows; the route defers its close
+with the fatal latch clear, and releasing the token yields one `cancelled`
+terminal and a released channel. The [late-release test][t-late] observes the dispatch future's
 drop signal before releasing that token, then checks one cancelled terminal.
 These replace sleep-based phase assumptions. Separate integration tests hold
 real blocking threads and check cancellation, route cleanup, and instance
@@ -186,26 +195,27 @@ Tokio time and an abort-drop signal; they do not claim to execute real blocking
 threads. Separate integration tests exercise held physical work and instance
 exclusion.
 
-[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L606
+[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L619
 [work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L458-L462
-[work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L660-L673
+[work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L663-L676
 [failed]: ../../../../crates/host-runtime/src/handler.rs#L467-L475
 [cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L502-L537
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
-[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L915-L951
-[cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L951
-[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
-[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1290-L1313
+[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L1087-L1091
+[cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L1194
+[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1466-L1649
+[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1524-L1592
 [daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
-[t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L617-L665
-[t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L725-L776
-[t-close]: ../../../../crates/host-runtime/tests/dispatch.rs#L781-L825
-[t-detached]: ../../../../crates/host-runtime/tests/dispatch.rs#L830-L866
-[t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L179-L205
-[t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L149-L177
-[t-panic]: ../../../../crates/host-runtime/tests/dispatch.rs#L872-L906
-[t-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L610-L612
+[t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L653
+[t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L748-L800
+[t-close]: ../../../../crates/host-runtime/tests/dispatch.rs#L804-L836
+[t-detached]: ../../../../crates/host-runtime/tests/dispatch.rs#L840-L868
+[t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L214-L270
+[t-deferred-budget]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L816-L849
+[t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L184-L212
+[t-panic]: ../../../../crates/host-runtime/tests/dispatch.rs#L873-L908
+[t-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L633-L636
 
 [fence]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/dispatch.rs#L873-L934
 [cancel]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/dispatch.rs#L937-L954
@@ -252,8 +262,10 @@ commit. [The focused receipt][receipt] records execution with adequacy unaudited
 - Sources examined: [The host join contract][run-blocking], [the close gate][close-gate-live],
   [unit cancellation and settlement][unit-lifecycle], and the owner's explicit
   approval on 2026-09-13.
-- Findings: The owner accepts the existing fatal-shutdown path when physical
-  work outlasts the close budget. Started blocking work cannot be forcibly
+- Findings: The owner accepted, on 2026-09-13, that physical work may outlast
+  the close budget. Route close now defers route-gone until that work stops;
+  fatal shutdown remains the outcome on forced shutdown and past
+  `MAX_DEFERRED_WORK`. Started blocking work cannot be forcibly
   stopped; a full-cap paged request or slow disk can delay process exit. The
   owner also accepts late cancellation after a durable commit. A later
   Emergency95 unit may skip its work when it sees cancellation; derived caches

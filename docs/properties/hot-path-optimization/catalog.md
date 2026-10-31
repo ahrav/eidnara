@@ -139,7 +139,8 @@ suppression for rows outside the read's domain during #443. M1 and M5 below name
 
 The distribution is eleven `always` checks and five `sometimes` checks.
 There is no new liveness claim with an invented deadline. A route-close budget
-can lead to fatal refusal of cleanup, not proof that arbitrary work terminates.
+can defer cleanup until work stops, and forced shutdown can end in fatal
+refusal; neither is proof that arbitrary work terminates.
 
 ## Canonical read
 
@@ -301,8 +302,10 @@ terminal, no route-gone, and no charge release until the work is released, then
 one of each. Detached work remains joined by route close and host shutdown.
 Paused-time tests observe dispatch abort before releasing a completion token;
 fallback then emits one `cancelled` terminal. Held tokens past both close
-windows refuse cleanup. A real held-worker test checks that fatal close retains
-the handler and instance lock until release. The panic and stderr tests cover
+windows hand the route to a deferred close, which keeps the fatal latch clear
+and runs route-gone once the tokens drop. A real held-worker test checks that
+forced shutdown with held work retains the handler and instance lock until
+release. The panic and stderr tests cover
 redaction, internal-error settlement, and charge release on unwind. Work the
 daemon submits through `kernel_routes::blocking` runs through none of this.
 The [real-transform host tests](evidence/route-cleanup-waits-for-request-owned-physical-work.md#implementation-evidence-2026-09-13)
@@ -316,14 +319,16 @@ blocking work a request runs through its context is inside that gate: joined by
 the request's cancel arm and by route close, with its panics redacted.
 Check: `always` - At route-gone entry and cleanup-gated reuse, an independent
 ledger contains no live request-owned work that can access that route's state;
-an unquiesced timeout follows the fatal/refusal path instead of cleanup.
+an unquiesced post-abort timeout hands the route to a deferred close that runs
+route-gone only after the work stops, and forced shutdown keeps the fatal path.
 Work registered before the cancel arm completes its request-ledger drain
 finishes before a cancelled terminal. Later submissions may outlive that
 terminal but remain joined by route close and host shutdown. If cancellation
 wins and the generation remains viable through output admission, one cancelled
 terminal is queued after the request drain. Logical settlement does not
 prove peer observation: retired generations and failed delivery preserve
-`outcome_unknown`, and unquiesced work follows fatal refusal.
+`outcome_unknown`, and unquiesced work defers its route's terminals and
+route-gone until it stops.
 Fault/timing angle: Cancellation or outer-future drop precedes actual worker
 completion, including a worker that has not observed abort.
 Required faults and enabling state: Hold request work at an observable live
@@ -346,8 +351,9 @@ Open questions:
   `RequestCtx::run_blocking` enters the work in request, route, and host
   ledgers, and the daemon keeps no drain of its own. (answered)
 - May work exceed the close budget or commit before cancellation settles? The
-  owner explicitly approves both on 2026-09-13. Existing fatal shutdown remains
-  the outcome for unquiesced work; started work can delay process exit. Full-cap
+  owner explicitly approves both on 2026-09-13. Route close defers route-gone
+  until unquiesced work stops; fatal shutdown remains the outcome on forced
+  shutdown and past `MAX_DEFERRED_WORK`. Started work can delay process exit. Full-cap
   paged and slow-disk durations are unmeasured. Later Emergency95 units may skip
   on cancellation, with derived state recomputed or superseded. (answered)
 - `kernel_routes::blocking`
@@ -767,8 +773,8 @@ them without creating implementation tickets.
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8759
 [memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L141-L212
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
-[dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L824-L940
-[close]: ../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
+[dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
+[close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522
 [read-callback]: ../../../crates/storage/src/lib.rs#L346
 [write-callback]: ../../../crates/storage/src/lib.rs#L439
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2380
