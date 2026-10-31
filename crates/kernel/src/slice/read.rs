@@ -718,6 +718,21 @@ fn classify_row_error(error: rusqlite::Error) -> KernelError {
     }
 }
 
+impl crate::SnapshotRead<'_> {
+    /// [`KernelStore::linked_decision_evidence_within_budget`] in this transaction.
+    ///
+    /// # Errors
+    ///
+    /// The store's read errors.
+    pub fn linked_decision_evidence(
+        &self,
+        decision_object_id: &str,
+        max: std::num::NonZeroUsize,
+    ) -> Result<Vec<LinkedEvidence>, KernelError> {
+        linked_evidence(self.tx, decision_object_id, self.requested, max).map_err(crate::map_sqlite)
+    }
+}
+
 /// The page of [`KernelStore::scope_decisions_after_within_budget`]. `INDEXED BY` holds the read to
 /// the commit-sequence index, and the cursor bound `created_commit_seq>=?4` is the range it seeks.
 const SCOPE_DECISIONS_AFTER_SQL: &str = "SELECT d.created_commit_seq, d.object_id
@@ -804,20 +819,5 @@ mod scope_decisions_plan_tests {
         assert!(!plan.contains("idx_decisions_scope_fk"), "{plan}");
         // Rows sort only inside one commit sequence, never across the whole read.
         assert!(!plan.contains("TEMP B-TREE FOR ORDER BY"), "{plan}");
-    }
-}
-
-impl crate::SnapshotRead<'_> {
-    /// [`KernelStore::linked_decision_evidence_within_budget`] in this transaction.
-    ///
-    /// # Errors
-    ///
-    /// The store's read errors.
-    pub fn linked_decision_evidence(
-        &self,
-        decision_object_id: &str,
-        max: std::num::NonZeroUsize,
-    ) -> Result<Vec<LinkedEvidence>, KernelError> {
-        linked_evidence(self.tx, decision_object_id, self.requested, max).map_err(crate::map_sqlite)
     }
 }
