@@ -723,3 +723,13 @@ fn intent(input: &VerifierInput, write: Write, blob_oid: &str) -> CommitIntent {
         cause: "deterministic attestation verifier".into(),
     }
 }
+
+/// The id prefixes [`Identity::of`] writes under, in field order: object, decision, witness
+/// observation, witness object. The plugin commit route refuses rows under them, so no caller can
+/// occupy an attestation's ids before the verifier writes them.
+pub const ID_PREFIXES: [&str; 4] = [
+    "verattest:",
+    "verattestdec:",
+    "verwitness:",
+    "verwitnessobj:",
+];
