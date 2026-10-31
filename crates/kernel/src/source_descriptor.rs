@@ -829,19 +829,7 @@ fn descriptor_rows(
     values: &[&str],
     limit: usize,
 ) -> Result<Vec<LiveDescriptorRaw>, KernelError> {
-    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    // The bound is written into the statement text, so each bound has its own cached statement.
-    let sql = format!(
-        "SELECT {DESCRIPTOR_COLUMNS}
-         {rows}
-           AND o.source_kind=?1 AND o.object_kind='observation'
-           AND {live}
-           AND {key}
-         ORDER BY o.object_id
-         LIMIT {limit}",
-        rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
-        live = Descriptors::LiveAtEnd.predicate("?2", "0"),
-    );
+    let sql = descriptor_rows_statement(DESCRIPTOR_COLUMNS, key, limit);
     let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
     let code = class.code();
     let mut params: Vec<&dyn rusqlite::ToSql> = vec![&code, &requested];
@@ -851,6 +839,33 @@ fn descriptor_rows(
         .map_err(map_sqlite)?
         .collect::<rusqlite::Result<_>>()
         .map_err(map_sqlite)
+}
+
+/// The statement [`descriptor_rows`] runs, selecting `columns`. The bound is written into the
+/// statement text, so each bound has its own cached statement.
+fn descriptor_rows_statement(columns: &str, key: &str, limit: usize) -> String {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    format!(
+        "SELECT {columns}
+         {rows}
+           AND o.source_kind=?1 AND o.object_kind='observation'
+           AND {live}
+           AND {key}
+         ORDER BY o.object_id
+         LIMIT {limit}",
+        rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
+        live = Descriptors::LiveAtEnd.predicate("?2", "0"),
+    )
+}
+
+/// The `key` of [`descriptor_rows`] for one lineage's object id range, bound to [`lineage_range`].
+const LINEAGE_KEY: &str = "o.object_id>=?3 AND o.object_id<?4";
+
+/// The object id range of lineage `lineage_id`'s descriptors.
+fn lineage_range(lineage_id: &str) -> (String, String) {
+    let low = descriptor_object_id(lineage_id, "");
+    let high = super::envelope::prefix_upper_bound(&low);
+    (low, high)
 }
 
 /// The stored descriptor row columns [`raw_descriptor`] reads, in its order.
@@ -952,16 +967,18 @@ impl Envelope<'_> {
         class: OccurrenceClass,
         lineage_id: &str,
     ) -> Result<Option<LiveDescriptor>, KernelError> {
-        let low = descriptor_object_id(lineage_id, "");
-        let high = super::envelope::prefix_upper_bound(&low);
-        let mut raw = descriptor_rows(
-            self.tx,
-            class,
-            self.commit_seq,
-            "o.object_id>=?3 AND o.object_id<?4",
-            &[&low, &high],
-            2,
-        )?;
+        Self::lineage_descriptor(self.tx, class, self.commit_seq, lineage_id)
+    }
+
+    /// [`Self::live_source_descriptor_of_lineage`] read in `tx` at `requested`.
+    fn lineage_descriptor(
+        tx: &rusqlite::Transaction<'_>,
+        class: OccurrenceClass,
+        requested: i64,
+        lineage_id: &str,
+    ) -> Result<Option<LiveDescriptor>, KernelError> {
+        let (low, high) = lineage_range(lineage_id);
+        let mut raw = descriptor_rows(tx, class, requested, LINEAGE_KEY, &[&low, &high], 2)?;
         if raw.len() > 1 {
             return Err(KernelError::CorruptCanonicalRow);
         }
@@ -1227,6 +1244,51 @@ impl KernelStore {
 }
 
 impl crate::SnapshotRead<'_> {
+    /// [`Envelope::live_source_descriptor_of_lineage`] in this transaction, at its commit sequence.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Envelope::live_source_descriptor_of_lineage`].
+    pub fn live_source_descriptor_of_lineage(
+        &self,
+        class: OccurrenceClass,
+        lineage_id: &str,
+    ) -> Result<Option<LiveDescriptor>, KernelError> {
+        Envelope::lineage_descriptor(self.tx, class, self.requested, lineage_id)
+    }
+
+    /// The evidence artifact digest of the row [`Self::live_source_descriptor_of_lineage`] reads,
+    /// from the same statement over `descriptor_rows`'s lineage range and liveness predicate,
+    /// selecting the digest in place of the row and its stored detail, so no row check applies.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::CorruptCanonicalRow`] when the range holds more than one live
+    /// descriptor of `class`, and the store's read errors.
+    pub fn live_source_descriptor_digest_of_lineage(
+        &self,
+        class: OccurrenceClass,
+        lineage_id: &str,
+    ) -> Result<Option<String>, KernelError> {
+        static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            descriptor_rows_statement("e.artifact_digest", LINEAGE_KEY, 2)
+        });
+        let (low, high) = lineage_range(lineage_id);
+        let mut statement = self.tx.prepare_cached(&SQL).map_err(map_sqlite)?;
+        let mut digests = statement
+            .query_map(
+                rusqlite::params![class.code(), self.requested, low, high],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite)?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(map_sqlite)?;
+        if digests.len() > 1 {
+            return Err(KernelError::CorruptCanonicalRow);
+        }
+        Ok(digests.pop())
+    }
+
     /// [`KernelStore::source_descriptor_citing_evidence`] for each of `evidence_ids`, in request
     /// order, from one statement. An entry is `Err(CorruptCanonicalRow)` when its live row fails
     /// the descriptor row checks, including a stored class other than `class`; the other entries

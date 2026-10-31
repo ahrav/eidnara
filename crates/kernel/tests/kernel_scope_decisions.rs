@@ -1,10 +1,11 @@
 mod claim_fixture;
 
 use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 
 use claim_fixture::{DOMAIN, Fixture, decision, intent};
 use kernel::applicability::EvalBudget;
-use kernel::{KernelError, ScopeSpec, Sensitivity};
+use kernel::{ClaimFactsError, KernelError, ScopeSpec, Sensitivity};
 
 const SCOPE: &str = "project:a";
 
@@ -144,4 +145,176 @@ fn the_page_walks_a_scopes_live_decisions_in_commit_order_after_the_cursor() {
         fixture.store.controlled_acquisitions_for_test(),
         acquisitions + 1
     );
+}
+
+#[test]
+fn the_registry_source_page_walks_a_scopes_live_decisions_of_one_source_kind_in_source_order() {
+    let fixture = Fixture::open();
+    fixture
+        .store
+        .commit(intent("scopes"), |envelope| {
+            envelope.insert_scope(scope(SCOPE))?;
+            envelope.insert_scope(scope("project:b"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let insert = |key: &str, rows: &[(i64, &str, &str, &str)]| {
+        fixture
+            .store
+            .commit(intent(key), |envelope| {
+                for (index, scope_id, source_kind, source_id) in rows {
+                    let mut spec = decision(*index, 1);
+                    spec.scope_id = Some((*scope_id).to_string());
+                    spec.source_kind = (*source_kind).to_string();
+                    spec.source_id = (*source_id).to_string();
+                    envelope.insert_decision(spec)?;
+                }
+                Ok(String::new())
+            })
+            .unwrap()
+    };
+    // Source order runs against commit order, and two decisions share one source id, inserted
+    // against their object id order.
+    insert(
+        "first",
+        &[
+            (1, SCOPE, "verifier", "c"),
+            (2, SCOPE, "assistant", "a"),
+            (3, "project:b", "verifier", "b"),
+        ],
+    );
+    insert(
+        "second",
+        &[(5, SCOPE, "verifier", "a"), (4, SCOPE, "verifier", "a")],
+    );
+    insert("retired", &[(6, SCOPE, "verifier", "b")]);
+    let before_retire = fixture.tip();
+    fixture
+        .store
+        .commit(intent("retire"), |envelope| {
+            envelope.retire_decision(&object(6))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let retired = fixture.tip();
+    insert("later", &[(7, SCOPE, "verifier", "0")]);
+    let target = fixture.store.capture_commit_read_target().unwrap();
+    let budget = EvalBudget::unbounded();
+    // Each visit reads through the page's transaction before the statement steps on.
+    let source_page = |through: i64, after: Option<(&str, &str)>, max_rows: usize, take: usize| {
+        fixture
+            .store
+            .read_at(target, &budget, |snapshot| {
+                let mut rows = Vec::new();
+                let visited = snapshot.scope_source_decisions_after(
+                    SCOPE,
+                    "verifier",
+                    through,
+                    after,
+                    NonZeroUsize::new(max_rows).unwrap(),
+                    |source_id, object_id| {
+                        assert!(snapshot.decision_standing(&object_id).unwrap().is_some());
+                        rows.push((source_id, object_id));
+                        if rows.len() == take {
+                            ControlFlow::Break(())
+                        } else {
+                            ControlFlow::Continue(())
+                        }
+                    },
+                )?;
+                assert_eq!(visited, rows.len());
+                Ok::<_, ClaimFactsError>(rows)
+            })
+            .unwrap()
+    };
+    let pair = |source: &str, index: i64| (source.to_string(), object(index));
+    let all = vec![pair("a", 4), pair("a", 5), pair("c", 1)];
+    assert_eq!(source_page(retired, None, 32, usize::MAX), all);
+    assert_eq!(
+        source_page(before_retire, None, 32, usize::MAX),
+        vec![pair("a", 4), pair("a", 5), pair("b", 6), pair("c", 1)]
+    );
+    assert_eq!(source_page(retired, None, 2, usize::MAX), all[..2]);
+    assert_eq!(source_page(retired, None, 32, 1), all[..1]);
+    assert_eq!(
+        source_page(retired, Some(("a", &object(4))), 32, usize::MAX),
+        all[1..]
+    );
+    assert_eq!(
+        source_page(retired, Some(("a", &object(5))), 1, usize::MAX),
+        all[2..]
+    );
+    assert!(source_page(retired, Some(("c", &object(1))), 32, usize::MAX).is_empty());
+    assert_eq!(
+        source_page(target.through_commit, None, 32, usize::MAX)[0],
+        pair("0", 7)
+    );
+
+    let refused = |through: i64, budget: &EvalBudget| {
+        fixture.store.read_at(target, budget, |snapshot| {
+            snapshot
+                .scope_source_decisions_after(
+                    SCOPE,
+                    "verifier",
+                    through,
+                    None,
+                    NonZeroUsize::MIN,
+                    |_, _| ControlFlow::Continue(()),
+                )
+                .map_err(ClaimFactsError::from)
+        })
+    };
+    for through in [-1, target.through_commit + 1] {
+        assert_eq!(
+            refused(through, &budget),
+            Err(ClaimFactsError::Kernel(KernelError::InvalidInput))
+        );
+    }
+    let cancelled = EvalBudget::unbounded();
+    cancelled.cancel();
+    assert_eq!(
+        refused(retired, &cancelled),
+        Err(ClaimFactsError::Kernel(KernelError::Deadline))
+    );
+}
+
+/// A row bound past `i64::MAX` is clamped in the statement text, so a caller that passes
+/// `usize::MAX` for an unbounded page gets the page from both page reads.
+#[test]
+fn a_row_bound_past_i64_max_reads_the_page() {
+    let fixture = Fixture::open();
+    fixture
+        .store
+        .commit(intent("scopes"), |envelope| {
+            envelope.insert_scope(scope(SCOPE))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let seq = commit(&fixture, "rows", &[1, 2], SCOPE, "assistant");
+    commit(&fixture, "verifier", &[3], SCOPE, "verifier");
+    let tip = fixture.tip();
+    assert_eq!(
+        page(&fixture, tip, None, usize::MAX),
+        vec![(seq, object(1)), (seq, object(2))]
+    );
+    let target = fixture.store.capture_commit_read_target().unwrap();
+    let rows = fixture
+        .store
+        .read_at(target, &EvalBudget::unbounded(), |snapshot| {
+            let mut rows = Vec::new();
+            snapshot.scope_source_decisions_after(
+                SCOPE,
+                "verifier",
+                tip,
+                None,
+                NonZeroUsize::new(usize::MAX).unwrap(),
+                |source_id, object_id| {
+                    rows.push((source_id, object_id));
+                    ControlFlow::Continue(())
+                },
+            )?;
+            Ok::<_, ClaimFactsError>(rows)
+        })
+        .unwrap();
+    assert_eq!(rows, vec![("source-3".to_string(), object(3))]);
 }

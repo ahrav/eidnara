@@ -2109,7 +2109,7 @@ mod source_capture_block_tests {
 
 pub(crate) const VERIFIER_KEY: &str = "verifier";
 /// `VERIFIER_COUNTERS` defines the counter allowlist for `metrics.verifier` in `docs/host-wire-protocol.md`.
-const VERIFIER_COUNTERS: [&str; 37] = [
+const VERIFIER_COUNTERS: [&str; 40] = [
     "considered",
     "match",
     "mismatch",
@@ -2144,6 +2144,9 @@ const VERIFIER_COUNTERS: [&str; 37] = [
     "witness_degraded",
     "witness_degraded_skipped",
     "unavailable_skipped",
+    "applicability_stale",
+    "applicability_current",
+    "applicability_unavailable",
     "bytes_read",
     "passes",
     "last_pass_ms",

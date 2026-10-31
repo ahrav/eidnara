@@ -719,6 +719,66 @@ fn classify_row_error(error: rusqlite::Error) -> KernelError {
 }
 
 impl crate::SnapshotRead<'_> {
+    /// Hands `visit` the decisions of scope `scope_id` live at `through` whose registry `source_kind`
+    /// is `source_kind`, as `(source_id, object_id)` registry pairs in that order after the pair
+    /// `after`, at most `max_rows`, one row per call, and returns the number of rows handed over.
+    /// The statement steps to the next row only after `visit` returns, so `visit` can read through
+    /// this transaction, and a `visit` that breaks is handed no later row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] for a `through` below zero or above this transaction's
+    /// commit sequence, and the store's read errors.
+    pub fn scope_source_decisions_after(
+        &self,
+        scope_id: &str,
+        source_kind: &str,
+        through: i64,
+        after: Option<(&str, &str)>,
+        max_rows: std::num::NonZeroUsize,
+        mut visit: impl FnMut(String, String) -> std::ops::ControlFlow<()>,
+    ) -> Result<usize, KernelError> {
+        if !(0..=self.requested).contains(&through) {
+            return Err(KernelError::InvalidInput);
+        }
+        let (after_source, after_id) = after.unwrap_or(("", ""));
+        let mut statement = self
+            .tx
+            .prepare_cached(&limited(SCOPE_SOURCE_DECISIONS_AFTER_SQL, max_rows))
+            .map_err(crate::map_sqlite)?;
+        let mut rows = statement
+            .query(rusqlite::params![
+                scope_id,
+                source_kind,
+                through,
+                after_source,
+                after_id
+            ])
+            .map_err(crate::map_sqlite)?;
+        let mut visited = 0;
+        while let Some(row) = rows.next().map_err(crate::map_sqlite)? {
+            visited += 1;
+            let source_id = row.get(0).map_err(crate::map_sqlite)?;
+            let object_id = row.get(1).map_err(crate::map_sqlite)?;
+            if visit(source_id, object_id).is_break() {
+                break;
+            }
+        }
+        Ok(visited)
+    }
+
+    /// [`KernelStore::observation_for_object_as_of`] in this transaction.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`KernelStore::observation_for_object_as_of`].
+    pub fn observation_for_object(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<ObservationRow>, KernelError> {
+        load_observation_for_object(self.tx, self.requested, object_id)
+    }
+
     /// [`KernelStore::linked_decision_evidence_within_budget`] in this transaction.
     ///
     /// # Errors
@@ -741,8 +801,31 @@ const SCOPE_DECISIONS_AFTER_SQL: &str = "SELECT d.created_commit_seq, d.object_i
      WHERE d.scope_id=?1 AND o.source_kind<>?2 AND d.created_commit_seq<=?3
        AND (d.invalidated_commit_seq IS NULL OR ?3<d.invalidated_commit_seq)
        AND d.created_commit_seq>=?4 AND (d.created_commit_seq>?4 OR d.object_id>?5)
-     ORDER BY d.created_commit_seq, d.object_id
-     LIMIT ?6";
+     ORDER BY d.created_commit_seq, d.object_id";
+
+/// The page of [`crate::SnapshotRead::scope_source_decisions_after`]. `idx_objects_source` indexes
+/// `(source_kind,source_id,source_revision,object_kind)`, so `INDEXED BY` seeks the cursor's
+/// `source_id` among the source kind's registry entries and tests `object_kind` on each index
+/// entry before its registry and decision rows are read.
+const SCOPE_SOURCE_DECISIONS_AFTER_SQL: &str = "SELECT o.source_id, o.object_id
+     FROM object_registry o INDEXED BY idx_objects_source
+     JOIN decisions d ON d.object_id=o.object_id
+     WHERE o.source_kind=?2 AND o.object_kind='decision'
+       AND o.source_id>=?4 AND (o.source_id>?4 OR o.object_id>?5)
+       AND d.scope_id=?1 AND d.created_commit_seq<=?3
+       AND (d.invalidated_commit_seq IS NULL OR ?3<d.invalidated_commit_seq)
+     ORDER BY o.source_id, o.object_id";
+
+/// `sql` bounded by `max_rows`, written into the statement text: SQLite reads a bound `LIMIT`
+/// parameter while it prepares the statement and expires the prepared statement when the
+/// parameter is bound again, so a bound `LIMIT` prepares the cached statement anew at each
+/// execution.
+/// SQLite parses integer literals above `i64::MAX` as real values, causing `LIMIT` to report a
+/// datatype mismatch.
+fn limited(sql: &str, max_rows: std::num::NonZeroUsize) -> String {
+    let max_rows = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
+    format!("{sql} LIMIT {max_rows}")
+}
 
 impl KernelStore {
     /// The decisions of scope `scope_id` live at `requested` whose registry `source_kind` is not `excluded_source_kind`, as `(created_commit_seq, object_id)` pairs in that order after the pair `after`, at most `max_rows`. A decision's creating commit never changes, so a caller that pages by the last pair it acted on revisits no decision and passes over none created at or before `requested`. The read seeks the commit-sequence index `idx_decisions_known_as_of` at `after`'s sequence and walks it forward, so a page reads the decision rows of every scope from `after`'s commit sequence through its last row's commit sequence, or through `requested` when it is short, whatever the scope's size. The wait for a pooled reader and the read itself stop at `budget`'s deadline or interrupt.
@@ -763,9 +846,8 @@ impl KernelStore {
         let tx = reader.transaction(TransactionBehavior::Deferred)?;
         snapshot_tip(&tx, requested)?;
         let (after_seq, after_id) = after.unwrap_or((-1, ""));
-        let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
         let rows = tx
-            .prepare_cached(SCOPE_DECISIONS_AFTER_SQL)
+            .prepare_cached(&limited(SCOPE_DECISIONS_AFTER_SQL, max_rows))
             .and_then(|mut statement| {
                 statement
                     .query_map(
@@ -774,8 +856,7 @@ impl KernelStore {
                             excluded_source_kind,
                             requested,
                             after_seq,
-                            after_id,
-                            limit
+                            after_id
                         ],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )?
@@ -789,6 +870,8 @@ impl KernelStore {
 
 #[cfg(test)]
 mod scope_decisions_plan_tests {
+    use std::num::NonZeroUsize;
+
     /// The page seeks the commit-sequence index at the cursor rather than reading every decision of
     /// the scope, so its cost follows the rows after the cursor and not the scope's size.
     #[test]
@@ -800,12 +883,15 @@ mod scope_decisions_plan_tests {
         let mut statement = connection
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN {}",
-                super::SCOPE_DECISIONS_AFTER_SQL
+                super::limited(
+                    super::SCOPE_DECISIONS_AFTER_SQL,
+                    NonZeroUsize::new(32).unwrap()
+                )
             ))
             .unwrap();
         let plan = statement
             .query_map(
-                rusqlite::params!["project:a", "verifier", 10, 3, "decision", 32],
+                rusqlite::params!["project:a", "verifier", 10, 3, "decision"],
                 |row| row.get::<_, String>(3),
             )
             .unwrap()
@@ -819,6 +905,72 @@ mod scope_decisions_plan_tests {
         assert!(!plan.contains("idx_decisions_scope_fk"), "{plan}");
         // Rows sort only inside one commit sequence, never across the whole read.
         assert!(!plan.contains("TEMP B-TREE FOR ORDER BY"), "{plan}");
+    }
+
+    #[test]
+    fn a_page_statement_with_its_bound_in_the_text_is_prepared_once() {
+        let directory = tempfile::tempdir().unwrap();
+        drop(crate::KernelStore::open(directory.path()).unwrap());
+        let connection =
+            rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        let executions = |sql: &str, bound: bool| {
+            let mut statement = connection.prepare(sql).unwrap();
+            for after in ["a", "b"] {
+                let params = rusqlite::params_from_iter(
+                    ["project:a", "verifier", "10", after, "decision", "32"]
+                        .into_iter()
+                        .take(if bound { 6 } else { 5 }),
+                );
+                statement.query(params).unwrap().next().unwrap();
+            }
+            statement.get_status(rusqlite::StatementStatus::RePrepare)
+        };
+        let page = super::SCOPE_SOURCE_DECISIONS_AFTER_SQL;
+        assert_eq!(
+            executions(&super::limited(page, NonZeroUsize::new(32).unwrap()), false),
+            0
+        );
+        // A bound `LIMIT` parameter expires the statement at each rebind.
+        assert!(executions(&format!("{page} LIMIT ?6"), true) > 0);
+    }
+
+    #[test]
+    fn the_source_decision_page_seeks_the_registry_source_index() {
+        let directory = tempfile::tempdir().unwrap();
+        drop(crate::KernelStore::open(directory.path()).unwrap());
+        let connection =
+            rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        let mut statement = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {} LIMIT 32",
+                super::SCOPE_SOURCE_DECISIONS_AFTER_SQL
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map(
+                rusqlite::params!["project:a", "verifier", 10, "source", "decision"],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join(" | ");
+        assert!(
+            plan.contains(
+                "SEARCH o USING INDEX idx_objects_source (source_kind=? AND source_id>?)"
+            ),
+            "{plan}"
+        );
+        assert!(
+            plan.contains("SEARCH d USING INDEX sqlite_autoindex_decisions_2 (object_id=?)"),
+            "{plan}"
+        );
+        assert!(!plan.contains("idx_decisions_known_as_of"), "{plan}");
+        // Rows sort by `object_id` only among those sharing one `source_id`.
+        assert!(
+            plan.ends_with("USE TEMP B-TREE FOR LAST TERM OF ORDER BY"),
+            "{plan}"
+        );
     }
 
     /// A tip query the budget's progress handler interrupts reports the budget, as the page query

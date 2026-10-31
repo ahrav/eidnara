@@ -44,7 +44,8 @@ pub const PRODUCER: &str = "verifier";
 /// The decision-event kind of the attestation's citation of the compared evidence.
 pub const CITATION_EVENT_KIND: &str = "verifier_citation";
 
-/// The version of the witness observation's detail.
+/// The version of the witness observation's detail. The applicability step reads a detail at
+/// another version as unavailable.
 pub const WITNESS_DETAIL_VERSION: u32 = 1;
 
 /// The ids one attestation of a model decision at one commit oid is written under: `source_id` is
@@ -64,6 +65,11 @@ pub struct Identity {
 impl Identity {
     pub fn of(model_object_id: &str, oid: &str) -> Self {
         let hash = format!("{:x}", Sha256::digest(format!("{model_object_id}\n{oid}")));
+        Self::of_hash(hash)
+    }
+
+    /// The ids derived from `hash`, the SHA-256 hex of a `(model object id, oid)` pair.
+    fn of_hash(hash: String) -> Self {
         Self {
             source_id: hash.clone(),
             object_id: format!("{}{hash}", ID_PREFIXES[0]),
@@ -71,6 +77,14 @@ impl Identity {
             witness_observation_id: format!("{}{hash}", ID_PREFIXES[2]),
             witness_object_id: format!("{}{hash}", ID_PREFIXES[3]),
         }
+    }
+
+    /// The identity whose attestation object id is `object_id`, or `None` for an id outside the
+    /// attestation prefix.
+    pub fn of_attestation(object_id: &str) -> Option<Self> {
+        object_id
+            .strip_prefix(ID_PREFIXES[0])
+            .map(|hash| Self::of_hash(hash.to_owned()))
     }
 }
 
@@ -80,7 +94,8 @@ impl Identity {
 pub enum Outcome {
     /// The attestation and every companion row committed.
     Committed(CommitReceipt),
-    /// The `MarkStale` on the model decision committed.
+    /// The `MarkStale` committed: on the model decision for [`attest`], or on the attestation for
+    /// [`super::applicability::mark_republished`].
     StaleCommitted(CommitReceipt),
     /// The key's receipt was already recorded with the same request digest; nothing was written.
     Replayed(CommitReceipt),
@@ -92,8 +107,10 @@ pub enum Outcome {
     Conflict,
     /// The model decision, its served sensitivity, its anchor, its cited descriptor or evidence
     /// row, or the store's incarnation differs from the classification, or the Kernel reports the
-    /// causality parent missing or at another revision; nothing committed, whether detected
-    /// before or inside the envelope.
+    /// causality parent missing or at another revision; for
+    /// [`super::applicability::mark_republished`], the attestation is retired, superseded, or
+    /// without an admission, the store's incarnation changed, or the lineage's live descriptor is
+    /// another one or none. Nothing committed, whether detected before or inside the envelope.
     Changed,
     /// A `Match` or `Mismatch` names no blob, the witness detail failed to serialize, the write
     /// set failed [`WriteSet::check`] before the commit, a set handed to [`WriteSet::commit`]
@@ -104,8 +121,10 @@ pub enum Outcome {
     /// The Kernel refused the commit or a read before it. A [`KernelError::Io`] from the commit
     /// can follow a durable commit, so a
     /// caller treats it as an unknown outcome. The next pass resolves an attestation by replaying
-    /// the key's receipt; a committed `MarkStale` leaves the model decision `Stale`, outside the
-    /// next pass's input, so a caller resolves it by reading the model decision's disposition.
+    /// the key's receipt; a committed `MarkStale` leaves its subject `Stale`, outside the next
+    /// pass's input, so a caller resolves it by reading the disposition of the marked subject: the
+    /// model decision for [`attest`], the attestation for
+    /// [`super::applicability::mark_republished`].
     Refused(KernelError),
 }
 
@@ -116,7 +135,8 @@ pub enum Skip {
     NotVerifiable,
     /// The verdict is `Unavailable`.
     Unavailable,
-    /// The model decision is already `Stale`.
+    /// The marked subject is already `Stale`: the model decision for [`attest`], the attestation
+    /// for [`super::applicability::mark_republished`].
     AlreadyStale,
 }
 
@@ -153,7 +173,7 @@ fn attest_match(
         kernel,
         budget,
         keyed,
-        opposite,
+        Some(opposite),
         Outcome::Committed,
         |envelope| {
             let write_set = WriteSet::at_tip(envelope, target, input, blob_oid)?;
@@ -179,17 +199,17 @@ pub struct WriteSet {
     pub citation: DecisionEventSpec,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WitnessDetail {
-    witness_version: u32,
+pub(super) struct WitnessDetail {
+    pub(super) witness_version: u32,
     evidence_id: String,
-    artifact_digest: String,
+    pub(super) artifact_digest: String,
     commit_oid: String,
     blob_oid: String,
-    relative_path: String,
+    pub(super) relative_path: String,
     descriptor_object_id: String,
-    lineage_id: String,
+    pub(super) lineage_id: String,
     descriptor_revision: String,
 }
 
@@ -386,7 +406,7 @@ impl WriteSet {
             kernel,
             budget,
             keyed,
-            opposite,
+            Some(opposite),
             Outcome::Committed,
             |envelope| {
                 let mut built = Self::at_tip(envelope, self.target, &self.input, blob)?;
@@ -504,40 +524,51 @@ fn mark_stale(
         kernel,
         budget,
         keyed,
-        opposite,
+        Some(opposite),
         Outcome::StaleCommitted,
         |envelope| {
             let (_, prior) = recheck(envelope, kernel, target, input)?;
-            match prior.disposition {
-                Disposition::Active => {}
-                Disposition::Stale => {
-                    return Err(Stop::Outcome(Outcome::Skipped(Skip::AlreadyStale)));
-                }
-                _ => return Err(Stop::Outcome(Outcome::Changed)),
-            }
-            let marked = envelope.record_admission(AdmissionRequest {
-                candidate_id: None,
-                subject_object_id: Some(input.decision.object_id.clone()),
-                source_class: Some(prior.source_class),
-                taint_class: Some(prior.taint_class),
-                event: AdmissionEvent {
-                    kind: EventKind::MarkStale,
-                    trigger_object_id: None,
-                    approval_object_id: None,
-                    evidence_id: None,
-                    reason,
-                },
-            })?;
-            if marked.disposition != Disposition::Stale {
-                return Err(Stop::Outcome(Outcome::InvalidWriteSet));
-            }
-            Ok(())
+            record_stale(envelope, &input.decision.object_id, &prior, reason)
         },
     )
 }
 
+/// Records one `MarkStale` on `subject` under the classes of `prior`, its latest admission, with
+/// no evidence. An `Active` subject is marked, a `Stale` one stops the envelope as
+/// [`Skip::AlreadyStale`], and any other disposition stops it as `Changed`; a mark the Kernel
+/// leaves short of `Stale` stops it as an invalid write set.
+pub(super) fn record_stale(
+    envelope: &mut Envelope<'_>,
+    subject: &str,
+    prior: &PriorDecision,
+    reason: String,
+) -> Result<(), Stop> {
+    match prior.disposition {
+        Disposition::Active => {}
+        Disposition::Stale => return Err(Stop::Outcome(Outcome::Skipped(Skip::AlreadyStale))),
+        _ => return Err(Stop::Outcome(Outcome::Changed)),
+    }
+    let marked = envelope.record_admission(AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(subject.to_owned()),
+        source_class: Some(prior.source_class),
+        taint_class: Some(prior.taint_class),
+        event: AdmissionEvent {
+            kind: EventKind::MarkStale,
+            trigger_object_id: None,
+            approval_object_id: None,
+            evidence_id: None,
+            reason,
+        },
+    })?;
+    if marked.disposition != Disposition::Stale {
+        return Err(Stop::Outcome(Outcome::InvalidWriteSet));
+    }
+    Ok(())
+}
+
 /// Why an envelope stopped before it committed.
-enum Stop {
+pub(super) enum Stop {
     Outcome(Outcome),
     Kernel(KernelError),
 }
@@ -548,13 +579,14 @@ impl From<KernelError> for Stop {
     }
 }
 
-/// Commits `write` under `intent` after refusing a recorded `opposite` key, mapping the result to
-/// one outcome. A stopped envelope returns its error from the closure, so the commit rolls back.
-fn run(
+/// Commits `write` under `intent`, after refusing a recorded `opposite` key when one is given,
+/// mapping the result to one outcome. A stopped envelope returns its error from the closure, so
+/// the commit rolls back.
+pub(super) fn run(
     kernel: &KernelStore,
     budget: &EvalBudget,
     intent: CommitIntent,
-    opposite: CommitIntent,
+    opposite: Option<CommitIntent>,
     committed: fn(CommitReceipt) -> Outcome,
     write: impl FnOnce(&mut Envelope<'_>) -> Result<(), Stop>,
 ) -> Outcome {
@@ -562,7 +594,7 @@ fn run(
     let mut entered = false;
     let result = kernel.commit_within_budget(budget, intent, |envelope| {
         entered = true;
-        let stop = match envelope.stored_receipt(opposite) {
+        let stop = match opposite.map_or(Ok(None), |opposite| envelope.stored_receipt(opposite)) {
             Ok(Some(_)) | Err(KernelError::Conflict) => Stop::Outcome(Outcome::Conflict),
             Ok(None) => match write(envelope) {
                 Ok(()) => return Ok(String::new()),
@@ -704,25 +736,34 @@ fn intent(input: &VerifierInput, write: Write, blob_oid: &str) -> CommitIntent {
     };
     let claim = &input.claim;
     let model = &input.decision.object_id;
+    verifier_intent(
+        format!("{write_name}:{model}:{}", claim.oid()),
+        &[
+            model,
+            &input.decision.source_revision.to_string(),
+            claim.oid(),
+            claim.relative_path(),
+            &hex(claim.digest()),
+            &claim.byte_length().to_string(),
+            &input.evidence_id,
+            blob_oid,
+            verdict,
+        ],
+    )
+}
+
+/// The verifier's commit intent for `operation_key`, whose request digest is the SHA-256 of a
+/// preimage led by [`REQUEST_DIGEST_FORMAT`] and followed by each of `parts` as its big-endian
+/// `u64` length and bytes.
+pub(super) fn verifier_intent(operation_key: String, parts: &[&str]) -> CommitIntent {
     let mut digest = Sha256::new();
-    for part in [
-        REQUEST_DIGEST_FORMAT,
-        model,
-        &input.decision.source_revision.to_string(),
-        claim.oid(),
-        claim.relative_path(),
-        &hex(claim.digest()),
-        &claim.byte_length().to_string(),
-        &input.evidence_id,
-        blob_oid,
-        verdict,
-    ] {
+    for part in std::iter::once(&REQUEST_DIGEST_FORMAT).chain(parts) {
         digest.update((part.len() as u64).to_be_bytes());
         digest.update(part.as_bytes());
     }
     CommitIntent {
         producer: PRODUCER.into(),
-        operation_key: format!("{write_name}:{model}:{}", claim.oid()),
+        operation_key,
         request_digest: hex(&digest.finalize()),
         actor: "agent:verifier".into(),
         cause: "deterministic attestation verifier".into(),
