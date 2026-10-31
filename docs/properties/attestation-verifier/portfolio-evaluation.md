@@ -58,8 +58,9 @@ the current line.
 | G3 | The Kernel checkout open has no allocation limit and honors replacement refs | added as `p6-kernel-checkout-open-has-no-allocation-limit-and-honors-replacements` |
 | G4 | A plugin `RetireDecision` can retire an attestation | queued; owner #1172 with OQ6-15 |
 | G5 | No record on the served form of an unpromoted trusted-class attestation (`ExplicitLabeled`) | queued; owner #1172 |
-| G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1171 |
-| G7 | The two records this part activates, `p6-new-verdict-deterministic` and `p6-new-blob-read-bounded-at-oid`, have no fresh-context four-lens evaluation | queued; owner U1 ([#1170](https://github.com/ahrav/eidnara/issues/1170)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
+| G6 | No record pinning that `artifact_reference` is a content-store path (D2) | queued; owner #1174 (U4 part pass). #1171 does not address it: the classifier reads no `artifact_reference`, and its claim comes from the descriptor detail and the evidence row |
+| G7 | The two records #1170 activates, `p6-new-verdict-deterministic` and `p6-new-blob-read-bounded-at-oid`, have no fresh-context four-lens evaluation | queued; owner U1 ([#1170](https://github.com/ahrav/eidnara/issues/1170)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
+| G8 | The two records #1171 activates, `p6-new-verifiability-pure-function-of-snapshot` and `p6-new-verifier-input-anchor-and-document-citation`, have no fresh-context four-lens evaluation | queued; owner U2 ([#1171](https://github.com/ahrav/eidnara/issues/1171)): evaluate harness fit, coverage balance, implementability, and wildcard, and record each finding's disposition |
 
 ## Biases for a human
 

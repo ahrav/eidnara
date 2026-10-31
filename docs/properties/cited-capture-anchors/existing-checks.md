@@ -36,8 +36,8 @@ part.
 | Capture-decision counters | `crates/daemon/src/source_capture.rs:659` (`record_capture_decisions`); `crates/host-runtime/src/control.rs:709` (`SOURCE_CAPTURE_COUNTERS`) | counts added after a non-replayed receipt; names forwarded by the host | unaudited |
 | Settlement record | `crates/daemon/src/source_capture/settlement.rs:91` (`Settlements`), `:272` (`settle`); writers in `crates/daemon/src/source_capture.rs:708` (`into_job`), `:572` (`refuse_handoff`), `:933` (the job's end, after the gate is released), `:470` (`ActiveSlot`) | bounded per-session record; the wait returns by `accepted_at + 5 s`; a free slot leaves no `Running` entry | unaudited |
 | Settlement wait | `crates/daemon/src/memory_capture/native.rs:124` (`capture_settlements`, which observes every job session under one lock), awaited at `:394`; `crates/daemon/src/memory_capture/cite.rs:123` (`settlement_key`) | settles each job session's observed entry before the blocking hop that takes the commit gate; skips error submits, consent off, and unjoinable ids; a cancel returns with nothing recorded | unaudited |
-| Anchor write validation | `crates/kernel/src/anchor_write.rs:296` (`validate_anchor`), `:287` (`validate_anchor_row`) | written anchor rows pass the engine's bound check and decoder and round-trip | unaudited |
-| Anchor write order | `crates/kernel/src/anchor_write.rs:409` (`insert_anchor_inner`) | registry row, anchor row, and change record in one envelope | unaudited |
+| Anchor write validation | `crates/kernel/src/anchor_write.rs:297` (`validate_anchor`), `:288` (`validate_anchor_row`) | written anchor rows pass the engine's bound check and decoder and round-trip | unaudited |
+| Anchor write order | `crates/kernel/src/anchor_write.rs:410` (`insert_anchor_inner`) | registry row, anchor row, and change record in one envelope | unaudited |
 
 ## Claim-bearing tests
 
