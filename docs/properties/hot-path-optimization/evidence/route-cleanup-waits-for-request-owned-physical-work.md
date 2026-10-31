@@ -29,12 +29,14 @@ The present claim concerns tracked callbacks; moving work must extend that gate.
 - [dispatch.rs:937-954][cancel] aborts and awaits the callback when cancellation
   wins before settling the cancelled terminal.
 - [dispatch.rs:1237-1268][close] closes the tracker, waits, aborts, and waits
-  again. Failure to stop trips fatal state and returns false, not cleanup.
+  again. Work that has not stopped by then moves to a deferred close, which
+  runs route-gone only after the work stops; the close owner returns false and
+  skips cleanup.
 - [The wire contract:767-781][wire] requires best-effort cancellation and
   cleanup-gated reuse, and preserves unknown outcomes after unobserved terminals.
 - [daemon/lib.rs:8138-8202][transform] invokes the transform synchronously;
   no off-worker transform completion protocol is demonstrated by this site.
-- [tests/dispatch.rs:832-887][overlap] starts a hanging callback, sends route
+- [tests/dispatch.rs:1134-1177][overlap] starts a hanging callback, sends route
   Goodbye, then checks cancellation and one cleanup callback. It is unaudited.
 
 ## Failure scenario
@@ -115,8 +117,9 @@ cancelled terminal. Work registered before that drain completes must stop
 first; subsequent submissions remain covered by route close and host shutdown,
 not by the completed request drain. Route close keeps its shape: the
 [close gate][close-gate-live] closes the route tracker, waits the route-close
-budget, aborts the dispatch tasks, waits the budget again, and trips fatal
-rather than running route-gone if work is still live; the join task is entered
+budget, aborts the dispatch tasks, waits the budget again, and hands a route
+whose work is still live to a deferred close that runs route-gone only after the
+work stops; the join task is entered
 in that tracker, so held blocking work, awaited or not, is inside the gate.
 The abort drops the dispatch task at its wait on the request ledger, before
 that task's own `settle`, so when the work then finishes inside the post-abort
@@ -130,8 +133,8 @@ The host cannot stop a thread that has started, so the
 seam's contract asks the work to terminate on its own or to observe the
 request's [cancel signal][cancel-signal] at its safe points; the signal is an
 observation-only view of the token, so a handler cannot cancel its own request
-through it; work held past the budget follows the fatal path, which is E1's
-stated outcome for unquiesced work. Captures dropped by the closure release
+through it; work held past the budget keeps its route closing until it stops,
+and forced shutdown keeps the fatal path. Captures dropped by the closure release
 on its return or unwind. Captures moved into the result, including charges,
 remain owned by the channel or receiver until their final owner drops them.
 The counted-charge test explicitly drops its charge on the blocking thread;
@@ -164,8 +167,9 @@ terminal, exactly one route-gone, and one release. The [detached test][t-detache
 has the handler answer without awaiting its work, and shows route-gone waiting
 for release despite the earlier response. The
 [budget test][t-fatal] uses paused time, observes dispatch abort, and retains
-a completion token through both close windows; cleanup is refused at the
-shared deadline. The [late-release test][t-late] observes the dispatch future's
+a completion token through both close windows; the route defers its close
+with the fatal latch clear, and releasing the token yields one `cancelled`
+terminal and a released channel. The [late-release test][t-late] observes the dispatch future's
 drop signal before releasing that token, then checks one cancelled terminal.
 These replace sleep-based phase assumptions. Separate integration tests hold
 real blocking threads and check cancellation, route cleanup, and instance
@@ -188,23 +192,23 @@ exclusion.
 
 [run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L606
 [work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L458-L462
-[work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L660-L673
+[work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L659-L672
 [failed]: ../../../../crates/host-runtime/src/handler.rs#L467-L475
 [cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L502-L537
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
-[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L915-L951
-[cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L951
-[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
-[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1290-L1313
+[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L931-L967
+[cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L967
+[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1435-L1491
+[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1493-L1524
 [daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
 [t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L617-L665
 [t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L725-L776
 [t-close]: ../../../../crates/host-runtime/tests/dispatch.rs#L781-L825
-[t-detached]: ../../../../crates/host-runtime/tests/dispatch.rs#L830-L866
-[t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L179-L205
-[t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L149-L177
-[t-panic]: ../../../../crates/host-runtime/tests/dispatch.rs#L872-L906
+[t-detached]: ../../../../crates/host-runtime/tests/dispatch.rs#L840-L868
+[t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L203-L255
+[t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L173-L201
+[t-panic]: ../../../../crates/host-runtime/tests/dispatch.rs#L873-L908
 [t-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L610-L612
 
 [fence]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/dispatch.rs#L873-L934
@@ -212,7 +216,7 @@ exclusion.
 [close]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/dispatch.rs#L1237-L1268
 [wire]: https://github.com/ahrav/eidnara/blob/9132344/docs/host-wire-protocol.md#L765-L781
 [transform]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8138-L8202
-[overlap]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/tests/dispatch.rs#L832-L887
+[overlap]: ../../../../crates/host-runtime/tests/dispatch.rs#L1134-L1177
 
 ## Implementation evidence, 2026-09-13
 
