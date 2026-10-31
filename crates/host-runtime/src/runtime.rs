@@ -116,6 +116,9 @@ pub struct HostShared<H> {
     pub handshake_permits: Arc<Semaphore>,
     pub connection_permits: Arc<Semaphore>,
     pub tracker: TaskTracker,
+    /// Route closes whose request work outlived the close budget; graceful shutdown joins them
+    /// before it sends connection `Goodbye`.
+    pub deferred_closes: TaskTracker,
     abort_handles: Mutex<AbortRegistry>,
     /// The shutdown-callback latch prevents abandon cleanup from spawning a second callback while the graceful callback still runs.
     shutdown_callback_ran: AtomicBool,
@@ -844,6 +847,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
         handshake_permits: Arc::new(Semaphore::new(config.limits.max_handshakes)),
         connection_permits: Arc::new(Semaphore::new(config.limits.max_connections)),
         tracker: TaskTracker::new(),
+        deferred_closes: TaskTracker::new(),
         abort_handles: Mutex::new(AbortRegistry::new()),
         shutdown_callback_ran: AtomicBool::new(false),
         shutdown: shutdown.clone(),
@@ -1088,6 +1092,10 @@ async fn shutdown_sequence<H: HostHandler>(
             });
         }
         while closes.join_next().await.is_some() {}
+        // Deferred closes emit their routes' `cancelled` terminals once the work stops, and
+        // those terminals precede connection `Goodbye`.
+        shared.deferred_closes.close();
+        shared.deferred_closes.wait().await;
 
         let generations: Vec<Arc<GenerationCore>> = shared
             .connections

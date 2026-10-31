@@ -607,7 +607,6 @@ impl RequestCtx {
     /// The calling runtime submits work immediately, without polling the returned future.
     /// Calling this method outside a Tokio runtime panics.
     /// Started work must terminate on its own or observe [`cancel_signal`] at safe points.
-    /// Work held beyond the close budget causes fatal refusal rather than concurrent cleanup.
     /// The handler task is the intended caller.
     /// A surviving task can submit work after request cancellation has drained its ledger.
     /// Route close and host shutdown still join that late work.

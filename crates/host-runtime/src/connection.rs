@@ -71,6 +71,10 @@ impl PingProbe {
 pub struct PendingEntry {
     pub cancel: CancellationToken,
     pub settlement: Arc<crate::dispatch::Settlement>,
+    /// The pending-request permit is released when the entry leaves the map, so a request whose
+    /// dispatch task was aborted keeps counting against `max_pending_requests` until its route
+    /// close settles it.
+    pub(crate) _pending_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// Generation-owned state shared with the registry and dispatch tasks.

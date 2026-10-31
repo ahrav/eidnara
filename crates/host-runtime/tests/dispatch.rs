@@ -1603,20 +1603,57 @@ async fn detached_blocking_work_observes_route_cancellation() {
     );
 }
 
+/// Twice the 50 ms `route_close_budget` these tests configure, with a wide margin for a loaded
+/// scheduler: by then the close owner has handed the held route to its deferred close.
+const PAST_BOTH_CLOSE_WINDOWS: Duration = Duration::from_secs(1);
+
+/// Waits for route-gone on `channel` and asserts that it fired exactly once.
+async fn await_route_gone_once(host: &TestHost, channel: u16) {
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    loop {
+        let count = host
+            .handler
+            .route_gones()
+            .iter()
+            .filter(|handle| handle.channel == channel)
+            .count();
+        if count > 0 {
+            assert_eq!(count, 1, "route-gone must fire once");
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "route-gone missing after the work stopped"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Asserts that nothing arrives on `client` within `window`, naming whatever did arrive.
+async fn assert_silent(client: &mut RawClient, window: Duration, what: &str) {
+    if let Ok(read) = tokio::time::timeout(window, client.expect_frame()).await {
+        panic!(
+            "{what}: a frame or read result arrived while the blocking work was held: {:?}",
+            read.map(|frame| (frame.ty, frame.channel, frame.corr))
+        );
+    }
+}
+
 /// The host keeps serving new connections when a closing connection's blocking work
-/// outlives twice `route_close_budget`; route-gone runs once after the work stops.
+/// outlives twice `route_close_budget`; the held route keeps its slot, and route-gone runs
+/// once after the work stops.
 #[tokio::test]
 async fn a_dropped_connection_with_work_past_the_close_budget_keeps_the_host_serving() {
     let host = TestHost::start_with(|config| {
         config.timing.route_close_budget = Duration::from_millis(50);
+        config.limits.max_routes = 2;
     })
     .await;
     let release = ReleaseOnDrop(&host.handler);
     let (client, channel, _epoch, _corr) =
         start_held_blocking_work(&host, "slow-pass", "blocking_hold", 1).await;
     drop(client);
-    // 400 ms exceeds twice the 50 ms budget while the work stays held.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(PAST_BOTH_CLOSE_WINDOWS).await;
     assert!(
         host.handler.route_gones().is_empty(),
         "route-gone ran while the blocking work was still held"
@@ -1627,7 +1664,13 @@ async fn a_dropped_connection_with_work_past_the_close_budget_keeps_the_host_ser
         .route_open(LINKED_MODULE_ID, ROOT, "opencode", "slow-pass")
         .await
         .expect("a new connection opens a route while the old route's work is held");
-    assert_ne!(next_channel, channel, "the held route keeps its channel");
+    assert!(
+        successor
+            .route_open(LINKED_MODULE_ID, ROOT, "opencode", "slow-pass-third")
+            .await
+            .is_err(),
+        "the held route keeps its slot, so a third route exceeds max_routes = 2"
+    );
     let corr = successor.next_corr();
     successor
         .send_frame(
@@ -1640,34 +1683,19 @@ async fn a_dropped_connection_with_work_past_the_close_budget_keeps_the_host_ser
         )
         .await
         .expect("send");
-    let frame = successor.frame_within(BUDGET).await.expect("terminal");
+    let (_, frame) = successor
+        .frames_until_corr(corr, BUDGET)
+        .await
+        .expect("echo terminal");
     assert_eq!(frame.ty, TY_RESPONSE);
-    assert_eq!(frame.corr, corr);
 
     drop(release);
-    let deadline = tokio::time::Instant::now() + BUDGET;
-    while !host
-        .handler
-        .route_gones()
-        .iter()
-        .any(|handle| handle.channel == channel)
-    {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "route-gone missing after the work stopped"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(
-        host.handler
-            .route_gones()
-            .iter()
-            .filter(|handle| handle.channel == channel)
-            .count(),
-        1,
-        "route-gone must fire once"
-    );
+    await_route_gone_once(&host, channel).await;
     assert_eq!(host.handler.blocking_charges_released(), 1);
+    successor
+        .route_open(LINKED_MODULE_ID, ROOT, "opencode", "slow-pass-third")
+        .await
+        .expect("route-gone released the held route's slot");
     drop(successor);
     let shutdown = host.shutdown().await;
     assert!(
@@ -1691,12 +1719,7 @@ async fn a_route_goodbye_with_work_past_the_close_budget_keeps_the_connection_se
         .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
         .await
         .expect("route goodbye");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(400), client.expect_frame())
-            .await
-            .is_err(),
-        "the closed route's request settled while its blocking work was still held"
-    );
+    assert_silent(&mut client, PAST_BOTH_CLOSE_WINDOWS, "route goodbye").await;
 
     let (other_channel, other_epoch) = client
         .route_open(LINKED_MODULE_ID, ROOT, "opencode", "slow-goodbye-other")
@@ -1726,17 +1749,153 @@ async fn a_route_goodbye_with_work_past_the_close_budget_keeps_the_connection_se
         .await
         .expect("terminal for the closed route's work");
     assert_eq!(frame.error_code(), "cancelled");
-    let deadline = tokio::time::Instant::now() + BUDGET;
-    while !host
-        .handler
-        .route_gones()
-        .iter()
-        .any(|handle| handle.channel == channel)
-    {
-        assert!(tokio::time::Instant::now() < deadline, "route-gone missing");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    await_route_gone_once(&host, channel).await;
     host.shutdown_gracefully().await;
+}
+
+/// A request whose route close is deferred keeps counting against `max_pending_requests` until
+/// its work stops and the close settles it.
+#[tokio::test]
+async fn a_deferred_request_keeps_its_pending_permit_until_its_work_stops() {
+    let host = TestHost::start_with(|config| {
+        config.timing.route_close_budget = Duration::from_millis(50);
+        config.limits.max_pending_requests = 1;
+    })
+    .await;
+    let mut other = host.client().await;
+    let (other_channel, other_epoch) = other
+        .route_open(LINKED_MODULE_ID, ROOT, "opencode", "pending-other")
+        .await
+        .expect("route");
+    let release = ReleaseOnDrop(&host.handler);
+    let (mut client, channel, epoch, corr) =
+        start_held_blocking_work(&host, "pending-held", "blocking_hold", 1).await;
+    client
+        .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
+        .await
+        .expect("route goodbye");
+    assert_silent(&mut client, PAST_BOTH_CLOSE_WINDOWS, "route goodbye").await;
+
+    let echo = |client: &mut RawClient| {
+        let corr = client.next_corr();
+        (corr, mode_body(serde_json::json!({"mode": "echo"})))
+    };
+    let (busy, body) = echo(&mut other);
+    other
+        .send_frame(
+            TY_REQUEST,
+            FLAGS_INTERACTIVE,
+            other_channel,
+            other_epoch,
+            busy,
+            &body,
+        )
+        .await
+        .expect("send");
+    let (_, frame) = other
+        .frames_until_corr(busy, BUDGET)
+        .await
+        .expect("busy terminal");
+    assert_eq!(
+        frame.error_code(),
+        "server_busy",
+        "the deferred request still holds the only pending permit"
+    );
+
+    drop(release);
+    let (_, frame) = client
+        .frames_until_corr(corr, BUDGET)
+        .await
+        .expect("terminal for the closed route's work");
+    assert_eq!(frame.error_code(), "cancelled");
+    await_route_gone_once(&host, channel).await;
+    let (served, body) = echo(&mut other);
+    other
+        .send_frame(
+            TY_REQUEST,
+            FLAGS_INTERACTIVE,
+            other_channel,
+            other_epoch,
+            served,
+            &body,
+        )
+        .await
+        .expect("send");
+    let (_, frame) = other
+        .frames_until_corr(served, BUDGET)
+        .await
+        .expect("echo terminal");
+    assert_eq!(
+        frame.ty, TY_RESPONSE,
+        "the settled close released the permit"
+    );
+    host.shutdown_gracefully().await;
+}
+
+/// Graceful shutdown that starts while a deferred close waits on held work joins it: once the
+/// work stops, the `cancelled` terminal precedes connection `Goodbye`, route-gone runs once
+/// before handler shutdown, and shutdown returns `Ok`.
+#[tokio::test]
+async fn graceful_shutdown_joins_a_deferred_close_before_goodbye() {
+    let host = TestHost::start_with(|config| {
+        config.timing.route_close_budget = Duration::from_millis(50);
+        config.timing.shutdown_deadline = Duration::from_secs(10);
+    })
+    .await;
+    let handler = host.handler.clone();
+    let release = ReleaseOnDrop(&handler);
+    let (mut client, channel, epoch, corr) =
+        start_held_blocking_work(&host, "shutdown-deferred", "blocking_hold", 1).await;
+    client
+        .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
+        .await
+        .expect("route goodbye");
+    assert_silent(&mut client, PAST_BOTH_CLOSE_WINDOWS, "route goodbye").await;
+
+    let shutdown = tokio::spawn(host.shutdown());
+    assert_silent(&mut client, Duration::from_millis(300), "shutdown").await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown waits for the deferred close"
+    );
+    drop(release);
+
+    let frames = client.drain_until_close(BUDGET).await;
+    let terminal = frames
+        .iter()
+        .position(|frame| frame.corr == corr && frame.channel == channel)
+        .expect("the deferred close emits the request's terminal");
+    assert_eq!(frames[terminal].error_code(), "cancelled");
+    let goodbye = frames
+        .iter()
+        .position(|frame| frame.ty == TY_GOODBYE && frame.channel == 0)
+        .expect("connection goodbye");
+    assert!(
+        terminal < goodbye,
+        "the terminal precedes connection Goodbye"
+    );
+    let result = shutdown.await.expect("shutdown task");
+    assert!(result.is_ok(), "graceful shutdown: {result:?}");
+    let events = handler.events();
+    let gone = events
+        .iter()
+        .position(
+            |event| matches!(event, support::Event::RouteGone(handle) if handle.channel == channel),
+        )
+        .expect("route-gone ran");
+    let shut = events
+        .iter()
+        .position(|event| matches!(event, support::Event::Shutdown))
+        .expect("handler shutdown ran");
+    assert!(gone < shut, "route-gone precedes handler shutdown");
+    assert_eq!(
+        handler
+            .route_gones()
+            .iter()
+            .filter(|h| h.channel == channel)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

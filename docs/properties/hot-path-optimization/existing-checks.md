@@ -81,7 +81,7 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | --- | --- | --- |
 | [Admission permits][permits] | Pending and handler-task capacity are acquired separately before dispatch. | unaudited |
 | [Handler completion fence][handler-fence] | Both the outer task and callback are tracked. | unaudited |
-| [Close gate][close-gate] | Unstopped dispatch after the post-abort wait trips fatal state and refuses cleanup. | unaudited |
+| [Close gate][close-gate] | Dispatch still running after the post-abort wait hands the route to a deferred close, which settles the route's requests and runs route-gone once the work stops. | unaudited |
 | [Retained reservations][reservations] | Staging and decode ownership release their respective charges. | unaudited |
 | [Parse admission][parse-admission] | Parse residency is charged inside the decode as values are built; a footprint above the capacity and a pool held by other requests have different refusals. | unaudited |
 | [ByteCharge ownership][byte-charge] | Owned permits hold bytes through transfer and release them on drop. | unaudited |
@@ -95,7 +95,7 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [`cancel_waits_for_the_request_blocking_work`][t-cancel-work] | Cancel during held blocking work settles nothing and releases no charge until the work is released, then one `cancelled` terminal and one release. | unaudited |
 | [`route_close_waits_for_the_request_blocking_work`][t-close-work] | Goodbye during held blocking work runs no route-gone until the work is released, then the `cancelled` terminal, exactly one route-gone, and one release. | unaudited |
 | [`route_close_waits_for_blocking_work_the_handler_did_not_await`][t-detached-work] | A handler answers without awaiting its work; route-gone still waits for the work, and the charge releases once. | unaudited |
-| [`live_work_after_both_close_windows_refuses_cleanup`][t-fatal-work] | Paused time and an observed dispatch abort establish both close windows; a retained completion token refuses cleanup. | unaudited |
+| [`live_work_after_both_close_windows_defers_route_gone_until_it_stops`][t-fatal-work] | Paused time and an observed dispatch abort establish both close windows; a retained completion token keeps the route closing with the fatal latch clear, and releasing it yields one `cancelled` terminal, an empty pending map, and a released channel. | unaudited |
 | [`post_abort_completion_settles_once_without_wall_clock_sleeps`][t-late-work] | An abort-drop signal precedes token release; fallback emits exactly one cancelled terminal. | unaudited |
 | [`a_blocking_work_panic_settles_as_one_internal_error`][t-panic-work] | A panic inside `run_blocking` settles as one `internal_error` terminal and releases the held charge once. | unaudited |
 | [`blocking_work_panic_payload_is_redacted_from_process_stderr`][t-stderr-work] | A child process panicking inside `run_blocking` writes the fixed diagnostic and not the payload to stderr. | unaudited |
@@ -471,7 +471,7 @@ that no related check exists anywhere in the repository.
 [byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
 [permits]: ../../../crates/host-runtime/src/dispatch.rs#L824-L856
 [handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L872-L940
-[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
+[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1436-L1492
 [reservations]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
 [saturation-test]: ../../../crates/host-runtime/tests/dispatch.rs#L294
 [cancel-test]: ../../../crates/host-runtime/tests/dispatch.rs#L357
@@ -534,7 +534,7 @@ that no related check exists anywhere in the repository.
 [t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L725
 [t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L781
 [t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L830
-[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L180
+[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L191
 [t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L150
 [t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L872
 [t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L610

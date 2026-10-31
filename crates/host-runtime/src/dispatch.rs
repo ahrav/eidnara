@@ -425,6 +425,23 @@ pub async fn settle(
     if settlement.won.swap(true, Ordering::SeqCst) {
         return false;
     }
+    // A future dropped after winning, before its terminal is queued, leaves the correlation
+    // with no terminal; the guard then retires the generation, and the client reports the
+    // request as `outcome_unknown`.
+    let retire_if_dropped = generation.token.clone().drop_guard();
+    emit_won_terminal(settlement, budget, generation, route, corr, terminal).await;
+    retire_if_dropped.disarm();
+    true
+}
+
+async fn emit_won_terminal(
+    settlement: &Settlement,
+    budget: &crate::wire::ByteBudget,
+    generation: &GenerationCore,
+    route: RouteHandle,
+    corr: u64,
+    terminal: Terminal,
+) {
     // The credit rides the terminal frame to its block and returns with the block.
     let credit = settlement.take_credit();
     let (ty, flags, body) = match terminal {
@@ -442,7 +459,7 @@ pub async fn settle(
                 .await
                 else {
                     generation.token.cancel();
-                    return true;
+                    return;
                 };
                 if emit_reserved_frame(
                     generation,
@@ -458,7 +475,7 @@ pub async fn settle(
                 {
                     generation.token.cancel();
                 }
-                return true;
+                return;
             }
             if emit_reserved_frame(
                 generation,
@@ -474,7 +491,7 @@ pub async fn settle(
             {
                 generation.token.cancel();
             }
-            return true;
+            return;
         }
         Terminal::Error {
             code,
@@ -485,7 +502,7 @@ pub async fn settle(
                 charged_error_body(budget, generation, &code, &message, retry_after_ms).await
             else {
                 generation.token.cancel();
-                return true;
+                return;
             };
             if emit_reserved_frame(
                 generation,
@@ -501,7 +518,7 @@ pub async fn settle(
             {
                 generation.token.cancel();
             }
-            return true;
+            return;
         }
         Terminal::StreamEnd => (
             FrameType::StreamEnd,
@@ -523,7 +540,6 @@ pub async fn settle(
     {
         generation.token.cancel();
     }
-    true
 }
 
 /// `StreamSink` serializes stream-item emission for each request.
@@ -966,6 +982,7 @@ pub async fn dispatch_request<H: HostHandler>(
         PendingEntry {
             cancel: cancel.clone(),
             settlement: Arc::clone(&settlement),
+            _pending_permit: Some(pending_permit),
         },
     );
 
@@ -977,7 +994,6 @@ pub async fn dispatch_request<H: HostHandler>(
     // Without the handler fence, route close could see the tracker empty while request code still runs.
     let handler_fence = route_tracker.clone();
     let outer = shared.spawn_tracked(route_tracker.track_future(async move {
-        let _pending_permit = pending_permit;
         let rejection = match start_rx.await {
             Ok(None) => None,
             Ok(Some(rejection)) => Some(rejection),
@@ -1359,11 +1375,12 @@ pub async fn open_route<H: HostHandler>(
 }
 
 /// Runs the handler's `route_gone` callback once per route under the lifecycle deadline.
-/// Returns whether the host is still running afterwards: a deadline overrun trips the fatal
-/// latch, and a panic surfaces through the lifecycle join.
+/// Returns whether the caller finalizes the route: this call claimed route-gone, ran it, and the
+/// host is still running. A deadline overrun trips the fatal latch, a panic surfaces through the
+/// lifecycle join, and a caller that lost the claim leaves finalization to the claimant.
 async fn run_route_gone<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: RouteHandle) -> bool {
     if !shared.registry.mark_gone_started(handle) {
-        return true;
+        return false;
     }
     let handler = Arc::clone(&shared.handler);
     let deadline = shared.timing.lifecycle_callback_deadline;
@@ -1413,6 +1430,9 @@ pub(crate) async fn finish_route_close<H: HostHandler>(
     }
 }
 
+/// Returns whether the caller owes `finish_route_close`. It returns `false` when another owner
+/// runs route-gone: the bind task, an earlier close, or the deferred close this call spawns for
+/// work that outlives both close windows.
 pub(crate) async fn settle_route_work<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     handle: RouteHandle,
@@ -1446,7 +1466,6 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
                 }
                 // A task observes abort only when it yields.
                 // A future that never yields prevents its task from observing abort.
-                // Shutdown must still terminate; trip the fatal latch when the task does not stop within the post-abort budget.
                 let post_abort_deadline = Instant::now() + shared.timing.route_close_budget;
                 if timeout_at(post_abort_deadline, tracker.wait())
                     .await
@@ -1454,10 +1473,6 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
                 {
                     // Request code still runs, so route-gone and the route's terminals follow the
                     // end of its tracked work.
-                    eprintln!(
-                        "eidnara-host: route {}/{} work outlived its close budget; route-gone runs when it stops",
-                        handle.channel, handle.epoch
-                    );
                     spawn_deferred_route_close(shared, handle, generation, entries, tracker);
                     return false;
                 }
@@ -1521,13 +1536,41 @@ fn spawn_deferred_route_close<H: HostHandler>(
     tracker: TaskTracker,
 ) {
     let owner = Arc::clone(shared);
-    shared.spawn_lifecycle(async move {
+    let deferred_at = Instant::now();
+    let task = shared.deferred_closes.track_future(async move {
         tracker.wait().await;
+        stderr_line(&format!(
+            "eidnara-host: route {}/{} work stopped {} ms into its deferred close; running route-gone",
+            handle.channel,
+            handle.epoch,
+            deferred_at.elapsed().as_millis()
+        ));
         let deadline = Instant::now() + owner.timing.route_close_budget;
         settle_stopped_route_work(&owner, handle, &generation, &entries, deadline).await;
         remove_route_pending(&generation, &entries);
         finish_route_close(&owner, handle).await;
     });
+    shared.spawn_lifecycle(task);
+    let deferred = shared.deferred_closes.len();
+    stderr_line(&format!(
+        "eidnara-host: route {}/{} work outlived its close budget; route-gone runs when it stops ({deferred} deferred)",
+        handle.channel, handle.epoch
+    ));
+    if deferred > MAX_DEFERRED_ROUTE_CLOSES {
+        shared.fatal.trip(
+            &shared.shutdown,
+            format!("{deferred} routes hold work past their close budget"),
+        );
+    }
+}
+
+/// The limit stays below Tokio's default blocking-pool limit of 512 threads.
+const MAX_DEFERRED_ROUTE_CLOSES: usize = 64;
+
+/// `eprintln!` panics when stderr is closed; this write drops the error.
+fn stderr_line(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{line}");
 }
 
 pub async fn close_generation<H: HostHandler>(
