@@ -429,6 +429,60 @@ async fn a_retried_terminal_whose_emission_stalls_retires_the_generation() {
     settle_aborted_before_queuing(Credits::FreedWithEmissionBlocked).await;
 }
 
+/// A retry whose credit arrives with the deadline already reached is dropped, and the credit
+/// it took goes back to the connection.
+#[tokio::test(start_paused = true)]
+async fn a_retry_credited_at_the_deadline_is_dropped_and_returns_its_credit() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        route,
+        key,
+        settlement,
+        physical_work,
+        ..
+    } = fixture();
+    let credits = generation.terminal_credits.clone();
+    settlement.reattach_credit(&generation).await.unwrap();
+    let reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
+    let mut winner = Box::pin(settle(
+        &settlement,
+        &shared.terminal_budget,
+        &generation,
+        route,
+        key.2,
+        cancelled_terminal_for_test(),
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(winner.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(winner);
+    drop(reserve);
+    let before = credits.available_permits();
+    let entries = vec![(key, settlement.clone())];
+    settle_stopped_route_work(&shared, route, &generation, &entries, Instant::now()).await;
+    assert!(queue.try_recv().is_err(), "no terminal after the deadline");
+    assert!(!generation.token.is_cancelled());
+    assert!(!generation.writer.is_retired());
+    assert_eq!(
+        credits.available_permits(),
+        before,
+        "the dropped retry returned the credit it took"
+    );
+    drop(physical_work);
+}
+
+fn cancelled_terminal_for_test() -> Terminal {
+    Terminal::Error {
+        code: "handler_error".to_owned(),
+        message: "handler failed".to_owned(),
+        retry_after_ms: None,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Credits {
     Available,

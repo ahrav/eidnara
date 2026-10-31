@@ -1567,6 +1567,7 @@ pub(crate) async fn settle_stopped_route_work<H: HostHandler>(
         // routes instead of retiring for one request.
         let credited = timeout_at(deadline, settlement.reattach_credit(generation)).await;
         if !matches!(credited, Ok(Ok(()))) || Instant::now() >= deadline {
+            drop(settlement.take_credit());
             settlement.queued.store(true, Ordering::SeqCst);
             continue;
         }
