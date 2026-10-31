@@ -190,26 +190,26 @@ Tokio time and an abort-drop signal; they do not claim to execute real blocking
 threads. Separate integration tests exercise held physical work and instance
 exclusion.
 
-[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L606
+[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L616
 [work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L458-L462
 [work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L659-L672
 [failed]: ../../../../crates/host-runtime/src/handler.rs#L467-L475
 [cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L502-L537
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
-[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L931-L967
-[cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L967
+[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L1054-L1058
+[cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L1161
 [close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1435-L1491
 [close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1493-L1524
 [daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
-[t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L617-L665
-[t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L725-L776
-[t-close]: ../../../../crates/host-runtime/tests/dispatch.rs#L781-L825
+[t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L653
+[t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L748-L800
+[t-close]: ../../../../crates/host-runtime/tests/dispatch.rs#L804-L836
 [t-detached]: ../../../../crates/host-runtime/tests/dispatch.rs#L840-L868
 [t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L203-L255
 [t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L173-L201
 [t-panic]: ../../../../crates/host-runtime/tests/dispatch.rs#L873-L908
-[t-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L610-L612
+[t-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L633-L636
 
 [fence]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/dispatch.rs#L873-L934
 [cancel]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/dispatch.rs#L937-L954
