@@ -2180,3 +2180,31 @@ fn a_row_level_citation_older_than_the_event_window_still_attests() {
     let outcome = attest_now(&store, &classification, &mismatch);
     assert!(matches!(outcome, Outcome::StaleCommitted(_)), "{outcome:?}");
 }
+
+/// A classification whose descriptor revision differs from the live descriptor's, at the same
+/// descriptor object id, is `Changed` on both verdicts with nothing written.
+#[test]
+fn a_classification_naming_another_descriptor_revision_is_changed() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("revised", &checkout.head, &evidence, false);
+    let mut classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    let Class::Verifiable(input) = &mut classification.class else {
+        panic!("expected a verifiable decision");
+    };
+    assert_eq!(input.descriptor_revision, "1");
+    input.descriptor_revision = "2".into();
+    let tip = store.tip();
+    for attempted in both_verdicts(&evaluation) {
+        assert_eq!(
+            attest_now(&store, &classification, &attempted),
+            Outcome::Changed,
+            "{:?}",
+            attempted.verdict
+        );
+    }
+    assert_eq!(store.tip(), tip);
+    assert_eq!(store.write_set_rows(), 0);
+}

@@ -660,6 +660,7 @@ fn recheck(
             let field = |name: &str| crate::git_reconcile::identity_field(&descriptor, name);
             descriptor.object_id == input.descriptor_object_id
                 && descriptor.detail.evidence_id == input.evidence_id
+                && descriptor.detail.revision == input.descriptor_revision
                 && field("relative_path") == Some(claim.relative_path())
                 && field("repository_id") == Some(input.repository_id.as_str())
                 && crate::memory_capture::cite::digest_bytes(&descriptor.detail.artifact_digest)
