@@ -83,7 +83,7 @@ impl Identity {
     /// attestation prefix.
     pub fn of_attestation(object_id: &str) -> Option<Self> {
         object_id
-            .strip_prefix("verattest:")
+            .strip_prefix(ID_PREFIXES[0])
             .map(|hash| Self::of_hash(hash.to_owned()))
     }
 }
