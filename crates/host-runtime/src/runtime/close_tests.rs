@@ -9,12 +9,21 @@ use crate::routing::CloseDecision;
 use crate::wire::FrameId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[derive(Default)]
 struct UnusedHandler {
     route_gones: AtomicUsize,
     route_gones_started: AtomicUsize,
-    hold_route_gone: AtomicBool,
-    route_gone_release: tokio::sync::Notify,
+    /// `true` parks every route-gone callback until the test sends `false`.
+    hold_route_gone: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for UnusedHandler {
+    fn default() -> Self {
+        Self {
+            route_gones: AtomicUsize::new(0),
+            route_gones_started: AtomicUsize::new(0),
+            hold_route_gone: tokio::sync::watch::Sender::new(false),
+        }
+    }
 }
 impl HostHandler for UnusedHandler {
     fn manifests(&self) -> Vec<crate::ManifestSnapshot> {
@@ -31,9 +40,11 @@ impl HostHandler for UnusedHandler {
     }
     async fn route_gone(&self, _: RouteHandle) {
         self.route_gones_started.fetch_add(1, Ordering::SeqCst);
-        while self.hold_route_gone.load(Ordering::SeqCst) {
-            self.route_gone_release.notified().await;
-        }
+        let _ = self
+            .hold_route_gone
+            .subscribe()
+            .wait_for(|held| !*held)
+            .await;
         self.route_gones.fetch_add(1, Ordering::SeqCst);
     }
     async fn health(&self) -> HealthReport {
@@ -274,7 +285,7 @@ async fn a_deferred_close_and_the_forced_drain_run_route_gone_once() {
         physical_work,
         ..
     } = fixture();
-    shared.handler.hold_route_gone.store(true, Ordering::SeqCst);
+    shared.handler.hold_route_gone.send_replace(true);
     let close_shared = shared.clone();
     let close =
         tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
@@ -314,12 +325,11 @@ async fn a_deferred_close_and_the_forced_drain_run_route_gone_once() {
         1,
         "the owner that lost the route-gone claim keeps the channel while route-gone runs"
     );
-    shared
-        .handler
-        .hold_route_gone
-        .store(false, Ordering::SeqCst);
-    shared.handler.route_gone_release.notify_one();
-    forced.await.unwrap();
+    shared.handler.hold_route_gone.send_replace(false);
+    tokio::time::timeout(Duration::from_secs(1), forced)
+        .await
+        .expect("the forced drain returns once route-gone is released")
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
         shared.tracker.close();
         shared.tracker.wait().await;
