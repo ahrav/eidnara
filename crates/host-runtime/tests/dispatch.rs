@@ -830,20 +830,7 @@ async fn route_close_waits_for_the_request_blocking_work() {
         .await
         .expect("terminal for the closed route's work");
     assert_eq!(frame.error_code(), "cancelled");
-    let deadline = tokio::time::Instant::now() + BUDGET;
-    loop {
-        let gones = host.handler.route_gones();
-        if gones.iter().any(|handle| handle.channel == channel) {
-            assert_eq!(
-                gones.iter().filter(|h| h.channel == channel).count(),
-                1,
-                "route-gone must fire once"
-            );
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "route-gone missing");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    await_route_gone_once(&host, channel).await;
     assert_eq!(host.handler.blocking_charges_released(), 1);
     host.shutdown_gracefully().await;
 }
@@ -875,16 +862,7 @@ async fn route_close_waits_for_blocking_work_the_handler_did_not_await() {
     );
     drop(release);
 
-    let deadline = tokio::time::Instant::now() + BUDGET;
-    while !host
-        .handler
-        .route_gones()
-        .iter()
-        .any(|handle| handle.channel == channel)
-    {
-        assert!(tokio::time::Instant::now() < deadline, "route-gone missing");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    await_route_gone_once(&host, channel).await;
     assert_eq!(host.handler.blocking_charges_released(), 1);
     host.shutdown_gracefully().await;
 }
@@ -1193,20 +1171,7 @@ async fn closing_a_route_settles_its_admitted_work() {
     assert_eq!(frame.error_code(), "cancelled");
 
     // The route cleanup callback runs exactly once.
-    let deadline = tokio::time::Instant::now() + BUDGET;
-    loop {
-        let gones = host.handler.route_gones();
-        if gones.iter().any(|handle| handle.channel == channel) {
-            assert_eq!(
-                gones.iter().filter(|h| h.channel == channel).count(),
-                1,
-                "route-gone must fire once"
-            );
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "route-gone missing");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    await_route_gone_once(&host, channel).await;
 
     host.shutdown_gracefully().await;
 }
@@ -1837,8 +1802,20 @@ async fn a_deferred_request_keeps_its_pending_permit_until_its_work_stops() {
 /// before handler shutdown, and shutdown returns `Ok`.
 #[tokio::test]
 async fn graceful_shutdown_joins_a_deferred_close_before_goodbye() {
+    shutdown_joins_a_deferred_close(true).await;
+}
+
+/// Graceful shutdown that starts while a route `Goodbye` close is still inside its close windows
+/// joins the deferred close that close hands off to.
+#[tokio::test]
+async fn graceful_shutdown_inside_the_close_windows_joins_the_later_deferred_close() {
+    shutdown_joins_a_deferred_close(false).await;
+}
+
+async fn shutdown_joins_a_deferred_close(after_windows: bool) {
     let host = TestHost::start_with(|config| {
-        config.timing.route_close_budget = Duration::from_millis(50);
+        config.timing.route_close_budget =
+            Duration::from_millis(if after_windows { 50 } else { 300 });
         config.timing.shutdown_deadline = Duration::from_secs(10);
     })
     .await;
@@ -1850,10 +1827,16 @@ async fn graceful_shutdown_joins_a_deferred_close_before_goodbye() {
         .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
         .await
         .expect("route goodbye");
-    assert_silent(&mut client, PAST_BOTH_CLOSE_WINDOWS, "route goodbye").await;
+    if after_windows {
+        assert_silent(&mut client, PAST_BOTH_CLOSE_WINDOWS, "route goodbye").await;
+    } else {
+        // 100 ms lets the read loop take the `Goodbye` and start its close, well inside the
+        // first 300 ms window.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     let shutdown = tokio::spawn(host.shutdown());
-    assert_silent(&mut client, Duration::from_millis(300), "shutdown").await;
+    assert_silent(&mut client, PAST_BOTH_CLOSE_WINDOWS, "shutdown").await;
     assert!(
         !shutdown.is_finished(),
         "shutdown waits for the deferred close"

@@ -982,7 +982,7 @@ pub async fn dispatch_request<H: HostHandler>(
         PendingEntry {
             cancel: cancel.clone(),
             settlement: Arc::clone(&settlement),
-            _pending_permit: Some(pending_permit),
+            _pending_permit: pending_permit,
         },
     );
 
@@ -1237,11 +1237,12 @@ pub async fn dispatch_request<H: HostHandler>(
 }
 
 fn remove_pending(generation: &GenerationCore, key: PendingKey) {
-    generation
+    let removed = generation
         .pending
         .lock()
         .expect("pending lock")
         .remove(&key);
+    drop(removed);
 }
 
 fn cancelled_terminal() -> Terminal {
@@ -1375,9 +1376,6 @@ pub async fn open_route<H: HostHandler>(
 }
 
 /// Runs the handler's `route_gone` callback once per route under the lifecycle deadline.
-/// Returns whether the caller finalizes the route: this call claimed route-gone, ran it, and the
-/// host is still running. A deadline overrun trips the fatal latch, a panic surfaces through the
-/// lifecycle join, and a caller that lost the claim leaves finalization to the claimant.
 async fn run_route_gone<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: RouteHandle) -> bool {
     if !shared.registry.mark_gone_started(handle) {
         return false;
@@ -1522,10 +1520,14 @@ async fn settle_stopped_route_work<H: HostHandler>(
 }
 
 fn remove_route_pending(generation: &GenerationCore, entries: &[(PendingKey, Arc<Settlement>)]) {
-    let mut pending = generation.pending.lock().expect("pending lock");
-    for (key, _) in entries {
-        pending.remove(key);
-    }
+    let removed: Vec<PendingEntry> = {
+        let mut pending = generation.pending.lock().expect("pending lock");
+        entries
+            .iter()
+            .filter_map(|(key, _)| pending.remove(key))
+            .collect()
+    };
+    drop(removed);
 }
 
 fn spawn_deferred_route_close<H: HostHandler>(
@@ -1537,35 +1539,40 @@ fn spawn_deferred_route_close<H: HostHandler>(
 ) {
     let owner = Arc::clone(shared);
     let deferred_at = Instant::now();
+    let held = tracker.len();
     let task = shared.deferred_closes.track_future(async move {
         tracker.wait().await;
-        stderr_line(&format!(
-            "eidnara-host: route {}/{} work stopped {} ms into its deferred close; running route-gone",
-            handle.channel,
-            handle.epoch,
-            deferred_at.elapsed().as_millis()
-        ));
+        let stopped_after = deferred_at.elapsed();
+        // Terminal emission receives a fresh `route_close_budget` after tracked work stops.
         let deadline = Instant::now() + owner.timing.route_close_budget;
         settle_stopped_route_work(&owner, handle, &generation, &entries, deadline).await;
         remove_route_pending(&generation, &entries);
         finish_route_close(&owner, handle).await;
+        owner.deferred_work.fetch_sub(held, Ordering::SeqCst);
+        stderr_line(&format!(
+            "eidnara-host: route {}/{} work stopped {} ms into its deferred close; route-gone ran",
+            handle.channel,
+            handle.epoch,
+            stopped_after.as_millis()
+        ));
     });
+    let deferred_work = shared.deferred_work.fetch_add(held, Ordering::SeqCst) + held;
     shared.spawn_lifecycle(task);
-    let deferred = shared.deferred_closes.len();
-    stderr_line(&format!(
-        "eidnara-host: route {}/{} work outlived its close budget; route-gone runs when it stops ({deferred} deferred)",
-        handle.channel, handle.epoch
-    ));
-    if deferred > MAX_DEFERRED_ROUTE_CLOSES {
+    if deferred_work > MAX_DEFERRED_WORK {
         shared.fatal.trip(
             &shared.shutdown,
-            format!("{deferred} routes hold work past their close budget"),
+            format!("{deferred_work} tasks and blocking jobs outlived their routes' close budget"),
         );
     }
+    stderr_line(&format!(
+        "eidnara-host: route {}/{} work outlived its close budget; route-gone runs when it stops ({held} held, {deferred_work} across deferred closes)",
+        handle.channel, handle.epoch
+    ));
 }
 
-/// The limit stays below Tokio's default blocking-pool limit of 512 threads.
-const MAX_DEFERRED_ROUTE_CLOSES: usize = 64;
+/// `MAX_DEFERRED_WORK` limits the total route-tracker entries (tasks and `run_blocking` jobs)
+/// held by deferred closes, below Tokio's default blocking-pool limit of 512 threads.
+pub(crate) const MAX_DEFERRED_WORK: usize = 64;
 
 /// `eprintln!` panics when stderr is closed; this write drops the error.
 fn stderr_line(line: &str) {

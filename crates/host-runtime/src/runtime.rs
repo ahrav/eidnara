@@ -116,9 +116,12 @@ pub struct HostShared<H> {
     pub handshake_permits: Arc<Semaphore>,
     pub connection_permits: Arc<Semaphore>,
     pub tracker: TaskTracker,
-    /// Route closes whose request work outlived the close budget; graceful shutdown joins them
-    /// before it sends connection `Goodbye`.
+    /// Route closes that run beside their connection's read loop (route `Goodbye` closes) and
+    /// the deferred closes for work that outlived the close budget; graceful shutdown joins them
+    /// before it fences read loops and sends connection `Goodbye`.
     pub deferred_closes: TaskTracker,
+    /// Route-tracker entries that deferred route closes still wait on.
+    pub deferred_work: std::sync::atomic::AtomicUsize,
     abort_handles: Mutex<AbortRegistry>,
     /// The shutdown-callback latch prevents abandon cleanup from spawning a second callback while the graceful callback still runs.
     shutdown_callback_ran: AtomicBool,
@@ -848,6 +851,7 @@ pub async fn run_with_publish_hook<H: HostHandler>(
         connection_permits: Arc::new(Semaphore::new(config.limits.max_connections)),
         tracker: TaskTracker::new(),
         deferred_closes: TaskTracker::new(),
+        deferred_work: std::sync::atomic::AtomicUsize::new(0),
         abort_handles: Mutex::new(AbortRegistry::new()),
         shutdown_callback_ran: AtomicBool::new(false),
         shutdown: shutdown.clone(),
@@ -1092,8 +1096,9 @@ async fn shutdown_sequence<H: HostHandler>(
             });
         }
         while closes.join_next().await.is_some() {}
-        // Deferred closes emit their routes' `cancelled` terminals once the work stops, and
-        // those terminals precede connection `Goodbye`.
+        // Route `Goodbye` closes and the deferred closes they hand off to emit their routes'
+        // `cancelled` terminals once the work stops, before read loops are fenced and
+        // connection `Goodbye` is sent.
         shared.deferred_closes.close();
         shared.deferred_closes.wait().await;
 
