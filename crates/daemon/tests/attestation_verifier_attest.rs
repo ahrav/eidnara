@@ -13,7 +13,8 @@ use daemon::attestation_verifier::attest::{
     attest,
 };
 use daemon::attestation_verifier::classify::{
-    BoundRoot, Class, Classification, Unverifiable, VERIFIER_SOURCE_KIND, VerifierInput, classify,
+    BoundRoot, Class, Classification, MAX_EVENT_CITATIONS, Unverifiable, VERIFIER_SOURCE_KIND,
+    VerifierInput, classify,
 };
 use daemon::attestation_verifier::{Claim, Evaluation, Reason, Verdict, verify};
 use kernel::applicability::EvalBudget;
@@ -2107,4 +2108,75 @@ fn a_classification_citing_a_document_the_model_decision_does_not_is_changed() {
     }
     assert_eq!(store.tip(), tip);
     assert_eq!(store.write_set_rows(), 0);
+}
+
+/// A model decision whose row cites the compared document and whose events then cite
+/// `MAX_EVENT_CITATIONS + 1` other evidence rows still attests and still goes stale: the recheck
+/// reads the row-level citation first, as `classify` does, outside the recency-bounded event window.
+#[test]
+fn a_row_level_citation_older_than_the_event_window_still_attests() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("row_cited", &checkout.head, &evidence, true);
+    let newer: Vec<kernel::ArtifactHandle> = (0..=MAX_EVENT_CITATIONS.get())
+        .map(|index| {
+            store.retain(
+                &format!("newer-{index}"),
+                &format!("newer evidence {index}\n"),
+            )
+        })
+        .collect();
+    store
+        .kernel
+        .commit(intent("newer-citations"), |envelope| {
+            for (index, handle) in newer.iter().enumerate() {
+                envelope.append_decision_event(
+                    "dec_row_cited",
+                    DecisionEventSpec {
+                        event_kind: "memory_capture_citation".into(),
+                        payload: DecisionEventPayload {
+                            summary: format!("cites newer evidence {index}"),
+                        },
+                        evidence_id: Some(handle.evidence_id.clone()),
+                        recorded_at: 2 + index as i64,
+                    },
+                )?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    let classification = store.classification(&model, &checkout);
+    assert_eq!(input(&classification).evidence_id, evidence.id);
+    let evaluation = evaluate(&classification);
+    assert_eq!(evaluation.verdict, Verdict::Match);
+    let outcome = attest_now(&store, &classification, &evaluation);
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+    let other = store.model("row_cited_stale", &checkout.head, &evidence, true);
+    store
+        .kernel
+        .commit(intent("newer-citations-stale"), |envelope| {
+            for (index, handle) in newer.iter().enumerate() {
+                envelope.append_decision_event(
+                    "dec_row_cited_stale",
+                    DecisionEventSpec {
+                        event_kind: "memory_capture_citation".into(),
+                        payload: DecisionEventPayload {
+                            summary: format!("cites newer evidence {index}"),
+                        },
+                        evidence_id: Some(handle.evidence_id.clone()),
+                        recorded_at: 2 + index as i64,
+                    },
+                )?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    let classification = store.classification(&other, &checkout);
+    let mismatch = Evaluation {
+        verdict: Verdict::Mismatch,
+        ..evaluation
+    };
+    let outcome = attest_now(&store, &classification, &mismatch);
+    assert!(matches!(outcome, Outcome::StaleCommitted(_)), "{outcome:?}");
 }

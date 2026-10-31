@@ -636,13 +636,12 @@ fn recheck(
     if (prior.source_class, prior.taint_class) != (model.source_class, model.taint_class) {
         return Err(changed());
     }
-    let row_anchor = envelope
+    let row = envelope
         .decisions_for_objects(std::slice::from_ref(&model.object_id))?
         .into_iter()
         .find(|row| row.object_id == model.object_id)
-        .ok_or_else(changed)?
-        .anchor_id;
-    if row_anchor != model.anchor_id {
+        .ok_or_else(changed)?;
+    if row.anchor_id != model.anchor_id {
         return Err(changed());
     }
     let anchor = match &model.anchor_id {
@@ -670,13 +669,17 @@ fn recheck(
     if !anchored || !cited {
         return Err(changed());
     }
-    let cites = envelope
-        .linked_decision_evidence(
-            &model.object_id,
-            super::classify::MAX_EVENT_CITATIONS.saturating_add(1),
-        )?
-        .iter()
-        .any(|evidence| evidence.evidence_id == input.evidence_id);
+    // The classifier reads the row's own citation first and the newest events after it, so the
+    // own citation is checked outside the recency-bounded event window.
+    let own = row.evidence_id.as_deref();
+    let max = super::classify::MAX_EVENT_CITATIONS;
+    let cites = own == Some(input.evidence_id.as_str())
+        || envelope
+            .linked_decision_evidence(&model.object_id, max.saturating_add(1))?
+            .iter()
+            .filter(|evidence| Some(evidence.evidence_id.as_str()) != own)
+            .take(max.get())
+            .any(|evidence| evidence.evidence_id == input.evidence_id);
     if !cites {
         return Err(changed());
     }
