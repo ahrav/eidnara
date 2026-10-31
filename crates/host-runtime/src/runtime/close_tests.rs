@@ -116,6 +116,15 @@ struct CloseFixture {
     physical_work: tokio_util::task::task_tracker::TaskTrackerToken,
 }
 
+/// Waits for the close owner to abort the fixture's dispatch task, bounded so a close that skips
+/// the abort fails here.
+async fn observe_abort(aborted: tokio::sync::oneshot::Receiver<()>) {
+    tokio::time::timeout(Duration::from_secs(1), aborted)
+        .await
+        .expect("the close owner aborts the dispatch task")
+        .unwrap();
+}
+
 fn fixture() -> CloseFixture {
     fixture_on(shared(), 1)
 }
@@ -195,7 +204,7 @@ async fn post_abort_completion_settles_once_without_wall_clock_sleeps() {
         ..
     } = fixture();
     let close = tokio::spawn(async move { settle_route_work(&shared, route, decision).await });
-    aborted.await.unwrap();
+    observe_abort(aborted).await;
     assert!(!settlement.is_settled());
     assert!(queue.try_recv().is_err());
     drop(physical_work);
@@ -228,7 +237,7 @@ async fn live_work_after_both_close_windows_defers_route_gone_until_it_stops() {
     let close_shared = shared.clone();
     let close =
         tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
-    aborted.await.unwrap();
+    observe_abort(aborted).await;
     assert!(
         !close.await.unwrap(),
         "held physical work defers route-gone past the close owner"
@@ -289,7 +298,7 @@ async fn a_deferred_close_and_the_forced_drain_run_route_gone_once() {
     let close_shared = shared.clone();
     let close =
         tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
-    aborted.await.unwrap();
+    observe_abort(aborted).await;
     assert!(!close.await.unwrap());
     let forced_shared = shared.clone();
     let forced =
@@ -378,7 +387,7 @@ async fn deferred_work_past_its_limit_trips_the_fatal_latch() {
         let close_shared = shared.clone();
         let close =
             tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
-        aborted.await.unwrap();
+        observe_abort(aborted).await;
         assert!(!close.await.unwrap());
         assert_eq!(
             shared.fatal.take().is_some(),
@@ -710,7 +719,7 @@ async fn deferred_work_sums_across_deferred_closes() {
         let close_shared = shared.clone();
         let close =
             tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
-        aborted.await.unwrap();
+        observe_abort(aborted).await;
         assert!(!close.await.unwrap());
         assert_eq!(shared.fatal.take().is_some(), fatal);
         work.push(physical_work);
@@ -760,7 +769,7 @@ async fn deferred_work_counts_only_entries_still_held() {
         let close_shared = shared.clone();
         let close =
             tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
-        aborted.await.unwrap();
+        observe_abort(aborted).await;
         assert!(!close.await.unwrap());
         held.truncate(extra - release_early);
         kept.push((held, physical_work));
@@ -791,7 +800,7 @@ async fn deferred_work_counts_only_entries_still_held() {
     let close_shared = shared.clone();
     let close =
         tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
-    aborted.await.unwrap();
+    observe_abort(aborted).await;
     assert!(!close.await.unwrap());
     assert_eq!(
         shared
@@ -828,7 +837,7 @@ async fn a_deferred_close_emits_under_one_fresh_close_budget() {
     let close_shared = shared.clone();
     let close =
         tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
-    aborted.await.unwrap();
+    observe_abort(aborted).await;
     assert!(!close.await.unwrap());
     let _reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
     // Separating the deferral instant from the stop instant shows the budget starts when the
@@ -866,7 +875,7 @@ async fn post_abort_emission_shares_the_close_deadline() {
     let _terminal = shared.terminal_budget.try_charge(1 << 20).unwrap();
     let started = Instant::now();
     let close = tokio::spawn(async move { settle_route_work(&shared, route, decision).await });
-    aborted.await.unwrap();
+    observe_abort(aborted).await;
     // Spending half of the post-abort window before the work stops separates a shared deadline
     // (done at 200 ms) from a fresh emission budget (250 ms).
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -902,7 +911,7 @@ async fn post_abort_snapshot_does_not_resettle_rejection() {
         let close_shared = shared.clone();
         let close =
             tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
-        aborted.await.unwrap();
+        observe_abort(aborted).await;
         assert!(cancelled.is_cancelled());
         shared.registry.freeze_admission();
         let never_started = tokio::spawn(std::future::pending::<()>());
