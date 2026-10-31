@@ -1594,6 +1594,20 @@ async fn await_route_gone_once(host: &TestHost, channel: u16) {
     }
 }
 
+/// Asserts that route-gone fired exactly once for `channel` over the whole run; called after
+/// shutdown has drained every lifecycle task.
+fn assert_route_gone_count(handler: &support::TestHandler, channel: u16) {
+    assert_eq!(
+        handler
+            .route_gones()
+            .iter()
+            .filter(|handle| handle.channel == channel)
+            .count(),
+        1,
+        "route-gone fired once after every lifecycle task drained"
+    );
+}
+
 /// Asserts that nothing arrives on `client` within `window`, naming whatever did arrive.
 async fn assert_silent(client: &mut RawClient, window: Duration, what: &str) {
     if let Ok(read) = tokio::time::timeout(window, client.expect_frame()).await {
@@ -1662,7 +1676,9 @@ async fn a_dropped_connection_with_work_past_the_close_budget_keeps_the_host_ser
         .await
         .expect("route-gone released the held route's slot");
     drop(successor);
+    let handler = host.handler.clone();
     let shutdown = host.shutdown().await;
+    assert_route_gone_count(&handler, channel);
     assert!(
         shutdown.is_ok(),
         "work that outlived the close budget must not make the host fatal: {shutdown:?}"
@@ -1715,7 +1731,9 @@ async fn a_route_goodbye_with_work_past_the_close_budget_keeps_the_connection_se
         .expect("terminal for the closed route's work");
     assert_eq!(frame.error_code(), "cancelled");
     await_route_gone_once(&host, channel).await;
+    let handler = host.handler.clone();
     host.shutdown_gracefully().await;
+    assert_route_gone_count(&handler, channel);
 }
 
 /// A request whose route close is deferred keeps counting against `max_pending_requests` until
@@ -1794,7 +1812,9 @@ async fn a_deferred_request_keeps_its_pending_permit_until_its_work_stops() {
         frame.ty, TY_RESPONSE,
         "the settled close released the permit"
     );
+    let handler = host.handler.clone();
     host.shutdown_gracefully().await;
+    assert_route_gone_count(&handler, channel);
 }
 
 /// Graceful shutdown that starts while a deferred close waits on held work joins it: once the
@@ -1887,14 +1907,7 @@ async fn shutdown_joins_a_deferred_close(after_windows: bool) {
         .position(|event| matches!(event, support::Event::Shutdown))
         .expect("handler shutdown ran");
     assert!(gone < shut, "route-gone precedes handler shutdown");
-    assert_eq!(
-        handler
-            .route_gones()
-            .iter()
-            .filter(|h| h.channel == channel)
-            .count(),
-        1
-    );
+    assert_route_gone_count(&handler, channel);
 }
 
 #[tokio::test]

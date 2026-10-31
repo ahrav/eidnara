@@ -289,14 +289,22 @@ async fn a_deferred_close_and_the_forced_drain_run_route_gone_once() {
     assert_eq!(shared.handler.route_gones_started.load(Ordering::SeqCst), 0);
 
     drop(physical_work);
-    while shared.handler.route_gones_started.load(Ordering::SeqCst) == 0 {
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while shared.handler.route_gones_started.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("route-gone starts once the work stops");
     // One owner holds the claim inside route-gone; the other returns once it loses the claim,
     // ending either the forced drain or the deferred close.
-    while !forced.is_finished() && !shared.deferred_closes.is_empty() {
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !forced.is_finished() && !shared.deferred_closes.is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the owner that lost the claim returns");
     assert_eq!(
         shared.registry.live_count(),
         1,
@@ -453,9 +461,13 @@ async fn deferred_work_sums_across_deferred_closes() {
     );
     drop(held.remove(0));
     drop(work.remove(0));
-    while shared.deferred_work.load(Ordering::SeqCst) != half + 1 {
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while shared.deferred_work.load(Ordering::SeqCst) != half + 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the released close returns exactly its share");
     drop(held);
     drop(work);
     shared.tracker.close();
