@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `handle_session_recomp_value` reads a ledger row before doing anything
-(`crates/daemon/src/lib.rs:6015`), which is the shape of a
+(`crates/daemon/src/lib.rs:6027`), which is the shape of a
 retry-safe handler. But the write that creates that row on the reset path happens
 at `:6114`, thirty-seven lines *after* the destructive reset at `:6077`. A handler
 whose replay guard is written last is not retry-safe in the window between.

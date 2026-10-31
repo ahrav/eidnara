@@ -112,9 +112,9 @@ refuses a store at the prior baseline untouched (`:496`).
 | `the_budgeted_scope_read_answers_as_the_unbudgeted_one_and_stops_at_its_deadline` | `crates/kernel/tests/kernel_scope.rs:460` | `scope_terms_within_budget` equals `scope_terms`, answers `None` for a missing scope, and returns `Deadline` on an expired budget and on a fully held reader pool | sweep | unaudited |
 | `every_standing_equals_the_claim_facts_of_its_claim_at_every_snapshot`, `standing_refusals_match_the_claim_facts_refusals` | `crates/kernel/tests/kernel_claim_standing.rs:111`, `:168` | the sweep's claim standing read equals the registry row, decision row, own admission row, and served standing of claim facts at every snapshot, and refuses as claim facts does | sweep | unaudited |
 
-Also: `crates/daemon/src/config.rs:2299` and `:2320` (default, tier, and
-resolved-config freezing), `crates/daemon/src/lib.rs:21502` (bound route and
-status block), `crates/host-runtime/src/control.rs:2011` (host forwarding
+Also: `crates/daemon/src/config.rs:2328` and `:2349` (default, tier, and
+resolved-config freezing), `crates/daemon/src/lib.rs:21515` (bound route and
+status block), `crates/host-runtime/src/control.rs:2017` (host forwarding
 allowlist against `docs/host-wire-protocol.md`), and
 `a_delete_as_read_spares_a_row_rewritten_since_the_read`
 (`crates/memory-store/tests/contradiction_candidates.rs:791`).

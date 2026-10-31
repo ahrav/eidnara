@@ -10,7 +10,7 @@ both tree stages together for native scalars at `:110-123`.
 The text-heavy case measures only direct decoding at `:178-199`.
 
 Library tests compare outcomes and needed bytes at
-`crates/daemon/src/lib.rs:20188-20229`, with capacities recomputed from the
+`crates/daemon/src/lib.rs:20201-20242`, with capacities recomputed from the
 same footprint function. `FixtureProcess` supports a real unary transform
 (`crates/daemon/tests/direct_host.rs:48-69`). Source presence is not proof
 that any new resource case passed. Every check remains unaudited in the

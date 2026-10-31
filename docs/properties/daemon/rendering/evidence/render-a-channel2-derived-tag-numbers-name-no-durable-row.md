@@ -133,8 +133,8 @@ surface and sub-part 4d's scope.
 ### Q: Does `eidnara_reduce` reject an unresolvable tag number?
 
 - Sources examined: identified `parse_tag_range_string` at
-  `crates/daemon/src/lib.rs:15165-15210` and `handle_eidnara_reduce_facade` at
-  `:10482-10588` from the Part 4 region map; did not read them, because both are
+  `crates/daemon/src/lib.rs:15178-15223` and `handle_eidnara_reduce_facade` at
+  `:10494-10600` from the Part 4 region map; did not read them, because both are
   sub-part 4d's assigned scope and this pass must not re-derive another part's
   material.
 - Findings: none beyond location.

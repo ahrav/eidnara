@@ -6,7 +6,7 @@ Scope and P notation: [source register](../source-register.md).
 P:L164 prohibits wire-visible changes, while P:L88 changes heap coefficients.
 Freeze refusal results at the same numeric capacity and input bytes. A test
 that derives its capacity from each version's footprint cannot compare the
-old and new admitted sets (`crates/daemon/src/lib.rs:20188-20199`).
+old and new admitted sets (`crates/daemon/src/lib.rs:20201-20212`).
 
 The local `main` is not the plan's baseline. Use the pinned B identity from
 the source register, then record the actual candidate artifact. W1 is

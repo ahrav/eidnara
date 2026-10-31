@@ -24,7 +24,7 @@ explicit connection before a result is meaningful.
 4. `crates/daemon/tests/parse_charge_covers_typed_decode.rs:25-88` supplies a
    requested-layout live/peak counter and serializes participating tests.
    The mutex alone does not exclude every unrelated process allocation.
-5. `crates/daemon/src/lib.rs:1745-1766` accounts native Values and tail data
+5. `crates/daemon/src/lib.rs:1746-1767` accounts native Values and tail data
    outside messages. Their allocations must remain in the full resource
    ledger but not leak into a messages-only target numerator.
 

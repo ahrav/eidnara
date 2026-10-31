@@ -69,7 +69,7 @@ The new text-heavy ceiling is recorded with additive witnesses under R3.
 
 R1-R4 constrain default production paths, not default occurrence of every
 fault. `Handler::handle` drives them at
-`crates/daemon/src/lib.rs:12153-12170`. R5 and R7 are test-only budget and
+`crates/daemon/src/lib.rs:12165-12182`. R5 and R7 are test-only budget and
 situation checks. R6's test-only classification is retained as history.
 Each active record repeats its own reachability evidence.
 
@@ -114,11 +114,11 @@ retained payload Values, duplicate envelope keys causing fallback, late typed
 errors, trailing malformed bytes, and permanent/transient refusals.
 Confidence: medium - [evidence](evidence/decode-footprint-covers-both-lanes-combined-peak.md).
 The current meter and production lanes are source-verified at
-`crates/daemon/src/lib.rs:12921-12946`; the proposed coefficient is unmeasured.
+`crates/daemon/src/lib.rs:12933-12958`; the proposed coefficient is unmeasured.
 Existing check: `crates/daemon/tests/parse_charge_covers_typed_decode.rs:103-199`
 covers dense-native combined tree and direct text peaks;
-`crates/daemon/src/lib.rs:20281-20315` includes a hard-coded three-copy bound
-at `:20294-20298`. Both are unaudited; the latter needs explicit disposition
+`crates/daemon/src/lib.rs:20294-20328` includes a hard-coded three-copy bound
+at `:20307-20311`. Both are unaudited; the latter needs explicit disposition
 against KTD4 rather than omission from the replacement inventory.
 Impact: An underestimated footprint admits more heap than the host can cover.
 Open questions:
@@ -155,7 +155,7 @@ Required faults and enabling state: Populated tool/media/opaque/JSON/extras
 Values, spare capacity, native Values, tail_delta, canonical text, shared and
 equal-but-distinct allocations, and an owner surviving cache eviction.
 Confidence: high - [evidence](evidence/retained-accounting-follows-typed-ownership.md).
-Production holder estimates at `crates/daemon/src/lib.rs:1745-1799` and
+Production holder estimates at `crates/daemon/src/lib.rs:1746-1800` and
 `crates/daemon/src/wire.rs:243-365` establish the accounting seams, not success.
 Existing check: `crates/daemon/src/retained_size.rs:290-335` and
 `crates/daemon/src/wire.rs:958-1238,1749-1792` exercise ownership accounting and
@@ -201,9 +201,9 @@ node-floor neighbours, independent held-pool pressure, malformed/fallback
 cases, and separately labelled additive string-ceiling witnesses. Observe
 terminal frames before any client duplicate filtering.
 Confidence: high - [evidence](evidence/frozen-admission-outcomes-and-boundaries-stay-stable.md).
-The production gate is `crates/daemon/src/lib.rs:16084-16161`; plan language
+The production gate is `crates/daemon/src/lib.rs:16097-16174`; plan language
 contains an unresolved conflict, not permission to retune the fixtures.
-Existing check: `crates/daemon/src/lib.rs:19569-19645,20188-20229,20414-20580`;
+Existing check: `crates/daemon/src/lib.rs:19582-19658,20201-20242,20427-20593`;
 unaudited. Several capacities depend on the candidate footprint.
 Impact: An original refusal changes unnoticed, a fixed admission rule drifts,
 or retuned witnesses conceal a required stop.
@@ -246,12 +246,12 @@ keys above and below the facade cap, both decode lanes, forced late errors,
 nonempty projection, synthetic normalization, shared prefixes, and held capacity.
 Confidence: medium - [evidence](evidence/decode-and-projection-stay-within-resident-pool.md).
 The default handler retains its meter through settlement at
-`crates/daemon/src/lib.rs:12153-12170`. The above-cap probe runs before that
+`crates/daemon/src/lib.rs:12165-12182`. The above-cap probe runs before that
 meter, contradicting A1's unqualified charge-before-probe statement at
 `docs/properties/hot-path-optimization/latency-audit/catalog.md:159-165`.
 This ordering discrepancy is verified; its allocation magnitude is unmeasured.
 Existing check: `crates/host-runtime/src/config.rs:481-502` checks pool splits;
-`crates/daemon/src/lib.rs:23311-23353` checked active projection leases until
+`crates/daemon/src/lib.rs:23324-23366` checked active projection leases until
 #828 deleted the projection cache and that test; the pool-split check is
 unaudited. No complete transient allocation-to-pool check is found.
 Impact: A smaller decode charge leaves projection or probe allocation unbounded
@@ -363,7 +363,7 @@ success, tree conversion, fallback after a prefix, escaped scratch, late error,
 pool shortfall with another owner, boundary neighbours, live projection,
 owner survival, and isolated allocation scope.
 Confidence: high - [evidence](evidence/resource-witnesses-reach-independent-preconditions.md).
-`crates/daemon/src/lib.rs:20414-20443` supplies a partial test-only witness;
+`crates/daemon/src/lib.rs:20427-20456` supplies a partial test-only witness;
 `ShortfallMarker` is supporting data, not the entire independent oracle.
 Existing check: The held-pool and sharing tests in
 [existing-checks.md](existing-checks.md) are unaudited. No complete campaign

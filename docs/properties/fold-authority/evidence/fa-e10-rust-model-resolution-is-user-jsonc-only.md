@@ -18,7 +18,7 @@ All references are verified at HEAD `0ff62b29a` unless another tree is named.
 Clauses and their disposition at HEAD:
 
 - "Discovers `.jsonc` tiers only": replaced. `discover_tier`
-  (`crates/daemon/src/config.rs:401-408`) returns `.jsonc`, then `.json`,
+  (`crates/daemon/src/config.rs:405-412`) returns `.jsonc`, then `.json`,
   then the `.jsonc` path for a missing tier. Negative control:
   `jsonc_only_discovery_fails_the_fixture` (`:2588`).
 - "Parses without variable substitution": preserved. `read_tier_cached`

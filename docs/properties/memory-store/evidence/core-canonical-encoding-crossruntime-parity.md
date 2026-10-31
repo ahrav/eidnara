@@ -72,7 +72,7 @@ Fixture breadth at HEAD, enumerated: 5 `canonicalization` cases
 Live consumers at HEAD:
 
 - `crates/memory-store/src/memory_classifier_ledger.rs:685-688` wraps
-  `compute_memory_classifier_request_digest`; `crates/daemon/src/lib.rs:9579-9588`
+  `compute_memory_classifier_request_digest`; `crates/daemon/src/lib.rs:9591-9600`
   digests the classify request's effect-defining inputs through it, and
   `:9624` passes the digest into `begin_memory_classifier_receipt`.
 - `crates/memory-store/src/memory_classifier_ledger.rs:318-321` compares a stored
@@ -94,8 +94,8 @@ Different canonical bytes mean a different SHA-256 through `protocol_digest`
 (`:128-135`) and therefore a different `compute_memory_classifier_request_digest`
 (`:139-141`). The consequence follows the digest's job in the MemoryClassifier ledger.
 `run_memory_classifier_task` computes the digest over the request's effect-defining
-inputs (`crates/daemon/src/lib.rs:9579-9588`) and hands it to
-`begin_memory_classifier_receipt` (`:9624`). If the same command's retry digests
+inputs (`crates/daemon/src/lib.rs:9591-9600`) and hands it to
+`begin_memory_classifier_receipt` (`:9636`). If the same command's retry digests
 differently, `memory_classifier_ledger.rs:318` reports `DigestConflict` and the daemon
 returns `memory_classifier_request_conflict` (`lib.rs:9646-9652`) instead of replaying
 the recorded outcome (`:9626-9628`). If two different requests digest the
@@ -217,7 +217,7 @@ optional path and no situation to reach, only an input domain to cover.
   that names the host repository's encoder, which this repository does not
   carry. The Rust encoder's only consumers here are the MemoryClassifier request digest
   (`crates/memory-store/src/memory_classifier_ledger.rs:686`, called from
-  `crates/daemon/src/lib.rs:9579`) and the durable-write redaction scan
+  `crates/daemon/src/lib.rs:9591`) and the durable-write redaction scan
   (`crates/memory-store/src/lib.rs:3206`), both Rust.
 - Missing evidence: none for the question as asked.
 - Conclusion: resolved with answer. The record's cross-runtime clause has no

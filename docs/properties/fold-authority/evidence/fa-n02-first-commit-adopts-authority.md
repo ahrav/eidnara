@@ -35,9 +35,9 @@ All references are verified at HEAD `0ff62b29a`.
   configuration is admitted (`:105-111`), and adopts `applied` for a legacy
   row only when admitted (`:112`). An adopted row never gets `adopt`.
 - The binding's intent is `DaemonConfig::eidnara_folds()`
-  (`crates/daemon/src/config.rs:181-185`), which is false when admission is
+  (`crates/daemon/src/config.rs:185-189`), which is false when admission is
   unresolved. It is captured per route in `RouteBindings::fold_authority_intent`
-  (`crates/daemon/src/lib.rs:338-349`).
+  (`crates/daemon/src/lib.rs:339-350`).
 - `apply_once_with_estimator` reads the record and plans on every attempt
   (`crates/daemon/src/transform.rs:2022-2023`). `stamp_fold_authority`
   (`:2154-2168`) requires the pass's own load to be at the planned

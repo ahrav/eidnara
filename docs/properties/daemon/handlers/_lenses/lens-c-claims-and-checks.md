@@ -166,7 +166,7 @@ occurrences in the test module, so nothing observes it either.
 constituents are not individually re-checked.** Doc side: `:2303-2307` states "No
 cache may interpret another cache's presence as authority. Keep their aggregate
 process-retained ceiling explicit when any individual budget changes." Code side:
-`crates/daemon/src/lib.rs:2254-2257` is a `const _: () = assert!(...)`, a compile-time check
+`crates/daemon/src/lib.rs:2255-2258` is a `const _: () = assert!(...)`, a compile-time check
 that the serialized-output and native-output budgets sum to exactly
 `TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`. This is
 the strongest guard in the whole 4c range and it is the only `assert!` in it, but
@@ -461,7 +461,7 @@ Measured over production lines only, restricted to the five 4c ranges.
 
 **Compile-time assertions: one, and it is the strongest guard in scope.**
 
-- `crates/daemon/src/lib.rs:2254-2257`, a `const _: () = assert!(...)` requiring
+- `crates/daemon/src/lib.rs:2255-2258`, a `const _: () = assert!(...)` requiring
   `SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES + NATIVE_OUTPUT_BUDGET_BYTES ==
   TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`.
   A `const` assertion, so a budget change that breaks the aggregate ceiling fails

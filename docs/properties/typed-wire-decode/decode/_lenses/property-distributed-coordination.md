@@ -4,7 +4,7 @@ Provenance: HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 
 Narrowly nonapplicable: this change decodes one received body into local owned
 types. It changes no quorum, election, distributed lease, or remote commit.
-`crates/daemon/src/lib.rs:12911-12951` contains the complete lane decision.
+`crates/daemon/src/lib.rs:12923-12963` contains the complete lane decision.
 
 Page generation and route ownership exist around that decision. Their
 replay, retirement, and fencing obligations stay in the daemon handlers and

@@ -3,7 +3,7 @@
 Provenance: HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 
 - Invalid typed decoding reaches one tree attempt in
-  `crates/daemon/src/lib.rs:12923-12951`; this is bounded control flow, not an
+  `crates/daemon/src/lib.rs:12935-12963`; this is bounded control flow, not an
   eventual-progress guarantee needing a timer.
 - Page collection and expiry are separate state machines. Existing handler
   catalogs own their progress obligations. Preserving the tree lane does not

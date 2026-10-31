@@ -32,7 +32,7 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
   selected render tier. An omitted segment may still contribute a hint.
 
 Reachability is **default-production**: the default compaction setting is true
-at [config.rs:144](../../../../../crates/daemon/src/config.rs#L144), and normal
+at [config.rs:144](../../../../../crates/daemon/src/config.rs#L147), and normal
 m0 composition calls the renderer. A deliberately tight positive budget is a
 test input to an existing path, not a proposed production policy change.
 

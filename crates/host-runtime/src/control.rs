@@ -892,6 +892,12 @@ fn sanitize_context_metrics(
             serde_json::Value::Object(candidates),
         );
     }
+    if let Some(verifier) = metrics
+        .and_then(|metrics| metrics.get(VERIFIER_KEY))
+        .and_then(|raw| sanitize_counters(raw, &VERIFIER_COUNTERS))
+    {
+        sanitized_metrics.insert(VERIFIER_KEY.to_owned(), serde_json::Value::Object(verifier));
+    }
 }
 
 pub fn host_shutdown_response_json() -> Vec<u8> {
@@ -2098,5 +2104,117 @@ mod source_capture_block_tests {
             .map(str::to_owned)
             .collect();
         assert_eq!(documented, forwarded);
+    }
+}
+
+pub(crate) const VERIFIER_KEY: &str = "verifier";
+/// `VERIFIER_COUNTERS` defines the counter allowlist for `metrics.verifier` in `docs/host-wire-protocol.md`.
+const VERIFIER_COUNTERS: [&str; 37] = [
+    "considered",
+    "match",
+    "mismatch",
+    "unavailable_path_absent",
+    "unavailable_not_a_blob",
+    "unavailable_object_unreadable",
+    "unavailable_over_budget",
+    "unavailable_deadline",
+    "unavailable_repository_unbound",
+    "unavailable_repository_unopenable",
+    "unverifiable_no_anchor",
+    "unverifiable_anchor_not_git",
+    "unverifiable_no_citation",
+    "unverifiable_citation_not_document",
+    "unverifiable_evidence_retired",
+    "unverifiable_descriptor_retired",
+    "unverifiable_digest_missing",
+    "unverifiable_self_source",
+    "unverifiable_invalid_document_path",
+    "skipped_attested",
+    "skipped_stale",
+    "attestation_committed",
+    "attestation_replayed",
+    "stale_committed",
+    "commit_refused_changed",
+    "commit_refused_invalid_write_set",
+    "commit_refused_busy",
+    "commit_refused_deadline",
+    "commit_refused_io",
+    "commit_refused_other",
+    "commit_conflict",
+    "witness_degraded",
+    "witness_degraded_skipped",
+    "unavailable_skipped",
+    "bytes_read",
+    "passes",
+    "last_pass_ms",
+];
+
+#[cfg(test)]
+mod verifier_block_tests {
+    use super::*;
+
+    fn verifier_of(block: serde_json::Value) -> Option<serde_json::Value> {
+        let report = crate::handler::HealthReport {
+            status: crate::handler::HealthStatus::Ok,
+            detail: None,
+            metrics: Some(serde_json::json!({
+                "components": { "context": { "status": "ok",
+                    "metrics": { "storage_state": "ready", "verifier": block } } }
+            })),
+        };
+        let response: serde_json::Value = serde_json::from_slice(&host_status_response_json(
+            &report,
+            serde_json::json!({"state": "healthy"}),
+        ))
+        .expect("status JSON");
+        response["metrics"]["components"]["context"]["metrics"]
+            .get(VERIFIER_KEY)
+            .cloned()
+    }
+
+    #[test]
+    fn the_verifier_block_is_sanitized_field_by_field_and_documented() {
+        let mut full = serde_json::Map::new();
+        for (index, name) in VERIFIER_COUNTERS.iter().enumerate() {
+            full.insert((*name).to_owned(), (index as u64).into());
+        }
+        full.insert("unit".into(), serde_json::json!("ms"));
+        full.insert("object_ids".into(), serde_json::json!(["mem_a"]));
+        let kept = verifier_of(serde_json::Value::Object(full)).expect("kept");
+        let kept = kept.as_object().unwrap();
+        assert_eq!(kept.len(), VERIFIER_COUNTERS.len());
+        for (index, name) in VERIFIER_COUNTERS.iter().enumerate() {
+            assert_eq!(kept[*name], serde_json::Value::from(index as u64), "{name}");
+        }
+        assert_eq!(
+            verifier_of(serde_json::json!({
+                "considered": -1, "match": "1", "mismatch": 1.5, "passes": null,
+                "bytes_read": 1_u64 << 60, "last_pass_ms": 1_u64 << 53,
+                "unavailable_unknown_reason": 1,
+            })),
+            Some(serde_json::json!({ "last_pass_ms": 1_u64 << 53 }))
+        );
+        assert!(verifier_of(serde_json::json!("ready")).is_none());
+        assert!(verifier_of(serde_json::json!([1])).is_none());
+
+        let doc = include_str!("../../../docs/host-wire-protocol.md");
+        let lines: Vec<&str> = doc.lines().collect();
+        let first = lines
+            .iter()
+            .position(|line| line.starts_with("| `considered`"))
+            .expect("the verifier table");
+        let documented: std::collections::BTreeSet<&str> = lines[first..]
+            .iter()
+            .take_while(|line| line.starts_with('|'))
+            .flat_map(|line| {
+                line.split(" | ")
+                    .next()
+                    .unwrap_or_default()
+                    .split('`')
+                    .skip(1)
+                    .step_by(2)
+            })
+            .collect();
+        assert_eq!(documented, VERIFIER_COUNTERS.into_iter().collect());
     }
 }

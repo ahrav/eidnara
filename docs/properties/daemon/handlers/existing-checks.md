@@ -284,7 +284,7 @@ self.ingress_chunk_retained_bytes.len())`, paired the native attachment cache's
 ingress chunks with their retained-byte entries; #830 deleted it with that cache.
 
 **Compile-time assertions: one, and it is the strongest guard in scope.**
-`crates/daemon/src/lib.rs:2254-2257`, a `const _: () = assert!(...)` requiring
+`crates/daemon/src/lib.rs:2255-2258`, a `const _: () = assert!(...)` requiring
 `SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES + NATIVE_OUTPUT_BUDGET_BYTES ==
 TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`. A
 budget change that breaks the aggregate ceiling fails the build rather than

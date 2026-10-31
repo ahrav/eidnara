@@ -163,7 +163,7 @@ component report - not on the override itself.
 
 - Sources examined: `runtime.rs:981-983`, `:1129-1133`,
   `docs/host-wire-protocol.md:679-685`.
-- Findings: the comment at `:981-983` deliberately declines a deadline for
+- Findings: the comment at `:1009-1011` deliberately declines a deadline for
   activation, reasoning that post-publication budgets belong to the components.
   That justifies the *activation* being unbounded. It does not address the probe
   cadence that tracks it, and the specification says nothing about a probe

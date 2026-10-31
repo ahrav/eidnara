@@ -16,13 +16,13 @@ branch, updated at the #1171 branch for F1, F3, F14, and F15, and at the
 | F4 | Header over budget; header under budget with an over-budget delta base; hash mismatch on decode | constructible: large blobs, `write_delta_pack` in `crates/daemon/tests/support/git_repo.rs`, and a valid object stored under another id |
 | F5 | Partial clone or missing object; corrupt commit, tree, or blob | constructible: a deleted loose object stands in for a missing promisor object; a valid object stored under another id, an undecodable object written with `git hash-object --literally`, a loose object whose bytes are not zlib data, a commit or tree with a valid prefix and a malformed remainder, or `write_self_delta_pack`'s self-referencing ref-delta, for corruption |
 | F6 | Path absent; gitlink, symlink, or tree at the path; path beneath a gitlink | constructible: `git mktree --missing` in a bare fixture |
-| F7 | Deadline before the pass, between decisions, and during a read; budget cancellation | constructible for one claim: a cancelled or expired `EvalBudget`, and a stage-aware `Deadline` double; between decisions with #1173 |
+| F7 | Deadline before the pass, between decisions, and during a read; budget cancellation | constructible for one claim: a cancelled or expired `EvalBudget`, and a stage-aware `Deadline` double; for the pass, a recording `PassClock` double that passes before decision k + 1 or before a blob read (#1173) |
 | F8 | Worktree edit, HEAD move, repack between two verdicts; the repack clause excludes allocation-limit refusals of the commit, a tree, or the blob, whose verdict depends on pack layout | constructible: a linked worktree of the bare fixture, `git update-ref`, `git repack -a -d` |
 | F9 | `text eol`, `ident`, encoding, or clean filter attributes at the oid | partial: the LF and CRLF forms are constructible; `ident`, encoding, and clean filters stay false mismatches by the OQ6-8 decision |
 | F10 | Operation key replayed with the same and with a different verdict | constructible: the write-set fixture repeats a call, changes the blob id under the same key, and calls the opposite verdict for the same decision and oid |
 | F11 | Fault-injected rollback after the admission; crash after commit then fresh open | partial: a SQLite trigger on the test store aborts the citation event, the last write; the crash half is a fresh open after a clean close, which shows durability across an open and not across process termination, since a live store holds its data home's writer lock and a second open of an abandoned store fails |
-| F12 | Flag absent, reload true to false, project-tier flag | constructible with #1173 |
-| F13 | More than N candidates; a starving two-project pattern; a permanently transient head decision | constructible with #1173 |
+| F12 | Flag absent, reload true to false, project-tier flag | constructible: a switchable flag reader drives the pass and the task; the shared parity fixture drives the Rust tier merge and both plugin loaders (#1173) |
+| F13 | More than N candidates; a starving two-project pattern; a permanently transient head decision | constructible: bare repositories as project roots with N + 2 verifiable documents, 3N absent paths in one project, a head decision citing an unbound repository, and a SQLite trigger that degrades one decision's witness every pass (#1173) |
 | F14 | A `Sensitive` evidence row cited through the row FK, the observation FK, or the admission event | constructible: Kernel slice and admission fixtures; the precondition at classification is constructed by the classifier fixture store, whose document evidence is `Sensitive`, cited by the row FK and by events, and named in the input by id only; the write-set fixture commits attestations for a model decision citing the evidence by an event and by its row |
 | F15 | Default prose documents with no code-or-config kind | constructible: the OQ6-9 path rule classifies `ARCHITECTURE.md` and `STRUCTURE.md` `CurrentCode` (#1171); the write set attests `ARCHITECTURE.md` under `CurrentCode` and `config.toml` under `CurrentConfig` (#1172) |
 
@@ -65,7 +65,7 @@ branch, updated at the #1171 branch for F1, F3, F14, and F15, and at the
 | `p6-new-mismatch-stale-unavailable-silent` | other bytes at the cited path; `Unavailable` verdicts (F5, F6) |
 | `p6-new-party-distinct-and-self-refusal` | an attestation in the store; an undecodable anchor on it, so a read before the check fails; a plugin write under `verifier` |
 | `p6-new-flag-off-nothing-runs` | F12 |
-| `p6-new-pass-bounds-and-accounting` | F7, F13 |
+| `p6-new-pass-bounds-and-accounting` | F7, F10, F11, F13 |
 | `p6-new-cursor-never-skips-unresolved` | F7, F13 |
 | `p6-new-pass-progress-under-transient-unavailable` | F13 |
 | `p6-new-attestation-stale-on-byte-change` | a descendant commit changing the cited bytes |
@@ -120,5 +120,6 @@ never the violation.
    The classifier fixture store for N1 is in this tier: Kernel commits and
    reads with no repository.
 4. Source-capture tests for S5, which need the daemon test host.
-5. The bounded pass (#1173), which needs a test host, a controlled clock, and
-   tiered flags.
+5. The bounded pass (#1173): a fixture store, bare repositories as project
+   roots, a recording `PassClock` double, and a switchable flag reader; the
+   counters block and the clock's poll log are the oracle.

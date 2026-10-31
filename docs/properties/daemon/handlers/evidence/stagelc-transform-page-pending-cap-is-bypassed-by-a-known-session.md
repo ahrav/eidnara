@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 Reading the doc comment on `TransformPageCoordinator` at
-`crates/daemon/src/lib.rs:1064-1065`: "Live transform pages share one
+`crates/daemon/src/lib.rs:1065-1066`: "Live transform pages share one
 coordinator so every session has one in-flight attempt and every sender
 contributes to the same bounded staging budget." That is two claims. The byte
 half is enforced. Checking the count half led straight to the `contains_key`

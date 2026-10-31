@@ -103,6 +103,9 @@ pub struct DaemonConfig {
     /// User-only consent to score each settled source publication against the project's live
     /// memory decisions and keep the overlaps as derived candidate rows, and to sweep those rows.
     pub contradiction_candidates_enabled: bool,
+    /// User-only consent to run the attestation verifier's bounded background pass over the
+    /// project's live decisions; read again at the start of every pass.
+    pub verifier_enabled: bool,
     /// Auto-search hint controls operate independently at transform time.
     pub auto_search: AutoSearchConfig,
     /// TerseTextCompression compression uses deterministic age-tier controls.
@@ -156,6 +159,7 @@ impl Default for DaemonConfig {
             memory_auto_capture: true,
             source_capture_enabled: false,
             contradiction_candidates_enabled: false,
+            verifier_enabled: false,
             auto_search: AutoSearchConfig::default(),
             terse_text_compression: TerseTextCompressionConfig::default(),
             auto_promote: true,
@@ -434,6 +438,7 @@ impl MergedConfig {
             memory_auto_capture: _,
             source_capture_enabled: _,
             contradiction_candidates_enabled: _,
+            verifier_enabled: _,
             auto_search: _,
             terse_text_compression: _,
             auto_promote: _,
@@ -501,6 +506,19 @@ impl ConfigCache {
         );
         emit_warnings(warnings);
         effective
+    }
+
+    /// The key is user-tier only, so the merge names the filesystem root as its project and its
+    /// result holds for every project root.
+    pub fn verifier_enabled(&mut self, xdg_config_home: Option<&str>, home: Option<&str>) -> bool {
+        const _: () = assert!(matches!(
+            ConfigKey::VerifierEnabled.tier_class(),
+            TierClass::UserOnly
+        ));
+        let user = user_config_base_from(xdg_config_home, home).map(discover_tier);
+        self.effective_from_sources(user, Path::new("/"))
+            .0
+            .verifier_enabled
     }
 
     /// The daemon-level `contradiction_candidates.enabled`: the user tier's value over the
@@ -949,6 +967,7 @@ pub enum ConfigKey {
     MemoryAutoCapture,
     SourceCaptureEnabled,
     ContradictionCandidatesEnabled,
+    VerifierEnabled,
     AutoSearchEnabled,
     AutoSearchScoreThreshold,
     AutoSearchMinPromptChars,
@@ -987,6 +1006,7 @@ impl ConfigKey {
         Self::MemoryAutoCapture,
         Self::SourceCaptureEnabled,
         Self::ContradictionCandidatesEnabled,
+        Self::VerifierEnabled,
         Self::AutoSearchEnabled,
         Self::AutoSearchScoreThreshold,
         Self::AutoSearchMinPromptChars,
@@ -1022,6 +1042,7 @@ impl ConfigKey {
             Self::MemoryAutoCapture => "/memory/auto_capture",
             Self::SourceCaptureEnabled => "/source_capture/enabled",
             Self::ContradictionCandidatesEnabled => "/contradiction_candidates/enabled",
+            Self::VerifierEnabled => "/verifier/enabled",
             Self::AutoSearchEnabled => "/memory/auto_search/enabled",
             Self::AutoSearchScoreThreshold => "/memory/auto_search/score_threshold",
             Self::AutoSearchMinPromptChars => "/memory/auto_search/min_prompt_chars",
@@ -1071,6 +1092,7 @@ impl ConfigKey {
             | Self::MemoryAutoCapture
             | Self::SourceCaptureEnabled
             | Self::ContradictionCandidatesEnabled
+            | Self::VerifierEnabled
             | Self::CacheTtl => true,
             Self::ExecuteThresholdPercentage
             | Self::CompactionEnabled
@@ -1105,6 +1127,7 @@ impl ConfigKey {
             | Self::MemoryAutoCapture
             | Self::SourceCaptureEnabled
             | Self::ContradictionCandidatesEnabled
+            | Self::VerifierEnabled
             | Self::PromptSurfaceGuidanceOverrideText
             | Self::PromptSurfaceGuidanceOverridePath
             | Self::CacheTtl => TierClass::UserOnly,
@@ -1241,6 +1264,11 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
         ConfigKey::ContradictionCandidatesEnabled => {
             if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
                 cfg.contradiction_candidates_enabled = enabled;
+            }
+        }
+        ConfigKey::VerifierEnabled => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.verifier_enabled = enabled;
             }
         }
         ConfigKey::AutoSearchEnabled => {
@@ -2276,6 +2304,7 @@ mod tests {
                 ConfigKey::MemoryAutoCapture,
                 ConfigKey::SourceCaptureEnabled,
                 ConfigKey::ContradictionCandidatesEnabled,
+                ConfigKey::VerifierEnabled,
                 ConfigKey::MemoryInjectionBudgetTokens,
                 ConfigKey::MemoryBudgetTokens,
                 ConfigKey::UserProfileBudgetTokens,
@@ -2390,6 +2419,7 @@ mod tests {
             "terse_text_compression": { "enabled": true, "min_chars": 999 },
             "source_capture": { "enabled": true },
             "contradiction_candidates": { "enabled": true },
+            "verifier": { "enabled": true },
             "user_memories": { "enabled": true },
             "memory_classifier": {
                 "inject_docs": true,
@@ -2608,7 +2638,7 @@ mod tests {
             0,
             "tier values are read through ConfigKey::pointer(), never a raw literal"
         );
-        assert_eq!(ConfigKey::ALL.len(), 29);
+        assert_eq!(ConfigKey::ALL.len(), 30);
     }
 
     /// The user-memory gate's two keys and the budget's two keys resolve the
@@ -3866,5 +3896,121 @@ mod project_docs_parity {
                 row["name"]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod verifier_parity {
+    use super::*;
+
+    /// The source-capture rows, which apply to `verifier` with the block renamed.
+    const FIXTURE: &str = include_str!(
+        "../../../packages/opencode-plugin/src/config/__fixtures__/source-capture-parity.json"
+    );
+
+    fn write_tier(dir: &Path, tier: &Value) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("eidnara.jsonc"), tier.to_string()).unwrap();
+    }
+
+    /// AC10, F12: the flag defaults false, and a project-tier value is dropped with the user-only
+    /// warning.
+    #[test]
+    fn every_fixture_row_matches_through_the_configuration_cache() {
+        let renamed = FIXTURE.replace("\"source_capture\"", "\"verifier\"");
+        let fixture: Value = serde_json::from_str(&renamed).expect("the parity fixture parses");
+        let rows = fixture["rows"].as_array().expect("rows");
+        assert!(!rows.is_empty());
+        assert!(!DaemonConfig::default().verifier_enabled);
+        for row in rows {
+            let home = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            write_tier(&home.path().join("eidnara"), &row["user"]);
+            write_tier(&project.path().join(".eidnara"), &row["project"]);
+            let expected = row["expected_enabled"].as_bool().expect("expected_enabled");
+            let (config, warnings) = ConfigCache::default().effective_for_env(
+                home.path().to_str(),
+                None,
+                project.path(),
+            );
+            assert_eq!(config.verifier_enabled, expected, "{}", row["name"]);
+            let expected_warnings = usize::from(
+                row["expected_project_warning"]
+                    .as_bool()
+                    .expect("expected_project_warning"),
+            );
+            assert_eq!(
+                warnings
+                    .iter()
+                    .filter(|warning| warning.contains(
+                        "ignoring /verifier/enabled from project tier; setting is user-tier only"
+                    ))
+                    .count(),
+                expected_warnings,
+                "{}: {warnings:?}",
+                row["name"]
+            );
+        }
+    }
+
+    /// AC13, F12: the pass's reader returns the user tier's value, observes a rewrite through the
+    /// same cache, and reads a project-tier value alone as false with the user-only warning.
+    #[test]
+    fn the_pass_reader_follows_the_user_tier_and_drops_a_project_tier_value() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let user = home.path().join("eidnara/eidnara.jsonc");
+        let backdate = |seconds| {
+            let mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+            filetime::set_file_mtime(&user, filetime::FileTime::from_system_time(mtime)).unwrap();
+        };
+        let mut cache = ConfigCache::default();
+        write_tier(
+            &home.path().join("eidnara"),
+            &serde_json::json!({ "verifier": { "enabled": true } }),
+        );
+        backdate(120);
+        assert!(cache.verifier_enabled(home.path().to_str(), None));
+        // A past mtime outside the recent-change margin still differs from the memoized one.
+        write_tier(
+            &home.path().join("eidnara"),
+            &serde_json::json!({ "verifier": { "enabled": false } }),
+        );
+        backdate(60);
+        assert!(!cache.verifier_enabled(home.path().to_str(), None));
+
+        let home = tempfile::tempdir().unwrap();
+        write_tier(
+            &project.path().join(".eidnara"),
+            &serde_json::json!({ "verifier": { "enabled": true } }),
+        );
+        let mut cache = ConfigCache::default();
+        assert!(!cache.verifier_enabled(home.path().to_str(), None));
+        let (_, warnings) = cache.effective_for_env(home.path().to_str(), None, project.path());
+        assert!(
+            warnings.iter().any(|warning| warning.contains(
+                "ignoring /verifier/enabled from project tier; setting is user-tier only"
+            )),
+            "{warnings:?}"
+        );
+    }
+
+    /// The flag is user-tier only, so `verifier_enabled` resolves the user tier alone even when
+    /// the project root holds its own tier file.
+    #[test]
+    fn the_pass_reader_reads_the_user_tier_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_tier(
+            &home.path().join("eidnara"),
+            &serde_json::json!({ "verifier": { "enabled": true } }),
+        );
+        write_tier(
+            &project.path().join(".eidnara"),
+            &serde_json::json!({ "verifier": { "enabled": false } }),
+        );
+        let mut cache = ConfigCache::default();
+        assert!(cache.verifier_enabled(home.path().to_str(), None));
+        assert!(cache.project.stamp.is_none(), "{:?}", cache.project.path);
     }
 }

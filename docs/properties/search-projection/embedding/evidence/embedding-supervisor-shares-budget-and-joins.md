@@ -11,7 +11,7 @@ slice or shared LocalEmbeddings EvalBudget bridge exists at the pinned revision.
 
 ## Evidence trail
 
-- `crates/daemon/src/lib.rs:3646-3660` starts the existing MemoryClassifierScheduler
+- `crates/daemon/src/lib.rs:3649-3663` starts the existing MemoryClassifierScheduler
   after store open with the daemon cancellation token and task admission owner.
 - `crates/daemon/src/memory_classifier_scheduler.rs:163-220` races cancellation with the
   whole tick and sleeps after deferred/retained work rather than busy retrying.

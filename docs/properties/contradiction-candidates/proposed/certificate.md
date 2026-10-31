@@ -213,7 +213,7 @@ R-F2 Unavailable is distinct from empty. Flag off -> `disabled`; memory-store
 unreadable -> `store_unavailable`; Kernel not Ready -> the kernel routes' state;
 no rows for an eligible decision -> an empty page. Kind: state predicate on the
 answer. Validity: response. Settled by the `review.*` family contract
-(`host-wire-protocol.md:790-794`).
+(`host-wire-protocol.md:818-822`).
 
 R-G1 Flag off means no pass, no write, no table read. With the route's frozen
 `contradiction_candidates.enabled` false, no pass is offered, no row is written,

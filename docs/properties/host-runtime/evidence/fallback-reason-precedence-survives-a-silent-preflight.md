@@ -145,7 +145,7 @@ doc describes as a crate-internal seam for the integration-test harness
   comments), `:116-120` (the default body), `:237-247` (the analogous panic
   containment for `prepare`, which maps to `ProviderFailure::Unavailable` rather
   than to omission); `docs/host-wire-protocol.md:614-621`.
-- Findings: the wire behaviour is deliberate and should not change. `:906` states
+- Findings: the wire behaviour is deliberate and should not change. `:934` states
   that a panicking preflight fails toward static omission specifically so the
   client gets no probe authorization, and `:943` states that permanent absence must
   select reasonless TCP so a client cannot probe for a provider that cannot appear.

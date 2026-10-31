@@ -12,18 +12,18 @@ Dirty daemon lib.rs is read from git show HEAD throughout this evidence.
 
 ## Evidence trail
 
-- `crates/daemon/src/lib.rs:15811-15814,15962-15964` treats any page key
+- `crates/daemon/src/lib.rs:15824-15827,15975-15977` treats any page key
   as present, including null, and excludes it from the direct typed route.
-- `crates/daemon/src/lib.rs:8078-8084` branches to page handling on the
-  parsed Value. `:9575-9609` validates the six-field envelope and types.
-- `crates/daemon/src/lib.rs:9647-9653` rejects mismatched content digest
+- `crates/daemon/src/lib.rs:8090-8096` branches to page handling on the
+  parsed Value. `:9587-9621` validates the six-field envelope and types.
+- `crates/daemon/src/lib.rs:9659-9665` rejects mismatched content digest
   before assembly or typed conversion.
-- `crates/daemon/src/lib.rs:15007-15026` separates array content digest
+- `crates/daemon/src/lib.rs:15020-15039` separates array content digest
   from the final-page scalar digest used for replay.
-- `crates/daemon/src/lib.rs:15055-15171` reconstructs continuation values,
+- `crates/daemon/src/lib.rs:15068-15184` reconstructs continuation values,
   strips the page envelope, and concatenates array fields as Values.
-- `crates/daemon/src/lib.rs:8107-8126` performs the typed conversion after
-  the tree path. `:13036-13046` retains explicit echo and facade behavior.
+- `crates/daemon/src/lib.rs:8119-8138` performs the typed conversion after
+  the tree path. `:13048-13058` retains explicit echo and facade behavior.
 - `packages/opencode-plugin/src/hooks/context/module-wire.ts:148-155`
   hashes the selected page-array object using its canonical JSON function.
 

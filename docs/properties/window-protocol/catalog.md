@@ -136,7 +136,7 @@ path runs without configuration: the plugin builds the Rust-mode transform
 unconditionally (`packages/opencode-plugin/src/hooks/context/hook.ts:518` at
 `f2442b2f`; `4061315c` removed `transform_mode`). `explicit-config-only` means
 a configured summarizer model chain is required (`model_chain` defaults to
-empty at `crates/daemon/src/config.rs:123`). There are eight campaign
+empty at `crates/daemon/src/config.rs:126`). There are eight campaign
 markers (WP-P16 to WP-P23). Seven are `test-only`: they assert enabling state
 through test instrumentation. WP-P16 is `explicit-config-only`, because its
 production overlap needs a configured summarizer.
@@ -347,7 +347,7 @@ Open questions: None. D10 decides the reset; the record stays for
 Type: safety
 Reachability: explicit-config-only - publication requires a nonempty
 summarizer model chain; the default is empty (`model_chain: Vec::new()` at
-`crates/daemon/src/config.rs:123`, `f2442b2f`).
+`crates/daemon/src/config.rs:126`, `f2442b2f`).
 Status: active
 Exercised: yes -
 `selected_range_identity_drift_during_await_rejects_without_cooldown`,
@@ -428,7 +428,7 @@ previous entry by reference and never edits either source";
 `rust-mode-transform.test.ts:1432` "rejects mutated retained output
 ${mutationTime}"; `:1488` "keeps from the applied previous output and the
 submitted input, then acks its note deliveries";
-`crates/daemon/src/lib.rs:25487`
+`crates/daemon/src/lib.rs:25500`
 `native_previous_keeps_bind_the_applied_revision` (#879). Canonical owner:
 TE21 and `recipe-wire-switch.md`.
 Impact: High. A positional or revision error silently substitutes context.
@@ -512,8 +512,8 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - successful transform completion calls
-`finish_ready` (`TransformSnapshotCache`, `crates/daemon/src/lib.rs:1860`,
-`:1930`, `f2442b2f`).
+`finish_ready` (`TransformSnapshotCache`, `crates/daemon/src/lib.rs:1861`,
+`:1931`, `f2442b2f`).
 Status: active
 Exercised: yes -
 `transform_snapshot_cache_is_generation_safe_and_lru_bounded`,
@@ -534,8 +534,8 @@ Confidence: high -
 [evidence](evidence/wp-e08-ready-snapshots-reject-stale-generations.md).
 Witnesses located at `f2442b2f`. This is a generation fence, not a
 serialization test; WP-P04 owns execution order.
-Existing check: `crates/daemon/src/lib.rs:21135`
-`transform_snapshot_cache_is_generation_safe_and_lru_bounded`; `:21175`
+Existing check: `crates/daemon/src/lib.rs:21148`
+`transform_snapshot_cache_is_generation_safe_and_lru_bounded`; `:21188`
 `snapshot_lease_budget_survives_cache_churn_and_releases_exact_charge`;
 `:21230`
 `ready_snapshot_holds_no_native_payload_and_a_lease_pins_its_generation`
@@ -672,7 +672,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - retained native output is taken only at the
 current `revert_epoch` (`RetainedNativeOutput::into_previous`,
-`crates/daemon/src/lib.rs:2317`, `f2442b2f`) and the retained CK previous
+`crates/daemon/src/lib.rs:2318`, `f2442b2f`) and the retained CK previous
 output only at the epoch it was served under
 (`SerializedOutputCache::take_previous_output`,
 `crates/daemon/src/transform.rs:435`).
@@ -705,8 +705,8 @@ holding only the D13 previous CK output with LRU eviction, and
 `NativeOutputStore` (`lib.rs:2368`). The per-message memo and its lookup are
 gone; every pass renders its window afresh. The D10 reset leaves handler
 caches in place and relies on the epoch bump.
-Existing check: `crates/daemon/src/lib.rs:25333`
-`native_output_store_enforces_entry_cap_lru_and_revert_epoch`; `:25284`
+Existing check: `crates/daemon/src/lib.rs:25346`
+`native_output_store_enforces_entry_cap_lru_and_revert_epoch`; `:25297`
 `handler_native_cache_adopts_the_bumped_durable_revert_epoch`;
 `crates/memory-store/src/lib.rs:26148`
 `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch`;
@@ -752,7 +752,7 @@ whose configuration withdraws fold authority submits its whole array, and a
 consumer whose half-cap suffix is answered under native authority declines
 that pass and submits its whole array on each later null pass while its
 latest transformed response names native authority
-(`docs/host-wire-protocol.md:955`, `:982`).
+(`docs/host-wire-protocol.md:984`, `:1011`).
 Check: `always` - At capture and send, native membership is exactly
 `host[boundaryIndex..capturedLength)`, CK represents that same ordered suffix,
 and the first mid equals the declared mid; ids inside the window are unique;
@@ -763,7 +763,7 @@ supplied it is the whole array or the wire's newest half-cap suffix, whose
 head `windowStart` moves later past a tool result whose call is outside the
 suffix, or, when every newer slot is such a result, back to the message
 carrying the calls, which can carry the suffix past half the cap
-(`transform-session-client.ts:898-903`; `docs/host-wire-protocol.md:996`;
+(`transform-session-client.ts:898-903`; `docs/host-wire-protocol.md:1025`;
 `packages/pi-plugin/src/transform/pi-transform.test.ts:488`). The
 implementation's folding cold window is `host[:lead] + host[head:]`, the
 cold lead slots (`coldLead`, one for a leading Pi compaction summary)
@@ -796,7 +796,7 @@ Authority qualifier, verified at `07ea883b5` (#1060): the record said "null
 submits the whole host array" while the wire document and `coldHead` narrowed
 a null window above half the cap to its newest suffix; the record is
 corrected. The wire now states the authority-conditional rule
-(`docs/host-wire-protocol.md:955`, `:982`, `:996`); Pi supplies the sizing
+(`docs/host-wire-protocol.md:984`, `:1011`, `:1025`); Pi supplies the sizing
 hook only while the session's project lets Eidnara fold
 (`packages/pi-plugin/src/index.ts:571`, `:586`,
 `packages/pi-plugin/src/transform/pi-transform.ts:268-275`; #1069) and
@@ -819,7 +819,7 @@ exist. Pi sets `coldLead: 1` for a leading compaction summary
 (`packages/pi-plugin/src/transform/pi-transform.ts:280`), and `coldSource`
 serves `host[:lead]` then `host[head:]` (`transform-session-client.ts:906-913`),
 while the wire text says "its newest half-cap suffix"
-(`docs/host-wire-protocol.md:955`, `:982`). The guarantee states the wire
+(`docs/host-wire-protocol.md:984`, `:1011`). The guarantee states the wire
 rule; the lead-slot behavior is the open disagreement below. The
 knowledge-delivery records are in `docs/properties/fold-authority/` (KD-E03,
 KD-P06, KD-P08).
@@ -846,7 +846,7 @@ Open questions:
 - C7 states the trusted-producer assumption; the daemon does not prove host
   completeness.
 - The wire text names the folding null window as the newest half-cap
-  suffix (`docs/host-wire-protocol.md:955`, `:982`) while the code serves
+  suffix (`docs/host-wire-protocol.md:984`, `:1011`) while the code serves
   the cold lead slots ahead of that suffix
   (`transform-session-client.ts:906-913`), so a folding Pi cold import that
   starts with a compaction summary is not wire-conformant at `07ea883b5`.
@@ -855,7 +855,7 @@ Open questions:
   (needs human input).
 - The wire text says the folding suffix is headed by the same pinned
   message on every pass until the first anchor exists
-  (`docs/host-wire-protocol.md:955`, `:982`), while the client clears the pin
+  (`docs/host-wire-protocol.md:984`, `:1011`), while the client clears the pin
   when a response names native authority
   (`transform-session-client.ts:1673-1674`) and pins a fresh head on the
   first folding pass after that authority settles
@@ -1054,7 +1054,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - the withdrawal record runs on ordinary
 passes, but the competing publication requires a configured summarizer
-(`model_chain` defaults empty, `crates/daemon/src/config.rs:123`).
+(`model_chain` defaults empty, `crates/daemon/src/config.rs:126`).
 Status: active
 Exercised: yes -
 `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`
@@ -2015,7 +2015,7 @@ fold trigger and is inert under native authority. An oversized native pass
 declines through the resident reservation (`invalid_params` or `queue_full`),
 the invocation budget, or the 64 MiB reconstructed-output cap, which the
 daemon answers with `transform_output_too_large`
-(`crates/daemon/src/lib.rs:15681-15687`, `:15643-15645`) and the client
+(`crates/daemon/src/lib.rs:15694-15700`, `:15656-15658`) and the client
 enforces as `output_too_large`
 (`packages/opencode-plugin/src/hooks/context/edit-recipe.ts:429-434`).
 WP-P15 bounds work at a fixed window and gives no constant-cost claim for
