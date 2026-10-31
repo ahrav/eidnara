@@ -1779,9 +1779,10 @@ async fn a_deferred_request_keeps_its_pending_permit_until_its_work_stops() {
         .frames_until_corr(busy, BUDGET)
         .await
         .expect("busy terminal");
+    assert_eq!(frame.error_code(), "server_busy");
     assert_eq!(
-        frame.error_code(),
-        "server_busy",
+        frame.json()["message"],
+        "pending request capacity exhausted",
         "the deferred request still holds the only pending permit"
     );
 
@@ -1870,14 +1871,32 @@ async fn shutdown_joins_a_deferred_close(after_windows: bool) {
             .await
             .expect("probe terminal");
         assert_eq!(frame.error_code(), "unknown_channel");
+    }
+
+    let mut observer = if after_windows {
+        None
+    } else {
+        Some(host.client().await)
+    };
+    let shutdown = tokio::spawn(host.shutdown());
+    if let Some(observer) = observer.as_mut() {
+        // `route.open` answers `target_unavailable` once shutdown has begun draining; seeing
+        // that inside both 300 ms windows proves shutdown started before the close deferred.
+        loop {
+            match observer
+                .route_open(LINKED_MODULE_ID, ROOT, "opencode", "shutdown-observer")
+                .await
+            {
+                Err(code) if code == "target_unavailable" => break,
+                _ => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
         assert!(
             goodbye_sent.elapsed() < Duration::from_millis(600),
-            "shutdown must start inside both 300 ms close windows; the probe took {:?}",
+            "shutdown must begin draining inside both 300 ms close windows; it began after {:?}",
             goodbye_sent.elapsed()
         );
     }
-
-    let shutdown = tokio::spawn(host.shutdown());
     assert_silent(&mut client, PAST_BOTH_CLOSE_WINDOWS, "shutdown").await;
     assert!(
         !shutdown.is_finished(),

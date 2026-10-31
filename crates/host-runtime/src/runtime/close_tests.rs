@@ -378,10 +378,21 @@ async fn deferred_work_past_its_limit_trips_the_fatal_latch() {
 }
 
 /// A dispatch task aborted inside `settle`, after it wins and before its terminal is queued,
-/// leaves the request to its route close: the close queues one `cancelled` terminal and the
-/// generation keeps serving.
+/// leaves the request to its route close: the close queues one `cancelled` terminal carrying a
+/// fresh terminal credit, and the generation keeps serving.
 #[tokio::test(start_paused = true)]
 async fn a_settle_aborted_before_queuing_is_settled_by_the_route_close() {
+    settle_aborted_before_queuing(false).await;
+}
+
+/// The retried terminal waits for a terminal credit under the post-abort deadline; with every
+/// credit held, the close retires the generation instead of queuing an uncredited terminal.
+#[tokio::test(start_paused = true)]
+async fn a_retried_terminal_without_a_credit_retires_the_generation() {
+    settle_aborted_before_queuing(true).await;
+}
+
+async fn settle_aborted_before_queuing(drain_credits: bool) {
     let CloseFixture {
         shared,
         generation,
@@ -396,7 +407,7 @@ async fn a_settle_aborted_before_queuing_is_settled_by_the_route_close() {
     // The request carries a real terminal credit, as an admitted request does.
     let credits = generation.terminal_credits.clone();
     let before = credits.available_permits();
-    settlement.reattach_credit(&generation);
+    settlement.reattach_credit(&generation).await.unwrap();
     assert_eq!(credits.available_permits(), before - 1);
     // Holding the whole terminal reserve parks the winner in its budget wait.
     let reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
@@ -419,9 +430,27 @@ async fn a_settle_aborted_before_queuing_is_settled_by_the_route_close() {
     .await;
     assert!(settlement.is_settled());
     drop(winner);
+    assert_eq!(
+        credits.available_permits(),
+        before,
+        "the aborted winner's credit returned"
+    );
+    let held = drain_credits.then(|| {
+        let all = u32::try_from(credits.available_permits()).unwrap();
+        credits.clone().try_acquire_many_owned(all).unwrap()
+    });
     drop(reserve);
     drop(physical_work);
     assert!(settle_route_work(&shared, route, decision).await);
+    if drain_credits {
+        assert!(generation.token.is_cancelled());
+        assert!(
+            queue.try_recv().is_err(),
+            "no uncredited terminal was queued"
+        );
+        drop(held);
+        return;
+    }
     assert!(!generation.token.is_cancelled());
     let terminal = queue.try_recv().unwrap();
     assert_eq!(
@@ -536,6 +565,9 @@ async fn post_abort_emission_shares_the_close_deadline() {
     let started = Instant::now();
     let close = tokio::spawn(async move { settle_route_work(&shared, route, decision).await });
     aborted.await.unwrap();
+    // Spending half of the post-abort window before the work stops separates a shared deadline
+    // (done at 200 ms) from a fresh emission budget (250 ms).
+    tokio::time::sleep(Duration::from_millis(50)).await;
     drop(physical_work);
     assert!(close.await.unwrap());
     assert!(

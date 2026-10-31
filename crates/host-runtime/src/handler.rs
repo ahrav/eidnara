@@ -607,6 +607,9 @@ impl RequestCtx {
     /// The calling runtime submits work immediately, without polling the returned future.
     /// Calling this method outside a Tokio runtime panics.
     /// Started work must terminate on its own or observe [`cancel_signal`] at safe points.
+    /// Work that outlives its route's close budget keeps that route closing with its channel
+    /// reserved; the route's `cancelled` terminals and route-gone follow the end of the work, and
+    /// the host stops with `HostError::LifecycleFatal` once such held work exceeds a fixed bound.
     /// The handler task is the intended caller.
     /// A surviving task can submit work after request cancellation has drained its ledger.
     /// Route close and host shutdown still join that late work.

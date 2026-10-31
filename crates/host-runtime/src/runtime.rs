@@ -35,6 +35,8 @@ pub enum HostError {
     /// published.
     InitFailed(String),
     /// A bind, route-gone, or health callback that panics or misses its deadline causes `HostError::LifecycleFatal`; shutdown is not graceful.
+    /// Forced-shutdown work that does not stop, and deferred route closes holding more than
+    /// `MAX_DEFERRED_WORK` route-tracker entries, cause it too.
     LifecycleFatal(String),
     /// If host tasks remain unreaped after aborts at the shutdown deadline, shutdown is not graceful.
     ShutdownDeadlineExpired,
@@ -120,7 +122,9 @@ pub struct HostShared<H> {
     /// the deferred closes for work that outlived the close budget; graceful shutdown joins them
     /// before it fences read loops and sends connection `Goodbye`.
     pub deferred_closes: TaskTracker,
-    /// Route-tracker entries that deferred route closes still wait on.
+    /// Sum of the route-tracker entry counts each deferred close observed when it deferred. A
+    /// close subtracts its share when its whole tracker drains, so the sum can exceed the live
+    /// entry count while some of a deferred route's entries have already finished.
     pub deferred_work: std::sync::atomic::AtomicUsize,
     abort_handles: Mutex<AbortRegistry>,
     /// The shutdown-callback latch prevents abandon cleanup from spawning a second callback while the graceful callback still runs.

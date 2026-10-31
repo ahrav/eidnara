@@ -59,15 +59,26 @@ impl Settlement {
     }
 
     /// A settle aborted after it took the credit returned that credit to the generation; the
-    /// retried terminal takes a fresh one when the pool has one.
-    pub(crate) fn reattach_credit(&self, generation: &GenerationCore) {
-        let mut slot = self
+    /// retried terminal waits for a fresh one, and a closed credit pool retires the generation.
+    pub(crate) async fn reattach_credit(&self, generation: &GenerationCore) -> Result<(), ()> {
+        let missing = self
             .credit
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if slot.is_none() {
-            *slot = generation.terminal_credits.clone().try_acquire_owned().ok();
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none();
+        if missing {
+            let credit = generation
+                .terminal_credits
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| ())?;
+            *self
+                .credit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(credit);
         }
+        Ok(())
     }
 
     fn take_credit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
@@ -1518,8 +1529,12 @@ async fn settle_stopped_route_work<H: HostHandler>(
             if settlement.queued.load(Ordering::SeqCst) {
                 continue;
             }
-            if settlement.won.swap(true, Ordering::SeqCst) {
-                settlement.reattach_credit(generation);
+            if settlement.won.swap(true, Ordering::SeqCst)
+                && settlement.reattach_credit(generation).await.is_err()
+            {
+                generation.token.cancel();
+                settlement.queued.store(true, Ordering::SeqCst);
+                continue;
             }
             emit_won_terminal(
                 settlement,
@@ -1580,6 +1595,9 @@ fn spawn_deferred_route_close<H: HostHandler>(
             stopped_after.as_millis()
         ));
     });
+    // `spawn_lifecycle` keeps forced shutdown's `abort_all` from dropping this owner. During
+    // forced shutdown `force_drain` may retake the same Closing route; `mark_gone_started`
+    // gives route-gone to one owner, and the other leaves finalization to it.
     shared.spawn_lifecycle(task);
     if deferred_work > MAX_DEFERRED_WORK {
         shared.fatal.trip(
@@ -1593,26 +1611,32 @@ fn spawn_deferred_route_close<H: HostHandler>(
     ));
 }
 
-/// `MAX_DEFERRED_WORK` limits the total route-tracker entries (tasks and `run_blocking` jobs)
-/// held by deferred closes, below Tokio's default blocking-pool limit of 512 threads.
+/// `MAX_DEFERRED_WORK` limits the total route-tracker entries held by deferred closes. A running
+/// `run_blocking` job holds two entries (its closure's completion token and its join task's
+/// clone) and an unfinished dispatch task holds one, so about 32 stalled blocking jobs fit, well
+/// below Tokio's default blocking-pool limit of 512 threads.
 pub(crate) const MAX_DEFERRED_WORK: usize = 64;
 
-/// Stderr logging is best-effort: one detached thread writes at a time, and a line that arrives
-/// while it is busy is dropped.
+/// Stderr logging is best-effort: one long-lived writer thread drains a bounded queue, and a
+/// line that finds the queue full behind a stalled stderr is dropped. The caller never blocks.
 fn stderr_line(line: String) {
-    static WRITING: AtomicBool = AtomicBool::new(false);
-    if WRITING.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let spawned = std::thread::Builder::new()
-        .name("eidnara-host-stderr".to_owned())
-        .spawn(move || {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "{line}");
-            WRITING.store(false, Ordering::Release);
-        });
-    if spawned.is_err() {
-        WRITING.store(false, Ordering::Release);
+    use std::sync::{OnceLock, mpsc};
+    static QUEUE: OnceLock<Option<mpsc::SyncSender<String>>> = OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<String>(64);
+        std::thread::Builder::new()
+            .name("eidnara-host-stderr".to_owned())
+            .spawn(move || {
+                use std::io::Write;
+                for line in rx {
+                    let _ = writeln!(std::io::stderr().lock(), "{line}");
+                }
+            })
+            .ok()
+            .map(|_| tx)
+    });
+    if let Some(queue) = queue {
+        let _ = queue.try_send(line);
     }
 }
 
