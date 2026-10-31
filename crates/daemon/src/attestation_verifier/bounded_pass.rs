@@ -60,6 +60,20 @@
 //! `unavailable_skipped` otherwise. A terminal reason is kept for the claim's path at its oid for
 //! the process lifetime. All state is process-local: a restart rescans from the start, and the
 //! skips and the write set's receipt replay keep the rescan idempotent.
+//!
+//! After its decisions resolve or reach their bound, each project runs the applicability step over
+//! the attestations the verifier authored; a refusal that stops the decisions step stops the
+//! project. The step pages them from its own cursor through the commit its cycle started at, at
+//! most [`MAX_VERDICTS`] pages of [`PAGE_ROWS`] rows, polls [`Poll::Decision`] before each page,
+//! and evaluates at most [`MAX_VERDICTS`] live `Active` attestations through
+//! [`applicability::evaluate`]. An evaluation that writes nothing counts `applicability_current`
+//! or `applicability_unavailable`, and one whose `MarkStale` commits counts `applicability_stale`;
+//! a refused mark counts under a `commit_refused_` reason or `commit_conflict`; a replayed or
+//! already `Stale` mark, a read refused at the deadline, and a mark the commit poll cuts short
+//! count in no field; a row whose standing read fails for a reason one row can cause counts
+//! `applicability_unavailable` with no evaluation. A page shorter than [`PAGE_ROWS`] ends the
+//! cycle and returns the cursor to the start, so the next pass scans the attestations again from
+//! the first.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -73,6 +87,7 @@ use kernel::{
     GitCondition, KernelError, KernelStore,
 };
 
+use super::applicability::{self, Applicability};
 use super::attest::{Identity, Outcome, attest};
 use super::classify::{BoundRoot, Class, ClassifyError, VERIFIER_SOURCE_KIND, classify};
 use super::{Deadline, Evaluation, MAX_BLOB_BYTES, Reason, Stage, Verdict, verify};
@@ -94,7 +109,7 @@ pub const IDLE_INTERVAL: Duration = Duration::from_secs(30);
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Every counter of the `metrics.verifier` block. All are process-local and content-free.
-pub const COUNTERS: [&str; 37] = [
+pub const COUNTERS: [&str; 40] = [
     "considered",
     "match",
     "mismatch",
@@ -129,6 +144,9 @@ pub const COUNTERS: [&str; 37] = [
     "witness_degraded",
     "witness_degraded_skipped",
     "unavailable_skipped",
+    "applicability_stale",
+    "applicability_current",
+    "applicability_unavailable",
     "bytes_read",
     "passes",
     "last_pass_ms",
@@ -191,13 +209,14 @@ impl Counters {
 /// Where the pass polls its deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Poll {
-    /// Before a project, before each decision, and after a Kernel read or commit refusal.
+    /// Before a project, before each decision or applicability page, and after a Kernel read or
+    /// commit refusal.
     Decision,
     /// Before a root's repository identity derivation.
     Derive,
     /// Before the object read [`verify`] names.
     Read(Stage),
-    /// Before a write set's commit.
+    /// Before a write set's commit or an applicability `MarkStale`'s commit.
     Commit,
 }
 
@@ -244,10 +263,12 @@ pub struct Project {
 /// What one pass did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PassReport {
-    /// Whether some decision was resolved or written.
+    /// Whether some decision was resolved or written, or an applicability `MarkStale` committed.
     pub progressed: bool,
     /// Whether the pass stopped at its deadline, a Kernel read or commit was refused, a repository
-    /// identity derivation failed, or a decision ended an attempt without a terminal outcome.
+    /// identity derivation failed, or a decision ended an attempt without a terminal outcome. An
+    /// applicability read refused for a reason one row can cause leaves it unset; a refused,
+    /// conflicting, or invalid applicability mark sets it.
     pub failed: bool,
 }
 
@@ -264,6 +285,11 @@ struct ProjectState {
     /// The page start just past a commit sequence at or before which every live non-`verifier`
     /// decision of the scope is resolved; a pass pages from the later of it and the cursor.
     floor: Option<(i64, String)>,
+    /// The last attestation the applicability step passed, by `(created_commit_seq, object_id)`.
+    applicability: Option<(i64, String)>,
+    /// The commit the applicability cycle pages through, fixed when the cycle starts, so a cycle
+    /// reaches its end while attestations keep arriving.
+    applicability_through: Option<i64>,
 }
 
 /// The pass's process-local state.
@@ -281,6 +307,8 @@ pub struct Verifier {
 enum Step {
     Resolved,
     Unresolved,
+    /// The decisions step reached its verdict or byte bound.
+    Capped,
     StopProject,
     StopPass,
 }
@@ -493,13 +521,21 @@ impl ProjectRun<'_, '_> {
                 ..ProjectState::default()
             };
         }
+        match self.decisions(target) {
+            Step::Capped | Step::Resolved => self.applicability(target),
+            step => step,
+        }
+    }
+
+    fn decisions(&mut self, target: CommitReadTarget) -> Step {
+        let budget = self.clock.budget();
         let mut after = self.state.cursor.clone().max(self.state.floor.clone());
         // `prefix` holds while every decision before `after` is resolved.
         let mut prefix = true;
         loop {
             let page = match self.kernel.scope_decisions_after_within_budget(
                 self.scope_id,
-                VERIFIER_SOURCE_KIND,
+                kernel::SourceKindFilter::Except(VERIFIER_SOURCE_KIND),
                 target.through_commit,
                 after.as_ref().map(|(seq, id)| (*seq, id.as_str())),
                 PAGE_ROWS,
@@ -519,13 +555,7 @@ impl ProjectRun<'_, '_> {
                 Ok(standings) => standings,
                 // A refusal one row can cause leaves each decision to its own classification read,
                 // whose refusal spends an attempt, so one bad row cannot hold the cursor.
-                Err(
-                    ClaimFactsError::NotADecision
-                    | ClaimFactsError::MalformedRequiredField
-                    | ClaimFactsError::Kernel(
-                        KernelError::InvalidInput | KernelError::CorruptCanonicalRow,
-                    ),
-                ) => ids.iter().map(|_| None).collect(),
+                Err(error) if row_caused(&error) => ids.iter().map(|_| None).collect(),
                 Err(error) => {
                     return self.refused(error == ClaimFactsError::Kernel(KernelError::Deadline));
                 }
@@ -570,7 +600,7 @@ impl ProjectRun<'_, '_> {
                 }
                 if self.verdicts >= MAX_VERDICTS || self.bytes_read >= MAX_VERDICTS * MAX_BLOB_BYTES
                 {
-                    return Step::StopProject;
+                    return Step::Capped;
                 }
             }
             if last {
@@ -748,20 +778,189 @@ impl ProjectRun<'_, '_> {
             // An `Io` refusal can follow a durable commit; the next attempt finds the attestation
             // in the registry or the decision `Stale` and skips it.
             Outcome::Refused(error) => {
-                self.counters.add(
-                    match error {
-                        KernelError::Busy => "commit_refused_busy",
-                        KernelError::Deadline => "commit_refused_deadline",
-                        KernelError::Io => "commit_refused_io",
-                        _ => "commit_refused_other",
-                    },
-                    1,
-                );
+                self.counters.add(refused_counter(error), 1);
                 return self.transient(key, error == KernelError::Deadline);
             }
         };
         self.counters.add(counter, 1);
         Step::Resolved
+    }
+
+    /// Pages the project's live verifier decisions from the applicability cursor, at most N pages,
+    /// and evaluates at most N `Active` attestations. A refused page read stops the project, and a
+    /// refusal for one attestation resolves it, so one failing row holds back no later one. A page
+    /// shorter than [`PAGE_ROWS`] ends the cycle: the cursor returns to the start and the next
+    /// cycle pages through the commit its first pass captures.
+    fn applicability(&mut self, target: CommitReadTarget) -> Step {
+        let budget = self.clock.budget();
+        let through = *self
+            .state
+            .applicability_through
+            .get_or_insert(target.through_commit);
+        let mut evaluated = 0;
+        for _ in 0..MAX_VERDICTS {
+            if self.clock.passed(Poll::Decision) {
+                return self.refused(true);
+            }
+            let after = self.state.applicability.clone();
+            let page = match self.kernel.scope_decisions_after_within_budget(
+                self.scope_id,
+                kernel::SourceKindFilter::Only(VERIFIER_SOURCE_KIND),
+                through,
+                after.as_ref().map(|(seq, id)| (*seq, id.as_str())),
+                PAGE_ROWS,
+                budget,
+            ) {
+                Ok(page) => page,
+                Err(error) => return self.refused(error == KernelError::Deadline),
+            };
+            let end = page.len() < PAGE_ROWS.get();
+            let ids: Vec<String> = page.iter().map(|(_, id)| id.clone()).collect();
+            // A refusal one row can cause reads each attestation's standing alone, as the step
+            // reaches it, so the refusing row resolves as unavailable and the rows after it are
+            // evaluated.
+            let mut batched = match self
+                .kernel
+                .claim_standing_at_within_budget(&ids, target, PAGE_ROWS, budget)
+            {
+                Ok(standings) => Some(standings.into_iter()),
+                Err(error) if row_caused(&error) => None,
+                Err(error) => {
+                    return self.refused(error == ClaimFactsError::Kernel(KernelError::Deadline));
+                }
+            };
+            for (seq, object_id) in page {
+                let standing = match batched.as_mut() {
+                    Some(standings) => Ok(standings.next().flatten()),
+                    None => self
+                        .kernel
+                        .claim_standing_at_within_budget(
+                            std::slice::from_ref(&object_id),
+                            target,
+                            PAGE_ROWS,
+                            budget,
+                        )
+                        .map(|mut standing| standing.pop().flatten()),
+                };
+                // An attestation the cycle's page names can retire before `target`; its standing
+                // then carries the retirement and the step passes over it.
+                let active = match standing {
+                    Ok(standing) => standing.is_some_and(|standing| {
+                        standing.object.invalidated_commit_seq.is_none()
+                            && standing.object.superseded_by.is_none()
+                            && standing.own_admission.is_some_and(|admission| {
+                                admission.disposition == Disposition::Active
+                            })
+                    }),
+                    // The row's refusal recurs on every pass, so it resolves the attestation
+                    // with the pass healthy.
+                    Err(error) if row_caused(&error) => {
+                        self.count("applicability_unavailable", false);
+                        false
+                    }
+                    Err(error) => {
+                        return self
+                            .refused(error == ClaimFactsError::Kernel(KernelError::Deadline));
+                    }
+                };
+                if active {
+                    if evaluated == MAX_VERDICTS {
+                        return Step::StopProject;
+                    }
+                    evaluated += 1;
+                    match self.applicable(&object_id, target) {
+                        Step::Resolved => {}
+                        stop => return stop,
+                    }
+                }
+                self.state.applicability = Some((seq, object_id));
+            }
+            if end {
+                self.state.applicability = None;
+                self.state.applicability_through = None;
+                return Step::Resolved;
+            }
+        }
+        Step::StopProject
+    }
+
+    /// Counts `counter` for one resolved attestation, marking the pass failed when `failed`.
+    fn count(&mut self, counter: &str, failed: bool) {
+        self.counters.add(counter, 1);
+        self.report.failed |= failed;
+    }
+
+    fn applicable(&mut self, object_id: &str, target: CommitReadTarget) -> Step {
+        let budget = self.clock.budget();
+        let evaluation = applicability::evaluate(self.kernel, object_id, target, budget);
+        // The evaluation reads at a bare commit sequence; a restore since the standing read
+        // leaves its result naming another history. The next pass captures the new incarnation
+        // and resets the project's state.
+        if self.kernel.require_incarnation(target.incarnation).is_err() {
+            return self.refused(false);
+        }
+        let (counter, failed) = match evaluation {
+            Ok(Applicability::Current) => ("applicability_current", false),
+            Ok(Applicability::Unavailable) => ("applicability_unavailable", false),
+            Err(KernelError::Deadline) => return self.refused(true),
+            // A refusal one row can cause recurs on every pass, so it leaves the pass healthy;
+            // a transient refusal fails the pass so the task retries soon.
+            Err(error) => ("applicability_unavailable", !kernel_row_caused(error)),
+            Ok(Applicability::Republished(republished)) => {
+                if self.clock.passed(Poll::Commit) {
+                    return self.refused(true);
+                }
+                match applicability::mark_republished(self.kernel, target, &republished, budget) {
+                    Outcome::StaleCommitted(_) => {
+                        self.report.progressed = true;
+                        ("applicability_stale", false)
+                    }
+                    Outcome::Replayed(_) | Outcome::Skipped(_) => return Step::Resolved,
+                    Outcome::Changed => ("commit_refused_changed", true),
+                    Outcome::Conflict => ("commit_conflict", true),
+                    // `mark_republished` returns `InvalidWriteSet` when `record_stale` leaves
+                    // the mark short of `Stale`; `Committed` and `WitnessDegraded` belong to
+                    // `attest` alone.
+                    Outcome::Committed(_) | Outcome::InvalidWriteSet | Outcome::WitnessDegraded => {
+                        ("commit_refused_invalid_write_set", true)
+                    }
+                    Outcome::Refused(KernelError::Deadline) => {
+                        self.counters.add("commit_refused_deadline", 1);
+                        return self.refused(true);
+                    }
+                    Outcome::Refused(error) => (refused_counter(error), true),
+                }
+            }
+        };
+        self.count(counter, failed);
+        Step::Resolved
+    }
+}
+
+/// Whether the batched standing read refused for a reason one row can cause: an invalid id, a
+/// corrupt row, or a malformed field.
+fn row_caused(error: &ClaimFactsError) -> bool {
+    match error {
+        ClaimFactsError::NotADecision | ClaimFactsError::MalformedRequiredField => true,
+        ClaimFactsError::Kernel(error) => kernel_row_caused(*error),
+        _ => false,
+    }
+}
+
+/// Whether a Kernel read refused for a reason one row can cause: an invalid id or a corrupt row.
+fn kernel_row_caused(error: KernelError) -> bool {
+    matches!(
+        error,
+        KernelError::InvalidInput | KernelError::CorruptCanonicalRow
+    )
+}
+
+fn refused_counter(error: KernelError) -> &'static str {
+    match error {
+        KernelError::Busy => "commit_refused_busy",
+        KernelError::Deadline => "commit_refused_deadline",
+        KernelError::Io => "commit_refused_io",
+        _ => "commit_refused_other",
     }
 }
 

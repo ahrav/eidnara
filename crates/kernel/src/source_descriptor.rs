@@ -952,12 +952,22 @@ impl Envelope<'_> {
         class: OccurrenceClass,
         lineage_id: &str,
     ) -> Result<Option<LiveDescriptor>, KernelError> {
+        Self::lineage_descriptor(self.tx, class, self.commit_seq, lineage_id)
+    }
+
+    /// [`Self::live_source_descriptor_of_lineage`] read in `tx` at `requested`.
+    fn lineage_descriptor(
+        tx: &rusqlite::Transaction<'_>,
+        class: OccurrenceClass,
+        requested: i64,
+        lineage_id: &str,
+    ) -> Result<Option<LiveDescriptor>, KernelError> {
         let low = descriptor_object_id(lineage_id, "");
         let high = super::envelope::prefix_upper_bound(&low);
         let mut raw = descriptor_rows(
-            self.tx,
+            tx,
             class,
-            self.commit_seq,
+            requested,
             "o.object_id>=?3 AND o.object_id<?4",
             &[&low, &high],
             2,
@@ -1298,6 +1308,26 @@ pub enum CitingDescriptor {
     Retired,
     /// Zero descriptors of the class cited the evidence by the sequence.
     Uncited,
+}
+
+impl KernelStore {
+    /// The live descriptor of `class` in lineage `lineage_id` at `requested`, or `None` when the lineage has no live revision there; the read [`Envelope::live_source_descriptor_of_lineage`] makes in an envelope's view. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and the errors of [`Envelope::live_source_descriptor_of_lineage`].
+    pub fn live_source_descriptor_of_lineage_within_budget(
+        &self,
+        class: OccurrenceClass,
+        lineage_id: &str,
+        requested: i64,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Option<LiveDescriptor>, KernelError> {
+        self.read_snapshot_within_budget(requested, budget, |tx, _| {
+            Envelope::lineage_descriptor(tx, class, requested, lineage_id)
+        })
+        .map(|(_, row)| row)
+    }
 }
 
 #[cfg(test)]

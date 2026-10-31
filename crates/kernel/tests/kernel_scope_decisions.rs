@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 
 use claim_fixture::{DOMAIN, Fixture, decision, intent};
 use kernel::applicability::EvalBudget;
-use kernel::{KernelError, ScopeSpec, Sensitivity};
+use kernel::{KernelError, ScopeSpec, Sensitivity, SourceKindFilter};
 
 const SCOPE: &str = "project:a";
 
@@ -48,7 +48,7 @@ fn page(
         .store
         .scope_decisions_after_within_budget(
             SCOPE,
-            "verifier",
+            SourceKindFilter::Except("verifier"),
             requested,
             after,
             NonZeroUsize::new(max_rows).unwrap(),
@@ -118,7 +118,7 @@ fn the_page_walks_a_scopes_live_decisions_in_commit_order_after_the_cursor() {
     let refused = |requested, budget: &EvalBudget| {
         fixture.store.scope_decisions_after_within_budget(
             SCOPE,
-            "verifier",
+            SourceKindFilter::Except("verifier"),
             requested,
             None,
             NonZeroUsize::MIN,
@@ -144,4 +144,40 @@ fn the_page_walks_a_scopes_live_decisions_in_commit_order_after_the_cursor() {
         fixture.store.controlled_acquisitions_for_test(),
         acquisitions + 1
     );
+}
+
+#[test]
+fn the_source_page_walks_only_the_scopes_decisions_of_one_source_kind() {
+    let fixture = Fixture::open();
+    fixture
+        .store
+        .commit(intent("scopes"), |envelope| {
+            envelope.insert_scope(scope(SCOPE))?;
+            envelope.insert_scope(scope("project:b"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let model = commit(&fixture, "model", &[1], SCOPE, "assistant");
+    let first = commit(&fixture, "first", &[8, 3], SCOPE, "verifier");
+    commit(&fixture, "other-scope", &[4], "project:b", "verifier");
+    let last = commit(&fixture, "last", &[2], SCOPE, "verifier");
+    let tip = fixture.tip();
+    let source_page = |after: Option<(i64, &str)>, max_rows: usize| {
+        fixture
+            .store
+            .scope_decisions_after_within_budget(
+                SCOPE,
+                SourceKindFilter::Only("verifier"),
+                tip,
+                after,
+                NonZeroUsize::new(max_rows).unwrap(),
+                &EvalBudget::unbounded(),
+            )
+            .unwrap()
+    };
+    let all = vec![(first, object(3)), (first, object(8)), (last, object(2))];
+    assert_eq!(source_page(None, 32), all);
+    assert_eq!(source_page(None, 1), all[..1]);
+    assert_eq!(source_page(Some((first, &object(8))), 32), all[2..]);
+    assert_eq!(page(&fixture, tip, None, 32), vec![(model, object(1))]);
 }

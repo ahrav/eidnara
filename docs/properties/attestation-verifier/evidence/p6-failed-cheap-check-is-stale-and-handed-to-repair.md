@@ -28,3 +28,10 @@ A candidate whose cheap check fails against the checkout.
 - Findings: Each cited line is the first line of the named test, function, or constant, or the named line inside it.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
+
+### Q: Does attestation staleness use this path?
+
+- Sources examined: OQ6-4 as resolved in [#1174](https://github.com/ahrav/eidnara/issues/1174); `crates/daemon/src/attestation_verifier/applicability.rs`.
+- Findings: The owner chose the push model. The verifier's applicability step compares the witnessed digest with the lineage's live descriptor and writes `MarkStale` itself (`p6-new-attestation-stale-on-byte-change`); it builds no `ApplicabilityCandidate` and calls no cheap check, so this record's reachability stays test-only. A digest check kind in the engine is a handoff to #657.
+- Missing evidence: none.
+- Conclusion: resolved with answer.

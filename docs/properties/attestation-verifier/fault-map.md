@@ -4,22 +4,23 @@ Fault classes come from the specification's fault map
 ([#1169](https://github.com/ahrav/eidnara/issues/1169), Fault and state
 coverage). Availability names what can construct the fault at the #1170
 branch, updated at the #1171 branch for F1, F3, F14, and F15, and at the
-#1172 branch for F1, F2, F3, F10, F11, F14, and F15.
+#1172 branch for F1, F2, F3, F10, F11, F14, and F15, and at the #1174
+branch for F2 and F10.
 
 ## Fault classes
 
 | Id | Fault | Availability |
 | --- | --- | --- |
 | F1 | Trigger absent, foreign, wrong kind, invalidated, at another revision, or with retired backing evidence | constructible: Kernel admission fixtures; for the classifier, a cited evidence row invalidated by `delete_artifact` classifies `evidence_retired`; for the write set, a SQLite trigger on the test store rewrites the witness's kind at insert, and another attestation's witness is named as a trigger |
-| F2 | Model decision superseded, retired, or re-disposed between selection and commit | constructible: Kernel slice fixtures; the write-set fixture supersedes, retires, quarantines, and marks stale a model decision after its classification |
+| F2 | Model decision superseded, retired, or re-disposed between selection and commit | constructible: Kernel slice fixtures; the write-set fixture supersedes, retires, quarantines, and marks stale a model decision after its classification; the pass fixture retires an attestation from the commit poll between the applicability read and the stale mark (#1174) |
 | F3 | Evidence or anchor invalidated in that window; `delete_artifact` bypassing the citation guard | constructible: `retire_evidence` and `delete_artifact` in Kernel tests; at the classification step, the classifier fixture store invalidates cited evidence (`delete_artifact`), a cited descriptor (`retire_observation`), and an anchor (`anchors.invalidated_commit_seq` set by SQL) after the requested sequence, which leaves the classification at that sequence unchanged and changes it at the tip, and the AC16 table invalidates evidence and a descriptor before it; the Kernel anchor-read test finds an anchor invalidated by SQL live before that sequence and absent from it on; the write-set fixture invalidates an anchor, retires a descriptor, and deletes the compared evidence row (`delete_artifact`) after classification, each `changed` |
 | F4 | Header over budget; header under budget with an over-budget delta base; hash mismatch on decode | constructible: large blobs, `write_delta_pack` in `crates/daemon/tests/support/git_repo.rs`, and a valid object stored under another id |
 | F5 | Partial clone or missing object; corrupt commit, tree, or blob | constructible: a deleted loose object stands in for a missing promisor object; a valid object stored under another id, an undecodable object written with `git hash-object --literally`, a loose object whose bytes are not zlib data, a commit or tree with a valid prefix and a malformed remainder, or `write_self_delta_pack`'s self-referencing ref-delta, for corruption |
 | F6 | Path absent; gitlink, symlink, or tree at the path; path beneath a gitlink | constructible: `git mktree --missing` in a bare fixture |
-| F7 | Deadline before the pass, between decisions, and during a read; budget cancellation | constructible for one claim: a cancelled or expired `EvalBudget`, and a stage-aware `Deadline` double; for the pass, a recording `PassClock` double that passes before decision k + 1 or before a blob read (#1173) |
+| F7 | Deadline before the pass, between decisions, and during a read; budget cancellation | constructible for one claim: a cancelled or expired `EvalBudget`, and a stage-aware `Deadline` double; for the pass, a recording `PassClock` double that passes before decision k + 1 or before a blob read (#1173), or at the applicability page poll or stale-mark commit poll (#1174) |
 | F8 | Worktree edit, HEAD move, repack between two verdicts; the repack clause excludes allocation-limit refusals of the commit, a tree, or the blob, whose verdict depends on pack layout | constructible: a linked worktree of the bare fixture, `git update-ref`, `git repack -a -d` |
 | F9 | `text eol`, `ident`, encoding, or clean filter attributes at the oid | partial: the LF and CRLF forms are constructible; `ident`, encoding, and clean filters stay false mismatches by the OQ6-8 decision |
-| F10 | Operation key replayed with the same and with a different verdict | constructible: the write-set fixture repeats a call, changes the blob id under the same key, and calls the opposite verdict for the same decision and oid |
+| F10 | Operation key replayed with the same and with a different verdict | constructible: the write-set fixture repeats a call, changes the blob id under the same key, and calls the opposite verdict for the same decision and oid; the applicability fixture repeats a stale mark under its key (#1174) |
 | F11 | Fault-injected rollback after the admission; crash after commit then fresh open | partial: a SQLite trigger on the test store aborts the citation event, the last write; the crash half is a fresh open after a clean close, which shows durability across an open and not across process termination, since a live store holds its data home's writer lock and a second open of an abandoned store fails |
 | F12 | Flag absent, reload true to false, project-tier flag | constructible: a switchable flag reader drives the pass and the task; the shared parity fixture drives the Rust tier merge and both plugin loaders (#1173) |
 | F13 | More than N candidates; a starving two-project pattern; a permanently transient head decision | constructible: bare repositories as project roots with N + 2 verifiable documents, 3N absent paths in one project, a head decision citing an unbound repository, and a SQLite trigger that degrades one decision's witness every pass (#1173) |
@@ -68,7 +69,7 @@ branch, updated at the #1171 branch for F1, F3, F14, and F15, and at the
 | `p6-new-pass-bounds-and-accounting` | F7, F10, F11, F13 |
 | `p6-new-cursor-never-skips-unresolved` | F7, F13 |
 | `p6-new-pass-progress-under-transient-unavailable` | F13 |
-| `p6-new-attestation-stale-on-byte-change` | a descendant commit changing the cited bytes |
+| `p6-new-attestation-stale-on-byte-change` | a second descriptor revision of the cited document with other bytes; F2 on the attestation; F7 at the stale mark's commit poll and the page poll; F10; F13 |
 | `p6-new-verdict-deterministic` | F8, F9 |
 | `p6-new-blob-read-bounded-at-oid` | F4, F5, F6, F7 |
 
@@ -122,4 +123,7 @@ never the violation.
 4. Source-capture tests for S5, which need the daemon test host.
 5. The bounded pass (#1173): a fixture store, bare repositories as project
    roots, a recording `PassClock` double, and a switchable flag reader; the
-   counters block and the clock's poll log are the oracle.
+   counters block and the clock's poll log are the oracle. The applicability
+   step (#1174) runs in the same fixture, with a second descriptor revision
+   published through the Kernel; the admission rows and receipts are the
+   oracle.
