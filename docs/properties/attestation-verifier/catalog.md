@@ -745,7 +745,7 @@ Check: `always` - every non-`verifier` decision of the scope live at the pass's 
 Fault/timing angle: a deadline between decisions or during a read; a restart between passes
 Required faults and enabling state: F7, F13, a restart
 Confidence: high - [evidence](evidence/p6-new-cursor-never-skips-unresolved.md). Read `ProjectRun::run` (`crates/daemon/src/attestation_verifier/bounded_pass.rs:485`), which moves the cursor only over a resolved prefix (`:567`), `retry` (`:595`), the skips before any claim verification read (`:553`, `:632`, the latter only for a registry row under the `verifier` source kind), the terminal set keyed by the decision, the claim's path, and its oid (`:718`), and the page read `scope_decisions_after_within_budget` (`crates/kernel/src/slice/read.rs:753`)
-Existing check: `crates/daemon/tests/attestation_verifier_bounded_pass.rs:542`, `:734`, `:774`, `:990`, `:1353`, `:1390`, `:1602`, `:1705`, `:1814`, `:1924`, `:2026`, `:2122`; `crates/kernel/tests/kernel_scope_decisions.rs:65` (unaudited)
+Existing check: `crates/daemon/tests/attestation_verifier_bounded_pass.rs:542`, `:734`, `:774`, `:990`, `:1353`, `:1390`, `:1602`, `:1705`, `:1814`, `:1924`, `:2026`, `:2122`; `crates/kernel/tests/kernel_scope_decisions.rs:65`; `crates/kernel/src/slice/read.rs:827` (unaudited)
 Impact: falsifier: a `deadline` decision passed and never revisited, or a second `MarkStale`
 Open questions:
 - What are N and K? - resolved with answer: N = 8 and K = 3 ([#1173](https://github.com/ahrav/eidnara/issues/1173), OQ6-10).

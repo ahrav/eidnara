@@ -257,6 +257,7 @@ every row pointing into a file #1173 changed at the #1173 branch.
 | `the_pass_reader_reads_the_user_tier_alone` | `crates/daemon/src/config.rs:4001` | flag off (the reader resolves the user tier and leaves a project root's tier file unread) | unaudited |
 | `the_page_walks_a_scopes_live_decisions_in_commit_order_after_the_cursor` | `crates/kernel/tests/kernel_scope_decisions.rs:65` | cursor (page order, including a cursor whose object id sorts after later decisions') | unaudited |
 | `the_scope_decision_page_seeks_the_commit_sequence_index` | `crates/kernel/src/slice/read.rs:795` | page plan only: the read seeks the commit-sequence index and sorts within one sequence | unaudited |
+| `an_interrupted_tip_query_is_a_deadline` | `crates/kernel/src/slice/read.rs:827` | cursor (a tip query the budget's progress handler interrupts is `Deadline`, the page read's documented refusal) | unaudited |
 | `every_fixture_row_matches_through_the_configuration_cache` | `crates/daemon/src/config.rs:3919` | flag off (project tier, Rust) | unaudited |
 | `verifier parity fixture` | `packages/opencode-plugin/src/config/index.test.ts:1101`, `packages/pi-plugin/src/config/index.test.ts:754` | flag off (project tier, both plugins) | unaudited |
 | `the_verifier_block_is_sanitized_field_by_field_and_documented` | `crates/host-runtime/src/control.rs:2176` | counters block on the wire | unaudited |
