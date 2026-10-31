@@ -35,6 +35,8 @@ pub enum HostError {
     /// published.
     InitFailed(String),
     /// A bind, route-gone, or health callback that panics or misses its deadline causes `HostError::LifecycleFatal`; shutdown is not graceful.
+    /// Forced-shutdown work that does not stop, and deferred route closes holding more than
+    /// `MAX_DEFERRED_WORK` route-tracker entries, cause it too.
     LifecycleFatal(String),
     /// If host tasks remain unreaped after aborts at the shutdown deadline, shutdown is not graceful.
     ShutdownDeadlineExpired,
@@ -116,6 +118,12 @@ pub struct HostShared<H> {
     pub handshake_permits: Arc<Semaphore>,
     pub connection_permits: Arc<Semaphore>,
     pub tracker: TaskTracker,
+    /// Route closes that run beside their connection's read loop (route `Goodbye` closes) and
+    /// the deferred closes for work that outlived the close budget; graceful shutdown joins them
+    /// before it fences read loops and sends connection `Goodbye`.
+    pub deferred_closes: TaskTracker,
+    /// Route trackers of deferred route closes; `deferred_work` sums their live entry counts.
+    pub deferred_trackers: Mutex<Vec<TaskTracker>>,
     abort_handles: Mutex<AbortRegistry>,
     /// The shutdown-callback latch prevents abandon cleanup from spawning a second callback while the graceful callback still runs.
     shutdown_callback_ran: AtomicBool,
@@ -199,6 +207,44 @@ impl<H: HostHandler> HostShared<H> {
                 })
             }
         }
+    }
+
+    /// Starts a route `Goodbye` close. The `deferred_closes` token is taken before the route
+    /// turns Closing, so a graceful shutdown that finds the route Closing also waits for this
+    /// close and any deferred close it hands off to.
+    pub(crate) fn begin_goodbye_close(
+        &self,
+        handle: crate::handler::RouteHandle,
+        gen_id: u64,
+    ) -> (
+        tokio_util::task::task_tracker::TaskTrackerToken,
+        crate::routing::CloseDecision,
+    ) {
+        let fence = self.deferred_closes.token();
+        (fence, self.registry.begin_close_owned(handle, gen_id))
+    }
+
+    /// Registers a deferred route's tracker and returns the live route-tracker entries across
+    /// every deferred close, pruning trackers that have drained.
+    pub(crate) fn defer_route_work(&self, tracker: &TaskTracker) -> usize {
+        let mut trackers = self
+            .deferred_trackers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        trackers.retain(|held| !held.is_empty());
+        trackers.push(tracker.clone());
+        trackers.iter().map(TaskTracker::len).sum()
+    }
+
+    /// Live route-tracker entries across every deferred close.
+    #[cfg(test)]
+    pub(crate) fn deferred_work(&self) -> usize {
+        self.deferred_trackers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(TaskTracker::len)
+            .sum()
     }
 
     fn abort_all(&self) {
@@ -844,6 +890,8 @@ pub async fn run_with_publish_hook<H: HostHandler>(
         handshake_permits: Arc::new(Semaphore::new(config.limits.max_handshakes)),
         connection_permits: Arc::new(Semaphore::new(config.limits.max_connections)),
         tracker: TaskTracker::new(),
+        deferred_closes: TaskTracker::new(),
+        deferred_trackers: Mutex::new(Vec::new()),
         abort_handles: Mutex::new(AbortRegistry::new()),
         shutdown_callback_ran: AtomicBool::new(false),
         shutdown: shutdown.clone(),
@@ -1088,6 +1136,11 @@ async fn shutdown_sequence<H: HostHandler>(
             });
         }
         while closes.join_next().await.is_some() {}
+        // Route `Goodbye` closes and the deferred closes they hand off to emit their routes'
+        // `cancelled` terminals once the work stops, before read loops are fenced and
+        // connection `Goodbye` is sent.
+        shared.deferred_closes.close();
+        shared.deferred_closes.wait().await;
 
         let generations: Vec<Arc<GenerationCore>> = shared
             .connections

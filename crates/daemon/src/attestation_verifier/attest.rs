@@ -72,10 +72,10 @@ impl Identity {
     fn of_hash(hash: String) -> Self {
         Self {
             source_id: hash.clone(),
-            object_id: format!("verattest:{hash}"),
-            decision_id: format!("verattestdec:{hash}"),
-            witness_observation_id: format!("verwitness:{hash}"),
-            witness_object_id: format!("verwitnessobj:{hash}"),
+            object_id: format!("{}{hash}", ID_PREFIXES[0]),
+            decision_id: format!("{}{hash}", ID_PREFIXES[1]),
+            witness_observation_id: format!("{}{hash}", ID_PREFIXES[2]),
+            witness_object_id: format!("{}{hash}", ID_PREFIXES[3]),
         }
     }
 
@@ -736,27 +736,35 @@ fn intent(input: &VerifierInput, write: Write, blob_oid: &str) -> CommitIntent {
     };
     let claim = &input.claim;
     let model = &input.decision.object_id;
-    let frozen = serde_json::json!({
-        "model_object_id": model,
-        "model_revision": input.decision.source_revision,
-        "commit_oid": claim.oid(),
-        "relative_path": claim.relative_path(),
-        "artifact_digest": hex(claim.digest()),
-        "byte_length": claim.byte_length(),
-        "evidence_id": input.evidence_id,
-        "blob_oid": blob_oid,
-        "verdict": verdict,
-    });
-    verifier_intent(format!("{write_name}:{model}:{}", claim.oid()), &frozen)
+    verifier_intent(
+        format!("{write_name}:{model}:{}", claim.oid()),
+        &[
+            model,
+            &input.decision.source_revision.to_string(),
+            claim.oid(),
+            claim.relative_path(),
+            &hex(claim.digest()),
+            &claim.byte_length().to_string(),
+            &input.evidence_id,
+            blob_oid,
+            verdict,
+        ],
+    )
 }
 
-/// The verifier's commit intent for `operation_key`, whose request digest is the SHA-256 of the
-/// frozen inputs `frozen`.
-pub(super) fn verifier_intent(operation_key: String, frozen: &serde_json::Value) -> CommitIntent {
+/// The verifier's commit intent for `operation_key`, whose request digest is the SHA-256 of a
+/// preimage led by [`REQUEST_DIGEST_FORMAT`] and followed by each of `parts` as its big-endian
+/// `u64` length and bytes.
+pub(super) fn verifier_intent(operation_key: String, parts: &[&str]) -> CommitIntent {
+    let mut digest = Sha256::new();
+    for part in std::iter::once(&REQUEST_DIGEST_FORMAT).chain(parts) {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
     CommitIntent {
         producer: PRODUCER.into(),
         operation_key,
-        request_digest: format!("{:x}", Sha256::digest(frozen.to_string())),
+        request_digest: hex(&digest.finalize()),
         actor: "agent:verifier".into(),
         cause: "deterministic attestation verifier".into(),
     }
@@ -771,3 +779,8 @@ pub const ID_PREFIXES: [&str; 4] = [
     "verwitness:",
     "verwitnessobj:",
 ];
+
+/// The tag that leads the request digest's preimage: each input follows as its big-endian `u64`
+/// length and bytes, so a change to the layout moves the tag and old receipts read as `Conflict`
+/// rather than replaying under a digest computed another way.
+const REQUEST_DIGEST_FORMAT: &str = "verifier-request.v1";

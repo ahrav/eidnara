@@ -71,6 +71,10 @@ impl PingProbe {
 pub struct PendingEntry {
     pub cancel: CancellationToken,
     pub settlement: Arc<crate::dispatch::Settlement>,
+    /// The pending-request permit is released when the entry leaves the map, so a request whose
+    /// dispatch task was aborted keeps counting against `max_pending_requests` until its route
+    /// close settles it.
+    pub(crate) _pending_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 /// Generation-owned state shared with the registry and dispatch tasks.
@@ -505,20 +509,23 @@ pub(crate) async fn read_loop<H: HostHandler>(
                             channel: header.channel,
                             epoch: header.epoch,
                         };
-                        let decision = shared.registry.begin_close_owned(handle, generation.id);
+                        let (close_fence, decision) =
+                            shared.begin_goodbye_close(handle, generation.id);
                         // Duplicate, stale, and mid-bind Goodbyes require no cleanup.
                         // Spawning for duplicate, stale, or mid-bind Goodbyes would allow client-pipelined no-op tasks.
                         // Clients could pipeline unbounded no-op tasks because pure-header frames have zero capacity cost.
                         if matches!(decision, CloseDecision::Owner { .. }) {
                             let shared_task = Arc::clone(shared);
-                            shared.spawn_tracked(generation.read_tasks.track_future(async move {
+                            let close = async move {
+                                let _close_fence = close_fence;
                                 crate::dispatch::close_route_decision(
                                     &shared_task,
                                     handle,
                                     decision,
                                 )
                                 .await;
-                            }));
+                            };
+                            shared.spawn_tracked(generation.read_tasks.track_future(close));
                         }
                     }
                     // Consumer-originated role violations close the generation

@@ -125,13 +125,15 @@ pub fn mark_republished(
         live,
     } = republished;
     let (revision, digest) = (&live.detail.revision, &live.detail.artifact_digest);
-    let frozen = serde_json::json!({
-        "attestation_object_id": attestation,
-        "witnessed_digest": witnessed.artifact_digest,
-        "descriptor_object_id": live.object_id,
-        "artifact_digest": digest,
-    });
-    let intent = verifier_intent(format!("applicability:{attestation}:{revision}"), &frozen);
+    let intent = verifier_intent(
+        format!("applicability:{attestation}:{revision}"),
+        &[
+            attestation,
+            &witnessed.artifact_digest,
+            &live.object_id,
+            digest,
+        ],
+    );
     let reason = format!(
         "verifier: the document at {} was republished at descriptor revision {revision} with \
          sha256 {digest}, which differs from the attested sha256 {}",

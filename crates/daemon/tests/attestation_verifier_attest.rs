@@ -1293,7 +1293,11 @@ fn no_model_client_is_reachable_from_the_verifier_module() {
                     .trim_end_matches(':')
                     .to_owned()
             })
-            .filter(|path| !ALLOWED.iter().any(|allowed| path.starts_with(allowed)))
+            .filter(|path| {
+                !ALLOWED
+                    .iter()
+                    .any(|allowed| path == allowed || path.starts_with(&format!("{allowed}::")))
+            })
             .collect();
         found.extend(
             FORBIDDEN
@@ -1320,6 +1324,12 @@ fn no_model_client_is_reachable_from_the_verifier_module() {
         ]
     );
     assert!(!violations("let x = crate::history_summarizer::run();").is_empty());
+    // An allowlisted prefix matches whole path segments only.
+    assert_eq!(
+        violations("crate::git_sources_model_client::run()"),
+        ["crate::git_sources_model_client::run"]
+    );
+    assert!(violations("crate::git_sources::open_with_slots(root)").is_empty());
     // The allowlisted paths are the ones the sources use, so the allowlist is not vacuous.
     let all: String = sources.concat();
     for allowed in ALLOWED {
@@ -2208,4 +2218,145 @@ fn a_classification_naming_another_descriptor_revision_is_changed() {
     }
     assert_eq!(store.tip(), tip);
     assert_eq!(store.write_set_rows(), 0);
+}
+
+/// AC8: the `MarkStale` row carries the classes of the model decision's latest admission, read in
+/// the envelope, for a decision admitted under a taint other than the fixture's default.
+#[test]
+fn a_mismatch_marks_stale_under_the_model_decisions_own_classes() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = model_with_taint(
+        &store,
+        "personal_stale",
+        &checkout.head,
+        &evidence,
+        TaintClass::Personal,
+    );
+    let classification = store.classification(&model, &checkout);
+    let mismatch = Evaluation {
+        verdict: Verdict::Mismatch,
+        ..evaluate(&classification)
+    };
+    let outcome = attest_now(&store, &classification, &mismatch);
+    assert!(matches!(outcome, Outcome::StaleCommitted(_)), "{outcome:?}");
+    let stale = store.facts(&model).own_admission.unwrap();
+    assert_eq!(stale.event_kind, EventKind::MarkStale);
+    assert_eq!(
+        (stale.source_class, stale.taint_class),
+        (SourceClass::ModelInference, TaintClass::Personal)
+    );
+}
+
+/// The committed attestation's rationale names the model object, the commit oid, the path, and
+/// the compared digest, and the witness detail names the descriptor's lineage and revision.
+#[test]
+fn the_committed_rationale_and_detail_name_the_compared_claim() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("rationale", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let input = input(&classification).clone();
+    let outcome = attest_now(&store, &classification, &evaluate(&classification));
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+    let ids = Identity::of(&model, &checkout.head);
+    let rationale: String = store
+        .sqlite()
+        .query_row(
+            "SELECT json_extract(decision_payload, '$.rationale') FROM decisions WHERE object_id=?1",
+            [&ids.object_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let rationale: serde_json::Value = serde_json::from_str(&rationale).unwrap();
+    assert_eq!(rationale["source"], PRODUCER);
+    assert_eq!(rationale["attests"], model.as_str());
+    assert_eq!(rationale["commit_oid"], checkout.head.as_str());
+    assert_eq!(rationale["relative_path"], DOC_PATH);
+    assert_eq!(rationale["artifact_digest"], digest_hex(DOC).as_str());
+    let detail = witness_detail(&store, &ids.witness_object_id);
+    assert_eq!(detail["lineage_id"], input.lineage_id.as_str());
+    assert_eq!(
+        detail["descriptor_revision"],
+        input.descriptor_revision.as_str()
+    );
+}
+
+/// D1: an attestation id already occupied in the registry refuses the write set as
+/// `Refused(Conflict)` with nothing written, on every retry.
+#[test]
+fn an_occupied_attestation_id_refuses_the_write_set() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("occupied", &checkout.head, &evidence, false);
+    let ids = Identity::of(&model, &checkout.head);
+    store
+        .kernel
+        .commit(intent("squat"), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                decision_id: "dec_squat".into(),
+                object_id: ids.object_id.clone(),
+                ..model_spec("squat", None, &evidence, false, 1)
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    let tip = store.tip();
+    for _ in 0..2 {
+        assert_eq!(
+            attest_now(&store, &classification, &evaluation),
+            Outcome::Refused(KernelError::Conflict)
+        );
+    }
+    assert_eq!(store.tip(), tip);
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM admission_decisions WHERE source_kind='verifier'"),
+        0
+    );
+}
+
+/// The request digest is a tagged, length-prefixed SHA-256 over the frozen claim, evidence, blob,
+/// and verdict, pinned here so a layout change is a deliberate format bump.
+#[test]
+fn the_request_digest_is_pinned() {
+    let store = Store::open();
+    let checkout = Checkout::at("PINNED.md", "pinned\n");
+    let (evidence, _) = store.document_at("pinned", "PINNED.md", "pinned\n");
+    let model = store.model("pinned", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let input = input(&classification);
+    let mut digest = Sha256::new();
+    for part in [
+        "verifier-request.v1",
+        model.as_str(),
+        "1",
+        checkout.head.as_str(),
+        "PINNED.md",
+        digest_hex("pinned\n").as_str(),
+        "7",
+        evidence.id.as_str(),
+        checkout.blob.as_str(),
+        "match",
+    ] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    let expected = format!("{:x}", digest.finalize());
+    let outcome = attest_now(&store, &classification, &evaluate(&classification));
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+    let recorded: String = store
+        .sqlite()
+        .query_row(
+            "SELECT request_digest FROM operation_receipts WHERE operation_key=?1",
+            [format!("attest:{model}:{}", checkout.head)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded, expected);
+    assert_eq!(input.claim.byte_length(), 7);
 }

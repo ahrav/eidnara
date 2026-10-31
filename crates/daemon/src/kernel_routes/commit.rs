@@ -45,7 +45,7 @@
 //!
 //! Refusals: a dispute with neither field, an empty value, a malformed
 //! reference, evidence on another event, a capped or secret-bearing reason,
-//! or a verifier-prefixed row id answers `invalid_input`; a nonexistent,
+//! or an inserted row id under a verifier prefix answers `invalid_input`; a nonexistent,
 //! retired, uncited, or foreign evidence id answers `not_found`; an asserted
 //! class above the derivation answers `class_over_declared`; a Kernel
 //! admission refusal answers `admission_policy`; an identity reused with

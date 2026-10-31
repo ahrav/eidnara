@@ -409,7 +409,7 @@ pub(crate) fn snapshot_tip(tx: &Transaction<'_>, requested: i64) -> Result<i64, 
             [],
             |row| row.get::<_, i64>(0),
         )
-        .map_err(|_| KernelError::Io)?;
+        .map_err(crate::map_sqlite)?;
     if requested > tip {
         return Err(KernelError::FutureSnapshot);
     }
@@ -968,5 +968,29 @@ mod scope_decisions_plan_tests {
             plan.ends_with("USE TEMP B-TREE FOR LAST TERM OF ORDER BY"),
             "{plan}"
         );
+    }
+
+    /// A tip query the budget's progress handler interrupts reports the budget, as the page query
+    /// does, so a cancellation during the snapshot's first read is `Deadline`.
+    #[test]
+    fn an_interrupted_tip_query_is_a_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        drop(crate::KernelStore::open(directory.path()).unwrap());
+        let connection =
+            rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        let tx = rusqlite::Transaction::new_unchecked(
+            &connection,
+            rusqlite::TransactionBehavior::Deferred,
+        )
+        .unwrap();
+        connection.progress_handler(1, Some(|| true)).unwrap();
+        assert_eq!(
+            super::snapshot_tip(&tx, 0),
+            Err(crate::KernelError::Deadline)
+        );
+        connection
+            .progress_handler(1, None::<fn() -> bool>)
+            .unwrap();
+        tx.rollback().unwrap();
     }
 }

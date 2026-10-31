@@ -59,9 +59,9 @@
 //! transient `Unavailable` reasons, deadlines at classification, during an object read, or at the
 //! commit, Kernel refusals of the classification or the commit, a changed decision, and degraded
 //! witnesses. The K-th attempt counts `witness_degraded_skipped` when its witness degraded and
-//! `unavailable_skipped` otherwise. A terminal reason is kept for the claim's path at its oid for
-//! the process lifetime. All state is process-local: a restart rescans from the start, and the
-//! skips and the write set's receipt replay keep the rescan idempotent.
+//! `unavailable_skipped` otherwise. A terminal reason is kept per decision for the claim's path at
+//! its oid for the process lifetime. All state is process-local: a restart rescans from the start,
+//! and the skips and the write set's receipt replay keep the rescan idempotent.
 //!
 //! After its decisions resolve or reach their bound, each project runs the applicability step over
 //! the attestations the verifier authored; a refusal that stops the decisions step stops the
@@ -282,8 +282,9 @@ struct ProjectState {
     /// Resolved decisions above the cursor, by `(created_commit_seq, object_id)`; every entry at or
     /// before the cursor is dropped when the cursor advances.
     resolved: BTreeSet<(i64, String)>,
-    /// Attempts of unresolved decisions, by `(created_commit_seq, object_id)`. A cursor advance
-    /// drops the entries at or before the cursor, and a recorded floor drops those below it.
+    /// Attempts of unresolved decisions, by `(created_commit_seq, object_id)`. While the resolved
+    /// prefix holds, a visit drops the entries before its key, and a recorded floor drops those
+    /// below it.
     attempts: BTreeMap<(i64, String), u32>,
     /// The page start just past a commit sequence at or before which every live non-`verifier`
     /// decision of the scope is resolved; a pass pages from the later of it and the cursor.
@@ -299,8 +300,9 @@ struct ProjectState {
 #[derive(Default)]
 pub struct Verifier {
     projects: HashMap<String, ProjectState>,
-    /// Terminal `Unavailable` reasons, keyed by the claim's relative path and its oid.
-    terminal: HashSet<(String, String)>,
+    /// Terminal `Unavailable` reasons, keyed by the decision's object id, the claim's relative
+    /// path, and its oid.
+    terminal: HashSet<(String, String, String)>,
     /// Each root's repository identities, keyed by its path and project digest, so a path bound
     /// again to another project derives again.
     repository_ids: HashMap<(PathBuf, String), Vec<String>>,
@@ -355,14 +357,19 @@ impl Verifier {
         clock: &dyn PassClock,
     ) -> PassReport {
         let started = Instant::now();
+        let bound_scopes: HashSet<&str> = projects
+            .iter()
+            .map(|project| project.scope_id.as_str())
+            .collect();
+        let bound_roots: HashSet<(&Path, &str)> = projects
+            .iter()
+            .flat_map(|project| &project.roots)
+            .map(|root| (root.path.as_path(), root.digest.as_str()))
+            .collect();
         self.projects
-            .retain(|scope_id, _| projects.iter().any(|project| project.scope_id == *scope_id));
-        self.repository_ids.retain(|(path, digest), _| {
-            projects
-                .iter()
-                .flat_map(|project| &project.roots)
-                .any(|root| root.path == *path && root.digest == *digest)
-        });
+            .retain(|scope_id, _| bound_scopes.contains(scope_id.as_str()));
+        self.repository_ids
+            .retain(|(path, digest), _| bound_roots.contains(&(path.as_path(), digest.as_str())));
         let enabled: Vec<&Project> = projects
             .iter()
             .filter(|project| {
@@ -385,7 +392,7 @@ impl Verifier {
             }
             let Some(roots) = self.roots(project, clock, &mut report) else {
                 report.failed = true;
-                continue;
+                break;
             };
             let bound: Vec<BoundRoot<'_>> = roots
                 .iter()
@@ -498,7 +505,7 @@ struct ProjectRun<'a, 'r> {
     counters: &'a Counters,
     clock: &'a dyn PassClock,
     report: &'a mut PassReport,
-    terminal: &'a mut HashSet<(String, String)>,
+    terminal: &'a mut HashSet<(String, String, String)>,
     state: &'a mut ProjectState,
     verdicts: u64,
     bytes_read: u64,
@@ -579,6 +586,12 @@ impl ProjectRun<'_, '_> {
             for ((seq, object_id), standing) in page.into_iter().zip(standings) {
                 let key = (seq, object_id.clone());
                 after = Some(key.clone());
+                // While the prefix holds, no live decision lies between the cursor and `key`, so
+                // the entries before `key` name retired decisions.
+                if prefix {
+                    self.state.resolved = self.state.resolved.split_off(&key);
+                    self.state.attempts = self.state.attempts.split_off(&key);
+                }
                 let known = self.state.resolved.contains(&key);
                 let step = if known {
                     Step::Resolved
@@ -601,11 +614,7 @@ impl ProjectRun<'_, '_> {
                         self.report.progressed |= !known;
                         self.state.attempts.remove(&key);
                         if prefix {
-                            let mut above = self.state.resolved.split_off(&key);
-                            above.remove(&key);
-                            self.state.resolved = above;
-                            self.state.attempts = self.state.attempts.split_off(&key);
-                            self.state.attempts.remove(&key);
+                            self.state.resolved.remove(&key);
                             self.state.cursor = Some(key);
                         } else {
                             self.state.resolved.insert(key);
@@ -724,10 +733,12 @@ impl ProjectRun<'_, '_> {
             Class::Verifiable(input) => input,
         };
         let oid = input.claim.oid().to_owned();
-        if self
-            .terminal
-            .contains(&(input.claim.relative_path().to_owned(), oid.clone()))
-        {
+        let terminal = (
+            object_id.to_owned(),
+            input.claim.relative_path().to_owned(),
+            oid.clone(),
+        );
+        if self.terminal.contains(&terminal) {
             return Step::Resolved;
         }
         // The pre-check passes over a decision whose page standing named no readable anchor.
@@ -755,8 +766,7 @@ impl ProjectRun<'_, '_> {
         self.counters.consider(&bucket, evaluation.bytes_read);
         match evaluation.verdict {
             Verdict::Unavailable(reason) if reason.is_terminal() => {
-                self.terminal
-                    .insert((input.claim.relative_path().to_owned(), oid));
+                self.terminal.insert(terminal);
                 return Step::Resolved;
             }
             Verdict::Unavailable(reason) => {

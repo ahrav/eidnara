@@ -2,6 +2,7 @@
 //! while the Kernel is ready, over the bindings' participating per-root view and each root's
 //! effective `verifier.enabled`, and paces the passes.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -33,25 +34,40 @@ pub(crate) fn task(
 }
 
 /// The bound projects in bound-root order: the participating per-root view's roots in path order,
-/// each project once, with every root it binds.
+/// each project once, with every canonical root it binds once. The canonical root is the one the
+/// binding's scope and source capture's repository identity derive from, so a spelling bound
+/// through a symlink reads the scope's repository after the link is retargeted.
 fn bound_projects(bindings: &Mutex<crate::RouteBindings>) -> Vec<Project> {
-    let bindings = bindings
+    // The snapshot frees the route mutex before the roster is built.
+    let bound: Vec<crate::kernel_routes::ProjectBinding> = bindings
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .latest_per_root()
+        .into_values()
+        .map(|(_, binding)| binding.kernel_project.clone())
+        .collect();
     let mut projects: Vec<Project> = Vec::new();
-    for (root, (_, binding)) in bindings.latest_per_root() {
-        let project = &binding.kernel_project;
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    for project in bound {
         let root = Root {
-            path: root.to_path_buf(),
+            path: project.root().to_path_buf(),
             digest: project.digest().to_owned(),
         };
         let scope_id = project.scope_id();
-        match projects.iter_mut().find(|known| known.scope_id == scope_id) {
-            Some(known) => known.roots.push(root),
-            None => projects.push(Project {
-                scope_id,
-                roots: vec![root],
-            }),
+        match positions.get(&scope_id) {
+            Some(&position) => {
+                let roots = &mut projects[position].roots;
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+            None => {
+                positions.insert(scope_id.clone(), projects.len());
+                projects.push(Project {
+                    scope_id,
+                    roots: vec![root],
+                });
+            }
         }
     }
     projects
@@ -154,8 +170,8 @@ mod tests {
         }
     }
 
-    /// Projects come in bound-root order, whatever the bind order, with every root a project
-    /// binds in that order and each project once.
+    /// Projects come in bound-root order, whatever the bind order, with every canonical root a
+    /// project binds in that order, each once, and each project once.
     #[test]
     fn bound_projects_follow_bound_root_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -163,7 +179,7 @@ mod tests {
         for root in [&a, &b, &c] {
             std::fs::create_dir(root).unwrap();
         }
-        // `d` is a second spelling of `a`, so it binds `a`'s project.
+        // `d` is a second spelling of `a`, so it binds `a`'s project and adds no root.
         let d = dir.path().join("d");
         std::os::unix::fs::symlink(&a, &d).unwrap();
         let mut bindings = RouteBindings::default();
@@ -179,10 +195,16 @@ mod tests {
             .iter()
             .map(|project| project.roots.iter().map(|root| root.path.clone()).collect())
             .collect();
+        let canonical = |root: &PathBuf| std::fs::canonicalize(root).unwrap();
         assert_eq!(
             roots,
-            vec![vec![a.clone(), d], vec![b.clone()], vec![c.clone()]]
+            vec![
+                vec![canonical(&a)],
+                vec![canonical(&b)],
+                vec![canonical(&c)]
+            ]
         );
+        drop(d);
         let scopes: Vec<String> = [&a, &b, &c]
             .map(|root| crate::kernel_routes::ProjectBinding::new(root).scope_id())
             .into();
@@ -192,6 +214,42 @@ mod tests {
                 .map(|project| project.scope_id.clone())
                 .collect::<Vec<_>>(),
             scopes
+        );
+    }
+
+    /// A project bound only through a symlink gets the canonical root the binding's scope was
+    /// derived from, the root source capture derives the repository identity from, so a symlink
+    /// retargeted after the bind leaves the verifier reading the scope's repository.
+    #[test]
+    fn a_project_bound_through_a_symlink_gets_its_canonical_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut bindings = RouteBindings::default();
+        bindings.insert(
+            RouteHandle {
+                channel: 0,
+                epoch: 1,
+            },
+            binding(&link),
+        );
+        let projects = bound_projects(&Mutex::new(bindings));
+        let binding = crate::kernel_routes::ProjectBinding::new(&link);
+        assert_eq!(
+            projects,
+            vec![Project {
+                scope_id: binding.scope_id(),
+                roots: vec![Root {
+                    path: binding.root().to_path_buf(),
+                    digest: binding.digest().to_owned(),
+                }],
+            }]
+        );
+        assert_eq!(
+            projects[0].roots[0].path,
+            std::fs::canonicalize(&real).unwrap()
         );
     }
 
