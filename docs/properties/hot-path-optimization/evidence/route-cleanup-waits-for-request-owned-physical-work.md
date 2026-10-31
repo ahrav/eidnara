@@ -29,14 +29,13 @@ The present claim concerns tracked callbacks; moving work must extend that gate.
 - [dispatch.rs:937-954][cancel] aborts and awaits the callback when cancellation
   wins before settling the cancelled terminal.
 - [dispatch.rs:1237-1268][close] closes the tracker, waits, aborts, and waits
-  again. Work that has not stopped by then moves to a deferred close, which
-  runs route-gone only after the work stops; the close owner returns false and
-  skips cleanup.
+  again. At this baseline, failure to stop trips fatal state and returns false,
+  not cleanup; the live close gate below defers such a route instead.
 - [The wire contract:767-781][wire] requires best-effort cancellation and
   cleanup-gated reuse, and preserves unknown outcomes after unobserved terminals.
 - [daemon/lib.rs:8138-8202][transform] invokes the transform synchronously;
   no off-worker transform completion protocol is demonstrated by this site.
-- [tests/dispatch.rs:1134-1177][overlap] starts a hanging callback, sends route
+- [The baseline route-close test][overlap] starts a hanging callback, sends route
   Goodbye, then checks cancellation and one cleanup callback. It is unaudited.
 
 ## Failure scenario
@@ -123,10 +122,11 @@ work stops; the join task is entered
 in that tracker, so held blocking work, awaited or not, is inside the gate.
 The abort drops the dispatch task at its wait on the request ledger, before
 that task's own `settle`, so when the work then finishes inside the post-abort
-budget the [route drain settles][close-fallback] each collected pending entry
-that is still unsettled as `cancelled` before route-gone; `settle` is
-first-terminal-wins, including admission rejection, so a request with an earlier
-terminal is left alone. Post-abort waiting and fallback emission share one
+budget the [route drain emits][close-fallback] `cancelled` before route-gone for
+each collected pending entry whose terminal has not reached the writer
+(`Settlement::queued`), including a request whose own winning settle was aborted
+before queuing; an entry whose terminal was already queued, including admission
+rejection, is left alone. Post-abort waiting and fallback emission share one
 absolute deadline. Undeliverable fallback output retires the generation;
 logical settlement does not guarantee a received terminal on a retired link.
 The host cannot stop a thread that has started, so the
@@ -216,7 +216,7 @@ exclusion.
 [close]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/dispatch.rs#L1237-L1268
 [wire]: https://github.com/ahrav/eidnara/blob/9132344/docs/host-wire-protocol.md#L765-L781
 [transform]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8138-L8202
-[overlap]: ../../../../crates/host-runtime/tests/dispatch.rs#L1134-L1177
+[overlap]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/tests/dispatch.rs#L832-L887
 
 ## Implementation evidence, 2026-09-13
 
@@ -256,8 +256,10 @@ commit. [The focused receipt][receipt] records execution with adequacy unaudited
 - Sources examined: [The host join contract][run-blocking], [the close gate][close-gate-live],
   [unit cancellation and settlement][unit-lifecycle], and the owner's explicit
   approval on 2026-09-13.
-- Findings: The owner accepts the existing fatal-shutdown path when physical
-  work outlasts the close budget. Started blocking work cannot be forcibly
+- Findings: The owner accepted, on 2026-09-13, that physical work may outlast
+  the close budget. Route close now defers route-gone until that work stops;
+  fatal shutdown remains the outcome on forced shutdown and past
+  `MAX_DEFERRED_WORK`. Started blocking work cannot be forcibly
   stopped; a full-cap paged request or slow disk can delay process exit. The
   owner also accepts late cancellation after a durable commit. A later
   Emergency95 unit may skip its work when it sees cancellation; derived caches
