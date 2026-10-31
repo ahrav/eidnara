@@ -636,6 +636,15 @@ fn recheck(
     if (prior.source_class, prior.taint_class) != (model.source_class, model.taint_class) {
         return Err(changed());
     }
+    let row_anchor = envelope
+        .decisions_for_objects(std::slice::from_ref(&model.object_id))?
+        .into_iter()
+        .find(|row| row.object_id == model.object_id)
+        .ok_or_else(changed)?
+        .anchor_id;
+    if row_anchor != model.anchor_id {
+        return Err(changed());
+    }
     let anchor = match &model.anchor_id {
         Some(anchor_id) => envelope.anchor_condition(anchor_id)?,
         None => None,
