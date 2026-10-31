@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/issues/1169)), surface N7. Converted to active by [#1173](https://github.com/ahrav/eidnara/issues/1173), which lands the bounded pass in `crates/daemon/src/attestation_verifier/bounded_pass.rs` and the Kernel page read `scope_decisions_after_within_budget` (`crates/kernel/src/slice/read.rs:738`).
+The specification's Property Catalog ([#1169](https://github.com/ahrav/eidnara/issues/1169)), surface N7. Converted to active by [#1173](https://github.com/ahrav/eidnara/issues/1173), which lands the bounded pass in `crates/daemon/src/attestation_verifier/bounded_pass.rs` and the Kernel page read `scope_decisions_after_within_budget` (`crates/kernel/src/slice/read.rs:753`).
 
 ## Evidence trail
 
