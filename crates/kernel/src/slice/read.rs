@@ -545,6 +545,17 @@ impl crate::Envelope<'_> {
     ) -> Result<Vec<DecisionRow>, KernelError> {
         load_decisions_for_objects(self.tx, self.commit_seq - 1, object_ids)
     }
+
+    /// `linked_decision_evidence` reads the decision's cited evidence in the envelope's
+    /// transaction at the committed tip the envelope extends.
+    pub fn linked_decision_evidence(
+        &self,
+        decision_object_id: &str,
+        max: std::num::NonZeroUsize,
+    ) -> Result<Vec<LinkedEvidence>, KernelError> {
+        linked_evidence(self.tx, decision_object_id, self.commit_seq - 1, max)
+            .map_err(crate::map_sqlite)
+    }
 }
 
 /// Returns each successor's latest predecessor invalidation commit at or before `requested`. `ids` is a JSON array of successor IDs.

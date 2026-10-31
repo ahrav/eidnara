@@ -21,11 +21,11 @@ use kernel::source_identity::{Occurrence, OccurrenceClass};
 use kernel::{
     AdmissionEvent, AdmissionRequest, AnchorSpec, AnchorValue, ArtifactDeletionIdentity,
     ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactIngestRequest, CausalClass,
-    ClaimFactBounds, ClaimFacts, CommitIntent, DecisionEventPayload, DecisionEventSpec,
-    DecisionPayload, DecisionSpec, Disposition, DomainSpec, EventKind, KernelError, KernelStore,
-    Maturity, Outcome as AdmissionOutcome, ParentReference, ProviderEgress, Sensitivity,
-    ServedStanding, SourceClass, SourceDescriptorPolicy, SourceDescriptorRequest, Surface,
-    SurfaceVisibility, TaintClass,
+    CitingDescriptor, ClaimFactBounds, ClaimFacts, CommitIntent, DecisionEventPayload,
+    DecisionEventSpec, DecisionPayload, DecisionSpec, Disposition, DomainSpec, EventKind,
+    KernelError, KernelStore, Maturity, Outcome as AdmissionOutcome, ParentReference,
+    ProviderEgress, Sensitivity, ServedStanding, SourceClass, SourceDescriptorPolicy,
+    SourceDescriptorRequest, Surface, SurfaceVisibility, TaintClass,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -2051,6 +2051,59 @@ fn a_classification_whose_claim_differs_from_the_cited_descriptor_is_changed() {
                 attempted.verdict
             );
         }
+    }
+    assert_eq!(store.tip(), tip);
+    assert_eq!(store.write_set_rows(), 0);
+}
+
+/// A classification whose evidence, descriptor, and claim all name a live document the model
+/// decision never cited is `Changed` on both verdicts with nothing written.
+#[test]
+fn a_classification_citing_a_document_the_model_decision_does_not_is_changed() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("cites", &checkout.head, &evidence, false);
+    let other_text = "# Other\n\nAnother document the model never cited.\n";
+    let (other, other_descriptor) = store.document_at("other", "docs/other.md", other_text);
+    let mut classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    let CitingDescriptor::Live(descriptor) = store
+        .kernel
+        .source_descriptor_citing_evidence(
+            OccurrenceClass::RepositoryDocuments,
+            &other.id,
+            store.tip(),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap()
+    else {
+        panic!("expected the other document's descriptor live");
+    };
+    assert_eq!(descriptor.object_id, other_descriptor);
+    let Class::Verifiable(input) = &mut classification.class else {
+        panic!("expected a verifiable decision");
+    };
+    assert_eq!(descriptor.detail.artifact_digest, digest_hex(other_text));
+    input.claim = Claim::new(
+        "docs/other.md",
+        Sha256::digest(other_text).into(),
+        descriptor.byte_length,
+        input.claim.oid(),
+    )
+    .unwrap();
+    input.evidence_id = other.id.clone();
+    input.descriptor_object_id = descriptor.object_id.clone();
+    input.lineage_id = descriptor.detail.lineage_id.clone();
+    input.descriptor_revision = descriptor.detail.revision.clone();
+    let tip = store.tip();
+    for attempted in both_verdicts(&evaluation) {
+        assert_eq!(
+            attest_now(&store, &classification, &attempted),
+            Outcome::Changed,
+            "{:?}",
+            attempted.verdict
+        );
     }
     assert_eq!(store.tip(), tip);
     assert_eq!(store.write_set_rows(), 0);

@@ -2588,3 +2588,60 @@ fn an_envelope_reads_the_decisions_live_at_the_tip_it_extends() {
         .unwrap();
     assert_eq!(read.unwrap(), expected);
 }
+
+/// The envelope read answers as the reader-side read does at the committed tip the envelope
+/// extends: a citation made earlier in the same envelope is not yet visible.
+#[test]
+fn an_envelope_reads_the_decisions_cited_evidence_at_the_tip_it_extends() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let own = ingest_evidence(&store, "own", '1');
+    store
+        .commit(intent("decision-1", '2'), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                evidence_id: Some(own.clone()),
+                ..decision(1)
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let first = ingest_evidence(&store, "first", '3');
+    cite(&store, "first", '4', &first);
+    let later = ingest_evidence(&store, "later", '5');
+    let max = std::num::NonZeroUsize::new(8).unwrap();
+    let expected = store
+        .linked_decision_evidence_within_budget(
+            "decision-object-1",
+            store.tip().unwrap(),
+            max,
+            &kernel::applicability::EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(
+        expected
+            .iter()
+            .map(|row| row.evidence_id.as_str())
+            .collect::<Vec<_>>(),
+        [first.as_str(), own.as_str()]
+    );
+    let mut read = None;
+    store
+        .commit(intent("read", '6'), |envelope| {
+            envelope.append_decision_event(
+                "decision-1",
+                DecisionEventSpec {
+                    event_kind: "cite".into(),
+                    payload: DecisionEventPayload {
+                        summary: "cites later".into(),
+                    },
+                    evidence_id: Some(later.clone()),
+                    recorded_at: 1,
+                },
+            )?;
+            read = Some(envelope.linked_decision_evidence("decision-object-1", max)?);
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(read.unwrap(), expected);
+}

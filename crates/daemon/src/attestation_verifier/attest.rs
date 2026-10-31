@@ -670,6 +670,16 @@ fn recheck(
     if !anchored || !cited {
         return Err(changed());
     }
+    let cites = envelope
+        .linked_decision_evidence(
+            &model.object_id,
+            super::classify::MAX_EVENT_CITATIONS.saturating_add(1),
+        )?
+        .iter()
+        .any(|evidence| evidence.evidence_id == input.evidence_id);
+    if !cites {
+        return Err(changed());
+    }
     Ok((state.scope_id, prior))
 }
 
