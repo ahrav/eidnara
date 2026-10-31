@@ -60,9 +60,9 @@ impl Settlement {
 
     /// A settle aborted after it took the credit returned that credit to the generation; the
     /// retried terminal waits here for a fresh one. The wait has no deadline of its own:
-    /// `settle_stopped_route_work` runs it under its emission deadline, which retires the
-    /// generation when it passes first. `Err` reports a retired generation, which has no use
-    /// for the terminal, or a closed credit pool.
+    /// `settle_stopped_route_work` bounds it with its emission deadline and drops that one
+    /// terminal when the deadline passes first. `Err` reports a retired generation, which has
+    /// no use for the terminal, or a closed credit pool.
     pub(crate) async fn reattach_credit(&self, generation: &GenerationCore) -> Result<(), ()> {
         let missing = self
             .credit
@@ -1532,7 +1532,7 @@ pub(crate) async fn settle_stopped_route_work<H: HostHandler>(
     // `queued` marks the requests whose terminal reached the writer. Requests that still hold
     // their terminal credit go first, so a retry's wait for a fresh credit cannot delay them
     // under the shared deadline.
-    let emit_remaining = async {
+    let emit_credited = async {
         let mut retries = Vec::new();
         for (key, settlement) in entries {
             let _order = settlement.order.lock().await;
@@ -1554,13 +1554,24 @@ pub(crate) async fn settle_stopped_route_work<H: HostHandler>(
             .await;
             settlement.queued.store(true, Ordering::SeqCst);
         }
-        for (key, settlement) in retries {
-            let _order = settlement.order.lock().await;
-            if settlement.reattach_credit(generation).await.is_err() {
-                generation.token.cancel();
-                settlement.queued.store(true, Ordering::SeqCst);
-                continue;
-            }
+        retries
+    };
+    let Ok(retries) = timeout_at(deadline, emit_credited).await else {
+        generation.token.cancel();
+        return;
+    };
+    for (key, settlement) in retries {
+        let _order = settlement.order.lock().await;
+        // A retry whose credit does not free by the deadline leaves that request without a
+        // terminal: its route is already closed, and the connection keeps serving its other
+        // routes instead of retiring for one request.
+        let credited = timeout_at(deadline, settlement.reattach_credit(generation)).await;
+        if !matches!(credited, Ok(Ok(()))) {
+            settlement.queued.store(true, Ordering::SeqCst);
+            continue;
+        }
+        let emitted = timeout_at(
+            deadline,
             emit_won_terminal(
                 settlement,
                 &shared.terminal_budget,
@@ -1568,13 +1579,14 @@ pub(crate) async fn settle_stopped_route_work<H: HostHandler>(
                 handle,
                 key.2,
                 cancelled_terminal(),
-            )
-            .await;
-            settlement.queued.store(true, Ordering::SeqCst);
+            ),
+        )
+        .await;
+        settlement.queued.store(true, Ordering::SeqCst);
+        if emitted.is_err() {
+            generation.token.cancel();
+            return;
         }
-    };
-    if timeout_at(deadline, emit_remaining).await.is_err() {
-        generation.token.cancel();
     }
 }
 

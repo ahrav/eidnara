@@ -407,11 +407,11 @@ async fn a_settle_aborted_before_queuing_is_settled_by_the_route_close() {
     settle_aborted_before_queuing(Credits::Available).await;
 }
 
-/// The retried terminal waits for a terminal credit under the post-abort deadline; with every
-/// credit held until then, the close retires the generation at the deadline instead of queuing
-/// an uncredited terminal.
+/// The retried terminal waits for a terminal credit until the post-abort deadline; with every
+/// credit held until then, the close drops that one terminal instead of queuing an uncredited
+/// frame, and the connection keeps serving.
 #[tokio::test(start_paused = true)]
-async fn a_retried_terminal_without_a_credit_retires_the_generation() {
+async fn a_retried_terminal_without_a_credit_is_dropped_and_the_connection_keeps_serving() {
     settle_aborted_before_queuing(Credits::HeldPastDeadline).await;
 }
 
@@ -506,7 +506,10 @@ async fn settle_aborted_before_queuing(credits_state: Credits) {
             Duration::from_millis(200),
             "the retry waits until the post-abort deadline"
         );
-        assert!(generation.token.is_cancelled());
+        assert!(
+            !generation.token.is_cancelled(),
+            "one missing credit leaves the connection serving"
+        );
         assert!(
             queue.try_recv().is_err(),
             "no uncredited terminal was queued"
