@@ -198,7 +198,7 @@ exclusion.
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
 [ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L1087-L1091
 [cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L1194
-[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1466-L1522
+[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1466-L1636
 [close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1524-L1579
 [daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
