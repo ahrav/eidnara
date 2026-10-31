@@ -15,7 +15,7 @@ use daemon::attestation_verifier::attest::{
 use daemon::attestation_verifier::classify::{
     BoundRoot, Class, Classification, Unverifiable, VERIFIER_SOURCE_KIND, VerifierInput, classify,
 };
-use daemon::attestation_verifier::{Evaluation, Reason, Verdict, verify};
+use daemon::attestation_verifier::{Claim, Evaluation, Reason, Verdict, verify};
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass};
 use kernel::{
@@ -2003,6 +2003,54 @@ fn a_classification_naming_another_live_anchor_is_changed() {
             "{:?}",
             attempted.verdict
         );
+    }
+    assert_eq!(store.tip(), tip);
+    assert_eq!(store.write_set_rows(), 0);
+}
+
+/// A classification whose claim names a path, digest, or byte length other than the cited
+/// descriptor's, at the same oid, is `Changed` on both verdicts with nothing written.
+#[test]
+fn a_classification_whose_claim_differs_from_the_cited_descriptor_is_changed() {
+    let store = Store::open();
+    let checkout = Checkout::new(DOC);
+    let (evidence, _) = store.document("doc", DOC);
+    let model = store.model("claimed", &checkout.head, &evidence, false);
+    let classification = store.classification(&model, &checkout);
+    let evaluation = evaluate(&classification);
+    let claim = &input(&classification).claim;
+    let (path, digest, length, oid) = (
+        claim.relative_path(),
+        *claim.digest(),
+        claim.byte_length(),
+        claim.oid(),
+    );
+    let edited: [(&str, Claim); 3] = [
+        (
+            "path",
+            Claim::new("docs/other.md", digest, length, oid).unwrap(),
+        ),
+        ("digest", Claim::new(path, [0; 32], length, oid).unwrap()),
+        (
+            "byte length",
+            Claim::new(path, digest, length + 1, oid).unwrap(),
+        ),
+    ];
+    let tip = store.tip();
+    for (name, claim) in edited {
+        let mut classification = classification.clone();
+        let Class::Verifiable(input) = &mut classification.class else {
+            panic!("expected a verifiable decision");
+        };
+        input.claim = claim;
+        for attempted in both_verdicts(&evaluation) {
+            assert_eq!(
+                attest_now(&store, &classification, &attempted),
+                Outcome::Changed,
+                "{name} {:?}",
+                attempted.verdict
+            );
+        }
     }
     assert_eq!(store.tip(), tip);
     assert_eq!(store.write_set_rows(), 0);

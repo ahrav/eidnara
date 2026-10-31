@@ -654,11 +654,18 @@ fn recheck(
         Some(AnchorCondition::Git(GitCondition::ReachableFrom { oid, .. }))
             if oid == input.claim.oid()
     );
+    let claim = &input.claim;
     let cited = envelope
         .live_source_descriptor_of_lineage(OccurrenceClass::RepositoryDocuments, &input.lineage_id)?
         .is_some_and(|descriptor| {
+            let field = |name: &str| crate::git_reconcile::identity_field(&descriptor, name);
             descriptor.object_id == input.descriptor_object_id
                 && descriptor.detail.evidence_id == input.evidence_id
+                && field("relative_path") == Some(claim.relative_path())
+                && field("repository_id") == Some(input.repository_id.as_str())
+                && crate::memory_capture::cite::digest_bytes(&descriptor.detail.artifact_digest)
+                    == Some(*claim.digest())
+                && descriptor.byte_length == claim.byte_length()
         });
     if !anchored || !cited {
         return Err(changed());
