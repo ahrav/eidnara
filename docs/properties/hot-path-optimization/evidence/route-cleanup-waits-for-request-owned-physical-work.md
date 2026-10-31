@@ -129,7 +129,10 @@ before queuing, which receives its terminal only when a terminal credit frees
 before the deadline and otherwise stays `outcome_unknown` while the generation
 keeps serving; an entry whose terminal was already queued, including
 admission rejection, is left alone. Post-abort waiting and fallback emission share one
-absolute deadline. Credited fallback output that misses it retires the generation;
+absolute deadline. Credited fallback output that misses it retires the generation.
+A deferred close runs the same drain under one fresh close budget taken when its
+work stops, and the same credit and retirement rules apply against that budget
+([deferred-budget test][t-deferred-budget]);
 logical settlement does not guarantee a received terminal on a retired link.
 The host cannot stop a thread that has started, so the
 seam's contract asks the work to terminate on its own or to observe the
@@ -200,8 +203,8 @@ exclusion.
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
 [ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L1087-L1091
 [cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L1194
-[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1466-L1648
-[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1524-L1591
+[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1466-L1649
+[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1524-L1592
 [daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
 [t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L653
@@ -209,6 +212,7 @@ exclusion.
 [t-close]: ../../../../crates/host-runtime/tests/dispatch.rs#L804-L836
 [t-detached]: ../../../../crates/host-runtime/tests/dispatch.rs#L840-L868
 [t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L214-L270
+[t-deferred-budget]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L816-L849
 [t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L184-L212
 [t-panic]: ../../../../crates/host-runtime/tests/dispatch.rs#L873-L908
 [t-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L633-L636
