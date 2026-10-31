@@ -422,11 +422,19 @@ async fn a_retried_terminal_takes_a_credit_that_frees_inside_the_window() {
     settle_aborted_before_queuing(Credits::FreedInsideWindow).await;
 }
 
+/// A credit that frees inside the window lets the retry start emitting; a retry whose emission
+/// is still blocked at the deadline retires the generation.
+#[tokio::test(start_paused = true)]
+async fn a_retried_terminal_whose_emission_stalls_retires_the_generation() {
+    settle_aborted_before_queuing(Credits::FreedWithEmissionBlocked).await;
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Credits {
     Available,
     HeldPastDeadline,
     FreedInsideWindow,
+    FreedWithEmissionBlocked,
 }
 
 async fn settle_aborted_before_queuing(credits_state: Credits) {
@@ -485,6 +493,17 @@ async fn settle_aborted_before_queuing(credits_state: Credits) {
     let started = Instant::now();
     tokio::time::sleep(Duration::from_millis(150)).await;
     drop(physical_work);
+    if credits_state == Credits::FreedWithEmissionBlocked {
+        let blocked = shared.terminal_budget.try_charge(1 << 20).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(held);
+        assert!(close.await.unwrap());
+        assert_eq!(Instant::now() - started, Duration::from_millis(200));
+        assert!(generation.token.is_cancelled());
+        assert!(queue.try_recv().is_err());
+        drop(blocked);
+        return;
+    }
     if credits_state == Credits::FreedInsideWindow {
         tokio::time::sleep(Duration::from_millis(20)).await;
         drop(held);
@@ -509,6 +528,10 @@ async fn settle_aborted_before_queuing(credits_state: Credits) {
         assert!(
             !generation.token.is_cancelled(),
             "one missing credit leaves the connection serving"
+        );
+        assert!(
+            !generation.writer.is_retired(),
+            "one missing credit leaves the writer accepting output"
         );
         assert!(
             queue.try_recv().is_err(),

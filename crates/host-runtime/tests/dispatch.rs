@@ -1788,6 +1788,13 @@ async fn a_deferred_request_keeps_its_pending_permit_until_its_work_stops() {
         "pending request capacity exhausted",
         "the deferred request still holds the only pending permit"
     );
+    assert_eq!(
+        other
+            .route_open(LINKED_MODULE_ID, ROOT, "opencode", "pending-busy-open")
+            .await,
+        Err("server_busy".to_owned()),
+        "route.open meets the held pending slot before any route-capacity check"
+    );
 
     drop(release);
     let (_, frame) = client
