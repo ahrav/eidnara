@@ -561,7 +561,7 @@ Check: `always` - live verifier decisions grouped by `(model object id, oid)` co
 Fault/timing angle: a retry after a crash or a replayed pass; a changed claim at the same oid
 Required faults and enabling state: F10: the operation key replayed with the same and with a different verdict
 Confidence: high - [evidence](evidence/p6-new-attestation-identity-unique-per-decision-oid.md). Read `Identity::of` (`crates/daemon/src/attestation_verifier/attest.rs:65`), `intent` (`:700`), whose request digest covers the frozen claim, the compared evidence, the blob, and the verdict, and `run` (`:553`), which refuses a recorded opposite key at `:565` before any write
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:895`, `:938`, `:1132`, `:2279`, `:2315` (unaudited)
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:895`, `:938`, `:1132`, `:2289`, `:2325` (unaudited)
 Impact: falsifier: an id containing pass time or randomness, or two live attestations for one pair
 Open questions:
 - Can a retired attestation's pair be attested again? - resolved with answer: no; the registry keeps the retired ids, and OQ6-7 accepts that re-attesting a pair after retirement is out of scope.
@@ -577,7 +577,7 @@ Check: `always` - `anchor_id` equals the model decision's, the one citation even
 Fault/timing angle: none
 Required faults and enabling state: F14: the compared evidence is `Sensitive`; F15: a prose document classified `CurrentCode`
 Confidence: high - [evidence](evidence/p6-new-attestation-classes-and-cited-fields.md). Read `attest_match` (`crates/daemon/src/attestation_verifier/attest.rs:143`), which reads the model decision's row in its envelope, and `WriteSet::from_row` (`:229`), which builds the decision, witness, and citation specs for it and for `WriteSet::new` (`:204`), and the writes at `:432` and `:480`; the admission at `:435` takes the classes from `DocumentKind::taint_class` and its event from `DocumentKind::event_kind` (`crates/daemon/src/attestation_verifier/classify.rs:505`); `WriteSet::check` (`crates/daemon/src/attestation_verifier/attest.rs:323`) requires the model decision's anchor, domain, and served sensitivity before the commit, and `WriteSet::write` rereads the served sensitivity in the envelope (`:425`); `WriteSet::commit` (`:378`) compares a caller's set, timestamps aside, with the set `WriteSet::at_tip` (`:403`) rebuilds from the model decision's row at the committed tip (`:395`), so the decision kind, summary, rationale, and payload text it commits are the ones `attest` derives; `classify` takes it from the Kernel's serving view through `served_facts` (`crates/daemon/src/attestation_verifier/classify.rs:340-342`)
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:431`, `:572`, `:1092`, `:1399`, `:1434`, `:1848`, `:1927`, `:2244` (unaudited)
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:431`, `:572`, `:1092`, `:1409`, `:1444`, `:1858`, `:1937`, `:2254` (unaudited)
 Impact: falsifier: no citation event, or a different evidence row, at `Verified`
 Open questions:
 - Is a configuration document's attestation exercised? - resolved with answer: yes; `a_match_on_a_configuration_document_commits_under_current_config` commits a `config.toml` attestation and reads `(TrustedLocalCode, CurrentConfig)`, `ConfigObserved`, `config_present`, `admit`, `verified`, and `active`.
@@ -594,7 +594,7 @@ Check: `always` - after a match the model decision's registry row and own admiss
 Fault/timing angle: the model decision, its anchor, its descriptor, or its evidence row changed between the classification and the commit; an unrelated attestation committed in that window
 Required faults and enabling state: F2, F3
 Confidence: high - [evidence](evidence/p6-new-attestation-sibling-model-stays-candidate.md). Read `recheck` (`crates/daemon/src/attestation_verifier/attest.rs:602`), which compares the store's incarnation (`:611`), the model decision's registry row and latest admission, its row's `anchor_id` with the classification's (`:644`), its anchor (`:648`) at the sequence the envelope extends, and its descriptor lineage (`:658`), whose live read requires the cited evidence row live and whose revision, path, digest, and byte length must be the classification's, and the model decision's own citations (`:677`), its row-level citation first and then the newest `MAX_EVENT_CITATIONS` events, which must include the compared evidence, all read in the envelope's transaction, and the causality write at `:454`
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:431`, `:965`, `:1067`, `:1542`, `:1585`, `:1613`, `:1764`, `:1816`, `:1985`, `:2014`, `:2062`, `:2116`, `:2187`; `crates/kernel/tests/kernel_slice.rs:2550`, `:2595`; `crates/kernel/tests/kernel_anchor_write.rs:971` (unaudited)
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:431`, `:965`, `:1067`, `:1552`, `:1595`, `:1623`, `:1774`, `:1826`, `:1995`, `:2024`, `:2072`, `:2126`, `:2197`; `crates/kernel/tests/kernel_slice.rs:2550`, `:2595`; `crates/kernel/tests/kernel_anchor_write.rs:971` (unaudited)
 Impact: falsifier: a `Replace` on the model decision, or an attestation without causality
 Open questions:
 - What does the causality read report after the model decision is superseded? - resolved with answer: `DerivedReinjection` naming `(model object id, model revision)` while the attestation keeps `Verified`; `parents_existed` (`crates/kernel/src/claim_causality.rs:719`) checks only that the parent row existed at the requested snapshot with the named revision, and supersession leaves that row and revision in place. OQ6-12 expected `Unknown(ParentUnavailable)`, which the Kernel reports only for a missing historical parent row or a revision mismatch; no test reads it.
@@ -626,7 +626,7 @@ Check: `always` - `WriteSet::check` holds for every write set `attest` or `Write
 Fault/timing angle: none
 Required faults and enabling state: F1, F3: a detail or citation naming another live evidence row
 Confidence: high - [evidence](evidence/p6-new-witness-evidence-id-equals-attestation.md). Read `WriteSet::check` (`crates/daemon/src/attestation_verifier/attest.rs:323`), called in the `attest_match` envelope before any write (`:160`) and first in `WriteSet::commit` (`:378`), and `recheck` (`:602`), which also requires the cited descriptor to still cite the compared evidence
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:749`, `:685`, `:1469` (unaudited)
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:749`, `:685`, `:1479` (unaudited)
 Impact: falsifier: a `Verified` attestation citing E whose witness detail names E'
 Open questions: None.
 
@@ -657,7 +657,7 @@ Check: `always` - a live attestation always has all five companions and its rece
 Fault/timing angle: a fault after the admission inside the envelope; a restart after the commit
 Required faults and enabling state: F11: a fault-injected rollback after the admission, constructed; a process termination after the commit followed by a fresh open, not yet constructed (a clean close and fresh open shows durability across an open only)
 Confidence: high - [evidence](evidence/p6-new-attestation-write-set-one-outcome.md). Read `WriteSet::write`'s order, insert at `crates/daemon/src/attestation_verifier/attest.rs:432` through the citation at `:480`, all inside one `commit_within_budget` call in `run` (`:553`)
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:1178`, `:727`, `:1816`, `:1722` (unaudited)
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:1178`, `:727`, `:1826`, `:1732` (unaudited)
 Impact: falsifier: an attestation at `Candidate` with no observation after a crash
 Open questions:
 - Does the reopen model a crash? - resolved with answer: partly; the test records a fresh open after close. A live store holds its data home's writer lock, so an abandoned store (`std::mem::forget`) makes the second open fail with "held by another writer"; the test closes the store and opens it again, which shows the commit is durable across a fresh open and does not kill the process mid-write.
@@ -673,7 +673,7 @@ Check: `always` - after `StaleCommitted` the model decision is `Stale` with one 
 Fault/timing angle: the model decision marked `Stale` between the classification and the commit
 Required faults and enabling state: a commit holding other bytes at the cited path; `Unavailable` verdicts with and without a blob id: the fixture supplies `RepositoryUnbound`, `PathAbsent` (F6), and `OverBudget` (F4), and no F5 verdict; `attest` treats every `Unavailable` reason alike
 Confidence: high - [evidence](evidence/p6-new-mismatch-stale-unavailable-silent.md). Read `attest` (`crates/daemon/src/attestation_verifier/attest.rs:125`), which returns `skipped(unavailable)` for every `Unavailable` verdict before any commit, and `mark_stale` (`:487`), whose skip is at `:513` and whose one admission is at `:518`
-Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:597`, `:660`, `:685`, `:1585`, `:2215` (unaudited)
+Existing check: `crates/daemon/tests/attestation_verifier_attest.rs:597`, `:660`, `:685`, `:1595`, `:2225` (unaudited)
 Impact: falsifier: an attestation on `Mismatch`, or `MarkStale` on `Unavailable` or on the attestation
 Open questions:
 - Which two digests does the reason name? - resolved with answer: the cited sha256 and the git blob id at the path, where #1172 AC8 and #1169 D6 say "the oid and both digests"; the driver reports no content digest for a mismatch the header size decides, so the blob id is the observed value the reason carries, recorded as an amendment in the preamble.

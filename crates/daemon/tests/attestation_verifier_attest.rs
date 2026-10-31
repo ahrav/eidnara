@@ -1292,7 +1292,11 @@ fn no_model_client_is_reachable_from_the_verifier_module() {
                     .trim_end_matches(':')
                     .to_owned()
             })
-            .filter(|path| !ALLOWED.iter().any(|allowed| path.starts_with(allowed)))
+            .filter(|path| {
+                !ALLOWED
+                    .iter()
+                    .any(|allowed| path == allowed || path.starts_with(&format!("{allowed}::")))
+            })
             .collect();
         found.extend(
             FORBIDDEN
@@ -1319,6 +1323,12 @@ fn no_model_client_is_reachable_from_the_verifier_module() {
         ]
     );
     assert!(!violations("let x = crate::history_summarizer::run();").is_empty());
+    // An allowlisted prefix matches whole path segments only.
+    assert_eq!(
+        violations("crate::git_sources_model_client::run()"),
+        ["crate::git_sources_model_client::run"]
+    );
+    assert!(violations("crate::git_sources::open_with_slots(root)").is_empty());
     // The allowlisted paths are the ones the sources use, so the allowlist is not vacuous.
     let all: String = sources.concat();
     for allowed in ALLOWED {
