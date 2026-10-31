@@ -532,6 +532,32 @@ fn load_decisions_for_objects(
     Ok(rows)
 }
 
+impl crate::Envelope<'_> {
+    /// The decision rows of `object_ids` live at the committed tip this envelope extends, read in
+    /// the envelope's transaction, in unspecified order, one row per id with a live decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::CorruptCanonicalRow`] for a stored payload that fails to decode.
+    pub fn decisions_for_objects(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<DecisionRow>, KernelError> {
+        load_decisions_for_objects(self.tx, self.commit_seq - 1, object_ids)
+    }
+
+    /// `linked_decision_evidence` reads the decision's cited evidence in the envelope's
+    /// transaction at the committed tip the envelope extends.
+    pub fn linked_decision_evidence(
+        &self,
+        decision_object_id: &str,
+        max: std::num::NonZeroUsize,
+    ) -> Result<Vec<LinkedEvidence>, KernelError> {
+        linked_evidence(self.tx, decision_object_id, self.commit_seq - 1, max)
+            .map_err(crate::map_sqlite)
+    }
+}
+
 /// Returns each successor's latest predecessor invalidation commit at or before `requested`. `ids` is a JSON array of successor IDs.
 fn load_latest_folds(
     tx: &Transaction<'_>,
@@ -692,12 +718,53 @@ fn classify_row_error(error: rusqlite::Error) -> KernelError {
     }
 }
 
-impl KernelStore {
-    /// The decisions of scope `scope_id` live at `requested` whose registry `source_kind` `source` admits, as `(created_commit_seq, object_id)` pairs in that order after the pair `after`, at most `max_rows`. A decision's creating commit never changes, so a caller that pages by the last pair it acted on revisits no decision and passes over none created at or before `requested`. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
+impl crate::SnapshotRead<'_> {
+    /// [`KernelStore::linked_decision_evidence_within_budget`] in this transaction.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and the SQLite classification (`Busy`, `Conflict`, `Io`) for a read that fails.
+    /// The store's read errors.
+    pub fn linked_decision_evidence(
+        &self,
+        decision_object_id: &str,
+        max: std::num::NonZeroUsize,
+    ) -> Result<Vec<LinkedEvidence>, KernelError> {
+        linked_evidence(self.tx, decision_object_id, self.requested, max).map_err(crate::map_sqlite)
+    }
+}
+
+/// The page of [`KernelStore::scope_decisions_after_within_budget`] whose registry `source_kind`
+/// compares to `?2` by `$operator`. `INDEXED BY` holds the read to the commit-sequence index, and
+/// the cursor bound `created_commit_seq>=?4` is the range it seeks.
+macro_rules! scope_decisions_after_sql {
+    ($operator:literal) => {
+        concat!(
+            "SELECT d.created_commit_seq, d.object_id
+     FROM decisions d INDEXED BY idx_decisions_known_as_of
+     JOIN object_registry o ON o.object_id=d.object_id
+     WHERE d.scope_id=?1 AND o.source_kind",
+            $operator,
+            "?2 AND d.created_commit_seq<=?3
+       AND (d.invalidated_commit_seq IS NULL OR ?3<d.invalidated_commit_seq)
+       AND d.created_commit_seq>=?4 AND (d.created_commit_seq>?4 OR d.object_id>?5)
+     ORDER BY d.created_commit_seq, d.object_id
+     LIMIT ?6"
+        )
+    };
+}
+
+/// The page for [`SourceKindFilter::Except`].
+const SCOPE_DECISIONS_AFTER_SQL: &str = scope_decisions_after_sql!("<>");
+
+/// The page for [`SourceKindFilter::Only`].
+const SCOPE_DECISIONS_OF_SOURCE_AFTER_SQL: &str = scope_decisions_after_sql!("=");
+
+impl KernelStore {
+    /// The decisions of scope `scope_id` live at `requested` whose registry `source_kind` `source` admits, as `(created_commit_seq, object_id)` pairs in that order after the pair `after`, at most `max_rows`. A decision's creating commit never changes, so a caller that pages by the last pair it acted on revisits no decision and passes over none created at or before `requested`. The read seeks the commit-sequence index `idx_decisions_known_as_of` at `after`'s sequence and walks it forward, so a page reads the decision rows of every scope from `after`'s commit sequence through its last row's commit sequence, or through `requested` when it is short, whatever the scope's size. The wait for a pooled reader and the read itself stop at `budget`'s deadline or interrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Deadline`] when no reader frees or the page query does not finish before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and the SQLite classification (`Busy`, `Conflict`, `Io`) for a read that fails.
     pub fn scope_decisions_after_within_budget(
         &self,
         scope_id: &str,
@@ -707,27 +774,17 @@ impl KernelStore {
         max_rows: std::num::NonZeroUsize,
         budget: &crate::applicability::EvalBudget,
     ) -> Result<Vec<(i64, String)>, KernelError> {
-        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(crate::map_sqlite)?;
+        let mut reader = self.reader_with_limit(&budget.acquire_limit())?;
+        let tx = reader.transaction(TransactionBehavior::Deferred)?;
         snapshot_tip(&tx, requested)?;
-        let (operator, source_kind) = match source {
-            SourceKindFilter::Except(kind) => ("<>", kind),
-            SourceKindFilter::Only(kind) => ("=", kind),
+        let (sql, source_kind) = match source {
+            SourceKindFilter::Except(kind) => (SCOPE_DECISIONS_AFTER_SQL, kind),
+            SourceKindFilter::Only(kind) => (SCOPE_DECISIONS_OF_SOURCE_AFTER_SQL, kind),
         };
         let (after_seq, after_id) = after.unwrap_or((-1, ""));
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
         let rows = tx
-            .prepare_cached(&format!(
-                "SELECT d.created_commit_seq, d.object_id
-                 FROM decisions d JOIN object_registry o ON o.object_id=d.object_id
-                 WHERE d.scope_id=?1 AND o.source_kind{operator}?2 AND d.created_commit_seq<=?3
-                   AND (d.invalidated_commit_seq IS NULL OR ?3<d.invalidated_commit_seq)
-                   AND (d.created_commit_seq>?4 OR (d.created_commit_seq=?4 AND d.object_id>?5))
-                 ORDER BY d.created_commit_seq, d.object_id
-                 LIMIT ?6",
-            ))
+            .prepare_cached(sql)
             .and_then(|mut statement| {
                 statement
                     .query_map(
@@ -744,7 +801,7 @@ impl KernelStore {
                     .collect()
             })
             .map_err(crate::map_sqlite)?;
-        tx.commit().map_err(crate::map_sqlite)?;
+        tx.commit()?;
         Ok(rows)
     }
 
@@ -773,4 +830,43 @@ pub enum SourceKindFilter<'a> {
     Except(&'a str),
     /// Only the named source kind.
     Only(&'a str),
+}
+
+#[cfg(test)]
+mod scope_decisions_plan_tests {
+    /// The page seeks the commit-sequence index at the cursor rather than reading every decision of
+    /// the scope, so its cost follows the rows after the cursor and not the scope's size.
+    #[test]
+    fn the_scope_decision_page_seeks_the_commit_sequence_index() {
+        let directory = tempfile::tempdir().unwrap();
+        drop(crate::KernelStore::open(directory.path()).unwrap());
+        let connection =
+            rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        for sql in [
+            super::SCOPE_DECISIONS_AFTER_SQL,
+            super::SCOPE_DECISIONS_OF_SOURCE_AFTER_SQL,
+        ] {
+            let mut statement = connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let plan = statement
+                .query_map(
+                    rusqlite::params!["project:a", "verifier", 10, 3, "decision", 32],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join(" | ");
+            assert!(
+                plan.contains(
+                    "SEARCH d USING INDEX idx_decisions_known_as_of (created_commit_seq>"
+                ),
+                "{plan}"
+            );
+            assert!(!plan.contains("idx_decisions_scope_fk"), "{plan}");
+            // Rows sort only inside one commit sequence, never across the whole read.
+            assert!(!plan.contains("TEMP B-TREE FOR ORDER BY"), "{plan}");
+        }
+    }
 }

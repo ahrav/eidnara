@@ -17,7 +17,7 @@ ordinary path.
   `redact_durable_text` detection in the path (`dispute.rs:149-162`).
 - `is_lower_hex_oid` accepts exactly 40 or 64 lowercase hex bytes; PR A
   made it `pub` (`crates/kernel/src/scope.rs:710-716`) and re-exported it
-  (`crates/kernel/src/lib.rs:155`).
+  (`crates/kernel/src/lib.rs:159`).
 - `confined_path::check` refuses NUL, empty, `.`, and `..` components,
   protected components, and more than `MAX_COMPONENTS` components
   (`crates/daemon/src/confined_path.rs:29-45`). An absolute path has an

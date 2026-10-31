@@ -10,7 +10,8 @@
 //!
 //! - a skip, before any claim verification read or Kernel write: `skipped_stale` when its latest
 //!   own admission is `Stale`, `skipped_attested` when the registry holds the attestation object id
-//!   [`Identity::of`] derives for the decision and its anchored oid, live or retired;
+//!   [`Identity::of`] derives for the decision and its anchored oid, live or retired, checked at the
+//!   anchor the page's standing read names before the decision is classified, and again after;
 //! - an unverifiable bucket `unverifiable_<reason>`, including `invalid_document_path` for
 //!   [`ClassifyError::InvalidDocumentPath`];
 //! - a verdict bucket (`match`, `mismatch`, `unavailable_<reason>`) and then, for `match` and
@@ -30,9 +31,12 @@
 //! publication derives that identity from the publishing project's root, so a document another
 //! project's root publishes classifies `repository_unbound` here. A root at its repository's top
 //! level binds both its Git identity and the project digest, since publication takes the digest
-//! when the repository had no derivable identity at capture time. Each root's repository identity
-//! is derived when the project's turn comes, before the skip checks, and kept for the process
-//! lifetime once derived, keyed by the root's path and project digest. A
+//! when the repository had no derivable identity at capture time. The verifier derives each root's
+//! repository identity when the project's turn comes, before the skip checks, and keeps it, keyed
+//! by the root's path and project digest, while the root stays bound. The verifier derives a root
+//! whose identity is the project digest alone again on the pass after one of the project's
+//! decisions classifies `repository_unbound`, so a repository's first commit binds its `git:`
+//! identity. A
 //! derivation the pass deadline cuts short passes over the project for this pass before any
 //! decision is read, so no decision is counted or attempted, and the next pass derives again. A
 //! root whose repository is unreadable, or whose walk spends its own share of the pass, binds no
@@ -44,14 +48,18 @@
 //!
 //! The cursor passes a decision only once it is resolved, and only while every decision before it
 //! is resolved too; resolved decisions above the cursor are remembered, so no pass reads them
-//! again. A decision is resolved by a skip, an unverifiable class, a decision outside the
-//! verifier's input ([`Class::NotInput`]), a terminal `Unavailable` reason, a committed or replayed
-//! write, a `conflict`, an invalid write set, or K = [`MAX_ATTEMPTS`] attempts in total, shared
-//! across transient `Unavailable` reasons, deadlines, Kernel refusals, a changed decision, and
-//! degraded witnesses. The K-th attempt counts `witness_degraded_skipped` when its witness
-//! degraded and `unavailable_skipped` otherwise. A terminal reason is kept per `(decision, oid)`
-//! for the process lifetime. All state is process-local: a restart rescans from the start, and the
-//! write set's receipt replay make the rescan write nothing.
+//! again. A project whose pages end at an empty page or a page shorter than [`PAGE_ROWS`], with
+//! every decision resolved, records as its floor the page start just past the target's commit
+//! sequence, and its next pass pages from the later of the floor and the cursor. A decision is
+//! resolved by a skip, an unverifiable class, a decision outside the verifier's input
+//! ([`Class::NotInput`]), a terminal `Unavailable` reason, a committed, replayed, or skipped write,
+//! a `conflict`, an invalid write set, or K = [`MAX_ATTEMPTS`] attempts in total, shared across
+//! transient `Unavailable` reasons, deadlines at classification, during an object read, or at the
+//! commit, Kernel refusals of the classification or the commit, a changed decision, and degraded
+//! witnesses. The K-th attempt counts `witness_degraded_skipped` when its witness degraded and
+//! `unavailable_skipped` otherwise. A terminal reason is kept for the claim's path at its oid for
+//! the process lifetime. All state is process-local: a restart rescans from the start, and the
+//! skips and the write set's receipt replay keep the rescan idempotent.
 //!
 //! After its decisions resolve or reach their bound, each project runs the applicability step over
 //! the attestations the verifier authored; a refusal that stops the decisions step stops the
@@ -75,7 +83,8 @@ use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
 use kernel::{
-    ClaimFactsError, CommitReadIncarnation, CommitReadTarget, Disposition, KernelError, KernelStore,
+    AnchorCondition, ClaimFactsError, CommitReadIncarnation, CommitReadTarget, Disposition,
+    GitCondition, KernelError, KernelStore,
 };
 
 use super::applicability::{self, Applicability};
@@ -270,7 +279,12 @@ struct ProjectState {
     /// Resolved decisions above the cursor, by `(created_commit_seq, object_id)`; every entry at or
     /// before the cursor is dropped when the cursor advances.
     resolved: BTreeSet<(i64, String)>,
-    attempts: HashMap<String, u32>,
+    /// Attempts of unresolved decisions, by `(created_commit_seq, object_id)`. A cursor advance
+    /// drops the entries at or before the cursor, and a recorded floor drops those below it.
+    attempts: BTreeMap<(i64, String), u32>,
+    /// The page start just past a commit sequence at or before which every live non-`verifier`
+    /// decision of the scope is resolved; a pass pages from the later of it and the cursor.
+    floor: Option<(i64, String)>,
     /// The last attestation the applicability step passed, by `(created_commit_seq, object_id)`.
     applicability: Option<(i64, String)>,
     /// The commit the applicability cycle pages through, fixed when the cycle starts, so a cycle
@@ -282,6 +296,7 @@ struct ProjectState {
 #[derive(Default)]
 pub struct Verifier {
     projects: HashMap<String, ProjectState>,
+    /// Terminal `Unavailable` reasons, keyed by the claim's relative path and its oid.
     terminal: HashSet<(String, String)>,
     /// Each root's repository identities, keyed by its path and project digest, so a path bound
     /// again to another project derives again.
@@ -303,6 +318,23 @@ impl Verifier {
     /// of its resolved prefix.
     pub fn cursor(&self, scope_id: &str) -> Option<(i64, String)> {
         self.projects.get(scope_id)?.cursor.clone()
+    }
+
+    /// The page start past the commit sequence a drained project `scope_id` paged through.
+    pub fn floor(&self, scope_id: &str) -> Option<(i64, String)> {
+        self.projects.get(scope_id)?.floor.clone()
+    }
+
+    pub fn attempts(&self, scope_id: &str) -> usize {
+        self.projects
+            .get(scope_id)
+            .map_or(0, |state| state.attempts.len())
+    }
+
+    pub fn remembered(&self, scope_id: &str) -> usize {
+        self.projects
+            .get(scope_id)
+            .map_or(0, |state| state.resolved.len())
     }
 
     /// One pass over `projects`, counting into `counters`.
@@ -343,7 +375,7 @@ impl Verifier {
                 report.failed = true;
                 break;
             }
-            let Some(roots) = self.roots(project, clock) else {
+            let Some(roots) = self.roots(project, clock, &mut report) else {
                 report.failed = true;
                 continue;
             };
@@ -366,8 +398,13 @@ impl Verifier {
                 state,
                 verdicts: 0,
                 bytes_read: 0,
+                unbound: false,
             };
-            if matches!(run.run(), Step::StopPass) {
+            let step = run.run();
+            if run.unbound {
+                self.forget_digest_only_roots(project);
+            }
+            if matches!(step, Step::StopPass) {
                 break;
             }
         }
@@ -385,6 +422,7 @@ impl Verifier {
         &mut self,
         project: &Project,
         clock: &dyn PassClock,
+        report: &mut PassReport,
     ) -> Option<Vec<(PathBuf, String)>> {
         let mut bound = Vec::new();
         for root in &project.roots {
@@ -398,12 +436,28 @@ impl Verifier {
                         ids
                     }
                     Err(DerivationFailure::Budget) if clock.budget().is_exhausted() => return None,
-                    Err(DerivationFailure::Budget | DerivationFailure::Unreadable) => Vec::new(),
+                    Err(DerivationFailure::Budget | DerivationFailure::Unreadable) => {
+                        report.failed = true;
+                        Vec::new()
+                    }
                 },
             };
             bound.extend(ids.into_iter().map(|id| (root.path.clone(), id)));
         }
         Some(bound)
+    }
+
+    fn forget_digest_only_roots(&mut self, project: &Project) {
+        for root in &project.roots {
+            let key = (root.path.clone(), root.digest.clone());
+            if self
+                .repository_ids
+                .get(&key)
+                .is_some_and(|ids| matches!(ids.as_slice(), [only] if *only == root.digest))
+            {
+                self.repository_ids.remove(&key);
+            }
+        }
     }
 }
 
@@ -440,6 +494,8 @@ struct ProjectRun<'a, 'r> {
     state: &'a mut ProjectState,
     verdicts: u64,
     bytes_read: u64,
+    /// Whether a decision named a repository identity that none of the project's roots binds.
+    unbound: bool,
 }
 
 impl ProjectRun<'_, '_> {
@@ -473,7 +529,8 @@ impl ProjectRun<'_, '_> {
 
     fn decisions(&mut self, target: CommitReadTarget) -> Step {
         let budget = self.clock.budget();
-        let mut after = self.state.cursor.clone();
+        let mut after = self.state.cursor.clone().max(self.state.floor.clone());
+        // `prefix` holds while every decision before `after` is resolved.
         let mut prefix = true;
         loop {
             let page = match self.kernel.scope_decisions_after_within_budget(
@@ -484,10 +541,12 @@ impl ProjectRun<'_, '_> {
                 PAGE_ROWS,
                 budget,
             ) {
-                Ok(page) if page.is_empty() => return Step::Resolved,
+                Ok(page) if page.is_empty() => break,
                 Ok(page) => page,
                 Err(error) => return self.refused(error == KernelError::Deadline),
             };
+            // A page shorter than the row cap is the last one at the target.
+            let last = page.len() < PAGE_ROWS.get();
             let ids: Vec<String> = page.iter().map(|(_, id)| id.clone()).collect();
             let standings = match self
                 .kernel
@@ -518,16 +577,19 @@ impl ProjectRun<'_, '_> {
                     self.counters.add("skipped_stale", 1);
                     Step::Resolved
                 } else {
-                    self.decision(&object_id, target)
+                    let anchor = standing.and_then(|standing| standing.decision.anchor_id);
+                    self.decision(&key, anchor.as_deref(), target)
                 };
                 match step {
                     Step::Resolved => {
                         self.report.progressed |= !known;
-                        self.state.attempts.remove(&object_id);
+                        self.state.attempts.remove(&key);
                         if prefix {
                             let mut above = self.state.resolved.split_off(&key);
                             above.remove(&key);
                             self.state.resolved = above;
+                            self.state.attempts = self.state.attempts.split_off(&key);
+                            self.state.attempts.remove(&key);
                             self.state.cursor = Some(key);
                         } else {
                             self.state.resolved.insert(key);
@@ -541,19 +603,29 @@ impl ProjectRun<'_, '_> {
                     return Step::Capped;
                 }
             }
+            if last {
+                break;
+            }
         }
+        if prefix {
+            let floor = (target.through_commit.saturating_add(1), String::new());
+            self.state.attempts = self.state.attempts.split_off(&floor);
+            self.state.resolved = self.state.resolved.split_off(&floor);
+            self.state.floor = Some(floor);
+        }
+        Step::Resolved
     }
 
     /// One more attempt at a decision that ended without a terminal outcome; the K-th resolves it
     /// under `skipped`.
-    fn retry(&mut self, object_id: &str, skipped: &str) -> Step {
+    fn retry(&mut self, key: &(i64, String), skipped: &str) -> Step {
         self.report.failed = true;
-        let attempts = self.state.attempts.entry(object_id.to_owned()).or_insert(0);
+        let attempts = self.state.attempts.entry(key.clone()).or_insert(0);
         *attempts += 1;
         if *attempts < MAX_ATTEMPTS {
             return Step::Unresolved;
         }
-        self.state.attempts.remove(object_id);
+        self.state.attempts.remove(key);
         self.counters.add(skipped, 1);
         Step::Resolved
     }
@@ -561,16 +633,56 @@ impl ProjectRun<'_, '_> {
     /// [`Self::retry`] under `unavailable_skipped` for an attempt that may have ended at the
     /// deadline: an attempt that leaves the decision unresolved stops the pass when `deadline`
     /// holds, and the K-th resolves it.
-    fn transient(&mut self, object_id: &str, deadline: bool) -> Step {
-        match self.retry(object_id, "unavailable_skipped") {
+    fn transient(&mut self, key: &(i64, String), deadline: bool) -> Step {
+        match self.retry(key, "unavailable_skipped") {
             Step::Unresolved if deadline => Step::StopPass,
             step => step,
         }
     }
 
-    fn decision(&mut self, object_id: &str, target: CommitReadTarget) -> Step {
+    /// The skip of a decision whose attestation at `oid` the registry holds, or the stop a refused
+    /// registry read leaves; `None` when no attestation is registered.
+    fn attested(&mut self, object_id: &str, oid: &str) -> Option<Step> {
+        let attestation = [Identity::of(object_id, oid).object_id];
+        match self
+            .kernel
+            .object_states_within_budget(self.clock.budget(), &attestation)
+        {
+            Ok((_, states))
+                if states.first().is_some_and(|state| {
+                    state
+                        .as_ref()
+                        .is_some_and(|state| state.object.source_kind == VERIFIER_SOURCE_KIND)
+                }) =>
+            {
+                self.counters.add("skipped_attested", 1);
+                Some(Step::Resolved)
+            }
+            Ok(_) => None,
+            Err(error) => Some(self.refused(error == KernelError::Deadline)),
+        }
+    }
+
+    fn decision(
+        &mut self,
+        key: &(i64, String),
+        anchor: Option<&str>,
+        at: CommitReadTarget,
+    ) -> Step {
+        let object_id = key.1.as_str();
         let budget = self.clock.budget();
-        let classification = match classify(self.kernel, object_id, target, self.roots, budget) {
+        // The anchored oid alone names the attestation, so an attested decision skips before its
+        // classification reads; a refused anchor read leaves the decision to its classification.
+        if let Some(Ok(Some(AnchorCondition::Git(GitCondition::ReachableFrom { oid, .. })))) =
+            anchor.map(|id| {
+                self.kernel
+                    .anchor_condition_as_of(id, at.through_commit, budget)
+            })
+            && let Some(step) = self.attested(object_id, &oid)
+        {
+            return step;
+        }
+        let classification = match classify(self.kernel, object_id, at, self.roots, budget) {
             Ok(classification) => classification,
             Err(ClassifyError::InvalidDocumentPath) => {
                 self.counters
@@ -578,13 +690,13 @@ impl ProjectRun<'_, '_> {
                 return Step::Resolved;
             }
             Err(ClassifyError::Facts(ClaimFactsError::Kernel(KernelError::Deadline))) => {
-                return self.transient(object_id, true);
+                return self.transient(key, true);
             }
             // The next pass captures the new incarnation and resets the project's state.
             Err(ClassifyError::Facts(ClaimFactsError::IncarnationMismatch)) => {
                 return self.refused(false);
             }
-            Err(ClassifyError::Facts(_)) => return self.transient(object_id, false),
+            Err(ClassifyError::Facts(_)) => return self.transient(key, false),
         };
         let input = match &classification.class {
             Class::NotInput => return Step::Resolved,
@@ -596,28 +708,26 @@ impl ProjectRun<'_, '_> {
             Class::Verifiable(input) => input,
         };
         let oid = input.claim.oid().to_owned();
-        if self.terminal.contains(&(object_id.to_owned(), oid.clone())) {
+        if self
+            .terminal
+            .contains(&(input.claim.relative_path().to_owned(), oid.clone()))
+        {
             return Step::Resolved;
         }
-        let attestation = Identity::of(object_id, &oid).object_id;
-        match self
-            .kernel
-            .object_states_within_budget(budget, std::slice::from_ref(&attestation))
-        {
-            Ok((_, states)) if states.first().is_some_and(Option::is_some) => {
-                self.counters.add("skipped_attested", 1);
-                return Step::Resolved;
-            }
-            Ok(_) => {}
-            Err(error) => return self.refused(error == KernelError::Deadline),
+        // The pre-check passes over a decision whose page standing named no readable anchor.
+        if let Some(step) = self.attested(object_id, &oid) {
+            return step;
         }
         let evaluation = match &input.root {
             Ok(root) => verify(root, &input.claim, &Reads(self.clock)),
-            Err(reason) => Evaluation {
-                verdict: Verdict::Unavailable(*reason),
-                bytes_read: 0,
-                blob_oid: None,
-            },
+            Err(reason) => {
+                self.unbound |= *reason == Reason::RepositoryUnbound;
+                Evaluation {
+                    verdict: Verdict::Unavailable(*reason),
+                    bytes_read: 0,
+                    blob_oid: None,
+                }
+            }
         };
         self.verdicts += 1;
         self.bytes_read = self.bytes_read.saturating_add(evaluation.bytes_read);
@@ -629,24 +739,25 @@ impl ProjectRun<'_, '_> {
         self.counters.consider(&bucket, evaluation.bytes_read);
         match evaluation.verdict {
             Verdict::Unavailable(reason) if reason.is_terminal() => {
-                self.terminal.insert((object_id.to_owned(), oid));
+                self.terminal
+                    .insert((input.claim.relative_path().to_owned(), oid));
                 return Step::Resolved;
             }
             Verdict::Unavailable(reason) => {
                 let deadline = matches!(reason, Reason::Deadline(_));
-                return self.transient(object_id, deadline);
+                return self.transient(key, deadline);
             }
             Verdict::Match | Verdict::Mismatch => {}
         }
         if self.clock.passed(Poll::Commit) {
-            return self.transient(object_id, true);
+            return self.transient(key, true);
         }
         let outcome = attest(self.kernel, &classification, &evaluation, budget);
-        self.outcome(object_id, evaluation.verdict, outcome)
+        self.outcome(key, evaluation.verdict, outcome)
     }
 
     /// Counts `outcome` under its effect counter, after the receipt or refusal returned.
-    fn outcome(&mut self, object_id: &str, verdict: Verdict, outcome: Outcome) -> Step {
+    fn outcome(&mut self, key: &(i64, String), verdict: Verdict, outcome: Outcome) -> Step {
         let counter = match outcome {
             Outcome::Committed(_) => "attestation_committed",
             Outcome::StaleCommitted(_) => "stale_committed",
@@ -658,17 +769,17 @@ impl ProjectRun<'_, '_> {
             Outcome::InvalidWriteSet => "commit_refused_invalid_write_set",
             Outcome::WitnessDegraded => {
                 self.counters.add("witness_degraded", 1);
-                return self.retry(object_id, "witness_degraded_skipped");
+                return self.retry(key, "witness_degraded_skipped");
             }
             Outcome::Changed => {
                 self.counters.add("commit_refused_changed", 1);
-                return self.transient(object_id, false);
+                return self.transient(key, false);
             }
             // An `Io` refusal can follow a durable commit; the next attempt finds the attestation
             // in the registry or the decision `Stale` and skips it.
             Outcome::Refused(error) => {
                 self.counters.add(refused_counter(error), 1);
-                return self.transient(object_id, error == KernelError::Deadline);
+                return self.transient(key, error == KernelError::Deadline);
             }
         };
         self.counters.add(counter, 1);

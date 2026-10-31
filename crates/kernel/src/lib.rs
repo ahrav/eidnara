@@ -34,6 +34,7 @@ mod review_staging;
 pub mod schema;
 mod scope;
 mod slice;
+mod snapshot_read;
 mod source_descriptor;
 mod source_export;
 mod source_hold;
@@ -89,7 +90,7 @@ pub use claim_causality::{
 };
 pub use claim_facts::{
     AdmissionFacts, ClaimDecisionFacts, ClaimFactBounds, ClaimFacts, ClaimFactsError,
-    ClaimFactsSnapshot, ClaimOccurrence, ClaimStanding, ExcludedRepresentation,
+    ClaimFactsSnapshot, ClaimOccurrence, ClaimStanding, DecisionStanding, ExcludedRepresentation,
     MAX_CLAIM_OBJECT_ID_BYTES, RepresentationExclusion, ServedFacts, ServedStanding,
     SupportingApproval,
 };
@@ -167,6 +168,7 @@ pub use slice::{
     ObservationPayload, ObservationRow, ObservationSpec, ObservationWriteOutcome, PagedDecision,
     RetirementOutcome, SliceSnapshot, SourceKindFilter,
 };
+pub use snapshot_read::SnapshotRead;
 pub use source_descriptor::{
     CitingDescriptor, LiveDescriptor, LiveDescriptorPage, MAX_DESCRIPTORS_PER_COMMIT,
     SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND, SourceDescriptorDetail,

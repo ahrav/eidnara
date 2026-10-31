@@ -28,9 +28,9 @@ use kernel::source_identity::{OccurrenceClass, lower_hex as hex};
 use kernel::{
     AdmissionEvent, AdmissionRequest, AnchorCondition, CausalEvidence, ClaimCausalityError,
     ClaimCausalityRequest, CommitIntent, CommitReadTarget, CommitReceipt, DecisionEventPayload,
-    DecisionEventSpec, DecisionPayload, DecisionSpec, Disposition, Envelope, EventKind,
-    GitCondition, KernelError, KernelStore, Maturity, ObservationPayload, ObservationSpec,
-    ParentReference, PriorDecision, SourceClass,
+    DecisionEventSpec, DecisionPayload, DecisionRow, DecisionSpec, Disposition, Envelope,
+    EventKind, GitCondition, KernelError, KernelStore, Maturity, ObservationPayload,
+    ObservationSpec, ParentReference, PriorDecision, SourceClass,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -113,9 +113,10 @@ pub enum Outcome {
     /// another one or none. Nothing committed, whether detected before or inside the envelope.
     Changed,
     /// A `Match` or `Mismatch` names no blob, the witness detail failed to serialize, the write
-    /// set failed [`WriteSet::check`] before the commit, the Kernel refused the causality request
-    /// as malformed, or the `MarkStale` admission returned a disposition other than `Stale`;
-    /// nothing committed.
+    /// set failed [`WriteSet::check`] before the commit, a set handed to [`WriteSet::commit`]
+    /// differs from the set the model decision's row yields, the Kernel refused the causality
+    /// request as malformed, or the `MarkStale` admission returned a disposition other than
+    /// `Stale`; the store stays at its tip.
     InvalidWriteSet,
     /// The Kernel refused the commit or a read before it. A [`KernelError::Io`] from the commit
     /// can follow a durable commit, so a
@@ -140,8 +141,7 @@ pub enum Skip {
 }
 
 /// Performs the one write `evaluation`'s verdict calls for on the decision `classification`
-/// names, under `budget`, which bounds the model decision's row read and the writer wait. The caller computed `evaluation` for the classification's
-/// claim before the call.
+/// names.
 pub fn attest(
     kernel: &KernelStore,
     classification: &Classification,
@@ -155,17 +155,40 @@ pub fn attest(
     match (evaluation.verdict, evaluation.blob_oid.as_deref()) {
         (Verdict::Unavailable(_), _) => Outcome::Skipped(Skip::Unavailable),
         (_, None) => Outcome::InvalidWriteSet,
-        (Verdict::Match, Some(blob)) => match WriteSet::new(kernel, target, input, blob, budget) {
-            Ok(write_set) => write_set.commit(kernel, budget),
-            Err(outcome) => outcome,
-        },
+        (Verdict::Match, Some(blob)) => attest_match(kernel, target, input, blob, budget),
         (Verdict::Mismatch, Some(blob)) => mark_stale(kernel, target, input, blob, budget),
     }
 }
 
-/// The rows a `Match` writes, built from the classification and the model decision's row before
-/// the commit. [`WriteSet::commit`] checks them with [`WriteSet::check`] before it opens the
-/// envelope.
+fn attest_match(
+    kernel: &KernelStore,
+    target: CommitReadTarget,
+    input: &VerifierInput,
+    blob_oid: &str,
+    budget: &EvalBudget,
+) -> Outcome {
+    let keyed = intent(input, Write::Attest, blob_oid);
+    let opposite = intent(input, Write::Stale, blob_oid);
+    run(
+        kernel,
+        budget,
+        keyed,
+        Some(opposite),
+        Outcome::Committed,
+        |envelope| {
+            let write_set = WriteSet::at_tip(envelope, target, input, blob_oid)?;
+            if !write_set.check() {
+                return Err(Stop::Outcome(Outcome::InvalidWriteSet));
+            }
+            write_set.write(envelope, kernel)
+        },
+    )
+}
+
+/// The rows a `Match` writes, built from the classification and the model decision's row.
+/// [`WriteSet::commit`] checks them with [`WriteSet::check`] before it opens the envelope and
+/// commits them only while they equal the set the model decision's row at the committed tip
+/// yields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteSet {
     pub target: CommitReadTarget,
@@ -219,6 +242,17 @@ impl WriteSet {
             .into_iter()
             .find(|row| row.object_id == model.object_id)
             .ok_or(Outcome::Changed)?;
+        Self::from_row(target, input, blob_oid, row)
+    }
+
+    /// The attestation takes its kind, scope, and summary from `row`, the model decision's row.
+    fn from_row(
+        target: CommitReadTarget,
+        input: &VerifierInput,
+        blob_oid: &str,
+        row: DecisionRow,
+    ) -> Result<Self, Outcome> {
+        let model = &input.decision;
         let claim = &input.claim;
         let ids = Identity::of(&model.object_id, claim.oid());
         let digest = hex(claim.digest());
@@ -358,7 +392,9 @@ impl WriteSet {
             && witness.evidence_id.is_none()
     }
 
-    /// Commits the write set in one envelope after [`Self::check`] passes.
+    /// The write set must match the set rebuilt from the model decision's row at the committed
+    /// tip, except for `observed_at` and `recorded_at`; other differences produce
+    /// [`Outcome::InvalidWriteSet`].
     pub fn commit(&self, kernel: &KernelStore, budget: &EvalBudget) -> Outcome {
         if !self.check() {
             return Outcome::InvalidWriteSet;
@@ -372,8 +408,31 @@ impl WriteSet {
             keyed,
             Some(opposite),
             Outcome::Committed,
-            |envelope| self.write(envelope, kernel),
+            |envelope| {
+                let mut built = Self::at_tip(envelope, self.target, &self.input, blob)?;
+                built.witness.observed_at = self.witness.observed_at;
+                built.citation.recorded_at = self.citation.recorded_at;
+                if built != *self {
+                    return Err(Stop::Outcome(Outcome::InvalidWriteSet));
+                }
+                self.write(envelope, kernel)
+            },
         )
+    }
+
+    fn at_tip(
+        envelope: &Envelope<'_>,
+        target: CommitReadTarget,
+        input: &VerifierInput,
+        blob_oid: &str,
+    ) -> Result<Self, Stop> {
+        let object_id = &input.decision.object_id;
+        let row = envelope
+            .decisions_for_objects(std::slice::from_ref(object_id))?
+            .into_iter()
+            .find(|row| &row.object_id == object_id)
+            .ok_or(Stop::Outcome(Outcome::Changed))?;
+        Self::from_row(target, input, blob_oid, row).map_err(Stop::Outcome)
     }
 
     fn write(&self, envelope: &mut Envelope<'_>, kernel: &KernelStore) -> Result<(), Stop> {
@@ -592,6 +651,7 @@ fn recheck(
         && object.invalidated_commit_seq.is_none()
         && object.superseded_by.is_none()
         && object.created_commit_seq == model.created_commit_seq
+        && model.created_commit_seq <= target.through_commit
         && object.domain_id == model.domain_id
         && (
             &object.source_kind,
@@ -608,6 +668,14 @@ fn recheck(
     if (prior.source_class, prior.taint_class) != (model.source_class, model.taint_class) {
         return Err(changed());
     }
+    let row = envelope
+        .decisions_for_objects(std::slice::from_ref(&model.object_id))?
+        .into_iter()
+        .find(|row| row.object_id == model.object_id)
+        .ok_or_else(changed)?;
+    if row.anchor_id != model.anchor_id {
+        return Err(changed());
+    }
     let anchor = match &model.anchor_id {
         Some(anchor_id) => envelope.anchor_condition(anchor_id)?,
         None => None,
@@ -617,13 +685,35 @@ fn recheck(
         Some(AnchorCondition::Git(GitCondition::ReachableFrom { oid, .. }))
             if oid == input.claim.oid()
     );
+    let claim = &input.claim;
     let cited = envelope
         .live_source_descriptor_of_lineage(OccurrenceClass::RepositoryDocuments, &input.lineage_id)?
         .is_some_and(|descriptor| {
+            let field = |name: &str| crate::git_reconcile::identity_field(&descriptor, name);
             descriptor.object_id == input.descriptor_object_id
                 && descriptor.detail.evidence_id == input.evidence_id
+                && descriptor.detail.revision == input.descriptor_revision
+                && field("relative_path") == Some(claim.relative_path())
+                && field("repository_id") == Some(input.repository_id.as_str())
+                && crate::memory_capture::cite::digest_bytes(&descriptor.detail.artifact_digest)
+                    == Some(*claim.digest())
+                && descriptor.byte_length == claim.byte_length()
         });
     if !anchored || !cited {
+        return Err(changed());
+    }
+    // The classifier reads the row's own citation first and the newest events after it, so the
+    // own citation is checked outside the recency-bounded event window.
+    let own = row.evidence_id.as_deref();
+    let max = super::classify::MAX_EVENT_CITATIONS;
+    let cites = own == Some(input.evidence_id.as_str())
+        || envelope
+            .linked_decision_evidence(&model.object_id, max.saturating_add(1))?
+            .iter()
+            .filter(|evidence| Some(evidence.evidence_id.as_str()) != own)
+            .take(max.get())
+            .any(|evidence| evidence.evidence_id == input.evidence_id);
+    if !cites {
         return Err(changed());
     }
     Ok((state.scope_id, prior))
@@ -671,3 +761,13 @@ pub(super) fn verifier_intent(operation_key: String, frozen: &serde_json::Value)
         cause: "deterministic attestation verifier".into(),
     }
 }
+
+/// The id prefixes [`Identity::of`] writes under, in field order: object, decision, witness
+/// observation, witness object. The plugin commit route refuses rows under them, so no caller can
+/// occupy an attestation's ids before the verifier writes them.
+pub const ID_PREFIXES: [&str; 4] = [
+    "verattest:",
+    "verattestdec:",
+    "verwitness:",
+    "verwitnessobj:",
+];

@@ -101,7 +101,7 @@ the difference noted.
 - The admission write path has no liveness check on `evidence_id`:
   `write_admission` passes it through `identity()` only
   (`admission.rs:1753-1758`) and relies on the FK. A FK violation maps to
-  `KernelError::Conflict` (`crates/kernel/src/lib.rs:218-230`), which the
+  `KernelError::Conflict` (`crates/kernel/src/lib.rs:223-235`), which the
   route reports as `invalid/already_exists` when raised inside `apply`
   (`commit.rs:1084-1092`).
 

@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use daemon::attestation_verifier::attest::{CITATION_EVENT_KIND, Identity, Outcome, attest};
 use daemon::attestation_verifier::bounded_pass::{
-    COUNTERS, Counters, IDLE_INTERVAL, MAX_VERDICTS, PAGE_ROWS, PASS_DEADLINE, PassClock,
-    PassReport, Poll, Project, RETRY_INTERVAL, Root, Verifier,
+    COUNTERS, Counters, IDLE_INTERVAL, MAX_ATTEMPTS, MAX_VERDICTS, PAGE_ROWS, PASS_DEADLINE,
+    PassClock, PassReport, Poll, Project, RETRY_INTERVAL, Root, Verifier,
 };
 use daemon::attestation_verifier::classify::{BoundRoot, classify};
 use daemon::attestation_verifier::{MAX_BLOB_BYTES, Stage, verify};
@@ -2291,6 +2291,65 @@ fn a_worktree_root_verifies_a_document_published_under_the_project_digest() {
     assert!(exists(&store, &attestation(&decision, &repo)));
 }
 
+#[test]
+fn a_digest_only_root_derives_again_after_a_decision_names_an_unbound_repository() {
+    let store = Store::open();
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "--quiet", "--initial-branch=main"]);
+    let mut repo = Repo {
+        bare: work.clone(),
+        work: work.clone(),
+        _dir: dir,
+        head: String::new(),
+        digest: format!("{:x}", Sha256::digest(b"unborn")),
+    };
+    store.scope(&repo);
+    let project = repo.project_at(&work);
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::open();
+    verifier.pass(
+        &store.kernel,
+        std::slice::from_ref(&project),
+        &on,
+        &counters,
+        &clock,
+    );
+    assert_eq!(clock.polled(Poll::Derive), 1);
+
+    std::fs::write(work.join("doc.md"), text(0, 1024)).unwrap();
+    git(&work, &["add", "--all"]);
+    git(&work, &["commit", "--quiet", "-m", "first"]);
+    repo.head = git(&work, &["rev-parse", "HEAD"]);
+    let decision = store.decision_under(
+        &repo,
+        &format!("git:{}", repo.head),
+        "u0",
+        "doc.md",
+        &text(0, 1024),
+    );
+    for _ in 0..MAX_ATTEMPTS {
+        verifier.pass(
+            &store.kernel,
+            std::slice::from_ref(&project),
+            &on,
+            &counters,
+            &Clock::open(),
+        );
+        assert_accounting(&counters);
+    }
+    assert_eq!(counters.get("unavailable_repository_unbound"), 1);
+    assert_eq!(counters.get("unavailable_skipped"), 0);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert!(exists(&store, &attestation(&decision, &repo)));
+
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[project], &on, &counters, &clock);
+    assert_eq!(clock.polled(Poll::Derive), 0);
+}
+
 /// A root path bound again under another project digest derives its repository identity again.
 #[test]
 fn a_root_path_bound_under_another_project_derives_again() {
@@ -2352,6 +2411,456 @@ fn a_row_the_standing_read_refuses_is_skipped_after_k_passes() {
     assert!(exists(&store, &attestation(&good, &repo)));
     assert_eq!(counters.get("unavailable_skipped"), 1);
     assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, good);
+
+    // The refused page standing names no anchor, so a restart skips the attested decision at the
+    // check after its classification, before any repository read.
+    let store = store.reopen();
+    let tip = store.kernel.tip().unwrap();
+    let counters = Counters::default();
+    let clock = Clock::open();
+    Verifier::default().pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(counters.get("skipped_attested"), 1);
+    assert_eq!(counters.get("attestation_replayed"), 0);
+    assert_eq!(clock.opens(), 0);
+    assert_eq!(store.kernel.tip().unwrap(), tip);
+}
+
+/// An anchor row the pre-check cannot read leaves its decision to classification, which refuses it
+/// and spends an attempt each pass until the K-th skips it, while the decision behind it verifies
+/// in the first pass.
+#[test]
+fn a_refused_anchor_read_leaves_the_decision_to_its_classification() {
+    let store = Store::open();
+    let repo = Repo::new(
+        "anchor",
+        &[
+            ("bad.md".into(), text(0, 1024)),
+            ("good.md".into(), text(1, 1024)),
+        ],
+    );
+    store.scope(&repo);
+    let bad = store.decision(&repo, "a0", "bad.md", &text(0, 1024));
+    let good = store.decision(&repo, "a1", "good.md", &text(1, 1024));
+    store
+        .sqlite()
+        .execute(
+            "UPDATE anchors SET anchor_kind='bogus' WHERE anchor_id='anchor_a0'",
+            [],
+        )
+        .unwrap();
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    for pass in 1..=3 {
+        let report = verifier.pass(
+            &store.kernel,
+            &[repo.project()],
+            &on,
+            &counters,
+            &Clock::open(),
+        );
+        assert!(report.failed, "pass {pass}");
+        assert_accounting(&counters);
+        assert_eq!(counters.get("attestation_committed"), 1, "pass {pass}");
+        let skipped = u64::from(pass == 3);
+        assert_eq!(counters.get("unavailable_skipped"), skipped, "pass {pass}");
+        if pass < 3 {
+            assert_eq!(verifier.cursor(&repo.scope_id()), None, "pass {pass}");
+        }
+    }
+    assert!(exists(&store, &attestation(&good, &repo)));
+    assert!(!exists(&store, &attestation(&bad, &repo)));
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, good);
+}
+
+/// A project whose pages ran out with every decision resolved records the page start just past the
+/// target's sequence as its floor. A decision committed at the floor's sequence, decisions committed
+/// behind another project's, and a decision committed during the project's own pass after its
+/// target capture are each read on a later pass, and a transient decision committed past the floor
+/// holds the project at its cursor until it resolves.
+#[test]
+fn a_drained_project_verifies_the_decisions_committed_after_its_last_page() {
+    let store = Store::open();
+    let files: Vec<_> = (0..5)
+        .map(|i| (format!("doc{i}.md"), text(i, 1024)))
+        .collect();
+    let repo = Repo::new("drained", &files);
+    let other = Repo::new("other", &files);
+    store.scope(&repo);
+    store.scope(&other);
+    let first = store.decision(&repo, "d0", &files[0].0, &files[0].1);
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let both = [repo.project(), other.project()];
+    let pass = |verifier: &mut Verifier, clock: &Clock<'_>| {
+        let report = verifier.pass(&store.kernel, &both, &on, &counters, clock);
+        assert_accounting(&counters);
+        report
+    };
+    let floor = |verifier: &Verifier, repo: &Repo| verifier.floor(&repo.scope_id());
+    let past = |seq: i64| Some((seq + 1, String::new()));
+    let clock = Clock::open();
+    let captured = store.kernel.tip().unwrap();
+    pass(&mut verifier, &clock);
+    assert_eq!(clock.opens(), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, first);
+    // The floor is just past the target captured before the attestation commit, which the page
+    // excludes.
+    assert_eq!(floor(&verifier, &repo), past(captured));
+    let report = pass(&mut verifier, &Clock::open());
+    assert!(!report.progressed && !report.failed);
+    let drained = store.kernel.tip().unwrap();
+    assert_eq!(floor(&verifier, &repo), past(drained));
+    assert_eq!(floor(&verifier, &other), past(drained));
+
+    // One commit lands at the floor's own sequence.
+    let next = store.model_decision(&repo, "n0", "", None, None);
+    assert_eq!(store.kernel.tip().unwrap(), drained + 1);
+    let report = pass(&mut verifier, &Clock::open());
+    assert!(report.progressed && !report.failed);
+    assert_eq!(counters.get("unverifiable_no_anchor"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, next);
+    assert_eq!(floor(&verifier, &repo), past(drained + 1));
+
+    let later = store.decision(&repo, "d1", &files[1].0, &files[1].1);
+    let unbound = store.decision_under(&repo, "git:unbound", "d2", &files[2].0, &files[2].1);
+    let last = store.decision(&repo, "d3", &files[3].0, &files[3].1);
+    let clock = Clock::open();
+    pass(&mut verifier, &clock);
+    assert_eq!(clock.opens(), 2);
+    assert!(exists(&store, &attestation(&later, &repo)));
+    assert!(exists(&store, &attestation(&last, &repo)));
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, later);
+    assert_eq!(floor(&verifier, &repo), past(drained + 1));
+    for attempt in 2..=3 {
+        let report = pass(&mut verifier, &Clock::open());
+        assert!(report.failed);
+        assert_eq!(counters.get("unavailable_repository_unbound"), attempt);
+    }
+    assert_eq!(counters.get("unavailable_skipped"), 1);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, last);
+    assert!(!exists(&store, &attestation(&unbound, &repo)));
+    let resolved = store.kernel.tip().unwrap();
+    assert_eq!(floor(&verifier, &repo), past(resolved));
+
+    // `other` pages from its own floor and verifies the decisions committed behind `repo`'s. The
+    // rotation starts this pass with `repo`, whose floor then lies past them; the floors pin it.
+    for (i, (path, body)) in files.iter().enumerate().take(3) {
+        store.decision(&other, &format!("o{i}"), path, body);
+    }
+    let before = store.kernel.tip().unwrap();
+    let clock = Clock::open();
+    let report = pass(&mut verifier, &clock);
+    assert!(report.progressed && !report.failed);
+    assert_eq!(clock.opens(), 3);
+    assert_eq!(counters.get("attestation_committed"), 6);
+    assert_eq!(floor(&verifier, &repo), past(before));
+    assert_eq!(floor(&verifier, &other), past(before));
+
+    // A decision committed during `repo`'s own run, after its target capture and while a decision
+    // there is pending, waits for the next pass: the floor is the captured target's, not the tip's.
+    let pending = store.decision(&repo, "p0", &files[4].0, &files[4].1);
+    let during = Mutex::new(None);
+    let clock = Clock::with(|poll, opens| {
+        if poll == Poll::Read(Stage::Open) && opens == 1 {
+            *during.lock().unwrap() = Some(store.model_decision(&repo, "m0", "", None, None));
+        }
+        false
+    });
+    let report = pass(&mut verifier, &clock);
+    assert!(report.progressed && !report.failed);
+    assert_eq!(counters.get("attestation_committed"), 7);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, pending);
+    let during = during.lock().unwrap().clone().unwrap();
+    let report = pass(&mut verifier, &Clock::open());
+    assert!(report.progressed && !report.failed);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, during);
+    assert_eq!(counters.get("unverifiable_no_anchor"), 2);
+    let clock = Clock::open();
+    let report = pass(&mut verifier, &clock);
+    assert!(!report.progressed && !report.failed);
+    assert_eq!(clock.opens(), 0);
+    assert_eq!(counters.get("considered"), 12);
+    assert_eq!(counters.get("skipped_attested"), 0);
+}
+
+/// An attested decision skips under `skipped_attested` at the oid its anchor names before it is
+/// classified, so a restart counts it skipped after its cited descriptor retires, where its
+/// classification alone would count `unverifiable_descriptor_retired`.
+#[test]
+fn an_attested_decision_skips_before_its_classification_after_its_descriptor_retires() {
+    let store = Store::open();
+    let repo = Repo::new("retired", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let decision = store.decision(&repo, "s0", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    let clock = Clock::open();
+    Verifier::default().pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    let descriptor: String = store
+        .sqlite()
+        .query_row(
+            "SELECT object_id FROM observations WHERE evidence_id='srcev:s0'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store
+        .kernel
+        .commit(intent("retire-descriptor"), |envelope| {
+            envelope.retire_observation(&descriptor)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let target = store.kernel.capture_commit_read_target().unwrap();
+    let budget = EvalBudget::unbounded();
+    let classification = classify(&store.kernel, &decision, target, &[repo.bound()], &budget);
+    assert_eq!(
+        classification.unwrap().class,
+        daemon::attestation_verifier::classify::Class::Unverifiable(
+            daemon::attestation_verifier::classify::Unverifiable::DescriptorRetired
+        )
+    );
+
+    let store = store.reopen();
+    let tip = store.kernel.tip().unwrap();
+    let counters = Counters::default();
+    let clock = Clock::open();
+    Verifier::default().pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_accounting(&counters);
+    assert_eq!(counters.get("skipped_attested"), 1);
+    assert_eq!(counters.get("considered"), 0);
+    assert_eq!(counters.get("unverifiable_descriptor_retired"), 0);
+    assert_eq!(clock.opens(), 0);
+    assert_eq!(store.kernel.tip().unwrap(), tip);
+}
+
+/// A decision committed through a plugin route under the object id the attestation would take.
+fn squat(store: &Store, object_id: &str) {
+    store
+        .kernel
+        .commit(intent(&format!("squat-{object_id}")), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                decision_id: format!("squatdec:{object_id}"),
+                object_id: object_id.to_owned(),
+                domain_id: "memory".into(),
+                proposition_id: None,
+                scope_id: None,
+                anchor_id: None,
+                evidence_id: None,
+                decision_kind: "ARCHITECTURE".into(),
+                payload: DecisionPayload {
+                    summary: "a plugin-route object under the attestation's id".into(),
+                    rationale: "{}".into(),
+                },
+                source_kind: "assistant".into(),
+                source_id: "memory_capture".into(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// A registry object under the attestation's id written by another source is not the attestation:
+/// the mismatch behind it is marked stale, and the match behind it is verified and its commit
+/// refused by the occupied id, with no `skipped_attested`.
+#[test]
+fn an_object_another_source_wrote_under_the_attestations_id_skips_nothing() {
+    let store = Store::open();
+    let repo = Repo::new(
+        "squat",
+        &[
+            ("same.md".into(), text(0, 1024)),
+            ("changed.md".into(), text(1, 1024)),
+        ],
+    );
+    store.scope(&repo);
+    let matched = store.decision(&repo, "q0", "same.md", &text(0, 1024));
+    let mismatched = store.decision(&repo, "q1", "changed.md", &text(2, 1024));
+    squat(&store, &attestation(&matched, &repo));
+    squat(&store, &attestation(&mismatched, &repo));
+    let counters = Counters::default();
+    let clock = Clock::open();
+    Verifier::default().pass(&store.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_accounting(&counters);
+    assert_eq!(counters.get("skipped_attested"), 0);
+    assert_eq!(counters.get("mismatch"), 1);
+    assert_eq!(counters.get("stale_committed"), 1);
+    assert_eq!(counters.get("match"), 1);
+    assert_eq!(counters.get("attestation_committed"), 0);
+    assert_eq!(counters.get("commit_refused_other"), 1);
+    assert_eq!(clock.opens(), 2);
+    assert_eq!(store.verifier_rows(), 0);
+}
+
+/// A terminal reason names the claim's path at its oid, so a store with another history, where the
+/// same decision object id cites a path the commit holds, verifies the decision.
+#[test]
+fn a_terminal_reason_does_not_resolve_the_same_object_id_citing_another_path() {
+    let repo = Repo::new("history", &[("doc.md".into(), text(0, 1024))]);
+    let store = Store::open();
+    store.scope(&repo);
+    store.decision(&repo, "h0", "absent.md", "gone\n");
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(counters.get("unavailable_path_absent"), 1);
+
+    let other = Store::open();
+    other.scope(&repo);
+    let decision = other.decision(&repo, "h0", "doc.md", &text(0, 1024));
+    let clock = Clock::open();
+    verifier.pass(&other.kernel, &[repo.project()], &on, &counters, &clock);
+    assert_eq!(clock.opens(), 1);
+    assert_eq!(counters.get("match"), 1);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert!(exists(&other, &attestation(&decision, &repo)));
+}
+
+/// The attempt of a transient decision retired before it resolves is dropped once the cursor or
+/// the floor passes its commit, so retired decisions leave no attempt behind.
+#[test]
+fn a_transient_decision_retired_before_it_resolves_leaves_no_attempt() {
+    let store = Store::open();
+    let repo = Repo::new("retired", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let unbound = store.decision_under(&repo, "git:unbound", "r0", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(counters.get("unavailable_repository_unbound"), 1);
+    assert_eq!(verifier.attempts(&repo.scope_id()), 1);
+
+    store
+        .kernel
+        .commit(intent("retire-r0"), |envelope| {
+            envelope.retire_decision(&unbound)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(verifier.attempts(&repo.scope_id()), 0);
+
+    let unbound = store.decision_under(&repo, "git:unbound", "r1", "other.md", &text(1, 1024));
+    let verified = store.decision(&repo, "r2", "doc.md", &text(0, 1024));
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(counters.get("unavailable_repository_unbound"), 2);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert_eq!(verifier.attempts(&repo.scope_id()), 1);
+    store
+        .kernel
+        .commit(intent("retire-r1"), |envelope| {
+            envelope.retire_decision(&unbound)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    // A transient decision behind the verified one keeps the floor where it is, so the cursor's
+    // advance to the verified decision is what drops the retired decision's attempt.
+    store.decision_under(&repo, "git:unbound", "r3", "third.md", &text(2, 1024));
+    let floor = verifier.floor(&repo.scope_id());
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(counters.get("unavailable_repository_unbound"), 3);
+    assert_eq!(verifier.cursor(&repo.scope_id()).unwrap().1, verified);
+    assert_eq!(verifier.floor(&repo.scope_id()), floor);
+    assert_eq!(verifier.attempts(&repo.scope_id()), 1);
+}
+
+/// A resolved decision remembered behind a transient head is dropped once the floor passes it, so
+/// a batch retired before its head resolves leaves no memory behind.
+#[test]
+fn a_resolved_decision_retired_behind_a_transient_head_is_forgotten_at_the_floor() {
+    let store = Store::open();
+    let repo = Repo::new("forgotten", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&repo);
+    let head = store.decision_under(&repo, "git:unbound", "f0", "other.md", &text(1, 1024));
+    let tail = store.decision(&repo, "f1", "doc.md", &text(0, 1024));
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert_eq!(counters.get("unavailable_repository_unbound"), 1);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert_eq!(verifier.remembered(&repo.scope_id()), 1);
+    assert_eq!(verifier.attempts(&repo.scope_id()), 1);
+
+    store
+        .kernel
+        .commit(intent("retire-f0-f1"), |envelope| {
+            envelope.retire_decision(&head)?;
+            envelope.retire_decision(&tail)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    verifier.pass(
+        &store.kernel,
+        &[repo.project()],
+        &on,
+        &counters,
+        &Clock::open(),
+    );
+    assert!(verifier.floor(&repo.scope_id()).is_some());
+    assert_eq!(verifier.remembered(&repo.scope_id()), 0);
+    assert_eq!(verifier.attempts(&repo.scope_id()), 0);
+}
+
+/// A root whose derivation fails marks the pass failed even when the project has no decision to
+/// count the failure through, so the task retries at [`RETRY_INTERVAL`] instead of idling.
+#[test]
+fn a_failed_derivation_without_decisions_fails_the_pass() {
+    let store = Store::open();
+    let broken = Repo::new("broken-idle", &[("doc.md".into(), text(0, 1024))]);
+    store.scope(&broken);
+    break_gitfile(&broken);
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::open();
+    let report = verifier.pass(
+        &store.kernel,
+        &[broken.project_at(&broken.work)],
+        &on,
+        &counters,
+        &clock,
+    );
+    assert_eq!(clock.polled(Poll::Derive), 1);
+    assert_eq!(counters.get("considered"), 0);
+    assert!(report.failed);
+    assert!(!report.progressed);
 }
 
 /// The applicability step runs after the decisions step stops at its verdict bound: a pass that

@@ -508,15 +508,15 @@ impl ConfigCache {
         effective
     }
 
-    /// The effective `verifier.enabled` for `project_root` under the user tier the environment's
-    /// `XDG_CONFIG_HOME` and `HOME` name. Tier warnings are left to the routes' loads.
-    pub fn verifier_enabled(
-        &mut self,
-        xdg_config_home: Option<&str>,
-        home: Option<&str>,
-        project_root: &Path,
-    ) -> bool {
-        self.effective_for_env(xdg_config_home, home, project_root)
+    /// The key is user-tier only, so the merge names the filesystem root as its project and its
+    /// result holds for every project root.
+    pub fn verifier_enabled(&mut self, xdg_config_home: Option<&str>, home: Option<&str>) -> bool {
+        const _: () = assert!(matches!(
+            ConfigKey::VerifierEnabled.tier_class(),
+            TierClass::UserOnly
+        ));
+        let user = user_config_base_from(xdg_config_home, home).map(discover_tier);
+        self.effective_from_sources(user, Path::new("/"))
             .0
             .verifier_enabled
     }
@@ -3970,14 +3970,14 @@ mod verifier_parity {
             &serde_json::json!({ "verifier": { "enabled": true } }),
         );
         backdate(120);
-        assert!(cache.verifier_enabled(home.path().to_str(), None, project.path()));
+        assert!(cache.verifier_enabled(home.path().to_str(), None));
         // A past mtime outside the recent-change margin still differs from the memoized one.
         write_tier(
             &home.path().join("eidnara"),
             &serde_json::json!({ "verifier": { "enabled": false } }),
         );
         backdate(60);
-        assert!(!cache.verifier_enabled(home.path().to_str(), None, project.path()));
+        assert!(!cache.verifier_enabled(home.path().to_str(), None));
 
         let home = tempfile::tempdir().unwrap();
         write_tier(
@@ -3985,7 +3985,7 @@ mod verifier_parity {
             &serde_json::json!({ "verifier": { "enabled": true } }),
         );
         let mut cache = ConfigCache::default();
-        assert!(!cache.verifier_enabled(home.path().to_str(), None, project.path()));
+        assert!(!cache.verifier_enabled(home.path().to_str(), None));
         let (_, warnings) = cache.effective_for_env(home.path().to_str(), None, project.path());
         assert!(
             warnings.iter().any(|warning| warning.contains(
@@ -3993,5 +3993,24 @@ mod verifier_parity {
             )),
             "{warnings:?}"
         );
+    }
+
+    /// The flag is user-tier only, so `verifier_enabled` resolves the user tier alone even when
+    /// the project root holds its own tier file.
+    #[test]
+    fn the_pass_reader_reads_the_user_tier_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_tier(
+            &home.path().join("eidnara"),
+            &serde_json::json!({ "verifier": { "enabled": true } }),
+        );
+        write_tier(
+            &project.path().join(".eidnara"),
+            &serde_json::json!({ "verifier": { "enabled": false } }),
+        );
+        let mut cache = ConfigCache::default();
+        assert!(cache.verifier_enabled(home.path().to_str(), None));
+        assert!(cache.project.stamp.is_none(), "{:?}", cache.project.path);
     }
 }

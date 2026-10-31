@@ -475,7 +475,7 @@ Required faults and enabling state: a held reader pool
 inside the statement; a parent interrupt raised mid-read.
 Confidence: medium - [evidence](evidence/p5dep-budget-exhaustion-stops-a-budgeted-kernel-read.md).
 Read `slice/read.rs:134`, `:241`, `open.rs:565-593`, `:1654-1664`,
-`:1693-1722`, `claim_facts.rs:248`, `:313`, `:326`, `:548`, `:552`. The
+`:1693-1722`, `claim_facts.rs:248`, `:313`, `:326`, `:568`, `:572`. The
 statement-interrupt path for claim facts is read in code but not observed by
 a test this pass found.
 Existing check: `an_eligibility_read_against_held_kernel_readers_ends_at_the_budget`,

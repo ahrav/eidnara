@@ -88,7 +88,7 @@ the current line.
 - `over_budget` from the allocation limit depends on the pack layout of the
   commit, a tree on the path, or the blob, so a repack can change it, while
   the ticket classes `over_budget` as terminal. The question was recorded for the #1173 owner,
-  who kept it terminal per `(decision, oid)` for the process lifetime
+  who kept it terminal per claim `(path, oid)` for the process lifetime
   (`p6-new-verdict-deterministic`).
 - The verifier maps an allocation refusal on any object, including a commit
   or tree, to `over_budget`. No test constructs a commit or tree above
