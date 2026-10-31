@@ -638,12 +638,13 @@ impl WorkLedgers {
             value: RedactedValue(Some(work)),
             completion: (self.host.token(), self.request.token(), self.route.token()),
         };
+        let join_work = (captured.completion.0.clone(), captured.completion.2.clone());
         if self.route.is_closed() {
+            drop(join_work);
             drop(captured);
             drop(result_tx);
             return blocking_result(result_rx, BlockingWorkFailed::RouteClosing);
         }
-        let join_work = (captured.completion.0.clone(), captured.completion.2.clone());
         let blocking = tokio::task::spawn_blocking(move || {
             let mut captured = captured;
             let work = captured

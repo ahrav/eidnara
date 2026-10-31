@@ -617,11 +617,42 @@ async fn deferred_work_counts_only_entries_still_held() {
     assert_eq!(shared.deferred_work(), 2 + 31);
     drop(kept);
     tokio::time::timeout(Duration::from_secs(1), async {
+        while shared.deferred_work() != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("both deferred closes drain once their work stops");
+
+    // The next deferral prunes the drained trackers.
+    let CloseFixture {
+        route,
+        decision,
+        aborted,
+        physical_work,
+        ..
+    } = fixture_on(shared.clone(), 3);
+    let close_shared = shared.clone();
+    let close =
+        tokio::spawn(async move { settle_route_work(&close_shared, route, decision).await });
+    aborted.await.unwrap();
+    assert!(!close.await.unwrap());
+    assert_eq!(
+        shared
+            .deferred_trackers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "drained trackers were pruned at the next deferral"
+    );
+    drop(physical_work);
+    tokio::time::timeout(Duration::from_secs(1), async {
         shared.tracker.close();
         shared.tracker.wait().await;
     })
     .await
-    .expect("both deferred closes finish once their work stops");
+    .expect("every deferred close finishes once its work stops");
 }
 
 /// After its work stops, a deferred close emits under one fresh close budget and retires the
@@ -644,6 +675,9 @@ async fn a_deferred_close_emits_under_one_fresh_close_budget() {
     aborted.await.unwrap();
     assert!(!close.await.unwrap());
     let _reserve = shared.terminal_budget.try_charge(1 << 20).unwrap();
+    // Separating the deferral instant from the stop instant shows the budget starts when the
+    // work stops.
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let stopped = Instant::now();
     drop(physical_work);
     tokio::time::timeout(Duration::from_secs(1), async {

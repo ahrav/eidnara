@@ -61,7 +61,8 @@ impl Settlement {
     /// A settle aborted after it took the credit returned that credit to the generation; the
     /// retried terminal waits here for a fresh one. The wait has no deadline of its own:
     /// `settle_stopped_route_work` runs it under its emission deadline, which retires the
-    /// generation when it passes first. `Err` reports a closed credit pool.
+    /// generation when it passes first. `Err` reports a retired generation, which has no use
+    /// for the terminal, or a closed credit pool.
     pub(crate) async fn reattach_credit(&self, generation: &GenerationCore) -> Result<(), ()> {
         let missing = self
             .credit
@@ -69,12 +70,16 @@ impl Settlement {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_none();
         if missing {
-            let credit = generation
-                .terminal_credits
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| ())?;
+            if generation.token.is_cancelled() || generation.writer.is_retired() {
+                return Err(());
+            }
+            let credit = tokio::select! {
+                biased;
+                () = generation.token.cancelled() => return Err(()),
+                credit = generation.terminal_credits.clone().acquire_owned() => {
+                    credit.map_err(|_| ())?
+                }
+            };
             *self
                 .credit
                 .lock()
@@ -1525,8 +1530,8 @@ async fn settle_stopped_route_work<H: HostHandler>(
 ) {
     // Aborting a dispatch task can interrupt settlement before terminal emission completes;
     // `queued` marks the requests whose terminal reached the writer. Requests that still hold
-    // their terminal credit go first, so their credits return before an aborted winner waits
-    // for a fresh one.
+    // their terminal credit go first, so a retry's wait for a fresh credit cannot delay them
+    // under the shared deadline.
     let emit_remaining = async {
         let mut retries = Vec::new();
         for (key, settlement) in entries {

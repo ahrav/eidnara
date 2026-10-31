@@ -1626,6 +1626,9 @@ async fn a_dropped_connection_with_work_past_the_close_budget_keeps_the_host_ser
     let host = TestHost::start_with(|config| {
         config.timing.route_close_budget = Duration::from_millis(50);
         config.limits.max_routes = 2;
+        // One connection slot: the successor connects only after the dropped connection's
+        // close returned, which takes the deferred close.
+        config.limits.max_connections = 1;
     })
     .await;
     let release = ReleaseOnDrop(&host.handler);
@@ -1844,6 +1847,13 @@ async fn shutdown_joins_a_deferred_close(after_windows: bool) {
     let release = ReleaseOnDrop(&handler);
     let (mut client, channel, epoch, corr) =
         start_held_blocking_work(&host, "shutdown-deferred", "blocking_hold", 1).await;
+    // The observer connects before the route Goodbye, so its handshake stays outside the
+    // timed window.
+    let mut observer = if after_windows {
+        None
+    } else {
+        Some(host.client().await)
+    };
     client
         .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
         .await
@@ -1873,11 +1883,6 @@ async fn shutdown_joins_a_deferred_close(after_windows: bool) {
         assert_eq!(frame.error_code(), "unknown_channel");
     }
 
-    let mut observer = if after_windows {
-        None
-    } else {
-        Some(host.client().await)
-    };
     let shutdown = tokio::spawn(host.shutdown());
     if let Some(observer) = observer.as_mut() {
         // `route.open` answers `target_unavailable` once shutdown has begun draining; seeing
