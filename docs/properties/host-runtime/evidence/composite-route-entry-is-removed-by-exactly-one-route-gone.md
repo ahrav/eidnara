@@ -101,12 +101,16 @@ All three trip the fatal latch, so the map entry outlives the route only for as
 long as the incarnation is terminating. That is a weaker bound than the record's
 `Impact:` assumes ("for the host's lifetime") but it is a bound.
 
-> Dated note, 2026-10-31 (#1201): exception 2 no longer trips the latch. Work
-> that outlives both route-close windows hands the route to a deferred close,
-> which runs route-gone once the work stops, subject to `MAX_DEFERRED_WORK`;
-> forced shutdown keeps its fatal timeout. A `run_route_gone` caller that
-> loses the claim now returns `false` and leaves finalization to the owner
-> that claimed route-gone.
+> Dated note, 2026-10-31 (#1201): the graceful close path had a latch trip
+> this list did not name: `settle_route_work`'s post-abort wait expiring with
+> work still running. That trip is gone; the route passes to a deferred close
+> that runs route-gone once the work stops, bounded by `MAX_DEFERRED_WORK`, so
+> on that path the composite entry outlives the route while the host keeps
+> serving. Exception 2, the forced-drain trip in `force_close_all_routes`, is
+> unchanged. A `run_route_gone` caller that loses the claim now returns `false`
+> and leaves finalization to the owner that claimed route-gone. The record's
+> `dispatch.rs` line references cite e447c927; its `runtime.rs` references
+> cite the #1201 head.
 
 **Existing coverage, both spans re-verified.**
 

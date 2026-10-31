@@ -773,8 +773,8 @@ them without creating implementation tickets.
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8747
 [memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L141-L212
 [memory-default]: ../../../crates/daemon/src/config.rs#L122
-[dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L903-L1263
-[close]: ../../../crates/host-runtime/src/dispatch.rs#L1459-L1515
+[dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L905-L1265
+[close]: ../../../crates/host-runtime/src/dispatch.rs#L1461-L1517
 [read-callback]: ../../../crates/storage/src/lib.rs#L346
 [write-callback]: ../../../crates/storage/src/lib.rs#L439
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2380
