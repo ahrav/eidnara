@@ -963,3 +963,64 @@ fn the_anchor_read_returns_the_decoded_condition_and_refuses_an_undecodable_row(
         "a corrupt neighbor leaves another anchor readable"
     );
 }
+
+/// The envelope read answers as `anchor_condition_as_of` does at the committed tip the envelope
+/// extends: a live anchor decodes, an anchor inserted earlier in the same envelope reads as absent,
+/// and an anchor invalidated before that tip reads as absent.
+#[test]
+fn an_envelope_reads_the_anchors_live_at_the_tip_it_extends() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = seeded_store(directory.path());
+    let budget = EvalBudget::unbounded();
+    let mut kinds = every_kind();
+    let (live_name, live_value, live_expected) = kinds.remove(0);
+    let (gone_name, gone_value, _) = kinds.remove(0);
+    let (new_name, new_value, _) = kinds.remove(0);
+    let live = spec(live_name, live_value);
+    let gone = spec(gone_name, gone_value);
+    let new = spec(new_name, new_value);
+    store
+        .commit_before(deadline(), intent("live-and-gone"), |envelope| {
+            envelope.insert_anchor(live.clone())?;
+            envelope.insert_anchor(gone.clone())?;
+            Ok(String::new())
+        })
+        .unwrap();
+    // A later commit lets `gone` be invalidated at a sequence after its creating commit.
+    store
+        .commit_before(deadline(), intent("later"), |envelope| {
+            envelope.insert_anchor(spec(kinds[0].0, kinds[0].1.clone()))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    let connection = Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap();
+    connection
+        .execute(
+            "UPDATE anchors SET invalidated_commit_seq=?1 WHERE anchor_id=?2",
+            rusqlite::params![tip, gone.anchor_id],
+        )
+        .unwrap();
+    let expected = store
+        .anchor_condition_as_of(&live.anchor_id, tip, &budget)
+        .unwrap();
+    assert_eq!(expected, Some(live_expected));
+    let mut read = None;
+    store
+        .commit_before(deadline(), intent("read"), |envelope| {
+            envelope.insert_anchor(new.clone())?;
+            read = Some((
+                envelope.anchor_condition(&live.anchor_id)?,
+                envelope.anchor_condition(&gone.anchor_id)?,
+                envelope.anchor_condition(&new.anchor_id)?,
+                envelope.anchor_condition("anchor-never")?,
+            ));
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(read.unwrap(), (expected, None, None, None));
+}
