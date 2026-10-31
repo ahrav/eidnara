@@ -472,21 +472,24 @@ impl super::KernelStore {
         requested: i64,
         budget: &super::applicability::EvalBudget,
     ) -> Result<Option<AnchorCondition>, KernelError> {
-        let limit = budget.acquire_limit();
-        limit.run(|| {
-            if requested < 0 {
-                return Err(KernelError::InvalidInput);
-            }
-            let mut reader = self.reader_with_limit(&limit)?;
-            let tx = reader.transaction(rusqlite::TransactionBehavior::Deferred)?;
-            if requested > super::commit_read::tip(&tx).map_err(super::map_sqlite)? {
-                return Err(KernelError::FutureSnapshot);
-            }
-            let condition = condition_at(&tx, anchor_id, requested)?;
-            tx.commit()?;
-            limit.check()?;
-            Ok(condition)
+        self.read_as_of(requested, budget, |snapshot| {
+            snapshot.anchor_condition(anchor_id)
         })
+    }
+}
+
+impl super::SnapshotRead<'_> {
+    /// [`super::KernelStore::anchor_condition_as_of`] in this transaction.
+    ///
+    /// # Errors
+    ///
+    /// `CorruptCanonicalRow` for a stored row that fails [`validate_anchor_row`], and the store's
+    /// read errors.
+    pub fn anchor_condition(
+        &self,
+        anchor_id: &str,
+    ) -> Result<Option<AnchorCondition>, KernelError> {
+        condition_at(self.tx, anchor_id, self.requested)
     }
 }
 

@@ -1217,48 +1217,74 @@ impl KernelStore {
         requested: i64,
         budget: &crate::applicability::EvalBudget,
     ) -> Result<CitingDescriptor, KernelError> {
+        self.read_as_of(requested, budget, |snapshot| {
+            snapshot
+                .source_descriptors_citing_evidence(class, &[evidence_id])?
+                .pop()
+                .unwrap_or(Err(KernelError::CorruptCanonicalRow))
+        })
+    }
+}
+
+impl crate::SnapshotRead<'_> {
+    /// [`KernelStore::source_descriptor_citing_evidence`] for each of `evidence_ids`, in request
+    /// order, from one statement. An entry is `Err(CorruptCanonicalRow)` when its live row fails
+    /// the descriptor row checks, including a stored class other than `class`; the other entries
+    /// still answer.
+    ///
+    /// # Errors
+    ///
+    /// The store's read errors.
+    pub fn source_descriptors_citing_evidence(
+        &self,
+        class: OccurrenceClass,
+        evidence_ids: &[&str],
+    ) -> Result<Vec<Result<CitingDescriptor, KernelError>>, KernelError> {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
-                "SELECT {DESCRIPTOR_COLUMNS},({live}) AS live
-                 FROM observations b INDEXED BY idx_observations_evidence_fk
+                "SELECT {DESCRIPTOR_COLUMNS},({live}) AS live,j.key AS cited
+                 FROM json_each(?3) j
+                 CROSS JOIN observations b INDEXED BY idx_observations_evidence_fk
+                   ON b.evidence_id=j.value
                  CROSS JOIN object_registry o ON o.object_id=b.object_id
                  CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
-                 WHERE b.evidence_id=?3 AND b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
+                 WHERE b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
                    AND o.object_id GLOB '{DESCRIPTOR_OBJECT_ID_PREFIX}*'
                    AND o.source_kind=?1 AND o.object_kind='observation'
                    AND o.created_commit_seq<=?2
-                 ORDER BY live DESC,o.object_id
-                 LIMIT 1",
+                 ORDER BY j.key,live DESC,o.object_id",
                 live = Descriptors::LiveAtEnd.predicate("?2", "0"),
             )
         });
-        let limit = budget.acquire_limit();
-        limit.run(|| {
-            if requested < 0 {
-                return Err(KernelError::InvalidInput);
+        let mut found: Vec<Option<Result<CitingDescriptor, KernelError>>> =
+            evidence_ids.iter().map(|_| None).collect();
+        let ids = serde_json::to_string(evidence_ids).map_err(|_| KernelError::InvalidInput)?;
+        let mut statement = self.tx.prepare_cached(&SQL).map_err(map_sqlite)?;
+        let mut rows = statement
+            .query(rusqlite::params![class.code(), self.requested, ids])
+            .map_err(map_sqlite)?;
+        while let Some(row) = rows.next().map_err(map_sqlite)? {
+            let cited: i64 = row.get("cited").map_err(map_sqlite)?;
+            let slot = usize::try_from(cited)
+                .ok()
+                .and_then(|index| found.get_mut(index))
+                .ok_or(KernelError::CorruptCanonicalRow)?;
+            // Rows arrive live first and then in object id order, so an entry's first row decides it.
+            if slot.is_some() {
+                continue;
             }
-            let mut reader = self.reader_with_limit(&limit)?;
-            let tx = reader.transaction(rusqlite::TransactionBehavior::Deferred)?;
-            if requested > crate::commit_read::tip(&tx).map_err(map_sqlite)? {
-                return Err(KernelError::FutureSnapshot);
-            }
-            let found = tx
-                .query_row_cached(
-                    &SQL,
-                    rusqlite::params![class.code(), requested, evidence_id],
-                    |row| Ok((raw_descriptor(row)?, row.get::<_, bool>("live")?)),
-                )
-                .optional()
-                .map_err(map_sqlite)?;
-            let citing = match found {
-                Some((raw, true)) => CitingDescriptor::Live(Box::new(checked(raw, class)?)),
-                Some((_, false)) => CitingDescriptor::Retired,
-                None => CitingDescriptor::Uncited,
-            };
-            tx.commit()?;
-            limit.check()?;
-            Ok(citing)
-        })
+            let live: bool = row.get("live").map_err(map_sqlite)?;
+            *slot = Some(if live {
+                let raw = raw_descriptor(row).map_err(map_sqlite)?;
+                checked(raw, class).map(|descriptor| CitingDescriptor::Live(Box::new(descriptor)))
+            } else {
+                Ok(CitingDescriptor::Retired)
+            });
+        }
+        Ok(found
+            .into_iter()
+            .map(|entry| entry.unwrap_or(Ok(CitingDescriptor::Uncited)))
+            .collect())
     }
 }
 
