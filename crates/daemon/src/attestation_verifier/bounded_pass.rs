@@ -31,9 +31,12 @@
 //! publication derives that identity from the publishing project's root, so a document another
 //! project's root publishes classifies `repository_unbound` here. A root at its repository's top
 //! level binds both its Git identity and the project digest, since publication takes the digest
-//! when the repository had no derivable identity at capture time. Each root's repository identity
-//! is derived when the project's turn comes, before the skip checks, and kept for the process
-//! lifetime once derived, keyed by the root's path and project digest. A
+//! when the repository had no derivable identity at capture time. The verifier derives each root's
+//! repository identity when the project's turn comes, before the skip checks, and keeps it, keyed
+//! by the root's path and project digest, while the root stays bound. The verifier derives a root
+//! whose identity is the project digest alone again on the pass after one of the project's
+//! decisions classifies `repository_unbound`, so a repository's first commit binds its `git:`
+//! identity. A
 //! derivation the pass deadline cuts short passes over the project for this pass before any
 //! decision is read, so no decision is counted or attempted, and the next pass derives again. A
 //! root whose repository is unreadable, or whose walk spends its own share of the pass, binds no
@@ -352,8 +355,13 @@ impl Verifier {
                 state,
                 verdicts: 0,
                 bytes_read: 0,
+                unbound: false,
             };
-            if matches!(run.run(), Step::StopPass) {
+            let step = run.run();
+            if run.unbound {
+                self.forget_digest_only_roots(project);
+            }
+            if matches!(step, Step::StopPass) {
                 break;
             }
         }
@@ -391,6 +399,19 @@ impl Verifier {
         }
         Some(bound)
     }
+
+    fn forget_digest_only_roots(&mut self, project: &Project) {
+        for root in &project.roots {
+            let key = (root.path.clone(), root.digest.clone());
+            if self
+                .repository_ids
+                .get(&key)
+                .is_some_and(|ids| matches!(ids.as_slice(), [only] if *only == root.digest))
+            {
+                self.repository_ids.remove(&key);
+            }
+        }
+    }
 }
 
 /// The repository identities `root`'s documents can be published under: for a root at its
@@ -426,6 +447,8 @@ struct ProjectRun<'a, 'r> {
     state: &'a mut ProjectState,
     verdicts: u64,
     bytes_read: u64,
+    /// Whether a decision named a repository identity that none of the project's roots binds.
+    unbound: bool,
 }
 
 impl ProjectRun<'_, '_> {
@@ -628,11 +651,14 @@ impl ProjectRun<'_, '_> {
         }
         let evaluation = match &input.root {
             Ok(root) => verify(root, &input.claim, &Reads(self.clock)),
-            Err(reason) => Evaluation {
-                verdict: Verdict::Unavailable(*reason),
-                bytes_read: 0,
-                blob_oid: None,
-            },
+            Err(reason) => {
+                self.unbound |= *reason == Reason::RepositoryUnbound;
+                Evaluation {
+                    verdict: Verdict::Unavailable(*reason),
+                    bytes_read: 0,
+                    blob_oid: None,
+                }
+            }
         };
         self.verdicts += 1;
         self.bytes_read = self.bytes_read.saturating_add(evaluation.bytes_read);

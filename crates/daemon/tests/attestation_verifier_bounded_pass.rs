@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use daemon::attestation_verifier::attest::{CITATION_EVENT_KIND, Identity, Outcome, attest};
 use daemon::attestation_verifier::bounded_pass::{
-    COUNTERS, Counters, IDLE_INTERVAL, MAX_VERDICTS, PAGE_ROWS, PASS_DEADLINE, PassClock, Poll,
-    Project, RETRY_INTERVAL, Root, Verifier,
+    COUNTERS, Counters, IDLE_INTERVAL, MAX_ATTEMPTS, MAX_VERDICTS, PAGE_ROWS, PASS_DEADLINE,
+    PassClock, Poll, Project, RETRY_INTERVAL, Root, Verifier,
 };
 use daemon::attestation_verifier::classify::{BoundRoot, classify};
 use daemon::attestation_verifier::{MAX_BLOB_BYTES, Stage, verify};
@@ -1513,6 +1513,65 @@ fn a_worktree_root_verifies_a_document_published_under_the_project_digest() {
     assert_eq!(counters.get("match"), 1);
     assert_eq!(counters.get("unavailable_repository_unbound"), 0);
     assert!(exists(&store, &attestation(&decision, &repo)));
+}
+
+#[test]
+fn a_digest_only_root_derives_again_after_a_decision_names_an_unbound_repository() {
+    let store = Store::open();
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "--quiet", "--initial-branch=main"]);
+    let mut repo = Repo {
+        bare: work.clone(),
+        work: work.clone(),
+        _dir: dir,
+        head: String::new(),
+        digest: format!("{:x}", Sha256::digest(b"unborn")),
+    };
+    store.scope(&repo);
+    let project = repo.project_at(&work);
+    let counters = Counters::default();
+    let mut verifier = Verifier::default();
+    let clock = Clock::open();
+    verifier.pass(
+        &store.kernel,
+        std::slice::from_ref(&project),
+        &on,
+        &counters,
+        &clock,
+    );
+    assert_eq!(clock.polled(Poll::Derive), 1);
+
+    std::fs::write(work.join("doc.md"), text(0, 1024)).unwrap();
+    git(&work, &["add", "--all"]);
+    git(&work, &["commit", "--quiet", "-m", "first"]);
+    repo.head = git(&work, &["rev-parse", "HEAD"]);
+    let decision = store.decision_under(
+        &repo,
+        &format!("git:{}", repo.head),
+        "u0",
+        "doc.md",
+        &text(0, 1024),
+    );
+    for _ in 0..MAX_ATTEMPTS {
+        verifier.pass(
+            &store.kernel,
+            std::slice::from_ref(&project),
+            &on,
+            &counters,
+            &Clock::open(),
+        );
+        assert_accounting(&counters);
+    }
+    assert_eq!(counters.get("unavailable_repository_unbound"), 1);
+    assert_eq!(counters.get("unavailable_skipped"), 0);
+    assert_eq!(counters.get("attestation_committed"), 1);
+    assert!(exists(&store, &attestation(&decision, &repo)));
+
+    let clock = Clock::open();
+    verifier.pass(&store.kernel, &[project], &on, &counters, &clock);
+    assert_eq!(clock.polled(Poll::Derive), 0);
 }
 
 /// A root path bound again under another project digest derives its repository identity again.
