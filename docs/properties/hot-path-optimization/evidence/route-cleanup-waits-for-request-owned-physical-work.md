@@ -190,9 +190,9 @@ Tokio time and an abort-drop signal; they do not claim to execute real blocking
 threads. Separate integration tests exercise held physical work and instance
 exclusion.
 
-[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L616
+[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L619
 [work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L458-L462
-[work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L659-L672
+[work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L662-L675
 [failed]: ../../../../crates/host-runtime/src/handler.rs#L467-L475
 [cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L502-L537
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
