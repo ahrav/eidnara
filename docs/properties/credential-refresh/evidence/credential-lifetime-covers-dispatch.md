@@ -46,7 +46,7 @@ The window is the interval between acquisition and the spawn recheck: setup
 work, queueing, and a wall-clock jump can all land there. The monotonic bound
 survives a wall rollback; the wall bound catches a forward jump. The check
 depends on the owner's `ShiftedClock` seam in tests and on `SystemClock` in
-production (`crates/daemon/src/bin/eidnara_host/serve.rs:1000`).
+production (`crates/daemon/src/bin/eidnara_host/serve.rs:998`).
 
 ## What a test must construct
 

@@ -129,6 +129,16 @@ export interface ReadArgs extends CallOptions {
     gated?: boolean;
     /** Scopes the read to the named objects before the daemon applies its row cap, so a targeted lookup reaches a live row a capped unfiltered snapshot drops. At most `MAX_READ_OBJECT_IDS` ids; a longer list answers `invalid_input` without a daemon round trip. */
     objectIds?: readonly string[];
+    /** `before` supports pagination through results that exceed the daemon's row cap: the daemon serves only the rows that follow the named row in serving order. */
+    before?: ReadCursor;
+    /** `false` leaves the returned rows' mutation tokens out of the token cache, for a read whose rows the caller ranks and mostly discards. */
+    cacheTokens?: boolean;
+}
+
+/** `ReadCursor` identifies a row's position in the daemon's serving order. */
+export interface ReadCursor {
+    createdCommitSeq: number;
+    objectId: string;
 }
 
 export interface IntentArgs {
@@ -547,6 +557,14 @@ export class KernelClient {
             as_of: asOf,
             gated: args.gated ?? false,
             ...(args.objectIds === undefined ? {} : { object_ids: [...args.objectIds] }),
+            ...(args.before === undefined
+                ? {}
+                : {
+                      before: {
+                          created_commit_seq: args.before.createdCommitSeq,
+                          object_id: args.before.objectId,
+                      },
+                  }),
         });
         const { result, connectionIdentity } = await this.call(
             "kernel.read",
@@ -555,7 +573,7 @@ export class KernelClient {
             { signal: args.signal, deadline, reissuable: true },
             parseReadResponse,
         );
-        if (isAvailable(result)) {
+        if (isAvailable(result) && args.cacheTokens !== false) {
             this.tokens.remember(
                 this.projectRoot,
                 result.rows,

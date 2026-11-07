@@ -9,7 +9,7 @@ independent false-success routes. Inspected 2026-09-19 at
 
 ## Evidence trail
 
-- [direct_host_fixture.rs:383-498](../../../../../crates/daemon/examples/direct_host_fixture.rs#L383-L498)
+- [direct_host_fixture.rs:394-509](../../../../../crates/daemon/examples/direct_host_fixture.rs#L394-L509)
   ignores the backend request and emits literal `fixture-success`, then increments
   `completed`. This is not summary XML bound to a case or its source aliases.
 - [history_summarizer_validate.rs:588-592](../../../../../crates/daemon/src/history_summarizer_validate.rs#L588-L592)

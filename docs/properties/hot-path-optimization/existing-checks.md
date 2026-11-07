@@ -458,7 +458,7 @@ Production guards go to
 above mean no check was identified in the stated inspected scope, not a claim
 that no related check exists anywhere in the repository.
 
-[read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L163-L258
+[read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L182-L292
 [injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L282
 [revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L315
 [dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L373

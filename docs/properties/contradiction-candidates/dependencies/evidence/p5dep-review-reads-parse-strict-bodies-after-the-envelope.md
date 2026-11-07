@@ -46,7 +46,7 @@ C13; D6.
 - `mod.rs:461-473`: `ENVELOPE_KEYS = ["method", "kind", "session_id",
   "project_root"]` removed before `serde_json::from_value::<T>`; a failure is
   `invalid_params_error("invalid {operation}: {error}")`.
-- `crates/daemon/src/kernel_routes/read.rs:34-55` `ReadRequest` for
+- `crates/daemon/src/kernel_routes/read.rs:34-58` `ReadRequest` for
   `kernel.read` with `deny_unknown_fields`; `read.rs:1-4` header.
 - Tests: `crates/daemon/tests/memory_reviewer_wire.rs:15` (`disabled`
   without MODULE at `:25-34`; strict bodies at `:238-252`); `:409` (`v` field

@@ -12,6 +12,7 @@ import commitInvalidProjectMismatch from "../../../../../crates/daemon/tests/fix
 import commitInvalidRevision from "../../../../../crates/daemon/tests/fixtures/kernel-routes/commit-invalid-revision-not-advanced.json";
 import readAutoInjectEmpty from "../../../../../crates/daemon/tests/fixtures/kernel-routes/read-auto-inject-empty.json";
 import readCrossProjectEmpty from "../../../../../crates/daemon/tests/fixtures/kernel-routes/read-cross-project-empty.json";
+import readExplicitAfterCursor from "../../../../../crates/daemon/tests/fixtures/kernel-routes/read-explicit-search-after-cursor.json";
 import readExplicitLabeled from "../../../../../crates/daemon/tests/fixtures/kernel-routes/read-explicit-search-labeled.json";
 import { type DispositionEvent, KernelClient, type KernelTransportCall } from "../kernel-client";
 import { FakeKernel, FakeKernelTransport, fakeProjectScopeId } from "./fake-kernel";
@@ -112,6 +113,28 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
         await createDecisionOne(h);
         await h.client(OTHER_PROJECT, "session-b").read({ surface: "explicit_search" });
         expect(h.transport.lastReply()).toEqual(readCrossProjectEmpty);
+    });
+
+    test("a read after a cursor serves the older rows", async () => {
+        const h = harness();
+        for (const index of [1, 2, 3]) {
+            const created = await h.client().create(decisionSpec(index), intent(`create-${index}`));
+            expect(created.state).toEqual({ kind: "available" });
+        }
+        const newest = await h.client().read({ surface: "explicit_search" });
+        if (newest.state.kind !== "available") throw new Error("read unavailable");
+        const cursor = (
+            newest as { rows: { object: { created_commit_seq: number; object_id: string } }[] }
+        ).rows[0]?.object;
+        expect(cursor?.object_id).toBe("decision-object-3");
+        await h.client().read({
+            surface: "explicit_search",
+            before: {
+                createdCommitSeq: cursor?.created_commit_seq ?? 0,
+                objectId: cursor?.object_id ?? "",
+            },
+        });
+        expect(withScopePlaceholder(h.transport.lastReply())).toEqual(readExplicitAfterCursor);
     });
 
     test("refused commits answer with the state alone", async () => {

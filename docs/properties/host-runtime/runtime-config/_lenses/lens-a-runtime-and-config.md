@@ -53,11 +53,11 @@ flag, or `cfg` gating it.
 | 19 | `AbandonGuard` | `:929-931` | Unconditional |
 | 20 | Activation task | `:932` | **Unconditional.** Tracked, abort-exempt, not awaited by startup |
 | 21 | Health task | `:933` | **Unconditional.** No config key disables it. `liveness: None` does not suppress it |
-| 22 | Liveness loop | `connection.rs:279-284` | **Conditional on `shared.liveness.is_some()`**, which is `None` by default (`config.rs:294`) and `None` in production (`serve.rs:593`) |
+| 22 | Liveness loop | `connection.rs:279-284` | **Conditional on `shared.liveness.is_some()`**, which is `None` by default (`config.rs:294`) and `None` in production (`serve.rs:591`) |
 | 23 | Accept loop | `:934` | Unconditional. 100 ms fixed `ACCEPT_ERROR_BACKOFF` (`:965`), not configurable |
 | 24 | Setup-socket unlink | `:935` | Unconditional, result discarded |
 | 25 | `shutdown_sequence` | `:936` | Unconditional |
-| - | `HarnessClosureStore` | - | **Never constructed by this crate.** Zero Rust references to `HarnessClosureStore`, `ClosureCandidate`, or `HarnessClosureStore::open` anywhere under `crates/host-runtime/src`. Its production constructor is `serve.rs:162` and `:349`, in `daemon`, and both discard the error with `.ok()` |
+| - | `HarnessClosureStore` | - | **Never constructed by this crate.** Zero Rust references to `HarnessClosureStore`, `ClosureCandidate`, or `HarnessClosureStore::open` anywhere under `crates/host-runtime/src`. Its production constructor is `serve.rs:160` and `:347`, in `daemon`, and both discard the error with `.ok()` |
 
 Three conclusions siblings can rely on:
 
@@ -119,7 +119,7 @@ Columns: code default; what `docs/host-wire-protocol.md` says; the bound
 | `daemon_ver` | `host-runtime/{CARGO_PKG_VERSION}` (`:289`) | Published as `daemon_ver`, echoed in the proof; `auth.rs:132-133` says it is not an authentication input | nonempty (`config.rs:302`); worst-case auth and connection-file size (`:314-340`) | Yes - `:842`, `:926` |
 | `payload_manifest_digest` | SHA-256 of zero bytes (`:84-85`, `:290`) | Required persisted identity; `lifecycle.rs:378` treats an *empty* digest as legacy | 64 lowercase hex (`config.rs:305`) | Yes - `:661` |
 | `init.storage` | `None` (`HostInit::default`) | "The handler deserializes it; the host never reads it" (`config.rs:252-253`) | none | Pass-through - moved out at `:751`, handed to `initialize` |
-| `init.host_capabilities` | `Vec::new()` (`:250`) | Not documented | none | **No.** Zero readers repo-wide. Only written (`serve.rs:487`, two test sites, both `Vec::new()`) and `Debug`-formatted (`config.rs:262`) |
+| `init.host_capabilities` | `Vec::new()` (`:250`) | Not documented | none | **No.** Zero readers repo-wide. Only written (`serve.rs:485`, two test sites, both `Vec::new()`) and `Debug`-formatted (`config.rs:262`) |
 
 **Totals in Part 4f's categories.** 21 keys in scope.
 
@@ -201,9 +201,9 @@ not bound shutdown.
 
 **O4. `host_capabilities` is inert.** `config.rs:250` declares it `pub`;
 `config.rs:262` formats it for `Debug`. Every construction site in the
-repository passes `Vec::new()` - `serve.rs:487`,
+repository passes `Vec::new()` - `serve.rs:485`,
 `daemon/tests/host_adapter.rs:29` and `:88`,
-`daemon/examples/direct_host_fixture.rs:577`. No code reads it. It reaches
+`daemon/examples/direct_host_fixture.rs:588`. No code reads it. It reaches
 the handler inside the moved `HostInit` (`runtime.rs:751`), so a future handler
 could read it, but none does.
 
@@ -246,7 +246,7 @@ the function is `pub(crate)`, shared with `generation.rs`, which is Part 2a's
 file and outside my footprint.
 
 **O8. A closure-store open failure is swallowed into `None`.**
-`serve.rs:162` and `:349` both write
+`serve.rs:160` and `:347` both write
 `HarnessClosureStore::open(&closure_root).ok()`. `open` fails on a symlinked or
 non-owner-only path component, a wrong mode, or a creation failure
 (`harness_closure.rs:1019-1086`, all mapped through `invalid(...)` with a
@@ -350,7 +350,7 @@ Guarantee: With `liveness` unset, the host arms no Ping timer, sends no Ping, an
 Check: `always` - whenever `shared.liveness.is_none()`, assert no `liveness_loop` task was spawned for any generation, and no frame of type `Ping` was ever enqueued. `always` because the absence must hold for the whole incarnation, not merely at one observation.
 Fault/timing angle: the window is the whole incarnation. A default host cannot detect a silently wedged peer through Ping at all; peer death is discovered only by the ring's own path.
 Required faults and enabling state: a default `HostConfig`. That is the production configuration.
-Confidence: high - [evidence](../../evidence/rt-a-the-default-configuration-arms-no-liveness-probe.md). Verified `config.rs:294`, the single spawn condition at `connection.rs:279`, and that `serve.rs:582-593` reaches `HostConfig::default` for this field.
+Confidence: high - [evidence](../../evidence/rt-a-the-default-configuration-arms-no-liveness-probe.md). Verified `config.rs:294`, the single spawn condition at `connection.rs:279`, and that `serve.rs:580-591` reaches `HostConfig::default` for this field.
 Existing check: `tests/lifecycle.rs:496`. Status `unaudited`.
 Impact: this is the reachability label for every liveness property in the catalog. Any record whose enabling state is a `LivenessPolicy` is reachable only from `tests/lifecycle.rs:402` or `tests/client.rs:64`, never from production.
 Open questions:
@@ -483,7 +483,7 @@ Existing check: none on the failure path. Status `unaudited`.
 Impact: a permissions or symlink problem on the closure root presents as "no harness available" rather than "the closure store is insecure", so an operator investigates the wrong subsystem. This is Part 4f's silent-degradation shape.
 Open questions:
 
-- Does `harness_backend` (`serve.rs:344`) ultimately surface any distinguishable reason to an operator, or does the `None` terminate in a generic unavailability? Unresolved; needs the `daemon` binary pass, which is outside this footprint.
+- Does `harness_backend` (`serve.rs:342`) ultimately surface any distinguishable reason to an operator, or does the `None` terminate in a generic unavailability? Unresolved; needs the `daemon` binary pass, which is outside this footprint.
 
 ### rt-a-the-activation-fast-probe-interval-is-entered
 

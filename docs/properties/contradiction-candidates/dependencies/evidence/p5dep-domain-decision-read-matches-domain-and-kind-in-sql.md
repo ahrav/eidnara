@@ -30,7 +30,7 @@ outside the domain never fails this read." Lens: protocol contracts; C4.
   shape, so `prepare_cached` reuses them.
 - `admission.rs:3202-3235` `visible_selected_as_of`: reads in one
   `read_snapshot`, filters `Hidden`, sorts by `object_id`.
-- Daemon re-check: `crates/daemon/src/kernel_routes/read.rs:89-97`
+- Daemon re-check: `crates/daemon/src/kernel_routes/read.rs:108-116`
   `RowSelection::keeps` re-checks `object_kind == "decision" && domain_id ==
   domain_id` on each returned row ("Applied in the kernel query as well;
   `keeps` re-checks each returned row", `:84`).
@@ -70,7 +70,7 @@ reader.
 
 - Sources examined: grep for `visible_domain_decisions_as_of_in_scope`
   across `crates/`.
-- Findings: `crates/daemon/src/kernel_routes/read.rs:185` is the only
+- Findings: `crates/daemon/src/kernel_routes/read.rs:216` is the only
   non-test caller; it is reached from `canonical_memory.rs:188`,
   `memory_capture.rs:1054`, `:1611`, and `lib.rs` tests.
 - Missing evidence: none.

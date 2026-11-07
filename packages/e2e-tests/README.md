@@ -237,6 +237,74 @@ Environment:
   `eidnara_search` tools must then rank a memory created before admission and
   one created after it through the fused route's dense lane. With the variable
   set, a missing payload file, OpenCode, or Pi fails the suite.
+- The same variable runs `tests/fixture-production-search.test.ts`, which
+  starts the direct-host fixture with
+  `--query-route production --local-embeddings-manifest
+  <payload>/payload-manifest.json` and compares it with the default fixture.
+  It checks the fixture's startup line and `match=fused` results, and reports
+  recall@5 and recall@10 of the legacy snapshot scan and of the production
+  route for paraphrased questions over generic project memories, as one
+  `[paraphrase-recall]` JSON line.
+
+### Production search in the direct-host fixture
+
+The fixture ranks `eidnara_search` through the daemon's production query
+route when it starts with both `--query-route production` and
+`--local-embeddings-manifest <path>`; it refuses either flag alone. `<path>`
+is a built payload's `payload-manifest.json`. The fixture then:
+
+- installs `QueryRouteLimits::production()`, the limits `eidnara-host serve`
+  installs;
+- runs the embedding lane on the payload's `gte-modernbert-base-f32` bundle
+  and ONNX Runtime library through the constructor `eidnara-host serve` uses
+  (`crates/daemon/src/bin/eidnara_host/payload_local_embeddings.rs`). The ONNX
+  Runtime library and the bundle manifest are checked against the SHA-256 the
+  payload manifest records, and each model file against the bundle manifest's
+  digest;
+- installs the fixture search admission pair, the records the
+  `search_admission_records` example writes, under its `--state-root`. The
+  records carry no qualification measurement: they admit the projection under
+  every hook with the daemon integration tests' fixture values, except a
+  catch-up lag of 1,000,000 commits and catch-up windows of 4,096 rows, 8 MiB
+  of payload, and 8 MiB of source, which `search_admission_records/records.rs`
+  sets so one capture batch or source publication fits in a window.
+
+ModelExecution side calls keep the fixture's own routing: its controlled
+backend, a cassette, or the closures `--harness-runtime` names. The memory
+reviewer stays detached, because it signs requests straight to Bedrock and
+changes memory visibility rather than ranking.
+
+To build the payload, run `bun run inputs:fetch`, which downloads the locked
+model, tokenizer, corpus, and ONNX Runtime archive into `target/host-inputs`
+and verifies each against `release/production-inputs.lock.json`. Then run
+`cargo build -p daemon --bin eidnara-host --locked`,
+`bun run --cwd packages/shm-native build:native`, and `bun run payload:dev`,
+which stages `packages/host-linux-x64-gnu/payload-manifest.json` and
+`payload/` from that cache without a network. A cache copied from another
+machine, or passed with `--inputs-dir <dir>`, is re-verified against the lock.
+
+The route in use is observable three ways:
+
+- the fixture prints `direct_host_fixture: search route production, embedding
+  model <model>, payload <path>, admission from fixture records` on stderr at
+  startup;
+- `session.status` reports `search_admission.state`, which reads `admitted`
+  once the projection opens;
+- each result the route ranks renders `match=fused lanes=<lanes>`. A search
+  the route cannot serve, before admission or while the lane starts, carries
+  `Memory: the fused search route is unavailable (<reason>); results come
+  from the legacy snapshot scan.`, as every search on the default fixture
+  does with the reason `disabled`.
+
+The legacy snapshot scan pages `kernel.read` with its `before` cursor at the
+first page's snapshot, up to 16 pages of at most 8,192 rows and 8 MiB each,
+so one search reads at most 131,072 rows and 128 MiB. It keeps only the best
+`limit` rows between pages. Each page costs the daemon one scan of the
+project's visible registry rows, and the whole scan shares one 10-second
+deadline. A search that stops before the oldest rows, because of that bound,
+the deadline, a refused later page, or a later page served from another
+snapshot, gets the note
+`Memory: the memory read was truncated; older memories were not searched.`
 
 ## Incident pool
 

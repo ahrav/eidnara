@@ -39,9 +39,9 @@ D5.
 - Daemon side: `crates/daemon/src/kernel_routes/project.rs:106-111`
   `scope_term()` = `{ Project, &self.digest }`; `:186-213` `ScopeFilter`
   judges each row with `ProjectScope::names_project` and memoizes per scope
-  id; `:204-206` returns `Ok(false)` for a `None` scope id.
-- `read.rs:170-188` comment: "The kernel keeps rows whose scope names another
-  project out of the snapshot"; `:189`: the row bound "cannot be a SQL
+  id; `:212-213` returns `Ok(false)` for a `None` scope id.
+- `read.rs:201-219` comment: "The kernel keeps rows whose scope names another
+  project out of the snapshot"; `:220`: the row bound "cannot be a SQL
   `LIMIT`" because the filter runs after SQL.
 - Test: `crates/kernel/tests/kernel_scope.rs:235-388`: four scopes (branch
   `main`, branch `release`, branch redacted, project only); filter `branch =
@@ -82,7 +82,8 @@ read is a benign race (the terms are append-only per scope revision).
 
 - Sources examined: `project.rs:85-104` `scope_spec` (route-written rows
   always get a project scope), `kernel_scope.rs` fixtures (fixtures use
-  `scope_id: Some(..)`), `read.rs:204-206`.
+  `scope_id: Some(..)`), `read.rs:223-228` passing the row's optional scope to
+  `ScopeFilter::matches`, which answers `false` for no scope (`project.rs:207-214`).
 - Findings: route-written memory decisions carry a scope; the daemon filter
   drops a NULL-scope row. Other writers (history summarizer promotion,
   reviewer acceptance) were not audited in this pass.

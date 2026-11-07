@@ -31,25 +31,25 @@ Do not build a second fixture or a second three-way disposition oracle.
 - [Search schema/wrapper, lines 13-41](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.ts#L13)
   exposes `query`, `limit`, and memory-only `sources`, then invokes
   `executeEidnaraSearch` and returns its text.
-- [Execution, lines 142-181](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L142)
+- [Execution, lines 140-179](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L140)
   resolves the session/project and creates the kernel client. At
-  [lines 200-238](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L200)
+  [lines 198-246](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L198)
   object IDs use chunked filtered reads, text queries use `explicit_search`,
   and nonavailable states remain explicit unless the no-consumer fallback
   succeeds with its freshness note.
-- [KernelClient, lines 520-562](../../../../../packages/opencode-plugin/src/shared/kernel-client/client.ts#L520)
+- [KernelClient, lines 530-580](../../../../../packages/opencode-plugin/src/shared/kernel-client/client.ts#L530)
   serializes these reads as `kernel.read`, preserving surface and optional
   object IDs. This completes the registered-tool transport trace.
-- [Daemon read, lines 390-478](../../../../../crates/daemon/src/kernel_routes/read.rs#L390)
+- [Daemon read, lines 424-513](../../../../../crates/daemon/src/kernel_routes/read.rs#L424)
   binds the request, applies the requested freshness gate, reads project-visible
   rows, and bounds serialized output. This is not native artifact expansion.
-- [Memory ranking, lines 172-174, 248-285](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L172)
+- [Memory ranking, lines 172-174, 248-294](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L172)
   uses memory decision summaries/rationales. Exact object-id matching is a
   lookup mode. [Lines 188-229](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L178)
   render rejected approaches distinctly and carry their rationale.
-- [Delivery, lines 151-169, 239-260](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L151)
+- [Delivery, lines 149-167, 247-268](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L149)
   separates pre-pack ranking from delivered results. The
-  [search tests, lines 218-255, 473-493](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L218)
+  [search tests, lines 218-255, 497-517](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L218)
   assert memory text, rationale, and packing behavior using a fake kernel.
 - [Hint rendering, lines 8609-8634](../../../../../crates/daemon/src/transform.rs#L8609)
   compresses snippets and offers a project-memory search for their topic.

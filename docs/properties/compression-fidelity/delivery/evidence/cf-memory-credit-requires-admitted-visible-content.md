@@ -17,7 +17,7 @@ evidence. Inspected 2026-09-19 at
 - [canonical_memory.rs:147-174](../../../../../crates/daemon/src/canonical_memory.rs#L147-L174)
   captures the kernel tip, evaluates freshness, and reads the bound project's
   `auto_inject` memory-domain decisions. Failure returns `Withheld`.
-- [kernel_routes/read.rs:162-186](../../../../../crates/daemon/src/kernel_routes/read.rs#L162-L186)
+- [kernel_routes/read.rs:181-230](../../../../../crates/daemon/src/kernel_routes/read.rs#L181-L230)
   filters by the bound project and scope before applying row limits.
 - [canonical_memory.rs:195-211](../../../../../crates/daemon/src/canonical_memory.rs#L195-L211)
   keeps visible positive decisions, then trims to the memory budget.

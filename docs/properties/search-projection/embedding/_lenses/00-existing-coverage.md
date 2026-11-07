@@ -58,9 +58,9 @@ The tokenizer catalog's no-production-caller statement is stale:
 `crates/daemon/Cargo.toml:32` depends on it and
 `crates/daemon/src/token_cache.rs:133` calls it in production code.
 The host catalog's test-only LocalEmbeddings composition statement is also stale:
-`crates/daemon/src/bin/eidnara_host/serve.rs:1097-1127` composes LocalEmbeddings.
+`crates/daemon/src/bin/eidnara_host/serve.rs:1232-1298` builds and composes LocalEmbeddings.
 Ready inference still requires a selected generation with certified artifacts
-(`serve.rs:1027-1065`). That path is explicit-config-only; composition and the
+(`serve.rs:1167-1202`, `payload_local_embeddings.rs:8-24`). That path is explicit-config-only; composition and the
 disabled fallback are default-production.
 
 The old admission record describes oldest-completion eviction. Current

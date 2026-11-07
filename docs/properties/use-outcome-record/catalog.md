@@ -275,7 +275,7 @@ Confidence: high -
 `read_project_memory` captures the tip and passes it as the requested snapshot
 (`read_project_memory` (`crates/daemon/src/canonical_memory.rs:205`)); the route
 returns `known_as_of` from the visible read
-(`crates/daemon/src/kernel_routes/read.rs:252`).
+(`crates/daemon/src/kernel_routes/read.rs:286`).
 Existing check:
 `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
 (`crates/daemon/tests/transform_canonical_memory.rs:46`) (assertions

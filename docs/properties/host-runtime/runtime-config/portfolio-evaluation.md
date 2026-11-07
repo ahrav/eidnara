@@ -38,7 +38,7 @@ three artifacts already state. The working tree is clean apart from untracked
 directories. Every line reference below was printed individually at that commit.
 References verified for this disposition: `runtime.rs:1-5`, `:340-345`, `:351-365`,
 `:375-393`, `:395-417`, `:419-476`, `:920-960`, `:1144-1244`, `:1246-1253`,
-`:1255-1297`; `serve.rs:570-637`; `harness_closure.rs:21-32`, `:231`, `:413-479`,
+`:1255-1297`; `serve.rs:568-635`; `harness_closure.rs:21-32`, `:231`, `:413-479`,
 `:491`, `:554`, `:571`, `:826`, `:859`, `:872`, `:897`, `:907`, `:919`, `:928`;
 `config.rs:294`; `connection.rs:279`. One grep is load-bearing for F3 and is
 recorded as a fact rather than an impression: `serve.rs` installs
@@ -228,11 +228,11 @@ for the newly visible path.
 **Error 1: production installs the signal handlers.** The catalog said
 `runtime.rs:3-5` was a forward reference to unbuilt work and that "no signal
 handling was deleted because none has been written". The crate comment is accurate
-about the crate and stale about production. `serve.rs:617-619` installs a `SIGTERM`
-stream and `:620-622` a `SIGINT` stream, each failing startup on installation
-failure; `:623-631` spawns a task that cancels the `CancellationToken` on the first
-of the two; and all of it precedes `host_runtime::run` at `:632`. The comment at
-`serve.rs:604-616` states why the ordering is mandatory - registering inside the
+about the crate and stale about production. `serve.rs:615-617` installs a `SIGTERM`
+stream and `:618-620` a `SIGINT` stream, each failing startup on installation
+failure; `:621-629` spawns a task that cancels the `CancellationToken` on the first
+of the two; and all of it precedes `host_runtime::run` at `:630`. The comment at
+`serve.rs:602-614` states why the ordering is mandatory - registering inside the
 spawned task would race `run`, and a signal arriving first would take the default
 disposition and kill the daemon outright. So the register row moves from "no
 implementing code" to "implemented by the caller".
@@ -256,7 +256,7 @@ dropped mid-shutdown-sequence".
 **The dependent-label answer, which the evaluation asked for explicitly.** Every
 claim resting on the map was re-derived rather than assumed. Part 2a's three
 `explicit-config-only` liveness records rest on conclusion 3, untouched, and were
-re-verified at `config.rs:294`, `connection.rs:279`, `serve.rs:593`. 2b's and 2d's
+re-verified at `config.rs:294`, `connection.rs:279`, `serve.rs:591`. 2b's and 2d's
 `RingTransport`-is-unconditional citation is map row 17, above the abandon window
 and uncoloured by either error. 2e's citation of "nothing is `cfg`-gated"
 (`../part-2e-request-path/catalog.md:406-407`) is conclusion 1, which survives
@@ -304,7 +304,7 @@ Recorded, not mined. Both verified for this disposition.
    store - zero references to `HarnessClosureStore`, `ClosureCandidate`, or
    `HarnessClosureStore::open` anywhere under `crates/host-runtime/src`, which the map
    already records - so every production path through those 1,122 lines begins at
-   `serve.rs:162` or `:349`, in `daemon`, and the one record 2f does have is
+   `serve.rs:160` or `:347`, in `daemon`, and the one record 2f does have is
    `medium` confidence *precisely because* its call sites are outside the
    footprint. *Judgment required:* decide whether 2f owns the closure store's
    behaviour or only its host-facing surface. If it owns the behaviour, G2 is a
