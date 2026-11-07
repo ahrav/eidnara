@@ -501,20 +501,28 @@ const LIVE_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";
 const LIVE_MODEL: &str = "EIDNARA_FIDELITY_REAL_MODEL";
 const LIVE_WAIT_SECONDS: &str = "EIDNARA_FIDELITY_REAL_WAIT_SECONDS";
 
-/// Folds the fixture through a real summarizer model until a fold publishes, at most twice. A
-/// model answer the validator rejects as a whole publishes nothing, and the second fold gives the
-/// model one more answer.
+/// Folds the fixture through a real summarizer model until a published row covers message
+/// `covers`, at most twice, and returns the rows that do. A model answer the validator rejects as
+/// a whole publishes nothing, and validation discards a provisional last segment that ends next to
+/// the chunk's end; either leaves the fixture's answer raw, and the second fold gives the model
+/// one more answer.
 async fn published_fold(
     factory: &Arc<RealHistorySummarizerProducerFactory>,
     model: &str,
     wait: Duration,
     fixture: fn(u64) -> Vec<IngressMessage>,
+    covers: i64,
 ) -> Vec<StoredHistorySegment> {
-    let rows = live_fold(factory, model, wait, fixture(1)).await;
+    let covering = |rows: Vec<StoredHistorySegment>| -> Vec<StoredHistorySegment> {
+        rows.into_iter()
+            .filter(|row| (row.start_message..=row.end_message).contains(&covers))
+            .collect()
+    };
+    let rows = covering(live_fold(factory, model, wait, fixture(1)).await);
     if !rows.is_empty() {
         return rows;
     }
-    live_fold(factory, model, wait, fixture(1)).await
+    covering(live_fold(factory, model, wait, fixture(1)).await)
 }
 
 /// Folds `messages` once through a real summarizer model and returns the stored rows.
@@ -589,7 +597,7 @@ async fn live_fold(
 }
 
 /// The three fixtures through a real summarizer model: the answered question leaves no waiting
-/// line, the unanswered one stays open in `p1`, and the lifted constraint is stated as lifted.
+/// line, the unanswered one stays open, and the lifted constraint is stated as lifted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "opt-in live summarizer run; needs EIDNARA_FIDELITY_REAL_CONNECTION_FILE naming a \
             host that admits sends without a credential claim (direct_host_fixture without \
@@ -605,7 +613,7 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
     let model = required(LIVE_MODEL);
     let wait = Duration::from_secs(required(LIVE_WAIT_SECONDS).parse().unwrap());
 
-    let rows = published_fold(&factory, &model, wait, answered).await;
+    let rows = published_fold(&factory, &model, wait, answered, 3).await;
     assert!(!rows.is_empty());
     assert!(open_lines(&rows).is_empty(), "{rows:#?}");
     assert!(
@@ -620,7 +628,7 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
 
     // The open question stays open: a waiting line in a recent tier, or `p1` saying so in the
     // summarizer's own words.
-    let rows = published_fold(&factory, &model, wait, unanswered).await;
+    let rows = published_fold(&factory, &model, wait, unanswered, 2).await;
     let waiting = open_lines(&rows)
         .iter()
         .any(|line| line.contains("Waiting on user ("));
@@ -636,7 +644,7 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
     .any(|phrase| p1.contains(phrase));
     assert!(waiting || stated_open, "{rows:#?}");
 
-    let rows = published_fold(&factory, &model, wait, lifted).await;
+    let rows = published_fold(&factory, &model, wait, lifted, 3).await;
     assert!(open_lines(&rows).is_empty(), "{rows:#?}");
     // `p1` may quote the constraint where the user set it; the later tiers state only its lifted form.
     for row in &rows {
