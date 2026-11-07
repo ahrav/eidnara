@@ -37,7 +37,7 @@ per report.
   replay reports the original verdict even if the subject has since moved.
 - Preview honors the same identity (`:890-892`).
 - Reissue: the client reissues a write once under the same identity after
-  an ambiguous send (`client.ts:310-311`, `:472-478`), relying on this
+  an ambiguous send (`client.ts:300-301`, `:462-468`), relying on this
   property.
 - Tests: `kernel_routes.rs:4982-5088` (replay equal `dispositions` and
   `tokens`, counts unchanged; reused key refused; token abort drops the

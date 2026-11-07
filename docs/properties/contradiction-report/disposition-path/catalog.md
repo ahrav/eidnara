@@ -615,7 +615,7 @@ different digest returns `invalid/operation_key_reused` (`commit.rs:1063-
 1070`). Every request, so `always`.
 Fault/timing angle: a lost response (`outcome_unknown`) followed by the
 client's single reissue under the same identity
-(`client.ts:310-311`, `:472`); a replay whose original `result` predates the
+(`client.ts:300-301`, `:462`); a replay whose original `result` predates the
 `dispositions` key.
 Required faults and enabling state: a committed disposition; a repeat with
 equal digest; a repeat with a different digest; a reissue after a dropped

@@ -36,7 +36,7 @@ None`. PR A adds the fields and the requirement.
   (`packages/opencode-plugin/src/shared/memory-mark-command.ts:137-138`).
   The fake kernel mirrors the rule (`disputeEvidenceWellFormed`,
   `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:336-352`,
-  applied at `:708`).
+  applied at `:707`).
 - No other production writer files the two dispute events: a search of
   `crates/daemon/src`, `crates/kernel/src`, and `packages/*/src` (non-test)
   for `MarkDisputed`, `EventKind::Contradict`, `mark_disputed`, and

@@ -56,7 +56,7 @@ cause` (`schema.rs:26`; insert `envelope.rs:1484-1499`). `IntentRequest`
 carries `producer, operation_key, request_digest, actor, cause`
 (`project.rs:139-146`). The transport strips `session_id` before the body
 is parsed (`mod.rs:461-473`). `operation_key` is
-`sha256(producer, actor, operationId)` on the client (`client.ts:294-300`),
+`sha256(producer, actor, operationId)` on the client (`client.ts:284-290`),
 so the session inside `operationId` is not recoverable from the stored
 key.
 
@@ -113,7 +113,7 @@ dispute with evidence rides today's envelope.
 
 Evidence at `3a3b916b7`: `memoryMarkOperationId` was `[sessionId, event,
 objectId]`; `deriveRequestDigest` covers the operations
-(`client.ts:282-291`); a stored receipt with a different digest is
+(`client.ts:272-281`); a stored receipt with a different digest is
 `KernelError::Conflict` (`envelope.rs:1385-1387`), which `run` maps to
 `OperationKeyReused` when raised before entering the closure
 (`commit.rs:1083-1091`).
@@ -213,7 +213,7 @@ replay guarantee the command's doc comment promises (PR A implements (a):
 `memoryMarkOperationId`, `memory-mark-command.ts:210-215`). Alternative: (b), if the product wants one
 dispute per session and a clear "already disputed" message. (c) loses the
 replay property and is not recommended. Under (a), the evidence key must be
-U+001F-free (`client.ts:257-265`); A4 excludes NUL only, so the parser must
+U+001F-free (`client.ts:247-255`); A4 excludes NUL only, so the parser must
 also refuse U+001F in `path` as it does for `object_id`
 (`memory-mark-command.ts:124-126`).
 

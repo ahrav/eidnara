@@ -23,7 +23,7 @@ specification recommended adding the evidence key
   `packages/pi-plugin/src/commands/eidnara-memory-mark.ts:61`).
 - The client derives `operation_key = sha256(join(producer, actor,
   operationId))` (`packages/opencode-plugin/src/shared/kernel-client/client.ts:293-300`)
-  with `joinKeyFields` (`client.ts:257`); `request_digest` covers the
+  with `joinKeyFields` (`client.ts:247`); `request_digest` covers the
   operations, so other bytes under one key are `operation_key_reused`.
 - The parser refuses U+001F in the object id and the evidence id
   (`memory-mark-command.ts:124-129`) and in the path (`:80`).
