@@ -1061,7 +1061,8 @@ positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
 and leaves out facts captured from that session's own messages. A user message may correct earlier facts, and only
 the user's statement may replace a fact served on `auto_inject`: its fact
-supersedes the captured fact it `replaces`, retires each further fact it names
+supersedes the captured fact it `replaces` (which must share its category
+and at least one content word), retires each further fact it names
 in `also_replaces` (each must share the replaced fact's category and at
 least half of its distinct words of three or more characters other than
 common English function words, of which it must have at least one) and a replaced

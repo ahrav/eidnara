@@ -327,10 +327,11 @@ fn validate_capture_memories(
             .as_ref()
             .and_then(|target| existing.iter().find(|previous| previous.id == *target))
         {
-            if content_words(&memory.quote)
-                .intersection(&content_words(&primary.content))
-                .next()
-                .is_none()
+            if memory.category != primary.category
+                || content_words(&memory.quote)
+                    .intersection(&content_words(&primary.content))
+                    .next()
+                    .is_none()
             {
                 return Err("capture replaces a memory that states a different fact");
             }
@@ -2382,6 +2383,10 @@ mod tests {
         ] {
             assert!(parse(Some("mem_old"), also).is_err(), "{also:?}");
         }
+        assert!(
+            parse(Some("mem_other_kind"), &[]).is_err(),
+            "a correction replaces only a memory of its own category"
+        );
         assert!(
             parse(Some("mem_unrelated"), &[]).is_err(),
             "a correction replaces only a memory it shares a content word with"
