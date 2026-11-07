@@ -976,7 +976,7 @@ and `store_failed`; mismatched models and malformed envelopes are errors.
 
 Before freezing, each memory's text becomes its exact supporting quotation,
 prefixed with `User stated:` or `Assistant reported:` from the native role.
-The model's paraphrase is not published. Memories of one source that share a
+The model's paraphrase is not published. A printable source line that carries a diagnostic header (`panicked at`; the word `ERROR`, `FAIL`, or `FAILED`; or the word `error`, `fatal`, `FATAL`, `panic`, or a word ending in `Error` or `Exception`, followed by `:` other than `::`, or by `[`), at any word inside a fenced block and at the start of the line outside one, is appended trimmed and on its own line to the memory whose quotation ends nearest before it, or else starts nearest after it, together with the next line when the header line ends with `:` or the next line begins with `-->` or `at `. A line the memory already holds is skipped. A memory gains at most four such lines, appended only within 2,048 bytes, a line cut to fit ending in `…`, so a failure report keeps its error text beside the sentence that frames it; the recorded quotation stays the model's quote. Memories of one source that share a
 category and quotation freeze as one memory, keeping any replacement target
 among them; distinct replacement targets keep one memory each, since a
 memory supersedes exactly one predecessor. Relevant and sufficiently complete quote selection still depends

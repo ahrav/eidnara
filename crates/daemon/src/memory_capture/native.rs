@@ -629,7 +629,8 @@ impl CaptureWork {
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
-            let memories = collapse_quotations(attribution, decision.memories);
+            let mut memories = collapse_quotations(attribution, decision.memories);
+            failure_evidence::attach(&job.text, &mut memories);
             let existing = plan
                 .existing
                 .iter()
@@ -670,3 +671,5 @@ impl CaptureWork {
         Ok(())
     }
 }
+
+mod failure_evidence;
