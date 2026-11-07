@@ -22,9 +22,7 @@ use host_runtime::harness_closure::{
     ClosureCandidate, ClosureManifest, HarnessClosureStore, ValidatedHarnessClosure,
     manifest_digest,
 };
-use host_runtime::local_embeddings::{
-    LocalEmbeddingsComponent, LocalEmbeddingsConfig, LocalEmbeddingsLimits,
-};
+use host_runtime::local_embeddings::LocalEmbeddingsComponent;
 use host_runtime::model_execution::ModelExecutionComponent;
 use host_runtime::model_execution::aws_helper::TEST_ORIGIN_ENV;
 use host_runtime::model_execution::aws_refresh::{
@@ -1181,43 +1179,26 @@ fn local_embeddings_component(generation: &ValidatedGeneration) -> LocalEmbeddin
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+#[path = "payload_local_embeddings.rs"]
+mod payload_local_embeddings;
+
 /// Every Linux generation runs the embedding lane, so a validated generation that lacks the ORT
 /// library or the bundle manifest is a broken payload: `degraded`, which status and doctor
-/// surface. `unsupported` is reserved for platforms the host does not ship.
+/// surface. `unsupported` is reserved for platforms the host does not ship. The generation
+/// manifest carries `bundle_manifest.sha256` forward because it authenticates the bundle;
+/// otherwise, a replaced bundle can remain self-consistent while serving different embeddings.
 #[cfg(not(target_os = "macos"))]
 fn local_embeddings_from_manifest(
     files: &[host_runtime::generation::ManifestFile],
     descriptor_root: &Path,
 ) -> LocalEmbeddingsComponent {
-    const BUNDLE_DIR: &str = "payload/model/gte-modernbert-base-f32";
-    const ORT_LIBRARY: &str = "payload/ort/libonnxruntime.so";
-    let Some(ort) = files.iter().find(|entry| entry.path == ORT_LIBRARY) else {
-        return LocalEmbeddingsComponent::new(None);
-    };
-    let bundle_dir = descriptor_root.join(BUNDLE_DIR);
-    // The generation manifest carries `bundle_manifest.sha256` forward because it authenticates the bundle; otherwise, a replaced bundle can remain self-consistent while serving different embeddings.
-    let bundle_manifest_path = format!("{BUNDLE_DIR}/manifest.json");
-    let Some(bundle_manifest) = files
-        .iter()
-        .find(|entry| entry.path == bundle_manifest_path)
-    else {
-        return LocalEmbeddingsComponent::new(None);
-    };
-    LocalEmbeddingsComponent::new(Some(LocalEmbeddingsConfig {
-        bundle_dir,
-        ort_library: descriptor_root.join(ORT_LIBRARY),
-        bundle_manifest_sha256: Some(bundle_manifest.sha256.clone()),
-        ort_library_sha256: ort.sha256.clone(),
-        limits: lane_limits(),
-    }))
-}
-
-/// The daemon embeds one text per inference call, with the shipped lane's waiting-query bound.
-/// One row keeps certification and every admitted batch at the single window the bundle
-/// certifies, instead of `[64, max_tokens]` tensors no supported host can hold.
-#[cfg(not(target_os = "macos"))]
-fn lane_limits() -> LocalEmbeddingsLimits {
-    LocalEmbeddingsLimits::shipped_lane()
+    payload_local_embeddings::component(descriptor_root, |path| {
+        files
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.sha256.as_str())
+    })
 }
 
 /// Revalidates startup state and runs the fixed host profile until shutdown.
@@ -1368,7 +1349,11 @@ pub fn run() -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "macos"))]
+    use super::payload_local_embeddings::lane_limits;
     use super::*;
+    #[cfg(not(target_os = "macos"))]
+    use host_runtime::local_embeddings::LocalEmbeddingsLimits;
 
     /// The committed manifest of the bundle every Linux payload ships.
     #[cfg(not(target_os = "macos"))]
