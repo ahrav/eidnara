@@ -1255,17 +1255,18 @@ mod unix {
             })
     }
 
-    /// Whether the lifecycle record at `root` names a running incarnation of another process, such as an `eidnara-host` daemon serving the same data home.
-    fn another_host_is_running(root: &Path) -> bool {
-        host_runtime::probe_lifecycle(Some(root), &host_runtime::ProbeFreshness::default())
-            .ok()
-            .is_some_and(|observed| {
-                observed.state == host_runtime::LifecycleState::Running
-                    && observed
-                        .record
-                        .as_ref()
-                        .is_some_and(|record| record.pid != std::process::id())
-            })
+    /// `Ok` when no host process holds `root`'s runtime or lifetime lock; a held lock (a host starting, running, or stopping) or an unreadable lifecycle refuses.
+    fn no_host_holds(root: &Path) -> Result<(), String> {
+        match host_runtime::probe_lifecycle(Some(root), &host_runtime::ProbeFreshness::default()) {
+            Ok(observed) if observed.instance_lock_free && observed.lifetime_lock_free => Ok(()),
+            Ok(observed) => Err(format!(
+                "a host holds the state root ({:?})",
+                observed.state
+            )),
+            Err(error) => Err(format!(
+                "the state root's lifecycle could not be read: {error:?}"
+            )),
+        }
     }
 
     async fn wait_for_publication(
@@ -1683,9 +1684,9 @@ mod unix {
         // The records are written after every fallible step that builds the host, so a start that fails before this point leaves the state root's admission as it found it. An install that fails partway can leave records from two payloads; the projection gate admits only records whose identity matches the running lane, so a mixed pair closes admission and search stays on the labeled snapshot fallback. A refused install also unlinks the socket this process bound.
         if let Some(production) = &production {
             // A daemon that owns the data home holds no fixture control socket, so its lifecycle record is checked too; the records are left untouched for it.
-            if another_host_is_running(&root) {
+            if let Err(reason) = no_host_holds(&root) {
                 let _ = unlink_own_control_socket(&control_path, own_socket);
-                return Err("another host is running on the state root; search admission records left unchanged".into());
+                return Err(format!("{reason}; search admission records left unchanged").into());
             }
             production.install(&root).inspect_err(|_| {
                 let _ = unlink_own_control_socket(&control_path, own_socket);
