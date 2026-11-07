@@ -189,6 +189,8 @@ function recallAt(ranks: readonly (number | null)[], k: number): number {
 describe.skipIf(!PAYLOAD_DIR)("direct-host fixture with the production search route", () => {
     let legacy: Arm | undefined;
     let production: Arm | undefined;
+    // Each harness is held from the moment it starts, so a later setup failure still disposes it.
+    const started: RustTestHarness<HermeticHostStack>[] = [];
 
     beforeAll(async () => {
         const payload = PAYLOAD_DIR as string;
@@ -202,7 +204,9 @@ describe.skipIf(!PAYLOAD_DIR)("direct-host fixture with the production search ro
                 productionSearchManifest: join(payload, "payload-manifest.json"),
             }),
         );
+        started.push(productionHarness);
         const legacyHarness = await RustTestHarness.create();
+        started.push(legacyHarness);
         production = await seedArm(productionHarness);
         legacy = await seedArm(legacyHarness);
         await waitForSearchAdmitted(
@@ -215,7 +219,7 @@ describe.skipIf(!PAYLOAD_DIR)("direct-host fixture with the production search ro
     }, SUITE_TIMEOUT_MS);
 
     afterAll(async () => {
-        await disposeAll([production?.harness, legacy?.harness].filter((harness) => !!harness));
+        await disposeAll(started);
     }, 120_000);
 
     it(
