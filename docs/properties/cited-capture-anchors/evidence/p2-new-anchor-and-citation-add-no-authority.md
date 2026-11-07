@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-Admission is `(ModelInference, AssistantInference)` for every capture decision (`crates/daemon/src/kernel_routes/commit.rs:601`). A decision `user_attributed` accepts (`crates/daemon/src/memory_capture.rs:1127`), a whole-sentence quotation of a user message, is admitted under `Approve` on its statement record, and every other decision under `Other`. The anchor is a parent row and the citation is a decision event; neither is an input to `user_attributed` or `record_admission`, and the decision row's class stays its own because `decisions.evidence_id` is empty.
+Admission is `(ModelInference, AssistantInference)` for every capture decision (`crates/daemon/src/kernel_routes/commit.rs:601`). A decision `user_attributed` accepts (`crates/daemon/src/memory_capture.rs:1162`), a whole-sentence quotation of a user message, is admitted under `Approve` on its statement record, and every other decision under `Other`. The anchor is a parent row and the citation is a decision event; neither is an input to `user_attributed` or `record_admission`, and the decision row's class stays its own because `decisions.evidence_id` is empty.
 
 ## Failure scenario
 
