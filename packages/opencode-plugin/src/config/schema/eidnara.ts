@@ -725,7 +725,7 @@ export const EidnaraConfigSchema = z
                             .boolean()
                             .default(true)
                             .describe(
-                                "User-only: deliver captured user statements from earlier sessions in the automatic <project-memory> block, with the user-profile block (default: true). Set false to keep memory on explicit eidnara_search only; capture and search are unchanged. Project values are ignored with a warning.",
+                                "User-only: compose the automatic <project-memory> block, which carries captured user statements from earlier sessions and other automatic project memories, and the user-profile block (default: true). Set false to keep memory on explicit eidnara_search only; capture and search are unchanged. Project values are ignored with a warning.",
                             ),
                     })
                     .default({ enabled: true })
@@ -742,7 +742,7 @@ export const EidnaraConfigSchema = z
                     .boolean()
                     .default(true)
                     .describe(
-                        "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches automatic surfaces; every other captured fact stays labeled model inference for explicit search. Set false to disable unattended capture.",
+                        "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches the <project-memory> block while memory.auto_inject.enabled holds; every other captured fact stays labeled model inference for explicit search. Set false to disable unattended capture.",
                     ),
                 retrieval_count_promotion_threshold: z
                     .number()

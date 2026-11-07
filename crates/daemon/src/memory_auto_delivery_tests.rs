@@ -261,6 +261,26 @@ async fn a_user_statement_reaches_the_next_session_and_a_correction_replaces_it(
         [(stated(TUESDAY), "visible".to_string())],
         "explicit search serves the correction record, which names both values"
     );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(TUESDAY)],
+        "the replaced statement's approval is retired with it"
+    );
+}
+
+fn live_statement_records(handler: &Handler, project: &Path) -> Vec<String> {
+    let read = kernel_routes::read::read_visible(
+        &handler.kernel.kernel_store().unwrap(),
+        &kernel_routes::ProjectBinding::new(project),
+        kernel::Surface::ExplicitSearch,
+        None,
+        kernel_routes::read::RowSelection::DomainDecisions("user-statements"),
+    )
+    .unwrap();
+    read.decisions
+        .into_values()
+        .map(|decision| decision.payload.summary)
+        .collect()
 }
 
 #[tokio::test]
@@ -368,6 +388,22 @@ async fn switching_auto_inject_off_delivers_no_block_and_search_still_finds_the_
         explicit_search(&handler, (SWITCHED_OFF, "s-off"), &project).await,
         [(stated(PNPM), "visible".to_string())]
     );
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m2", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let on = serve(&handler, SECOND, "s2").await;
+    assert_eq!(on["materialize_reason"], "project_memory_epoch", "{on}");
+    let off = serve(&handler, SWITCHED_OFF, "s-off").await;
+    assert_ne!(
+        off["materialize_reason"], "project_memory_epoch",
+        "a publication rewrites no m0 that carries no memory: {off}"
+    );
+    assert_eq!(project_memory_block(&off), None, "{off}");
 }
 
 #[tokio::test]
@@ -397,6 +433,17 @@ async fn another_projects_statement_is_not_delivered() {
         .expect("this project's own statement is delivered");
     assert!(block.contains(&stated(THURSDAY)), "{block}");
     assert!(!block.contains(PNPM), "{block}");
+    bind(
+        &handler,
+        OTHER_PROJECT + 1,
+        &other,
+        "s-other-2",
+        capture_config(),
+    );
+    let theirs = project_memory_block(&serve(&handler, OTHER_PROJECT + 1, "s-other-2").await)
+        .expect("the other project's statement is delivered in its own project");
+    assert!(theirs.contains(&stated(PNPM)), "{theirs}");
+    assert!(!theirs.contains(THURSDAY), "{theirs}");
     assert_eq!(
         explicit_search(&handler, (SECOND, "s2"), &project).await,
         [(stated(THURSDAY), "visible".to_string())]
@@ -504,6 +551,17 @@ async fn the_host_memory_tool_cannot_retire_a_user_statement() {
     );
     assert_eq!(refused["state"]["kind"], "invalid", "{refused}");
     assert_eq!(refused["state"]["reason"], "admission_policy", "{refused}");
+    let approval = user.replacen("mem_", "stm_", 1);
+    assert_eq!(live_statement_records(&handler, &project), [stated(PNPM)]);
+    let refused = body(
+        handler
+            .dispatch_value_for_test(test_route(FIRST), retire("retire-approval", &approval))
+            .await,
+    );
+    assert_eq!(
+        refused["state"]["reason"], "admission_policy",
+        "the statement record is explicit user text: {refused}"
+    );
     let revise = kernel_route_fixtures::commit_request(
         &project,
         "s1",

@@ -586,22 +586,16 @@ impl CommitResult {
 pub(crate) fn admit(
     envelope: &mut Envelope<'_>,
     object_id: &str,
-    (source_class, taint_class): (SourceClass, TaintClass),
+    classes: (SourceClass, TaintClass),
 ) -> Result<(), KernelError> {
-    envelope.record_admission(AdmissionRequest {
-        candidate_id: None,
-        subject_object_id: Some(object_id.to_string()),
-        source_class: Some(source_class),
-        taint_class: Some(taint_class),
-        event: AdmissionEvent {
-            kind: EventKind::Other,
-            trigger_object_id: None,
-            approval_object_id: None,
-            evidence_id: None,
-            reason: ADMISSION_REASON.to_string(),
-        },
-    })?;
-    Ok(())
+    record(
+        envelope,
+        object_id,
+        classes,
+        EventKind::Other,
+        None,
+        ADMISSION_REASON,
+    )
 }
 
 pub(crate) fn admit_capture(
@@ -609,41 +603,54 @@ pub(crate) fn admit_capture(
     object_id: &str,
     approval: Option<&str>,
 ) -> Result<(), KernelError> {
-    envelope.record_admission(AdmissionRequest {
-        candidate_id: None,
-        subject_object_id: Some(object_id.to_string()),
-        source_class: Some(SourceClass::ModelInference),
-        taint_class: Some(TaintClass::AssistantInference),
-        event: AdmissionEvent {
-            kind: if approval.is_some() {
-                EventKind::Approve
-            } else {
-                EventKind::Other
-            },
-            trigger_object_id: None,
-            approval_object_id: approval.map(str::to_string),
-            evidence_id: None,
-            reason: CAPTURE_ADMISSION_REASON.to_string(),
-        },
-    })?;
-    Ok(())
+    let kind = if approval.is_some() {
+        EventKind::Approve
+    } else {
+        EventKind::Other
+    };
+    record(
+        envelope,
+        object_id,
+        (SourceClass::ModelInference, TaintClass::AssistantInference),
+        kind,
+        approval,
+        CAPTURE_ADMISSION_REASON,
+    )
 }
 
 pub(crate) fn accept_statement(
     envelope: &mut Envelope<'_>,
     object_id: &str,
 ) -> Result<(), KernelError> {
+    record(
+        envelope,
+        object_id,
+        (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+        EventKind::AcceptedAdr,
+        None,
+        CAPTURE_ADMISSION_REASON,
+    )
+}
+
+fn record(
+    envelope: &mut Envelope<'_>,
+    object_id: &str,
+    (source_class, taint_class): (SourceClass, TaintClass),
+    kind: EventKind,
+    approval: Option<&str>,
+    reason: &str,
+) -> Result<(), KernelError> {
     envelope.record_admission(AdmissionRequest {
         candidate_id: None,
         subject_object_id: Some(object_id.to_string()),
-        source_class: Some(SourceClass::ExplicitUser),
-        taint_class: Some(TaintClass::UserExplicit),
+        source_class: Some(source_class),
+        taint_class: Some(taint_class),
         event: AdmissionEvent {
-            kind: EventKind::AcceptedAdr,
+            kind,
             trigger_object_id: None,
-            approval_object_id: None,
+            approval_object_id: approval.map(str::to_string),
             evidence_id: None,
-            reason: CAPTURE_ADMISSION_REASON.to_string(),
+            reason: reason.to_string(),
         },
     })?;
     Ok(())

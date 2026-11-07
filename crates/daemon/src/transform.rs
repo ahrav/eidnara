@@ -597,7 +597,7 @@ impl ProducerContext<'_> {
     fn injected_memory(&self) -> Option<&CanonicalMemoryRead> {
         self.project_memory
             .as_ref()
-            .filter(|_| self.memory_auto_inject)
+            .filter(|_| self.injects_memory())
     }
 
     /// The injectable rows of the pinned read; empty when no read was taken or it was withheld.

@@ -66,10 +66,10 @@ code named, and states the intended reachability. Every existing check named in 
 
 - `default-production`: reached with the shipped configuration. Memory
   capture runs when `memory_enabled`, `auto_promote`, and
-  `memory_auto_capture` are on (`crates/daemon/src/memory_capture.rs:578`),
-  and all three default to on (`crates/daemon/src/config.rs:149`).
+  `memory_auto_capture` are on (`crates/daemon/src/memory_capture.rs:594`),
+  and all three default to on (`crates/daemon/src/config.rs:152`).
 - `explicit-config-only`: reached only when source capture is enabled;
-  `source_capture_enabled` defaults to off (`crates/daemon/src/config.rs:149`).
+  `source_capture_enabled` defaults to off (`crates/daemon/src/config.rs:152`).
 - `test-only`: no production caller at the branch tip. Nothing outside
   `crates/kernel` calls `evaluate_batch` or builds an `ApplicabilityRequest`.
 
@@ -218,7 +218,7 @@ Check: `always` - after any retirement or sweep, every evidence row cited under 
 Fault/timing angle: a citation committed after the sweep selected the row for expiry
 Required faults and enabling state: `harness_capture` evidence past `retain_until` with one live citing decision event; a pin added after selection
 Confidence: high - [evidence](evidence/p2-cited-evidence-is-never-retired-or-swept.md). Read `EVIDENCE_CITED_SQL` at `crates/kernel/src/slice/write.rs:42`, `retire_evidence` at `:585`, and `expire_harness_captures` at `crates/kernel/src/local_file.rs:245`
-Existing check: `crates/kernel/tests/kernel_source_descriptors.rs:1895`; `crates/daemon/tests/harness_sources.rs:3500`; `crates/kernel/src/local_file.rs:791`, `:889`; `crates/daemon/src/source_capture_tests.rs:3783` for a capture citation event (unaudited)
+Existing check: `crates/kernel/tests/kernel_source_descriptors.rs:1895`; `crates/daemon/tests/harness_sources.rs:3500`; `crates/kernel/src/local_file.rs:791`, `:889`; `crates/daemon/src/source_capture_tests.rs:3805` for a capture citation event (unaudited)
 Impact: retired evidence would break every citation that names it
 Open questions: None.
 
@@ -232,8 +232,8 @@ Guarantee: The capture commit's operation key is the project's `memory_capture` 
 Check: `always` - for every receipt of producer `memory_capture`, a second commit with the same key and digest is `replayed` and adds no row; one with a different digest returns `Conflict`. The receipt-conflict coverage marker is test-only (refinement R7): production never changes a frozen plan under its key
 Fault/timing angle: the first commit's reply is lost and the job is retried
 Required faults and enabling state: a publish retried after success; a frozen plan altered under the same key
-Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:1215` and the frozen-plan read in `publish` at `:1006`
-Existing check: `crates/daemon/src/memory_capture.rs:2016`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24944` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:1463` and the frozen-plan read in `publish` at `:1022`
+Existing check: `crates/daemon/src/memory_capture.rs:2488`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24953` (unaudited)
 Impact: a non-replaying retry would duplicate memories; a digest that omitted plan fields would let a changed plan replay the old receipt
 Open questions: None.
 
@@ -247,8 +247,8 @@ Guarantee: A captured memory is accepted only when its `message_id` names a mess
 Check: `always` - for every prepared memory, `source.text.contains(quote)` for the batch message whose id the memory's row names, and every row's `message_id` names exactly one batch message
 Fault/timing angle: none
 Required faults and enabling state: a quote taken from another message of the batch; an invented `message_id`; a duplicate `message_id`; an empty quote
-Confidence: high - [evidence](evidence/p2-capture-quote-is-an-exact-substring-of-its-own-batch-source.md). Read `parse_capture_batch` at `crates/daemon/src/memory_capture.rs:212` and `validate_capture_memories` at `:274`; the prompt states the rule at `:134` (offset corrected by refinement R8)
-Existing check: `crates/daemon/src/memory_capture.rs:1406`, `:1439`, `:1471`, `:1512`, `:1519`; `crates/daemon/src/lib.rs:25339` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-quote-is-an-exact-substring-of-its-own-batch-source.md). Read `parse_capture_batch` at `crates/daemon/src/memory_capture.rs:219` and `validate_capture_memories` at `:281`; the prompt states the rule at `:140` (offset corrected by refinement R8)
+Existing check: `crates/daemon/src/memory_capture.rs:1687`, `:1720`, `:1752`, `:1794`, `:1989`; `crates/daemon/src/lib.rs:25361` (unaudited)
 Impact: a quote from another message would cite evidence for a statement the source never made
 Open questions: None.
 
@@ -262,8 +262,8 @@ Guarantee: A capture job id is the SHA-256 of `(project, harness, session_id, me
 Check: `always` - for every capture job, `job_id == job_id(source, redacted_text)`, and for every decision it writes, `object_id == "mem_" + sha256(job_id + ":" + index)[..32]`
 Fault/timing angle: none
 Required faults and enabling state: the same source enqueued twice; a fragment id outside the store grammar
-Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:112`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:319`, and the object id at `:1280`
-Existing check: `crates/memory-store/src/memory_capture.rs:755`; `crates/daemon/src/memory_capture.rs:1538`, `:1587`, `:1900`, `:1922`, `:2016`; `crates/daemon/src/lib.rs:24944`, `:26255` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:112`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:335`, and the object id at `:1550`
+Existing check: `crates/memory-store/src/memory_capture.rs:755`; `crates/daemon/src/memory_capture.rs:2008`, `:2057`, `:2371`, `:2393`, `:2488`; `crates/daemon/src/lib.rs:24953`, `:26277` (unaudited)
 Impact: unstable ids would duplicate memories on retry and break the deterministic anchor id U3 derives from the job id
 Open questions: None.
 
@@ -277,8 +277,8 @@ Guarantee: Capture publication, capture checkpointing, source-capture publish, a
 Check: `always` - no capture or source publish commit for a session has a `commit_seq` after that session's delete sweep committed; observed by holding the gate from a test thread and asserting the competing operation has not committed (refinement R5 adds this gate-hold observation method)
 Fault/timing angle: a checkpoint or publish admitted before a delete that runs after it
 Required faults and enabling state: a session delete issued while a checkpoint or publish waits on the gate
-Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:1013`, the delete path at `crates/daemon/src/lib.rs:7042`, and `capture_after_response` at `crates/daemon/src/lib.rs:9292`
-Existing check: `crates/daemon/src/lib.rs:25487`, `:25825`, `:26030`, `:26578`; `crates/daemon/src/lib.rs:25236`; `crates/daemon/src/source_capture_tests.rs:1037` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:1029`, the delete path at `crates/daemon/src/lib.rs:7044`, and `capture_after_response` at `crates/daemon/src/lib.rs:9294`
+Existing check: `crates/daemon/src/lib.rs:25509`, `:25847`, `:26052`, `:26600`; `crates/daemon/src/lib.rs:25258`; `crates/daemon/src/source_capture_tests.rs:1037` (unaudited)
 Impact: an interleaving would leave a deleted session's memory or descriptor live
 Open questions: None.
 
@@ -308,7 +308,7 @@ Check: `sometimes` - a campaign constructs a window whose memo holds a `Pending`
 Fault/timing angle: the Kernel is starting or the window exceeds one pass's unit bound
 Required faults and enabling state: a 33-unit window; a Kernel still starting during the first pass
 Confidence: high - [evidence](evidence/p2-deferred-source-units-publish-on-a-later-pass.md). Read `Disposition::Pending` at `crates/daemon/src/source_capture.rs:183`
-Existing check: `crates/daemon/src/source_capture_tests.rs:181`, `:429`, `:465`, `:1073`, `:1234`; `crates/daemon/src/source_capture_tests.rs:4483` for the settlement witness (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:181`, `:429`, `:465`, `:1073`, `:1234`; `crates/daemon/src/source_capture_tests.rs:4505` for the settlement witness (unaudited)
 Impact: without the witness, U4's rule that settlement means job end rather than descriptor presence is untested
 Open questions: None.
 
@@ -330,7 +330,7 @@ Open questions: None.
 ### p2-new-anchor-row-decodes-on-write
 
 Type: safety
-Reachability: default-production - every memory-capture publish of a job with a readable frozen HEAD calls `Envelope::insert_anchor` (`crates/daemon/src/memory_capture.rs:1274`), added by U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135))
+Reachability: default-production - every memory-capture publish of a job with a readable frozen HEAD calls `Envelope::insert_anchor` (`crates/daemon/src/memory_capture.rs:1544`), added by U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135))
 Status: active
 Exercised: yes - `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference` writes all seven kinds; `invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause` refuses the required faults
 Guarantee: Every `anchors` row committed through `insert_anchor` decodes with `AnchorCondition::decode`, holds values only in the columns its kind owns, carries a lowercase hex oid for git kinds, and fits within `MAX_OBJECT_PAYLOAD_BYTES`.
@@ -368,8 +368,8 @@ Guarantee: The anchor id for a capture job is a pure function of `(job_id, head_
 Check: `always` - for every capture decision with `anchor_id = Some(a)`, `a == "anchor_" + sha256(job_id + ":" + oid)[..32]` for the job's frozen head, every decision of the job names `a`, and exactly one live `anchors` row has that id; a retry rebuilds byte-identical anchor and decision rows, and its citation events match in kind and evidence id while `recorded_at` is the retry's clock
 Fault/timing angle: a retry after a rolled-back or lost commit
 Required faults and enabling state: the same job and plan published into two fresh Kernels; a committed publish whose completion the store refuses, then a retry
-Confidence: high - [evidence](evidence/p2-new-capture-anchor-identity-is-deterministic.md). Read `anchor_spec` at `crates/daemon/src/memory_capture/cite.rs:403` and the lazy insert in `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:1215`
-Existing check: `crates/daemon/src/memory_capture.rs:1747`, `:1785`; `crates/daemon/src/source_capture_tests.rs:3822`; `crates/daemon/src/source_capture_tests.rs:3496` (one anchor per job); `crates/kernel/tests/kernel_anchor_write.rs:732` for the Kernel refusal of a second row (unaudited)
+Confidence: high - [evidence](evidence/p2-new-capture-anchor-identity-is-deterministic.md). Read `anchor_spec` at `crates/daemon/src/memory_capture/cite.rs:403` and the lazy insert in `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:1463`
+Existing check: `crates/daemon/src/memory_capture.rs:2218`, `:2256`; `crates/daemon/src/source_capture_tests.rs:3844`; `crates/daemon/src/source_capture_tests.rs:3496` (one anchor per job); `crates/kernel/tests/kernel_anchor_write.rs:732` for the Kernel refusal of a second row (unaudited)
 Impact: duplicate anchors per job, or `Conflict` on retry that permanently fails the job
 Open questions:
 - Whether anchors should be shared across jobs at one oid (needs human input; the model keeps per-job identity because `insert_anchor` refuses duplicates and no receipt covers a cross-job row).
@@ -377,15 +377,15 @@ Open questions:
 ### p2-new-head-observed-once-and-frozen
 
 Type: safety
-Reachability: default-production - every `memory.capture.submit` whose output parses observes HEAD in `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:614`)
+Reachability: default-production - every `memory.capture.submit` whose output parses observes HEAD in `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:615`)
 Status: active - activated by U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)); U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135)) adds the anchor-equals-frozen-head clause
 Exercised: yes - `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it` freezes one head in both jobs of a submission for five roots and keeps it across a later commit and a retry; the head-observation tests freeze loose, packed, delta-packed, and alternate HEAD commits and a HEAD that reaches its commit through branch aliases; `captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_head` and `misses_carry_one_closed_reason_each_and_the_counters_follow_them` check each anchor's oid against the fixture HEAD, detached included
 Guarantee: The checkout HEAD is read once per `memory.capture.submit`, before any plan of that submission is frozen, and the observation is part of the frozen `prepared_json`, so the receipt digest covers the anchor's value.
 Check: `always` - every job frozen by one submission carries the identical `head`, equal to the commit the fixture's HEAD named at submit, and a retry publishes that frozen value; after U3, for every capture decision with an anchor, `anchors.reachable_from_oid == parse(prepared_json).head`
 Fault/timing angle: a `git checkout` between the submit and its retry
 Required faults and enabling state: a commit on the checked-out branch between the submit and the retry, with completion refused so the frozen plans stay in the store
-Confidence: high - [evidence](evidence/p2-new-head-observed-once-and-frozen.md). Read `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:599`): one `observe_head` call precedes the loop that freezes each job's plan, and the receipt digest covers every frozen byte (`crates/daemon/src/memory_capture.rs:1230`)
-Existing check: `crates/daemon/src/lib.rs:25074`; `crates/daemon/src/memory_capture/head.rs:351`, `:373`, `:517`, `:690`; `crates/daemon/src/source_capture_tests.rs:3496`, `:3646` (unaudited)
+Confidence: high - [evidence](evidence/p2-new-head-observed-once-and-frozen.md). Read `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:600`): one `observe_head` call precedes the loop that freezes each job's plan, and the receipt digest covers every frozen byte (`crates/daemon/src/memory_capture.rs:1478`)
+Existing check: `crates/daemon/src/lib.rs:25096`; `crates/daemon/src/memory_capture/head.rs:351`, `:373`, `:517`, `:690`; `crates/daemon/src/source_capture_tests.rs:3496`, `:3662` (unaudited)
 Impact: the anchor stops describing the revision at which the quote was observed, and the receipt no longer covers the anchor's value
 Open questions: None.
 
@@ -400,7 +400,7 @@ Check: `always-or-unreached` - the path runs only when the head observation is u
 Fault/timing angle: none
 Required faults and enabling state: a root with no `.git`; an unborn branch; an `objectFormat` gix refuses
 Confidence: medium - [evidence](evidence/p2-new-head-unavailable-keeps-decision-admitted.md). The owner decided on 2026-10-25 (OQ2-11) that a detached HEAD anchors at its commit, which removes detached HEAD from this path; `observe_head` (`crates/daemon/src/memory_capture/head.rs:32`) maps every other refusal to `HeadUnavailable`
-Existing check: `crates/daemon/src/memory_capture/head.rs:373`, `:416`, `:568`; `crates/daemon/src/lib.rs:25074`, `:25184`; `crates/daemon/src/source_capture_tests.rs:3646` (unaudited)
+Existing check: `crates/daemon/src/memory_capture/head.rs:373`, `:416`, `:568`; `crates/daemon/src/lib.rs:25096`, `:25206`; `crates/daemon/src/source_capture_tests.rs:3662` (unaudited)
 Impact: capture would stop in fresh checkouts
 Open questions: None.
 
@@ -414,8 +414,8 @@ Guarantee: Every citation a capture decision carries is the `detail.evidence_id`
 Check: `always` - for every capture citation event, the evidence id equals the `detail.evidence_id` of a descriptor of the job's lineage tuple live at the decision's commit, and `PreparedCapture` (which denies unknown fields) has no evidence field
 Fault/timing angle: none
 Required faults and enabling state: model output naming a source outside the batch; a message published in another session with the same id
-Confidence: high - [evidence](evidence/p2-new-citation-is-alias-only.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:301`, which derives each lineage from the job row alone (`message_lineages`, `:152`, which validates the shared identity fields and hashes their encoding once through the Kernel's `lineage_ids_varying_last_field`), and the call inside the publish envelope at `crates/daemon/src/memory_capture.rs:1278`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3737` (unaudited)
+Confidence: high - [evidence](evidence/p2-new-citation-is-alias-only.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:301`, which derives each lineage from the job row alone (`message_lineages`, `:152`, which validates the shared identity fields and hashes their encoding once through the Kernel's `lineage_ids_varying_last_field`), and the call inside the publish envelope at `crates/daemon/src/memory_capture.rs:1548`
+Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3759` (unaudited)
 Impact: a model-emitted id would let the extraction forge its own evidence link
 Open questions: None.
 
@@ -445,7 +445,7 @@ Check: `always` - for every live cited capture decision, each cited evidence row
 Fault/timing angle: a sweep running after the evidence's `retain_until`
 Required faults and enabling state: cited evidence past `retain_until` with one live citing decision; a retirement attempt
 Confidence: high - [evidence](evidence/p2-new-citation-folds-sensitivity-and-pins-evidence.md). `append_citations` (`crates/daemon/src/memory_capture/cite.rs:379`) writes decision events, which `EVIDENCE_CITED_SQL` counts (`crates/kernel/src/slice/write.rs:42`)
-Existing check: `crates/daemon/src/source_capture_tests.rs:3783`, `:3496` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3805`, `:3496` (unaudited)
 Impact: retired evidence breaks every citation
 Open questions: None.
 
@@ -460,7 +460,7 @@ Check: `always` - the wait returns within the bound measured from the record's `
 Fault/timing angle: a source job that stalls past its budget
 Required faults and enabling state: a parked source job under a paused tokio clock; a parked job with a real clock
 Confidence: high - [evidence](evidence/p2-new-settlement-wait-is-bounded-and-gate-free.md). Read `settle` at `crates/daemon/src/source_capture/settlement.rs:272` and `capture_settlements` at `crates/daemon/src/memory_capture/native.rs:124`
-Existing check: `crates/daemon/src/source_capture/settlement.rs:340`; `crates/daemon/src/source_capture_tests.rs:4008`, `:4093`, `:4205`; `crates/daemon/src/source_capture/settlement.rs:518` (sessions observed together), `:556` (shared waiter channel), `:586` (a waiter reads the write after its observation) (unaudited)
+Existing check: `crates/daemon/src/source_capture/settlement.rs:340`; `crates/daemon/src/source_capture_tests.rs:4030`, `:4115`, `:4227`; `crates/daemon/src/source_capture/settlement.rs:518` (sessions observed together), `:556` (shared waiter channel), `:586` (a waiter reads the write after its observation) (unaudited)
 Impact: the native lease is consumed by waits, or the daemon deadlocks on the capture gate
 Open questions: None.
 
@@ -475,7 +475,7 @@ Check: `always` - at the instant the publish envelope opens for a job, the recor
 Fault/timing angle: a slow source job and a fast harness submit, including a submit on another session whose lease carries the job
 Required faults and enabling state: a parked source job and a submit inside its window; a second session bound to the same project
 Confidence: high - [evidence](evidence/p2-new-lookup-runs-only-after-settlement.md). Read the wait at `crates/daemon/src/memory_capture/native.rs:394`, before `kernel_routes::blocking`, and `settlement_key` at `crates/daemon/src/memory_capture/cite.rs:123`
-Existing check: `crates/daemon/src/source_capture_tests.rs:4093`, `:4158`, `:4483`; `crates/daemon/src/source_capture/settlement.rs:312`, `:461`, `:500`, `:598`, `:886`, `:895` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:4115`, `:4180`, `:4505`; `crates/daemon/src/source_capture/settlement.rs:312`, `:461`, `:500`, `:598`, `:886`, `:895` (unaudited)
 Impact: avoidable `descriptor_not_found` misses that hide a race as a missing source
 Open questions: None.
 
@@ -490,7 +490,7 @@ Check: `always` - for every capture decision, `(no citation event) == (citation 
 Fault/timing angle: a source publish refused or past its budget at submit time
 Required faults and enabling state: source capture off; a hashed source id; an unpublished message; a plain and an unborn root; a parked source job; a refused handoff; a 33-unit window
 Confidence: high - [evidence](evidence/p2-new-miss-reason-matches-outcome.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:301`, `is_hashed_source_id` at `:136`, and `settle` at `crates/daemon/src/source_capture/settlement.rs:272`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3646`, `:4205`, `:4259`, `:4483`; `crates/daemon/src/memory_capture/cite.rs:529`; `crates/daemon/src/memory_capture.rs:1587`; `crates/daemon/src/source_capture/settlement.rs:312` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3662`, `:4227`, `:4281`, `:4505`; `crates/daemon/src/memory_capture/cite.rs:529`; `crates/daemon/src/memory_capture.rs:2057`; `crates/daemon/src/source_capture/settlement.rs:312` (unaudited)
 Impact: revalidation cannot tell "never captured" from "captured late" from "lookup failed"
 Open questions: None.
 
@@ -505,7 +505,7 @@ Check: `always` - after each publish settles, `counter[reason] == committed(reas
 Fault/timing angle: a publish that rolls back after its reasons were computed; a replayed receipt
 Required faults and enabling state: a replayed publish; a refused commit
 Confidence: high - [evidence](evidence/p2-new-miss-counters-track-rationale.md). Read `record_capture_decisions` at `crates/daemon/src/source_capture.rs:659` and its call in `CaptureWork::publish`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3646`, `:3822`; `crates/host-runtime/src/control.rs:1966` for the wire allowlist (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3662`, `:3844`; `crates/host-runtime/src/control.rs:1966` for the wire allowlist (unaudited)
 Impact: operators tune the budget on numbers that count failures as misses
 Open questions: None.
 
@@ -514,13 +514,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - as above
 Status: active - activated by U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135))
-Exercised: yes - the end-to-end test admits four cited decisions and one uncited sibling in one session and compares their admission rows and served visibility
-Guarantee: A capture decision's admission record carries `ModelInference` and `AssistantInference` and the same maturity, and it serves with the same visibility and class, whether or not it has an anchor or a citation.
-Check: `always` - sibling capture decisions that differ only in citation or anchor presence have equal `source_class`, `taint_class`, `maturity`, `effective_maturity`, and `elevated_support`, and equal visibility on every surface
+Exercised: yes - the end-to-end test admits three cited whole-sentence user quotations, one uncited whole-sentence quotation, and two cited fragments in one session and compares their admission rows and served visibility
+Guarantee: A capture decision's admission record carries `ModelInference` and `AssistantInference`, and its maturity and served visibility depend on whether it is a whole-sentence quotation of a user message, never on whether it has an anchor or a citation.
+Check: `always` - capture decisions of one attribution that differ only in citation or anchor presence have equal `source_class`, `taint_class`, `maturity`, `effective_maturity`, and `elevated_support`, and equal visibility on every surface
 Fault/timing angle: none
 Required faults and enabling state: one cited and one uncited job in one session
-Confidence: high - [evidence](evidence/p2-new-anchor-and-citation-add-no-authority.md). Admission classes are fixed at `crates/daemon/src/memory_capture.rs:1322`, and neither the anchor nor the citation event is an admission input
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496` (unaudited)
+Confidence: high - [evidence](evidence/p2-new-anchor-and-citation-add-no-authority.md). Admission is `admit_capture` (`crates/daemon/src/kernel_routes/commit.rs:601`), called at `crates/daemon/src/memory_capture.rs:1610` with the statement record `user_attributed` (`crates/daemon/src/memory_capture.rs:1130`) selects; neither the anchor nor the citation event is an input to either
+Existing check: `crates/daemon/src/source_capture_tests.rs:3523` (unaudited)
 Impact: a model could raise its own authority by quoting a captured message
 Open questions: None.
 
@@ -535,7 +535,7 @@ Check: `sometimes` - states, not code points: a committed decision with an ancho
 Fault/timing angle: none
 Required faults and enabling state: a published message and a repository fixture with one commit; source capture off; a hashed id; a plain root; a parked source job past its budget
 Confidence: high - [evidence](evidence/p2-new-cited-decision-pair-observed.md)
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3646`, `:4205`, `:4259` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3662`, `:4227`, `:4281` (unaudited)
 Impact: without these witnesses, the safety records above are vacuous
 Open questions: None.
 

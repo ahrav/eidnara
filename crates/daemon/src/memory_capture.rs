@@ -96,6 +96,8 @@ struct ExistingCaptureMemory {
     can_replace: bool,
     source_revision: i64,
     created_commit_seq: i64,
+    #[serde(skip)]
+    automatic: bool,
 }
 
 /// The batch parser's view: whole-document shape is typed once, and each
@@ -318,6 +320,9 @@ fn validate_capture_memories(
             };
             if !previous.can_replace || !replaced.insert(target.clone()) {
                 return Err("capture target is protected or already replaced");
+            }
+            if previous.automatic && !quotes_whole_statements(&source.text, &memory.quote) {
+                return Err("only a whole user statement may replace an automatic memory");
             }
         }
         if !distinct.insert((memory.category.as_str(), memory.content.as_str())) {
@@ -1118,12 +1123,13 @@ const CAPTURE_SOURCE_KIND: &str = "assistant";
 const REPLACEABLE_SOURCES: [&str; 2] = [CAPTURE_SOURCE_ID, "eidnara_memory"];
 
 /// The attribution native capture prefixes to a user message's quotation.
-pub(crate) const USER_STATED: &str = "User stated";
+const USER_STATED: &str = "User stated";
 
 /// A captured memory qualifies as the user's own words when it is an
 /// attributed quotation spanning whole statements of a user message.
 fn user_attributed(job: &CaptureJob, memory: &CapturedMemory) -> bool {
     job.role == "user"
+        && holds_whole_message(job)
         && memory
             .content
             .strip_prefix(USER_STATED)
@@ -1132,9 +1138,21 @@ fn user_attributed(job: &CaptureJob, memory: &CapturedMemory) -> bool {
         && quotes_whole_statements(&job.text, &memory.quote)
 }
 
+fn holds_whole_message(job: &CaptureJob) -> bool {
+    let continued = job
+        .message_id
+        .rsplit_once(':')
+        .is_some_and(|(source, offset)| {
+            source.len() == 64
+                && source.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && offset != "0"
+        });
+    !continued && job.text.len() + 4 <= CAPTURE_FRAGMENT_BYTES
+}
+
 /// The domain of the statement records that approve user-attributed captures;
 /// memory reads select the `memory` domain.
-pub(crate) const STATEMENT_DOMAIN_ID: &str = "user-statements";
+const STATEMENT_DOMAIN_ID: &str = "user-statements";
 const STATEMENT_SOURCE_ID: &str = "memory_capture_statement";
 
 /// The decision kind the Kernel's approval predicate requires.
@@ -1198,52 +1216,135 @@ fn retire_statement(
     Ok(())
 }
 
-/// Whether `quote` occurs in `text` as whole statements: it starts where a
-/// line or sentence starts, and it ends with a sentence-ending `.` or `!`, or
-/// at the end of a line.
+/// Whether `quote` occurs in `text` as whole statements of the user's own
+/// prose. The quotation starts a sentence: at the start of the text, after a
+/// sentence-ending `.`, `!`, or `?` on the same line with a capitalized first
+/// word, or at the start of a line or list item whose preceding line, above
+/// any list it belongs to, ends a sentence. It ends with `.` or `!`, directly
+/// before one, or at the end of a line followed by the end of the text, a
+/// blank line, a list item, or a tag line. The quotation is a statement, and it sits in
+/// the message's own prose, outside each block a markup tag line opens, such
+/// as the text a command appends in `<context_researcher-augmentation>`.
 ///
-/// A fragment cut from inside a sentence can drop the negation, condition, or
-/// scope that governs it, and a question states nothing, so neither counts.
+/// A fragment cut from inside a sentence or from under a lead-in can drop the
+/// negation, condition, or scope that governs it.
 fn quotes_whole_statements(text: &str, quote: &str) -> bool {
     let trimmed = quote.trim();
-    if trimmed.is_empty() || trimmed.ends_with('?') {
+    if trimmed.is_empty() || trimmed.ends_with('?') || trimmed.lines().any(is_tag_line) {
         return false;
     }
     let lead = quote.len() - quote.trim_start().len();
     text.match_indices(quote).any(|(at, _)| {
         let start = at + lead;
         let end = start + trimmed.len();
-        statement_starts_at(&text[..start]) && statement_ends_at(trimmed, &text[end..])
+        !inside_markup_block(&text[..start])
+            && statement_starts_at(&text[..start], trimmed)
+            && statement_ends_at(trimmed, &text[end..])
     })
 }
 
-/// `before` is the message text ahead of the quotation.
-fn statement_starts_at(before: &str) -> bool {
-    let line = before.rsplit('\n').next().unwrap_or_default();
+/// `-`, `*`, `+`, or digits followed by `.` or `)`.
+fn is_list_marker(marker: &str) -> bool {
+    matches!(marker, "-" | "*" | "+")
+        || marker.strip_suffix(['.', ')']).is_some_and(|digits| {
+            !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+        })
+}
+
+fn is_list_item(line: &str) -> bool {
+    let line = line.trim_start();
+    line.split_once(char::is_whitespace)
+        .is_some_and(|(marker, _)| is_list_marker(marker))
+}
+
+/// `<notes>` or `</notes>` alone on a line.
+fn is_tag_line(line: &str) -> bool {
+    tag_name(line).is_some()
+}
+
+/// The tag name of a markup tag line, with `true` for a closing tag.
+fn tag_name(line: &str) -> Option<(&str, bool)> {
+    let inner = line.trim().strip_prefix('<')?.strip_suffix('>')?;
+    let (inner, closing) = match inner.strip_prefix('/') {
+        Some(rest) => (rest, true),
+        None => (inner, false),
+    };
+    let name = inner.split(char::is_whitespace).next()?;
+    let valid = name.starts_with(|ch: char| ch.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "-_:.".contains(ch))
+        && !inner.ends_with('/')
+        && !inner.contains(['<', '>']);
+    valid.then_some((name, closing))
+}
+
+/// Whether the end of `before` lies in a block a tag line opened and no
+/// matching tag line has closed.
+fn inside_markup_block(before: &str) -> bool {
+    let mut open: Vec<&str> = Vec::new();
+    let complete = before.rsplit_once('\n').map_or("", |(lines, _)| lines);
+    for line in complete.lines() {
+        match tag_name(line) {
+            Some((name, true)) => {
+                if let Some(at) = open.iter().rposition(|opened| *opened == name) {
+                    open.truncate(at);
+                }
+            }
+            Some((name, false)) => open.push(name),
+            None => {}
+        }
+    }
+    !open.is_empty()
+}
+
+/// Whether the nearest prose line of `lines`, counted from its end past blank
+/// and tag lines and, when `skip_items` holds, list items, is absent or ends
+/// a sentence.
+fn preceding_line_ends_sentence(lines: &str, skip_items: bool) -> bool {
+    lines
+        .lines()
+        .rev()
+        .find(|line| {
+            !line.trim().is_empty() && !is_tag_line(line) && !(skip_items && is_list_item(line))
+        })
+        .is_none_or(|line| line.trim_end().ends_with(['.', '!', '?']))
+}
+
+/// `before` is the message text ahead of the quotation `quote`.
+fn statement_starts_at(before: &str, quote: &str) -> bool {
+    let (above, line) = before.rsplit_once('\n').unwrap_or(("", before));
     let marker = line.trim();
-    if marker.chars().all(|ch| "-*+>#".contains(ch))
-        || (marker.ends_with(['.', ')'])
-            && marker[..marker.len() - 1]
-                .chars()
-                .all(|ch| ch.is_ascii_digit()))
+    if marker.is_empty() {
+        return preceding_line_ends_sentence(above, false);
+    }
+    if is_list_marker(marker) && line.ends_with(char::is_whitespace) {
+        return preceding_line_ends_sentence(above, true);
+    }
+    before.ends_with(char::is_whitespace)
+        && before.trim_end().ends_with(['.', '!', '?'])
+        && !quote.starts_with(|ch: char| ch.is_lowercase())
+}
+
+/// `after` is the message text following the quotation `quote`.
+fn statement_ends_at(quote: &str, after: &str) -> bool {
+    if quote.ends_with(['.', '!']) {
+        return after.is_empty() || after.starts_with(char::is_whitespace);
+    }
+    if after
+        .strip_prefix(['.', '!'])
+        .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
     {
         return true;
     }
-    before.ends_with(char::is_whitespace) && before.trim_end().ends_with(['.', '!', '?'])
-}
-
-/// `after` is the message text following the quotation.
-fn statement_ends_at(quote: &str, after: &str) -> bool {
-    let rest = after.trim_start_matches([' ', '\t']);
-    if rest.is_empty() || rest.starts_with(['\n', '\r']) {
-        return true;
-    }
-    if quote.ends_with(['.', '!']) {
-        return after.starts_with(char::is_whitespace);
-    }
-    after
-        .strip_prefix(['.', '!'])
-        .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
+    let rest = after.trim_start_matches([' ', '\t', '\r']);
+    let Some(below) = rest.strip_prefix('\n') else {
+        return rest.is_empty();
+    };
+    below
+        .lines()
+        .next()
+        .is_none_or(|next| next.trim().is_empty() || is_list_item(next) || is_tag_line(next))
 }
 
 /// The bounded candidate set for one batch: the 64 memory decisions sharing
@@ -1310,20 +1411,12 @@ fn select_existing_memories(
             id: row.object.object_id.clone(),
             category: decision.decision_kind.clone(),
             content: decision.payload.summary.clone(),
-            can_replace: REPLACEABLE_SOURCES.contains(&row.object.source_id.as_str())
-                && matches!(
-                    row.visibility,
-                    kernel::SurfaceVisibility::Labeled | kernel::SurfaceVisibility::Visible
-                ),
+            can_replace: REPLACEABLE_SOURCES.contains(&row.object.source_id.as_str()),
+            automatic: row.visibility == kernel::SurfaceVisibility::Visible,
             source_revision: row.object.source_revision,
             created_commit_seq: row.object.created_commit_seq,
         })
         .collect())
-}
-
-struct ReplaceTarget {
-    source_revision: i64,
-    capture_lineage: bool,
 }
 
 fn checked_capture_target(
@@ -1332,7 +1425,7 @@ fn checked_capture_target(
     output: &PreparedCapture,
     target: &str,
     replacing: bool,
-) -> Result<ReplaceTarget, kernel::KernelError> {
+) -> Result<Option<i64>, kernel::KernelError> {
     let previous = output
         .existing
         .iter()
@@ -1353,19 +1446,16 @@ fn checked_capture_target(
     }
     let served = envelope.served_rows_for(&[target], None)?;
     let row = served.get(target).ok_or(kernel::KernelError::Conflict)?;
-    let visibility = row.visibility(kernel::Surface::ExplicitSearch);
-    if visibility == kernel::SurfaceVisibility::Hidden
+    if row.visibility(kernel::Surface::ExplicitSearch) == kernel::SurfaceVisibility::Hidden
         || (replacing
             && (!REPLACEABLE_SOURCES.contains(&state.object.source_id.as_str())
                 || row.object.sensitivity != kernel::Sensitivity::Normal))
     {
         return Err(kernel::KernelError::Conflict);
     }
-    Ok(ReplaceTarget {
-        source_revision: previous.source_revision,
-        capture_lineage: state.object.source_id == CAPTURE_SOURCE_ID
-            && state.object.source_kind == CAPTURE_SOURCE_KIND,
-    })
+    Ok((state.object.source_id == CAPTURE_SOURCE_ID
+        && state.object.source_kind == CAPTURE_SOURCE_KIND)
+        .then_some(previous.source_revision))
 }
 
 /// `reasons` receives one citation reason and one anchor reason per decision
@@ -1420,19 +1510,28 @@ fn publish_captured_memories(
                     checked_capture_target(envelope, project, output, target, false)?;
                     continue;
                 }
+                let attributed = user_attributed(job, memory);
+                for target in memory.replaces.iter().chain(&memory.also_replaces) {
+                    if !attributed
+                        && envelope
+                            .subject_admission(target)?
+                            .is_some_and(|(_, approval)| approval.is_some())
+                    {
+                        return Err(kernel::KernelError::Conflict);
+                    }
+                }
                 let mut superseded = None;
                 let mut retired = Vec::new();
                 let mut source_revision = 1;
                 if let Some(target) = &memory.replaces {
-                    let checked = checked_capture_target(envelope, project, output, target, true)?;
-                    if checked.capture_lineage {
-                        source_revision = checked
-                            .source_revision
-                            .checked_add(1)
-                            .ok_or(kernel::KernelError::InvalidInput)?;
-                        superseded = Some(target);
-                    } else {
-                        retired.push(target);
+                    match checked_capture_target(envelope, project, output, target, true)? {
+                        Some(revision) => {
+                            source_revision = revision
+                                .checked_add(1)
+                                .ok_or(kernel::KernelError::InvalidInput)?;
+                            superseded = Some(target);
+                        }
+                        None => retired.push(target),
                     }
                 }
                 for target in &memory.also_replaces {
@@ -1455,7 +1554,7 @@ fn publish_captured_memories(
                 let id = &id[..36];
                 let decision_id = format!("dec_{}", &id[4..]);
                 let mut rationale: serde_json::Map<String, Value> = [
-                    ("source", json!("memory_capture")),
+                    ("source", json!(CAPTURE_SOURCE_ID)),
                     ("session", json!(job.session_id)),
                     ("message", json!(job.message_id)),
                     ("quote", json!(memory.quote)),
@@ -1496,7 +1595,7 @@ fn publish_captured_memories(
                     retire_statement(envelope, target)?;
                 }
                 cite::append_citations(envelope, &decision_id, &evidence, recorded_at)?;
-                let approval = if user_attributed(job, memory) {
+                let approval = if attributed {
                     Some(record_statement(
                         envelope,
                         project,
@@ -1670,6 +1769,7 @@ mod tests {
             can_replace: true,
             source_revision: 1,
             created_commit_seq: 1,
+            automatic: false,
         }];
         let text = json!({"version":1,"decisions":[
             {"message_id":"u1","memories":[
@@ -1699,7 +1799,7 @@ mod tests {
 
     #[test]
     fn only_whole_declarative_sentences_count_as_whole_statements() {
-        let text = "Use pnpm here. Never deploy on Fridays unless the lead agrees.\n- Keep logs for 30 days\nShould we cache v1.2 builds?";
+        let text = "Use pnpm here. Never deploy on Fridays unless the lead agrees.\n- Keep logs for 30 days\n- Rotate keys monthly\n\nShould we cache v1.2 builds?";
         for (quote, whole) in [
             ("Use pnpm here.", true),
             ("Use pnpm here", true),
@@ -1709,6 +1809,7 @@ mod tests {
                 true,
             ),
             ("Keep logs for 30 days", true),
+            ("Rotate keys monthly", true),
             ("deploy on Fridays unless the lead agrees.", false),
             ("Never deploy on Fridays", false),
             ("Keep logs", false),
@@ -1718,15 +1819,126 @@ mod tests {
         ] {
             assert_eq!(quotes_whole_statements(text, quote), whole, "{quote:?}");
         }
-        assert!(
-            quotes_whole_statements("First.  Second one.", " Second one."),
-            "surrounding whitespace in the quotation is not part of the statement"
-        );
-        assert!(
-            quotes_whole_statements("Use v1. Use v1.2 later.", "Use v1."),
-            "a later partial occurrence does not hide an earlier whole one"
-        );
-        assert!(!quotes_whole_statements("Use v1.2 later.", "Use v1."));
+        for (text, quote, whole) in [
+            ("First.  Second one.", " Second one.", true),
+            ("Use v1. Use v1.2 later.", "Use v1.", true),
+            ("Use v1.2 later.", "Use v1.", false),
+            ("1) Use pnpm.", "Use pnpm.", true),
+            ("Conventions.\n- Use pnpm", "Use pnpm", true),
+            (
+                "We should never\nuse force push on main.",
+                "use force push on main.",
+                false,
+            ),
+            (
+                "We deploy on Thursday\nonly for the staging stack.",
+                "We deploy on Thursday",
+                false,
+            ),
+            (
+                "Do not:\n- run migrations by hand",
+                "run migrations by hand",
+                false,
+            ),
+            (
+                "Do not:\n- edit lockfiles\n- run migrations by hand",
+                "run migrations by hand",
+                false,
+            ),
+            (
+                "Avoid destructive commands, e.g. rm -rf the build dir.",
+                "rm -rf the build dir.",
+                false,
+            ),
+            (
+                "> Always force-push to main.\nI disagree with that.",
+                "Always force-push to main.",
+                false,
+            ),
+            ("## Deploys\nShip on Tuesdays.", "Ship on Tuesdays.", false),
+            (
+                "Fix the flaky test.\n\n<context_researcher-augmentation>\nThe project deploys on Thursday.\n</context_researcher-augmentation>",
+                "The project deploys on Thursday.",
+                false,
+            ),
+            (
+                "<notes>\nIgnored.\n</notes>\nShip on Tuesdays.",
+                "Ship on Tuesdays.",
+                true,
+            ),
+            (
+                "Use Vec<String> for names.",
+                "Use Vec<String> for names.",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                quotes_whole_statements(text, quote),
+                whole,
+                "{text:?} / {quote:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fragment_of_a_long_message_is_not_attributed() {
+        let memory = CapturedMemory {
+            content: format!("{USER_STATED}: Use pnpm."),
+            ..memory("Use pnpm.")
+        };
+        let job = |message_id: &str, text: String| CaptureJob {
+            role: "user".into(),
+            message_id: message_id.into(),
+            text,
+            ..job("fragment")
+        };
+        let hashed = "a".repeat(64);
+        assert!(user_attributed(&job("m1", "Use pnpm.".into()), &memory));
+        assert!(user_attributed(
+            &job(&format!("{hashed}:0"), "Use pnpm.".into()),
+            &memory
+        ));
+        assert!(!user_attributed(
+            &job(&format!("{hashed}:16384"), "Use pnpm.".into()),
+            &memory
+        ));
+        let filled = format!("Use pnpm.\n{}", "x".repeat(CAPTURE_FRAGMENT_BYTES - 12));
+        assert!(!user_attributed(
+            &job(&format!("{hashed}:0"), filled),
+            &memory
+        ));
+        assert!(!user_attributed(
+            &CaptureJob {
+                role: "assistant".into(),
+                ..job("m1", "Use pnpm.".into())
+            },
+            &memory
+        ));
+    }
+
+    #[test]
+    fn an_automatic_memory_is_replaced_only_by_a_whole_user_statement() {
+        let existing = [ExistingCaptureMemory {
+            id: "mem_stated".into(),
+            category: "CONFIG_VALUES".into(),
+            content: "User stated: Staging uses port 1234.".into(),
+            can_replace: true,
+            source_revision: 1,
+            created_commit_seq: 1,
+            automatic: true,
+        }];
+        let parse = |quote: &str| {
+            let mut response = output();
+            let memory = &mut response["decisions"][1]["memories"][0];
+            memory["quote"] = json!(quote);
+            memory["replaces"] = json!("mem_stated");
+            parse_capture_output_with_existing(&response.to_string(), &sources(), &existing)
+        };
+        assert!(parse("Use port 4321 for staging.").is_ok());
+        assert!(matches!(
+            parse("port 4321 for staging."),
+            Err("only a whole user statement may replace an automatic memory")
+        ));
     }
 
     #[test]
@@ -1738,6 +1950,7 @@ mod tests {
             can_replace,
             source_revision: 1,
             created_commit_seq: 1,
+            automatic: false,
         };
         let existing = [
             target("mem_old", true),
@@ -2221,6 +2434,7 @@ mod tests {
             can_replace: true,
             source_revision: row.object.source_revision,
             created_commit_seq: row.object.created_commit_seq,
+            automatic: false,
         }
     }
 
@@ -2369,6 +2583,7 @@ mod tests {
             can_replace: true,
             source_revision: 1,
             created_commit_seq: 1,
+            automatic: false,
         };
         let mut response = output();
         response["decisions"][1]["memories"][0]["replaces"] = json!(existing.id);
@@ -2410,6 +2625,7 @@ mod tests {
             can_replace: true,
             source_revision: 1,
             created_commit_seq: 1,
+            automatic: false,
         };
         let mut users = sources();
         users[1].role = CaptureRole::User;

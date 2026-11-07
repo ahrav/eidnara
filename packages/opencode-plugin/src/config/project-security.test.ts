@@ -293,6 +293,12 @@ describe("stripUnsafeProjectConfigFields", () => {
             expect.stringContaining("memory.injection_budget_tokens"),
         ]);
 
+        for (const autoInject of [{}, true]) {
+            const unset: Record<string, unknown> = { memory: { auto_inject: autoInject } };
+            expect(stripUnsafeProjectConfigFields(unset)).toEqual([]);
+            expect(unset).toEqual({ memory: {} });
+        }
+
         const replaced: Record<string, unknown> = { memory: null };
         const replacedWarnings = stripUnsafeProjectConfigFields(replaced);
         expect(replaced).toEqual({});

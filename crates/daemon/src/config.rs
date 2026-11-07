@@ -2624,6 +2624,22 @@ mod tests {
     /// Every JSON pointer literal the production merge reads is a `ConfigKey`,
     /// and every `ConfigKey` is listed once in `ALL`.
     #[test]
+    fn auto_inject_follows_the_user_tier_and_ignores_the_project_tier() {
+        let user = serde_json::json!({ "memory": { "auto_inject": { "enabled": false } } });
+        let project = serde_json::json!({ "memory": { "auto_inject": { "enabled": true } } });
+        assert!(merge_tiers(None, None).memory_auto_inject);
+        assert!(!merge_tiers(Some(&user), None).memory_auto_inject);
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), Some(&project));
+        assert!(!cfg.memory_auto_inject);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("/memory/auto_inject/enabled")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
     fn every_consumed_pointer_is_a_classified_config_key() {
         let source = include_str!("config.rs");
         let production = &source[..source
