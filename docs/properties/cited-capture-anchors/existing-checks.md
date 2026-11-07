@@ -67,12 +67,12 @@ part.
 | `crates/kernel/src/local_file.rs:889` `a_refused_harness_capture_rolls_back_alone_inside_its_page_commit` | same | unaudited |
 | `crates/daemon/src/memory_capture.rs:2904` `correction_supersedes_and_replay_or_duplicate_creates_no_extra_memory` | `p2-capture-commit-replays-by-job-key-and-frozen-digest`; `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
 | `crates/kernel/tests/kernel_envelope.rs:160` `receipt_replay_is_effect_free_and_digest_conflict_is_typed` | `p2-capture-commit-replays-by-job-key-and-frozen-digest` | unaudited |
-| `crates/daemon/src/lib.rs:24953` `automatic_capture_commits_once_and_is_explicitly_retrievable` | same; identity record | unaudited |
+| `crates/daemon/src/lib.rs:24957` `automatic_capture_commits_once_and_is_explicitly_retrievable` | same; identity record | unaudited |
 | `crates/daemon/src/memory_capture.rs:1813`, `:1846`, `:1878`, `:1920`, `:2405` | `p2-capture-quote-is-an-exact-substring-of-its-own-batch-source` | unaudited |
-| `crates/daemon/src/lib.rs:25361` `automatic_capture_rejection_stays_pending_not_successful_empty_memory` | same | unaudited |
+| `crates/daemon/src/lib.rs:25365` `automatic_capture_rejection_stays_pending_not_successful_empty_memory` | same | unaudited |
 | `crates/memory-store/src/memory_capture.rs:755` `job_identity_derives_from_redacted_text_so_a_stored_digest_cannot_confirm_a_secret` | `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
-| `crates/daemon/src/memory_capture.rs:2424`, `:2473`, `:2787`, `:2809`; `crates/daemon/src/lib.rs:26277` | same | unaudited |
-| `crates/daemon/src/lib.rs:25509`, `:25847`, `:26052`, `:26600`, `:25258`; `crates/daemon/src/source_capture_tests.rs:1037` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |
+| `crates/daemon/src/memory_capture.rs:2424`, `:2473`, `:2787`, `:2809`; `crates/daemon/src/lib.rs:26281` | same | unaudited |
+| `crates/daemon/src/lib.rs:25513`, `:25851`, `:26056`, `:26604`, `:25262`; `crates/daemon/src/source_capture_tests.rs:1037` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:867`, `:1259`; `crates/kernel/tests/kernel_source_descriptors.rs:494`, `:2484`, `:2593`, `:2717`, `:2795`, `:2871`; `crates/daemon/tests/harness_sources.rs:1724` | `p2-messages-descriptor-identity-is-per-block-and-evidence-id-is-the-receipt-key` | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:181`, `:429`, `:465`, `:1073`, `:1234` | `p2-deferred-source-units-publish-on-a-later-pass` | unaudited |
 | `crates/daemon/tests/git_sources.rs:549` `refused_selections_publish_nothing_and_encodings_are_dispositions` | `p2-git-open-is-isolated-and-allocation-bounded` | unaudited |
@@ -86,8 +86,8 @@ part.
 | `crates/daemon/src/memory_capture/head.rs:595` `a_delta_chain_that_revisits_an_entry_is_unavailable_without_a_store_read`; `:609` `an_index_paired_with_another_pack_is_unavailable_without_a_store_read`; `:631` `slot_exhaustion_while_resolving_a_delta_base_reads_as_exhausted` | `p2-new-head-unavailable-keeps-decision-admitted` (a pack whose delta chain revisits an entry, an index paired with another pack's data); `p2-git-open-is-isolated-and-allocation-bounded` (slot exhaustion reported from inside a delta-base lookup) | unaudited |
 | `crates/daemon/src/memory_capture/head.rs:690` `a_head_commit_in_an_alternate_freezes_when_the_store_holds_more_indices_than_its_first_slots` | `p2-git-open-is-isolated-and-allocation-bounded`; `p2-new-head-observed-once-and-frozen` (slot retry, alternates) | unaudited |
 | `crates/daemon/src/memory_capture/head.rs:716` `frozen_heads_serialize_as_tagged_values_and_round_trip`; `crates/daemon/src/memory_capture.rs:2884` `a_plan_frozen_without_a_head_reads_as_head_unavailable` | same (C13 compatibility) | unaudited |
-| `crates/daemon/src/lib.rs:25096` `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it` | `p2-new-head-observed-once-and-frozen`; `p2-new-head-unavailable-keeps-decision-admitted` | unaudited |
-| `crates/daemon/src/lib.rs:25206` `a_plan_frozen_without_a_head_publishes_as_before` | `p2-new-head-observed-once-and-frozen` (C13: a plan without `head` publishes) | unaudited |
+| `crates/daemon/src/lib.rs:25100` `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it` | `p2-new-head-observed-once-and-frozen`; `p2-new-head-unavailable-keeps-decision-admitted` | unaudited |
+| `crates/daemon/src/lib.rs:25210` `a_plan_frozen_without_a_head_publishes_as_before` | `p2-new-head-observed-once-and-frozen` (C13: a plan without `head` publishes) | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:797` `a_written_reachable_from_anchor_holds_through_descendants_and_not_after_a_rewrite` | `p2-reachable-from-holds-on-ancestor-of-head` (seam 2) | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:3523` `captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_head` | `p2-new-citation-is-alias-only`; `p2-new-citation-block-target-rule`; `p2-new-anchor-and-citation-add-no-authority`; `p2-new-capture-anchor-identity-is-deterministic`; `p2-new-miss-counters-track-rationale`; `p2-new-cited-decision-pair-observed` | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:3662` `misses_carry_one_closed_reason_each_and_the_counters_follow_them` | `p2-new-miss-reason-matches-outcome`; `p2-new-head-unavailable-keeps-decision-admitted`; `p2-new-miss-counters-track-rationale` | unaudited |

@@ -7263,7 +7263,11 @@ impl HandlerCore {
             &store,
             &binding.project_root.to_string_lossy(),
             &session_id,
-            loaded.meta.user_profile_version,
+            if binding.config.memory_auto_inject || loaded.meta.memory_disabled {
+                loaded.meta.user_profile_version
+            } else {
+                0
+            },
             !loaded.meta.memory_disabled,
             loaded
                 .meta

@@ -1894,7 +1894,7 @@ fn revision_signal_for_context(
         store,
         note_project_path,
         session_id,
-        if ctx.injects_memory() {
+        if ctx.memory_auto_inject || !ctx.memory_enabled {
             user_profile_version
         } else {
             0

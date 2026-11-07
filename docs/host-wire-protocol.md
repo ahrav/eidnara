@@ -1045,8 +1045,8 @@ ending in `:` (also after closing `*` or `_`, and the fullwidth colon), every pa
 after such a line, every paragraph after one holding a quotation mark, and
 every paragraph that a fence or tag line borders without a blank
 line. The quotation starts the
-paragraph or follows a `.`, `!`, or `?` and whitespace, with a first character
-that is not lowercase and no colon earlier in the paragraph; it ends with `.`
+paragraph, or follows a `.`, `!`, or `?` and whitespace with a first character
+that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, and no lowercase word
 follows it past any punctuation; neither boundary falls
 at a dotted abbreviation, a word of two or more one- or two-letter segments
