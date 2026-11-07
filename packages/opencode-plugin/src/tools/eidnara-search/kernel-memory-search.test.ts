@@ -579,9 +579,42 @@ describe("scanSnapshotForLexicalSearch", () => {
         expect(reads.map((args) => (args as { gated: boolean }).gated)).toEqual([true, false]);
     });
 
-    test("keeps the first page's cancellation as the search's state", async () => {
-        const { client } = twoPageClient({ state: { kind: "cancelled" } });
-        expect(await scanWith(client)).toEqual({ ok: false, state: { kind: "cancelled" } });
+    test("answers the cancelled state when the caller's signal aborts after the first page", async () => {
+        const controller = new AbortController();
+        const first = readRow({
+            objectId: OBJECT_A,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup volume",
+            seq: 5,
+        });
+        let reads = 0;
+        const client = {
+            read: async () => {
+                reads += 1;
+                if (reads === 1) {
+                    controller.abort();
+                    return {
+                        state: { kind: "available" },
+                        known_as_of: 9,
+                        tip: 9,
+                        gated: false,
+                        truncated: true,
+                        rows: [first],
+                    };
+                }
+                return { state: { kind: "cancelled" } };
+            },
+        } as unknown as KernelClient;
+        const scan = await scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated: false,
+            query: "backup",
+            limit: 10,
+            nowMs: 0,
+            signal: controller.signal,
+        });
+        expect(scan).toEqual({ ok: false, state: { kind: "cancelled" } });
     });
 
     test("passes one deadline's remainder to every page", async () => {
@@ -593,6 +626,12 @@ describe("scanSnapshotForLexicalSearch", () => {
             truncated: false,
             rows: [],
         });
+        let now = 0;
+        const clock = () => {
+            const at = now;
+            now += 1_000;
+            return at;
+        };
         await scanSnapshotForLexicalSearch({
             client,
             surface: "explicit_search",
@@ -600,12 +639,37 @@ describe("scanSnapshotForLexicalSearch", () => {
             query: "backup",
             limit: 10,
             nowMs: 0,
-            deadline: Deadline.start(60_000),
+            deadline: Deadline.start(60_000, clock),
         });
-        const budgets = reads.map((args) => (args as { deadlineMs?: number }).deadlineMs);
-        expect(budgets).toHaveLength(2);
-        for (const budget of budgets) expect(budget).toBeLessThanOrEqual(60_000);
-        expect(budgets[1] as number).toBeLessThanOrEqual(budgets[0] as number);
+        // The clock reads 0 at the start, 1,000 for page 1's budget, then 2,000 for page 2's expiry check and 3,000 for its budget.
+        expect(reads.map((args) => (args as { deadlineMs?: number }).deadlineMs)).toEqual([
+            59_000, 57_000,
+        ]);
+    });
+
+    test("keeps the rows already ranked when the shared deadline expires during a later page", async () => {
+        const { kernel, target } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        let now = 0;
+        const clock = () => {
+            const at = now;
+            now += 400;
+            return at;
+        };
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+            // Page 1 receives 600 ms; page 2 passes its expiry check at 800 and receives no budget at 1,200, which the client reports as `cancelled`.
+            deadline: Deadline.start(1_000, clock),
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: true });
+        if (!scan.ok) return;
+        expect(scan.rows).toHaveLength(10);
+        expect(scan.rows.map((row) => row.object.object_id)).not.toContain(target);
     });
 
     test("continues inside one commit: a later page may start with that commit's greater ids", async () => {
@@ -624,7 +688,7 @@ describe("scanSnapshotForLexicalSearch", () => {
             rows: [sibling],
         });
         const scan = await scanWith(client);
-        expect(scan.ok && scan.truncated).toBe(false);
+        expect(scan).toMatchObject({ ok: true, truncated: false });
         if (!scan.ok) return;
         expect(scan.rows.map((row) => row.object.object_id).sort()).toEqual([OBJECT_A, OBJECT_B]);
     });

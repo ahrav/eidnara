@@ -329,7 +329,7 @@ export type SnapshotScan =
  * top `limit` lexical results among eligible rows from the pages read. Only the first page is
  * gated; later pages read the snapshot that gate admitted. `truncated` reports rows left unread,
  * after `maxPages` pages, past `deadline`, or when the daemon refuses a later page or answers it from
- * another snapshot. A cancelled call answers its state, as a refused first page does.
+ * another snapshot. A search the caller's signal cancels answers its state, as a refused first page does.
  */
 export async function scanSnapshotForLexicalSearch(args: {
     client: KernelClient;
@@ -349,6 +349,8 @@ export async function scanSnapshotForLexicalSearch(args: {
     let asOf: number | null = null;
     let before: ReadCursor | undefined;
     for (let page = 0; page < maxPages; page += 1) {
+        if (page > 0 && args.deadline?.isExpired())
+            return { ok: true, rows: kept, truncated: true };
         const read = await args.client.read({
             surface: args.surface,
             gated: page === 0 && args.gated,
@@ -358,7 +360,8 @@ export async function scanSnapshotForLexicalSearch(args: {
             ...(args.deadline ? { deadlineMs: args.deadline.remainingMs() } : {}),
         });
         if (!isAvailable(read)) {
-            const cancelled = read.state.kind === "cancelled" || args.signal?.aborted === true;
+            // The client reports an expired deadline as `cancelled` too, so only the caller's own signal marks a cancelled search.
+            const cancelled = args.signal?.aborted === true;
             return asOf === null || cancelled
                 ? { ok: false, state: read.state }
                 : { ok: true, rows: kept, truncated: true };
