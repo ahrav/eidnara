@@ -205,6 +205,7 @@ impl CanonicalMemoryRead {
 pub(crate) fn read_project_memory(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
+    session_id: &str,
     now_ms: i64,
     memory_budget_tokens: f64,
 ) -> CanonicalMemoryRead {
@@ -231,11 +232,29 @@ pub(crate) fn read_project_memory(
         Some(tip),
         RowSelection::DomainDecisions(MEMORY_DOMAIN_ID),
     ) {
-        Ok(response) => {
+        Ok(mut response) => {
+            let decisions = &response.decisions;
+            response.rows.retain(|row| {
+                row.object.source_id != crate::memory_capture::CAPTURE_SOURCE_ID
+                    || decisions.get(&row.object.object_id).is_none_or(|decision| {
+                        capture_session(&decision.payload.rationale).as_deref() != Some(session_id)
+                    })
+            });
             CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
         }
         Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     }
+}
+
+fn capture_session(rationale: &str) -> Option<std::borrow::Cow<'_, str>> {
+    #[derive(serde::Deserialize)]
+    struct CaptureRationale<'a> {
+        #[serde(borrow)]
+        session: Option<std::borrow::Cow<'a, str>>,
+    }
+    serde_json::from_str::<CaptureRationale<'_>>(rationale)
+        .ok()
+        .and_then(|rationale| rationale.session)
 }
 
 /// The domain filter the injectable memory surface applies to canonical rows:

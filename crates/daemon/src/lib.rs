@@ -5583,12 +5583,14 @@ impl HandlerCore {
         &self,
         binding: &SessionBinding,
         cfg: &DaemonConfig,
+        session_id: &str,
         now_ms: i64,
     ) -> Option<canonical_memory::CanonicalMemoryRead> {
         cfg.memory_enabled.then(|| {
             canonical_memory::read_project_memory(
                 &self.kernel,
                 &binding.kernel_project,
+                session_id,
                 now_ms,
                 cfg.memory_budget_tokens,
             )
@@ -6138,7 +6140,7 @@ impl HandlerCore {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
-                project_memory: self.project_memory_read(binding, &cfg, now),
+                project_memory: self.project_memory_read(binding, &cfg, &parsed.session_id, now),
                 model_chain: cfg.model_chain.clone(),
                 token_budget: derive_history_summarizer_chunk_tokens(
                     cfg.history_summarizer_context_limit_tokens,
@@ -7261,7 +7263,11 @@ impl HandlerCore {
             &store,
             &binding.project_root.to_string_lossy(),
             &session_id,
-            loaded.meta.user_profile_version,
+            if binding.config.memory_auto_inject || loaded.meta.memory_disabled {
+                loaded.meta.user_profile_version
+            } else {
+                0
+            },
             !loaded.meta.memory_disabled,
             loaded
                 .meta
@@ -9658,7 +9664,8 @@ impl HandlerCore {
         // every attempt the transform makes, composes from the same pinned
         // snapshot. `None` when memory is disabled, so the kernel store is not
         // touched for a block that is never rendered.
-        let project_memory = self.project_memory_read(&binding, &binding.config, pass_now);
+        let project_memory =
+            self.project_memory_read(&binding, &binding.config, &parsed.session_id, pass_now);
         let env = PassEnv {
             store,
             parsed,
@@ -9733,6 +9740,7 @@ impl HandlerCore {
                 .filter(|budget| budget.is_finite() && *budget >= 0.0)
                 .unwrap_or(binding.history_budget_tokens),
             memory_enabled: binding.config.memory_enabled,
+            memory_auto_inject: binding.config.memory_auto_inject,
             inject_docs: binding.config.inject_docs,
             project_doc_files: &binding.config.project_doc_files,
             document_reads: document_reads.as_deref(),
@@ -9785,7 +9793,10 @@ impl HandlerCore {
     }
 
     fn record_use_outcome(&self, env: &PassEnv, pass: &TransformWithProjection) {
-        if !(pass.froze_composition && pass.response.committed) {
+        if !(pass.froze_composition
+            && pass.response.committed
+            && env.binding.config.memory_auto_inject)
+        {
             return;
         }
         let Some(canonical_memory::CanonicalMemoryRead::Available(snapshot)) =
@@ -19261,6 +19272,8 @@ mod tests {
     mod compression_fidelity_tests;
     #[path = "fold_authority_handler_tests.rs"]
     mod fold_authority_handler_tests;
+    #[path = "memory_auto_delivery_tests.rs"]
+    mod memory_auto_delivery_tests;
     #[path = "pi_native_serving_tests.rs"]
     mod pi_native_serving_tests;
     #[path = "transform/recorded_goldens.rs"]
@@ -25020,22 +25033,35 @@ mod tests {
         );
         assert_eq!(
             memories.rows[0].visibility,
-            kernel::SurfaceVisibility::Labeled
+            kernel::SurfaceVisibility::Visible,
+            "a whole-sentence quotation of a user message is the user's approved statement"
         );
         assert_eq!(
             memories.decisions.values().next().unwrap().payload.summary,
             "User stated: Use port 4321 for staging.",
             "store the attributed source quotation, not the extractor's broadened environment"
         );
-        let injected = canonical_memory::read_project_memory(
-            &handler.kernel,
-            &kernel_routes::ProjectBinding::new(&project),
-            now_ms(),
-            4000.0,
+        let read = |session: &str| {
+            canonical_memory::read_project_memory(
+                &handler.kernel,
+                &kernel_routes::ProjectBinding::new(&project),
+                session,
+                now_ms(),
+                4000.0,
+            )
+        };
+        assert_eq!(
+            read("a-later-session")
+                .rows()
+                .iter()
+                .map(|row| row.content.as_str())
+                .collect::<Vec<_>>(),
+            ["User stated: Use port 4321 for staging."],
+            "a later session receives the user's statement automatically"
         );
         assert!(
-            injected.rows().is_empty(),
-            "extraction must not promote model inference into trusted automatic context"
+            read("ses").rows().is_empty(),
+            "the capturing session's own statements stay in its conversation"
         );
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
@@ -26851,6 +26877,7 @@ mod tests {
             execute_threshold_percentage: 65.0,
             compaction_enabled: true,
             memory_enabled: true,
+            memory_auto_inject: true,
             memory_auto_capture: false,
             source_capture_enabled: false,
             contradiction_candidates_enabled: false,
@@ -43387,6 +43414,7 @@ mod tests {
                 history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
                 user_profile_budget_tokens: 4_000.0,
                 memory_enabled: true,
+                memory_auto_inject: true,
                 inject_docs: true,
                 project_doc_files: crate::project_docs::default_document_paths_for_test(),
                 document_reads: None,

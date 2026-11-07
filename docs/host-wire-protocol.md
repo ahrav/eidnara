@@ -1030,8 +1030,52 @@ reads no documents. A project-tier
 list is ignored with a warning, and each plugin strips it from the project
 tier. `memory.auto_capture` and
 `memory.auto_promote` gate only model-extracted facts from redacted text.
-Captured facts remain labeled model inference for explicit
-search, not human approval or automatic-context eligibility. Session deletion
+A captured fact is the user's statement when its source message has the user
+role and reaches capture under its own message id (a source id of the form
+`<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
+and hashed ids, never qualifies); its stored text is `User stated: ` followed
+by a verbatim quotation of that message; and the quotation is one or more
+whole sentences of a plain-prose paragraph. Plain prose leaves out code fences
+(closed by a run of the opener's character at least as long), each block a
+line holding only a markup tag opens through the last line closing that tag
+(such as `<context_researcher-augmentation>`), every paragraph holding a list
+item, a heading, a blockquote, an indented code line, a double quotation mark
+of any script, a single opening quotation mark that starts a word, or a line
+ending in `:` (also after closing `*` or `_`, and the fullwidth colon), every paragraph
+after such a line, every paragraph after one holding a quotation mark, and
+every paragraph that a fence or tag line borders without a blank
+line. The quotation starts the
+paragraph, or follows a `.`, `!`, or `?` and whitespace with a first character
+that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
+or `!`, directly before one, or at the paragraph's end, and no lowercase word
+follows it past any punctuation; neither boundary falls
+at a dotted abbreviation, a word of two or more one- or two-letter segments
+such as `e.g.` or `U.S.`; and it contains no `?`, contains no double
+quotation mark, and neither starts nor closes a single quotation. Capture records each such fact with a statement record in the
+`user-statements` domain, an `adr_accepted` decision admitted as explicit user
+text, and admits the fact on that approval, so the Kernel serves it on
+automatic surfaces. Every other captured fact remains labeled model inference
+for explicit search, not human approval or automatic-context eligibility. The
+`<project-memory>` block of a session's m0 holds the live, project-scoped,
+positive-category facts visible on `auto_inject`, selected newest first until
+`memory.injection_budget_tokens` is spent and rendered grouped by category,
+and leaves out facts captured from that session's own messages. A user message may correct earlier facts, and only
+the user's statement may replace a fact served on `auto_inject`: its fact
+supersedes the captured fact it `replaces` (which must share its category
+and at least one content word), retires each further fact it names
+in `also_replaces` (each must share the replaced fact's category and at
+least half of its distinct words of three or more characters other than
+common English function words, of which it must have at least one) and a replaced
+memory the host memory tool wrote, and
+retires the statement record of each fact it removes; no surface serves a
+superseded or retired fact. A host `kernel.commit` that supersedes or retires a
+decision admitted as explicit user text, or one admitted on an approval,
+answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only
+and defaults to true; the daemon ignores a project-tier value with a warning,
+and each plugin strips it from the project tier. False composes m0 with
+neither the `<project-memory>` nor the user-profile block and m1 with no
+`<new-user-profile>` delta, and turning it off rebuilds m0, while explicit
+search, capture, and the history summarizer's memory read are unchanged. Session deletion
 fences publication and removes queued sources; committed memories remain
 project-owned. Lifecycle hooks store sources and return; the drain that runs
 model work continues after them until the harness shuts down. Shutdown closes

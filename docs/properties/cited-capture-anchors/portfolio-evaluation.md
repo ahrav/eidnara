@@ -28,7 +28,7 @@ that order and splits the fixture-rows item into its two tables.
 | R5 | Give the serialization record a gate-hold observation method | applied to `p2-capture-publish-and-session-delete-are-serialized` |
 | R6 | Narrow the deferred-unit record to "can publish from the memo's `Pending` entry" | applied to `p2-deferred-source-units-publish-on-a-later-pass` |
 | R7 | Mark the receipt-conflict coverage marker test-only | applied to `p2-capture-commit-replays-by-job-key-and-frozen-digest` |
-| R8 | Fix the offset `memory_capture.rs:126` | applied: the prompt's quote rule is at `crates/daemon/src/memory_capture.rs:134` at the branch tip |
+| R8 | Fix the offset `memory_capture.rs:126` | applied: the prompt's quote rule is at `crates/daemon/src/memory_capture.rs:140` at the branch tip |
 | R9 | Fix the offset `anchor.rs:329` | applied: references to the decoder use `crates/kernel/src/anchor.rs:273` (`AnchorCondition::decode`) and the interval check inside it |
 | R10 | Fix the offset `source_capture.rs:598` | applied: `into_job` is `crates/daemon/src/source_capture.rs:708` and `CAPTURE_BUDGET` is `:41` at the branch tip |
 

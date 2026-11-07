@@ -552,6 +552,9 @@ pub struct ProducerContext<'a> {
     pub history_budget_tokens: f64,
     pub user_profile_budget_tokens: f64,
     pub memory_enabled: bool,
+    /// `/memory/auto_inject/enabled`: whether m0 carries the project-memory and
+    /// user-profile blocks.
+    pub memory_auto_inject: bool,
     pub inject_docs: bool,
     /// The configured documents the prompt block reads, in order.
     pub project_doc_files: &'a [crate::project_docs::DocumentPath],
@@ -587,25 +590,39 @@ pub struct ProducerContext<'a> {
 }
 
 impl ProducerContext<'_> {
-    /// The injectable rows of the pinned read; empty when no read was taken or it was withheld.
-    fn project_memory_rows(&self) -> &[CanonicalMemory] {
+    fn injects_memory(&self) -> bool {
+        self.memory_enabled && self.memory_auto_inject
+    }
+
+    fn injected_memory(&self) -> Option<&CanonicalMemoryRead> {
         self.project_memory
             .as_ref()
+            .filter(|_| self.injects_memory())
+    }
+
+    /// The injectable rows of the pinned read; empty when no read was taken or it was withheld.
+    fn project_memory_rows(&self) -> &[CanonicalMemory] {
+        self.injected_memory()
             .map_or(&[], CanonicalMemoryRead::rows)
     }
 
     /// The row digest the m1 revision signal folds in; `None` when no read was taken or it was withheld.
     fn project_memory_revision(&self) -> Option<u64> {
-        self.project_memory
-            .as_ref()
+        self.injected_memory()
             .and_then(CanonicalMemoryRead::revision)
     }
 
     /// The composition record a HARD freezes beside its m0 bytes; `None` when no read was taken.
     fn project_memory_composition(&self) -> Option<ProjectMemoryComposition> {
-        self.project_memory
-            .as_ref()
-            .map(CanonicalMemoryRead::composition)
+        self.injected_memory().map(CanonicalMemoryRead::composition)
+    }
+}
+
+fn memory_render_identity(base: String, ctx: &ProducerContext<'_>) -> String {
+    if ctx.injects_memory() || !ctx.memory_enabled {
+        base
+    } else {
+        format!("{base}|memory-auto-inject-off")
     }
 }
 
@@ -1877,7 +1894,11 @@ fn revision_signal_for_context(
         store,
         note_project_path,
         session_id,
-        user_profile_version,
+        if ctx.memory_auto_inject || !ctx.memory_enabled {
+            user_profile_version
+        } else {
+            0
+        },
         memory_enabled,
         ctx.project_memory_revision(),
         timings,
@@ -2811,12 +2832,12 @@ fn compose_additive_m0(
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl crate::decay_render::TokenCount + Copy,
 ) -> Result<AdditiveM0Composition, TransformError> {
-    let selected_memories = if ctx.memory_enabled {
+    let selected_memories = if ctx.injects_memory() {
         ctx.project_memory_rows()
     } else {
         &[]
     };
-    let user_profile = if ctx.memory_enabled {
+    let user_profile = if ctx.injects_memory() {
         store.load_active_user_memories()?
     } else {
         Vec::new()
@@ -2906,7 +2927,10 @@ fn apply_additive_only(
         m0_content_epoch_for_pass(req, serializer_profile, tagging_surface_requested);
     let additive_render_identity = format!(
         "additive-only-v2|{}",
-        render_identity_base(req, &content_epoch.prompt_surface_epoch)
+        memory_render_identity(
+            render_identity_base(req, &content_epoch.prompt_surface_epoch),
+            ctx
+        )
     );
     let effective_render_config_base =
         fold_m0_content_epoch(&additive_render_identity, &content_epoch);
@@ -2928,7 +2952,8 @@ fn apply_additive_only(
     let external_revision_changed = loaded.meta.initialized
         && loaded.meta.m1_external_revision != 0
         && m1_signal.external_revision != loaded.meta.m1_external_revision;
-    let project_memory_epoch_hard_due = loaded.meta.project_memory_epoch_pending;
+    let project_memory_epoch_hard_due =
+        loaded.meta.project_memory_epoch_pending && ctx.injects_memory();
 
     let effective_usage = effective_usage(req.usage.as_ref(), loaded.meta.last_usage.as_ref());
     let context_limit_tokens =
@@ -3144,7 +3169,7 @@ fn apply_additive_only(
                 &req.session_id,
                 &additive_meta,
                 meta.expiry_cutoff_ms,
-                ctx.memory_enabled,
+                ctx.injects_memory(),
                 ctx.user_profile_budget_tokens,
                 ctx.temporal_awareness,
                 m1_row_cap_for(req.geometry.as_ref()),
@@ -3619,7 +3644,10 @@ fn apply_once(
 
     let mut content_epoch =
         m0_content_epoch_for_pass(req, serializer_profile, tagging_surface_requested);
-    let render_identity = render_identity_base(req, &content_epoch.prompt_surface_epoch);
+    let render_identity = memory_render_identity(
+        render_identity_base(req, &content_epoch.prompt_surface_epoch),
+        ctx,
+    );
 
     let stable_effective_render_config_base =
         fold_m0_content_epoch(&render_identity, &content_epoch);
@@ -3923,7 +3951,8 @@ fn apply_once(
     let external_revision_changed = loaded.meta.initialized
         && loaded.meta.m1_external_revision != 0
         && m1_signal.external_revision != loaded.meta.m1_external_revision;
-    let project_memory_epoch_hard_due = loaded.meta.project_memory_epoch_pending;
+    let project_memory_epoch_hard_due =
+        loaded.meta.project_memory_epoch_pending && ctx.injects_memory();
     let emergency_no_head_escape =
         req.emergency_recovery_armed && req.emergency_recovery_no_head_escape;
     if emergency_no_head_escape {
@@ -4518,7 +4547,7 @@ fn apply_once(
                         now_ms: ctx.now_ms,
                         history_budget_tokens: ctx.history_budget_tokens,
                         covered_system_messages: &covered_system_messages,
-                        memory_enabled: ctx.memory_enabled,
+                        inject_memory: ctx.injects_memory(),
                         user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                         inject_docs: ctx.inject_docs,
                         project_doc_files: ctx.project_doc_files,
@@ -4612,7 +4641,7 @@ fn apply_once(
                                     now_ms: ctx.now_ms,
                                     history_budget_tokens: ctx.history_budget_tokens,
                                     covered_system_messages: &recut_covered_system_messages,
-                                    memory_enabled: ctx.memory_enabled,
+                                    inject_memory: ctx.injects_memory(),
                                     user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                                     inject_docs: ctx.inject_docs,
                                     project_doc_files: ctx.project_doc_files,
@@ -4766,7 +4795,7 @@ fn apply_once(
                     &req.session_id,
                     &meta,
                     meta.expiry_cutoff_ms,
-                    ctx.memory_enabled,
+                    ctx.injects_memory(),
                     ctx.user_profile_budget_tokens,
                     ctx.temporal_awareness,
                     m1_row_cap_for(req.geometry.as_ref()),
@@ -4808,7 +4837,7 @@ fn apply_once(
                             now_ms: ctx.now_ms,
                             history_budget_tokens: ctx.history_budget_tokens,
                             covered_system_messages: &covered_system_messages,
-                            memory_enabled: ctx.memory_enabled,
+                            inject_memory: ctx.injects_memory(),
                             user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                             inject_docs: ctx.inject_docs,
                             project_doc_files: ctx.project_doc_files,
@@ -13829,6 +13858,7 @@ pub(crate) mod tests {
             history_budget_tokens: 60_000.0,
             user_profile_budget_tokens: 4_000.0,
             memory_enabled: true,
+            memory_auto_inject: true,
             inject_docs: true,
             project_doc_files: crate::project_docs::default_document_paths_for_test(),
             document_reads: None,
@@ -13880,6 +13910,79 @@ pub(crate) mod tests {
 
     fn served_bytes(response: &TransformResponse) -> String {
         serde_json::to_string(response.messages()).unwrap()
+    }
+
+    #[test]
+    fn auto_inject_off_composes_m0_without_either_memory_block() {
+        let request = req("auto-inject", "cfg", vec![item("u1", 1, "live prompt")]);
+        let mut served = Vec::new();
+        for auto_inject in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            store
+                .with_fenced_conn_for_test(|tx| {
+                    tx.execute(
+                        "INSERT INTO user_memories (id, content, status, promoted_at)
+                         VALUES (1, 'Prefers short commit subjects.', 'active', 1)",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            let mut ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
+            ctx.memory_auto_inject = auto_inject;
+            ctx.project_memory = canonical_read(
+                7,
+                &[("mem_rule", "PROJECT_RULES", "Keep the public contract.")],
+            );
+            let response = transform(&store, &request, &ctx).unwrap();
+            assert_eq!(response.action, "HARD");
+            let bytes = served_bytes(&response);
+            served.push((
+                bytes.contains("<project-memory>"),
+                bytes.contains("Prefers short commit subjects."),
+                response.project_memory.is_some(),
+            ));
+        }
+        assert_eq!(
+            served,
+            [(true, true, true), (false, false, false)],
+            "the switch removes both blocks and records no composition for them"
+        );
+    }
+
+    #[test]
+    fn switching_auto_inject_off_rebuilds_m0_without_the_profile_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .with_fenced_conn_for_test(|tx| {
+                tx.execute(
+                    "INSERT INTO user_memories (id, content, status, promoted_at)
+                     VALUES (1, 'Prefers short commit subjects.', 'active', 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let request = req(
+            "auto-inject-toggle",
+            "cfg",
+            vec![item("u1", 1, "live prompt")],
+        );
+        let mut ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
+        ctx.project_memory = Some(CanonicalMemoryRead::Withheld(
+            crate::kernel_routes::KernelOutcome::unavailable(
+                crate::kernel_routes::UnavailableReason::StoreStarting,
+            ),
+        ));
+        let first = transform(&store, &request, &ctx).unwrap();
+        assert!(served_bytes(&first).contains("Prefers short commit subjects."));
+        assert_ne!(transform(&store, &request, &ctx).unwrap().action, "HARD");
+        ctx.memory_auto_inject = false;
+        let off = transform(&store, &request, &ctx).unwrap();
+        assert_eq!(off.action, "HARD", "the switch alone rebuilds m0");
+        assert!(!served_bytes(&off).contains("Prefers short commit subjects."));
     }
 
     #[test]

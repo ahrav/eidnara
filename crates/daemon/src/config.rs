@@ -94,6 +94,9 @@ pub struct DaemonConfig {
     /// Compaction resolution determines the component that controls request context-window compaction.
     pub compaction_enabled: bool,
     pub memory_enabled: bool,
+    /// User-only switch for the automatic `<project-memory>` and user-profile
+    /// blocks.
+    pub memory_auto_inject: bool,
     /// User-only consent for unattended extraction from completed conversation text.
     pub memory_auto_capture: bool,
     /// User-only consent to retain the exact bytes of message text and tool results as
@@ -156,6 +159,7 @@ impl Default for DaemonConfig {
             execute_threshold_percentage: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
             compaction_enabled: true,
             memory_enabled: true,
+            memory_auto_inject: true,
             memory_auto_capture: true,
             source_capture_enabled: false,
             contradiction_candidates_enabled: false,
@@ -435,6 +439,7 @@ impl MergedConfig {
             execute_threshold_percentage: _,
             compaction_enabled: _,
             memory_enabled: _,
+            memory_auto_inject: _,
             memory_auto_capture: _,
             source_capture_enabled: _,
             contradiction_candidates_enabled: _,
@@ -964,6 +969,7 @@ pub enum ConfigKey {
     ExecuteThresholdPercentage,
     CompactionEnabled,
     MemoryEnabled,
+    MemoryAutoInjectEnabled,
     MemoryAutoCapture,
     SourceCaptureEnabled,
     ContradictionCandidatesEnabled,
@@ -1003,6 +1009,7 @@ impl ConfigKey {
         Self::ExecuteThresholdPercentage,
         Self::CompactionEnabled,
         Self::MemoryEnabled,
+        Self::MemoryAutoInjectEnabled,
         Self::MemoryAutoCapture,
         Self::SourceCaptureEnabled,
         Self::ContradictionCandidatesEnabled,
@@ -1039,6 +1046,7 @@ impl ConfigKey {
             Self::ExecuteThresholdPercentage => "/execute_threshold_percentage",
             Self::CompactionEnabled => "/compaction/enabled",
             Self::MemoryEnabled => "/memory/enabled",
+            Self::MemoryAutoInjectEnabled => "/memory/auto_inject/enabled",
             Self::MemoryAutoCapture => "/memory/auto_capture",
             Self::SourceCaptureEnabled => "/source_capture/enabled",
             Self::ContradictionCandidatesEnabled => "/contradiction_candidates/enabled",
@@ -1097,6 +1105,7 @@ impl ConfigKey {
             Self::ExecuteThresholdPercentage
             | Self::CompactionEnabled
             | Self::MemoryEnabled
+            | Self::MemoryAutoInjectEnabled
             | Self::AutoSearchEnabled
             | Self::AutoSearchScoreThreshold
             | Self::AutoSearchMinPromptChars
@@ -1117,6 +1126,7 @@ impl ConfigKey {
             | Self::HistorySummarizerModel
             | Self::HistorySummarizerFallbackModels
             | Self::CompactionEnabled
+            | Self::MemoryAutoInjectEnabled
             | Self::MemoryInjectionBudgetTokens
             | Self::MemoryBudgetTokens
             | Self::UserProfileBudgetTokens
@@ -1249,6 +1259,11 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
         ConfigKey::MemoryEnabled => {
             if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
                 cfg.memory_enabled = enabled;
+            }
+        }
+        ConfigKey::MemoryAutoInjectEnabled => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.memory_auto_inject = enabled;
             }
         }
         ConfigKey::MemoryAutoCapture => {
@@ -2409,6 +2424,7 @@ mod tests {
             "compaction": { "enabled": true },
             "memory": {
                 "enabled": true,
+                "auto_inject": { "enabled": false },
                 "auto_search": { "enabled": true, "score_threshold": 0.5, "min_prompt_chars": 999 },
                 "injection_budget_tokens": 999,
                 "budget_tokens": 999,
@@ -2456,6 +2472,10 @@ mod tests {
         assert!(
             !cfg.memory_auto_capture,
             "project tier cannot enable unattended capture"
+        );
+        assert!(
+            cfg.memory_auto_inject,
+            "project tier cannot remove automatic memory injection"
         );
         assert!(
             !cfg.source_capture_enabled,
@@ -2601,6 +2621,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn auto_inject_follows_the_user_tier_and_ignores_the_project_tier() {
+        let user = serde_json::json!({ "memory": { "auto_inject": { "enabled": false } } });
+        let project = serde_json::json!({ "memory": { "auto_inject": { "enabled": true } } });
+        assert!(merge_tiers(None, None).memory_auto_inject);
+        assert!(!merge_tiers(Some(&user), None).memory_auto_inject);
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), Some(&project));
+        assert!(!cfg.memory_auto_inject);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("/memory/auto_inject/enabled")),
+            "{warnings:?}"
+        );
+    }
+
     /// Every JSON pointer literal the production merge reads is a `ConfigKey`,
     /// and every `ConfigKey` is listed once in `ALL`.
     #[test]
@@ -2638,7 +2674,7 @@ mod tests {
             0,
             "tier values are read through ConfigKey::pointer(), never a raw literal"
         );
-        assert_eq!(ConfigKey::ALL.len(), 30);
+        assert_eq!(ConfigKey::ALL.len(), 31);
     }
 
     /// The user-memory gate's two keys and the budget's two keys resolve the

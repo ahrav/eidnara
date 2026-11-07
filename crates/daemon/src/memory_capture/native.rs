@@ -440,6 +440,7 @@ pub(super) fn collapse_quotations(
                     && (kept.duplicate_of.is_none() || memory.replaces.is_some())
                 {
                     kept.replaces = memory.replaces;
+                    kept.also_replaces = memory.also_replaces;
                     kept.duplicate_of = memory.duplicate_of;
                 }
             }
@@ -622,7 +623,7 @@ impl CaptureWork {
                 }
             };
             let attribution = if job.role == "user" {
-                "User stated"
+                USER_STATED
             } else {
                 "Assistant reported"
             };
@@ -630,12 +631,31 @@ impl CaptureWork {
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
             let memories = collapse_quotations(attribution, decision.memories);
+            if memories.iter().any(|memory| {
+                !user_attributed(&job, memory)
+                    && memory
+                        .replaces
+                        .iter()
+                        .chain(&memory.also_replaces)
+                        .any(|target| {
+                            plan.existing
+                                .iter()
+                                .any(|previous| previous.id == *target && previous.automatic)
+                        })
+            }) {
+                eprintln!(
+                    "daemon: native memory capture source rejected: only a whole user statement may replace an automatic memory"
+                );
+                self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
+                continue;
+            }
             let existing = plan
                 .existing
                 .iter()
                 .filter(|previous| {
                     memories.iter().any(|memory| {
                         memory.replaces.as_deref() == Some(&previous.id)
+                            || memory.also_replaces.contains(&previous.id)
                             || memory.duplicate_of.as_deref() == Some(&previous.id)
                     })
                 })
