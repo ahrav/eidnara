@@ -52,7 +52,7 @@ to perform its own validation. One consumer honours the descriptor:
 `open_verified_file`. The other does not:
 `crates/daemon/src/bin/eidnara_host/payload_local_embeddings.rs:18-19`, which
 `serve.rs:1192-1202` calls with the generation's `descriptor_root_path()`, hand
-`root.join(BUNDLE_DIR)` and `root.join(ORT_LIBRARY)` downstream as pathnames. The comment at `serve.rs:508-515` states the hazard in
+`root.join(BUNDLE_DIR)` and `root.join(ORT_LIBRARY)` downstream as pathnames. The comment at `serve.rs:1188-1190` states the hazard in
 the property's own terms - "a directory replaced after validation could serve
 different embedding bytes under a generation the daemon still reported as valid"
 
