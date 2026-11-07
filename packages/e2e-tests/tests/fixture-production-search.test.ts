@@ -176,7 +176,7 @@ async function waitForProjection(arm: Arm): Promise<void> {
         }
         if (!embedded(result)) {
             throw new Error(
-                `memory ${index} never ranked through the route:\n${result}\n${arm.harness.host.hostLog()}`,
+                `the embedding lane never ranked memory ${index}:\n${result}\n${arm.harness.host.hostLog()}`,
             );
         }
     }

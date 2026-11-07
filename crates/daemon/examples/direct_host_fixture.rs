@@ -1667,7 +1667,7 @@ mod unix {
             },
             ..Default::default()
         };
-        // The records are written after every other fallible startup step, so a start that fails before this point leaves the state root's admission as it found it. An install that fails partway can leave records from two payloads; the gate applies the pair only when both name the running lane, so a mixed pair closes admission and search stays on the labeled snapshot fallback. A refused install also unlinks the socket this process bound.
+        // The records are written after every fallible step that builds the host, so a start that fails before this point leaves the state root's admission as it found it. An install that fails partway can leave records from two payloads; the projection gate admits only records whose identity matches the running lane, so a mixed pair closes admission and search stays on the labeled snapshot fallback. A refused install also unlinks the socket this process bound.
         if let Some(production) = &production {
             production.install(&root).inspect_err(|_| {
                 let _ = unlink_own_control_socket(&control_path, own_socket);

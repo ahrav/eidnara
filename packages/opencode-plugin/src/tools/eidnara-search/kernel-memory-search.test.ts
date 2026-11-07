@@ -803,6 +803,37 @@ describe("scanSnapshotForLexicalSearch", () => {
         expect(scan.rows).toHaveLength(1);
     });
 
+    test("pages a same-commit pair through the fake kernel in the daemon's UTF-8 order", async () => {
+        const kernel = new FakeKernel();
+        const first = kernel.seedDecision({
+            object_id: "mem_\u{10000}",
+            decision_kind: "ARCHITECTURE",
+            summary: "backup",
+        });
+        const second = kernel.seedDecision({
+            object_id: "mem_\uE000",
+            decision_kind: "ARCHITECTURE",
+            summary: "backup",
+        });
+        second.created_commit_seq = first.created_commit_seq;
+        kernel.readRowCap = 1;
+        const transport = new FakeKernelTransport(kernel);
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(transport),
+            surface: "explicit_search",
+            gated: false,
+            query: "backup",
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        if (!scan.ok) return;
+        expect(scan.rows).toHaveLength(2);
+        // U+E000 encodes to fewer and smaller UTF-8 bytes than U+10000, so the first page serves it and the next page continues after it.
+        const secondPage = transport.calls[1]?.body as { before?: { object_id: string } };
+        expect(secondPage.before?.object_id).toBe("mem_\uE000");
+    });
+
     test("caches mutation tokens for the first page only", async () => {
         const { kernel } = storeLargerThanOnePage(450);
         kernel.readRowCap = 100;

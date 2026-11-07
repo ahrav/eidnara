@@ -1,4 +1,3 @@
-import { Buffer } from "node:buffer";
 /**
  * An in-memory stand-in for the daemon's `kernel.*` routes, driven through
  * the `KernelTransport` surface so consumers are tested against the same
@@ -15,6 +14,7 @@ import { Buffer } from "node:buffer";
  * row-backed replies.
  */
 
+import { Buffer } from "node:buffer";
 import { HostCallError } from "../host-client";
 import {
     DISPOSITION_EVENTS,
@@ -551,7 +551,6 @@ export class FakeKernel {
         return { ...object, disposition };
     }
 
-    /** Newest `created_commit_seq` first, then ascending `object_id` within one commit. */
     /** The daemon's serving order: newest commit first, then object ids in UTF-8 byte order. */
     private static servingOrder(left: FakeObject, right: FakeObject): number {
         if (left.created_commit_seq !== right.created_commit_seq) {
