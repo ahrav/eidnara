@@ -244,8 +244,7 @@ fn an_unanswered_question_stays_waiting_in_the_recent_tiers() {
         segment.p3.as_deref(),
         Some("Moved the plugin to the new host API.")
     );
-    // A tier that would hold nothing else keeps its waiting line.
-    assert_eq!(segment.p4.as_deref(), Some(waiting.as_str()));
+    assert_eq!(segment.p4.as_deref(), Some(""));
     assert_eq!(segment.claims.len(), 1);
     assert_eq!(segment.claims[0].anchor.as_deref(), Some(waiting.as_str()));
 }
@@ -254,16 +253,19 @@ fn an_unanswered_question_stays_waiting_in_the_recent_tiers() {
 fn a_lifted_constraint_is_carried_as_lifted_and_settles_the_question_it_answered() {
     let messages = lifted(1);
     let chunk = chunk_of(&messages, 1, 5);
+    let constraint = "Constraint (policy.measurement-fixes): No bug fixes during the baseline run.";
     let waiting = waiting_line(
         "policy.measurement-fixes",
         "Should I fix the two parser bugs now?",
     );
     let lifted_line = "Lifted (policy.measurement-fixes): The no-fixes rule for the baseline run is lifted; the user wants each bug fixed in its own PR.";
     let p1 = format!(
-        "U: {CONSTRAINT}.\nI measured the baseline and left the two parser bugs unfixed.\n{waiting}\n{lifted_line}\nI opened two PRs, one per parser fix."
+        "U: {CONSTRAINT}.\n{constraint}\nI measured the baseline and left the two parser bugs unfixed.\n{waiting}\n{lifted_line}\nI opened two PRs, one per parser fix."
     );
-    let p2 = format!("{waiting}\n{lifted_line}\nTwo PRs, one per parser fix.");
-    let p3 = format!("{lifted_line}\nTwo parser fixes in separate PRs.");
+    let p2 = format!("{constraint}\n{waiting}\n{lifted_line}\nTwo PRs, one per parser fix.");
+    let p3 = format!("{constraint}\n{lifted_line}\nTwo parser fixes in separate PRs.");
+    // The model emits the lift's claim before the constraint's, so keeping the last claim per key
+    // would keep the constraint's claim; the retired constraint line takes its claim with it.
     let text = output(
         1,
         4,
@@ -271,15 +273,15 @@ fn a_lifted_constraint_is_carried_as_lifted_and_settles_the_question_it_answered
         &[
             claim(
                 "policy.measurement-fixes",
-                &cite(&chunk, 1, CONSTRAINT),
-                CONSTRAINT,
-                &format!("U: {CONSTRAINT}."),
-            ),
-            claim(
-                "policy.measurement-fixes",
                 &cite(&chunk, 3, LIFT),
                 LIFT,
                 lifted_line,
+            ),
+            claim(
+                "policy.measurement-fixes",
+                &cite(&chunk, 1, CONSTRAINT),
+                CONSTRAINT,
+                constraint,
             ),
         ],
     );
@@ -289,6 +291,7 @@ fn a_lifted_constraint_is_carried_as_lifted_and_settles_the_question_it_answered
     let [p1, p2, p3, _] = tier_texts(&segment);
     for tier in [p1, p2, p3] {
         assert!(tier.contains(lifted_line), "{tier}");
+        assert!(!tier.contains("Constraint ("), "{tier}");
         assert!(!tier.contains("Waiting on user"), "{tier}");
     }
     assert_eq!(
@@ -307,7 +310,8 @@ fn a_lifted_constraint_is_carried_as_lifted_and_settles_the_question_it_answered
 #[tokio::test(flavor = "current_thread")]
 async fn an_answer_in_the_next_fold_supersedes_the_earlier_waiting_line_where_history_renders() {
     let waiting = waiting_line("release.server-steps", ANSWERED_QUESTION);
-    let constraint_line = format!("U: {CONSTRAINT}.");
+    let constraint_line =
+        "Constraint (policy.measurement-fixes): No bug fixes during the measurement.".to_owned();
     let log = work_log("the release checklist");
     let before = vec![
         user(
@@ -436,7 +440,7 @@ async fn an_answer_in_the_next_fold_supersedes_the_earlier_waiting_line_where_hi
     for tier in [1, 2] {
         let earlier = crate::decay_render::render_history_segment_at_tier(&rendered[0], tier);
         assert!(!earlier.contains("Waiting on user"), "{earlier}");
-        assert!(!earlier.contains(CONSTRAINT), "{earlier}");
+        assert!(!earlier.contains(&constraint_line), "{earlier}");
         assert!(
             earlier.contains(&format!("[corrected @3: release.server-steps = {ANSWER}]")),
             "{earlier}"
@@ -456,44 +460,6 @@ async fn an_answer_in_the_next_fold_supersedes_the_earlier_waiting_line_where_hi
         updates.contains(&format!("release.server-steps = {ANSWER} @3")),
         "{updates}"
     );
-}
-
-#[test]
-fn the_prompt_examples_parse_as_the_status_lines_the_fold_enforces() {
-    let prompt = crate::history_summarizer_prompt::HISTORY_SUMMARIZER_SYSTEM_PROMPT;
-    let section = prompt
-        .split("## Open items: waiting, decided, lifted")
-        .nth(1)
-        .and_then(|rest| rest.split("\n## ").next())
-        .expect("the prompt documents open items");
-    let examples: Vec<&str> = section
-        .split("```")
-        .nth(1)
-        .expect("the section shows the three forms")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    assert_eq!(examples.len(), 3, "{examples:?}");
-    let prefixes = std::iter::once(crate::history_summarizer_open_items::WAITING_PREFIX)
-        .chain(crate::history_summarizer_open_items::RESOLVING_PREFIXES);
-    for (example, prefix) in examples.iter().zip(prefixes) {
-        assert!(example.starts_with(prefix), "{example}");
-        let key = example[prefix.len()..].split_once("):").unwrap().0;
-        assert!(
-            crate::history_summarizer_citations::is_claim_key(key),
-            "{key}"
-        );
-        assert!(
-            example.len() <= crate::history_summarizer_citations::CLAIM_ANCHOR_MAX_BYTES,
-            "a waiting line is its own claim anchor: {example}"
-        );
-    }
-    for rule in [
-        "whose key has a `Decided` or `Lifted` line in the same or a later history_segment of this output",
-        "every `Waiting on user` line in `<p3>` and `<p4>`",
-    ] {
-        assert!(section.contains(rule), "{rule}");
-    }
 }
 
 const LIVE_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";
@@ -632,14 +598,16 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
             assert!(!tier.contains(CONSTRAINT), "{tier}");
         }
     }
-    let p1_and_p2: String = rows
+    // `p2` states the lift in the summarizer's own words, outside any quoted `U:` line.
+    let p2_own_words: String = rows
         .iter()
-        .flat_map(|row| [&row.p1, &row.p2])
-        .flatten()
-        .map(|tier| tier.to_lowercase())
+        .filter_map(|row| row.p2.as_deref())
+        .flat_map(str::lines)
+        .filter(|line| !line.contains("U:"))
+        .map(str::to_lowercase)
         .collect();
     assert!(
-        p1_and_p2.contains("lifted") || p1_and_p2.contains("its own pr"),
+        p2_own_words.contains("lifted") || p2_own_words.contains("own pr"),
         "{rows:#?}"
     );
 }

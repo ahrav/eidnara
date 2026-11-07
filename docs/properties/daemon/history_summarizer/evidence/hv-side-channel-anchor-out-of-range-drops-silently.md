@@ -9,7 +9,7 @@ disposition is a silent filter, not a rejection or a counted drop.
 
 ## Evidence trail
 
-The bound, `crates/daemon/src/history_summarizer_validate.rs:1086-1098`:
+The bound, `crates/daemon/src/history_summarizer_validate.rs:1104-1116`:
 
 ```rust
 fn keep_side_channel(
@@ -161,7 +161,7 @@ undocumented behaviour into a pinned one.
 
 ### Q: Should `.take(1)` on primers be a documented cap or a reject when more than one survives?
 
-- Sources examined: `history_summarizer_validate.rs:600-612` (the expression),
+- Sources examined: `history_summarizer_validate.rs:600-615` (the expression),
   `:163-170` (`PrimerCandidate` and its doc, which mentions only the 1-based
   anchor), `:585-588` (the nearby comment, which is about anchor invalidation),
   `:231` (`ValidatedChunk.primer_candidates`, no doc comment), `history_summarizer.rs:96-121`
@@ -179,7 +179,7 @@ undocumented behaviour into a pinned one.
 
 ### Q: Is the anchor bound the only anti-fabrication check in the module?
 
-- Sources examined: all of `history_summarizer_validate.rs:264-1098`, looking for any check
+- Sources examined: all of `history_summarizer_validate.rs:264-1116`, looking for any check
   that compares a model-supplied reference against a known set.
 - Findings: Three checks compare model output against a known set:
   `:941-957` (endpoint ordinals must exist as chunk lines), `:1021-1032`

@@ -10,7 +10,7 @@ does not: ranges must be disjoint, bodies need not be.
 ## Evidence trail
 
 `validate_parsed_history_segments`
-(`crates/daemon/src/history_summarizer_validate.rs:983-1084`) is the only per-set
+(`crates/daemon/src/history_summarizer_validate.rs:1001-1102`) is the only per-set
 validator. It iterates with `for (index, history_segment) in history_segments.iter().enumerate()`
 at `:997` and inside the loop touches exactly these fields:
 
@@ -122,7 +122,7 @@ will false-positive on correct output.
 - Sources examined: `history_summarizer_validate.rs:313-317` (the tier backfill),
   `history_summarizer_prompt.rs:218-265` (`render_session_ref_history_segment`, which shows the
   model the expected shape), `testdata/validate-golden.json` (all 16 cases),
-  `history_summarizer_validate.rs:1367-1375` (the `xml` test helper, which derives every
+  `history_summarizer_validate.rs:1385-1393` (the `xml` test helper, which derives every
   body from the history_segment title).
 - Findings: Every fixture in the tree gives each history_segment a distinct body
   derived from its title. The prompt's reference block shows per-history_segment

@@ -10,7 +10,7 @@ is correct, the unescape side is not.
 
 ## Evidence trail
 
-`crates/daemon/src/history_summarizer_validate.rs:1148-1154`:
+`crates/daemon/src/history_summarizer_validate.rs:1166-1172`:
 
 ```rust
 fn unescape_xml(s: &str) -> String {
@@ -56,7 +56,7 @@ assert_eq!(escape_xml_content("&<>\"'"), "&amp;&lt;&gt;\"'");
 ```
 
 No round-trip assertion exists anywhere. Grepped the 19 tests in
-`history_summarizer_validate.rs:1305-1868` for entity strings; none appears.
+`history_summarizer_validate.rs:1323-1889` for entity strings; none appears.
 
 Nothing downstream repairs it, and nothing downstream is endangered by it:
 `decay_render.rs:235` and `:245` re-escape the body on render, so the corrupted
@@ -139,7 +139,7 @@ than `<`.
   module uses "the TypeScript host parser's permissive extraction semantics for
   structures inside that root"), `:1384-1414` (the golden test and its carve-out),
   `testdata/validate-golden.json` (all 16 cases, inspected for entity sequences),
-  `history_summarizer_validate.rs:816-820` (an explicit note where Rust deliberately
+  `history_summarizer_validate.rs:834-838` (an explicit note where Rust deliberately
   diverges from TypeScript because Rust's regex engine lacks backreferences).
 - Findings: The module documents its TypeScript alignment as a goal and documents
   at least one deliberate divergence, so divergences are recorded when known. No

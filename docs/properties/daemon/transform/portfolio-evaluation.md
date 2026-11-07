@@ -463,7 +463,7 @@ preference, and each was verified for this disposition.
    single coverage note in `existing-checks.md` and stop restating it. **This
    refrain risk is not local to Part 4b.** Part 4a recorded the same observation as
    its queued gap G5, with the difference that 4a at least has an in-crate
-   TypeScript-oracle golden (`history_summarizer_validate.rs:1384`) and 4b has no
+   TypeScript-oracle golden (`history_summarizer_validate.rs:1402`) and 4b has no
    counterpart. Two parts have now independently produced the same unresolved
    finding and neither has produced a property, which suggests the decision belongs
    above the part level, as a single cross-part call rather than as a paragraph

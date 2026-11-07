@@ -3069,12 +3069,20 @@ struct RealCapture {
 }
 
 fn published_p1(output: &str) -> Option<String> {
-    crate::history_summarizer_validate::parse_history_segment_output(output)
+    let mut segments = crate::history_summarizer_validate::parse_history_segment_output(output)
         .ok()?
-        .history_segments
-        .into_iter()
-        .next()?
-        .p1
+        .history_segments;
+    crate::history_summarizer_validate::open_items::retire_settled_lines(&mut segments);
+    segments.into_iter().next()?.p1
+}
+
+#[test]
+fn published_p1_leaves_out_the_waiting_lines_validation_retires() {
+    let output = "<output><history_segments><history_segment start=\"1\" end=\"2\" title=\"t\"><p1>Drafted.\nWaiting on user (a.b): ask?\nDecided (a.b): yes.</p1><p2>b</p2><p3>b</p3><p4/></history_segment></history_segments><meta><unprocessed_from>3</unprocessed_from></meta></output>";
+    assert_eq!(
+        published_p1(output).as_deref(),
+        Some("Drafted.\nDecided (a.b): yes.")
+    );
 }
 
 #[test]

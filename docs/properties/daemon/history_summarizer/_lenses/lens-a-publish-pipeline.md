@@ -211,11 +211,11 @@ transaction commits, the store drains the queued side channels best effort
   `MAX(sequence) + 1` at write time (`memory-store:12618`, `:12654-12656`), and
   overlap is rejected on message ranges (`:12637-12646`). Validation refuses a
   batch that makes no forward progress past the last stored end
-  (`history_summarizer_validate.rs:625-635`) and refuses an empty history_segment set
+  (`history_summarizer_validate.rs:628-638`) and refuses an empty history_segment set
   (`:487-491`).
 - `unprocessed_from` is `last_new_end + 1` where `last_new_end` is the end of the
   last **kept** history_segment after discard-last healing
-  (`history_summarizer_validate.rs:638`), and it becomes the publication floor
+  (`history_summarizer_validate.rs:641`), and it becomes the publication floor
   (`history_summarizer.rs:1725`).
 - The wrapup drain has no round cap by design (`lib.rs:6831-6834`,
   `history_summarizer.rs:952-961`); its ceiling is `MAX_WRAPUP_REQUEST_BUDGET` (3800 s,
@@ -433,9 +433,9 @@ Status: active
 Exercised: partial — `history_summarizer.rs:2309` and `:4199` assert the floor equals a specific value after a publish, and `:2360` and `:3006` assert it stays `None` after a rejection. No test relates the floor to the appended history_segment ends generally. Not run in CI.
 Guarantee: After any publish, the publication floor is at most one past the highest appended history_segment end, and it never decreases.
 Check: `always` — after every committed publish, `meta.publication_floor_ordinal <= MAX(end_message) + 1` over all history_segments for the session, and `floor_after >= floor_before`. `always` because it constrains every post-publish state.
-Fault/timing angle: None for monotonicity, which is structural via the `max` at `memory-store:9484-9488`. The upper bound depends on validation producing `unprocessed_from = last_new_end + 1` after discard-last healing (`history_summarizer_validate.rs:638`), so the interesting case is a healed batch where the last emitted history_segment was popped (`:539-556`).
+Fault/timing angle: None for monotonicity, which is structural via the `max` at `memory-store:9484-9488`. The upper bound depends on validation producing `unprocessed_from = last_new_end + 1` after discard-last healing (`history_summarizer_validate.rs:641`), so the interesting case is a healed batch where the last emitted history_segment was popped (`:539-556`).
 Required faults and enabling state: A configured model chain and an accepted publish whose last history_segment was discarded by boundary healing, which needs at least two history_segments and a lookahead distance within `BOUNDARY_HEALING_SLACK` (`history_summarizer_validate.rs:19`, applied at `:554`).
-Confidence: high — [evidence](../evidence/publication-floor-never-outruns-appended-coverage.md). Traced the floor from `history_summarizer_validate.rs:638` through `history_summarizer.rs:1725` and `:523` to `memory-store:9484-9488`, and confirmed the empty-history_segment rejection at `history_summarizer_validate.rs:487-491` and the forward-progress check at `:625-635` together prevent a floor advance with no appended coverage.
+Confidence: high — [evidence](../evidence/publication-floor-never-outruns-appended-coverage.md). Traced the floor from `history_summarizer_validate.rs:641` through `history_summarizer.rs:1725` and `:523` to `memory-store:9484-9488`, and confirmed the empty-history_segment rejection at `history_summarizer_validate.rs:487-491` and the forward-progress check at `:628-638` together prevent a floor advance with no appended coverage.
 Existing check: `history_summarizer.rs:2309`, `:2360`, `:3006`, `:4199`. Status `unaudited`.
 Impact: A floor past the covered range would make messages in the gap ineligible as boundary candidates (`boundary.rs:1417-1426`) and ineligible for tool-arc fencing (`:1339-1357`) while no history_segment summarizes them. They would still be served verbatim, so this is a boundary-quality defect rather than data loss.
 Open questions: None.

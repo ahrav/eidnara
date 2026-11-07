@@ -8,7 +8,7 @@ the Part 1 shared-memory work that proof was a descriptor plus a generation. Her
 the equivalent question is: what in the model's output could only have been
 produced by a model that read this chunk?
 
-Reading `validate_history_summarizer_output` (`crates/daemon/src/history_summarizer_validate.rs:450-641`)
+Reading `validate_history_summarizer_output` (`crates/daemon/src/history_summarizer_validate.rs:450-644`)
 top to bottom, the answer is nothing. Every chunk-derived fact the gate consults
 is a small integer or a lookup keyed by one.
 
@@ -139,8 +139,8 @@ the marker then observes the binding field's presence.
 
 ### Q: Is a chunk-derived echo requirement compatible with the byte-identical TypeScript oracle the golden test pins?
 
-- Sources examined: `history_summarizer_validate.rs:1384-1414` (the golden test and its
-  divergence carve-out at `:1391-1399`), `testdata/validate-golden.json`
+- Sources examined: `history_summarizer_validate.rs:1402-1432` (the golden test and its
+  divergence carve-out at `:1409-1417`), `testdata/validate-golden.json`
   (16 cases), `history_summarizer_prompt.rs:72-77` (the vendored system prompt kept
   "byte-identical so both implementations drive the model with the same role
   guidance"), `history_summarizer_prompt.rs:1-4`.

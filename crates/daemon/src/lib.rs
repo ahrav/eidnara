@@ -41,7 +41,6 @@ pub mod history_summarizer;
 pub mod history_summarizer_archive;
 pub mod history_summarizer_chunk;
 pub mod history_summarizer_citations;
-pub(crate) mod history_summarizer_open_items;
 pub mod history_summarizer_producer;
 pub(crate) mod history_summarizer_prompt;
 pub(crate) mod history_summarizer_validate;
@@ -19262,8 +19261,6 @@ mod tests {
     mod compression_fidelity_tests;
     #[path = "fold_authority_handler_tests.rs"]
     mod fold_authority_handler_tests;
-    #[path = "history_summarizer_open_items_tests.rs"]
-    mod history_summarizer_open_items_tests;
     #[path = "pi_native_serving_tests.rs"]
     mod pi_native_serving_tests;
     #[path = "transform/recorded_goldens.rs"]
@@ -45024,6 +45021,9 @@ mod tests {
             );
         }
     }
+
+    #[path = "history_summarizer_open_items_tests.rs"]
+    mod history_summarizer_open_items_tests;
 }
 
 #[cfg(test)]

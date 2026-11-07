@@ -24,7 +24,7 @@ the scope map are recorded in "Contract-vs-code leads".
 
 The gate is two public functions plus their helpers. `parse_history_segment_output`
 (`history_summarizer_validate.rs:264-446`) turns text into structures.
-`validate_history_summarizer_output` (`:450-641`) is the admission decision. The single
+`validate_history_summarizer_output` (`:450-644`) is the admission decision. The single
 production caller is `publish_output_from_awaiting` (`history_summarizer.rs:1641-1704`),
 which calls it at `:1673-1678`.
 
@@ -163,7 +163,7 @@ Failure mode, established by reading the production caller end to end.
 
 - `history_summarizer.rs:1673-1678` is the only production call of
   `validate_history_summarizer_output`. Confirmed by `rg`: every other call is inside
-  `#[cfg(test)]` (`history_summarizer_validate.rs:1402` etc.,
+  `#[cfg(test)]` (`history_summarizer_validate.rs:1420` etc.,
   `history_summarizer_chunk.rs:1419`).
 - `history_summarizer.rs:1663-1664` moves durable state to `Validating` and persists it
   BEFORE validating. `history_summarizer.rs:1680-1704` handles the rejection: it
@@ -252,7 +252,7 @@ Existing check: none. The chunk fingerprint at `history_summarizer.rs:1449-1461`
 Impact: The served conversation prefix is replaced by a summary of something else. The raw record survives in `raw_chunk_messages`, so this is a wrong-context failure rather than data destruction, but every later pass reads the wrong m0.
 Open questions:
 
-- Is a chunk-derived echo requirement compatible with the byte-identical TypeScript oracle the golden test pins (`history_summarizer_validate.rs:1384`)? (needs human input)
+- Is a chunk-derived echo requirement compatible with the byte-identical TypeScript oracle the golden test pins (`history_summarizer_validate.rs:1614`)? (needs human input)
 
 ### hv-degenerate-body-passes-content-gate
 
@@ -413,7 +413,7 @@ Guarantee: Every set of history_segments that reaches the durable publish transa
 Check: `always` — every execution of `publish_validated_chunk` (`history_summarizer.rs:444`) is preceded in the same call chain by a successful `validate_history_summarizer_output` over the text that produced its `validated` argument. `always` because the obligation applies to each publish; the forbidden state has no single detection point, so per the coverage rules this is `always(...)`, not `unreachable`.
 Fault/timing angle: None. This is a structural, not a timing, property.
 Required faults and enabling state: None in the current tree; the record documents that the type system does not enforce the invariant. A second call site added later is the enabling change.
-Confidence: high — [evidence](../evidence/hv-publish-accepts-unvalidated-validated-chunk.md). `ValidatedChunk` at `:226-238` has all-`pub` fields and derives `Default`; `history_summarizer.rs:444` is `pub fn` inside `pub mod history_summarizer` (`lib.rs:19`), and `history_summarizer_validate` is also `pub` (`lib.rs:23`). Confirmed by `rg` that the only production constructions of a `ValidatedChunk` are `history_summarizer_validate.rs:628` (the gate's own return) and test code at `history_summarizer.rs:4476`.
+Confidence: high — [evidence](../evidence/hv-publish-accepts-unvalidated-validated-chunk.md). `ValidatedChunk` at `:226-238` has all-`pub` fields and derives `Default`; `history_summarizer.rs:444` is `pub fn` inside `pub mod history_summarizer` (`lib.rs:19`), and `history_summarizer_validate` is also `pub` (`lib.rs:23`). Confirmed by `rg` that the only production constructions of a `ValidatedChunk` are `history_summarizer_validate.rs:631` (the gate's own return) and test code at `history_summarizer.rs:4476`.
 Existing check: convention only. Both production paths (`history_summarizer.rs:1419`, `:1592`) funnel through `publish_output_from_awaiting`, which validates at `:1673`.
 Impact: A future publish route, or an external crate depending on `daemon`, can write model text into durable history_segments with zero validation. This is the mechanism that would make hv-tierless-stored-row-arm-must-stay-unreachable fire.
 Open questions:

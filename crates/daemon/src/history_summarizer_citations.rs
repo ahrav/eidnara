@@ -187,7 +187,8 @@ pub struct ClaimCandidate {
 /// The claims block's own verdict, independent of the segments and the facts:
 /// no block, an unreadable block, or the claims kept after the per-claim rules.
 /// `dropped` counts every emitted claim not kept: a rule failure, a claim a
-/// later one with its key superseded, or one past the per-segment cap.
+/// later one with its key superseded, one past the per-segment cap, or the
+/// claim of a status line that open-item retirement removed from `p1`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimsOutcome {

@@ -232,8 +232,8 @@ newly-covered-ordinals property as step 4.
 
 ### Q: Why does gap healing extend the PRECEDING history_segment rather than the following one?
 
-- Sources examined: `history_summarizer_validate.rs:904-931` (the loop and its indexing),
-  `:923-925` (the only comment), `:1039-1051` (the contiguity check that consumes
+- Sources examined: `history_summarizer_validate.rs:922-949` (the loop and its indexing),
+  `:941-943` (the only comment), `:1057-1069` (the contiguity check that consumes
   the result), `:1051` (`expected_start = next_present_after(&chunk_ordinals, history_segment.end_message)`).
 - Findings: The choice is mechanically necessary given how contiguity is checked.
   `expected_start` advances from the PREVIOUS history_segment's `end_message`, so

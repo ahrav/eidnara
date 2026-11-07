@@ -11,7 +11,7 @@ one non-whitespace character.
 ## Evidence trail
 
 Three content-touching sites exist in the whole module. There are no others in
-`crates/daemon/src/history_summarizer_validate.rs:1-1304`.
+`crates/daemon/src/history_summarizer_validate.rs:1-1322`.
 
 1. `:297-303` — the title. `capture_string(attr_title_regex(), attrs)` matched
    against `Some(v) if !v.is_empty()`. A title of `"x"` passes. Note this is a

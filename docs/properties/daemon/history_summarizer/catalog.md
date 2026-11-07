@@ -116,7 +116,7 @@ session file as the only remaining source. Reversal is therefore a suffix
 revert, not an undo.
 
 **The validation gate is the sole content gate, and three of its omissions are
-consequential.** `validate_history_summarizer_output` (`history_summarizer_validate.rs:450-641`)
+consequential.** `validate_history_summarizer_output` (`history_summarizer_validate.rs:450-644`)
 has exactly one production caller, `publish_output_from_awaiting`
 (`history_summarizer.rs:1673-1678`), confirmed by search: every other call is inside
 `#[cfg(test)]`. It is fail-closed on the history_segment path, with 22 rejecting
@@ -194,8 +194,8 @@ and documented, not an oversight.
 
 The consequence is the finding. Five in-crate test names assert TypeScript
 parity by construction, including `validate_golden_matches_typescript_oracle`
-(`history_summarizer_validate.rs:1384`), `five_message_narrative_gap_rejects_like_typescript_validator`
-(`:1426`), and `twenty_message_tool_only_gap_heals_like_typescript_validator`
+(`history_summarizer_validate.rs:1402`), `five_message_narrative_gap_rejects_like_typescript_validator`
+(`:1444`), and `twenty_message_tool_only_gap_heals_like_typescript_validator`
 (`:1443`), and every one of them is ungated. The Rust validator and the
 TypeScript validator are documented as a matched pair, the frozen corpus is
 described in `history_summarizer-eval/README.md` as "the best TS<->Rust validator
@@ -875,16 +875,16 @@ constrains every post-publish state.
 Fault/timing angle: None for monotonicity, which is structural via the `max` at
 `memory-store:9484-9488`. The upper bound depends on validation producing
 `unprocessed_from = last_new_end + 1` after discard-last healing
-(`history_summarizer_validate.rs:638`), so the interesting case is a healed batch where
+(`history_summarizer_validate.rs:641`), so the interesting case is a healed batch where
 the last emitted history_segment was popped (`:539-556`).
 Required faults and enabling state: A configured model chain and an accepted
 publish whose last history_segment was discarded by boundary healing, which needs at
 least two history_segments and a lookahead distance within `BOUNDARY_HEALING_SLACK`
 (`history_summarizer_validate.rs:19`, applied at `:554`).
 Confidence: high - [evidence](evidence/publication-floor-never-outruns-appended-coverage.md). Traced
-the floor from `history_summarizer_validate.rs:638` through `history_summarizer.rs:1725` and `:523`
+the floor from `history_summarizer_validate.rs:641` through `history_summarizer.rs:1725` and `:523`
 to `memory-store:9484-9488`, and confirmed the empty-history_segment rejection at
-`history_summarizer_validate.rs:487-491` and the forward-progress check at `:625-635`
+`history_summarizer_validate.rs:487-491` and the forward-progress check at `:628-638`
 together prevent a floor advance with no appended coverage.
 Existing check: `history_summarizer.rs:2309`, `:2360`, `:3006`, `:4199`. Status
 `unaudited`.
@@ -1035,7 +1035,7 @@ failure rather than data destruction, but every later pass reads the wrong m0.
 Open questions:
 
 - Is a chunk-derived echo requirement compatible with the byte-identical
-  TypeScript oracle the golden test pins (`history_summarizer_validate.rs:1384`)? (needs
+  TypeScript oracle the golden test pins (`history_summarizer_validate.rs:1402`)? (needs
   human input)
 
 ### reattach-publishes-a-chunk-recomputed-after-the-model-ran
@@ -1280,7 +1280,7 @@ Open questions:
 ## Group G: encoding, control characters, and numeric bounds
 
 Three records on what the gate does to the bytes and numbers it admits. The gate
-applies exactly one text transform, `unescape_xml` (`history_summarizer_validate.rs:1148-1154`),
+applies exactly one text transform, `unescape_xml` (`history_summarizer_validate.rs:1166-1172`),
 which decodes five entities and strips nothing, and exactly one numeric narrowing,
 an unchecked `as i32` on `importance` (`history_summarizer.rs:57`). The compensating
 controls all live downstream in `decay_render.rs` and are asymmetric, so these
@@ -1416,7 +1416,7 @@ Confidence: high - [evidence](evidence/hv-publish-accepts-unvalidated-validated-
 `ValidatedChunk` at `:226-238` has all-`pub` fields and derives `Default`;
 `history_summarizer.rs:444` is `pub fn` inside `pub mod history_summarizer` (`lib.rs:19`), and
 `history_summarizer_validate` is also `pub` (`lib.rs:23`). Confirmed by `rg` that the only
-production constructions of a `ValidatedChunk` are `history_summarizer_validate.rs:628`
+production constructions of a `ValidatedChunk` are `history_summarizer_validate.rs:631`
 (the gate's own return) and test code at `history_summarizer.rs:4476`.
 Existing check: convention only. Both production paths (`history_summarizer.rs:1419`,
 `:1592`) funnel through `publish_output_from_awaiting`, which validates at `:1673`.

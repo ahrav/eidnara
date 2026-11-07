@@ -34,7 +34,7 @@ than reporting a defect.
 ### The gate side of the claim, verified
 
 The predicate in the `legacy` expression is `c.p1` non-blank after trim. The gate's
-check at `history_summarizer_validate.rs:1000-1008`:
+check at `history_summarizer_validate.rs:1018-1026`:
 
 ```rust
 match history_segment.p1.as_deref() {
@@ -74,7 +74,7 @@ history_segment exists as a value inside the module and is stopped one function 
 
 - The gate half IS covered:
   `tierless_history_segments_reject_while_p1_only_output_keeps_soft_fallbacks`
-  (`history_summarizer_validate.rs:1463`) and
+  (`history_summarizer_validate.rs:1481`) and
   `mismatched_tier_close_parses_leniently_while_tierless_output_still_rejects`
   (`:1483`). Both assert the reject.
 - The projection half is NOT covered. Grepped for a `legacy` assertion:
@@ -160,10 +160,10 @@ today.
 
 ### Q: Are the gate predicate and the projection predicate genuinely identical, or only similar?
 
-- Sources examined: `history_summarizer_validate.rs:1000-1001`
+- Sources examined: `history_summarizer_validate.rs:1018-1019`
   (`Some(p1) if !p1.trim().is_empty()`), `history_summarizer.rs:63`
   (`c.p1.as_deref().is_some_and(|p1| !p1.trim().is_empty())`),
-  `history_summarizer_validate.rs:212` and `:972` (the field type and the clone),
+  `history_summarizer_validate.rs:212` and `:990` (the field type and the clone),
   `decay_render.rs:154-156` (`is_tiered_row`, a THIRD predicate:
   `c.p1.as_deref().is_some_and(|p| !p.is_empty())`).
 - Findings: The gate and the projection predicates are semantically identical, both
@@ -183,10 +183,10 @@ today.
 
 ### Q: Does any test already assert the arm is unreached?
 
-- Sources examined: all 19 tests in `history_summarizer_validate.rs:1305-1868`; the
+- Sources examined: all 19 tests in `history_summarizer_validate.rs:1323-1889`; the
   `history_summarizer.rs` test module hits for `legacy` and for
   `to_stored_history_segment`.
-- Findings: `history_summarizer_validate.rs:1463` and `:1483` assert the GATE rejects
+- Findings: `history_summarizer_validate.rs:1481` and `:1504` assert the GATE rejects
   tierless output. No test names `legacy` as an assertion target, and
   `to_stored_history_segment` has no direct test. So the claim's second half is
   unasserted.
