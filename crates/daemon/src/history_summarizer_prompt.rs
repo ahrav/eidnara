@@ -636,13 +636,19 @@ mod tests {
             "at most {} bytes",
             crate::history_summarizer_citations::CLAIM_VALUE_MAX_BYTES
         );
+        let whole = format!(
+            "at most {} bytes appears whole",
+            crate::tool_outcome::WHOLE_OUTPUT_MAX_BYTES
+        );
         for field in [
             "`; completed`",
             "`; error`",
             "`; bytes=N`",
+            "`; output=\"…\"`",
             "`; head=\"…\"`",
             "`; tail=\"…\"`",
             bound.as_str(),
+            whole.as_str(),
         ] {
             assert!(notation.contains(field), "{field}: {notation}");
         }
