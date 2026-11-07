@@ -47,7 +47,7 @@ Do not build a second fixture or a second three-way disposition oracle.
   uses memory decision summaries/rationales. Exact object-id matching is a
   lookup mode. [Lines 188-229](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L178)
   render rejected approaches distinctly and carry their rationale.
-- [Delivery, lines 149-167, 247-269](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L149)
+- [Delivery, lines 149-167, 247-268](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L149)
   separates pre-pack ranking from delivered results. The
   [search tests, lines 218-255, 497-517](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L218)
   assert memory text, rationale, and packing behavior using a fake kernel.

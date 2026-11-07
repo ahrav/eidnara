@@ -82,7 +82,8 @@ read is a benign race (the terms are append-only per scope revision).
 
 - Sources examined: `project.rs:85-104` `scope_spec` (route-written rows
   always get a project scope), `kernel_scope.rs` fixtures (fixtures use
-  `scope_id: Some(..)`), `read.rs:238-240`.
+  `scope_id: Some(..)`), `read.rs:223-228` passing the row's optional scope to
+  `ScopeFilter::matches`, which answers `false` for no scope (`project.rs:207-214`).
 - Findings: route-written memory decisions carry a scope; the daemon filter
   drops a NULL-scope row. Other writers (history summarizer promotion,
   reviewer acceptance) were not audited in this pass.

@@ -45,7 +45,7 @@ and owns pressure setup, rather than defining another disposition oracle.
   [inventory helper, lines 731-744](../../../../../crates/daemon/tests/harness_sources.rs#L731)
   maps absence to empty text, so that helper alone cannot observe this
   distinction for a C6 result.
-- [Search execution, lines 149-173, 238-269](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L149)
+- [Search execution, lines 149-173, 238-268](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L149)
   distinguishes invalid state, complete delivery, and packed results. An
   explicit empty sources list completes without reading. Unresolved IDs and
   truncated reads carry notes rather than proof of a complete search.
