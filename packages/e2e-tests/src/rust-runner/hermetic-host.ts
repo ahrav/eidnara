@@ -1101,6 +1101,8 @@ export interface HermeticHostOptions {
     daemonConfig?: Record<string, unknown>;
     /** `harnessRuntime` names a `--harness-runtime` file, so ModelExecution runs the real harness closures it lists. */
     harnessRuntime?: string;
+    /** `productionSearchManifest` names a built payload's `payload-manifest.json`, so `eidnara_search` ranks through the production query route over that payload's embedding lane. */
+    productionSearchManifest?: string;
     /** `credentialSource` is the envelope the status client derives its route's credential fingerprints from, as a harness plugin does. */
     credentialSource?: Record<string, string>;
 }
@@ -1121,6 +1123,7 @@ export class HermeticHostStack {
     private readonly daemonEnv: Record<string, string>;
     private readonly daemonConfig: Record<string, unknown>;
     private readonly harnessRuntime: string | undefined;
+    private readonly productionSearchManifest: string | undefined;
     private readonly credentialSource: Record<string, string> | undefined;
     private readonly fixtureConfigDir: string;
     private readonly logPath: string;
@@ -1134,8 +1137,16 @@ export class HermeticHostStack {
     private pidFileCreatedAtMs = 0;
 
     private constructor(
-        options: Required<Omit<HermeticHostOptions, "harnessRuntime" | "credentialSource">> &
-            Pick<HermeticHostOptions, "harnessRuntime" | "credentialSource">,
+        options: Required<
+            Omit<
+                HermeticHostOptions,
+                "harnessRuntime" | "credentialSource" | "productionSearchManifest"
+            >
+        > &
+            Pick<
+                HermeticHostOptions,
+                "harnessRuntime" | "credentialSource" | "productionSearchManifest"
+            >,
     ) {
         this.dataDir = options.dataDir;
         this.fixtureBin = options.fixtureBin;
@@ -1143,6 +1154,7 @@ export class HermeticHostStack {
         this.daemonEnv = options.daemonEnv;
         this.daemonConfig = options.daemonConfig;
         this.harnessRuntime = options.harnessRuntime;
+        this.productionSearchManifest = options.productionSearchManifest;
         this.credentialSource = options.credentialSource;
         this.connectionFile = connectionFilePath(this.dataDir);
         this.controlPath = join(this.dataDir, CONTROL_FILE);
@@ -1305,6 +1317,15 @@ export class HermeticHostStack {
         }
     }
 
+    /** The fixture's whole log file, which keeps the lines it writes at startup. */
+    logFile(): string {
+        try {
+            return readFileSync(this.logPath, "utf8");
+        } catch {
+            return "";
+        }
+    }
+
     hostLog(): string {
         let file = "";
         try {
@@ -1423,6 +1444,14 @@ export class HermeticHostStack {
 
         const args = ["--state-root", this.dataDir];
         if (this.harnessRuntime !== undefined) args.push("--harness-runtime", this.harnessRuntime);
+        if (this.productionSearchManifest !== undefined) {
+            args.push(
+                "--query-route",
+                "production",
+                "--local-embeddings-manifest",
+                this.productionSearchManifest,
+            );
+        }
         const child = spawn(this.fixtureBin, args, {
             cwd: REPO_ROOT,
             env: {

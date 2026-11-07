@@ -38,6 +38,60 @@ export interface SearchAdmission {
     reason?: string;
 }
 
+/** The `search_admission` block `session.status` reports for a session of `projectRoot` on the host behind `connectionFile`. */
+export async function searchAdmission(
+    connectionFile: string,
+    projectRoot: string,
+    sessionId: string,
+): Promise<SearchAdmission | undefined> {
+    const identity = {
+        project_root: resolve(projectRoot),
+        harness: "opencode",
+        session: sessionId,
+    };
+    const client = await HostClient.connect({
+        connectionFile,
+        identity,
+        targetKind: "tool_provider",
+    });
+    try {
+        const route = await client.routeOpen(
+            { kind: "tool_provider", module_id: "context" },
+            identity,
+        );
+        try {
+            const status = (await client.request(route, {
+                method: "session.status",
+                session_id: sessionId,
+            })) as { search_admission?: SearchAdmission } | null;
+            return status?.search_admission;
+        } finally {
+            await client.closeRoute(route).catch(() => undefined);
+        }
+    } finally {
+        await client.closeAsync().catch(() => undefined);
+    }
+}
+
+/** Polls `session.status` until the session's search admission reads `admitted`. */
+export async function waitForSearchAdmitted(
+    host: { connectionFile: string; hostLog(): string },
+    projectRoot: string,
+    sessionId: string,
+    timeoutMs: number,
+): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let last: SearchAdmission | undefined;
+    while (Date.now() < deadline) {
+        last = await searchAdmission(host.connectionFile, projectRoot, sessionId);
+        if (last?.state === "admitted") return;
+        await Bun.sleep(500);
+    }
+    throw new Error(
+        `search admission did not open within ${timeoutMs}ms: ${JSON.stringify(last ?? null)}\n${host.hostLog()}`,
+    );
+}
+
 interface CommandResult {
     status: number | null;
     stdout: string;
@@ -101,33 +155,7 @@ export class PayloadHost implements HarnessHost {
         projectRoot: string,
         sessionId: string,
     ): Promise<SearchAdmission | undefined> {
-        const identity = {
-            project_root: resolve(projectRoot),
-            harness: "opencode",
-            session: sessionId,
-        };
-        const client = await HostClient.connect({
-            connectionFile: this.connectionFile,
-            identity,
-            targetKind: "tool_provider",
-        });
-        try {
-            const route = await client.routeOpen(
-                { kind: "tool_provider", module_id: "context" },
-                identity,
-            );
-            try {
-                const status = (await client.request(route, {
-                    method: "session.status",
-                    session_id: sessionId,
-                })) as { search_admission?: SearchAdmission } | null;
-                return status?.search_admission;
-            } finally {
-                await client.closeRoute(route).catch(() => undefined);
-            }
-        } finally {
-            await client.closeAsync().catch(() => undefined);
-        }
+        return searchAdmission(this.connectionFile, projectRoot, sessionId);
     }
 
     async waitForAdmitted(
@@ -135,16 +163,7 @@ export class PayloadHost implements HarnessHost {
         sessionId: string,
         timeoutMs: number,
     ): Promise<void> {
-        const deadline = Date.now() + timeoutMs;
-        let last: SearchAdmission | undefined;
-        while (Date.now() < deadline) {
-            last = await this.searchAdmission(projectRoot, sessionId);
-            if (last?.state === "admitted") return;
-            await Bun.sleep(500);
-        }
-        throw new Error(
-            `search admission did not open within ${timeoutMs}ms: ${JSON.stringify(last ?? null)}\n${this.hostLog()}`,
-        );
+        await waitForSearchAdmitted(this, projectRoot, sessionId, timeoutMs);
     }
 
     hostLog(): string {

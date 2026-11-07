@@ -94,6 +94,15 @@
             ]
         },
         {
+            "path": "tests/fixture-production-search.test.ts",
+            "tier": "rust-only",
+            "rationale": "the direct-host fixture started with `--query-route production --local-embeddings-manifest` over the built payload package that EIDNARA_E2E_PAYLOAD_DIR names logs the route at startup, admits its projection from the fixture admission records, and serves eidnara_search through the fused route while the default fixture answers from the labeled snapshot fallback; over sixty generic project memories, twenty-four human-written paraphrase questions report recall@5 and recall@10 for both, and the route must exceed the snapshot scan at both depths; the suite skips when EIDNARA_E2E_PAYLOAD_DIR is unset",
+            "contract_refs": [
+                "SB-P33",
+                "SB-P35"
+            ]
+        },
+        {
             "path": "tests/incident-pool-green.test.ts",
             "tier": "rust-only",
             "rationale": "baseline-green incident variants executed in isolation through the incident-pool runner",
