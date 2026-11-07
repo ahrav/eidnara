@@ -98,8 +98,8 @@ and here with current evidence:
   `crates/daemon/src/token_cache.rs:127-141`. Its vocabulary remains distinct
   from the embedding model tokenizer.
 - Production LocalEmbeddings composition exists at
-  `crates/daemon/src/bin/eidnara_host/serve.rs:1095-1125`. Certified artifacts
-  or disabled/unsupported fallback are selected at `:1025-1063`. Composition
+  `crates/daemon/src/bin/eidnara_host/serve.rs:1232-1298`. Certified artifacts
+  or disabled/unsupported fallback are selected at `:1167-1202` and `payload_local_embeddings.rs:8-24`. Composition
   is default-production; certified inference/live jobs are explicit-config-only.
 - Eviction ranks eligible completed jobs by last poll time falling back to
   completion, then by completion: `crates/host-runtime/src/local_embeddings/jobs.rs:156-158`,
