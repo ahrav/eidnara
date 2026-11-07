@@ -476,7 +476,7 @@ mod tests {
         for rule in [
             "removes a `Waiting on user` or `Constraint` line when a `Decided` or `Lifted` line with its key follows it in the same tier",
             "removes every line that begins `Waiting on user (` from `<p3>` and `<p4>`",
-            "the document keeps the `<output>` shape the Output section shows",
+            "a status line is one line of a tier's text",
         ] {
             assert!(section.contains(rule), "{rule}");
         }
