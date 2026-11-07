@@ -73,8 +73,8 @@ landing.
 
 The fake kernel mirrors the form rule, including the daemon's
 confined-path rule and the percent-escape refusal (`disputeEvidenceWellFormed`,
-`packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:336-352`;
-`repositoryPathWellFormed`, `:271-284`); the secret scan, liveness, and
+`packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:335-351`;
+`repositoryPathWellFormed`, `:270-283`); the secret scan, liveness, and
 visibility stay with the daemon;
 its contract test is
 `packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.contract.test.ts`.

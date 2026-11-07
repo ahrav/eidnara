@@ -22,7 +22,7 @@ specification recommended adding the evidence key
   (`packages/opencode-plugin/src/hooks/context/command-handler.ts:415`,
   `packages/pi-plugin/src/commands/eidnara-memory-mark.ts:61`).
 - The client derives `operation_key = sha256(join(producer, actor,
-  operationId))` (`packages/opencode-plugin/src/shared/kernel-client/client.ts:293-300`)
+  operationId))` (`packages/opencode-plugin/src/shared/kernel-client/client.ts:283-290`)
   with `joinKeyFields` (`client.ts:247`); `request_digest` covers the
   operations, so other bytes under one key are `operation_key_reused`.
 - The parser refuses U+001F in the object id and the evidence id

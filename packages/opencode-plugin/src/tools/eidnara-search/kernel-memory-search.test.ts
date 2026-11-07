@@ -829,7 +829,7 @@ describe("scanSnapshotForLexicalSearch", () => {
         expect(scan).toMatchObject({ ok: true, truncated: false });
         if (!scan.ok) return;
         expect(scan.rows).toHaveLength(2);
-        // U+E000 encodes to fewer and smaller UTF-8 bytes than U+10000, so the first page serves it and the next page continues after it.
+        // The ids first differ at UTF-8 bytes EE (U+E000) and F0 (U+10000), so the first page serves U+E000 and the next page continues after it.
         const secondPage = transport.calls[1]?.body as { before?: { object_id: string } };
         expect(secondPage.before?.object_id).toBe("mem_\uE000");
     });

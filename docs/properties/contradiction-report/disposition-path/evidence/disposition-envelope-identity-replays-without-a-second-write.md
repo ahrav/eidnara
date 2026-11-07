@@ -17,8 +17,8 @@ per report.
 ## Evidence trail
 
 - Key derivation: `operation_key = sha256(producer, actor, operationId)`
-  (`shared/kernel-client/client.ts:294-300`); `request_digest = sha256(
-  stable(operations, source_kind, asserted classes))` (`:282-291`). The
+  (`shared/kernel-client/client.ts:284-290`); `request_digest = sha256(
+  stable(operations, source_kind, asserted classes))` (`:272-281`). The
   daemon prefixes the key with the project and `RECEIPT_FAMILY = "commit"`
   (`project.rs:78-83`, `:152-163`; `commit.rs:87`).
 - `commit_prepared_with_writer` opens the writer transaction, checks the
