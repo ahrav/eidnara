@@ -515,11 +515,11 @@ Type: safety
 Reachability: default-production - as above
 Status: active - activated by U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135))
 Exercised: yes - the end-to-end test admits three cited whole-sentence user quotations, one uncited whole-sentence quotation, and two cited fragments in one session and compares their admission rows and served visibility
-Guarantee: A capture decision's admission record carries `ModelInference` and `AssistantInference`, and its maturity and served visibility depend on whether it is a whole-sentence quotation of a user message, never on whether it has an anchor or a citation.
-Check: `always` - capture decisions of one attribution that differ only in citation or anchor presence have equal `source_class`, `taint_class`, `maturity`, `effective_maturity`, and `elevated_support`, and equal visibility on every surface
+Guarantee: A capture decision's admission record carries `ModelInference` and `AssistantInference`, and its maturity and served visibility depend on `user_attributed`, whether it is a whole-sentence quotation of a user message, never on whether it has an anchor or a citation.
+Check: `always` - capture decisions with one `user_attributed` outcome that differ only in citation or anchor presence have equal `source_class`, `taint_class`, `maturity`, `effective_maturity`, and `elevated_support`, and equal visibility on every surface
 Fault/timing angle: none
 Required faults and enabling state: one cited and one uncited job in one session
-Confidence: high - [evidence](evidence/p2-new-anchor-and-citation-add-no-authority.md). Admission is `admit_capture` (`crates/daemon/src/kernel_routes/commit.rs:601`), called at `crates/daemon/src/memory_capture.rs:1610` with the statement record `user_attributed` (`crates/daemon/src/memory_capture.rs:1130`) selects; neither the anchor nor the citation event is an input to either
+Confidence: high - [evidence](evidence/p2-new-anchor-and-citation-add-no-authority.md). Admission is `admit_capture` (`crates/daemon/src/kernel_routes/commit.rs:601`), called at `crates/daemon/src/memory_capture.rs:1611` with the statement record `user_attributed` (`crates/daemon/src/memory_capture.rs:1127`) selects; neither the anchor nor the citation event is an input to either
 Existing check: `crates/daemon/src/source_capture_tests.rs:3523` (unaudited)
 Impact: a model could raise its own authority by quoting a captured message
 Open questions: None.

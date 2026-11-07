@@ -631,6 +631,24 @@ impl CaptureWork {
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
             let memories = collapse_quotations(attribution, decision.memories);
+            if memories.iter().any(|memory| {
+                !user_attributed(&job, memory)
+                    && memory
+                        .replaces
+                        .iter()
+                        .chain(&memory.also_replaces)
+                        .any(|target| {
+                            plan.existing
+                                .iter()
+                                .any(|previous| previous.id == *target && previous.automatic)
+                        })
+            }) {
+                eprintln!(
+                    "daemon: native memory capture source rejected: only a whole user statement may replace an automatic memory"
+                );
+                self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
+                continue;
+            }
             let existing = plan
                 .existing
                 .iter()

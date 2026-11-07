@@ -2621,8 +2621,6 @@ mod tests {
         );
     }
 
-    /// Every JSON pointer literal the production merge reads is a `ConfigKey`,
-    /// and every `ConfigKey` is listed once in `ALL`.
     #[test]
     fn auto_inject_follows_the_user_tier_and_ignores_the_project_tier() {
         let user = serde_json::json!({ "memory": { "auto_inject": { "enabled": false } } });
@@ -2639,6 +2637,8 @@ mod tests {
         );
     }
 
+    /// Every JSON pointer literal the production merge reads is a `ConfigKey`,
+    /// and every `ConfigKey` is listed once in `ALL`.
     #[test]
     fn every_consumed_pointer_is_a_classified_config_key() {
         let source = include_str!("config.rs");

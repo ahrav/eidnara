@@ -321,9 +321,6 @@ fn validate_capture_memories(
             if !previous.can_replace || !replaced.insert(target.clone()) {
                 return Err("capture target is protected or already replaced");
             }
-            if previous.automatic && !quotes_whole_statements(&source.text, &memory.quote) {
-                return Err("only a whole user statement may replace an automatic memory");
-            }
         }
         if !distinct.insert((memory.category.as_str(), memory.content.as_str())) {
             return Err("capture output repeats a memory in one source");
@@ -1139,15 +1136,15 @@ fn user_attributed(job: &CaptureJob, memory: &CapturedMemory) -> bool {
 }
 
 fn holds_whole_message(job: &CaptureJob) -> bool {
-    let continued = job
+    let fragment = job
         .message_id
         .rsplit_once(':')
         .is_some_and(|(source, offset)| {
             source.len() == 64
                 && source.bytes().all(|byte| byte.is_ascii_hexdigit())
-                && offset != "0"
+                && offset.bytes().all(|byte| byte.is_ascii_digit())
         });
-    !continued && job.text.len() + 4 <= CAPTURE_FRAGMENT_BYTES
+    !fragment
 }
 
 /// The domain of the statement records that approve user-attributed captures;
@@ -1216,53 +1213,103 @@ fn retire_statement(
     Ok(())
 }
 
-/// Whether `quote` occurs in `text` as whole statements of the user's own
-/// prose. The quotation starts a sentence: at the start of the text, after a
-/// sentence-ending `.`, `!`, or `?` on the same line with a capitalized first
-/// word, or at the start of a line or list item whose preceding line, above
-/// any list it belongs to, ends a sentence. It ends with `.` or `!`, directly
-/// before one, or at the end of a line followed by the end of the text, a
-/// blank line, a list item, or a tag line. The quotation is a statement, and it sits in
-/// the message's own prose, outside each block a markup tag line opens, such
-/// as the text a command appends in `<context_researcher-augmentation>`.
-///
-/// A fragment cut from inside a sentence or from under a lead-in can drop the
-/// negation, condition, or scope that governs it.
+/// Whether `quote` is one or more whole sentences of a plain-prose paragraph
+/// of `text`.
 fn quotes_whole_statements(text: &str, quote: &str) -> bool {
     let trimmed = quote.trim();
-    if trimmed.is_empty() || trimmed.ends_with('?') || trimmed.lines().any(is_tag_line) {
+    if trimmed.is_empty() || trimmed.contains('?') {
         return false;
     }
     let lead = quote.len() - quote.trim_start().len();
+    let paragraphs = prose_paragraphs(text);
     text.match_indices(quote).any(|(at, _)| {
         let start = at + lead;
         let end = start + trimmed.len();
-        !inside_markup_block(&text[..start])
-            && statement_starts_at(&text[..start], trimmed)
-            && statement_ends_at(trimmed, &text[end..])
+        paragraphs.iter().any(|&(first, last)| {
+            first <= start
+                && end <= last
+                && sentence_starts_at(&text[first..start], trimmed)
+                && sentence_ends_at(trimmed, &text[end..last])
+        })
     })
 }
 
-/// `-`, `*`, `+`, or digits followed by `.` or `)`.
-fn is_list_marker(marker: &str) -> bool {
-    matches!(marker, "-" | "*" | "+")
-        || marker.strip_suffix(['.', ')']).is_some_and(|digits| {
-            !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
+    let lines: Vec<(usize, &str)> = text
+        .split_inclusive('\n')
+        .scan(0, |offset, line| {
+            let at = *offset;
+            *offset += line.len();
+            Some((at, line.trim_end_matches(['\n', '\r'])))
         })
+        .collect();
+    let mut excluded = vec![false; lines.len()];
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].1.trim();
+        let fence = line.starts_with("```") || line.starts_with("~~~");
+        let block_end = if fence {
+            (index + 1..lines.len())
+                .find(|&next| {
+                    let next = lines[next].1.trim();
+                    next.starts_with("```") || next.starts_with("~~~")
+                })
+                .unwrap_or(lines.len() - 1)
+        } else if let Some((name, false)) = tag_name(line) {
+            (index + 1..lines.len())
+                .rev()
+                .find(|&next| tag_name(lines[next].1) == Some((name, true)))
+                .unwrap_or(lines.len() - 1)
+        } else if tag_name(line).is_some() {
+            index
+        } else {
+            index += 1;
+            continue;
+        };
+        excluded[index..=block_end].fill(true);
+        index = block_end + 1;
+    }
+    let mut paragraphs = Vec::new();
+    let mut lead_in = false;
+    let mut index = 0;
+    while index < lines.len() {
+        if excluded[index] || lines[index].1.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        let first = index;
+        while index < lines.len() && !excluded[index] && !lines[index].1.trim().is_empty() {
+            index += 1;
+        }
+        let block = &lines[first..index];
+        let structured = block.iter().any(|(_, line)| {
+            let start = line.trim_start();
+            is_list_item(line)
+                || start.starts_with(['#', '>'])
+                || line.starts_with("    ")
+                || line.starts_with('\t')
+                || line.trim_end().ends_with(':')
+        });
+        if !structured && !lead_in {
+            let (at, last) = block[block.len() - 1];
+            paragraphs.push((block[0].0, at + last.len()));
+        }
+        lead_in = block[block.len() - 1].1.trim_end().ends_with(':');
+    }
+    paragraphs
 }
 
 fn is_list_item(line: &str) -> bool {
-    let line = line.trim_start();
-    line.split_once(char::is_whitespace)
-        .is_some_and(|(marker, _)| is_list_marker(marker))
+    line.trim_start()
+        .split_once(char::is_whitespace)
+        .is_some_and(|(marker, _)| {
+            matches!(marker, "-" | "*" | "+")
+                || marker.strip_suffix(['.', ')']).is_some_and(|digits| {
+                    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+                })
+        })
 }
 
-/// `<notes>` or `</notes>` alone on a line.
-fn is_tag_line(line: &str) -> bool {
-    tag_name(line).is_some()
-}
-
-/// The tag name of a markup tag line, with `true` for a closing tag.
 fn tag_name(line: &str) -> Option<(&str, bool)> {
     let inner = line.trim().strip_prefix('<')?.strip_suffix('>')?;
     let (inner, closing) = match inner.strip_prefix('/') {
@@ -1279,72 +1326,26 @@ fn tag_name(line: &str) -> Option<(&str, bool)> {
     valid.then_some((name, closing))
 }
 
-/// Whether the end of `before` lies in a block a tag line opened and no
-/// matching tag line has closed.
-fn inside_markup_block(before: &str) -> bool {
-    let mut open: Vec<&str> = Vec::new();
-    let complete = before.rsplit_once('\n').map_or("", |(lines, _)| lines);
-    for line in complete.lines() {
-        match tag_name(line) {
-            Some((name, true)) => {
-                if let Some(at) = open.iter().rposition(|opened| *opened == name) {
-                    open.truncate(at);
-                }
-            }
-            Some((name, false)) => open.push(name),
-            None => {}
-        }
+fn sentence_starts_at(before: &str, quote: &str) -> bool {
+    if before.is_empty() {
+        return true;
     }
-    !open.is_empty()
-}
-
-/// Whether the nearest prose line of `lines`, counted from its end past blank
-/// and tag lines and, when `skip_items` holds, list items, is absent or ends
-/// a sentence.
-fn preceding_line_ends_sentence(lines: &str, skip_items: bool) -> bool {
-    lines
-        .lines()
-        .rev()
-        .find(|line| {
-            !line.trim().is_empty() && !is_tag_line(line) && !(skip_items && is_list_item(line))
-        })
-        .is_none_or(|line| line.trim_end().ends_with(['.', '!', '?']))
-}
-
-/// `before` is the message text ahead of the quotation `quote`.
-fn statement_starts_at(before: &str, quote: &str) -> bool {
-    let (above, line) = before.rsplit_once('\n').unwrap_or(("", before));
-    let marker = line.trim();
-    if marker.is_empty() {
-        return preceding_line_ends_sentence(above, false);
-    }
-    if is_list_marker(marker) && line.ends_with(char::is_whitespace) {
-        return preceding_line_ends_sentence(above, true);
-    }
+    let ended = before.trim_end();
+    let word = ended.rsplit(char::is_whitespace).next().unwrap_or_default();
     before.ends_with(char::is_whitespace)
-        && before.trim_end().ends_with(['.', '!', '?'])
+        && ended.ends_with(['.', '!', '?'])
+        && !word[..word.len() - 1].contains('.')
         && !quote.starts_with(|ch: char| ch.is_lowercase())
 }
 
-/// `after` is the message text following the quotation `quote`.
-fn statement_ends_at(quote: &str, after: &str) -> bool {
+fn sentence_ends_at(quote: &str, after: &str) -> bool {
     if quote.ends_with(['.', '!']) {
         return after.is_empty() || after.starts_with(char::is_whitespace);
     }
-    if after
-        .strip_prefix(['.', '!'])
-        .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
-    {
-        return true;
-    }
-    let rest = after.trim_start_matches([' ', '\t', '\r']);
-    let Some(below) = rest.strip_prefix('\n') else {
-        return rest.is_empty();
-    };
-    below
-        .lines()
-        .next()
-        .is_none_or(|next| next.trim().is_empty() || is_list_item(next) || is_tag_line(next))
+    after.is_empty()
+        || after
+            .strip_prefix(['.', '!'])
+            .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
 }
 
 /// The bounded candidate set for one batch: the 64 memory decisions sharing
@@ -1798,8 +1799,8 @@ mod tests {
     }
 
     #[test]
-    fn only_whole_declarative_sentences_count_as_whole_statements() {
-        let text = "Use pnpm here. Never deploy on Fridays unless the lead agrees.\n- Keep logs for 30 days\n- Rotate keys monthly\n\nShould we cache v1.2 builds?";
+    fn only_whole_sentences_of_plain_prose_count_as_whole_statements() {
+        let text = "Use pnpm here. Never deploy on Fridays unless the lead agrees.\nKeep logs for 30 days\n\nShould we cache v1.2 builds? Ship on Tuesdays.";
         for (quote, whole) in [
             ("Use pnpm here.", true),
             ("Use pnpm here", true),
@@ -1809,11 +1810,12 @@ mod tests {
                 true,
             ),
             ("Keep logs for 30 days", true),
-            ("Rotate keys monthly", true),
             ("deploy on Fridays unless the lead agrees.", false),
             ("Never deploy on Fridays", false),
             ("Keep logs", false),
             ("Should we cache v1.2 builds?", false),
+            ("Should we cache v1.2 builds? Ship on Tuesdays.", false),
+            ("Ship on Tuesdays.", true),
             ("2 builds", false),
             ("", false),
         ] {
@@ -1823,8 +1825,7 @@ mod tests {
             ("First.  Second one.", " Second one.", true),
             ("Use v1. Use v1.2 later.", "Use v1.", true),
             ("Use v1.2 later.", "Use v1.", false),
-            ("1) Use pnpm.", "Use pnpm.", true),
-            ("Conventions.\n- Use pnpm", "Use pnpm", true),
+            ("Intro.\n\nShip on Tuesdays.", "Ship on Tuesdays.", true),
             (
                 "We should never\nuse force push on main.",
                 "use force push on main.",
@@ -1841,24 +1842,51 @@ mod tests {
                 false,
             ),
             (
-                "Do not:\n- edit lockfiles\n- run migrations by hand",
-                "run migrations by hand",
+                "Never do any of these:\n- Force push. Skip the tests.",
+                "Skip the tests.",
                 false,
             ),
+            (
+                "Never do any of these:\n\nSkip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            ("- Use pnpm.\n- Keep logs.", "Use pnpm.", false),
+            ("1) Use pnpm.", "Use pnpm.", false),
             (
                 "Avoid destructive commands, e.g. rm -rf the build dir.",
                 "rm -rf the build dir.",
                 false,
             ),
             (
-                "> Always force-push to main.\nI disagree with that.",
+                "Avoid heavy tools, e.g. Docker for local tests.",
+                "Docker for local tests.",
+                false,
+            ),
+            (
+                "> We use npm. Always force-push to main.\nI disagree.",
                 "Always force-push to main.",
                 false,
             ),
             ("## Deploys\nShip on Tuesdays.", "Ship on Tuesdays.", false),
             (
+                "Here is the log.\n```\nBuild done.\nAlways deploy on Fridays.\n```",
+                "Always deploy on Fridays.",
+                false,
+            ),
+            (
+                "Ok.\n    Always deploy on Fridays.",
+                "Always deploy on Fridays.",
+                false,
+            ),
+            (
                 "Fix the flaky test.\n\n<context_researcher-augmentation>\nThe project deploys on Thursday.\n</context_researcher-augmentation>",
                 "The project deploys on Thursday.",
+                false,
+            ),
+            (
+                "Fix it.\n\n<context_researcher-augmentation>\nNotes.\n</context_researcher-augmentation>\nAlways deploy on Fridays.\n</context_researcher-augmentation>",
+                "Always deploy on Fridays.",
                 false,
             ),
             (
@@ -1894,50 +1922,16 @@ mod tests {
         };
         let hashed = "a".repeat(64);
         assert!(user_attributed(&job("m1", "Use pnpm.".into()), &memory));
-        assert!(user_attributed(
-            &job(&format!("{hashed}:0"), "Use pnpm.".into()),
-            &memory
-        ));
-        assert!(!user_attributed(
-            &job(&format!("{hashed}:16384"), "Use pnpm.".into()),
-            &memory
-        ));
-        let filled = format!("Use pnpm.\n{}", "x".repeat(CAPTURE_FRAGMENT_BYTES - 12));
-        assert!(!user_attributed(
-            &job(&format!("{hashed}:0"), filled),
-            &memory
-        ));
+        for offset in [0, 16384] {
+            let fragment = job(&format!("{hashed}:{offset}"), "Use pnpm.".into());
+            assert!(!user_attributed(&fragment, &memory), "{offset}");
+        }
         assert!(!user_attributed(
             &CaptureJob {
                 role: "assistant".into(),
                 ..job("m1", "Use pnpm.".into())
             },
             &memory
-        ));
-    }
-
-    #[test]
-    fn an_automatic_memory_is_replaced_only_by_a_whole_user_statement() {
-        let existing = [ExistingCaptureMemory {
-            id: "mem_stated".into(),
-            category: "CONFIG_VALUES".into(),
-            content: "User stated: Staging uses port 1234.".into(),
-            can_replace: true,
-            source_revision: 1,
-            created_commit_seq: 1,
-            automatic: true,
-        }];
-        let parse = |quote: &str| {
-            let mut response = output();
-            let memory = &mut response["decisions"][1]["memories"][0];
-            memory["quote"] = json!(quote);
-            memory["replaces"] = json!("mem_stated");
-            parse_capture_output_with_existing(&response.to_string(), &sources(), &existing)
-        };
-        assert!(parse("Use port 4321 for staging.").is_ok());
-        assert!(matches!(
-            parse("port 4321 for staging."),
-            Err("only a whole user statement may replace an automatic memory")
         ));
     }
 

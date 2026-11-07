@@ -284,6 +284,42 @@ fn live_statement_records(handler: &Handler, project: &Path) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn only_a_whole_user_statement_replaces_a_delivered_statement() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let fragment = "the release cut from Thursday to Tuesday.";
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", TUESDAY)],
+        |_, existing| {
+            vec![Extracted {
+                quote: fragment.to_string(),
+                replaces: ids_containing(existing, "Thursday"),
+            }]
+        },
+    )
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(stated(THURSDAY), "visible".to_string())],
+        "a fragment cannot retire the user's statement"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(THURSDAY)]
+    );
+}
+
+#[tokio::test]
 async fn a_correction_retires_every_named_restatement_of_the_old_value() {
     let echo = "Noted: release branches are cut from main every Thursday.";
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;

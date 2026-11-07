@@ -1031,23 +1031,26 @@ list is ignored with a warning, and each plugin strips it from the project
 tier. `memory.auto_capture` and
 `memory.auto_promote` gate only model-extracted facts from redacted text.
 A captured fact is the user's statement when its source message has the user
-role and fits one capture source unfragmented, its stored text is `User
-stated: ` followed by a verbatim quotation of that message, and the quotation
-spans whole sentences of the message's own prose: it starts at the text start,
-after a sentence end on its line with a capitalized word, or on a line or list
-item below a line that ends a sentence; it ends with `.` or `!`, before one,
-or at a line end followed by the text end, a blank line, a list item, or a tag
-line; it lies outside each block a line holding only a markup tag opens, such
-as `<context_researcher-augmentation>`; and it is not a
-question. Capture records each such fact with a statement record in the
+role and reaches capture as one source, not as fragments of a message longer
+than one capture source; its stored text is `User stated: ` followed by a
+verbatim quotation of that message; and the quotation is one or more whole
+sentences of a plain-prose paragraph. Plain prose leaves out code fences, each
+block a line holding only a markup tag opens through the last line closing
+that tag (such as `<context_researcher-augmentation>`), and every paragraph
+holding a list item, a heading, a blockquote, an indented code line, or a line
+ending in `:`, along with the paragraph after one ending in `:`. The quotation
+starts the paragraph or follows a `.`, `!`, or `?` and whitespace, with a
+preceding word holding no other `.` and a first character that is not
+lowercase; it ends with `.` or `!`, directly before one, or at the paragraph's
+end; and it contains no `?`. Capture records each such fact with a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and admits the fact on that approval, so the Kernel serves it on
 automatic surfaces. Every other captured fact remains labeled model inference
 for explicit search, not human approval or automatic-context eligibility. The
 `<project-memory>` block of a session's m0 holds the live, project-scoped,
-positive-category facts visible on `auto_inject`, newest first within
-`memory.injection_budget_tokens`, and leaves out facts captured from that
-session's own messages. A user message may correct earlier facts, and only
+positive-category facts visible on `auto_inject`, selected newest first until
+`memory.injection_budget_tokens` is spent and rendered grouped by category,
+and leaves out facts captured from that session's own messages. A user message may correct earlier facts, and only
 the user's statement may replace a fact served on `auto_inject`: its fact
 supersedes the captured fact it `replaces`, retires each further fact it names
 in `also_replaces` and a replaced memory the host memory tool wrote, and
