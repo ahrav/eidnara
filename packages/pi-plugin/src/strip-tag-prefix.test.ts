@@ -18,6 +18,7 @@ describe("stripTagPrefixFromAssistantMessage", () => {
             ],
             ["strips trailing whitespace after the prefix", "§4§   \n\nYes", "Yes"],
             ["strips multi-digit tag IDs", "§38773§ Found it.", "Found it."],
+            ["keeps a tag's neighbour that only resembles a mangled tag", '§1§2">x', '2">x'],
         ] as Array<[string, string, string]>)("%s", (_title, input, expected) => {
             const msg = {
                 role: "assistant",
@@ -29,8 +30,7 @@ describe("stripTagPrefixFromAssistantMessage", () => {
     });
 
     describe("cargo-culted § mid-text (models mimicking Eidnara notation)", () => {
-        // Cargo-cult defense rows: § notation appearing mid-text (not as a
-        // leading tag) must be scrubbed wherever it appears.
+        // Cargo-cult defense rows: the scrub removes tag notation embedded in prose.
         it.each([
             [
                 "removes mid-text §N§ pair entirely (cargo-cult defense)",
@@ -41,11 +41,6 @@ describe("stripTagPrefixFromAssistantMessage", () => {
                 'removes malformed §N"> hybrid mid-text',
                 'Hello §40827">Oracle confirmed',
                 "Hello Oracle confirmed",
-            ],
-            [
-                "strips stray § character anywhere",
-                "See § marker for details",
-                "See  marker for details",
             ],
             [
                 "strips both leading prefix and mid-text § in same message",
@@ -60,6 +55,18 @@ describe("stripTagPrefixFromAssistantMessage", () => {
             expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
             expect((msg.content[0] as { type: string; text: string }).text).toBe(expected);
         });
+    });
+
+    it("keeps a section sign that is no tag, as the stream shows it", () => {
+        for (const text of [
+            "See § 4 of the spec.",
+            "Under §42 of the Act the fee applies.",
+            "§3.5 and §12a and price§§",
+        ]) {
+            const msg = { role: "assistant", content: [{ type: "text", text: `§9§ ${text}` }] };
+            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
+            expect((msg.content[0] as { text: string }).text).toBe(text);
+        }
     });
 
     describe("multi-part messages", () => {

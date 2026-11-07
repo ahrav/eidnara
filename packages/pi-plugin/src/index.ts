@@ -63,6 +63,7 @@ import { piMemoryCaptureExecutor } from "./memory-capture-native";
 import { resolvePiWindowGeometry } from "./pi-context-limit";
 import { createPiRustToolBackends } from "./rust-tool-backends";
 import { registerStatusLine } from "./status-line";
+import { stripStreamedTags } from "./stream-tag-strip";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 import { configurePiSubagentExtensions, EIDNARA_PI_SUBAGENT_ENV } from "./subagent-runner";
 import {
@@ -563,9 +564,13 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         return branch;
     }
     const piTransform = createPiTransform({ moduleClient, branchOf });
+    // Sessions whose latest context pass served daemon messages under fold authority, the only
+    // passes that tag blocks; any other turn's answer streams and saves as written.
+    const taggedSessions = new Set<string>();
     pi.on("context", async (event, ctx) => {
         const sessionId = sessionIdFromContext(ctx);
         if (!sessionId) return;
+        taggedSessions.delete(sessionId);
         try {
             const deps = resolveCurrentProjectDeps(ctx);
             const eidnaraFolds = isCompactionEnabled(deps.config);
@@ -601,9 +606,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
                         now: Date.now(),
                     }),
             });
-            return result.messages
-                ? { messages: result.messages as unknown as typeof event.messages }
-                : undefined;
+            if (!result.messages) return undefined;
+            if (piTransform.nativeAuthority(sessionId) !== true) taggedSessions.add(sessionId);
+            return { messages: result.messages as unknown as typeof event.messages };
         } catch (error) {
             warn("context transform declined:", error);
             return undefined;
@@ -979,12 +984,32 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         return answer;
     });
 
+    const servesTags = (ctx: unknown): boolean => {
+        if (compactionOff) return false;
+        const sessionId = sessionIdFromContext(ctx);
+        return sessionId === undefined || taggedSessions.has(sessionId);
+    };
+    const stripStream = (
+        type: string,
+        event: { message: unknown; assistantMessageEvent?: unknown },
+        ctx: unknown,
+    ) => {
+        if (!servesTags(ctx)) return;
+        try {
+            stripStreamedTags(event);
+        } catch (err) {
+            warn(`${type}: stripStreamedTags threw:`, err);
+        }
+    };
+    pi.on("message_start", (event, ctx) => stripStream("message_start", event, ctx));
+    pi.on("message_update", (event, ctx) => stripStream("message_update", event, ctx));
+
     // Mutating `event.message` changes the message persisted by `sessionManager.appendMessage`.
     // Unstripped prefixes appear in assistant responses in Pi's UI.
     pi.on("message_end", async (event, ctx) => {
         try {
             const msg = event.message as unknown;
-            if (!compactionOff && msg !== null && typeof msg === "object") {
+            if (servesTags(ctx) && msg !== null && typeof msg === "object") {
                 stripTagPrefixFromAssistantMessage(msg as { role: string; content: unknown });
             }
         } catch (err) {
@@ -1026,6 +1051,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         checkpointedLeafBySession.delete(sessionId);
         branchIndexes.delete(sessionId);
         piTransform.clearSession(sessionId);
+        taggedSessions.delete(sessionId);
         offered.delete(sessionId);
         refusals.delete(sessionId);
         clearPiSystemPromptSession(sessionId);
