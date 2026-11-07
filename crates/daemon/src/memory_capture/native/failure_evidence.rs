@@ -63,9 +63,10 @@ struct Evidence<'a> {
 /// `MAX_QUOTE_OCCURRENCES` per memory. Ending the pass can only leave lines out.
 const MAX_QUOTE_OCCURRENCES: usize = 8;
 
-/// One non-overlapping occurrence of a memory's quotation in the source. `eligible` holds when
-/// the quotation occurs once and publication writes the memory; an ineligible
-/// occurrence still competes for a frame, so its block stays off other facts.
+/// One non-overlapping occurrence of a memory's quotation in the source.
+/// `eligible` holds when the quotation occurs once and publication writes the
+/// memory; an ineligible occurrence still competes for a frame, so its block
+/// stays off other facts.
 struct Quote {
     memory: usize,
     span: Range<usize>,
@@ -341,12 +342,13 @@ fn is_word(c: char) -> bool {
 }
 
 /// The offset of the word that makes `line` report a failure, if it does.
-/// Inside an output block, `panicked at` and a level word count at any word, since runners print them mid-line, and an
-/// error header counts at the line start or after leading log tokens, each of
-/// which holds a digit or begins with `[` (timestamps, `file:line:col`
-/// locations, bracketed tags). In prose the line must begin with one of these.
-/// The fenced walk tracks the log-token state as it goes, so it reads each
-/// byte of the line a bounded number of times.
+/// Inside an output block, `panicked at` and a level word count at any word,
+/// since runners print them mid-line, and an error header counts at the line
+/// start or after leading log tokens, each of which holds a digit or begins
+/// with `[` (timestamps, `file:line:col` locations, bracketed tags). In prose
+/// the line must begin with one of these. The fenced walk tracks the log-token
+/// state as it goes, so it reads each byte of the line a bounded number of
+/// times.
 fn failure_word(line: &str, fenced: bool) -> Option<usize> {
     if !printable(line) {
         return None;
