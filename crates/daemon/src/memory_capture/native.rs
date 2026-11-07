@@ -631,8 +631,12 @@ impl CaptureWork {
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
             let quoted = collapse_quotations(attribution, decision.memories);
-            if quoted.iter().any(|memory| {
-                !user_attributed(&job, memory)
+            let attributed: Vec<bool> = quoted
+                .iter()
+                .map(|memory| user_attributed(&job, memory))
+                .collect();
+            if quoted.iter().zip(&attributed).any(|(memory, &attributed)| {
+                !attributed
                     && memory
                         .replaces
                         .iter()
@@ -650,7 +654,20 @@ impl CaptureWork {
                 continue;
             }
             let mut memories = quoted.clone();
-            let attached = failure_evidence::attach(&job.text, &mut memories);
+            let mut attached = failure_evidence::attach(&job.text, &mut memories);
+            // Preserving `quoted.content` preserves user attribution after
+            // `failure_evidence::attach`.
+            if attached {
+                attached = false;
+                for ((memory, quoted), &attributed) in
+                    memories.iter_mut().zip(&quoted).zip(&attributed)
+                {
+                    if attributed {
+                        memory.content.clone_from(&quoted.content);
+                    }
+                    attached |= memory.content != quoted.content;
+                }
+            }
             let existing = plan
                 .existing
                 .iter()

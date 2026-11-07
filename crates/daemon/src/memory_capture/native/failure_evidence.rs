@@ -414,6 +414,7 @@ mod tests {
             content: format!("{attribution}: {quote}"),
             quote: quote.into(),
             replaces: None,
+            also_replaces: Vec::new(),
             duplicate_of: None,
         }
     }

@@ -406,6 +406,27 @@ async fn assistant_reports_and_sentence_fragments_stay_on_explicit_search() {
 }
 
 #[tokio::test]
+async fn a_user_statement_on_a_failure_marker_line_is_delivered_as_its_quotation() {
+    let statement = "FAIL marks a quarantined upload test in this repository.";
+    let text = format!("{statement}\n--> See docs/flaky.md for the list.");
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", &text)], |_, _| {
+        vec![fact(statement)]
+    })
+    .await;
+
+    let served = serve(&handler, SECOND, "s2").await;
+    let block = project_memory_block(&served).expect("the whole statement is delivered");
+    assert!(block.contains(&stated(statement)), "{block}");
+    assert!(!block.contains("docs/flaky.md"), "{block}");
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(stated(statement), "visible".to_string())],
+        "failure-evidence lines leave a whole user statement's text and approval unchanged"
+    );
+}
+
+#[tokio::test]
 async fn switching_auto_inject_off_delivers_no_block_and_search_still_finds_the_statement() {
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
     bind(
