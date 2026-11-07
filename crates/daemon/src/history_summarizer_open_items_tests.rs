@@ -264,8 +264,8 @@ fn a_lifted_constraint_is_carried_as_lifted_and_settles_the_question_it_answered
     );
     let p2 = format!("{constraint}\n{waiting}\n{lifted_line}\nTwo PRs, one per parser fix.");
     let p3 = format!("{constraint}\n{lifted_line}\nTwo parser fixes in separate PRs.");
-    // The model emits the lift's claim before the constraint's, so keeping the last claim per key
-    // would keep the constraint's claim; the retired constraint line takes its claim with it.
+    // The model emits the lift's claim before the constraint's; ordering this segment's claims on
+    // the key by cited message keeps the lift's claim, which cites the later message.
     let text = output(
         1,
         4,
