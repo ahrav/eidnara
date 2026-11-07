@@ -62,7 +62,7 @@ End-to-end host matrix that exists:
 
 - `packages/e2e-tests/tests/payload-fused-search.test.ts:101`
   `fused search through a built payload` starts a built payload host
-  (`PayloadHost`, `src/rust-runner/payload-host.ts:47`) under the OpenCode
+  (`PayloadHost`, `src/rust-runner/payload-host.ts:101`) under the OpenCode
   harness (`RustTestHarness`, `src/rust-harness.ts:229`) and a Pi harness,
   creates one memory before and one after admission in each host, and
   asserts each ranks through `expectDenseOnly` (`:47`), whose header regex
@@ -73,7 +73,7 @@ End-to-end host matrix that exists:
   (`:1`, `:7`) calls them test-only fixture evidence with no qualification
   measurement.
 - CI runs the suite with `EIDNARA_E2E_PAYLOAD_DIR` set
-  (`.github/workflows/ci.yml:1029`); `mode-manifest.json:105` registers it
+  (`.github/workflows/ci.yml:1029`); `mode-manifest.json:114` registers it
   in the `pi-rust` tier with the dense-lane rationale.
 
 ## Failure scenario

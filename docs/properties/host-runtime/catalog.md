@@ -8666,12 +8666,12 @@ conditionality map below leaned on it.
 1. `runtime.rs:3-5` says signal acquisition stays outside the crate and that
    "future production wiring in the source module-host work will map SIGINT/SIGTERM".
    The first clause is true and the second is **stale**: the production wiring
-   already exists, outside this crate. `serve.rs:617-622` installs a `SIGTERM`
+   already exists, outside this crate. `serve.rs:615-620` installs a `SIGTERM`
    stream and a `SIGINT` stream, failing startup if either installation fails,
    and `:623-631` spawns a task that cancels the caller-supplied
    `CancellationToken` on the first of the two to arrive. All of that is
    **before** `host_runtime::run` is entered at `:632`, and the comment at
-   `serve.rs:604-616` states the ordering requirement explicitly: creating the
+   `serve.rs:602-614` states the ordering requirement explicitly: creating the
    stream inside the spawned task would race `run`, and a signal arriving before
    registration would take the default disposition and kill the daemon outright.
    So the correct statement is that the crate does not acquire signals and its
@@ -8787,12 +8787,12 @@ the additional condition that the caller keeps polling `run`.**
 | 19 | `AbandonGuard` | `:929-931` | Unconditional **construction**, and it is the switch every row below depends on. Armed with `Arc::clone(&shared)` and the `InstanceGuard`; `disarm` at `:937` is reached only if `:936` returned |
 | 20 | Activation task | `:932` | **Unconditional.** Tracked, abort-exempt, not awaited by startup |
 | 21 | Health task | `:933` | **Unconditional.** No config key disables it. `liveness: None` does not suppress it |
-| 22 | Liveness loop | `connection.rs:279-284` | **Conditional on `shared.liveness.is_some()`**, which is `None` by default (`config.rs:294`) and `None` in production (`serve.rs:593`) |
+| 22 | Liveness loop | `connection.rs:279-284` | **Conditional on `shared.liveness.is_some()`**, which is `None` by default (`config.rs:294`) and `None` in production (`serve.rs:591`) |
 | 23 | Accept loop | `:934` | Unconditional. 100 ms fixed `ACCEPT_ERROR_BACKOFF` (`:965`), not configurable |
 | 24 | Setup-socket unlink | `:935` | **Conditional on `accept_loop` returning to a live poller**, result discarded |
 | 25 | `shutdown_sequence` | `:936` | **Conditional, and this row previously said "Unconditional", which was wrong.** It is reached only if the caller polls `run` past `:934`. If the `run` future is *dropped* at any point after `:929` - a supervisor aborting the task, or a `select!` arm losing - the guard's `Drop` (`:419-476`) runs the teardown instead and `shutdown_sequence` never executes. The two paths are not equivalent: the drop path cancels the token and every generation's three tokens (`:424-434`), calls `abort_all` (`:435`), demotes the phase (`:442`), and then spawns a task that runs `force_close_all_routes`, `tracker.close()`, an **explicitly unbounded** `tracker.wait()` (`:457`, comment at `:452-456`), `run_handler_shutdown` (`:467`), and a **second** unbounded `tracker.wait()` (`:471`) before dropping the lock. So it performs no graceful drain, sends no connection Goodbyes, honours no `shutdown_deadline`, and is bounded by nothing at all. `run_handler_shutdown`'s once-latch (`:1265-1270`) is what keeps the two paths from double-running the handler callback, and its own comment at `:1260-1264` names this exact interleaving, which is direct evidence the drop path is a live concern rather than a theoretical one |
 | 26 | `abandon_guard.disarm` and the ordered handler-then-lock drop | `:937-951` | Same condition as 25. On the graceful branch `shared` and `guard` drop in order (`:944-945`); on the non-graceful branch `retain_lock_until_drained` (`:951`) takes both |
-| - | `HarnessClosureStore` | - | **Never constructed by this crate.** Zero Rust references to `HarnessClosureStore`, `ClosureCandidate`, or `HarnessClosureStore::open` anywhere under `crates/host-runtime/src`. Its production constructor is `serve.rs:162` and `:349`, in `daemon`, and both discard the error with `.ok()` |
+| - | `HarnessClosureStore` | - | **Never constructed by this crate.** Zero Rust references to `HarnessClosureStore`, `ClosureCandidate`, or `HarnessClosureStore::open` anywhere under `crates/host-runtime/src`. Its production constructor is `serve.rs:160` and `:347`, in `daemon`, and both discard the error with `.ok()` |
 
 Four conclusions siblings can rely on. The first three are the map's original
 three, two of which survive verification unchanged and one of which is narrowed.
@@ -8825,8 +8825,8 @@ re-derived rather than assumed:
 
 - **Part 2a's three `explicit-config-only` liveness records: unchanged.** They
   rest on conclusion 3, which is untouched by either error. Re-verified:
-  `config.rs:294`, `connection.rs:279`, `serve.rs:593`.
-- **2b's and 2d's citation of `RingTransport` at `:876` as unconditional:
+  `config.rs:294`, `connection.rs:279`, `serve.rs:591`.
+- **2b's and 2d's citation of `RingTransport` at `:874` as unconditional:
   unchanged.** Row 17 is above the abandon window and carries no condition.
 - **2e's citation of the map for "nothing is `cfg`-gated"
   (`../part-2e-request-path/catalog.md:406-407`): unchanged.** That is
@@ -8885,7 +8885,7 @@ now determined by a line outside the crate.
 The chain is three facts, each verified. `HostConfig::default` sets
 `liveness: None` at `config.rs:294`, printed and confirmed. The liveness loop is
 spawned only under `shared.liveness.is_some()` at `connection.rs:279`. And the
-sole production `HostConfig` construction, `serve.rs:582-593`, overrides only
+sole production `HostConfig` construction, `serve.rs:580-591`, overrides only
 `max_resident_bytes` and then falls through to `..HostConfig::default()` at
 `:593`, printed and confirmed, so the production host inherits `None`. No other
 non-test caller of `runtime::run` exists.
@@ -9102,7 +9102,7 @@ the key changes host behaviour.
 | `daemon_ver` | `host-runtime/{CARGO_PKG_VERSION}` (`:289`) | Published as `daemon_ver`, echoed in the proof; `auth.rs:132-133` says it is not an authentication input | nonempty (`config.rs:302`); worst-case auth and connection-file size (`:314-340`) | Yes - `:842`, `:926` |
 | `payload_manifest_digest` | SHA-256 of zero bytes (`:84-85`, `:290`) | Required persisted identity; `lifecycle.rs:378` treats an *empty* digest as legacy | 64 lowercase hex (`config.rs:305`) | Yes - `:661` |
 | `init.storage` | `None` (`HostInit::default`) | "The handler deserializes it; the host never reads it" (`config.rs:252-253`) | none | Pass-through - moved out at `:751`, handed to `initialize` |
-| `init.host_capabilities` | `Vec::new()` (`:250`) | Not documented | none | **No.** Zero readers repo-wide. Only written (`serve.rs:487`, two test sites, both `Vec::new()`) and `Debug`-formatted (`config.rs:262`) |
+| `init.host_capabilities` | `Vec::new()` (`:250`) | Not documented | none | **No.** Zero readers repo-wide. Only written (`serve.rs:485`, two test sites, both `Vec::new()`) and `Debug`-formatted (`config.rs:262`) |
 
 **Totals in Part 4f's categories.** 21 keys in scope.
 
@@ -9172,7 +9172,7 @@ The distinguishing signal exists, because `build_target_index` requires one to
 three manifests (`:500`) and `composite.rs:334-348` emits one entry per
 component so a real report is never empty, but it is incidental and unasserted,
 and no field marks "not yet probed". And a closure-store open failure is
-swallowed into `None` at `serve.rs:162` and `:349`, so a permissions or symlink
+swallowed into `None` at `serve.rs:160` and `:347`, so a permissions or symlink
 problem on the closure root presents as "no harness available" rather than as
 "the closure store is insecure".
 
@@ -9302,7 +9302,7 @@ One asymmetry to state explicitly, because it is the opposite of what the
 `ResourceDeclaration` with `route_class: RouteClass::Reserved` and 96/96 counts
 (`model_execution/config.rs:185`, `:188`), the comment at `model_execution/mod.rs:169-170` makes it
 deliberate and unconditional, `composite.rs:10-13` fixes the direct profile's
-tertiary as `model_execution/management_surface`; the daemon that would compose it (`serve.rs:575` in the source repository) is not in this tree, so in this checkout the reserved ModelExecution class is `test-only`, as the ModelExecution records below classify it. So the
+tertiary as `model_execution/management_surface`; the daemon that would compose it (`serve.rs:573` in the source repository) is not in this tree, so in this checkout the reserved ModelExecution class is `test-only`, as the ModelExecution records below classify it. So the
 comment's second clause is false and its first clause is true only of a
 composition that excludes ModelExecution. Sub-part 2e reached the same verdict
 independently. The record this bears on,
@@ -9721,7 +9721,7 @@ Required faults and enabling state: a default `HostConfig`. That is the
 production configuration.
 Confidence: high - [evidence](evidence/rt-a-the-default-configuration-arms-no-liveness-probe.md).
 Verified `config.rs:294`, the single spawn condition at `connection.rs:279`, and
-that `serve.rs:582-593` reaches `HostConfig::default` for this field.
+that `serve.rs:580-591` reaches `HostConfig::default` for this field.
 Existing check: `tests/lifecycle.rs:496`. Status `unaudited`.
 Impact: this is the reachability label for every liveness property in the
 catalog. Any record whose enabling state is a `LivenessPolicy` is reachable only
@@ -9937,7 +9937,7 @@ Open questions: None.
 > because every route is general-class". `model_execution/mod.rs:164-177` declares
 > `route_class: RouteClass::Reserved` with 96/96 counts (`model_execution/config.rs:185`,
 > `:188`), `composite.rs:10-13` fixes the direct profile's tertiary as
-> `model_execution/management_surface`, and `serve.rs:575` composes it. So the second
+> `model_execution/management_surface`, and `serve.rs:573` composes it. So the second
 > clause is false and the first is true only of a composition that excludes
 > ModelExecution. Sub-part 2e's lens B reached the same verdict independently and both
 > lenses report it as the fourth misleading comment in this crate; neither
@@ -10006,7 +10006,7 @@ harness available" rather than "the closure store is insecure", so an operator
 investigates the wrong subsystem. This is Part 4f's silent-degradation shape.
 Open questions:
 
-- Does `harness_backend` (`serve.rs:344`) ultimately surface any distinguishable
+- Does `harness_backend` (`serve.rs:342`) ultimately surface any distinguishable
   reason to an operator, or does the `None` terminate in a generic
   unavailability? Unresolved; needs the `daemon` binary pass, which is outside
   this footprint.
@@ -10123,8 +10123,8 @@ rather than the configuration contract.
   [rt-a-an-initialized-handler-drains-without-publishing](#rt-a-an-initialized-handler-drains-without-publishing).
   Both run before any request is served and both are unobserved. Hypothesis: they
   dominate each other not at all, and they fail for opposite reasons. The closure
-  record's oracle is blocked *outside* this sub-part, at `serve.rs:162` and
-  `:349` where the `.ok()` discards a well-built closed error vocabulary, which
+  record's oracle is blocked *outside* this sub-part, at `serve.rs:160` and
+  `:347` where the `.ok()` discards a well-built closed error vocabulary, which
   is why it is the catalog's only `medium`. The drain record's oracle is
   constructible *inside* it, by cancelling the shutdown token between
   `initialize`'s return and the `is_cancelled` check at `:831`, which is the

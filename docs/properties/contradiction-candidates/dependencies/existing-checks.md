@@ -42,7 +42,7 @@ folding exists as a check; the goldens imply both (e.g. `HTTPServer` stays
 | `a_request_naming_another_project_root_is_refused_before_any_work` | `:1487` | project mismatch before work | unaudited |
 
 Production guards: `CorruptCanonicalRow` when a visible decision lacks its
-payload size or row (`read.rs:215-219`, `:239-243`).
+payload size or row (`read.rs:249-253`, `:273-277`).
 
 None found: no test asserts the Kernel API's lack of a row bound (it is an
 absence, not a check), and no test drives `visible_domain_decisions_as_of_in_scope`

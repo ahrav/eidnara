@@ -42,7 +42,7 @@ today.
 - Actors: `user:opencode` (`hooks/context/command-handler.ts:391`),
   `user:pi` (`packages/pi-plugin/src/commands/eidnara-memory-mark.ts:18`).
 - Client: `targetIds` collects tokens for `supersede_decision` and
-  `retire_decision` only (`client.ts:644-651`), so a disposition commit
+  `retire_decision` only (`client.ts:660-667`), so a disposition commit
   sends no tokens; `previewDispositions` sends `commitBody(.., true)`,
   which adds `preview: true` (`:597-641`, `:773`, `:789`).
 - Tests: `memory-mark-command.test.ts:343-598`, including the mismatched-

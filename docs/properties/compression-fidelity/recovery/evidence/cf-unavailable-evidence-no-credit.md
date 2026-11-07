@@ -45,17 +45,17 @@ and owns pressure setup, rather than defining another disposition oracle.
   [inventory helper, lines 731-744](../../../../../crates/daemon/tests/harness_sources.rs#L731)
   maps absence to empty text, so that helper alone cannot observe this
   distinction for a C6 result.
-- [Search execution, lines 151-175, 230-260](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L151)
+- [Search execution, lines 149-173, 238-269](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L149)
   distinguishes invalid state, complete delivery, and packed results. An
   explicit empty sources list completes without reading. Unresolved IDs and
   truncated reads carry notes rather than proof of a complete search.
-- [Search fallback, lines 230-238](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L230)
+- [Search fallback, lines 238-246](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L238)
   retries only `no_required_consumer` ungated and adds a freshness note. Do
   not classify that first refusal as terminal if the permitted second read
   actually delivers supporting evidence.
-- [Search tests, lines 350-425](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L350)
+- [Search tests, lines 374-449](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L374)
   cover stale, no-consumer fallback, busy, disabled, and absent-daemon cases.
-  [Lines 473-508](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L473)
+  [Lines 497-532](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L497)
   distinguish pre-pack omissions from delivered results and complete-empty
   from invalid execution. The backing kernel in these tests is a fake.
 

@@ -34,7 +34,7 @@ all 14 `always` checks hold over per-request state.
 | evidence-scope | route-level for `not_found`; kernel unit for `scope_id == None` | see R3 |
 | subject | route-level daemon test | predicates in `disposition_request` (`commit.rs:700-724`) |
 | preview | route-level grid test | re-route from stateful-workload-design (R10) |
-| replay | route-level for replay and reuse; TypeScript unit for the reissue | `client.ts:462-466` owns the reissue |
+| replay | route-level for replay and reuse; TypeScript unit for the reissue | `client.ts:470-474` owns the reissue |
 | command | TypeScript unit test | `FakeKernel` exists |
 | cascade | route-level, store-API seeding | `seed_approval` (`kernel_routes.rs:4362`) |
 | commit-log | route-level daemon test | reads the `commit_log` row |

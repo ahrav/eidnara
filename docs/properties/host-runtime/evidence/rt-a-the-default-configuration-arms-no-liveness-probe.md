@@ -40,7 +40,7 @@ The value reaches `HostShared` unconditionally at `runtime.rs:886`
 is conditional.
 
 **The production configuration never sets it.** The sole non-test caller of
-`host_runtime::run` is `crates/daemon/src/bin/eidnara_host/serve.rs:582-593`:
+`host_runtime::run` is `crates/daemon/src/bin/eidnara_host/serve.rs:580-591`:
 
 ```
 let config = HostConfig {

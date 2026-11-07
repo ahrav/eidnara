@@ -263,7 +263,7 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - every `kernel.read` passes
-`project.scope_term()` (`read.rs:178`).
+`project.scope_term()` (`read.rs:209`).
 Status: active
 Exercised: partial - `crates/kernel/tests/kernel_scope.rs:235-388` covers
 branch-dimension terms: matching, other value, redacted, no term on the
@@ -309,7 +309,7 @@ Open questions:
 ### p5dep-daemon-bounds-rows-after-the-scope-filter
 
 Type: safety
-Reachability: default-production - `read_visible` (`read.rs:163`) is the
+Reachability: default-production - `read_visible` (`read.rs:182`) is the
 only path behind `kernel.read` and the in-process `DomainDecisions` callers.
 Status: active
 Exercised: yes - `crates/daemon/tests/kernel_routes.rs:1958`, `:2080`,
@@ -329,13 +329,13 @@ set; and `sum(payload_sizes[retained]) <= MAX_READ_ROW_BYTES` or the retained
 set is exactly the prefix the cut allows. `always` because every read must
 hold these bounds.
 Fault/timing angle: the row bound cannot be a SQL `LIMIT` because the filter
-runs after SQL (`read.rs:190`); a bound applied before the filter would
+runs after SQL (`read.rs:221`); a bound applied before the filter would
 under-serve.
 Required faults and enabling state: more than 8192 same-project visible rows;
 decisions whose payload sizes sum past `MAX_WIRE_BODY_BYTES / 8`; a decision
 row deleted out of band to force `CorruptCanonicalRow`.
 Confidence: high - [evidence](evidence/p5dep-daemon-bounds-rows-after-the-scope-filter.md).
-Read `read.rs:186-249`.
+Read `read.rs:217-283`.
 Existing check: `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`,
 `bounded_selection_matches_a_full_sort_and_truncate`,
 `a_read_over_the_byte_budget_serves_the_newest_rows_that_fit`. Status
@@ -345,7 +345,7 @@ after the scope filter; the test at
 `crates/daemon/src/candidate_pass_tests.rs:665` cuts the two oldest at a
 reduced cap.
 Impact: a P5 pass that copies this pattern (plan U1 "patterns to follow"
-`read.rs:185`) inherits a bound that is applied after full materialization of
+`read.rs:216`) inherits a bound that is applied after full materialization of
 the Kernel rows; see the next record.
 Open questions: None.
 
@@ -366,7 +366,7 @@ applied afterwards.
 Check: `sometimes` - a campaign must produce at least one history in which
 `rows.len() > MAX_READ_ROWS` is observed on the Kernel API's return value
 inside the over-cap fixture (`kernel_routes.rs:1958`), calling the Kernel
-API directly rather than probing `read.rs:192`, so that the daemon-side
+API directly rather than probing `read.rs:223`, so that the daemon-side
 bound and the plan's OQ5-1 concern are exercised rather than vacuously
 satisfied. `sometimes` because this is situation coverage of the state
 "Kernel returned more rows than the daemon will keep"; it is not a code

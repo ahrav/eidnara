@@ -8,9 +8,9 @@ corroboration. The wildcard is retained separately and runs last.
 
 ## Architecture and data flow
 
-The daemon host composes LocalEmbeddings at `serve.rs:1097-1127` under
+The daemon host composes LocalEmbeddings at `serve.rs:1095-1125` under
 `crates/daemon/src/bin/eidnara_host/`. A selected generation supplies the bundle
-manifest and ORT digests at `serve.rs:1027-1065`. LocalEmbeddings activation loads verified
+manifest and ORT digests at `serve.rs:1025-1063`. LocalEmbeddings activation loads verified
 bytes and builds Backend (`crates/host-runtime/src/local_embeddings/mod.rs:1205-1244`).
 Routed batches enter JobTable; routed queries have separate admission but share
 the same CPU semaphore (`mod.rs:650-918`). Product pending rows and the daemon

@@ -117,7 +117,7 @@ Actors:
   (`eidnara-memory-mark.ts:18`).
 - Harness model, through the `eidnara_memory` tool action `dispute` (new).
   Reporter class `(ModelInference, AssistantInference)` from the client's
-  default `sourceKind` `"assistant"` (`client.ts:604`; `commit.rs:372-374`).
+  default `sourceKind` `"assistant"` (`client.ts:620`; `commit.rs:372-374`).
   Actor claim `agent:<harness>` (R5): OpenCode sends `agent:opencode`
   (`execute.ts:50`) and Pi sends `agent:pi`
   (`pi-plugin/src/tools/eidnara-memory.ts:58`).
@@ -344,7 +344,7 @@ any check at commit.
 |---|---|---|---|---|---|
 | "Was decision D disputed after it was served to session S?" (P3 R3) | `admission_decisions` joined by `subject_object_id` and `commit_seq` | `commit_seq` of the row | As of the reader's `known_as_of` | P3 read API, operator observability | Must not infer reporter identity from `source_kind`/`source_id` (those are the subject's) |
 | "What evidence did dispute r cite, and is it still live?" | `admission_decisions.evidence_id`, `reason`/`event_payload`, `evidence_meta.invalidated_commit_seq` | row `commit_seq`; evidence `invalidated_commit_seq` | Two answers: live at `r.commit_seq` (always true by L2) and live now (may be false) | Operator, later reviewer | Must not present "live now" as "live when filed" or the reverse |
-| "Who filed r?" | `commit_log.actor`, `commit_log.cause` via `commit_seq`; reporter taint from `reason` (PR A) or typed columns (U3) | row `commit_seq` | Exact | Operator | Must not treat `actor` as authenticated identity; the session is not recoverable from `operation_key` (a hash, `client.ts:284-290`) and no column holds it (conflict C2) |
+| "Who filed r?" | `commit_log.actor`, `commit_log.cause` via `commit_seq`; reporter taint from `reason` (PR A) or typed columns (U3) | row `commit_seq` | Exact | Operator | Must not treat `actor` as authenticated identity; the session is not recoverable from `operation_key` (a hash, `client.ts:292-298`) and no column holds it (conflict C2) |
 
 ## 7. Mutation authority and enforcement sets
 
@@ -415,14 +415,14 @@ evidence.
   1372`); `run` maps a conflict raised before entering the closure to
   `OperationKeyReused` (`commit.rs:1083-1091`).
 - Ordinary writers: both plugins through `deriveOperationKey(producer,
-  actor, operationId)` (`client.ts:284-290`) with `operationId =
+  actor, operationId)` (`client.ts:292-298`) with `operationId =
   [sessionId, event, objectId, ...evidence flags]` for the command
   (`memoryMarkOperationId`, `memory-mark-command.ts:210-215`) and
   `sessionId SEP toolCallId` for the tool (`execute.ts:430-432`).
 - Gap at `3a3b916b7`, closed by PR A: the command's `operationId` omitted
   the evidence, so a second dispute in one session with different evidence
   changed the `request_digest` (`deriveRequestDigest` covers operations,
-  `client.ts:272-281`) but not the key, and the daemon refused
+  `client.ts:280-289`) but not the key, and the daemon refused
   `operation_key_reused`. PR A appends the evidence flags to the identity;
   `memory-mark-command.test.ts:212` lands two disputes with different
   evidence in one session as two commits and replays a repeat of the first.
@@ -432,7 +432,7 @@ evidence.
   `[sessionId, event, objectId, evidence flags]`, the flags being
   `--evidence <id>` and `--path <path>@<oid>` in a fixed order after A4
   admission (`evidenceFlags`, `memory-mark-command.ts:152-162`). Each field
-  must be free of U+001F (`joinKeyFields`, `client.ts:247-255`); A4's path
+  must be free of U+001F (`joinKeyFields`, `client.ts:255-263`); A4's path
   bounds exclude NUL but not U+001F, so the parser refuses it in the object
   id, the evidence id, and the path (`memory-mark-command.ts:124-129`,
   `:80`).

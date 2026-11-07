@@ -32,7 +32,7 @@ compression-corpus missing-file or read-failure rejection check was found.
 
 | Check and location | Condition or diagnostic | Status |
 | --- | --- | --- |
-| Rust control framing, `crates/daemon/examples/direct_host_fixture.rs:604-634,673-729,749-832` | Rejects unknown fields/commands and oversized lines; emits static `control request rejected` diagnostics. Request and response frames have a 64 KiB cap. | unaudited |
+| Rust control framing, `crates/daemon/examples/direct_host_fixture.rs:615-645,684-740,760-843` | Rejects unknown fields/commands and oversized lines; emits static `control request rejected` diagnostics. Request and response frames have a 64 KiB cap. | unaudited |
 | Readiness parser and publication check, `packages/e2e-tests/src/rust-runner/hermetic-host.ts:345-404` | Checks readiness keys, wire version/catalog, and owner/mode; rejects `direct host readiness preceded secure publication`. | unaudited |
 | Readiness and stale PID tests, `packages/e2e-tests/src/rust-runner/hermetic-host.test.ts:105-189` | Rejects unexpected readiness fields, oversized records, early publication, and checks PID-age boundaries. | unaudited |
 | Control-response test, `packages/e2e-tests/src/rust-runner/hermetic-host.test.ts:191-223` | Malformed, unknown-field, oversized, wrong-ID, and duplicate replies fail the client. | unaudited |
@@ -46,7 +46,7 @@ compression-corpus missing-file or read-failure rejection check was found.
 No case-ID script control, alias-matching script queue, consumed-script count,
 or ungated compression-fidelity publication qualification check was found.
 `ControlledBackend.execute` accepts `_request` without inspection and returns
-`fixture-success` on success (`direct_host_fixture.rs:383-499`). A completion
+`fixture-success` on success (`direct_host_fixture.rs:394-510`). A completion
 counter therefore cannot substitute for the U3 publication witness.
 This inventory concerns initial ungated qualification inside U3 after U1/U2.
 Downstream delivery and recovery checks still require their own per-invocation

@@ -784,7 +784,7 @@ them without creating implementation tickets.
 [transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3779-L3811
 [prepare-field]: ../../../crates/memory-store/src/lib.rs#L2339-L2377
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L36
-[read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L163
+[read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L182
 [admission-reference]: ../../../crates/kernel/src/admission.rs#L3485-L3699
 [outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L178-L215
 [tokenizer-reference]: ../../../crates/tokenizer/src/lib.rs#L123-L155

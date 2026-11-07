@@ -121,14 +121,14 @@ actually configure.
   `:81` (`MAX_CONFIG_DURATION`), `:347-368` (duration validation);
   `runtime.rs:257-271`, `:286-300`, `:663-671`, `:820-838`;
   `generation.rs:412-450` and `:657-664`; `eidnara_host/serve.rs:1-8` and
-  `:544-548`.
+  `:542-546`.
 - Findings: the unbounded post-`begin_stopping` drains and a multi-frame egress
   drain at 30 s per frame both exceed 60 s with every component inside contract.
   A raised `lifecycle_callback_deadline` does too, since validation permits up
   to 365 days. **Correction:** the catalog's third candidate, per-file hashing
   of a large generation, does *not* extend the `starting` phase. The per-file
   SHA-256 loop (`generation.rs:432-444`, driven per manifest entry at
-  `:657-664`) runs from `serve`'s revalidation at `serve.rs:544-548`, and
+  `:657-664`) runs from `serve`'s revalidation at `serve.rs:542-546`, and
   `serve.rs:6-8` states that lock acquisition and the `starting` record all live
   inside `host_runtime::run`, which is entered afterwards. That hashing precedes the
   record's existence rather than ageing it.

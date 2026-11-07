@@ -81,14 +81,14 @@ comment. A repo-wide search returns **six** occurrences and nothing else:
 | --- | --- |
 | `crates/host-runtime/src/config.rs:250` | the declaration |
 | `crates/host-runtime/src/config.rs:262` | the `Debug` render |
-| `crates/daemon/src/bin/eidnara_host/serve.rs:487` | write, `Vec::new()` |
-| `crates/daemon/examples/direct_host_fixture.rs:577` | write, `Vec::new()` |
+| `crates/daemon/src/bin/eidnara_host/serve.rs:485` | write, `Vec::new()` |
+| `crates/daemon/examples/direct_host_fixture.rs:588` | write, `Vec::new()` |
 | `crates/daemon/tests/host_adapter.rs:29` | write, `Vec::new()` |
 | `crates/daemon/tests/host_adapter.rs:88` | write, `Vec::new()` |
 
 So there are **zero readers anywhere in the repository**, all four writes are
 empty, and `HostInit::default()` (`:248`, derived) also yields empty. One of
-the four writes is production (`serve.rs:487`); the other three are a test and
+the four writes is production (`serve.rs:485`); the other three are a test and
 an example. The field crosses the host-to-handler boundary that
 `handler.rs:573`'s `initialize(&self, init: HostInit)` defines, and no
 implementation of that method reads it.
@@ -329,7 +329,7 @@ Six, each stated somewhere and checked by no build step.
    call sites.** `harness_closure.rs:162-166` deliberately makes the error a
    single `&'static str` behind one constructor (`invalid()`, `:182-184`) with a
    `detail()` accessor (`:169`), which is a well-built bounded vocabulary. Both
-   production consumers throw it away: `serve.rs:162` and `:349` are each
+   production consumers throw it away: `serve.rs:160` and `:347` are each
    `HarnessClosureStore::open(&closure_root).ok()`. A store that fails to open
    is therefore indistinguishable from one that was never configured.
 
@@ -575,7 +575,7 @@ proves.
   makes a correct graceful shutdown look like a client timeout.
   (needs human input)
 - Should `HarnessClosureStore::open`'s error reach a log or a startup failure
-  instead of `.ok()` at `serve.rs:162` and `:349`? The error type was built as a
+  instead of `.ok()` at `serve.rs:160` and `:347`? The error type was built as a
   closed bounded vocabulary specifically to be reportable.
   (needs human input)
 - Is `HarnessClosureStore` intended as public API? `lib.rs:18` exports

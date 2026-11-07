@@ -17,8 +17,8 @@ per report.
 ## Evidence trail
 
 - Key derivation: `operation_key = sha256(producer, actor, operationId)`
-  (`shared/kernel-client/client.ts:284-290`); `request_digest = sha256(
-  stable(operations, source_kind, asserted classes))` (`:272-281`). The
+  (`shared/kernel-client/client.ts:292-298`); `request_digest = sha256(
+  stable(operations, source_kind, asserted classes))` (`:280-289`). The
   daemon prefixes the key with the project and `RECEIPT_FAMILY = "commit"`
   (`project.rs:78-83`, `:152-163`; `commit.rs:87`).
 - `commit_prepared_with_writer` opens the writer transaction, checks the
@@ -37,7 +37,7 @@ per report.
   replay reports the original verdict even if the subject has since moved.
 - Preview honors the same identity (`:890-892`).
 - Reissue: the client reissues a write once under the same identity after
-  an ambiguous send (`client.ts:300-301`, `:462-468`), relying on this
+  an ambiguous send (`client.ts:308-309`, `:470-476`), relying on this
   property.
 - Tests: `kernel_routes.rs:4982-5088` (replay equal `dispositions` and
   `tokens`, counts unchanged; reused key refused; token abort drops the

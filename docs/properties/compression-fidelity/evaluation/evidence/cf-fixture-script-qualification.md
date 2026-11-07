@@ -21,10 +21,10 @@ receipt consumed by later delivery rows does not.
 ## Evidence trail
 
 - [Fixture target](../../../../../crates/daemon/Cargo.toml#L12-L15) requires
-  `direct-host-fixture`. The [control enum](../../../../../crates/daemon/examples/direct_host_fixture.rs#L660-L685)
+  `direct-host-fixture`. The [control enum](../../../../../crates/daemon/examples/direct_host_fixture.rs#L671-L696)
   accepts success, block, release, failure, outage, counters, shutdown, and the
   three script commands `script-cases`, `script-status`, and `script-source`.
-  [Dispatch](../../../../../crates/daemon/examples/direct_host_fixture.rs#L853-L865)
+  [Dispatch](../../../../../crates/daemon/examples/direct_host_fixture.rs#L864-L876)
   routes them to `CaseScript::select`, `CaseScript::status`, and
   `source_records`, returning each `ScriptError` code as a typed rejection.
 - [Case script](../../../../../crates/daemon/examples/direct_host_fixture/case_script.rs#L33)
@@ -38,10 +38,10 @@ receipt consumed by later delivery rows does not.
   while counting it.
   [`delivered`](../../../../../crates/daemon/examples/direct_host_fixture/case_script.rs#L759-L770)
   records a binding only after the sink accepts the emitted text.
-- [Backend execution](../../../../../crates/daemon/examples/direct_host_fixture.rs#L405-L435)
+- [Backend execution](../../../../../crates/daemon/examples/direct_host_fixture.rs#L416-L446)
   parses the presented records from the request prompt and asks the armed
   script for an answer on a success or block behavior.
-  [`summary_text` and `emit_summary`](../../../../../crates/daemon/examples/direct_host_fixture.rs#L233-L269)
+  [`summary_text` and `emit_summary`](../../../../../crates/daemon/examples/direct_host_fixture.rs#L244-L280)
   turn a refused answer into a typed failure and hand the receipt to
   `delivered` only when the sink status is `Accepted`; `fixture-success` is the
   fallback for a prompt with no presented records.

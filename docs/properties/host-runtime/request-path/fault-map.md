@@ -422,8 +422,8 @@ one of three outcomes in the first record and is the one class above marked "No
 deterministically", so that record inherits exactly that limitation and no other.
 
 **Reachability is recorded per record in `catalog.md`.** Both are
-`default-production`, verified at carry time against `serve.rs:575`
-(`StaticComposite::new`) and `:632` (`host_runtime::run`), plus the fact that
+`default-production`, verified at carry time against `serve.rs:573`
+(`StaticComposite::new`) and `:630` (`host_runtime::run`), plus the fact that
 `composite.rs` contains zero `#[cfg]` attributes. Neither row below infers a class
 from the absence of a gate.
 

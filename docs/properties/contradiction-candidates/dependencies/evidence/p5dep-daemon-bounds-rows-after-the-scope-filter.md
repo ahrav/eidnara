@@ -4,7 +4,7 @@ HEAD `3a3b916b7`. Surface S2.
 
 ## Discovery trigger
 
-Plan U1 "Patterns to follow: `crates/daemon/src/kernel_routes/read.rs:185`
+Plan U1 "Patterns to follow: `crates/daemon/src/kernel_routes/read.rs:216`
 for the scope-filtered decision read." The daemon read is the only bounded
 consumer of the unbounded Kernel API. Lens: resource boundaries; C6.
 
@@ -15,14 +15,14 @@ consumer of the unbounded Kernel API. Lens: resource boundaries; C6.
 - `read.rs:29` `MAX_READ_ROW_BYTES = MAX_WIRE_BODY_BYTES / 8`; doc: redaction
   caps each decision text field at 512 KiB, so a worst-case row is ~1 MiB and
   at least eight always fit.
-- `read.rs:99-125` `ServingOrderLast` ordering: older `created_commit_seq`
+- `read.rs:118-144` `ServingOrderLast` ordering: older `created_commit_seq`
   ranks greater; among equal commits, greater `object_id` ranks greater; the
   heap's max is the row a sort-then-truncate drops first.
-- `read.rs:127-161` `NewestRows`: `push` pops when `len > cap` and sets
+- `read.rs:146-180` `NewestRows`: `push` pops when `len > cap` and sets
   `dropped`; `finish` returns `into_sorted_vec` and `dropped`.
-- `read.rs:163-249` `read_visible`:
-  - `:170-188` Kernel read with `project.scope_term()`.
-  - `:189-195` `ScopeFilter` then `NewestRows::new(MAX_READ_ROWS)`; the
+- `read.rs:182-283` `read_visible`:
+  - `:201-219` Kernel read with `project.scope_term()`.
+  - `:220-229` `ScopeFilter` then `NewestRows::new(MAX_READ_ROWS)`; the
     comment explains the bound cannot be a SQL `LIMIT`.
   - `:196-212` payload sizes read via `decision_payload_sizes_as_of` for the
     kept decision ids before any payload; comment: "a project can retain
@@ -34,8 +34,8 @@ consumer of the unbounded Kernel API. Lens: resource boundaries; C6.
     `MAX_READ_ROW_BYTES`; `truncated = true` on cut.
   - `:235-243` `decisions_for_objects_as_of` for the retained ids; a missing
     row is `CorruptCanonicalRow`.
-- `read.rs:66-76` `ReadResponse.truncated` doc: byte-budget truncation also
-  happens at serialization (`:477-498`), so the wire flag can be `true` while
+- `read.rs:85-95` `ReadResponse.truncated` doc: byte-budget truncation also
+  happens at serialization (`:512-533`), so the wire flag can be `true` while
   this one is `false`.
 - Tests: `crates/daemon/tests/kernel_routes.rs:1958`
   `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`;

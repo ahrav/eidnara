@@ -18,7 +18,7 @@ produces:
 | `crates/host-runtime/src/harness_closure.rs` | the definitions |
 | `crates/host-runtime/src/model_execution/pi.rs:24`, `:49` | holds an `Arc<ValidatedHarnessClosure>` field |
 | `crates/host-runtime/src/model_execution/opencode.rs:23`, `:40` | holds an `Arc<ValidatedHarnessClosure>` field |
-| `crates/daemon/src/bin/eidnara_host/serve.rs:162`, `:349` | **the only production `open` calls** |
+| `crates/daemon/src/bin/eidnara_host/serve.rs:160`, `:347` | **the only production `open` calls** |
 | `crates/host-runtime/tests/harness_closure.rs` | 10 `open` calls |
 | `crates/host-runtime/tests/model_execution_subprocess.rs:853` | 1 `open` call |
 | `crates/daemon/tests/release_contract_conformance.rs:14`, `:132` | manifest parsing only |
@@ -26,14 +26,14 @@ produces:
 So `runtime::run` never touches the store. The two production sites, verified
 verbatim:
 
-`serve.rs:161-162`, inside `materialize_into_startup`:
+`serve.rs:159-160`, inside `materialize_into_startup`:
 
 ```
 let closure_root = data_dir.join("eidnara").join("harness-closures");
 let store = HarnessClosureStore::open(&closure_root).ok();
 ```
 
-`serve.rs:345-349`, inside `harness_backend`:
+`serve.rs:343-347`, inside `harness_backend`:
 
 ```
 let closure_root = envelope
@@ -72,8 +72,8 @@ effective uid. The whole walk uses `OFlags::NOFOLLOW` on every component
 (`:1049`, `:1061`, `:1071`) so a symlinked path component fails rather than
 resolving. That is a hostile-path defence, and its verdict is discarded.
 
-Downstream, the `None` collapses into a single string. `serve.rs:344`
-`harness_backend` passes `store.as_ref()` to `open_snapshot` (`:394-417`), which
+Downstream, the `None` collapses into a single string. `serve.rs:342`
+`harness_backend` passes `store.as_ref()` to `open_snapshot` (`:392-415`), which
 does:
 
 ```
@@ -95,9 +95,9 @@ So an insecure store path and a corrupted closure are indistinguishable, even
 though the two demand opposite responses: fix a permission, or re-materialize the
 harness.
 
-`serve.rs:150-153` shows the same module *does* have a validation path that
-returns errors (`validate_candidate`, `validate_credentials`), and `:400` and
-`:403` show `open_snapshot` itself is capable of carrying distinct strings
+`serve.rs:148-151` shows the same module *does* have a validation path that
+returns errors (`validate_candidate`, `validate_credentials`), and `:398` and
+`:401` show `open_snapshot` itself is capable of carrying distinct strings
 (`"descriptor_absent"`, and a snapshot's own `reason`). So the collapse is a local
 choice, not an absence of machinery.
 
@@ -121,7 +121,7 @@ read.
 They will investigate the harness, the manifest, the qualification script, and
 the release inputs. The one piece of evidence that would have pointed at the
 permission was computed, formatted into a `&'static str`, and dropped at
-`serve.rs:162`.
+`serve.rs:160`.
 
 This is the shape Part 4f named: a malformed configuration silently resolving to
 a default that disables a subsystem.
@@ -131,9 +131,9 @@ a default that disables a subsystem.
 No concurrency window. `open` runs once per call, at startup, before `run`.
 
 Both sites are on the same startup path and compute the same `closure_root` from
-the same `data_dir`, so they fail identically. `serve.rs:162` additionally uses
-the store for `prune` (`:175`, `let _ = store.prune(&protected)`), which is
-also error-discarded, with a comment at `:163-168` explaining that pruning
+the same `data_dir`, so they fail identically. `serve.rs:160` additionally uses
+the store for `prune` (`:173`, `let _ = store.prune(&protected)`), which is
+also error-discarded, with a comment at `:161-166` explaining that pruning
 reclaims superseded harness runtimes "hundreds of megabytes" each. So an
 unopenable store also silently stops reclaiming disk, and `prune`'s own
 `Result` is discarded a second time.
@@ -196,9 +196,9 @@ carried - rather than the swallowing itself.
 
 ### Q: does `open_snapshot` distinguish an absent store from a failed validation?
 
-- Sources examined: `serve.rs:394-417` in full.
-- Findings: **no.** `:405` is `let store = store.ok_or("closure_incomplete")?;`
-  and `:406-408` is `.validate(..).map_err(|_| "closure_incomplete")?`. Both
+- Sources examined: `serve.rs:392-415` in full.
+- Findings: **no.** `:403` is `let store = store.ok_or("closure_incomplete")?;`
+  and `:404-406` is `.validate(..).map_err(|_| "closure_incomplete")?`. Both
   produce the identical string. The function *is* capable of distinct strings -
   `"descriptor_absent"` at `:400`, the snapshot's own `reason` at `:403`,
   `"descriptor_invalid"` at `:410`, `"argument_variant_invalid"` at `:413` - so
@@ -210,7 +210,7 @@ carried - rather than the swallowing itself.
 
 ### Q: is the discarded `prune` failure a separate property?
 
-- Sources examined: `serve.rs:169-176`, `harness_closure.rs:554-568`.
+- Sources examined: `serve.rs:167-174`, `harness_closure.rs:554-568`.
 - Findings: `:175` `let _ = store.prune(&protected)` discards a `Result`, and `prune`'s
   doc at `:548-553` says unreferenced digests "otherwise accumulate without bound
   in the user data root", each holding "an entire harness runtime (hundreds of

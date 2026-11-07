@@ -291,7 +291,7 @@ were read at HEAD.
 | `crates/daemon/src/lib.rs:11817-11838` (parse admission) | verified | `_parse_charge` at 11813; only `ctx.route` forwarded at 11824. |
 | `crates/daemon/src/lib.rs:15421-15467` (footprint) | verified | Doc at 15408, `VALUE_ENVELOPE_BYTES` at 15454. |
 | `crates/daemon/src/canonical_memory.rs:141-212` | verified | `read_project_memory` 141-175, `injectable_snapshot` 184-212. |
-| `crates/daemon/src/kernel_routes/read.rs:23-26`, `:159-248` | verified | Caps at 23 and 26; `read_visible` 159-248; cutoff loop 208-224. |
+| `crates/daemon/src/kernel_routes/read.rs:23-26`, `:178-282` | verified | Caps at 23 and 26; `read_visible` 178-282; cutoff loop 242-258. |
 | `crates/kernel/src/admission.rs:3189-3355` | verified | SQL 3113-3204, `ORDER BY o.object_id` at 3202, decode 3215-3277. |
 | `crates/kernel/src/admission.rs:2956-2986` | verified | `visible_as_of_in_scope`. |
 | `crates/kernel/src/slice/read.rs:140-158` | verified | Payload-size query doc and return. |
