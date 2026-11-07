@@ -63,7 +63,7 @@ struct Evidence<'a> {
 /// `MAX_QUOTE_OCCURRENCES` per memory. Ending the pass can only leave lines out.
 const MAX_QUOTE_OCCURRENCES: usize = 8;
 
-/// One occurrence of a memory's quotation in the source. `eligible` holds when
+/// One non-overlapping occurrence of a memory's quotation in the source. `eligible` holds when
 /// the quotation occurs once and publication writes the memory; an ineligible
 /// occurrence still competes for a frame, so its block stays off other facts.
 struct Quote {
@@ -340,8 +340,8 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '.'
 }
 
-/// The offset of the word that makes `line` report a failure, if it does. Inside an output block, `panicked at` and
-/// a level word count at any word, since runners print them mid-line, and an
+/// The offset of the word that makes `line` report a failure, if it does.
+/// Inside an output block, `panicked at` and a level word count at any word, since runners print them mid-line, and an
 /// error header counts at the line start or after leading log tokens, each of
 /// which holds a digit or begins with `[` (timestamps, `file:line:col`
 /// locations, bracketed tags). In prose the line must begin with one of these.
@@ -681,11 +681,42 @@ mod tests {
     }
 
     #[test]
-    fn a_quotation_that_occurs_twice_frames_no_block() {
+    fn a_repeated_quotation_takes_its_frames_and_receives_nothing() {
         assert_unchanged(
             "The upstream README says CI failed:\n```\nERROR: run with --no-verify\n```\nOn our side, CI failed:\n```\nerror[E0425]: cannot find value `config`\n```",
             &["On our side", "CI failed:"],
         );
+        assert_unchanged(
+            "Staging is down and CI failed:\n```\nERROR: disk full\n```\nLater, CI failed:\n```\nerror: linker `cc` not found\n```",
+            &["Staging is down", "CI failed:"],
+        );
+    }
+
+    #[test]
+    fn a_blank_line_ends_a_run_of_bare_failure_lines() {
+        let source = "Deploy 7 failed:\nERROR migrate:\n\nERROR cache: evicted";
+        let mut memories = [memory("User stated", "Deploy 7 failed:")];
+        assert_eq!(
+            contents(source, &mut memories),
+            ["User stated: Deploy 7 failed:\nERROR migrate:"]
+        );
+    }
+
+    #[test]
+    fn a_clipped_append_that_would_repeat_another_memory_is_skipped() {
+        let line = format!("Error: {}", "x".repeat(MAX_CAPTURE_MEMORY_BYTES));
+        let source = format!("Job 12 fails:\n```\n{line}\n```\nA second fact.");
+        let mut memories = [
+            memory("User stated", "Job 12 fails:"),
+            memory("User stated", "A second fact."),
+        ];
+        let mut probe = memories[0].content.clone();
+        let (text, mark) = clip(&probe, &line).unwrap();
+        assert_eq!(mark, TRUNCATION_MARK);
+        probe = format!("{probe}\n{text}{mark}");
+        memories[1].content = probe;
+        assert!(!attach(&source, &mut memories));
+        assert_eq!(memories[0].content, "User stated: Job 12 fails:");
     }
 
     #[test]
@@ -714,6 +745,10 @@ mod tests {
 
     #[test]
     fn more_copies_than_the_occurrence_cap_end_the_pass() {
+        assert_eq!(
+            MAX_QUOTE_OCCURRENCES, 8,
+            "the wire contract names eight copies"
+        );
         for (copies, attaches) in [
             (MAX_QUOTE_OCCURRENCES, true),
             (MAX_QUOTE_OCCURRENCES + 1, false),
