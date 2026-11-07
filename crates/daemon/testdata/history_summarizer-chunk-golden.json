@@ -148,7 +148,7 @@
         "messageCount": 4,
         "tokenEstimate": 50,
         "hasMore": false,
-        "text": "[1-3] A: «s1»I will inspect / «s2»TC: read(src/lib.rs); completed; bytes=14; head=\"ignored output\"\n[4] U: «s3»continue",
+        "text": "[1-3] A: «s1»I will inspect / «s2»TC: read(src/lib.rs); completed; bytes=14; output=\"ignored output\"\n[4] U: «s3»continue",
         "lines": [
           {
             "ordinal": 1,
@@ -290,7 +290,7 @@
         "messageCount": 2,
         "tokenEstimate": 40,
         "hasMore": false,
-        "text": "[2] A: «s1»TC: read(src/lib.rs); completed; bytes=14; head=\"ignored output\"\n[3] U: «s2»after",
+        "text": "[2] A: «s1»TC: read(src/lib.rs); completed; bytes=14; output=\"ignored output\"\n[3] U: «s2»after",
         "lines": [
           {
             "ordinal": 2,
@@ -1172,7 +1172,7 @@
         "messageCount": 4,
         "tokenEstimate": 80,
         "hasMore": false,
-        "text": "[1-4] A: «s1»TC: read(one.rs) / «s2»TC: read(one.rs); completed; bytes=14; head=\"ignored output\" / «s3»TC: read(two.rs) / «s4»TC: read(two.rs); completed; bytes=14; head=\"ignored output\"",
+        "text": "[1-4] A: «s1»TC: read(one.rs) / «s2»TC: read(one.rs); completed; bytes=14; output=\"ignored output\" / «s3»TC: read(two.rs) / «s4»TC: read(two.rs); completed; bytes=14; output=\"ignored output\"",
         "lines": [
           {
             "ordinal": 1,

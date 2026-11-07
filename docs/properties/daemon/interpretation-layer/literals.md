@@ -18,12 +18,14 @@ top-level `#[cfg(test)]` item. Comment lines are skipped. A literal is one
 Rust string literal on one line; no production string literal in these files
 spans lines. Code references were verified at `41d889ea4` and re-checked at
 `aff5a00e6`; the nine files are identical at both, and the two `lib.rs`
-references that moved are updated.
+references that moved are updated. The `tool_outcome.rs` rows, the `lib.rs`
+references, and the counts were re-checked when the summarizer digest gained
+its whole-output form, which adds the one literal `; output="`.
 
-The extraction finds 256 distinct string literals at 895 occurrences.
+The extraction finds 257 distinct string literals at 896 occurrences.
 156 of them name a field, a tool, an argument key, or a discriminator
 value; they fill the 173 rows below (39 vocabulary, 35 Eidnara-owned,
-99 contract) and cover 755 occurrences. The other 100 are listed under
+99 contract) and cover 755 occurrences. The other 101 are listed under
 [Excluded literals](#excluded-literals) with the reason each is outside the rule.
 
 ## Classes
@@ -94,8 +96,8 @@ not defined once:
 
 - `synthetic_todo_` at `injection.rs:20` and `codec/opencode.rs:1074`.
 - The `eidnara_note` actions `read` and `dismiss` at `tool_vocabulary.rs:37`,
-  beside the note handler's own spellings at `lib.rs:12855`, `:13172` and the
-  tool schema at `lib.rs:18608`, and `conditional_note_evaluation.rs:1905`.
+  beside the note handler's own spellings at `lib.rs:13214`, `:13532` and the
+  tool schema at `lib.rs:19008`, and `conditional_note_evaluation.rs:1905`.
 - The placeholder `tool`, used for a missing native tool name or call id, at
   `codec/opencode.rs:1382` and `codec/pi.rs:458`, `:862`, `:878`, `:889`,
   `:1127`, `:1129`, `:1885`.
@@ -287,7 +289,7 @@ or rendered output text carries no interpretation of a harness record.
 | Literal | Reason | Locations |
 | --- | --- | --- |
 | <code> commits: {}</code> | format template | `chunk_text.rs:113` |
-| <code>; bytes={}</code> | format template | `tool_outcome.rs:167` |
+| <code>; bytes={}</code> | format template | `tool_outcome.rs:178` |
 | <code>&lt;output&gt;&lt;history_segments&gt;\n&lt;history_segment ...</code> | format template | `history_summarizer_chunk.rs:729` |
 | <code>Messages {start}-{end} were not summarized: {...</code> | format template | `history_summarizer_chunk.rs:726` |
 | <code>OpenCode serialization produced duplicate too...</code> | format template | `codec/opencode.rs:470` |
@@ -350,7 +352,7 @@ or rendered output text carries no interpretation of a harness record.
 | <code>\s{2,}</code> | regular expression or replacement | `chunk_text.rs:221` |
 | <code>(empty)</code> | rendered text, marker, separator, or value | `selection.rs:234`; `chunk_text.rs:40, 41, 144, 146`; `codec/opencode.rs:520, 997, 1168`; `codec/pi.rs:368, 907, 1463, 1521, 1522, 1523, 1581` |
 | <code> </code> | rendered text, marker, separator, or value | `chunk_text.rs:44` |
-| <code> / </code> | rendered text, marker, separator, or value | `chunk_text.rs:115`; `tool_outcome.rs:199`; `history_summarizer_chunk.rs:1162, 1174` |
+| <code> / </code> | rendered text, marker, separator, or value | `chunk_text.rs:115`; `tool_outcome.rs:217`; `history_summarizer_chunk.rs:1162, 1174` |
 | <code>%Y-%m-%d</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1117` |
 | <code>(no output)</code> | rendered text, marker, separator, or value | `codec/pi.rs:344` |
 | <code>+</code> | rendered text, marker, separator, or value | `codec/pi.rs:368` |
@@ -358,9 +360,10 @@ or rendered output text carries no interpretation of a harness record.
 | <code>, </code> | rendered text, marker, separator, or value | `chunk_text.rs:43, 113` |
 | <code>...[truncated]</code> | rendered text, marker, separator, or value | `selection.rs:36` |
 | <code>0123456789abcdef</code> | rendered text, marker, separator, or value | `wire.rs:651` |
-| <code>; </code> | rendered text, marker, separator, or value | `tool_outcome.rs:160` |
-| <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:170` |
-| <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:170` |
+| <code>; </code> | rendered text, marker, separator, or value | `crates/daemon/src/tool_outcome.rs:170` |
+| <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:185` |
+| <code>; output=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:354` |
+| <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:185` |
 | <code>&lt;!-- OMO_INTERNAL_INITIATOR --&gt;</code> | rendered text, marker, separator, or value | `chunk_text.rs:14` |
 | <code>&lt;/summary&gt;</code> | rendered text, marker, separator, or value | `codec/pi.rs:48` |
 | <code>Execution denied</code> | rendered text, marker, separator, or value | `codec/opencode.rs:1273`; `codec/pi.rs:1773, 1823` |
