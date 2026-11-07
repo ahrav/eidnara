@@ -4,7 +4,8 @@
 //! loses the error text a later search names. The failure lines of a block
 //! therefore join the memory whose quotation introduces that block, so one
 //! memory carries both the reference and the error identity. Appended lines
-//! are trimmed lines of the same source message.
+//! are trimmed lines of the same source message, or their prefixes cut to the
+//! memory budget and ending in `…`.
 
 use std::ops::Range;
 
@@ -18,7 +19,8 @@ const MAX_EVIDENCE_LINES: usize = 4;
 /// Marks a line cut to fit the memory budget.
 const TRUNCATION_MARK: &str = "…";
 
-/// Fence info strings that label terminal output or a shell session. A fence
+/// Fence info strings that label terminal output or a shell session, matched
+/// against the first word of the info string ignoring ASCII case. A fence
 /// labeled with a programming or configuration language holds source code,
 /// whose `error:` fields and `except ValueError:` clauses are code.
 const OUTPUT_FENCES: [&str; 14] = [
@@ -48,8 +50,8 @@ struct Line<'a> {
 }
 
 /// One failure line with the line that completes it. `span` covers those
-/// lines; `block` covers the fenced block holding them, or equals `span` for
-/// a line outside any fence.
+/// lines; `block` covers the fenced block holding them, or, outside a fence,
+/// the run of consecutive failure lines through this one.
 struct Evidence<'a> {
     block: Range<usize>,
     span: Range<usize>,
@@ -60,14 +62,18 @@ struct Evidence<'a> {
 /// introduces their block. A memory gains at most `MAX_EVIDENCE_LINES` lines,
 /// and its content grows only within `MAX_CAPTURE_MEMORY_BYTES`; a source
 /// without failure lines, or whose failure lines no quotation introduces,
-/// leaves every memory unchanged.
+/// leaves every memory unchanged. A memory that duplicates an existing one is
+/// never published, so it never receives lines.
 pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) {
     let lines = lines(source);
     let quotes: Vec<Option<Range<usize>>> = memories
         .iter()
         .map(|memory| {
-            source
-                .find(&memory.quote)
+            memory
+                .duplicate_of
+                .is_none()
+                .then(|| source.find(&memory.quote))
+                .flatten()
                 .map(|start| start..start + memory.quote.len())
         })
         .collect();
@@ -76,17 +82,32 @@ pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) {
         let Some(target) = framing_memory(source, &lines, &quotes, &evidence) else {
             continue;
         };
-        let content = &mut memories[target].content;
         for line in evidence.lines {
-            if content.contains(line) {
+            if memories[target].content.contains(line) {
                 continue;
             }
-            if appended[target] == MAX_EVIDENCE_LINES || !push_clipped(content, line) {
+            if appended[target] == MAX_EVIDENCE_LINES || repeats_another(memories, target, line) {
+                break;
+            }
+            if !push_clipped(&mut memories[target].content, line) {
                 break;
             }
             appended[target] += 1;
         }
     }
+}
+
+/// Whether appending `line` to `target` would give it the content of another
+/// memory of the same category, which publication would store twice.
+fn repeats_another(memories: &[CapturedMemory], target: usize, line: &str) -> bool {
+    let content = &memories[target].content;
+    memories.iter().enumerate().any(|(index, other)| {
+        index != target
+            && other.category == memories[target].category
+            && other.content.len() == content.len() + 1 + line.len()
+            && other.content.starts_with(content.as_str())
+            && other.content.ends_with(line)
+    })
 }
 
 /// Appends `line` on its own line, cut at a character boundary and marked
@@ -109,11 +130,11 @@ fn push_clipped(content: &mut String, line: &str) -> bool {
     true
 }
 
-/// The memory whose quotation introduces the evidence, in this order: the
-/// latest quotation that ends on the last nonblank line before the block when
-/// that line ends with `:` and no sentence ends between the quotation and the
-/// colon; a quotation overlapping the failure lines; a quotation that begins
-/// the first nonblank line after the block.
+/// The memory whose quotation introduces the evidence: the latest quotation
+/// that ends on the last nonblank line before the block when that line ends
+/// with `:` and no sentence ends between the quotation and the colon, or else
+/// a quotation overlapping the failure lines. Ties go to the memory proposed
+/// first.
 fn framing_memory(
     source: &str,
     lines: &[Line<'_>],
@@ -144,29 +165,19 @@ fn framing_memory(
         spans()
             .find(|(_, quote)| quote.start < evidence.span.end && evidence.span.start < quote.end)
     };
-    let following = || {
-        let next = lines
-            .iter()
-            .find(|line| line.start >= evidence.block.end && !line.text.is_empty())?;
-        spans().find(|(_, quote)| quote.start == next.text_start)
-    };
-    introducing
-        .or_else(overlapping)
-        .or_else(following)
-        .map(|(index, _)| index)
+    introducing.or_else(overlapping).map(|(index, _)| index)
 }
 
 /// Whether the text from `quote_end` to `end` continues the quotation's last
-/// sentence: the quotation does not end with a sentence terminator before more
-/// text, and no terminator followed by whitespace occurs in between.
+/// sentence. A `.`, `!`, or `?` that ends the quotation, or that is followed by
+/// whitespace in between, ends a sentence.
 fn same_sentence(source: &str, quote_end: usize, end: usize) -> bool {
     let gap = &source[quote_end..end];
     let terminator = |c: char| matches!(c, '.' | '!' | '?');
-    let quote_closes = source[..quote_end]
+    !source[..quote_end]
         .chars()
         .next_back()
-        .is_some_and(terminator);
-    !(quote_closes && !gap.trim().is_empty())
+        .is_some_and(terminator)
         && !gap.char_indices().any(|(index, c)| {
             terminator(c) && gap[index + c.len_utf8()..].starts_with(char::is_whitespace)
         })
@@ -218,13 +229,17 @@ fn failure_evidence<'a>(lines: &[Line<'a>]) -> Vec<Evidence<'a>> {
 /// Collects the failure lines of one region: the inside of the fenced block
 /// `block`, or prose when `block` is `None`. The next line completes a failure
 /// line that ends with `:`, as a panic header does, or that is followed by a
-/// location (`-->`) or a top stack frame (`at`).
+/// location (`-->`) or a top stack frame (`at`). A completing line that is a
+/// failure line itself also starts its own entry.
 fn scan<'a>(region: &[Line<'a>], block: Option<Range<usize>>, items: &mut Vec<Evidence<'a>>) {
+    let fenced = block.is_some();
+    let mut run_start = None;
     let mut index = 0;
     while index < region.len() {
         let line = &region[index];
         index += 1;
-        if !is_failure_line(line.text, block.is_some()) {
+        if !is_failure_line(line.text, fenced) {
+            run_start = None;
             continue;
         }
         let mut evidence = Evidence {
@@ -243,10 +258,13 @@ fn scan<'a>(region: &[Line<'a>], block: Option<Range<usize>>, items: &mut Vec<Ev
             {
                 evidence.lines.push(next_text);
                 evidence.span.end = next.end;
-                index += 1;
+                if !is_failure_line(next_text, fenced) {
+                    index += 1;
+                }
             }
         }
-        evidence.block = block.clone().unwrap_or_else(|| evidence.span.clone());
+        let start = *run_start.get_or_insert(line.start);
+        evidence.block = block.clone().unwrap_or(start..evidence.span.end);
         items.push(evidence);
     }
 }
@@ -275,9 +293,11 @@ fn is_word(c: char) -> bool {
 
 /// Whether `line` reports a failure. Inside an output block, `panicked at` and
 /// a level word count at any word, since runners print them mid-line, and an
-/// error header counts at the line start or after leading log tokens
-/// (timestamps, `file:line:col` locations, bracketed tags). In prose the line
-/// must begin with one of these.
+/// error header counts at the line start or after leading log tokens, each of
+/// which holds a digit or begins with `[` (timestamps, `file:line:col`
+/// locations, bracketed tags). In prose the line must begin with one of these.
+/// The fenced walk tracks the log-token state as it goes, so it reads each
+/// byte of the line a bounded number of times.
 fn is_failure_line(line: &str, fenced: bool) -> bool {
     if !printable(line) {
         return false;
@@ -285,17 +305,28 @@ fn is_failure_line(line: &str, fenced: bool) -> bool {
     if !fenced {
         return failure_marker(line) || error_header(line);
     }
-    line.char_indices().any(|(index, c)| {
-        let rest = &line[index..];
-        is_word(c)
-            && !line[..index].chars().next_back().is_some_and(is_word)
-            && (failure_marker(rest)
-                || (error_header(rest) && line[..index].split_whitespace().all(is_log_token)))
-    })
-}
-
-fn is_log_token(token: &str) -> bool {
-    token.starts_with('[') || token.bytes().any(|byte| byte.is_ascii_digit())
+    let mut tokens_logged = true;
+    let mut token: Option<bool> = None;
+    let mut previous: Option<char> = None;
+    for (index, c) in line.char_indices() {
+        if c.is_whitespace() {
+            if let Some(logged) = token.take() {
+                tokens_logged &= logged;
+            }
+        } else {
+            if is_word(c) && !previous.is_some_and(is_word) {
+                let rest = &line[index..];
+                let prefix_logged = tokens_logged && token.unwrap_or(true);
+                if failure_marker(rest) || (prefix_logged && error_header(rest)) {
+                    return true;
+                }
+            }
+            let logged = token.get_or_insert(c == '[');
+            *logged |= c.is_ascii_digit();
+        }
+        previous = Some(c);
+    }
+    false
 }
 
 fn leading_word(text: &str) -> (&str, &str) {
@@ -310,8 +341,9 @@ fn failure_marker(text: &str) -> bool {
 }
 
 /// An error word at the start of `text` (`error`, `fatal`, `FATAL`, `panic`,
-/// or a type name ending in `Error` or `Exception`) followed by `:` or a `[`
-/// code, as compilers, runtimes, and loggers print.
+/// or a type name ending in `Error` or `Exception`) followed by a `:` that
+/// does not begin `::`, or by a `[` code, as compilers, runtimes, and loggers
+/// print.
 fn error_header(text: &str) -> bool {
     let (word, rest) = leading_word(text);
     let delimited = (rest.starts_with(':') && !rest.starts_with("::")) || rest.starts_with('[');
@@ -461,6 +493,10 @@ mod tests {
             &["Staging uses port 4321."],
         );
         assert_unchanged(
+            "Handlers use snake_case\n```\nerror: linker `cc` not found\n```",
+            &["Handlers use snake_case"],
+        );
+        assert_unchanged(
             "Handlers use snake_case\nCI broke on main:\n```\nerror: linker `cc` not found\n```",
             &["Handlers use snake_case"],
         );
@@ -552,15 +588,136 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_before_any_prose_joins_the_quotation_that_follows_it() {
-        let source = "```\npanic: runtime error: index out of range [3] with length 3\n```\nThat is the crash from SUP-118.";
-        let mut memories = [memory("User stated", "That is the crash from SUP-118.")];
+    fn a_fact_after_a_failure_block_stays_out_of_it() {
+        assert_unchanged(
+            "My build broke again.\n```\nerror: linker `cc` not found\n```\nAlso, we use pnpm in this repo.",
+            &["My build broke again.", "Also, we use pnpm in this repo."],
+        );
+        assert_unchanged(
+            "```\npanic: runtime error: index out of range [3] with length 3\n```\n\nSeparately, use port 4321 for staging.",
+            &["Separately, use port 4321 for staging."],
+        );
+        assert_unchanged(
+            "ERROR db: connection refused\nUse snake_case for handler names.",
+            &["Use snake_case for handler names."],
+        );
+    }
+
+    #[test]
+    fn consecutive_bare_failure_lines_share_the_introducing_sentence() {
+        let source = "Running bun test for OPS-2291 fails:\nFAIL src/api/session.test.ts\nTypeError: Cannot read properties of undefined (reading 'token')\n    at refresh (src/api/session.ts:42:17)";
+        let mut memories = [memory(
+            "User stated",
+            "Running bun test for OPS-2291 fails:",
+        )];
         assert_eq!(
             contents(source, &mut memories),
             [
-                "User stated: That is the crash from SUP-118.\npanic: runtime error: index out of range [3] with length 3"
+                "User stated: Running bun test for OPS-2291 fails:\nFAIL src/api/session.test.ts\nTypeError: Cannot read properties of undefined (reading 'token')\nat refresh (src/api/session.ts:42:17)"
             ]
         );
+    }
+
+    #[test]
+    fn a_prose_line_ends_a_run_of_bare_failure_lines() {
+        let source = "Deploy 7 failed:\nERROR migrate: relation exists\nThe cache warmed up afterwards.\nERROR cache: evicted 12 keys";
+        let mut memories = [memory("User stated", "Deploy 7 failed:")];
+        assert_eq!(
+            contents(source, &mut memories),
+            ["User stated: Deploy 7 failed:\nERROR migrate: relation exists"]
+        );
+    }
+
+    #[test]
+    fn a_tilde_fence_holds_a_block() {
+        let source = "Build 3 fails:\n~~~\nerror: could not compile `server`\n~~~";
+        let mut memories = [memory("User stated", "Build 3 fails:")];
+        assert_eq!(
+            contents(source, &mut memories),
+            ["User stated: Build 3 fails:\nerror: could not compile `server`"]
+        );
+    }
+
+    #[test]
+    fn a_completing_failure_line_keeps_its_own_location() {
+        let source = "CI for PR 9 fails:\n```\nFAILED tests:\nerror[E0308]: mismatched types\n  --> src/a.rs:2:3\n```";
+        let mut memories = [memory("User stated", "CI for PR 9 fails:")];
+        assert_eq!(
+            contents(source, &mut memories),
+            [
+                "User stated: CI for PR 9 fails:\nFAILED tests:\nerror[E0308]: mismatched types\n--> src/a.rs:2:3"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_duplicate_or_later_memory_cedes_the_failure_lines() {
+        let source = "Deploy 4410 failed:\nERROR migrate: relation exists";
+        let mut duplicate = memory("User stated", "Deploy 4410 failed:");
+        duplicate.duplicate_of = Some("mem_existing".into());
+        let mut memories = [duplicate, memory("User stated", "Deploy 4410 failed:")];
+        assert_eq!(
+            contents(source, &mut memories),
+            [
+                "User stated: Deploy 4410 failed:",
+                "User stated: Deploy 4410 failed:\nERROR migrate: relation exists"
+            ]
+        );
+        let mut memories = [
+            memory("User stated", "Deploy 4410 failed:"),
+            memory("User stated", "Deploy 4410 failed:"),
+        ];
+        memories[1].category = "CONFIG_VALUES".into();
+        assert_eq!(
+            contents(source, &mut memories),
+            [
+                "User stated: Deploy 4410 failed:\nERROR migrate: relation exists",
+                "User stated: Deploy 4410 failed:"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_append_that_would_repeat_another_memory_is_skipped() {
+        assert_unchanged(
+            "Deploy 4410 failed:\nERROR migrate: relation exists",
+            &[
+                "Deploy 4410 failed:",
+                "Deploy 4410 failed:\nERROR migrate: relation exists",
+            ],
+        );
+    }
+
+    #[test]
+    fn failure_line_forms() {
+        for (line, fenced, expected) in [
+            ("ValueError: bad literal", false, true),
+            ("java.lang.IllegalStateException: closed", false, true),
+            ("FATAL: role missing", false, true),
+            ("error:\tlinker failed", false, true),
+            ("It logs ERROR on empty input.", false, false),
+            ("It logs ERROR on empty input.", true, true),
+            (";; status: NOERROR, id: 1", true, false),
+            ("Error::Io(e) => return", true, false),
+            ("2025-03-02 [db] Error: refused", true, true),
+            ("handler Error: refused", true, false),
+        ] {
+            assert_eq!(
+                is_failure_line(line, fenced),
+                expected,
+                "{line:?} fenced={fenced}"
+            );
+        }
+        for (opener, output) in [
+            ("```", true),
+            ("~~~", true),
+            ("```Bash", true),
+            ("```console title", true),
+            ("~~~rust", false),
+            ("```json", false),
+        ] {
+            assert_eq!(is_output_fence(opener), output, "{opener:?}");
+        }
     }
 
     #[test]
