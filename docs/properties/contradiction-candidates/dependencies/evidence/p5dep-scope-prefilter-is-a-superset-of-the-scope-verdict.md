@@ -39,7 +39,7 @@ D5.
 - Daemon side: `crates/daemon/src/kernel_routes/project.rs:106-111`
   `scope_term()` = `{ Project, &self.digest }`; `:186-213` `ScopeFilter`
   judges each row with `ProjectScope::names_project` and memoizes per scope
-  id; `:204-206` returns `Ok(false)` for a `None` scope id.
+  id; `:212-213` returns `Ok(false)` for a `None` scope id.
 - `read.rs:201-219` comment: "The kernel keeps rows whose scope names another
   project out of the snapshot"; `:220`: the row bound "cannot be a SQL
   `LIMIT`" because the filter runs after SQL.

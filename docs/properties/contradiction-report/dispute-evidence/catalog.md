@@ -149,8 +149,8 @@ Existing check: `kernel_routes.rs:5971`, `:6258`; `dispute.rs:401`
 (`a_dispute_needs_evidence_and_other_events_take_none`, unit);
 `memory-mark-command.test.ts:137`; the fake kernel mirrors the rule
 (`disputeEvidenceWellFormed`,
-`packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:335-351`,
-applied at `:700`).
+`packages/opencode-plugin/src/shared/kernel-client-testing/fake-kernel.ts:336-352`,
+applied at `:708`).
 Status unaudited.
 Impact: a dispute with nothing to check lowers a finding's standing on
 assertion alone, and a later reader has no evidence to follow.

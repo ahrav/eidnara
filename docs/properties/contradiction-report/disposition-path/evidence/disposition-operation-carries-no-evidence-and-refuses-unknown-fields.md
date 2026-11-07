@@ -83,8 +83,8 @@ binary is the enabling condition.
   this pass.
 - Missing evidence: the exact state key for a transport `invalid_params`
   on a mutating call.
-- Conclusion: unresolved, needs a read of `kernel-client/client.ts:410-
-  470` and `kernel-client/state.ts`.
+- Conclusion: unresolved, needs a read of `kernel-client/client.ts:420-
+  480` and `kernel-client/state.ts`.
 
 ### Q: Does the guarantee hold at the PR A tip?
 
