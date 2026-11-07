@@ -1429,12 +1429,33 @@ mod unix {
         sha256: String,
     }
 
-    /// `production_search` installs fixture admission records derived from the payload's bundle manifest under `root` to enable projection admission.
+    /// The production route's embedding lane and the fixture admission records derived from its bundle manifest, which `install` writes under the state root once the fixture owns it.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    struct ProductionSearch {
+        lane: LocalEmbeddingsComponent,
+        runtime_manifest: Vec<u8>,
+        campaign: Vec<u8>,
+        model: String,
+        payload_manifest: PathBuf,
+    }
+
+    impl ProductionSearch {
+        fn install(&self, root: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+            daemon::projection_admission::install(root, &self.runtime_manifest, &self.campaign)
+                .map_err(|refusal| format!("search admission records refused: {refusal}"))?;
+            eprintln!(
+                "direct_host_fixture: search route production, embedding model {}, payload {}, admission from fixture records",
+                self.model,
+                self.payload_manifest.display(),
+            );
+            Ok(())
+        }
+    }
+
     #[cfg(not(target_os = "macos"))]
     fn production_search(
-        root: &Path,
         payload_manifest: &Path,
-    ) -> Result<LocalEmbeddingsComponent, Box<dyn Error + Send + Sync>> {
+    ) -> Result<ProductionSearch, Box<dyn Error + Send + Sync>> {
         use crate::payload_local_embeddings::{BUNDLE_MANIFEST, ORT_LIBRARY};
         let manifest: PayloadManifest = serde_json::from_slice(&fs::read(payload_manifest)?)?;
         let payload_root = payload_manifest
@@ -1462,28 +1483,19 @@ mod unix {
         }
         let bundle: serde_json::Value = serde_json::from_slice(&bundle_bytes)?;
         let (runtime_manifest, campaign) = crate::search_admission::records(&bundle)?;
-        daemon::projection_admission::install(
-            root,
-            &serde_json::to_vec(&runtime_manifest)?,
-            &serde_json::to_vec(&campaign)?,
-        )
-        .map_err(|refusal| format!("search admission records refused: {refusal}"))?;
-        eprintln!(
-            "direct_host_fixture: search route production, embedding model {}, payload {}, admission from fixture records",
-            bundle["model"].as_str().unwrap_or("unnamed"),
-            payload_manifest.display(),
-        );
-        Ok(crate::payload_local_embeddings::component(
-            payload_root,
-            sha256_of,
-        ))
+        Ok(ProductionSearch {
+            lane: crate::payload_local_embeddings::component(payload_root, sha256_of),
+            runtime_manifest: serde_json::to_vec(&runtime_manifest)?,
+            campaign: serde_json::to_vec(&campaign)?,
+            model: bundle["model"].as_str().unwrap_or("unnamed").to_owned(),
+            payload_manifest: payload_manifest.to_owned(),
+        })
     }
 
     #[cfg(target_os = "macos")]
     fn production_search(
-        _root: &Path,
         _payload_manifest: &Path,
-    ) -> Result<LocalEmbeddingsComponent, Box<dyn Error + Send + Sync>> {
+    ) -> Result<ProductionSearch, Box<dyn Error + Send + Sync>> {
         Err("the production search route runs the Linux embedding lane".into())
     }
 
@@ -1545,10 +1557,11 @@ mod unix {
             search,
         } = parse_args()?;
         prepare_state_root(&root)?;
-        let production_lane = match &search {
+        // The payload is validated before the socket is bound; its admission records are written only once this process owns the state root.
+        let production = match &search {
             SearchRoute::Legacy => None,
             SearchRoute::Production { payload_manifest } => {
-                Some(production_search(&root, payload_manifest)?)
+                Some(production_search(payload_manifest)?)
             }
         };
         let shutdown = CancellationToken::new();
@@ -1586,6 +1599,10 @@ mod unix {
             let own_socket = socket_identity(&control_path)?;
             (listener, own_socket)
         };
+        if let Some(production) = &production {
+            production.install(&root)?;
+        }
+        let production_lane = production.map(|production| production.lane);
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
         let handler = daemon::Handler::new_with_connection_file(Some(publication.clone()));
