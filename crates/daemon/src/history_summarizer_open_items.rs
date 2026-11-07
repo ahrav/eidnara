@@ -18,8 +18,9 @@
 //! segment on its own, so a segment's stored text depends only on its own span:
 //!
 //! - An open line followed in its own tier by a settling line with its key leaves that tier.
-//! - When the segment's `p1` ends a key's status lines with a settling line, an open line with
-//!   that key in `p2`, `p3`, or `p4` gives way to that settling line. A tier that already states
+//! - When the segment's `p1` ends a key's status lines with a settling line, or `p1` has no
+//!   settling line for the key and `p2` ends it with one, an open line with that key in any other
+//!   tier gives way to that settling line. A tier that already states
 //!   an outcome for the key just loses the open line, a tier gets the outcome once, and a settling
 //!   line past the claim anchor bound settles the tier without being copied.
 //! - A question asked again after its answer stays open in `p1` and `p2`.
@@ -129,20 +130,37 @@ fn retire_in_segment(segment: &mut ParsedHistorySegment) -> BTreeSet<String> {
     let Some(p1) = segment.p1.as_deref() else {
         return settled;
     };
-    // Each key's outcome: the settling line that ends its status lines in `p1`. A line past the
-    // anchor bound every status line keeps to settles the key without being copied.
-    let mut last_in_p1: BTreeMap<&str, (Status, &str)> = BTreeMap::new();
-    for line in p1.lines() {
-        if let Some((status, key)) = status_line(line) {
-            last_in_p1.insert(key, (status, unbulleted(line)));
+    // Each key's outcome: the settling line that ends its status lines in `p1`, or else in `p2`
+    // when `p1` names the key only in open lines or not at all. A line past the anchor bound every
+    // status line keeps to settles the key without being copied.
+    let last_status = |tier: Option<&str>| {
+        let mut last: BTreeMap<String, (Status, String)> = BTreeMap::new();
+        for line in tier.unwrap_or_default().lines() {
+            if let Some((status, key)) = status_line(line) {
+                last.insert(key.to_owned(), (status, unbulleted(line).to_owned()));
+            }
         }
-    }
-    let outcome: BTreeMap<String, Option<String>> = last_in_p1
+        last
+    };
+    let p1_settles: BTreeSet<&str> = p1
+        .lines()
+        .filter_map(status_line)
+        .filter(|(status, _)| *status == Status::Settled)
+        .map(|(_, key)| key)
+        .collect();
+    let mut ends = last_status(segment.p2.as_deref());
+    ends.retain(|key, _| !p1_settles.contains(key.as_str()));
+    ends.extend(
+        last_status(Some(p1))
+            .into_iter()
+            .filter(|(key, _)| p1_settles.contains(key.as_str())),
+    );
+    let outcome: BTreeMap<String, Option<String>> = ends
         .into_iter()
         .filter(|(_, (status, _))| *status == Status::Settled)
         .map(|(key, (_, line))| {
-            let copy = (line.len() <= CLAIM_ANCHOR_MAX_BYTES).then(|| line.to_owned());
-            (key.to_owned(), copy)
+            let copy = (line.len() <= CLAIM_ANCHOR_MAX_BYTES).then_some(line);
+            (key, copy)
         })
         .collect();
     for (tier, text) in [
@@ -445,17 +463,36 @@ mod tests {
     }
 
     #[test]
-    fn a_settling_line_only_in_p2_settles_p2_and_leaves_p1_as_written() {
-        let p1 = "Worked.\nWaiting on user (a.b): ask?";
-        let [p1_after, p2, ..] = retired(vec![segment(
-            p1,
+    fn a_settling_line_only_in_p2_also_settles_p1() {
+        let [p1, p2, ..] = retired(vec![segment(
+            "Worked.\nWaiting on user (a.b): ask?",
             "Waiting on user (a.b): ask?\nDecided (a.b): yes.",
             "Done.",
             "",
         )])
         .remove(0);
-        assert_eq!(p1_after, p1);
+        assert_eq!(p1, "Worked.\nDecided (a.b): yes.");
         assert_eq!(p2, "Decided (a.b): yes.");
+    }
+
+    #[test]
+    fn a_reask_in_p1_stays_open_when_p2_still_shows_the_answer() {
+        let p1 = "Decided (a.b): yes.\nWaiting on user (a.b): ask again?";
+        let [p1_after, ..] =
+            retired(vec![segment(p1, "Decided (a.b): yes.", "Done.", "")]).remove(0);
+        assert_eq!(p1_after, p1);
+    }
+
+    #[test]
+    fn p1s_outcome_wins_over_p2s_when_both_settle_a_key() {
+        let [_, _, p3, _] = retired(vec![segment(
+            "Decided (a.b): from p1.",
+            "Decided (a.b): from p2.",
+            "Constraint (a.b): old rule.",
+            "",
+        )])
+        .remove(0);
+        assert_eq!(p3, "Decided (a.b): from p1.");
     }
 
     #[test]
