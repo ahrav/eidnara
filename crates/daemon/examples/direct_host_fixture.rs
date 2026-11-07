@@ -1557,7 +1557,7 @@ mod unix {
             search,
         } = parse_args()?;
         prepare_state_root(&root)?;
-        // The payload is validated before the socket is bound; its admission records are written only once this process owns the state root.
+        // The payload is validated before the socket is bound; its admission records are written only once this process owns the state root and has built its host.
         let production = match &search {
             SearchRoute::Legacy => None,
             SearchRoute::Production { payload_manifest } => {
@@ -1599,13 +1599,9 @@ mod unix {
             let own_socket = socket_identity(&control_path)?;
             (listener, own_socket)
         };
-        if let Some(production) = &production {
-            // A refused install unlinks the socket this process bound, so the next start finds the state root free.
-            production.install(&root).inspect_err(|_| {
-                let _ = unlink_own_control_socket(&control_path, own_socket);
-            })?;
-        }
-        let production_lane = production.map(|production| production.lane);
+        let production_lane = production
+            .as_ref()
+            .map(|production| production.lane.clone());
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
         let handler = daemon::Handler::new_with_connection_file(Some(publication.clone()));
@@ -1671,6 +1667,12 @@ mod unix {
             },
             ..Default::default()
         };
+        // The records are written after every fallible startup step, so a start that fails leaves the state root's admission as it found it; a refused install unlinks the socket this process bound.
+        if let Some(production) = &production {
+            production.install(&root).inspect_err(|_| {
+                let _ = unlink_own_control_socket(&control_path, own_socket);
+            })?;
+        }
         let host_shutdown = shutdown.clone();
         let mut host =
             tokio::spawn(async move { host_runtime::run(composite, config, host_shutdown).await });

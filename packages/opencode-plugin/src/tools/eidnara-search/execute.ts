@@ -264,7 +264,6 @@ export async function executeEidnaraSearch(
         query,
         limit,
         excludeObjectIds: new Set(),
-        nowMs,
     });
     return completeFrom(hits ?? [], memoryNote);
 }
