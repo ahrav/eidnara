@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 /**
  * An in-memory stand-in for the daemon's `kernel.*` routes, driven through
  * the `KernelTransport` surface so consumers are tested against the same
@@ -551,11 +552,15 @@ export class FakeKernel {
     }
 
     /** Newest `created_commit_seq` first, then ascending `object_id` within one commit. */
+    /** The daemon's serving order: newest commit first, then object ids in UTF-8 byte order. */
     private static servingOrder(left: FakeObject, right: FakeObject): number {
         if (left.created_commit_seq !== right.created_commit_seq) {
             return right.created_commit_seq - left.created_commit_seq;
         }
-        return left.object_id < right.object_id ? -1 : left.object_id > right.object_id ? 1 : 0;
+        return Buffer.compare(
+            Buffer.from(left.object_id, "utf8"),
+            Buffer.from(right.object_id, "utf8"),
+        );
     }
 
     /** Whether a row is in the calling project's scope; a seeded row without a root, or a call without one, passes. */
@@ -598,7 +603,10 @@ export class FakeKernel {
                 (object) =>
                     object.created_commit_seq < before.created_commit_seq ||
                     (object.created_commit_seq === before.created_commit_seq &&
-                        object.object_id > before.object_id),
+                        Buffer.compare(
+                            Buffer.from(object.object_id, "utf8"),
+                            Buffer.from(before.object_id, "utf8"),
+                        ) > 0),
             );
         }
         // The daemon serves rows newest first, then by object id, and keeps that order's prefix when a cap binds. The row cap never binds a filtered read (a filter names at most `MAX_READ_OBJECT_IDS` rows, far under the cap), so it applies to unfiltered reads alone; the filtered cap stands in for the byte budget, which binds either way.

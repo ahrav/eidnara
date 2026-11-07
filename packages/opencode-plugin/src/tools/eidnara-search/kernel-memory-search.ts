@@ -298,16 +298,13 @@ function rankLexicalRows(
         .slice(0, limit);
 }
 
-/** The daemon breaks commit ties by UTF-8 byte order, so ids compare as bytes here too. */
-function followsCursor(cursor: ReadCursor, row: ReadRow): boolean {
+/** The daemon breaks commit ties by UTF-8 byte order, so ids compare as bytes here too; `cursorId` is the cursor's id encoded once per page. */
+function followsCursor(cursor: ReadCursor, cursorId: Buffer, row: ReadRow): boolean {
     const seq = row.object.created_commit_seq;
     return (
         seq < cursor.createdCommitSeq ||
         (seq === cursor.createdCommitSeq &&
-            Buffer.compare(
-                Buffer.from(row.object.object_id, "utf8"),
-                Buffer.from(cursor.objectId, "utf8"),
-            ) > 0)
+            Buffer.compare(Buffer.from(row.object.object_id, "utf8"), cursorId) > 0)
     );
 }
 
@@ -376,12 +373,15 @@ export async function scanSnapshotForLexicalSearch(args: {
                 : { ok: true, rows: kept, truncated: true };
         }
         const cursor = before;
+        const cursorId = cursor === undefined ? null : Buffer.from(cursor.objectId, "utf8");
         // A reply from another daemon connection can reuse the same `known_as_of` for a different store state.
         const continuesSnapshot =
             asOf === null ||
             (read.known_as_of === asOf &&
                 args.client.connectionIdentity() === connection &&
-                (cursor === undefined || read.rows.every((row) => followsCursor(cursor, row))));
+                (cursor === undefined ||
+                    cursorId === null ||
+                    read.rows.every((row) => followsCursor(cursor, cursorId, row))));
         if (!continuesSnapshot) return { ok: true, rows: kept, truncated: true };
         asOf = read.known_as_of;
         const candidates = read.rows.filter((row) => isSearchableMemoryRow(row, args.nowMs));

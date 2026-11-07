@@ -162,18 +162,19 @@ async function seedArm(harness: RustTestHarness<HermeticHostStack>): Promise<Arm
     return { harness, session, ids };
 }
 
-/** Searches the opening words of each memory until the route ranks it, so every memory competes in the recall run. */
+/** Searches the opening words of each memory until the route's embedding lane ranks it, so every memory competes, with its vector, in the recall run. */
 async function waitForProjection(arm: Arm): Promise<void> {
     const deadline = Date.now() + CATCH_UP_TIMEOUT_MS;
     for (const [index, content] of MEMORIES.entries()) {
         const id = arm.ids[index] as string;
         const opening = content.split(/\s+/).slice(0, 8).join(" ");
         let result = await search(arm, opening);
-        while (!headerFor(result, id)?.includes("match=fused") && Date.now() < deadline) {
+        const embedded = (text: string) => /lanes=[a-z,]*dense/.test(headerFor(text, id) ?? "");
+        while (!embedded(result) && Date.now() < deadline) {
             await Bun.sleep(1_000);
             result = await search(arm, opening);
         }
-        if (!headerFor(result, id)?.includes("match=fused")) {
+        if (!embedded(result)) {
             throw new Error(
                 `memory ${index} never ranked through the route:\n${result}\n${arm.harness.host.hostLog()}`,
             );
