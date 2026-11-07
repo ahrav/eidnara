@@ -7,12 +7,7 @@
 
 import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import { getErrorMessage } from "../../shared/error-message";
-import {
-    isAvailable,
-    type MemoryState,
-    type ReadRow,
-    renderToolStateText,
-} from "../../shared/kernel-client";
+import { type MemoryState, type ReadRow, renderToolStateText } from "../../shared/kernel-client";
 import {
     boundDynamicField,
     describeQueryBoundsViolation,
@@ -23,6 +18,7 @@ import {
     type KernelMemorySearchResult,
     parseObjectIdQuery,
     readObjectRowsChunked,
+    scanSnapshotForLexicalSearch,
     searchKernelMemoryRows,
 } from "./kernel-memory-search";
 import { normalizeEidnaraSearchArgs, prepareQueryFromNormalizedArgs } from "./query-input";
@@ -199,6 +195,7 @@ export async function executeEidnaraSearch(
     // ranking rows that may miss recent writes.
     // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits a list over the client's filter bound into filtered requests and splits on byte-budget truncation, so every named id resolves or is reported unresolved by name.
     const idQuery = parseObjectIdQuery(query);
+    const nowMs = Date.now();
     // The gate judges the lag of registered consumers. A deployment with no consumer at all
     // (no admitted search projection) has no derived state that can lag behind the canonical
     // rows this read returns, so the same read is repeated ungated and the result says that
@@ -222,8 +219,16 @@ export async function executeEidnaraSearch(
                   }
                 : { state: read.state };
         }
-        const read = await client.read({ surface: "explicit_search", gated, ...signal });
-        return isAvailable(read)
+        const read = await scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated,
+            query,
+            limit,
+            nowMs,
+            ...signal,
+        });
+        return read.ok
             ? { rows: read.rows, truncated: read.truncated, unresolvedObjectIds: [], state: null }
             : { state: read.state };
     };
@@ -246,7 +251,7 @@ export async function executeEidnaraSearch(
             `Memory: unresolved object id${unresolvedObjectIds.length === 1 ? "" : "s"} (the daemon read stayed truncated): ${unresolvedObjectIds.join(", ")}`,
         );
     }
-    // A truncated snapshot drops the oldest rows, so a lexical hit that lives only in an omitted memory is silently missing; the note keeps "no results" from reading as a complete search.
+    // The truncation note marks results as partial because unread memories may contain lexical matches.
     if (memoryTruncated) {
         notes.push("Memory: the memory read was truncated; older memories were not searched.");
     }
@@ -256,6 +261,7 @@ export async function executeEidnaraSearch(
         query,
         limit,
         excludeObjectIds: new Set(),
+        nowMs,
     });
     return completeFrom(hits ?? [], memoryNote);
 }

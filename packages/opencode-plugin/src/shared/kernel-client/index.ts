@@ -33,6 +33,7 @@ export {
     type QueryArgs,
     type QueryResult,
     type ReadArgs,
+    type ReadCursor,
     type ReadResult,
     type RequestDigestInput,
     type SourceKind,

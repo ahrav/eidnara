@@ -6891,3 +6891,120 @@ async fn a_plugin_route_cannot_write_rows_under_the_verifier_id_prefixes() {
     assert_eq!(daemon.tip(), tip);
     daemon.handler.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn recorded_read_after_a_cursor_serves_the_older_rows() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    for index in 1..=3 {
+        let created = daemon
+            .commit(
+                &format!("create-{index}"),
+                vec![insert_decision(index)],
+                vec![],
+            )
+            .await;
+        assert_state(&created, "available", None);
+    }
+    let newest = daemon.read("explicit_search", None).await;
+    let cursor = &newest["rows"][0]["object"];
+    assert_eq!(cursor["object_id"], "decision-object-3");
+    let mut request = read_request(&daemon.project, SESSION, "explicit_search", None);
+    request["before"] = json!({
+        "created_commit_seq": cursor["created_commit_seq"],
+        "object_id": cursor["object_id"],
+    });
+    let page = daemon.call(daemon.route, request).await;
+    assert_state(&page, "available", None);
+    assert_eq!(page["truncated"], false);
+    assert_eq!(
+        object_ids(&page),
+        ["decision-object-1", "decision-object-2"]
+    );
+    assert_matches_route_fixture(
+        &with_scope_placeholder(&daemon.project, page),
+        "read-explicit-search-after-cursor.json",
+    );
+    daemon.handler.shutdown().await.unwrap();
+}
+
+async fn commit_decisions(daemon: &Daemon, total: usize) {
+    let mut index = 0usize;
+    let mut batch = 0usize;
+    while index < total {
+        let operations: Vec<Value> = (index..total.min(index + 256))
+            .map(|index| insert_decision(index as i64))
+            .collect();
+        index += operations.len();
+        let response = daemon
+            .commit(&format!("bulk-{batch}"), operations, vec![])
+            .await;
+        assert_state(&response, "available", None);
+        batch += 1;
+    }
+}
+
+#[tokio::test]
+async fn paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once() {
+    use daemon::kernel_routes::read::MAX_READ_ROWS;
+
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    let total = MAX_READ_ROWS + 300;
+    commit_decisions(&daemon, total).await;
+    let oldest = "decision-object-0".to_owned();
+
+    let first = daemon.read("explicit_search", None).await;
+    assert_state(&first, "available", None);
+    assert_eq!(first["truncated"], true);
+    assert!(!object_ids(&first).contains(&oldest));
+    let snapshot = first["known_as_of"].as_i64().unwrap();
+    // Later pages read the pinned `snapshot`, so they serve only decisions committed at or before the first page.
+    daemon
+        .commit(
+            "after-first-page",
+            vec![insert_decision(total as i64)],
+            vec![],
+        )
+        .await;
+
+    let mut served: Vec<(i64, String)> = Vec::new();
+    let mut page = first;
+    let mut pages = 1;
+    loop {
+        let rows = page["rows"].as_array().unwrap();
+        assert!(!rows.is_empty(), "{page}");
+        served.extend(rows.iter().map(|row| {
+            (
+                row["object"]["created_commit_seq"].as_i64().unwrap(),
+                row["object"]["object_id"].as_str().unwrap().to_owned(),
+            )
+        }));
+        if page["truncated"] == false {
+            break;
+        }
+        let (seq, id) = served.last().unwrap().clone();
+        let mut request = read_request(&daemon.project, SESSION, "explicit_search", Some(snapshot));
+        request["before"] = json!({ "created_commit_seq": seq, "object_id": id });
+        page = daemon.call(daemon.route, request).await;
+        assert_state(&page, "available", None);
+        assert_eq!(page["known_as_of"], snapshot);
+        pages += 1;
+        assert!(pages <= 2, "paging did not advance past the first page");
+    }
+    assert_eq!(pages, 2);
+    assert!(
+        served
+            .windows(2)
+            .all(|pair| pair[0].0 > pair[1].0 || (pair[0].0 == pair[1].0 && pair[0].1 < pair[1].1))
+    );
+    let mut ids: Vec<String> = served.into_iter().map(|(_, id)| id).collect();
+    ids.sort();
+    let mut expected: Vec<String> = (0..total)
+        .map(|index| format!("decision-object-{index}"))
+        .collect();
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert!(ids.contains(&oldest));
+    daemon.handler.shutdown().await.unwrap();
+}

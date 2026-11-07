@@ -9,6 +9,7 @@ import {
     memoryResultFromRow,
     parseObjectIdQuery,
     readObjectRowsChunked,
+    scanSnapshotForLexicalSearch,
     searchKernelMemoryRows,
 } from "./kernel-memory-search";
 
@@ -426,5 +427,196 @@ describe("readObjectRowsChunked filter bound", () => {
         ]);
         expect(bodies.flatMap((body) => body.object_ids ?? []).sort()).toEqual([...ids].sort());
         expect(bodies.map((body) => body.as_of)).toEqual([null, count]);
+    });
+});
+
+/** A store whose oldest memory answers the query, under `newer` later memories that share only one query word with it. */
+function storeLargerThanOnePage(newer: number): { kernel: FakeKernel; target: string } {
+    const kernel = new FakeKernel();
+    const target = `mem_${"f".repeat(32)}`;
+    kernel.seedDecision({
+        object_id: target,
+        decision_kind: "PROJECT_RULES",
+        summary: "The nightly backup job writes database dumps to the cold storage volume.",
+    });
+    for (let index = 0; index < newer; index += 1) {
+        kernel.seedDecision({
+            object_id: `mem_${String(index).padStart(32, "0")}`,
+            decision_kind: "ARCHITECTURE",
+            summary: `Module ${index} reads its settings from the database at startup.`,
+        });
+    }
+    return { kernel, target };
+}
+
+function clientOver(transport: FakeKernelTransport): KernelClient {
+    return new KernelClient({
+        transport,
+        enabled: true,
+        sessionId: "ses-paged",
+        projectRoot: "/tmp/paged",
+    });
+}
+
+const BACKUP_QUERY = "nightly backup database dumps";
+
+describe("scanSnapshotForLexicalSearch", () => {
+    test("finds the oldest memory of a store larger than one read page, which a single read misses", async () => {
+        const { kernel, target } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        const transport = new FakeKernelTransport(kernel);
+        const client = clientOver(transport);
+        const scan = (maxPages?: number) =>
+            scanSnapshotForLexicalSearch({
+                client,
+                surface: "explicit_search",
+                gated: false,
+                query: BACKUP_QUERY,
+                limit: 10,
+                nowMs: 0,
+                ...(maxPages === undefined ? {} : { maxPages }),
+            });
+
+        // One page is the single capped read the scan replaced.
+        const single = await scan(1);
+        expect(single.ok && single.truncated).toBe(true);
+        if (!single.ok) return;
+        expect(single.rows.map((row) => row.object.object_id)).not.toContain(target);
+
+        transport.calls.length = 0;
+        const paged = await scan();
+        expect(paged.ok).toBe(true);
+        if (!paged.ok) return;
+        expect(paged.truncated).toBe(false);
+        const hits = searchKernelMemoryRows({
+            rows: paged.rows,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(hits?.[0]?.objectId).toBe(target);
+        const bodies = transport.calls.map(
+            (call) => call.body as { as_of: number | null; before?: { object_id: string } },
+        );
+        // 451 rows at 100 per page: five pages, every page after the first pinned to the first page's snapshot.
+        expect(bodies).toHaveLength(5);
+        expect(bodies[0]?.before).toBeUndefined();
+        expect(new Set(bodies.slice(1).map((body) => body.as_of))).toEqual(new Set([kernel.tip]));
+        expect(paged.rows.length).toBe(10);
+    });
+
+    test("reports truncation when the page bound stops the scan before the oldest rows", async () => {
+        const { kernel, target } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+            maxPages: 4,
+        });
+        expect(scan.ok && scan.truncated).toBe(true);
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id)).not.toContain(target);
+    });
+
+    /** A client whose first page is truncated and whose second read answers `second`. */
+    function twoPageClient(second: unknown): { client: KernelClient; reads: unknown[] } {
+        const first = readRow({
+            objectId: OBJECT_A,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup volume",
+            seq: 5,
+        });
+        const reads: unknown[] = [];
+        const client = {
+            read: async (args: unknown) => {
+                reads.push(args);
+                if (reads.length === 1) {
+                    return {
+                        state: { kind: "available" },
+                        known_as_of: 9,
+                        tip: 9,
+                        gated: false,
+                        truncated: true,
+                        rows: [first],
+                    };
+                }
+                return second;
+            },
+        } as unknown as KernelClient;
+        return { client, reads };
+    }
+
+    const scanWith = (client: KernelClient) =>
+        scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated: true,
+            query: "backup",
+            limit: 10,
+            nowMs: 0,
+        });
+
+    test("keeps the first page's rows as partial when a later page is refused", async () => {
+        const { client, reads } = twoPageClient({
+            state: { kind: "unavailable", reason: "daemon_absent" },
+        });
+        const scan = await scanWith(client);
+        expect(scan).toEqual({
+            ok: true,
+            rows: [
+                expect.objectContaining({
+                    object: expect.objectContaining({ object_id: OBJECT_A }),
+                }),
+            ],
+            truncated: true,
+        });
+        // Only the first page is gated.
+        expect(reads.map((args) => (args as { gated: boolean }).gated)).toEqual([true, false]);
+    });
+
+    test("stops as partial when a later page answers another snapshot", async () => {
+        const moved = readRow({
+            objectId: OBJECT_B,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 4,
+        });
+        const { client } = twoPageClient({
+            state: { kind: "available" },
+            known_as_of: 10,
+            tip: 10,
+            gated: false,
+            truncated: false,
+            rows: [moved],
+        });
+        const scan = await scanWith(client);
+        expect(scan.ok && scan.truncated).toBe(true);
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([OBJECT_A]);
+    });
+
+    test("stops as partial when a later page serves a row at or before the cursor", async () => {
+        const repeated = readRow({
+            objectId: OBJECT_A,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup volume",
+            seq: 5,
+        });
+        const { client } = twoPageClient({
+            state: { kind: "available" },
+            known_as_of: 9,
+            tip: 9,
+            gated: false,
+            truncated: true,
+            rows: [repeated],
+        });
+        const scan = await scanWith(client);
+        expect(scan.ok && scan.truncated).toBe(true);
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([OBJECT_A]);
     });
 });

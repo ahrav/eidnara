@@ -592,6 +592,15 @@ export class FakeKernel {
         if (objectIds !== null) {
             visible = visible.filter((object) => objectIds.has(object.object_id));
         }
+        const before = body.before as { created_commit_seq: number; object_id: string } | undefined;
+        if (before !== undefined) {
+            visible = visible.filter(
+                (object) =>
+                    object.created_commit_seq < before.created_commit_seq ||
+                    (object.created_commit_seq === before.created_commit_seq &&
+                        object.object_id > before.object_id),
+            );
+        }
         // The daemon serves rows newest first, then by object id, and keeps that order's prefix when a cap binds. The row cap never binds a filtered read (a filter names at most `MAX_READ_OBJECT_IDS` rows, far under the cap), so it applies to unfiltered reads alone; the filtered cap stands in for the byte budget, which binds either way.
         visible.sort(FakeKernel.servingOrder);
         let truncated = this.readTruncated;

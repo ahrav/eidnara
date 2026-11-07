@@ -1,8 +1,6 @@
 /**
- * Ranks kernel memory rows for an explicit search. The daemon serves the
- * project's visible rows; matching them against the query is local because
- * the row set is already budget-sized and the match must not depend on a
- * second round trip.
+ * Memory search ranks kernel memory rows from the project's visible rows,
+ * which the daemon serves in bounded pages.
  */
 
 import { createHash } from "node:crypto";
@@ -14,6 +12,7 @@ import {
     type KernelClient,
     MAX_READ_OBJECT_IDS,
     type MemoryState,
+    type ReadCursor,
     type ReadRow,
     type RouteCausality,
     type Surface,
@@ -271,9 +270,20 @@ export function searchKernelMemoryRows(
     const candidates = decisionRows.filter(
         (row) => !args.excludeObjectIds?.has(row.object.object_id),
     );
-    const terms = queryTerms(args.query);
-    if (terms.length === 0) return null;
-    const scored = candidates
+    const scored = rankLexicalRows(candidates, queryTerms(args.query), args.limit).map((entry) =>
+        memoryResultFromRow(entry.row, entry.score, "lexical"),
+    );
+    return scored.length > 0 ? scored : null;
+}
+
+/** Each row's rank is independent of other rows, so merging each partition's top `limit` rows preserves the union's top `limit` rows. */
+function rankLexicalRows(
+    rows: readonly ReadRow[],
+    terms: readonly string[],
+    limit: number,
+): { row: ReadRow; score: number }[] {
+    if (terms.length === 0) return [];
+    return rows
         .map((row) => {
             const text = rowText(row).toLowerCase();
             const matched = terms.filter((term) => text.includes(term)).length;
@@ -286,7 +296,79 @@ export function searchKernelMemoryRows(
                 right.row.object.created_commit_seq - left.row.object.created_commit_seq ||
                 left.row.object.object_id.localeCompare(right.row.object.object_id),
         )
-        .slice(0, args.limit)
-        .map((entry) => memoryResultFromRow(entry.row, entry.score, "lexical"));
-    return scored.length > 0 ? scored : null;
+        .slice(0, limit);
+}
+
+function followsCursor(cursor: ReadCursor, row: ReadRow): boolean {
+    const seq = row.object.created_commit_seq;
+    return (
+        seq < cursor.createdCommitSeq ||
+        (seq === cursor.createdCommitSeq && row.object.object_id > cursor.objectId)
+    );
+}
+
+/** The default scan searches up to sixteen pages at the first page's snapshot. */
+export const MAX_SNAPSHOT_SCAN_PAGES = 16;
+
+export type SnapshotScan =
+    | { ok: true; rows: ReadRow[]; truncated: boolean }
+    | { ok: false; state: MemoryState };
+
+/**
+ * Reads the surface page by page at the first page's snapshot. The retained rows preserve the
+ * top `limit` lexical results among eligible rows from the pages read. Only the first page is
+ * gated; later pages read the snapshot that gate admitted. `truncated` reports rows left unread,
+ * after `maxPages` pages or when the daemon refuses a later page or answers it from another snapshot.
+ */
+export async function scanSnapshotForLexicalSearch(args: {
+    client: KernelClient;
+    surface: Surface;
+    gated: boolean;
+    query: string;
+    limit: number;
+    nowMs: number;
+    signal?: AbortSignal;
+    maxPages?: number;
+}): Promise<SnapshotScan> {
+    const terms = queryTerms(args.query);
+    const maxPages = args.maxPages ?? MAX_SNAPSHOT_SCAN_PAGES;
+    let kept: ReadRow[] = [];
+    let asOf: number | null = null;
+    let before: ReadCursor | undefined;
+    for (let page = 0; page < maxPages; page += 1) {
+        const read = await args.client.read({
+            surface: args.surface,
+            gated: page === 0 && args.gated,
+            ...(asOf === null ? {} : { asOf }),
+            ...(before === undefined ? {} : { before }),
+            ...(args.signal ? { signal: args.signal } : {}),
+        });
+        if (!isAvailable(read)) {
+            return asOf === null
+                ? { ok: false, state: read.state }
+                : { ok: true, rows: kept, truncated: true };
+        }
+        const cursor = before;
+        const continuesSnapshot =
+            asOf === null ||
+            (read.known_as_of === asOf &&
+                (cursor === undefined || read.rows.every((row) => followsCursor(cursor, row))));
+        if (!continuesSnapshot) return { ok: true, rows: kept, truncated: true };
+        asOf = read.known_as_of;
+        const candidates = read.rows.filter(
+            (row) => isMemoryDecisionRow(row) && !isExpiredAntiMemoryRow(row, args.nowMs),
+        );
+        kept = rankLexicalRows([...kept, ...candidates], terms, args.limit).map(
+            (entry) => entry.row,
+        );
+        const last = read.rows.at(-1);
+        if (!read.truncated || last === undefined || terms.length === 0) {
+            return { ok: true, rows: kept, truncated: read.truncated };
+        }
+        before = {
+            createdCommitSeq: last.object.created_commit_seq,
+            objectId: last.object.object_id,
+        };
+    }
+    return { ok: true, rows: kept, truncated: true };
 }
