@@ -204,7 +204,7 @@ pub enum ClaimsOutcome {
 }
 
 /// The D-7 claim-key grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within the byte bound.
-fn is_claim_key(key: &str) -> bool {
+pub(crate) fn is_claim_key(key: &str) -> bool {
     let part = |part: &str| {
         !part.is_empty()
             && part

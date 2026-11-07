@@ -730,6 +730,20 @@ pub fn validate_history_summarizer_output(
             outcome
         }
     };
+    // Retirement reads each segment's accepted claims and removes the claims anchored inside retired lines.
+    let retired = crate::history_summarizer_open_items::retire_waiting_lines(&mut history_segments);
+    let claims_outcome = match claims_outcome {
+        ClaimsOutcome::Accepted {
+            kept,
+            dropped,
+            anchor_missing,
+        } => ClaimsOutcome::Accepted {
+            kept: kept - retired.claims,
+            dropped: dropped + retired.claims,
+            anchor_missing: anchor_missing + retired.anchors,
+        },
+        other => other,
+    };
     // Discarding the last history_segment requires validation to skip unanchored producer output because its source history_segment cannot be proven.
     let events = parsed
         .events

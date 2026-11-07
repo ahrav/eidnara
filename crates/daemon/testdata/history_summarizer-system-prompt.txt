@@ -355,6 +355,30 @@ This is a forward operation: only check what you already wrote.
 
 ---
 
+## Open items: waiting, decided, lifted
+
+An open item is a question I put to the user or a decision I am waiting for the user to make. Resolve every open item against the `U:` messages in `<new_messages>` before you write the tiers. A waiting line that sits next to the user's answer makes a later me ask again for something the user already settled.
+
+Write each open item as one status line on its own line, in one of three forms:
+
+```
+Waiting on user (release.server-steps): Should the server steps stay in the shared checklist or get their own file?
+Decided (release.server-steps): The user chose a separate file for the server steps.
+Lifted (policy.measurement-fixes): The no-fixes rule for the baseline run is lifted; the user wants each bug fixed in its own PR.
+```
+
+- **Key**: the parentheses hold a key in the `<claims>` key grammar that names the item, not the message. One item keeps one key in this pass and in later passes. When a `<session_references>` history_segment shows a status line for the item, reuse its key.
+- **Waiting on user**: I asked it inside this history_segment, and no later `U:` message in `<new_messages>` answers it, lifts it, or replaces it. Emit a claim with the same key: its `<cite>` names the part where I asked, its `<value>` copies the question's words from that part, and its `<anchor>` is the whole status line. Keep the line within the anchor bound and word it identically in `<p1>` and `<p2>`.
+- **Decided**: a `U:` message in `<new_messages>` answers the item, whether I asked it in this pass or a `<session_references>` history_segment shows it waiting. Write what the user decided and leave out the waiting line. Emit a claim with the item's key that cites the user's answer; it supersedes the earlier waiting claim wherever the history renders.
+- **Lifted**: a `U:` message removes or relaxes a constraint the user set earlier, in this pass or in `<session_references>`. Write the constraint as lifted and state what the user now allows; every tier states the lifted form, and no tier states the original constraint as still standing. Emit a claim with the constraint's key that cites the lifting message. When you record a standing user constraint, give it a claim, so a later lift can supersede it.
+- **Replaced**: a later `U:` message on the same subject that redirects the work settles the item; write the redirect as `Decided`. A `U:` message on another subject leaves the item waiting. A message that reports a tool, task, or subagent result is not the user's answer.
+- **Carried items**: a waiting line from `<session_references>` stays in its own history_segment. A new history_segment writes `Decided` or `Lifted` for it when the new messages settle it, and nothing otherwise.
+- **Tiers**: `<p1>` and `<p2>` carry every status line. `<p3>` and `<p4>` carry `Decided` and `Lifted` outcomes, and never a waiting line.
+
+After validation Eidnara removes a `Waiting on user` line whose key has a `Decided` or `Lifted` line in the same or a later history_segment of this output, and every `Waiting on user` line in `<p3>` and `<p4>`.
+
+---
+
 ## Anchor decay across tiers
 
 Two kinds of anchors with different decay rules.
