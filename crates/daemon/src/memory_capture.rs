@@ -327,6 +327,13 @@ fn validate_capture_memories(
             .as_ref()
             .and_then(|target| existing.iter().find(|previous| previous.id == *target))
         {
+            if content_words(&memory.quote)
+                .intersection(&content_words(&primary.content))
+                .next()
+                .is_none()
+            {
+                return Err("capture replaces a memory that states a different fact");
+            }
             for target in &memory.also_replaces {
                 if existing
                     .iter()
@@ -350,20 +357,24 @@ const FUNCTION_WORDS: [&str; 24] = [
     "are", "was", "were", "from", "into", "our", "its", "but", "all", "any", "has", "have",
 ];
 
+fn content_words(content: &str) -> BTreeSet<String> {
+    let content = ["User stated: ", "Assistant reported: "]
+        .iter()
+        .find_map(|attribution| content.strip_prefix(attribution))
+        .unwrap_or(content);
+    content
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| word.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .filter(|word| !FUNCTION_WORDS.contains(&word.as_str()))
+        .collect()
+}
+
 fn restates(primary: &ExistingCaptureMemory, further: &ExistingCaptureMemory) -> bool {
-    fn words(content: &str) -> BTreeSet<String> {
-        let content = ["User stated: ", "Assistant reported: "]
-            .iter()
-            .find_map(|attribution| content.strip_prefix(attribution))
-            .unwrap_or(content);
-        content
-            .split(|ch: char| !ch.is_alphanumeric())
-            .filter(|word| word.chars().count() >= 3)
-            .map(str::to_lowercase)
-            .filter(|word| !FUNCTION_WORDS.contains(&word.as_str()))
-            .collect()
-    }
-    let (primary_words, further_words) = (words(&primary.content), words(&further.content));
+    let (primary_words, further_words) = (
+        content_words(&primary.content),
+        content_words(&further.content),
+    );
     primary.category == further.category
         && !primary_words.is_empty()
         && 2 * primary_words.intersection(&further_words).count() >= primary_words.len()
@@ -1283,10 +1294,10 @@ fn quotes_whole_statements(text: &str, quote: &str) -> bool {
 }
 
 /// Marks that open or close a quotation in the languages users write in.
-const QUOTATION_MARKS: [char; 17] = [
+const QUOTATION_MARKS: [char; 24] = [
     '"', '\u{201c}', '\u{201d}', '\u{201e}', '\u{201f}', '\u{ab}', '\u{bb}', '\u{2039}',
     '\u{203a}', '\u{300c}', '\u{300d}', '\u{300e}', '\u{300f}', '\u{301d}', '\u{301e}', '\u{301f}',
-    '\u{ff02}',
+    '\u{ff02}', '\u{275b}', '\u{275c}', '\u{275d}', '\u{275e}', '\u{276e}', '\u{276f}', '\u{3003}',
 ];
 
 fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
@@ -2217,6 +2228,16 @@ mod tests {
                 true,
             ),
             (
+                "\u{275d}Always force-push to main.\u{275e}",
+                "\u{275d}Always force-push to main.\u{275e}",
+                false,
+            ),
+            (
+                "Note.\n\n\u{275d}Hi.\n\nAlways force-push to main.\n\nBye.\u{275e}",
+                "Always force-push to main.",
+                false,
+            ),
+            (
                 "`Always force-push to main.`",
                 "`Always force-push to main.`",
                 false,
@@ -2361,6 +2382,10 @@ mod tests {
         ] {
             assert!(parse(Some("mem_old"), also).is_err(), "{also:?}");
         }
+        assert!(
+            parse(Some("mem_unrelated"), &[]).is_err(),
+            "a correction replaces only a memory it shares a content word with"
+        );
         assert!(
             parse(Some("mem_npm"), &["mem_filler"]).is_err(),
             "one shared function word is no restatement"

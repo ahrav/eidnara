@@ -619,7 +619,7 @@ impl ProducerContext<'_> {
 }
 
 fn memory_render_identity(base: String, ctx: &ProducerContext<'_>) -> String {
-    if ctx.memory_auto_inject {
+    if ctx.injects_memory() || !ctx.memory_enabled {
         base
     } else {
         format!("{base}|memory-auto-inject-off")
@@ -1894,7 +1894,11 @@ fn revision_signal_for_context(
         store,
         note_project_path,
         session_id,
-        user_profile_version,
+        if ctx.injects_memory() {
+            user_profile_version
+        } else {
+            0
+        },
         memory_enabled,
         ctx.project_memory_revision(),
         timings,
