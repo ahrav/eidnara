@@ -629,8 +629,9 @@ impl CaptureWork {
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
-            let mut memories = collapse_quotations(attribution, decision.memories);
-            failure_evidence::attach(&job.text, &mut memories);
+            let quoted = collapse_quotations(attribution, decision.memories);
+            let mut memories = quoted.clone();
+            let attached = failure_evidence::attach(&job.text, &mut memories);
             let existing = plan
                 .existing
                 .iter()
@@ -642,7 +643,7 @@ impl CaptureWork {
                 })
                 .cloned()
                 .collect();
-            let output = PreparedCapture {
+            let mut output = PreparedCapture {
                 version: CAPTURE_SCHEMA_VERSION,
                 model: plan.model.clone(),
                 existing,
@@ -650,19 +651,34 @@ impl CaptureWork {
                 head: head.clone(),
             };
             let frozen = serde_json::to_string(&output).map_err(|_| "output_encoding_failed")?;
-            let prepared =
-                match self
+            let mut prepared =
+                self.store
+                    .prepare_memory_capture(&job.project, &job.job_id, &frozen);
+            // Appended lines sit beside text they were not beside in the redacted
+            // source, so the store's secret scan or size bound may refuse a plan its
+            // quotations alone pass; that plan freezes without the appended lines.
+            if attached
+                && matches!(
+                    prepared,
+                    Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_))
+                )
+            {
+                output.memories = quoted;
+                let frozen =
+                    serde_json::to_string(&output).map_err(|_| "output_encoding_failed")?;
+                prepared = self
                     .store
-                    .prepare_memory_capture(&job.project, &job.job_id, &frozen)
-                {
-                    Ok(prepared) => prepared,
-                    Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_)) => {
-                        eprintln!("daemon: native memory capture plan refused by the store");
-                        self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
-                        continue;
-                    }
-                    Err(_) => return Err("store_failed"),
-                };
+                    .prepare_memory_capture(&job.project, &job.job_id, &frozen);
+            }
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_)) => {
+                    eprintln!("daemon: native memory capture plan refused by the store");
+                    self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
+                    continue;
+                }
+                Err(_) => return Err("store_failed"),
+            };
             if let Some(frozen) = prepared {
                 job.prepared = Some(frozen);
                 self.publish_or_recover(&job, job_settlement(settlements, &job))?;

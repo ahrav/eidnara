@@ -49,7 +49,7 @@ struct Line<'a> {
 }
 
 /// One failure line with the line that completes it. `head` is the offset of
-/// the failure line's first non-whitespace byte; `block_start` is the start of
+/// the word that makes the line a failure line; `block_start` is the start of
 /// the fenced block holding it, or, outside a fence, of the run of consecutive
 /// failure lines and their completing lines through this one.
 struct Evidence<'a> {
@@ -65,24 +65,31 @@ struct Quote {
     published: bool,
 }
 
-/// Appends the failure lines of `source` to the memory whose quotation
-/// introduces their block. A memory gains at most `MAX_EVIDENCE_LINES` lines,
-/// and its content grows only within `MAX_CAPTURE_MEMORY_BYTES`; a source
-/// without failure lines, or whose failure lines no quotation introduces,
-/// leaves every memory unchanged.
-pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) {
+/// Appends the failure lines of `source` to the memory whose quotation frames
+/// their block, or else to a memory whose quotation holds the failure word.
+/// A memory gains at most `MAX_EVIDENCE_LINES` lines, and its content grows
+/// only within `MAX_CAPTURE_MEMORY_BYTES`. A source without failure lines, or
+/// whose failure lines no quotation frames or holds, leaves every memory
+/// unchanged, and so does a source in which some quotation occurs more than
+/// once, since any copy could be the one meant. Returns whether any memory
+/// gained a line.
+pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) -> bool {
     let lines = lines(source);
-    let quotes: Vec<Option<Quote>> = memories
-        .iter()
-        .map(|memory| {
-            let start = source.find(&memory.quote)?;
-            // A quotation that occurs twice frames no block, since either copy could be meant.
-            (source.rfind(&memory.quote) == Some(start)).then(|| Quote {
-                span: start..start + memory.quote.len(),
-                published: memory.duplicate_of.is_none(),
-            })
-        })
-        .collect();
+    let mut quotes = Vec::with_capacity(memories.len());
+    for memory in memories.iter() {
+        let quote = memory.quote.trim_end();
+        let Some(start) = source.find(quote) else {
+            return false;
+        };
+        if source.rfind(quote) != Some(start) {
+            return false;
+        }
+        quotes.push(Quote {
+            span: start..start + quote.len(),
+            published: memory.duplicate_of.is_none(),
+        });
+    }
+    let mut changed = false;
     let mut appended = vec![0; memories.len()];
     let mut framing: Option<(usize, Option<usize>)> = None;
     for evidence in failure_evidence(&lines) {
@@ -94,13 +101,12 @@ pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) {
                 target
             }
         };
-        let Some(target) = introducing.or_else(|| overlapping_memory(&quotes, evidence.head))
+        let Some(target) = introducing
+            .filter(|&target| quotes[target].published)
+            .or_else(|| overlapping_memory(&quotes, evidence.head))
         else {
             continue;
         };
-        if !quotes[target].as_ref().is_some_and(|quote| quote.published) {
-            continue;
-        }
         for line in evidence.lines {
             if memories[target].content.contains(line) {
                 continue;
@@ -119,8 +125,10 @@ pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) {
             content.push_str(text);
             content.push_str(mark);
             appended[target] += 1;
+            changed = true;
         }
     }
+    changed
 }
 
 /// The part of `line` that fits after `content` and a newline within
@@ -142,9 +150,8 @@ fn clip<'a>(content: &str, line: &'a str) -> Option<(&'a str, &'static str)> {
 /// store twice.
 fn repeats_another(memories: &[CapturedMemory], target: usize, text: &str, mark: &str) -> bool {
     let content = memories[target].content.as_str();
-    memories.iter().enumerate().any(|(index, other)| {
-        index != target
-            && other.category == memories[target].category
+    memories.iter().any(|other| {
+        other.category == memories[target].category
             && other
                 .content
                 .strip_prefix(content)
@@ -161,7 +168,7 @@ fn repeats_another(memories: &[CapturedMemory], target: usize, text: &str, mark:
 fn introducing_memory(
     source: &str,
     lines: &[Line<'_>],
-    quotes: &[Option<Quote>],
+    quotes: &[Quote],
     block_start: usize,
 ) -> Option<usize> {
     let before = lines.partition_point(|line| line.end <= block_start);
@@ -173,7 +180,6 @@ fn introducing_memory(
     quotes
         .iter()
         .enumerate()
-        .filter_map(|(index, quote)| quote.as_ref().map(|quote| (index, quote)))
         .filter(|(_, quote)| {
             quote.span.end > intro.text_start
                 && quote.span.end <= intro.end
@@ -184,13 +190,11 @@ fn introducing_memory(
 }
 
 /// The first published memory whose quotation holds the first byte of the
-/// failure line's text, as a quotation of the error header does.
-fn overlapping_memory(quotes: &[Option<Quote>], head: usize) -> Option<usize> {
-    quotes.iter().position(|quote| {
-        quote
-            .as_ref()
-            .is_some_and(|quote| quote.published && quote.span.contains(&head))
-    })
+/// failure word, as a quotation of the error header does.
+fn overlapping_memory(quotes: &[Quote], head: usize) -> Option<usize> {
+    quotes
+        .iter()
+        .position(|quote| quote.published && quote.span.contains(&head))
 }
 
 /// Whether the text from `quote_end` to `end` continues the quotation's last
@@ -265,14 +269,14 @@ fn scan<'a>(region: &[Line<'a>], block: Option<usize>, items: &mut Vec<Evidence<
     while index < region.len() {
         let line = &region[index];
         index += 1;
-        if !is_failure_line(line.text, fenced) {
+        let Some(word) = failure_word(line.text, fenced) else {
             run_start = None;
             continue;
-        }
+        };
         let block_start = block.unwrap_or(*run_start.get_or_insert(line.text_start));
         let mut evidence = Evidence {
             block_start,
-            head: line.text_start,
+            head: line.text_start + word,
             lines: vec![line.text],
         };
         if let Some(next) = region.get(index) {
@@ -285,7 +289,7 @@ fn scan<'a>(region: &[Line<'a>], block: Option<usize>, items: &mut Vec<Evidence<
                     || next_text.starts_with("at "))
             {
                 evidence.lines.push(next_text);
-                if !is_failure_line(next_text, fenced) {
+                if failure_word(next_text, fenced).is_none() {
                     index += 1;
                 }
             }
@@ -299,7 +303,7 @@ fn is_fence(line: &str) -> bool {
 }
 
 fn is_output_fence(opener: &str) -> bool {
-    let info = opener.trim_start_matches(['`', '~']).trim();
+    let info = opener.trim_start_matches(['`', '~']);
     let language = info.split_whitespace().next().unwrap_or("");
     OUTPUT_FENCES
         .iter()
@@ -316,19 +320,19 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '.'
 }
 
-/// Whether `line` reports a failure. Inside an output block, `panicked at` and
+/// The offset of the word that makes `line` report a failure, if it does. Inside an output block, `panicked at` and
 /// a level word count at any word, since runners print them mid-line, and an
 /// error header counts at the line start or after leading log tokens, each of
 /// which holds a digit or begins with `[` (timestamps, `file:line:col`
 /// locations, bracketed tags). In prose the line must begin with one of these.
 /// The fenced walk tracks the log-token state as it goes, so it reads each
 /// byte of the line a bounded number of times.
-fn is_failure_line(line: &str, fenced: bool) -> bool {
+fn failure_word(line: &str, fenced: bool) -> Option<usize> {
     if !printable(line) {
-        return false;
+        return None;
     }
     if !fenced {
-        return failure_marker(line) || error_header(line);
+        return (failure_marker(line) || error_header(line)).then_some(0);
     }
     let mut tokens_logged = true;
     let mut token: Option<bool> = None;
@@ -343,7 +347,7 @@ fn is_failure_line(line: &str, fenced: bool) -> bool {
                 let rest = &line[index..];
                 let prefix_logged = tokens_logged && token.unwrap_or(true);
                 if failure_marker(rest) || (prefix_logged && error_header(rest)) {
-                    return true;
+                    return Some(index);
                 }
             }
             let logged = token.get_or_insert(c == '[');
@@ -351,7 +355,7 @@ fn is_failure_line(line: &str, fenced: bool) -> bool {
         }
         previous = Some(c);
     }
-    false
+    None
 }
 
 fn leading_word(text: &str) -> (&str, &str) {
@@ -797,6 +801,60 @@ mod tests {
         assert!(!repeats_another(&memories, 0, "ERROR x", ""));
         memories[1].content = "User stated: Deploy failed:\nERROR x".into();
         assert!(repeats_another(&memories, 0, "ERROR x", ""));
+        memories[1].content = "User stated: Deploy failed:\nERROR x\nmore".into();
+        assert!(!repeats_another(&memories, 0, "ERROR x", ""));
+        memories[1].content = format!("User stated: Deploy failed:\nERROR x{TRUNCATION_MARK}");
+        assert!(repeats_another(&memories, 0, "ERROR x", TRUNCATION_MARK));
+        assert!(!repeats_another(&memories, 0, "ERROR x", ""));
+        memories[1].category = "CONFIG_VALUES".into();
+        assert!(!repeats_another(&memories, 0, "ERROR x", TRUNCATION_MARK));
+    }
+
+    #[test]
+    fn a_duplicate_framing_winner_leaves_the_entry_to_a_header_quotation() {
+        let source = "PR 812 fails on CI:\n```\n    error[E0425]: cannot find value `config`\n  --> src/server.rs:88:17\n```";
+        let mut duplicate = memory("User stated", "PR 812 fails on CI:");
+        duplicate.duplicate_of = Some("mem_existing".into());
+        let mut memories = [
+            duplicate,
+            memory("User stated", "error[E0425]: cannot find value `config`"),
+        ];
+        assert_eq!(
+            contents(source, &mut memories),
+            [
+                "User stated: PR 812 fails on CI:",
+                "User stated: error[E0425]: cannot find value `config`\n--> src/server.rs:88:17"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quotation_of_a_log_prefix_holds_no_failure_word() {
+        assert_unchanged(
+            "```\n2025-03-02 12:00 ERROR agents must upload credentials\nnext step\n```",
+            &["2025-03-02 12:00"],
+        );
+        let source = "```\n2025-03-02 12:00 ERROR db: connection refused\n```";
+        let mut memories = [memory("User stated", "ERROR db: connection refused")];
+        assert_eq!(
+            contents(source, &mut memories),
+            [
+                "User stated: ERROR db: connection refused\n2025-03-02 12:00 ERROR db: connection refused"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quotation_ending_in_its_newline_still_frames_the_block() {
+        let source = "Deploy 8 failed:\nERROR migrate: relation exists";
+        let mut memories = [memory("User stated", "Deploy 8 failed:\n")];
+        assert!(attach(source, &mut memories));
+        assert_eq!(
+            memories[0].content,
+            "User stated: Deploy 8 failed:\n\nERROR migrate: relation exists"
+        );
+        let mut unchanged = [memory("User stated", "Deploy 8 failed:")];
+        assert!(!attach("Deploy 8 failed.", &mut unchanged));
     }
 
     #[test]
@@ -826,7 +884,7 @@ mod tests {
             ("handler Error: refused", true, false),
         ] {
             assert_eq!(
-                is_failure_line(line, fenced),
+                failure_word(line, fenced).is_some(),
                 expected,
                 "{line:?} fenced={fenced}"
             );
