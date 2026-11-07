@@ -174,13 +174,13 @@ async function taggedTurns(config: Json) {
 }
 
 /** Four-character faux deltas, behind 0 to 3 spaces, cut every tag at every offset across the four turns. */
-async function streamedTurns(config: Json, answer = STREAMED, pads = [0, 1, 2, 3]) {
+async function streamedTurns(config: Json, answer = STREAMED, pads = [0, 1, 2, 3], cwd = root) {
     writeUserConfig(config);
     const { call } = daemon((body) =>
         additive(body, { mid: rowsOf(body).at(-1)?.id, sequence: 1 }),
     );
     harness = await createTestAgentSession({
-        cwd: root,
+        cwd,
         extensionFactories: [
             eidnaraPiExtension,
             (pi: Parameters<typeof eidnaraPiExtension>[0]) =>
@@ -369,6 +369,12 @@ describe("Pi context handler in compaction-off mode", () => {
         expect(message.content[0]?.text).toBe(shown);
         await harness?.session.extensionRunner?.emit({ type: "message_end", message } as never);
         expect(message.content[0]?.text).toBe(shown);
+    });
+
+    it("streams and saves an answer as written in a project whose configuration withdraws fold authority", async () => {
+        const { h, updates } = await streamedTurns(CHAIN, STREAMED, [0], unresolvedProject());
+        expect(updates.some((update) => update.includes("\u00a712\u00a7"))).toBe(true);
+        expect(assistantTexts(h)).toEqual([STREAMED]);
     });
 
     it("streams a compaction-off answer as the provider sent it", async () => {

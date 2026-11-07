@@ -564,12 +564,17 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         return branch;
     }
     const piTransform = createPiTransform({ moduleClient, branchOf });
+    // A pass the project's configuration leaves additive serves Pi's messages untagged, so the
+    // answer to it carries no Eidnara tag and its text streams and saves as written.
+    const additiveSessions = new Set<string>();
     pi.on("context", async (event, ctx) => {
         const sessionId = sessionIdFromContext(ctx);
         if (!sessionId) return;
         try {
             const deps = resolveCurrentProjectDeps(ctx);
             const eidnaraFolds = isCompactionEnabled(deps.config);
+            if (eidnaraFolds) additiveSessions.delete(sessionId);
+            else additiveSessions.add(sessionId);
             if (!eidnaraFolds && !deps.projectIdentity) return undefined;
             const model = ctx.model;
             const geometry = model
@@ -980,26 +985,32 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         return answer;
     });
 
+    const servesTags = (ctx: unknown): boolean => {
+        if (compactionOff) return false;
+        const sessionId = sessionIdFromContext(ctx);
+        return sessionId === undefined || !additiveSessions.has(sessionId);
+    };
     const stripStream = (
         type: string,
         event: { message: unknown; assistantMessageEvent?: unknown },
+        ctx: unknown,
     ) => {
-        if (compactionOff) return;
+        if (!servesTags(ctx)) return;
         try {
             stripStreamedTags(event);
         } catch (err) {
             warn(`${type}: stripStreamedTags threw:`, err);
         }
     };
-    pi.on("message_start", (event) => stripStream("message_start", event));
-    pi.on("message_update", (event) => stripStream("message_update", event));
+    pi.on("message_start", (event, ctx) => stripStream("message_start", event, ctx));
+    pi.on("message_update", (event, ctx) => stripStream("message_update", event, ctx));
 
     // Mutating `event.message` changes the message persisted by `sessionManager.appendMessage`.
     // Unstripped prefixes appear in assistant responses in Pi's UI.
     pi.on("message_end", async (event, ctx) => {
         try {
             const msg = event.message as unknown;
-            if (!compactionOff && msg !== null && typeof msg === "object") {
+            if (servesTags(ctx) && msg !== null && typeof msg === "object") {
                 stripTagPrefixFromAssistantMessage(msg as { role: string; content: unknown });
             }
         } catch (err) {
@@ -1041,6 +1052,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         checkpointedLeafBySession.delete(sessionId);
         branchIndexes.delete(sessionId);
         piTransform.clearSession(sessionId);
+        additiveSessions.delete(sessionId);
         offered.delete(sessionId);
         refusals.delete(sessionId);
         clearPiSystemPromptSession(sessionId);
