@@ -572,29 +572,34 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
 
     let rows = published_fold(&factory, &model, wait, answered).await;
     assert!(!rows.is_empty());
-    assert!(open_lines(&rows, 1).is_empty(), "{rows:#?}");
+    assert!(open_lines(&rows).is_empty(), "{rows:#?}");
     assert!(
-        own_words(&rows, |row| [&row.p1, &row.p2]).contains("own file"),
+        own_words(
+            rows.iter()
+                .flat_map(|row| [row.p1.as_deref(), row.p2.as_deref()])
+                .flatten()
+        )
+        .contains("own file"),
         "{rows:#?}"
     );
 
     let rows = published_fold(&factory, &model, wait, unanswered).await;
     assert!(
-        open_lines(&rows, 1)
+        open_lines(&rows)
             .iter()
             .any(|line| line.contains("Waiting on user (")),
         "{rows:#?}"
     );
 
     let rows = published_fold(&factory, &model, wait, lifted).await;
-    assert!(open_lines(&rows, 1).is_empty(), "{rows:#?}");
+    assert!(open_lines(&rows).is_empty(), "{rows:#?}");
     // `p1` may quote the constraint where the user set it; the later tiers state only its lifted form.
     for row in &rows {
         for tier in [&row.p2, &row.p3, &row.p4].into_iter().flatten() {
             assert!(!tier.contains(CONSTRAINT), "{tier}");
         }
     }
-    let p2 = own_words(&rows, |row| [&row.p2, &None]);
+    let p2 = own_words(rows.iter().filter_map(|row| row.p2.as_deref()));
     assert!(
         p2.contains("lifted (")
             || (p2.contains("lifted") && !p2.contains("not lifted"))
@@ -603,14 +608,10 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
     );
 }
 
-/// The open status lines the rows store in tiers `from` through 4.
-fn open_lines(rows: &[StoredHistorySegment], from: usize) -> Vec<&str> {
+/// The open status lines the rows store, and any line that still mentions waiting on the user.
+fn open_lines(rows: &[StoredHistorySegment]) -> Vec<&str> {
     rows.iter()
-        .flat_map(|row| {
-            [&row.p1, &row.p2, &row.p3, &row.p4]
-                .into_iter()
-                .skip(from - 1)
-        })
+        .flat_map(|row| [&row.p1, &row.p2, &row.p3, &row.p4])
         .flatten()
         .flat_map(|tier| tier.lines())
         .filter(|line| {
@@ -622,15 +623,10 @@ fn open_lines(rows: &[StoredHistorySegment], from: usize) -> Vec<&str> {
         .collect()
 }
 
-/// The lowercased lines of the chosen tiers, without any line that quotes a `U:` message.
-fn own_words(
-    rows: &[StoredHistorySegment],
-    tiers: impl Fn(&StoredHistorySegment) -> [&Option<String>; 2],
-) -> String {
-    rows.iter()
-        .flat_map(tiers)
-        .flatten()
-        .flat_map(|tier| tier.lines())
+/// The lowercased lines of `tiers`, without any line that quotes a `U:` message.
+fn own_words<'r>(tiers: impl Iterator<Item = &'r str>) -> String {
+    tiers
+        .flat_map(str::lines)
         .filter(|line| !line.contains("U:"))
         .map(str::to_lowercase)
         .collect::<Vec<_>>()

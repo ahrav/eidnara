@@ -3071,7 +3071,7 @@ struct RealCapture {
 fn published_p1(output: &str) -> Option<String> {
     let mut parsed =
         crate::history_summarizer_validate::parse_history_segment_output(output).ok()?;
-    crate::history_summarizer_open_items::retire_settled_lines(&mut parsed)
+    crate::history_summarizer_open_items::retire_settled_lines(&mut parsed, &Default::default())
         .first()?
         .p1
         .clone()
