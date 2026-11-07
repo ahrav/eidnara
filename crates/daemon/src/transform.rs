@@ -2948,7 +2948,8 @@ fn apply_additive_only(
     let external_revision_changed = loaded.meta.initialized
         && loaded.meta.m1_external_revision != 0
         && m1_signal.external_revision != loaded.meta.m1_external_revision;
-    let project_memory_epoch_hard_due = loaded.meta.project_memory_epoch_pending;
+    let project_memory_epoch_hard_due =
+        loaded.meta.project_memory_epoch_pending && ctx.injects_memory();
 
     let effective_usage = effective_usage(req.usage.as_ref(), loaded.meta.last_usage.as_ref());
     let context_limit_tokens =
@@ -3946,7 +3947,8 @@ fn apply_once(
     let external_revision_changed = loaded.meta.initialized
         && loaded.meta.m1_external_revision != 0
         && m1_signal.external_revision != loaded.meta.m1_external_revision;
-    let project_memory_epoch_hard_due = loaded.meta.project_memory_epoch_pending;
+    let project_memory_epoch_hard_due =
+        loaded.meta.project_memory_epoch_pending && ctx.injects_memory();
     let emergency_no_head_escape =
         req.emergency_recovery_armed && req.emergency_recovery_no_head_escape;
     if emergency_no_head_escape {

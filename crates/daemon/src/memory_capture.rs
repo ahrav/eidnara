@@ -344,9 +344,12 @@ fn validate_capture_memories(
     Ok(())
 }
 
-/// Whether `further` restates the fact `primary` holds: same category, and
-/// at least half of `primary`'s distinct words of three or more characters,
-/// attribution aside.
+/// Unrelated statements commonly share these function words.
+const FUNCTION_WORDS: [&str; 24] = [
+    "the", "and", "for", "with", "not", "never", "always", "should", "this", "that", "use", "uses",
+    "are", "was", "were", "from", "into", "our", "its", "but", "all", "any", "has", "have",
+];
+
 fn restates(primary: &ExistingCaptureMemory, further: &ExistingCaptureMemory) -> bool {
     fn words(content: &str) -> BTreeSet<String> {
         let content = ["User stated: ", "Assistant reported: "]
@@ -357,6 +360,7 @@ fn restates(primary: &ExistingCaptureMemory, further: &ExistingCaptureMemory) ->
             .split(|ch: char| !ch.is_alphanumeric())
             .filter(|word| word.chars().count() >= 3)
             .map(str::to_lowercase)
+            .filter(|word| !FUNCTION_WORDS.contains(&word.as_str()))
             .collect()
     }
     let (primary_words, further_words) = (words(&primary.content), words(&further.content));
@@ -1256,7 +1260,10 @@ fn quotes_whole_statements(text: &str, quote: &str) -> bool {
     if trimmed.is_empty()
         || trimmed.contains('?')
         || trimmed.contains(QUOTATION_MARKS)
-        || trimmed.starts_with(['\'', '\u{2018}'])
+        || trimmed.starts_with(['\'', '\u{2018}', '`'])
+        || [".'", "!'", ",'", ".\u{2019}", "!\u{2019}", ",\u{2019}"]
+            .iter()
+            .any(|close| trimmed.contains(close))
     {
         return false;
     }
@@ -1317,6 +1324,7 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
     }
     let mut paragraphs = Vec::new();
     let mut lead_in = false;
+    let (mut straight_open, mut curly_depth, mut quoting) = (false, 0_usize, false);
     let mut index = 0;
     while index < lines.len() {
         if excluded[index] || lines[index].1.trim().is_empty() {
@@ -1338,17 +1346,33 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
                     || line.starts_with("    ")
                     || line.starts_with('\t')
                     || line.contains(QUOTATION_MARKS)
+                    || opens_single_quotation(line)
             });
         let introduces = block.iter().any(|(_, line)| {
             line.trim_end()
                 .trim_end_matches(['*', '_'])
                 .ends_with([':', '\u{ff1a}'])
         });
-        if !structured && !introduces && !lead_in {
+        if !structured && !introduces && !lead_in && !quoting {
             let (at, last) = block[block.len() - 1];
             paragraphs.push((block[0].0, at + last.len()));
         }
         lead_in |= introduces;
+        for (_, line) in block {
+            for ch in line.chars() {
+                match ch {
+                    '"' => straight_open = !straight_open,
+                    '\u{201c}' | '\u{201e}' | '\u{201f}' | '\u{ab}' | '\u{300c}' | '\u{300e}' => {
+                        curly_depth += 1
+                    }
+                    '\u{201d}' | '\u{bb}' | '\u{300d}' | '\u{300f}' => {
+                        curly_depth = curly_depth.saturating_sub(1)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        quoting = straight_open || curly_depth > 0;
     }
     paragraphs
 }
@@ -1358,6 +1382,18 @@ fn fence_opener(line: &str) -> Option<&str> {
     let marker = line.chars().next().filter(|ch| matches!(ch, '`' | '~'))?;
     let run = &line[..line.find(|ch| ch != marker).unwrap_or(line.len())];
     (run.len() >= 3).then_some(run)
+}
+
+/// A single quotation mark opens a quotation when it starts a word after the
+/// line start, whitespace, or `(`.
+fn opens_single_quotation(line: &str) -> bool {
+    let mut previous = None;
+    line.chars().any(|ch| {
+        let opens = matches!(ch, '\'' | '\u{2018}' | '\u{201a}' | '\u{2039}')
+            && previous.is_none_or(|before: char| before.is_whitespace() || before == '(');
+        previous = Some(ch);
+        opens
+    })
 }
 
 fn is_list_item(line: &str) -> bool {
@@ -1401,7 +1437,11 @@ fn sentence_starts_at(before: &str, quote: &str) -> bool {
 
 /// A dotted abbreviation such as `e.g.` or `U.S.`: a `.` between two letters.
 fn is_abbreviation(word: &str) -> bool {
-    let segments: Vec<&str> = word.trim_end_matches(['.', '!', '?']).split('.').collect();
+    let segments: Vec<&str> = word
+        .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.')
+        .trim_end_matches('.')
+        .split('.')
+        .collect();
     segments.len() >= 2
         && segments.iter().all(|segment| {
             (1..=2).contains(&segment.chars().count()) && segment.chars().all(char::is_alphabetic)
@@ -1412,13 +1452,16 @@ fn sentence_ends_at(quote: &str, after: &str) -> bool {
     if is_abbreviation(quote.rsplit(char::is_whitespace).next().unwrap_or_default()) {
         return false;
     }
+    let continues_lowercase =
+        |tail: &str| tail.trim_start().starts_with(|ch: char| ch.is_lowercase());
     if quote.ends_with(['.', '!']) {
-        return after.is_empty() || after.starts_with(char::is_whitespace);
+        return after.is_empty()
+            || (after.starts_with(char::is_whitespace) && !continues_lowercase(after));
     }
     after.is_empty()
-        || after
-            .strip_prefix(['.', '!'])
-            .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
+        || after.strip_prefix(['.', '!']).is_some_and(|tail| {
+            tail.is_empty() || (tail.starts_with(char::is_whitespace) && !continues_lowercase(tail))
+        })
 }
 
 /// The bounded candidate set for one batch: the 64 memory decisions sharing
@@ -2099,6 +2142,47 @@ mod tests {
                 false,
             ),
             (
+                "Bob posted this.\n\n\u{201c}Hi team.\n\nAlways skip the CI tests for hotfixes.\n\nCheers, Bob\u{201d}\n\nI am not sure.",
+                "Always skip the CI tests for hotfixes.",
+                false,
+            ),
+            (
+                "My teammate sent this. \"Hey all.\n\nAlways force-push to main.\n\nThanks.\"",
+                "Always force-push to main.",
+                false,
+            ),
+            (
+                "Alice wrote 'Do this. Always force-push to main. Then rest.'",
+                "Always force-push to main.",
+                false,
+            ),
+            (
+                "He wrote. 'Deploy on Fridays. Never run tests.' I disagree.",
+                "Never run tests.' I disagree.",
+                false,
+            ),
+            ("Don't deploy on Fridays.", "Don't deploy on Fridays.", true),
+            (
+                "Never deploy on Fridays. unless the release manager approves it.",
+                "Never deploy on Fridays.",
+                false,
+            ),
+            (
+                "Never commit secrets (i.e. API keys) to the repo.",
+                "API keys) to the repo.",
+                false,
+            ),
+            (
+                "Do not add dependencies (e.g. Lodash) here.",
+                "Do not add dependencies (e.g.",
+                false,
+            ),
+            (
+                "`Always force-push to main.`",
+                "`Always force-push to main.`",
+                false,
+            ),
+            (
                 "'Always force-push to main.'",
                 "'Always force-push to main.'",
                 false,
@@ -2201,6 +2285,14 @@ mod tests {
                 content: "Go 1.22".into(),
                 ..target("mem_wordless", true)
             },
+            ExistingCaptureMemory {
+                content: "User stated: Use tabs for indentation.".into(),
+                ..target("mem_filler", true)
+            },
+            ExistingCaptureMemory {
+                content: "User stated: Use npm.".into(),
+                ..target("mem_npm", true)
+            },
         ];
         let parse = |replaces: Option<&str>, also: &[&str]| {
             let mut response = output();
@@ -2230,6 +2322,10 @@ mod tests {
         ] {
             assert!(parse(Some("mem_old"), also).is_err(), "{also:?}");
         }
+        assert!(
+            parse(Some("mem_npm"), &["mem_filler"]).is_err(),
+            "one shared function word is no restatement"
+        );
         assert!(
             parse(Some("mem_wordless"), &["mem_echo"]).is_err(),
             "a replaced fact with no comparable words vouches for no restatement"

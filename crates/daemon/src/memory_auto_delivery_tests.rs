@@ -644,6 +644,32 @@ async fn the_host_memory_tool_cannot_retire_a_user_statement() {
         explicit_search(&handler, (FIRST, "s1"), &project).await,
         [(stated(PNPM), "visible".to_string())]
     );
+    let rejected = body(
+        handler
+            .dispatch_value_for_test(
+                test_route(FIRST),
+                kernel_route_fixtures::commit_request(
+                    &project,
+                    "s1",
+                    "reject-user",
+                    vec![
+                        json!({"op": "disposition", "object_id": user, "event": "explicit_reject"}),
+                    ],
+                    Vec::new(),
+                ),
+            )
+            .await,
+    );
+    assert_eq!(rejected["state"]["kind"], "available", "{rejected}");
+    let refused = body(
+        handler
+            .dispatch_value_for_test(test_route(FIRST), retire("retire-rejected", &user))
+            .await,
+    );
+    assert_eq!(
+        refused["state"]["reason"], "admission_policy",
+        "a disposition that drops the approval leaves the statement protected: {refused}"
+    );
 }
 
 #[tokio::test]

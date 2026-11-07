@@ -67,9 +67,9 @@ code named, and states the intended reachability. Every existing check named in 
 - `default-production`: reached with the shipped configuration. Memory
   capture runs when `memory_enabled`, `auto_promote`, and
   `memory_auto_capture` are on (`crates/daemon/src/memory_capture.rs:626`),
-  and all three default to on (`crates/daemon/src/config.rs:152`).
+  and all three default to on (`crates/daemon/src/config.rs:161-163`).
 - `explicit-config-only`: reached only when source capture is enabled;
-  `source_capture_enabled` defaults to off (`crates/daemon/src/config.rs:152`).
+  `source_capture_enabled` defaults to off (`crates/daemon/src/config.rs:164`).
 - `test-only`: no production caller at the branch tip. Nothing outside
   `crates/kernel` calls `evaluate_batch` or builds an `ApplicabilityRequest`.
 

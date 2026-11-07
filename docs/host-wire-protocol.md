@@ -1040,15 +1040,18 @@ whole sentences of a plain-prose paragraph. Plain prose leaves out code fences
 line holding only a markup tag opens through the last line closing that tag
 (such as `<context_researcher-augmentation>`), every paragraph holding a list
 item, a heading, a blockquote, an indented code line, a double quotation mark
-of any script, or a line ending in `:` (also after closing `*` or `_`, and the
-fullwidth colon), every paragraph after such a line, and every paragraph that
-a fence or tag line borders without a blank line. The quotation starts the
+of any script, a single quotation mark that starts a word, or a line ending in
+`:` (also after closing `*` or `_`, and the fullwidth colon), every paragraph
+after such a line, every paragraph inside a quotation an earlier paragraph
+opened, and every paragraph that a fence or tag line borders without a blank
+line. The quotation starts the
 paragraph or follows a `.`, `!`, or `?` and whitespace, with a first character
 that is not lowercase and no colon earlier in the paragraph; it ends with `.`
-or `!`, directly before one, or at the paragraph's end; neither boundary falls
+or `!`, directly before one, or at the paragraph's end, and no lowercase word
+follows it; neither boundary falls
 at a dotted abbreviation, a word of two or more one- or two-letter segments
 such as `e.g.` or `U.S.`; and it contains no `?`, contains no double
-quotation mark, and starts with no single quotation mark. Capture records each such fact with a statement record in the
+quotation mark, and neither starts nor closes a single quotation. Capture records each such fact with a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and admits the fact on that approval, so the Kernel serves it on
 automatic surfaces. Every other captured fact remains labeled model inference
@@ -1060,7 +1063,8 @@ and leaves out facts captured from that session's own messages. A user message m
 the user's statement may replace a fact served on `auto_inject`: its fact
 supersedes the captured fact it `replaces`, retires each further fact it names
 in `also_replaces` (each must share the replaced fact's category and at
-least half of its distinct words of three or more characters) and a replaced
+least half of its distinct words of three or more characters other than
+common English function words, of which it must have at least one) and a replaced
 memory the host memory tool wrote, and
 retires the statement record of each fact it removes; no surface serves a
 superseded or retired fact. A host `kernel.commit` that supersedes or retires a
