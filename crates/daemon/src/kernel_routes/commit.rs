@@ -98,6 +98,7 @@ const MAX_TOKENS: usize = 1024;
 pub const MAX_DEPENDENCIES: usize = 1024;
 /// Reason recorded on the admission decision of every route-written object.
 const ADMISSION_REASON: &str = "kernel.commit";
+const CAPTURE_ADMISSION_REASON: &str = "memory_capture";
 /// Dependency kinds a kernel projection reads without comparing scopes, so
 /// their targets must belong to the bound project.
 const PROJECTED_DEPENDENCY_KINDS: [&str; 2] = [
@@ -603,6 +604,66 @@ pub(crate) fn admit(
     Ok(())
 }
 
+pub(crate) fn admit_capture(
+    envelope: &mut Envelope<'_>,
+    object_id: &str,
+    approval: Option<&str>,
+) -> Result<(), KernelError> {
+    envelope.record_admission(AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(object_id.to_string()),
+        source_class: Some(SourceClass::ModelInference),
+        taint_class: Some(TaintClass::AssistantInference),
+        event: AdmissionEvent {
+            kind: if approval.is_some() {
+                EventKind::Approve
+            } else {
+                EventKind::Other
+            },
+            trigger_object_id: None,
+            approval_object_id: approval.map(str::to_string),
+            evidence_id: None,
+            reason: CAPTURE_ADMISSION_REASON.to_string(),
+        },
+    })?;
+    Ok(())
+}
+
+pub(crate) fn accept_statement(
+    envelope: &mut Envelope<'_>,
+    object_id: &str,
+) -> Result<(), KernelError> {
+    envelope.record_admission(AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(object_id.to_string()),
+        source_class: Some(SourceClass::ExplicitUser),
+        taint_class: Some(TaintClass::UserExplicit),
+        event: AdmissionEvent {
+            kind: EventKind::AcceptedAdr,
+            trigger_object_id: None,
+            approval_object_id: None,
+            evidence_id: None,
+            reason: CAPTURE_ADMISSION_REASON.to_string(),
+        },
+    })?;
+    Ok(())
+}
+
+fn refuse_rewriting_user_authority(
+    envelope: &Envelope<'_>,
+    object_id: &str,
+) -> Result<(), KernelError> {
+    if envelope
+        .subject_admission(object_id)?
+        .is_some_and(|(prior, approval)| {
+            prior.source_class == SourceClass::ExplicitUser || approval.is_some()
+        })
+    {
+        return Err(KernelError::AdmissionPolicy);
+    }
+    Ok(())
+}
+
 /// The domain every route-materialized project scope belongs to. Scopes are
 /// route-owned rows, so they hang off a route-owned domain that callers
 /// cannot write into. Scope rows created under an earlier layout keep their
@@ -961,6 +1022,7 @@ fn apply(
                     refused,
                 )?;
                 let predecessor = scoped_object_state(envelope, filter, replaced_object_id)?;
+                refuse_rewriting_user_authority(envelope, replaced_object_id)?;
                 // An existing replacement must belong to the bound project
                 // whether or not it is live: a foreign retired id answering
                 // `already_exists` where a foreign live one answers
@@ -1010,6 +1072,7 @@ fn apply(
             }
             Operation::RetireDecision { object_id } => {
                 scoped_object_state(envelope, filter, object_id)?;
+                refuse_rewriting_user_authority(envelope, object_id)?;
                 envelope.retire_decision(object_id)?;
                 result.touched.push(object_id.clone());
             }

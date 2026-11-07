@@ -1030,8 +1030,29 @@ reads no documents. A project-tier
 list is ignored with a warning, and each plugin strips it from the project
 tier. `memory.auto_capture` and
 `memory.auto_promote` gate only model-extracted facts from redacted text.
-Captured facts remain labeled model inference for explicit
-search, not human approval or automatic-context eligibility. Session deletion
+A captured fact is the user's statement when its source message has the user
+role, its stored text is `User stated: ` followed by a verbatim quotation of
+that message, and the quotation spans whole sentences of it: it starts at a
+line or sentence start, ends with `.` or `!` or at a line end, and is not a
+question. Capture records each such fact with a statement record in the
+`user-statements` domain, an `adr_accepted` decision admitted as explicit user
+text, and admits the fact on that approval, so the Kernel serves it on
+automatic surfaces. Every other captured fact remains labeled model inference
+for explicit search, not human approval or automatic-context eligibility. The
+`<project-memory>` block of a session's m0 holds the live, project-scoped,
+positive-category facts visible on `auto_inject`, newest first within
+`memory.injection_budget_tokens`, and leaves out facts captured from that
+session's own messages. A user message may correct earlier facts: its fact
+supersedes the captured fact it `replaces`, retires each further fact it names
+in `also_replaces` and a replaced memory the host memory tool wrote, and
+retires the statement record of each fact it removes; no surface serves a
+superseded or retired fact. A host `kernel.commit` that supersedes or retires a
+decision admitted as explicit user text, or one admitted on an approval,
+answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only
+and defaults to true; the daemon ignores a project-tier value with a warning,
+and each plugin strips it from the project tier. False composes m0 with
+neither the `<project-memory>` nor the user-profile block, while explicit
+search, capture, and the history summarizer's memory read are unchanged. Session deletion
 fences publication and removes queued sources; committed memories remain
 project-owned. Lifecycle hooks store sources and return; the drain that runs
 model work continues after them until the harness shuts down. Shutdown closes

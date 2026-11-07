@@ -785,6 +785,9 @@
       "default": {
         "enabled": true,
         "injection_budget_tokens": 4000,
+        "auto_inject": {
+          "enabled": true
+        },
         "auto_promote": true,
         "auto_capture": true,
         "retrieval_count_promotion_threshold": 3,
@@ -814,6 +817,21 @@
           "minimum": 500,
           "maximum": 20000
         },
+        "auto_inject": {
+          "default": {
+            "enabled": true
+          },
+          "description": "Automatic memory injection into the cached prompt prefix. The daemon reads this key itself.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "description": "User-only: deliver captured user statements from earlier sessions in the automatic <project-memory> block, with the user-profile block (default: true). Set false to keep memory on explicit eidnara_search only; capture and search are unchanged. Project values are ignored with a warning.",
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
         "auto_promote": {
           "default": true,
           "description": "Automatically promote eligible session facts into memory (default: true)",
@@ -821,7 +839,7 @@
         },
         "auto_capture": {
           "default": true,
-          "description": "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; captured facts remain labeled model inference. Set false to disable unattended capture.",
+          "description": "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches automatic surfaces; every other captured fact stays labeled model inference for explicit search. Set false to disable unattended capture.",
           "type": "boolean"
         },
         "retrieval_count_promotion_threshold": {

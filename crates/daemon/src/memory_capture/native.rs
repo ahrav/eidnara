@@ -440,6 +440,7 @@ pub(super) fn collapse_quotations(
                     && (kept.duplicate_of.is_none() || memory.replaces.is_some())
                 {
                     kept.replaces = memory.replaces;
+                    kept.also_replaces = memory.also_replaces;
                     kept.duplicate_of = memory.duplicate_of;
                 }
             }
@@ -622,7 +623,7 @@ impl CaptureWork {
                 }
             };
             let attribution = if job.role == "user" {
-                "User stated"
+                USER_STATED
             } else {
                 "Assistant reported"
             };
@@ -636,6 +637,7 @@ impl CaptureWork {
                 .filter(|previous| {
                     memories.iter().any(|memory| {
                         memory.replaces.as_deref() == Some(&previous.id)
+                            || memory.also_replaces.contains(&previous.id)
                             || memory.duplicate_of.as_deref() == Some(&previous.id)
                     })
                 })

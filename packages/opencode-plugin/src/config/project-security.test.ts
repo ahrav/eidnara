@@ -273,10 +273,14 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
-    it("strips keep_subagents and memory.injection_budget_tokens from project config", () => {
+    it("strips keep_subagents, memory.auto_inject, and memory.injection_budget_tokens from project config", () => {
         const raw: Record<string, unknown> = {
             keep_subagents: true,
-            memory: { injection_budget_tokens: 20_000, enabled: true },
+            memory: {
+                injection_budget_tokens: 20_000,
+                auto_inject: { enabled: false },
+                enabled: true,
+            },
             context_researcher: { model: "x" },
         };
 
@@ -285,6 +289,7 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(raw).toEqual({ memory: { enabled: true }, context_researcher: { model: "x" } });
         expect(warnings).toEqual([
             expect.stringContaining("keep_subagents"),
+            expect.stringContaining("memory.auto_inject"),
             expect.stringContaining("memory.injection_budget_tokens"),
         ]);
 

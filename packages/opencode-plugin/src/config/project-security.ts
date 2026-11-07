@@ -398,6 +398,12 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
             "Ignoring memory.auto_capture from project config (security: unattended conversation capture requires user-level configuration).",
         );
     }
+    if (isPlainObject(memory) && "auto_inject" in memory) {
+        delete memory.auto_inject;
+        warnings.push(
+            "Ignoring memory.auto_inject from project config (security: whether captured memory reaches the prompt automatically is a user-level choice; a repository cannot change it).",
+        );
+    }
     if (isPlainObject(memory) && "injection_budget_tokens" in memory) {
         delete memory.injection_budget_tokens;
         warnings.push(
