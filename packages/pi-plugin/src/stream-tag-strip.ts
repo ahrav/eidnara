@@ -185,8 +185,11 @@ export function stripStreamedTags(event: {
         if (update === undefined) return { ...part, text: stripTags(part.text, leading) };
         let stream = streams.get(part);
         if (stream === undefined || !part.text.startsWith(stream.raw)) {
-            const deltas = stream?.deltas ?? new StreamTagStripper(leading);
-            stream = { raw: "", stripper: new StreamTagStripper(leading), deltas };
+            stream = {
+                raw: "",
+                stripper: new StreamTagStripper(leading),
+                deltas: new StreamTagStripper(leading),
+            };
             streams.set(part, stream);
         }
         stream.stripper.push(part.text.slice(stream.raw.length));

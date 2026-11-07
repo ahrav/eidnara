@@ -261,6 +261,22 @@ describe("stripStreamedTags", () => {
         expect(shown()).toBe("xy  z");
     });
 
+    it("starts the deltas over when a part restarts, dropping a held prefix", () => {
+        const part = { type: "text", text: `ok ${S}12` };
+        const partial = { role: "assistant", content: [part] as Part[] };
+        const send = (delta: string) => {
+            const event = {
+                message: { ...partial },
+                assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
+            };
+            stripStreamedTags(event);
+            return [(event.message.content[0] as Part).text, event.assistantMessageEvent.delta];
+        };
+        expect(send(`ok ${S}12`)).toEqual(["ok ", "ok "]);
+        part.text = "new";
+        expect(send("new")).toEqual(["new", "new"]);
+    });
+
     it("hands listeners snapshots, so text the provider appends later stays out of them", () => {
         const part = { type: "text", text: "Hello there" };
         const partial = { role: "assistant", content: [part] as Part[] };
