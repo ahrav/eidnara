@@ -173,6 +173,46 @@ async function taggedTurns(config: Json) {
     return { h: harness, call, transforms };
 }
 
+/** Four-character faux deltas, behind 0 to 3 spaces, cut every tag at every offset across the four turns. */
+async function streamedTurns(config: Json, answer = STREAMED, pads = [0, 1, 2, 3]) {
+    writeUserConfig(config);
+    const { call } = daemon((body) =>
+        additive(body, { mid: rowsOf(body).at(-1)?.id, sequence: 1 }),
+    );
+    harness = await createTestAgentSession({
+        cwd: root,
+        extensionFactories: [
+            eidnaraPiExtension,
+            (pi: Parameters<typeof eidnaraPiExtension>[0]) =>
+                pi.on("message_update", async () => {
+                    await Promise.resolve();
+                    await Promise.resolve();
+                }),
+        ],
+        settings: PI_SETTINGS,
+        tokenSize: { min: 1, max: 1 },
+    });
+    const updates: string[] = [];
+    const unsubscribe = harness.session.subscribe((event) => {
+        if (event.type === "message_update") updates.push(JSON.stringify(event));
+    });
+    try {
+        for (const pad of pads) {
+            harness.respond([fauxAssistantMessage(`${" ".repeat(pad)}${answer}`)]);
+            await harness.session.prompt(`turn ${pad} ${"x".repeat(400)}`);
+            await Bun.sleep(20);
+        }
+    } finally {
+        unsubscribe();
+        call.mockRestore();
+    }
+    return { h: harness, updates };
+}
+
+const STREAMED =
+    "\u00a73\u00a7 The fix \u00a712\u00a7 is in \u00a74567\u00a7 parser.rs, see \u00a7 4.";
+const SHOWN = "The fix  is in  parser.rs, see \u00a7 4.";
+
 function assistantTexts(h: TestAgentSession): string[] {
     return h.sessionManager
         .getEntries()
@@ -275,6 +315,65 @@ describe("Pi context handler in compaction-off mode", () => {
         expect(capabilities(foldingProject)).toEqual([true, true]);
         expect(capabilities(withdrawnProject)).toEqual([true, true]);
         expect(capabilities(compactionOff)).toEqual([false, true]);
+    });
+
+    it("streams a compaction-on answer without its tags wherever a delta cuts one", async () => {
+        const { h, updates } = await streamedTurns(CHAIN);
+        expect(updates.length).toBeGreaterThan(STREAMED.length);
+        for (const update of updates) expect(update).not.toMatch(/\u00a7\d/u);
+        const ends = updates
+            .map(
+                (update) =>
+                    JSON.parse(update) as {
+                        assistantMessageEvent: { type: string; content?: string };
+                    },
+            )
+            .filter((update) => update.assistantMessageEvent.type === "text_end")
+            .map((update) => update.assistantMessageEvent.content);
+        expect(ends).toEqual([SHOWN, SHOWN, SHOWN, SHOWN]);
+        const deltas = updates
+            .map(
+                (update) =>
+                    JSON.parse(update) as {
+                        assistantMessageEvent: { type: string; delta?: string };
+                    },
+            )
+            .filter((update) => update.assistantMessageEvent.type === "text_delta")
+            .map((update) => update.assistantMessageEvent.delta)
+            .join("");
+        expect(deltas).toBe(SHOWN.repeat(4));
+        expect(assistantTexts(h)).toEqual([SHOWN, SHOWN, SHOWN, SHOWN]);
+    });
+
+    it("streams a mid-answer tag to no listener while a later handler awaits", async () => {
+        const answer =
+            "Hello there my friend, the answer is \u00a712\u00a7 right here, see \u00a7 4.";
+        const { updates } = await streamedTurns(CHAIN, answer, [0]);
+        expect(updates.length).toBeGreaterThan(answer.length / 4);
+        for (const update of updates) expect(update).not.toMatch(/\u00a7\d/u);
+    });
+
+    it("strips a whole assistant message at message_start in a compaction-on process", async () => {
+        await streamedTurns(CHAIN, "warm-up answer", [0]);
+        const message = {
+            role: "assistant",
+            content: [
+                {
+                    type: "text",
+                    text: "\u00a71\u00a7 hi, see \u00a7 4 and \u00a7\u00a71\u00a72\u00a7 \u00a742",
+                },
+            ],
+        };
+        await harness?.session.extensionRunner?.emit({ type: "message_start", message } as never);
+        const shown = "hi, see \u00a7 4 and \u00a72\u00a7 \u00a742";
+        expect(message.content[0]?.text).toBe(shown);
+        await harness?.session.extensionRunner?.emit({ type: "message_end", message } as never);
+        expect(message.content[0]?.text).toBe(shown);
+    });
+
+    it("streams a compaction-off answer as the provider sent it", async () => {
+        const { updates } = await streamedTurns({});
+        expect(updates.some((update) => update.includes("\u00a712\u00a7"))).toBe(true);
     });
 
     it("evicts and strips assistant tags in a compaction-on process", async () => {

@@ -63,6 +63,7 @@ import { piMemoryCaptureExecutor } from "./memory-capture-native";
 import { resolvePiWindowGeometry } from "./pi-context-limit";
 import { createPiRustToolBackends } from "./rust-tool-backends";
 import { registerStatusLine } from "./status-line";
+import { stripStreamedTags } from "./stream-tag-strip";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 import { configurePiSubagentExtensions, EIDNARA_PI_SUBAGENT_ENV } from "./subagent-runner";
 import {
@@ -978,6 +979,20 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         if (sessionId && answer && "compaction" in answer) offered.add(sessionId);
         return answer;
     });
+
+    const stripStream = (
+        type: string,
+        event: { message: unknown; assistantMessageEvent?: unknown },
+    ) => {
+        if (compactionOff) return;
+        try {
+            stripStreamedTags(event);
+        } catch (err) {
+            warn(`${type}: stripStreamedTags threw:`, err);
+        }
+    };
+    pi.on("message_start", (event) => stripStream("message_start", event));
+    pi.on("message_update", (event) => stripStream("message_update", event));
 
     // Mutating `event.message` changes the message persisted by `sessionManager.appendMessage`.
     // Unstripped prefixes appear in assistant responses in Pi's UI.
