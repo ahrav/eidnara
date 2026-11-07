@@ -174,11 +174,16 @@ async function taggedTurns(config: Json) {
 }
 
 /** Four-character faux deltas, behind 0 to 3 spaces, cut every tag at every offset across the four turns. */
-async function streamedTurns(config: Json, answer = STREAMED, pads = [0, 1, 2, 3], cwd = root) {
-    writeUserConfig(config);
-    const { call } = daemon((body) =>
+async function streamedTurns(
+    config: Json,
+    answer = STREAMED,
+    pads = [0, 1, 2, 3],
+    serve: (body: Json) => Json = (body) =>
         additive(body, { mid: rowsOf(body).at(-1)?.id, sequence: 1 }),
-    );
+    cwd = root,
+) {
+    writeUserConfig(config);
+    const { call } = daemon(serve);
     harness = await createTestAgentSession({
         cwd,
         extensionFactories: [
@@ -371,10 +376,25 @@ describe("Pi context handler in compaction-off mode", () => {
         expect(message.content[0]?.text).toBe(shown);
     });
 
-    it("streams and saves an answer as written in a project whose configuration withdraws fold authority", async () => {
-        const { h, updates } = await streamedTurns(CHAIN, STREAMED, [0], unresolvedProject());
+    it("streams and saves an answer as written when the daemon serves under native authority", async () => {
+        const native = (body: Json) => ({
+            ...additive(body),
+            history_summarizer: { no_fire: "native_authority" },
+        });
+        const { h, updates } = await streamedTurns(CHAIN, STREAMED, [0], native);
         expect(updates.some((update) => update.includes("\u00a712\u00a7"))).toBe(true);
         expect(assistantTexts(h)).toEqual([STREAMED]);
+    });
+
+    it("strips a tagged answer in a project whose configuration the daemon does not admit", async () => {
+        const { updates } = await streamedTurns(
+            CHAIN,
+            STREAMED,
+            [0],
+            undefined,
+            unresolvedProject(),
+        );
+        for (const update of updates) expect(update).not.toMatch(/\u00a7\d/u);
     });
 
     it("streams a compaction-off answer as the provider sent it", async () => {

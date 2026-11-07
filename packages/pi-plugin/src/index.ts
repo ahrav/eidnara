@@ -564,17 +564,16 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         return branch;
     }
     const piTransform = createPiTransform({ moduleClient, branchOf });
-    // A pass the project's configuration leaves additive serves Pi's messages untagged, so the
-    // answer to it carries no Eidnara tag and its text streams and saves as written.
-    const additiveSessions = new Set<string>();
+    // Sessions whose latest context pass served daemon messages under fold authority, the only
+    // passes that tag blocks; any other turn's answer streams and saves as written.
+    const taggedSessions = new Set<string>();
     pi.on("context", async (event, ctx) => {
         const sessionId = sessionIdFromContext(ctx);
         if (!sessionId) return;
         try {
             const deps = resolveCurrentProjectDeps(ctx);
             const eidnaraFolds = isCompactionEnabled(deps.config);
-            if (eidnaraFolds) additiveSessions.delete(sessionId);
-            else additiveSessions.add(sessionId);
+            taggedSessions.delete(sessionId);
             if (!eidnaraFolds && !deps.projectIdentity) return undefined;
             const model = ctx.model;
             const geometry = model
@@ -607,9 +606,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
                         now: Date.now(),
                     }),
             });
-            return result.messages
-                ? { messages: result.messages as unknown as typeof event.messages }
-                : undefined;
+            if (!result.messages) return undefined;
+            if (piTransform.nativeAuthority(sessionId) !== true) taggedSessions.add(sessionId);
+            return { messages: result.messages as unknown as typeof event.messages };
         } catch (error) {
             warn("context transform declined:", error);
             return undefined;
@@ -988,7 +987,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     const servesTags = (ctx: unknown): boolean => {
         if (compactionOff) return false;
         const sessionId = sessionIdFromContext(ctx);
-        return sessionId === undefined || !additiveSessions.has(sessionId);
+        return sessionId === undefined || taggedSessions.has(sessionId);
     };
     const stripStream = (
         type: string,
@@ -1052,7 +1051,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         checkpointedLeafBySession.delete(sessionId);
         branchIndexes.delete(sessionId);
         piTransform.clearSession(sessionId);
-        additiveSessions.delete(sessionId);
+        taggedSessions.delete(sessionId);
         offered.delete(sessionId);
         refusals.delete(sessionId);
         clearPiSystemPromptSession(sessionId);
