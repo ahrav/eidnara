@@ -306,7 +306,7 @@ mod tests {
             text: output.to_owned(),
         });
         let digest = super::super::output_outcome(&output);
-        assert!(digest.contains(&format!("\"{cause}\"")), "{digest}");
+        assert!(digest.contains(cause), "{digest}");
         assert_eq!(
             classify(&super::super::from_output(&output).1),
             OutputShape::MultiLine

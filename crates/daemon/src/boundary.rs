@@ -3131,7 +3131,7 @@ mod digest_tests {
         chunked_message_estimate(&boundary, start_ordinal, None, 1e9).formatted_blocks
     }
 
-    /// OQ17: the boundary site renders the same digest for a call whose result is in the message set, the bare line for one whose result is not, and no output byte outside the two excerpts (`tool_output_contains_sentinel`), on a message without narrative, one with narrative, and a user message without meaningful text.
+    /// OQ17: the boundary site renders the same digest for a call whose result is in the message set, the bare line for one whose result is not, and, for an output past the whole-output limit, no output byte outside the two excerpts (`a_large_tool_output_reaches_the_fold_input_as_its_bounded_digest`), on a message without narrative, one with narrative, and a user message without meaningful text.
     #[test]
     fn the_boundary_chunk_renders_digests_for_answered_calls() {
         let call = |id: &str, path: &str| BlockKind::ToolCall {
@@ -3140,6 +3140,10 @@ mod digest_tests {
             input: json!({ "filePath": path }),
             provider_executed: false,
         };
+        let text = format!(
+            "fn a() {{}}\nSENTINEL-7f3a\n{}}}\n",
+            "// filler\n".repeat(crate::tool_outcome::WHOLE_OUTPUT_MAX_BYTES / 10)
+        );
         let messages = vec![
             msg(
                 "a1",
@@ -3154,17 +3158,19 @@ mod digest_tests {
                 vec![BlockKind::ToolResult {
                     id: "c1".to_owned(),
                     tool_name: "read".to_owned(),
-                    output: ToolOutput::bare(OutputKind::Text {
-                        text: "fn a() {}\nSENTINEL-7f3a\n}\n".to_owned(),
-                    }),
+                    output: ToolOutput::bare(OutputKind::Text { text: text.clone() }),
                     provider_executed: false,
                 }],
             ),
         ];
         let chunk = boundary_chunk(&messages).join("\n");
+        assert!(!chunk.contains("SENTINEL-7f3a"), "{chunk}");
         let digest = crate::tool_outcome::digest(
             "TC: read(a.rs)",
-            "; completed; bytes=26; head=\"fn a() {}\"; tail=\"}\"",
+            &format!(
+                "; completed; bytes={}; head=\"fn a() {{}}\"; tail=\"}}\"",
+                text.len()
+            ),
         );
         assert!(
             chunk.contains(&format!("TC: read(b.rs) / {digest}")),
@@ -3194,7 +3200,6 @@ mod digest_tests {
         );
         assert!(!chunk.contains("TC: read(b.rs)"), "{chunk}");
         assert!(chunk.contains("TC: read(c.rs)"), "{chunk}");
-        assert!(!chunk.contains("SENTINEL-7f3a"));
         assert!(!chunk.contains("SENTINEL-7f3a"));
     }
 
@@ -3402,7 +3407,7 @@ mod digest_tests {
         let chunk = boundary_chunk(&messages).join("\n");
         assert!(
             chunk.contains(
-                "Read both. / TC: read(one.rs); completed; bytes=5; head=\"first\" / TC: read(two.rs); completed; bytes=6; head=\"second\""
+                "Read both. / TC: read(one.rs); completed; bytes=5; output=\"first\" / TC: read(two.rs); completed; bytes=6; output=\"second\""
             ),
             "{chunk}"
         );
