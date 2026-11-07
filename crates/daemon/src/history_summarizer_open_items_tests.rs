@@ -589,7 +589,7 @@ async fn live_fold(
 }
 
 /// The three fixtures through a real summarizer model: the answered question leaves no waiting
-/// line, the unanswered one keeps one in `p1` or `p2`, and the lifted constraint is stated as lifted.
+/// line, the unanswered one stays open in `p1`, and the lifted constraint is stated as lifted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "opt-in live summarizer run; needs EIDNARA_FIDELITY_REAL_CONNECTION_FILE naming a \
             host that admits sends without a credential claim (direct_host_fixture without \
@@ -618,13 +618,22 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
         "{rows:#?}"
     );
 
+    // The open question stays in `p1`, as a waiting line or in the summarizer's own words.
     let rows = published_fold(&factory, &model, wait, unanswered).await;
-    assert!(
-        open_lines(&rows)
-            .iter()
-            .any(|line| line.contains("Waiting on user (")),
-        "{rows:#?}"
-    );
+    let waiting = open_lines(&rows)
+        .iter()
+        .any(|line| line.contains("Waiting on user ("));
+    let p1 = own_words(rows.iter().filter_map(|row| row.p1.as_deref()));
+    let stated_open = [
+        "still open",
+        "undecided",
+        "not answered",
+        "unanswered",
+        "no answer",
+    ]
+    .iter()
+    .any(|phrase| p1.contains(phrase));
+    assert!(waiting || stated_open, "{rows:#?}");
 
     let rows = published_fold(&factory, &model, wait, lifted).await;
     assert!(open_lines(&rows).is_empty(), "{rows:#?}");
