@@ -618,7 +618,8 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
         "{rows:#?}"
     );
 
-    // The open question stays in `p1`, as a waiting line or in the summarizer's own words.
+    // The open question stays open: a waiting line in a recent tier, or `p1` saying so in the
+    // summarizer's own words.
     let rows = published_fold(&factory, &model, wait, unanswered).await;
     let waiting = open_lines(&rows)
         .iter()

@@ -23,22 +23,24 @@
 //!   settling line for the key and `p2` ends it with one, an open line with that key in any other
 //!   tier gives way to that settling line. A tier that already states the key's outcome just
 //!   loses the open line, and a tier receives each key's outcome once.
-//! - A tier never grows: a copy goes in only while the bytes the tier's removals have freed pay
-//!   for it, so a tier within the durable byte limit stays within it. An open line whose outcome
-//!   the tier cannot afford leaves, except in `p1`, which keeps it so that `p1` never loses an item
-//!   without its outcome.
+//! - A copy goes in only while its tier stays within the durable text bound the store enforces.
+//!   An open line whose outcome the bound leaves no room for leaves, except in `p1`, which keeps
+//!   it so that `p1` never loses an item without its outcome.
 //! - A question asked again in `p1` after its answer stays open, because `p1` decides the outcome.
 //! - Every other line that begins `Waiting on user (` leaves `p3` and `p4`, whatever its key.
 //!   Those tiers render once a segment has aged past its recent tiers, and they carry outcomes.
+//!   A `p3` left empty takes `p2`'s text without its waiting lines, as the parser fills a
+//!   missing tier from the denser one.
 //!
 //! Claim candidates follow the segment whose message their one citation names. A candidate whose
-//! anchor the final `p1` lacks, and that lies in an open line of its key retirement removed from
-//! the segment's `p1` or is itself an open status line of its key, leaves. In a segment that has
-//! an outcome for a key, the key's remaining candidates run in cited-message order, then cited
-//! byte, so claim validation, which keeps the last claim per key, keeps the claim on the latest
-//! message, the user's answer, whatever order the model emitted them in. A question or constraint whose claim has no anchor,
-//! or an anchor elsewhere, stays a candidate; it is the key's stored claim only when every later
-//! claim for the key fails validation.
+//! anchor the final `p1` lacks leaves when the anchor lies in an open line of its key that
+//! retirement removed from the segment's `p1`, or, for a key the segment has an outcome for, is
+//! itself an open status line of the key. In a segment that has an outcome for a key, the key's
+//! remaining candidates run in cited-message order, with candidates on one message in emission
+//! order, so claim validation, which keeps the last claim per key, keeps the claim on the latest
+//! message, normally the user's answer. A question or constraint whose claim has no anchor, or an
+//! anchor elsewhere, stays a candidate; it is the key's stored claim only when every later claim
+//! for the key fails validation.
 //!
 //! An item asked in one segment and settled in a later segment or a later fold is settled by its
 //! claims. The prompt has each status line carry a claim with its key, citing the asking part for a
@@ -51,11 +53,14 @@
 //! line whose claims fail validation stays as written in `p1` and `p2`, and an unsettled constraint
 //! line stays in every tier.
 //!
-//! The pass removes lines, removes and reorders claim candidates, and puts one of the segment's own
-//! settling lines where one open line stood only when its tier stays no longer than the model
-//! wrote it, so the stored summary is bounded by what the model emitted.
+//! The pass removes lines, removes and reorders claim candidates, puts one of the segment's own
+//! settling lines where one open line stood, at most once per key in each tier, and refills an
+//! emptied `p3` from `p2`, so every stored tier holds only text the model wrote for the segment
+//! and stays within the durable text bound.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use memory_store::MAX_DURABLE_TEXT_BYTES;
 
 use crate::history_summarizer_citations::{FrozenAliasTable, is_claim_key, split_citations};
 use crate::history_summarizer_validate::{ParsedHistorySegment, ParsedHistorySegmentOutput};
@@ -178,8 +183,6 @@ fn retire_in_segment(segment: &mut ParsedHistorySegment) -> SegmentRetirement {
         let Some(text) = text.as_mut() else {
             continue;
         };
-        // A tier never grows, so a tier within the durable byte limit stays within it: when the
-        // copied outcomes would make it longer, its open lines leave without a copy.
         let Some((kept, retired)) = retire_tier(text, tier, &outcome) else {
             continue;
         };
@@ -188,13 +191,13 @@ fn retire_in_segment(segment: &mut ParsedHistorySegment) -> SegmentRetirement {
         }
         *text = kept;
     }
-    // A `p2` or `p3` retirement emptied takes its denser tier's text, as the parser fills a
-    // missing tier, so the renderer never shows an empty body for a tier the model wrote.
-    if segment.p2.as_deref().is_some_and(str::is_empty) {
-        segment.p2.clone_from(&segment.p1);
-    }
-    if segment.p3.as_deref().is_some_and(str::is_empty) {
-        segment.p3.clone_from(&segment.p2);
+    // A `p3` that held only aged waiting lines takes `p2`'s text without its waiting lines, as the
+    // parser fills a missing tier from the denser one, so the renderer keeps a body for it.
+    if segment.p3.as_deref().is_some_and(str::is_empty)
+        && let Some(p2) = segment.p2.as_deref()
+    {
+        let refill = retire_tier(p2, 3, &outcome).map_or_else(|| p2.to_owned(), |(kept, _)| kept);
+        segment.p3 = Some(refill);
     }
     if let Some(p1) = &segment.p1 {
         segment.content.clone_from(p1);
@@ -206,11 +209,11 @@ fn retire_in_segment(segment: &mut ParsedHistorySegment) -> SegmentRetirement {
 }
 
 /// `text` of tier `tier` after retirement, and the lines retirement removed or replaced, or `None`
-/// when no line changes. An open line whose key has an outcome gives way to it once per key while
-/// the bytes the tier has freed so far pay for the copy, so the tier never grows past what the
-/// model wrote; an outcome the tier cannot afford removes the open line, except in `p1`, which
-/// keeps the open line so it never loses an item without its outcome. A blank line that would
-/// follow a blank line or open the text after a removal goes with it.
+/// when no line changes. An open line whose key has an outcome gives way to it once per key, while
+/// the tier stays within the durable text bound the store enforces; an outcome the bound leaves no
+/// room for removes the open line, except in `p1`, which keeps it so that `p1` never loses an item
+/// without its outcome. A blank line that would follow a blank line or open the text after a
+/// removal goes with it.
 fn retire_tier(
     text: &str,
     tier: u8,
@@ -220,13 +223,17 @@ fn retire_tier(
     // The keys whose selected outcome line this tier holds, including outcomes it receives below.
     let mut stated: BTreeSet<&str> = outcome
         .iter()
-        .filter(|(_, settling)| lines.iter().any(|line| line.trim() == settling.as_str()))
+        .filter(|(_, settling)| {
+            lines
+                .iter()
+                .any(|line| unbulleted(line).trim_end() == unbulleted(settling))
+        })
         .map(|(key, _)| key.as_str())
         .collect();
     let mut kept: Vec<&str> = Vec::new();
     let mut retired: Vec<String> = Vec::new();
-    // Bytes the removals so far have freed and copies have not spent.
-    let mut freed = 0usize;
+    // The tier's length as it stands after the changes so far.
+    let mut length = text.len();
     for (at, line) in lines.iter().enumerate() {
         let parsed = status_line(line);
         let aged = tier >= 3 && unbulleted(line).starts_with(WAITING_PREFIX);
@@ -239,18 +246,20 @@ fn retire_tier(
                 .and_then(|key| outcome.get_key_value(key))
                 .filter(|_| !settled_below);
             let wanted = copy.filter(|(key, _)| !stated.contains(key.as_str()));
-            let affordable = wanted.filter(|(_, settling)| settling.len() <= line.len() + freed);
-            if wanted.is_some() && affordable.is_none() && tier == 1 {
+            let fits = wanted.filter(|(_, settling)| {
+                length - line.len() + settling.len() <= MAX_DURABLE_TEXT_BYTES
+            });
+            if wanted.is_some() && fits.is_none() && tier == 1 {
                 kept.push(line);
                 continue;
             }
             if settled_below || copy.is_some() || aged {
                 retired.push((*line).to_owned());
-                freed += line.len();
-                if let Some((key, settling)) = affordable {
+                length -= line.len();
+                if let Some((key, settling)) = fits {
                     stated.insert(key);
                     kept.push(settling);
-                    freed -= settling.len();
+                    length += settling.len();
                 }
                 continue;
             }
@@ -264,19 +273,20 @@ fn retire_tier(
     (!retired.is_empty()).then(|| (kept.join("\n").trim().to_owned(), retired))
 }
 
-/// Removes a claim candidate whose one citation names a segment and whose anchor occurs in an open
-/// line of the candidate's own key that retirement removed from that segment's `p1`, and nowhere in
-/// the final `p1`; then orders the remaining candidates of each key a segment settles by the
-/// message their citation names. Every other candidate stays where it stands.
+/// Removes a claim candidate whose one citation names a segment and whose anchor the segment's
+/// final `p1` lacks, when the anchor lies in an open line of the candidate's key that retirement
+/// removed from that `p1` or, for a key the segment has an outcome for, is itself an open status
+/// line of the key; then orders the remaining candidates of each key with an outcome by the message
+/// their citation names, keeping emission order on one message. Every other candidate stays where
+/// it stands.
 fn settle_claims(
     output: &mut ParsedHistorySegmentOutput,
     aliases: &FrozenAliasTable,
     retired: &[SegmentRetirement],
 ) {
     let segments = &output.history_segments;
-    // The segment, ordinal, and cited start byte of a candidate whose one citation names a message
-    // in a segment.
-    let cited: Vec<Option<(usize, u64, usize)>> = output
+    // The segment and ordinal of a candidate whose one citation names a message in a segment.
+    let cited: Vec<Option<(usize, u64)>> = output
         .claims
         .iter()
         .map(|candidate| {
@@ -288,7 +298,7 @@ fn settle_claims(
             let segment = segments
                 .iter()
                 .position(|s| (s.start_message..=s.end_message).contains(&ordinal))?;
-            Some((segment, ordinal, citation.start))
+            Some((segment, ordinal))
         })
         .collect();
     let mut claims = std::mem::take(&mut output.claims);
@@ -301,12 +311,13 @@ fn settle_claims(
         // An anchor the final `p1` no longer holds that lies in a retired open line of the key, or
         // is itself an open status line of the key, belongs to a question or constraint the segment
         // no longer states.
+        let settles_key = retired[segment].settled.contains(&candidate.key);
         keep[at] = !candidate.anchor.as_deref().is_some_and(|anchor| {
             let open_of_key =
                 |line: &str| status_line(line) == Some((Status::Open, candidate.key.as_str()));
             !anchor.trim().is_empty()
                 && !final_p1.contains(anchor)
-                && (open_of_key(anchor)
+                && ((settles_key && open_of_key(anchor))
                     || retired[segment]
                         .retired_from_p1
                         .iter()
@@ -330,10 +341,7 @@ fn settle_claims(
     let mut arranged: Vec<usize> = (0..claims.len()).collect();
     for positions in slots.values() {
         let mut by_message = positions.clone();
-        by_message.sort_by_key(|&at| {
-            let (_, ordinal, start) = cited[at].expect("a slot names a cited candidate");
-            (ordinal, start)
-        });
+        by_message.sort_by_key(|&at| cited[at].expect("a slot names a cited candidate").1);
         for (&slot, &from) in positions.iter().zip(&by_message) {
             arranged[slot] = from;
         }
@@ -354,7 +362,7 @@ fn settle_claims(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history_summarizer_citations::{CLAIM_ANCHOR_MAX_BYTES, ClaimCandidate};
+    use crate::history_summarizer_citations::ClaimCandidate;
 
     fn segment(p1: &str, p2: &str, p3: &str, p4: &str) -> ParsedHistorySegment {
         ParsedHistorySegment {
@@ -528,53 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tier_never_grows_so_a_longer_outcome_replaces_nothing() {
-        let p1 =
-            "Constraint (c.d): no.\nLifted (c.d): the user now wants each bug fixed in its own PR.";
-        let [p1_after, p2, _, p4] = retired(vec![segment(
-            p1,
-            "Short.\nConstraint (c.d): no.",
-            "Done.",
-            "Constraint (c.d): no.",
-        )])
-        .remove(0);
-        assert_eq!(
-            p1_after,
-            "Lifted (c.d): the user now wants each bug fixed in its own PR."
-        );
-        // Each copy would lengthen its tier, so the open line leaves without one.
-        assert_eq!(p2, "Short.");
-        assert_eq!(p4, "");
-    }
-
-    #[test]
-    fn p1_keeps_its_open_line_when_p2s_longer_outcome_does_not_fit() {
-        let p1 = "Waiting on user (a.b): ask?";
-        let [p1_after, ..] = retired(vec![segment(
-            p1,
-            "Waiting on user (a.b): ask?\nDecided (a.b): the user chose the longer option.",
-            "Done.",
-            "",
-        )])
-        .remove(0);
-        assert_eq!(p1_after, p1);
-    }
-
-    #[test]
-    fn bytes_one_removal_frees_pay_for_a_later_longer_copy() {
-        let long = format!("Decided (c.d): {}", "y".repeat(CLAIM_ANCHOR_MAX_BYTES));
-        let p1 = format!("Decided (a.b): ok.\n{long}");
-        let p2 = format!(
-            "Waiting on user (a.b): {}\nWaiting on user (c.d): ask?",
-            "q".repeat(CLAIM_ANCHOR_MAX_BYTES + 40)
-        );
-        let [_, p2_after, ..] = retired(vec![segment(&p1, &p2, "Done.", "")]).remove(0);
-        assert_eq!(p2_after, format!("Decided (a.b): ok.\n{long}"));
-        assert!(p2_after.len() <= p2.len());
-    }
-
-    #[test]
-    fn a_copied_outcome_keeps_its_bullet_and_an_emptied_p2_takes_p1() {
+    fn a_copied_outcome_keeps_its_bullet_and_may_be_longer_than_the_open_line() {
         let [p1, p2, ..] = retired(vec![segment(
             "Worked.\n- Waiting on user (a.b): ask?",
             "- Waiting on user (a.b): ask?\n- Decided (a.b): yes.",
@@ -585,22 +547,52 @@ mod tests {
         assert_eq!(p1, "Worked.\n- Decided (a.b): yes.");
         assert_eq!(p2, "- Decided (a.b): yes.");
         let [_, p2, ..] = retired(vec![segment(
-            "Worked.\nWaiting on user (a.b): ask?\nDecided (a.b): yes.",
-            "Waiting on user (a.b): ask?",
+            "Waiting on user (a.b): ask?\nDecided (a.b): yes.",
+            "- Decided (a.b): yes.\nMore.\nWaiting on user (a.b): ask?",
             "Done.",
             "",
         )])
         .remove(0);
-        assert_eq!(p2, "Decided (a.b): yes.");
-        let [p1, p2, ..] = retired(vec![segment(
+        // The tier already states the outcome under a bullet, so it gets no second copy.
+        assert_eq!(p2, "- Decided (a.b): yes.\nMore.");
+        let [_, p2, ..] = retired(vec![segment(
             "Worked.\nConstraint (c.d): no.\nLifted (c.d): every bug gets its own PR now.",
             "Constraint (c.d): no.",
             "Done.",
             "",
         )])
         .remove(0);
-        // The longer outcome does not fit, the open line leaves, and the empty p2 takes p1's text.
-        assert_eq!(p2, p1);
+        // An outcome longer than the open line it replaces is copied all the same.
+        assert_eq!(p2, "Lifted (c.d): every bug gets its own PR now.");
+    }
+
+    #[test]
+    fn a_p3_of_only_aged_waiting_lines_takes_p2_without_its_waiting_lines() {
+        let [_, _, p3, _] = retired(vec![segment(
+            "Moved the plugin.\nWaiting on user (a.b): publish?",
+            "Moved the plugin.\nWaiting on user (a.b): publish?",
+            "Waiting on user (a.b): publish?",
+            "",
+        )])
+        .remove(0);
+        assert_eq!(p3, "Moved the plugin.");
+    }
+
+    #[test]
+    fn an_outcome_past_the_durable_text_bound_is_not_copied() {
+        let filler = "x".repeat(MAX_DURABLE_TEXT_BYTES - 40);
+        let p1 = format!("{filler}\nWaiting on user (a.b): ask?");
+        let [p1_after, p2, ..] = retired(vec![segment(
+            &p1,
+            &format!("{filler}\nWaiting on user (a.b): ask?\nDecided (a.b): the user chose the longer option."),
+            "Done.",
+            "",
+        )])
+        .remove(0);
+        // `p1` keeps its question rather than lose it without its outcome.
+        assert_eq!(p1_after, p1);
+        assert!(p2.ends_with("Decided (a.b): the user chose the longer option."));
+        assert!(p2.len() <= MAX_DURABLE_TEXT_BYTES + 60);
     }
 
     #[test]
@@ -741,7 +733,7 @@ mod tests {
         // In the second segment, the claim anchored only on the retired `c.d` question leaves, and so
         // does a `g.h` claim anchored on an open line the segment never states; one
         // whose anchor the final `p1` still holds stays, and each settled key's other claims run
-        // in message order, then cited byte, whatever their anchors. `x.y` names another key, so its claim anchored
+        // in message order, with claims on one message in emission order, whatever their anchors. `x.y` names another key, so its claim anchored
         // on the retired line stays, and as an unsettled key its claims keep emission order. The
         // first segment settles nothing, so its claim stays, and so does the two-cite claim.
         assert_eq!(
@@ -754,8 +746,8 @@ mod tests {
                 ("c.d", "[s4:0-1]"),
                 ("c.d", "[s5:0-1]"),
                 ("c.d", "[s6:0-1]"),
-                ("a.b", "[s5:0-1]"),
                 ("a.b", "[s5:2-3]"),
+                ("a.b", "[s5:0-1]"),
                 ("x.y", "[s4:0-1]"),
                 ("x.y", "[s3:0-1]"),
                 ("a.b", "[s2:0-1]"),
