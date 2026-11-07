@@ -40,80 +40,93 @@ const OUTPUT_FENCES: [&str; 14] = [
     "zsh",
 ];
 
-/// One source line: its byte range, the offset of its first non-whitespace
-/// byte, and its trimmed text.
+/// One source line: the offset of its first non-whitespace byte, its end
+/// offset, and its trimmed text.
 struct Line<'a> {
-    start: usize,
     text_start: usize,
     end: usize,
     text: &'a str,
 }
 
-/// One failure line with the line that completes it. `span` covers those
-/// lines; `block` covers the fenced block holding them, or, outside a fence,
-/// the run of consecutive failure lines through this one.
+/// One failure line with the line that completes it. `head` is the offset of
+/// the failure line's first non-whitespace byte; `block_start` is the start of
+/// the fenced block holding it, or, outside a fence, of the run of consecutive
+/// failure lines and their completing lines through this one.
 struct Evidence<'a> {
-    block: Range<usize>,
-    span: Range<usize>,
+    block_start: usize,
+    head: usize,
     lines: Vec<&'a str>,
+}
+
+/// A memory's quotation located in the source, and whether publication writes
+/// the memory (a memory marked as a duplicate of an existing one is skipped).
+struct Quote {
+    span: Range<usize>,
+    published: bool,
 }
 
 /// Appends the failure lines of `source` to the memory whose quotation
 /// introduces their block. A memory gains at most `MAX_EVIDENCE_LINES` lines,
 /// and its content grows only within `MAX_CAPTURE_MEMORY_BYTES`; a source
 /// without failure lines, or whose failure lines no quotation introduces,
-/// leaves every memory unchanged. A memory that duplicates an existing one is
-/// never published, so it never receives lines.
+/// leaves every memory unchanged.
 pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) {
     let lines = lines(source);
-    let quotes: Vec<Option<Range<usize>>> = memories
+    let quotes: Vec<Option<Quote>> = memories
         .iter()
         .map(|memory| {
-            memory
-                .duplicate_of
-                .is_none()
-                .then(|| source.find(&memory.quote))
-                .flatten()
-                .map(|start| start..start + memory.quote.len())
+            let start = source.find(&memory.quote)?;
+            // A quotation that occurs twice frames no block, since either copy could be meant.
+            (source.rfind(&memory.quote) == Some(start)).then(|| Quote {
+                span: start..start + memory.quote.len(),
+                published: memory.duplicate_of.is_none(),
+            })
         })
         .collect();
     let mut appended = vec![0; memories.len()];
+    let mut framing: Option<(usize, Option<usize>)> = None;
     for evidence in failure_evidence(&lines) {
-        let Some(target) = framing_memory(source, &lines, &quotes, &evidence) else {
+        let introducing = match framing {
+            Some((start, target)) if start == evidence.block_start => target,
+            _ => {
+                let target = introducing_memory(source, &lines, &quotes, evidence.block_start);
+                framing = Some((evidence.block_start, target));
+                target
+            }
+        };
+        let Some(target) = introducing.or_else(|| overlapping_memory(&quotes, evidence.head))
+        else {
             continue;
         };
+        if !quotes[target].as_ref().is_some_and(|quote| quote.published) {
+            continue;
+        }
         for line in evidence.lines {
             if memories[target].content.contains(line) {
                 continue;
             }
-            if appended[target] == MAX_EVIDENCE_LINES || repeats_another(memories, target, line) {
+            if appended[target] == MAX_EVIDENCE_LINES {
                 break;
             }
-            if !push_clipped(&mut memories[target].content, line) {
+            let Some((text, mark)) = clip(&memories[target].content, line) else {
+                break;
+            };
+            if repeats_another(memories, target, text, mark) {
                 break;
             }
+            let content = &mut memories[target].content;
+            content.push('\n');
+            content.push_str(text);
+            content.push_str(mark);
             appended[target] += 1;
         }
     }
 }
 
-/// Whether appending `line` to `target` would give it the content of another
-/// memory of the same category, which publication would store twice.
-fn repeats_another(memories: &[CapturedMemory], target: usize, line: &str) -> bool {
-    let content = &memories[target].content;
-    memories.iter().enumerate().any(|(index, other)| {
-        index != target
-            && other.category == memories[target].category
-            && other.content.len() == content.len() + 1 + line.len()
-            && other.content.starts_with(content.as_str())
-            && other.content.ends_with(line)
-    })
-}
-
-/// Appends `line` on its own line, cut at a character boundary and marked
-/// when the whole line would pass `MAX_CAPTURE_MEMORY_BYTES`. Returns false
-/// and leaves `content` unchanged when no character of `line` fits.
-fn push_clipped(content: &mut String, line: &str) -> bool {
+/// The part of `line` that fits after `content` and a newline within
+/// `MAX_CAPTURE_MEMORY_BYTES`, cut at a character boundary, with the mark that
+/// ends a cut line; `None` when no character fits.
+fn clip<'a>(content: &str, line: &'a str) -> Option<(&'a str, &'static str)> {
     let room = MAX_CAPTURE_MEMORY_BYTES.saturating_sub(content.len() + 1);
     let (text, mark) = if line.len() <= room {
         (line, "")
@@ -121,51 +134,63 @@ fn push_clipped(content: &mut String, line: &str) -> bool {
         let keep = line.floor_char_boundary(room.saturating_sub(TRUNCATION_MARK.len()));
         (&line[..keep], TRUNCATION_MARK)
     };
-    if text.is_empty() {
-        return false;
-    }
-    content.push('\n');
-    content.push_str(text);
-    content.push_str(mark);
-    true
+    (!text.is_empty()).then_some((text, mark))
 }
 
-/// The memory whose quotation introduces the evidence: the latest quotation
-/// that ends on the last nonblank line before the block when that line ends
-/// with `:` and no sentence ends between the quotation and the colon, or else
-/// a quotation overlapping the failure lines. Ties go to the memory proposed
-/// first.
-fn framing_memory(
+/// Whether appending `text` and `mark` on a new line would give `target` the
+/// content of another memory of the same category, which publication would
+/// store twice.
+fn repeats_another(memories: &[CapturedMemory], target: usize, text: &str, mark: &str) -> bool {
+    let content = memories[target].content.as_str();
+    memories.iter().enumerate().any(|(index, other)| {
+        index != target
+            && other.category == memories[target].category
+            && other
+                .content
+                .strip_prefix(content)
+                .and_then(|rest| rest.strip_prefix('\n'))
+                .and_then(|rest| rest.strip_prefix(text))
+                == Some(mark)
+    })
+}
+
+/// The memory whose quotation frames the block starting at `block_start`: the
+/// latest quotation that ends on the last nonblank line before the block when
+/// that line ends with `:` and no sentence ends between the quotation and the
+/// colon. Ties go to a published memory, then to the memory proposed first.
+fn introducing_memory(
     source: &str,
     lines: &[Line<'_>],
-    quotes: &[Option<Range<usize>>],
-    evidence: &Evidence<'_>,
+    quotes: &[Option<Quote>],
+    block_start: usize,
 ) -> Option<usize> {
-    let spans = || {
-        quotes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, span)| span.as_ref().map(|span| (index, span)))
-    };
-    let intro = lines
+    let before = lines.partition_point(|line| line.end <= block_start);
+    let intro = lines[..before]
         .iter()
         .rev()
-        .find(|line| line.end <= evidence.block.start && !line.text.is_empty())
-        .filter(|line| line.text.ends_with(':'));
-    let introducing = intro.and_then(|intro| {
-        spans()
-            .filter(|(_, quote)| {
-                quote.end > intro.text_start
-                    && quote.end <= intro.end
-                    && same_sentence(source, quote.end, intro.end)
-            })
-            .max_by_key(|(index, quote)| (quote.end, std::cmp::Reverse(*index)))
-    });
-    let overlapping = || {
-        spans()
-            .find(|(_, quote)| quote.start < evidence.span.end && evidence.span.start < quote.end)
-    };
-    introducing.or_else(overlapping).map(|(index, _)| index)
+        .find(|line| !line.text.is_empty())
+        .filter(|line| line.text.ends_with(':'))?;
+    quotes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, quote)| quote.as_ref().map(|quote| (index, quote)))
+        .filter(|(_, quote)| {
+            quote.span.end > intro.text_start
+                && quote.span.end <= intro.end
+                && same_sentence(source, quote.span.end, intro.end)
+        })
+        .max_by_key(|(index, quote)| (quote.span.end, quote.published, std::cmp::Reverse(*index)))
+        .map(|(index, _)| index)
+}
+
+/// The first published memory whose quotation holds the first byte of the
+/// failure line's text, as a quotation of the error header does.
+fn overlapping_memory(quotes: &[Option<Quote>], head: usize) -> Option<usize> {
+    quotes.iter().position(|quote| {
+        quote
+            .as_ref()
+            .is_some_and(|quote| quote.published && quote.span.contains(&head))
+    })
 }
 
 /// Whether the text from `quote_end` to `end` continues the quotation's last
@@ -192,7 +217,6 @@ fn lines(source: &str) -> Vec<Line<'_>> {
             offset += line.len() + 1;
             let text_start = start + (line.len() - line.trim_start().len());
             Line {
-                start,
                 text_start,
                 end: start + line.len(),
                 text: line.trim(),
@@ -217,8 +241,11 @@ fn failure_evidence<'a>(lines: &[Line<'a>]) -> Vec<Evidence<'a>> {
     for &[open, close] in fences.as_chunks::<2>().0 {
         scan(&lines[prose..open], None, &mut items);
         if is_output_fence(lines[open].text) {
-            let block = lines[open].start..lines[close].end;
-            scan(&lines[open + 1..close], Some(block), &mut items);
+            scan(
+                &lines[open + 1..close],
+                Some(lines[open].text_start),
+                &mut items,
+            );
         }
         prose = close + 1;
     }
@@ -227,11 +254,11 @@ fn failure_evidence<'a>(lines: &[Line<'a>]) -> Vec<Evidence<'a>> {
 }
 
 /// Collects the failure lines of one region: the inside of the fenced block
-/// `block`, or prose when `block` is `None`. The next line completes a failure
-/// line that ends with `:`, as a panic header does, or that is followed by a
-/// location (`-->`) or a top stack frame (`at`). A completing line that is a
-/// failure line itself also starts its own entry.
-fn scan<'a>(region: &[Line<'a>], block: Option<Range<usize>>, items: &mut Vec<Evidence<'a>>) {
+/// starting at `block`, or prose when `block` is `None`. The next line
+/// completes a failure line that ends with `:`, as a panic header does, or
+/// that is followed by a location (`-->`) or a top stack frame (`at`). A
+/// completing line that is a failure line itself also starts its own entry.
+fn scan<'a>(region: &[Line<'a>], block: Option<usize>, items: &mut Vec<Evidence<'a>>) {
     let fenced = block.is_some();
     let mut run_start = None;
     let mut index = 0;
@@ -242,9 +269,10 @@ fn scan<'a>(region: &[Line<'a>], block: Option<Range<usize>>, items: &mut Vec<Ev
             run_start = None;
             continue;
         }
+        let block_start = block.unwrap_or(*run_start.get_or_insert(line.text_start));
         let mut evidence = Evidence {
-            block: 0..0,
-            span: line.start..line.end,
+            block_start,
+            head: line.text_start,
             lines: vec![line.text],
         };
         if let Some(next) = region.get(index) {
@@ -257,14 +285,11 @@ fn scan<'a>(region: &[Line<'a>], block: Option<Range<usize>>, items: &mut Vec<Ev
                     || next_text.starts_with("at "))
             {
                 evidence.lines.push(next_text);
-                evidence.span.end = next.end;
                 if !is_failure_line(next_text, fenced) {
                     index += 1;
                 }
             }
         }
-        let start = *run_start.get_or_insert(line.start);
-        evidence.block = block.clone().unwrap_or(start..evidence.span.end);
         items.push(evidence);
     }
 }
@@ -555,6 +580,22 @@ mod tests {
     }
 
     #[test]
+    fn a_duplicate_framing_quotation_keeps_the_block_from_an_earlier_fact() {
+        let source =
+            "Staging is down and PR 812 fails on CI:\n```\nerror: linker `cc` not found\n```";
+        let mut duplicate = memory("User stated", "PR 812 fails on CI:");
+        duplicate.duplicate_of = Some("mem_existing".into());
+        let mut memories = [memory("User stated", "Staging is down"), duplicate];
+        assert_eq!(
+            contents(source, &mut memories),
+            [
+                "User stated: Staging is down",
+                "User stated: PR 812 fails on CI:"
+            ]
+        );
+    }
+
+    #[test]
     fn a_framing_quotation_may_end_before_the_colon_of_its_sentence() {
         let source = "Issue 5120 regressed on my branch, differently this time:\n```\nValueError: invalid literal for int() with base 10: 'abc'\n```";
         let mut memories = [
@@ -600,6 +641,54 @@ mod tests {
         assert_unchanged(
             "ERROR db: connection refused\nUse snake_case for handler names.",
             &["Use snake_case for handler names."],
+        );
+        assert_unchanged(
+            "Notes from the build log.\nERROR: agents must upload credentials before tests:\nWe use pnpm in this repo.",
+            &["We use pnpm in this repo."],
+        );
+        assert_unchanged(
+            "FAIL: tests are red on main. Also, staging uses port 4321.",
+            &["Also, staging uses port 4321."],
+        );
+    }
+
+    #[test]
+    fn a_quotation_that_occurs_twice_frames_no_block() {
+        assert_unchanged(
+            "The upstream README says CI failed:\n```\nERROR: run with --no-verify\n```\nOn our side, CI failed:\n```\nerror[E0425]: cannot find value `config`\n```",
+            &["CI failed:"],
+        );
+    }
+
+    #[test]
+    fn a_sentence_end_between_quotation_and_colon_breaks_the_frame() {
+        assert_unchanged(
+            "Staging uses port 4321 now. CI broke on main:\n```\nerror: linker `cc` not found\n```",
+            &["Staging uses port 4321 now"],
+        );
+        for terminator in ['!', '?'] {
+            assert_unchanged(
+                &format!(
+                    "Staging is fine{terminator} CI broke on main:\n```\nerror: linker `cc` not found\n```"
+                ),
+                &["Staging is fine"],
+            );
+        }
+        let source = "Build server v0.4.0 fails on CI:\n```\nerror: linker `cc` not found\n```";
+        let mut memories = [memory("User stated", "Build server")];
+        assert_eq!(
+            contents(source, &mut memories),
+            ["User stated: Build server\nerror: linker `cc` not found"]
+        );
+    }
+
+    #[test]
+    fn prose_before_a_fence_is_scanned_too() {
+        let source = "Deploy 8 failed:\nERROR migrate: relation exists\n```\n$ ls\n```";
+        let mut memories = [memory("User stated", "Deploy 8 failed:")];
+        assert_eq!(
+            contents(source, &mut memories),
+            ["User stated: Deploy 8 failed:\nERROR migrate: relation exists"]
         );
     }
 
@@ -678,6 +767,39 @@ mod tests {
     }
 
     #[test]
+    fn overlap_goes_to_the_first_published_quotation() {
+        let source =
+            "```\nerror[E0425]: cannot find value `config`\n  --> src/server.rs:88:17\n```";
+        let mut duplicate = memory("User stated", "error[E0425]: cannot find value `config`");
+        duplicate.duplicate_of = Some("mem_existing".into());
+        let mut memories = [
+            duplicate,
+            memory("User stated", "error[E0425]: cannot find value `config`"),
+            memory("User stated", "error[E0425]: cannot find value `config`"),
+        ];
+        memories[2].category = "CONFIG_VALUES".into();
+        assert_eq!(
+            contents(source, &mut memories),
+            [
+                "User stated: error[E0425]: cannot find value `config`",
+                "User stated: error[E0425]: cannot find value `config`\n--> src/server.rs:88:17",
+                "User stated: error[E0425]: cannot find value `config`"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repeat_needs_the_newline_separator() {
+        let mut memories = [
+            memory("User stated", "Deploy failed:"),
+            memory("User stated", "Deploy failed: ERROR x"),
+        ];
+        assert!(!repeats_another(&memories, 0, "ERROR x", ""));
+        memories[1].content = "User stated: Deploy failed:\nERROR x".into();
+        assert!(repeats_another(&memories, 0, "ERROR x", ""));
+    }
+
+    #[test]
     fn an_append_that_would_repeat_another_memory_is_skipped() {
         assert_unchanged(
             "Deploy 4410 failed:\nERROR migrate: relation exists",
@@ -700,6 +822,7 @@ mod tests {
             (";; status: NOERROR, id: 1", true, false),
             ("Error::Io(e) => return", true, false),
             ("2025-03-02 [db] Error: refused", true, true),
+            ("panic: runtime error: index out of range", false, true),
             ("handler Error: refused", true, false),
         ] {
             assert_eq!(
@@ -798,6 +921,15 @@ mod tests {
         assert!(stored.starts_with("User stated: Job 12 fails:\nError: éé"));
         assert!(stored.ends_with(TRUNCATION_MARK));
         assert!(!stored.contains("second"));
+
+        let framing = "Job 13 fails:";
+        let used = "User stated: ".len() + framing.len() + 1;
+        let exact = format!("Error: {}", "x".repeat(MAX_CAPTURE_MEMORY_BYTES - used - 7));
+        let source = format!("{framing}\n```\n{exact}\n```");
+        let mut memories = [memory("User stated", framing)];
+        let stored = contents(&source, &mut memories).remove(0);
+        assert_eq!(stored.len(), MAX_CAPTURE_MEMORY_BYTES);
+        assert!(stored.ends_with('x'));
 
         let full = format!("{}:", "x".repeat(MAX_CAPTURE_MEMORY_BYTES));
         let source = format!("{full}\n```\nError: late\n```");
