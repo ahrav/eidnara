@@ -503,9 +503,9 @@ const LIVE_WAIT_SECONDS: &str = "EIDNARA_FIDELITY_REAL_WAIT_SECONDS";
 
 /// Folds the fixture through a real summarizer model until a published row covers message
 /// `covers`, at most twice, and returns the rows that do. A model answer the validator rejects as
-/// a whole publishes nothing, and validation discards a provisional last segment that ends next to
-/// the chunk's end; either leaves the fixture's answer raw, and the second fold gives the model
-/// one more answer.
+/// a whole publishes nothing, and validation can discard a provisional last segment that ends next
+/// to the chunk's end; when no published row covers the answer, the second fold gives the model one
+/// more answer. A row that ends before the answer holds the item open for its own span.
 async fn published_fold(
     factory: &Arc<RealHistorySummarizerProducerFactory>,
     model: &str,

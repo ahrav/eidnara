@@ -36,8 +36,8 @@
 //! retirement removed from the segment's `p1`, or, for a key the segment has an outcome for, is
 //! itself an open status line of the key. In a segment that has an outcome for a key, the key's
 //! remaining candidates run in cited-message order, with candidates on one message in emission
-//! order, so claim validation, which keeps the last claim per key, keeps the claim on the latest
-//! message, normally the user's answer. A question or constraint whose claim has no anchor, or an
+//! order, so the claim on the latest message, normally the user's answer, is the last one claim
+//! validation judges and the one it keeps when that claim is valid. A question or constraint whose claim has no anchor, or an
 //! anchor elsewhere, stays a candidate; it is the key's stored claim only when every later claim
 //! for the key fails validation.
 //!
@@ -55,7 +55,7 @@
 //! The pass removes lines, removes and reorders claim candidates, puts one of the segment's own
 //! settling lines where one open line stood, at most once per key in each tier, and refills a `p3`
 //! it emptied from `p2`, so every line it adds is a line the model wrote for the segment, and no
-//! copy takes a tier past the durable text bound.
+//! outcome copy takes a tier past the durable text bound.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -210,9 +210,8 @@ fn retire_in_segment(segment: &mut ParsedHistorySegment) -> SegmentRetirement {
 /// `text` of tier `tier` after retirement, and the lines retirement removed or replaced, or `None`
 /// when no line changes. `tier` selects the rules: tiers 3 and 4 also drop every `Waiting on user (`
 /// line. An open line whose key has an outcome gives way to it once per key while the tier stays
-/// within the durable text bound the store enforces, and leaves without a copy otherwise; a tier
-/// that close to the bound holds far more than the open line, so it never empties. A blank line
-/// that would follow a blank line or open the text after a removal goes with it.
+/// within the durable text bound the store enforces, and leaves without a copy otherwise. A blank
+/// line that would follow a blank line or open the text after a removal goes with it.
 fn retire_tier(
     text: &str,
     tier: u8,
@@ -244,13 +243,13 @@ fn retire_tier(
             let copy = key
                 .and_then(|key| outcome.get_key_value(key))
                 .filter(|_| !settled_below);
-            let wanted = copy.filter(|(key, _)| !stated.contains(key.as_str()));
-            let fits = wanted.filter(|(_, settling)| {
-                length - line.len() + settling.len() <= MAX_DURABLE_TEXT_BYTES
-            });
             if settled_below || copy.is_some() || aged {
                 retired.push((*line).to_owned());
                 length -= line.len();
+                let fits = copy.filter(|(key, settling)| {
+                    !stated.contains(key.as_str())
+                        && length + settling.len() <= MAX_DURABLE_TEXT_BYTES
+                });
                 if let Some((key, settling)) = fits {
                     stated.insert(key);
                     kept.push(settling);
@@ -584,13 +583,15 @@ mod tests {
         // that close to the bound, still holds its other text.
         assert_eq!(p1_after, filler);
         assert_eq!(p2_after, format!("Short.\n{settling}"));
-        let fitting = format!(
-            "{}\nWaiting on user (a.b): ask?",
-            "x".repeat(MAX_DURABLE_TEXT_BYTES - 100)
+        // A copy that brings the tier to exactly the bound goes in.
+        let open = "Waiting on user (a.b): ask?";
+        let exact = format!(
+            "{}\n{open}",
+            "x".repeat(MAX_DURABLE_TEXT_BYTES - 1 - settling.len())
         );
-        let [p1_after, ..] = retired(vec![segment(&fitting, &p2, "Done.", "")]).remove(0);
+        let [p1_after, ..] = retired(vec![segment(&exact, &p2, "Done.", "")]).remove(0);
         assert!(p1_after.ends_with(settling));
-        assert!(p1_after.len() <= MAX_DURABLE_TEXT_BYTES);
+        assert_eq!(p1_after.len(), MAX_DURABLE_TEXT_BYTES);
     }
 
     #[test]
@@ -654,6 +655,10 @@ mod tests {
         retire_settled_lines(&mut output, &aliases);
         // The segment has no outcome for `a.b`, so the open item's claim stays.
         assert_eq!(output.claims.len(), 1);
+        // With an outcome for the key, the same unstated open-line claim leaves.
+        output.history_segments[0].p1 = Some("Decided (a.b): publish now.".into());
+        retire_settled_lines(&mut output, &aliases);
+        assert_eq!(output.claims.len(), 0);
     }
 
     #[test]
