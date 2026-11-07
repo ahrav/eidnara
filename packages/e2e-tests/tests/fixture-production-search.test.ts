@@ -253,6 +253,8 @@ describe.skipIf(!PAYLOAD_DIR)("direct-host fixture with the production search ro
         async () => {
             const arms = { legacy: legacy as Arm, production: production as Arm };
             const ranks = { legacy: [] as (number | null)[], production: [] as (number | null)[] };
+            // The embedding lane ranks rows for paraphrases; a route serving lexical and exact lanes alone would leave this at zero.
+            let denseRanked = 0;
             for (const [question, target] of QUESTIONS) {
                 for (const name of ["legacy", "production"] as const) {
                     const arm = arms[name];
@@ -260,6 +262,9 @@ describe.skipIf(!PAYLOAD_DIR)("direct-host fixture with the production search ro
                     expect(result.includes(FALLBACK)).toBe(name === "legacy");
                     const rank = rankedIds(result).indexOf(arm.ids[target] as string);
                     ranks[name].push(rank < 0 ? null : rank + 1);
+                    if (name === "production" && / match=fused lanes=[a-z,]*dense/.test(result)) {
+                        denseRanked += 1;
+                    }
                 }
             }
             const report = {
@@ -278,6 +283,7 @@ describe.skipIf(!PAYLOAD_DIR)("direct-host fixture with the production search ro
             console.log(`[paraphrase-recall] ${JSON.stringify(report)}`);
             expect(report.production.recall_at_10).toBeGreaterThan(report.legacy.recall_at_10);
             expect(report.production.recall_at_5).toBeGreaterThan(report.legacy.recall_at_5);
+            expect(denseRanked).toBeGreaterThan(0);
         },
         SUITE_TIMEOUT_MS,
     );

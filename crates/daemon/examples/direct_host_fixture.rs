@@ -24,7 +24,7 @@ mod eval_cassette;
 #[cfg(all(unix, not(target_os = "macos")))]
 #[path = "../src/bin/eidnara_host/payload_local_embeddings.rs"]
 mod payload_local_embeddings;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[path = "../tests/support/projection_gate.rs"]
 #[allow(dead_code)]
 mod projection_gate;
@@ -38,7 +38,7 @@ mod publish;
 #[cfg(unix)]
 #[path = "direct_host_fixture/review_witness.rs"]
 mod review_witness;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[path = "search_admission_records/records.rs"]
 mod search_admission;
 #[cfg(unix)]
@@ -1416,11 +1416,13 @@ mod unix {
         ))
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[derive(Deserialize)]
     struct PayloadManifest {
         files: Vec<PayloadFile>,
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[derive(Deserialize)]
     struct PayloadFile {
         path: String,

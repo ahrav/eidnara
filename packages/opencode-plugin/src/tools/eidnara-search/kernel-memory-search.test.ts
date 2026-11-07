@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Deadline } from "../../shared/host-client";
 import { KernelClient, MAX_READ_OBJECT_IDS, type ReadRow } from "../../shared/kernel-client";
 import {
     ANTI_MEMORY_CATEGORY,
@@ -578,6 +579,56 @@ describe("scanSnapshotForLexicalSearch", () => {
         expect(reads.map((args) => (args as { gated: boolean }).gated)).toEqual([true, false]);
     });
 
+    test("keeps the first page's cancellation as the search's state", async () => {
+        const { client } = twoPageClient({ state: { kind: "cancelled" } });
+        expect(await scanWith(client)).toEqual({ ok: false, state: { kind: "cancelled" } });
+    });
+
+    test("passes one deadline's remainder to every page", async () => {
+        const { client, reads } = twoPageClient({
+            state: { kind: "available" },
+            known_as_of: 9,
+            tip: 9,
+            gated: false,
+            truncated: false,
+            rows: [],
+        });
+        await scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated: false,
+            query: "backup",
+            limit: 10,
+            nowMs: 0,
+            deadline: Deadline.start(60_000),
+        });
+        const budgets = reads.map((args) => (args as { deadlineMs?: number }).deadlineMs);
+        expect(budgets).toHaveLength(2);
+        for (const budget of budgets) expect(budget).toBeLessThanOrEqual(60_000);
+        expect(budgets[1] as number).toBeLessThanOrEqual(budgets[0] as number);
+    });
+
+    test("continues inside one commit: a later page may start with that commit's greater ids", async () => {
+        const sibling = readRow({
+            objectId: OBJECT_B,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 5,
+        });
+        const { client } = twoPageClient({
+            state: { kind: "available" },
+            known_as_of: 9,
+            tip: 9,
+            gated: false,
+            truncated: false,
+            rows: [sibling],
+        });
+        const scan = await scanWith(client);
+        expect(scan.ok && scan.truncated).toBe(false);
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id).sort()).toEqual([OBJECT_A, OBJECT_B]);
+    });
+
     test("stops as partial when a later page answers another snapshot", async () => {
         const moved = readRow({
             objectId: OBJECT_B,
@@ -618,5 +669,88 @@ describe("scanSnapshotForLexicalSearch", () => {
         expect(scan.ok && scan.truncated).toBe(true);
         if (!scan.ok) return;
         expect(scan.rows.map((row) => row.object.object_id)).toEqual([OBJECT_A]);
+    });
+});
+
+describe("scanSnapshotForLexicalSearch over several pages", () => {
+    const NOW = 1_700_000_000_000;
+
+    test("ranks as one search over every row: strong hits on the newest and oldest pages both stay", async () => {
+        const { kernel, target } = storeLargerThanOnePage(450);
+        const newest = `mem_${"e".repeat(32)}`;
+        kernel.seedDecision({
+            object_id: newest,
+            decision_kind: "PROJECT_RULES",
+            summary: "The nightly backup job keeps database dumps for thirty days.",
+        });
+        kernel.readRowCap = 100;
+        const paged = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(paged.ok && !paged.truncated).toBe(true);
+        if (!paged.ok) return;
+        const pagedHits = searchKernelMemoryRows({
+            rows: paged.rows,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        kernel.readRowCap = null;
+        const whole = await clientOver(new FakeKernelTransport(kernel)).read({
+            surface: "explicit_search",
+        });
+        if (whole.state.kind !== "available") throw new Error("uncapped read unavailable");
+        const wholeHits = searchKernelMemoryRows({
+            rows: (whole as { rows: ReadRow[] }).rows,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(pagedHits?.map((hit) => hit.objectId)).toEqual(
+            wholeHits?.map((hit) => hit.objectId),
+        );
+        expect(
+            pagedHits
+                ?.slice(0, 2)
+                .map((hit) => hit.objectId)
+                .sort(),
+        ).toEqual([newest, target].sort());
+    });
+
+    test("an expired anti-memory that matches better takes no slot from an eligible memory", async () => {
+        const kernel = new FakeKernel();
+        const target = `mem_${"f".repeat(32)}`;
+        kernel.seedDecision({
+            object_id: target,
+            decision_kind: "PROJECT_RULES",
+            summary: "Session caching uses the embedded store.",
+        });
+        kernel.seedDecision({
+            object_id: `mem_${"d".repeat(32)}`,
+            decision_kind: ANTI_MEMORY_CATEGORY,
+            summary: renderAntiMemoryContent({
+                trigger: "session caching store",
+                rejectedStrategy: "Redis",
+                rejectionReason: "it creates split ownership",
+                expiresAt: NOW - 1,
+            }),
+        });
+        kernel.readRowCap = 1;
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: "session caching store",
+            limit: 1,
+            nowMs: NOW,
+        });
+        expect(scan.ok && !scan.truncated).toBe(true);
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([target]);
     });
 });

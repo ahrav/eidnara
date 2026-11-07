@@ -254,9 +254,7 @@ export function searchKernelMemoryRows(
     args: KernelMemorySearchArgs,
 ): KernelMemorySearchResult[] | null {
     const nowMs = args.nowMs ?? Date.now();
-    const decisionRows = args.rows.filter(
-        (row) => isMemoryDecisionRow(row) && !isExpiredAntiMemoryRow(row, nowMs),
-    );
+    const decisionRows = args.rows.filter((row) => isSearchableMemoryRow(row, nowMs));
     const ids = parseObjectIdQuery(args.query);
     if (ids) {
         const byId = new Map(decisionRows.map((row) => [row.object.object_id, row]));
@@ -307,8 +305,20 @@ function followsCursor(cursor: ReadCursor, row: ReadRow): boolean {
     );
 }
 
-/** The default scan searches up to sixteen pages at the first page's snapshot. */
+/**
+ * The default scan reads up to sixteen pages at the first page's snapshot. A page holds at most
+ * 8,192 rows and 8 MiB of row bytes, so sixteen pages cover 131,072 memories (a project that keeps
+ * 100 memories a day for more than three years) and transfer at most 128 MiB.
+ */
 export const MAX_SNAPSHOT_SCAN_PAGES = 16;
+
+/** One scan spends at most the deadline one memory read had before the scan paged, so the fallback answers no later than it did; pages the deadline leaves unread are reported as truncation. */
+export const SNAPSHOT_SCAN_DEADLINE_MS = 10_000;
+
+/** The rows a lexical search ranks: memory decisions, minus anti-memories past their expiry. */
+function isSearchableMemoryRow(row: ReadRow, nowMs: number): boolean {
+    return isMemoryDecisionRow(row) && !isExpiredAntiMemoryRow(row, nowMs);
+}
 
 export type SnapshotScan =
     | { ok: true; rows: ReadRow[]; truncated: boolean }
@@ -318,7 +328,8 @@ export type SnapshotScan =
  * Reads the surface page by page at the first page's snapshot. The retained rows preserve the
  * top `limit` lexical results among eligible rows from the pages read. Only the first page is
  * gated; later pages read the snapshot that gate admitted. `truncated` reports rows left unread,
- * after `maxPages` pages or when the daemon refuses a later page or answers it from another snapshot.
+ * after `maxPages` pages, past `deadline`, or when the daemon refuses a later page or answers it from
+ * another snapshot. A cancelled call answers its state, as a refused first page does.
  */
 export async function scanSnapshotForLexicalSearch(args: {
     client: KernelClient;
@@ -328,6 +339,8 @@ export async function scanSnapshotForLexicalSearch(args: {
     limit: number;
     nowMs: number;
     signal?: AbortSignal;
+    /** Each page's read receives this deadline's remainder. */
+    deadline?: Deadline;
     maxPages?: number;
 }): Promise<SnapshotScan> {
     const terms = queryTerms(args.query);
@@ -342,9 +355,11 @@ export async function scanSnapshotForLexicalSearch(args: {
             ...(asOf === null ? {} : { asOf }),
             ...(before === undefined ? {} : { before }),
             ...(args.signal ? { signal: args.signal } : {}),
+            ...(args.deadline ? { deadlineMs: args.deadline.remainingMs() } : {}),
         });
         if (!isAvailable(read)) {
-            return asOf === null
+            const cancelled = read.state.kind === "cancelled" || args.signal?.aborted === true;
+            return asOf === null || cancelled
                 ? { ok: false, state: read.state }
                 : { ok: true, rows: kept, truncated: true };
         }
@@ -355,9 +370,7 @@ export async function scanSnapshotForLexicalSearch(args: {
                 (cursor === undefined || read.rows.every((row) => followsCursor(cursor, row))));
         if (!continuesSnapshot) return { ok: true, rows: kept, truncated: true };
         asOf = read.known_as_of;
-        const candidates = read.rows.filter(
-            (row) => isMemoryDecisionRow(row) && !isExpiredAntiMemoryRow(row, args.nowMs),
-        );
+        const candidates = read.rows.filter((row) => isSearchableMemoryRow(row, args.nowMs));
         kept = rankLexicalRows([...kept, ...candidates], terms, args.limit).map(
             (entry) => entry.row,
         );

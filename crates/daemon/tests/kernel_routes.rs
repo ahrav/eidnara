@@ -6925,6 +6925,17 @@ async fn recorded_read_after_a_cursor_serves_the_older_rows() {
         &with_scope_placeholder(&daemon.project, page),
         "read-explicit-search-after-cursor.json",
     );
+    for malformed in [
+        json!({ "created_commit_seq": 1 }),
+        json!({ "created_commit_seq": 1, "object_id": "decision-object-3", "extra": true }),
+    ] {
+        let mut request = read_request(&daemon.project, SESSION, "explicit_search", None);
+        request["before"] = malformed;
+        assert!(matches!(
+            daemon.handler.dispatch_value_for_test(daemon.route, request).await,
+            PreparedOutcome::Error { code, .. } if code == "invalid_params"
+        ));
+    }
     daemon.handler.shutdown().await.unwrap();
 }
 
@@ -6959,14 +6970,27 @@ async fn paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once(
     assert_eq!(first["truncated"], true);
     assert!(!object_ids(&first).contains(&oldest));
     let snapshot = first["known_as_of"].as_i64().unwrap();
-    // Later pages read the pinned `snapshot`, so they serve only decisions committed at or before the first page.
-    daemon
+    // Later pages read the pinned `snapshot`: a decision committed after the first page stays out of them, and the oldest decision, retired after the first page, stays in them.
+    let inserted = daemon
         .commit(
             "after-first-page",
             vec![insert_decision(total as i64)],
             vec![],
         )
         .await;
+    assert_state(&inserted, "available", None);
+    let retired = daemon
+        .commit(
+            "retire-oldest",
+            vec![json!({"op": "retire_decision", "object_id": oldest})],
+            vec![token(&oldest, snapshot)],
+        )
+        .await;
+    assert_state(&retired, "available", None);
+    let mut at_tip = read_request(&daemon.project, SESSION, "explicit_search", None);
+    at_tip["object_ids"] = json!([oldest]);
+    let at_tip = daemon.call(daemon.route, at_tip).await;
+    assert!(object_ids(&at_tip).is_empty(), "{at_tip}");
 
     let mut served: Vec<(i64, String)> = Vec::new();
     let mut page = first;

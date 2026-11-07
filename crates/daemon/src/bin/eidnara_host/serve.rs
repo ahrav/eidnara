@@ -1349,8 +1349,6 @@ pub fn run() -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(target_os = "macos"))]
-    use super::payload_local_embeddings::lane_limits;
     use super::*;
     #[cfg(not(target_os = "macos"))]
     use host_runtime::local_embeddings::LocalEmbeddingsLimits;
@@ -1375,7 +1373,7 @@ mod tests {
     fn the_shipped_lane_certifies_and_serves_one_window_within_the_startup_envelope() {
         const QUALIFIED_TOKENS_PER_CALL: u64 = 512;
         let manifest = shipped_manifest();
-        let limits = lane_limits();
+        let limits = LocalEmbeddingsLimits::shipped_lane();
         let rows = u64::try_from(limits.max_batch_items).expect("row count fits u64");
         assert!(
             rows * manifest.max_tokens <= QUALIFIED_TOKENS_PER_CALL,
@@ -1422,7 +1420,7 @@ mod tests {
             };
             LocalEmbeddingsComponent::ready_with_engine(lane, std::sync::Arc::new(Unused), limits)
         };
-        let limits = lane_limits();
+        let limits = LocalEmbeddingsLimits::shipped_lane();
         assert_eq!(limits.max_waiting_queries, 4);
         assert!(
             validate(limits.clone()).is_ok(),

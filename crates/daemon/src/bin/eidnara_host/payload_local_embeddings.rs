@@ -19,10 +19,6 @@ pub fn component<'a>(
         ort_library: root.join(ORT_LIBRARY),
         bundle_manifest_sha256: Some(bundle_manifest.to_owned()),
         ort_library_sha256: ort.to_owned(),
-        limits: lane_limits(),
+        limits: LocalEmbeddingsLimits::shipped_lane(),
     }))
-}
-
-pub fn lane_limits() -> LocalEmbeddingsLimits {
-    LocalEmbeddingsLimits::shipped_lane()
 }

@@ -256,13 +256,18 @@ is a built payload's `payload-manifest.json`. The fixture then:
 - installs `QueryRouteLimits::production()`, the limits `eidnara-host serve`
   installs;
 - runs the embedding lane on the payload's `gte-modernbert-base-f32` bundle
-  and ONNX Runtime library through the same constructor `eidnara-host serve`
-  uses (`daemon::payload_local_embeddings`), each file checked against the
-  SHA-256 the payload manifest records;
+  and ONNX Runtime library through the constructor `eidnara-host serve` uses
+  (`crates/daemon/src/bin/eidnara_host/payload_local_embeddings.rs`). The ONNX
+  Runtime library and the bundle manifest are checked against the SHA-256 the
+  payload manifest records, and each model file against the bundle manifest's
+  digest;
 - installs the fixture search admission pair, the records the
   `search_admission_records` example writes, under its `--state-root`. The
   records carry no qualification measurement: they admit the projection under
-  every hook with the daemon integration tests' fixture values.
+  every hook with the daemon integration tests' fixture values, except a
+  catch-up lag of 1,000,000 commits and catch-up windows of 4,096 rows and
+  8 MiB, which `search_admission_records/records.rs` sets so one capture batch
+  or source publication fits in a window.
 
 ModelExecution side calls keep the fixture's own routing: its controlled
 backend, a cassette, or the closures `--harness-runtime` names. The memory
@@ -295,7 +300,10 @@ The legacy snapshot scan pages `kernel.read` with its `before` cursor at the
 first page's snapshot, up to 16 pages of at most 8,192 rows and 8 MiB each,
 so one search reads at most 131,072 rows and 128 MiB. It keeps only the best
 `limit` rows between pages. Each page costs the daemon one scan of the
-project's visible registry rows. A project past that bound gets the note
+project's visible registry rows, and the whole scan shares one 10-second
+deadline. A search that stops before the oldest rows, because of that bound,
+the deadline, a refused later page, or a later page served from another
+snapshot, gets the note
 `Memory: the memory read was truncated; older memories were not searched.`
 
 ## Incident pool

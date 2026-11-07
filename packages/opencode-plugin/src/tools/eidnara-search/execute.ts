@@ -7,6 +7,7 @@
 
 import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import { getErrorMessage } from "../../shared/error-message";
+import { Deadline } from "../../shared/host-client";
 import { type MemoryState, type ReadRow, renderToolStateText } from "../../shared/kernel-client";
 import {
     boundDynamicField,
@@ -18,6 +19,7 @@ import {
     type KernelMemorySearchResult,
     parseObjectIdQuery,
     readObjectRowsChunked,
+    SNAPSHOT_SCAN_DEADLINE_MS,
     scanSnapshotForLexicalSearch,
     searchKernelMemoryRows,
 } from "./kernel-memory-search";
@@ -226,6 +228,7 @@ export async function executeEidnaraSearch(
             query,
             limit,
             nowMs,
+            deadline: Deadline.start(SNAPSHOT_SCAN_DEADLINE_MS),
             ...signal,
         });
         return read.ok

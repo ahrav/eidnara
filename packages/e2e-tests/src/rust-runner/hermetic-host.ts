@@ -1113,6 +1113,8 @@ export interface LiveSourceDescriptor {
     readonly identity: Readonly<Record<string, string>>;
 }
 
+type OptionalHostOptions = "harnessRuntime" | "credentialSource" | "productionSearchManifest";
+
 /** The direct-host fixture starts no provider or module subprocess. */
 export class HermeticHostStack {
     readonly connectionFile: string;
@@ -1137,16 +1139,8 @@ export class HermeticHostStack {
     private pidFileCreatedAtMs = 0;
 
     private constructor(
-        options: Required<
-            Omit<
-                HermeticHostOptions,
-                "harnessRuntime" | "credentialSource" | "productionSearchManifest"
-            >
-        > &
-            Pick<
-                HermeticHostOptions,
-                "harnessRuntime" | "credentialSource" | "productionSearchManifest"
-            >,
+        options: Required<Omit<HermeticHostOptions, OptionalHostOptions>> &
+            Pick<HermeticHostOptions, OptionalHostOptions>,
     ) {
         this.dataDir = options.dataDir;
         this.fixtureBin = options.fixtureBin;

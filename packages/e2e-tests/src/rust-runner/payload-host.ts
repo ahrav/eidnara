@@ -151,13 +151,6 @@ export class PayloadHost implements HarnessHost {
         }
     }
 
-    async searchAdmission(
-        projectRoot: string,
-        sessionId: string,
-    ): Promise<SearchAdmission | undefined> {
-        return searchAdmission(this.connectionFile, projectRoot, sessionId);
-    }
-
     async waitForAdmitted(
         projectRoot: string,
         sessionId: string,
