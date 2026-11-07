@@ -58,11 +58,18 @@ struct Evidence<'a> {
     lines: Vec<&'a str>,
 }
 
-/// A memory's quotation located in the source, and whether publication writes
-/// the memory (a memory marked as a duplicate of an existing one is skipped).
+/// More copies of one quotation than this mark it as boilerplate, and the
+/// source then gains no failure lines. A real framing sentence or error header
+/// appears once or a few times in one message.
+const MAX_QUOTE_OCCURRENCES: usize = 8;
+
+/// One occurrence of a memory's quotation in the source. `eligible` holds when
+/// the quotation occurs once and publication writes the memory; an ineligible
+/// occurrence still competes for a frame, so its block stays off other facts.
 struct Quote {
+    memory: usize,
     span: Range<usize>,
-    published: bool,
+    eligible: bool,
 }
 
 /// Appends the failure lines of `source` to the memory whose quotation frames
@@ -70,40 +77,44 @@ struct Quote {
 /// A memory gains at most `MAX_EVIDENCE_LINES` lines, and its content grows
 /// only within `MAX_CAPTURE_MEMORY_BYTES`. A source without failure lines, or
 /// whose failure lines no quotation frames or holds, leaves every memory
-/// unchanged, and so does a source in which some quotation occurs more than
-/// once, since any copy could be the one meant. Returns whether any memory
-/// gained a line.
+/// unchanged. A quotation that occurs more than once receives nothing, since
+/// any copy could be the one meant. Returns whether any memory gained a line.
 pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) -> bool {
     let lines = lines(source);
     let mut quotes = Vec::with_capacity(memories.len());
-    for memory in memories.iter() {
-        let quote = memory.quote.trim_end();
-        let Some(start) = source.find(quote) else {
-            return false;
-        };
-        if source.rfind(quote) != Some(start) {
+    for (memory, captured) in memories.iter().enumerate() {
+        let quote = captured.quote.trim_end();
+        let starts: Vec<usize> = source
+            .match_indices(quote)
+            .map(|(start, _)| start)
+            .take(MAX_QUOTE_OCCURRENCES + 1)
+            .collect();
+        if starts.len() > MAX_QUOTE_OCCURRENCES {
             return false;
         }
-        quotes.push(Quote {
+        let eligible = starts.len() == 1 && captured.duplicate_of.is_none();
+        quotes.extend(starts.into_iter().map(|start| Quote {
+            memory,
             span: start..start + quote.len(),
-            published: memory.duplicate_of.is_none(),
-        });
+            eligible,
+        }));
     }
     let mut changed = false;
     let mut appended = vec![0; memories.len()];
-    let mut framing: Option<(usize, Option<usize>)> = None;
+    let mut framing: Option<(usize, Option<&Quote>)> = None;
     for evidence in failure_evidence(&lines) {
         let introducing = match framing {
             Some((start, target)) if start == evidence.block_start => target,
             _ => {
-                let target = introducing_memory(source, &lines, &quotes, evidence.block_start);
+                let target = introducing_quote(source, &lines, &quotes, evidence.block_start);
                 framing = Some((evidence.block_start, target));
                 target
             }
         };
         let Some(target) = introducing
-            .filter(|&target| quotes[target].published)
-            .or_else(|| overlapping_memory(&quotes, evidence.head))
+            .filter(|quote| quote.eligible)
+            .or_else(|| overlapping_quote(&quotes, evidence.head))
+            .map(|quote| quote.memory)
         else {
             continue;
         };
@@ -161,16 +172,16 @@ fn repeats_another(memories: &[CapturedMemory], target: usize, text: &str, mark:
     })
 }
 
-/// The memory whose quotation frames the block starting at `block_start`: the
-/// latest quotation that ends on the last nonblank line before the block when
+/// The quotation occurrence that frames the block starting at `block_start`:
+/// the latest occurrence that ends on the last nonblank line before the block when
 /// that line ends with `:` and no sentence ends between the quotation and the
-/// colon. Ties go to a published memory, then to the memory proposed first.
-fn introducing_memory(
+/// colon. Ties go to an eligible occurrence, then to the memory proposed first.
+fn introducing_quote<'q>(
     source: &str,
     lines: &[Line<'_>],
-    quotes: &[Quote],
+    quotes: &'q [Quote],
     block_start: usize,
-) -> Option<usize> {
+) -> Option<&'q Quote> {
     let before = lines.partition_point(|line| line.end <= block_start);
     let intro = lines[..before]
         .iter()
@@ -179,22 +190,27 @@ fn introducing_memory(
         .filter(|line| line.text.ends_with(':'))?;
     quotes
         .iter()
-        .enumerate()
-        .filter(|(_, quote)| {
+        .filter(|quote| {
             quote.span.end > intro.text_start
                 && quote.span.end <= intro.end
                 && same_sentence(source, quote.span.end, intro.end)
         })
-        .max_by_key(|(index, quote)| (quote.span.end, quote.published, std::cmp::Reverse(*index)))
-        .map(|(index, _)| index)
+        .max_by_key(|quote| {
+            (
+                quote.span.end,
+                quote.eligible,
+                std::cmp::Reverse(quote.memory),
+            )
+        })
 }
 
-/// The first published memory whose quotation holds the first byte of the
-/// failure word, as a quotation of the error header does.
-fn overlapping_memory(quotes: &[Quote], head: usize) -> Option<usize> {
+/// The eligible occurrence of the first memory whose quotation holds the first
+/// byte of the failure word, as a quotation of the error header does.
+fn overlapping_quote(quotes: &[Quote], head: usize) -> Option<&Quote> {
     quotes
         .iter()
-        .position(|quote| quote.published && quote.span.contains(&head))
+        .filter(|quote| quote.eligible && quote.span.contains(&head))
+        .min_by_key(|quote| quote.memory)
 }
 
 /// Whether the text from `quote_end` to `end` continues the quotation's last
@@ -502,6 +518,10 @@ mod tests {
             "The service config is:\n```yaml\nerror: false\nretries: 3\n```",
             &["The service config is:"],
         );
+        assert_unchanged(
+            "The workflow step reads:\n```\ncontinue-on-error: true\n```",
+            &["The workflow step reads:"],
+        );
     }
 
     #[test]
@@ -660,8 +680,36 @@ mod tests {
     fn a_quotation_that_occurs_twice_frames_no_block() {
         assert_unchanged(
             "The upstream README says CI failed:\n```\nERROR: run with --no-verify\n```\nOn our side, CI failed:\n```\nerror[E0425]: cannot find value `config`\n```",
-            &["CI failed:"],
+            &["On our side", "CI failed:"],
         );
+    }
+
+    #[test]
+    fn a_repeated_error_quotation_leaves_the_framing_memory_its_lines() {
+        let source = "PR 812's CI went red after the rebase:\n```\nTypeError: cannot read properties of undefined (reading 'id')\n    at handler (src/api.ts:42:7)\n```\nThe log says TypeError: cannot read properties of undefined (reading 'id') again.";
+        let mut memories = [
+            memory("User stated", "PR 812's CI went red after the rebase:"),
+            memory(
+                "User stated",
+                "TypeError: cannot read properties of undefined (reading 'id')",
+            ),
+        ];
+        assert_eq!(
+            contents(source, &mut memories),
+            [
+                "User stated: PR 812's CI went red after the rebase:\nTypeError: cannot read properties of undefined (reading 'id')\nat handler (src/api.ts:42:7)",
+                "User stated: TypeError: cannot read properties of undefined (reading 'id')"
+            ]
+        );
+        let boilerplate = format!(
+            "Build 5 fails:\n```\nerror: x\n```\n{}",
+            "ok ".repeat(MAX_QUOTE_OCCURRENCES + 1)
+        );
+        let mut memories = [
+            memory("User stated", "Build 5 fails:"),
+            memory("User stated", "ok"),
+        ];
+        assert!(!attach(&boilerplate, &mut memories));
     }
 
     #[test]
@@ -718,6 +766,18 @@ mod tests {
         assert_eq!(
             contents(source, &mut memories),
             ["User stated: Deploy 7 failed:\nERROR migrate: relation exists"]
+        );
+    }
+
+    #[test]
+    fn a_completing_line_continues_a_run_of_bare_failure_lines() {
+        let source = "Deploy 7 failed:\nERROR migrate:\nrelation exists\nERROR cache: evicted";
+        let mut memories = [memory("User stated", "Deploy 7 failed:")];
+        assert_eq!(
+            contents(source, &mut memories),
+            [
+                "User stated: Deploy 7 failed:\nERROR migrate:\nrelation exists\nERROR cache: evicted"
+            ]
         );
     }
 
@@ -829,7 +889,16 @@ mod tests {
     }
 
     #[test]
+    fn the_failure_lines_of_a_secret_report_attach_before_the_store_scan() {
+        let source = "The release job for PR 812 fails:\n```\nERROR: required secret is empty: NPM_TOKEN=\nError: Process completed with exit code 1.\n```";
+        let mut memories = [memory("User stated", "The release job for PR 812 fails:")];
+        assert!(attach(source, &mut memories));
+        assert!(memories[0].content.contains("NPM_TOKEN="));
+    }
+
+    #[test]
     fn a_quotation_of_a_log_prefix_holds_no_failure_word() {
+        assert_unchanged("```\n[db]ERROR connection refused\n```", &["[db]"]);
         assert_unchanged(
             "```\n2025-03-02 12:00 ERROR agents must upload credentials\nnext step\n```",
             &["2025-03-02 12:00"],
@@ -853,14 +922,18 @@ mod tests {
             memories[0].content,
             "User stated: Deploy 8 failed:\n\nERROR migrate: relation exists"
         );
-        let mut unchanged = [memory("User stated", "Deploy 8 failed:")];
-        assert!(!attach("Deploy 8 failed.", &mut unchanged));
+        let mut unchanged = [memory("User stated", "Deploy 8 failed.")];
+        assert!(!attach(
+            "Deploy 8 failed.\nERROR migrate: relation exists",
+            &mut unchanged
+        ));
+        assert_eq!(unchanged[0].content, "User stated: Deploy 8 failed.");
     }
 
     #[test]
     fn an_append_that_would_repeat_another_memory_is_skipped() {
         assert_unchanged(
-            "Deploy 4410 failed:\nERROR migrate: relation exists",
+            "Deploy 4410 failed:\nERROR migrate: relation exists\n--> db/migrate.sql:3",
             &[
                 "Deploy 4410 failed:",
                 "Deploy 4410 failed:\nERROR migrate: relation exists",
