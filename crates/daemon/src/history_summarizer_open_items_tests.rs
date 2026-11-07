@@ -215,6 +215,41 @@ fn an_answered_question_folds_to_the_decision_without_its_waiting_line() {
 }
 
 #[test]
+fn a_settling_claim_that_fails_validation_leaves_the_key_with_no_claim() {
+    let messages = answered(1);
+    let chunk = chunk_of(&messages, 1, 5);
+    let waiting = waiting_line("release.server-steps", ANSWERED_QUESTION);
+    let decided =
+        "Decided (release.server-steps): The user chose a separate file for the server steps.";
+    let p1 = format!("I drafted per-package steps.\n{waiting}\n{decided}");
+    // The answer's claim cites a byte range past its part, so claim validation drops it.
+    let bad_cite = cite(&chunk, 3, ANSWER).replace(&format!("-{}]", ANSWER.len()), "-999]");
+    let text = output(
+        1,
+        4,
+        [&p1, &p1, "Split the checklist.", ""],
+        &[
+            claim("release.server-steps", &bad_cite, ANSWER, decided),
+            claim(
+                "release.server-steps",
+                &cite(&chunk, 2, ANSWERED_QUESTION),
+                ANSWERED_QUESTION,
+                &waiting,
+            ),
+        ],
+    );
+
+    let segment = validated(&text, &chunk);
+
+    assert!(!segment.p1.as_deref().unwrap().contains("Waiting on user"));
+    assert_eq!(
+        segment.claims,
+        Vec::new(),
+        "the retired question never becomes the live value"
+    );
+}
+
+#[test]
 fn an_unanswered_question_stays_waiting_in_the_recent_tiers() {
     let messages = unanswered(1);
     let chunk = chunk_of(&messages, 1, 3);
@@ -264,8 +299,8 @@ fn a_lifted_constraint_is_carried_as_lifted_and_settles_the_question_it_answered
     );
     let p2 = format!("{constraint}\n{waiting}\n{lifted_line}\nTwo PRs, one per parser fix.");
     let p3 = format!("{constraint}\n{lifted_line}\nTwo parser fixes in separate PRs.");
-    // The model emits the lift's claim before the constraint's; ordering this segment's claims on
-    // the key by cited message keeps the lift's claim, which cites the later message.
+    // The model emits the lift's claim before the constraint's; only the lift's claim is anchored
+    // on the segment's settling line, so it is the one claim validation sees for the key.
     let text = output(
         1,
         4,
