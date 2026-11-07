@@ -29,8 +29,8 @@
 //! - A question asked again in `p1` after its answer stays open, because `p1` decides the outcome.
 //! - Every other line that begins `Waiting on user (` leaves `p3` and `p4`, whatever its key.
 //!   Those tiers render once a segment has aged past its recent tiers, and they carry outcomes.
-//!   A `p3` left empty takes `p2`'s text without its waiting lines, as the parser fills a
-//!   missing tier from the denser one.
+//!   A `p3` that retirement leaves empty takes `p2`'s text without its waiting lines, as the
+//!   parser fills a missing tier from the denser one.
 //!
 //! Claim candidates follow the segment whose message their one citation names. A candidate whose
 //! anchor the final `p1` lacks leaves when the anchor lies in an open line of its key that
@@ -174,6 +174,7 @@ fn retire_in_segment(segment: &mut ParsedHistorySegment) -> SegmentRetirement {
         .collect();
     let settled: BTreeSet<String> = outcome.keys().cloned().collect();
     let mut retired_from_p1 = Vec::new();
+    let mut emptied_p3 = false;
     for (tier, text) in [
         (1, &mut segment.p1),
         (2, &mut segment.p2),
@@ -189,13 +190,12 @@ fn retire_in_segment(segment: &mut ParsedHistorySegment) -> SegmentRetirement {
         if tier == 1 {
             retired_from_p1 = retired;
         }
+        emptied_p3 |= tier == 3 && kept.is_empty();
         *text = kept;
     }
     // A `p3` that held only aged waiting lines takes `p2`'s text without its waiting lines, as the
     // parser fills a missing tier from the denser one, so the renderer keeps a body for it.
-    if segment.p3.as_deref().is_some_and(str::is_empty)
-        && let Some(p2) = segment.p2.as_deref()
-    {
+    if emptied_p3 && let Some(p2) = segment.p2.as_deref() {
         let refill = retire_tier(p2, 3, &outcome).map_or_else(|| p2.to_owned(), |(kept, _)| kept);
         segment.p3 = Some(refill);
     }
@@ -609,6 +609,31 @@ mod tests {
     }
 
     #[test]
+    fn a_reasked_keys_claims_keep_emission_order_and_a_written_empty_p3_stays_empty() {
+        let mut aliases = FrozenAliasTable::default();
+        for ordinal in 1..=4 {
+            aliases.issue(crate::history_summarizer_citations::FrozenAlias {
+                message_id: format!("m{ordinal}"),
+                ordinal,
+                ..Default::default()
+            });
+        }
+        let p1 = "Decided (a.b): yes.\nWaiting on user (a.b): ask again?";
+        let mut output = output(vec![segment(p1, p1, "", "")]);
+        let claim = |cite: &str| ClaimCandidate {
+            key: "a.b".into(),
+            cite: cite.into(),
+            value: Some(cite.into()),
+            anchor: None,
+        };
+        output.claims = vec![claim("[s4:0-1]"), claim("[s2:0-1]")];
+        retire_settled_lines(&mut output, &aliases);
+        let cites: Vec<_> = output.claims.iter().map(|c| c.cite.as_str()).collect();
+        assert_eq!(cites, ["[s4:0-1]", "[s2:0-1]"]);
+        assert_eq!(output.history_segments[0].p3.as_deref(), Some(""));
+    }
+
+    #[test]
     fn a_reask_in_p1_stays_open_when_p2_still_shows_the_answer() {
         let p1 = "Decided (a.b): yes.\nWaiting on user (a.b): ask again?";
         let [p1_after, ..] =
@@ -720,6 +745,7 @@ mod tests {
                 "[s4:0-1]",
                 Some("Waiting on user (g.h): never written?"),
             ),
+            candidate("c.d", "[s5:0-1]", Some("other?")),
             candidate("a.b", "[s2:0-1]", Some("Waiting on user (a.b): ask?")),
             candidate("c.d", "[s4:0-1] [s5:0-1]", None),
             candidate("e.f", "[s1:0-1]", None),
@@ -730,8 +756,9 @@ mod tests {
             .iter()
             .map(|c| (c.key.as_str(), c.cite.as_str()))
             .collect();
-        // In the second segment, the claim anchored only on the retired `c.d` question leaves, and so
-        // does a `g.h` claim anchored on an open line the segment never states; one
+        // In the second segment, the claims anchored only on the retired `c.d` question, in full or
+        // in part, leave, and so does a `g.h` claim anchored on an open line the segment never
+        // states; one
         // whose anchor the final `p1` still holds stays, and each settled key's other claims run
         // in message order, with claims on one message in emission order, whatever their anchors. `x.y` names another key, so its claim anchored
         // on the retired line stays, and as an unsettled key its claims keep emission order. The
