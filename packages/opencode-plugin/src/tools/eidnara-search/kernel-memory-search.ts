@@ -3,6 +3,7 @@
  * which the daemon serves in bounded pages.
  */
 
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
 import type { Deadline } from "../../shared/host-client";
@@ -297,11 +298,16 @@ function rankLexicalRows(
         .slice(0, limit);
 }
 
+/** The daemon breaks commit ties by UTF-8 byte order, so ids compare as bytes here too. */
 function followsCursor(cursor: ReadCursor, row: ReadRow): boolean {
     const seq = row.object.created_commit_seq;
     return (
         seq < cursor.createdCommitSeq ||
-        (seq === cursor.createdCommitSeq && row.object.object_id > cursor.objectId)
+        (seq === cursor.createdCommitSeq &&
+            Buffer.compare(
+                Buffer.from(row.object.object_id, "utf8"),
+                Buffer.from(cursor.objectId, "utf8"),
+            ) > 0)
     );
 }
 
@@ -329,7 +335,7 @@ export type SnapshotScan =
  * top `limit` lexical results among eligible rows from the pages read. Only the first page is
  * gated; later pages read the snapshot that gate admitted. `truncated` reports rows left unread,
  * after `maxPages` pages, past `deadline`, or when the daemon refuses a later page or answers it from
- * another snapshot. A search the caller's signal cancels answers its state, as a refused first page does.
+ * another snapshot or another connection. A search the caller's signal cancels answers its state, as a refused first page does.
  */
 export async function scanSnapshotForLexicalSearch(args: {
     client: KernelClient;
@@ -348,12 +354,15 @@ export async function scanSnapshotForLexicalSearch(args: {
     let kept: ReadRow[] = [];
     let asOf: number | null = null;
     let before: ReadCursor | undefined;
+    const connection = args.client.connectionIdentity();
     for (let page = 0; page < maxPages; page += 1) {
         if (page > 0 && args.deadline?.isExpired())
             return { ok: true, rows: kept, truncated: true };
         const read = await args.client.read({
             surface: args.surface,
             gated: page === 0 && args.gated,
+            // The first page caches tokens as the single read did; later pages' rows mostly fall out of the ranking.
+            cacheTokens: page === 0,
             ...(asOf === null ? {} : { asOf }),
             ...(before === undefined ? {} : { before }),
             ...(args.signal ? { signal: args.signal } : {}),
@@ -367,9 +376,11 @@ export async function scanSnapshotForLexicalSearch(args: {
                 : { ok: true, rows: kept, truncated: true };
         }
         const cursor = before;
+        // A reply from another daemon connection can reuse the same `known_as_of` for a different store state.
         const continuesSnapshot =
             asOf === null ||
             (read.known_as_of === asOf &&
+                args.client.connectionIdentity() === connection &&
                 (cursor === undefined || read.rows.every((row) => followsCursor(cursor, row))));
         if (!continuesSnapshot) return { ok: true, rows: kept, truncated: true };
         asOf = read.known_as_of;

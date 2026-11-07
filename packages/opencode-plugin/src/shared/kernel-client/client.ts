@@ -131,6 +131,8 @@ export interface ReadArgs extends CallOptions {
     objectIds?: readonly string[];
     /** `before` supports pagination through results that exceed the daemon's row cap: the daemon serves only the rows that follow the named row in serving order. */
     before?: ReadCursor;
+    /** `false` leaves the returned rows' mutation tokens out of the token cache, for a read whose rows the caller ranks and mostly discards. */
+    cacheTokens?: boolean;
 }
 
 /** `ReadCursor` identifies a row's position in the daemon's serving order. */
@@ -571,7 +573,7 @@ export class KernelClient {
             { signal: args.signal, deadline, reissuable: true },
             parseReadResponse,
         );
-        if (isAvailable(result)) {
+        if (isAvailable(result) && args.cacheTokens !== false) {
             this.tokens.remember(
                 this.projectRoot,
                 result.rows,

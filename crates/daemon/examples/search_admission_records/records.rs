@@ -14,11 +14,13 @@ use crate::projection_gate;
 /// Replaces the fixture's four-commit `LAG_LIMIT` with `LIMIT`. Each tool turn commits its transcript to the kernel, so a four-commit lag marks a reader stale between slices, and `LIMIT` lets a search read the family while it catches up.
 const LAG_COMMITS: u64 = projection_gate::LIMIT;
 
-/// Catch-up applies each commit within one window of at most `local_transaction_rows / 2` and `local_transaction_bytes / 4 / 4096` rows and `catchup_batch_encoded_bytes / 2` payload bytes, and a commit past that window stops catch-up at that commit. A source publication writes three rows per descriptor, and one capture batch carries up to 32 units of 64 KiB, so the fixture's `LIMIT` of 1,000,000 for all three admits windows of only 61 rows, and a publication of 21 descriptors, which a session of a few dozen tool calls produces, stops catch-up. These values admit windows of 4,096 rows and 8 MiB, four times a whole capture batch's text.
-const WINDOW_LIMITS: [(&str, u64); 3] = [
+/// Catch-up applies each commit within one window of at most `local_transaction_rows / 2` and `local_transaction_bytes / 4 / 4096` rows and `catchup_batch_encoded_bytes / 2` payload bytes, and exports at most the least of `catchup_batch_source_bytes`, `export_live_decoded_bytes / 2`, and `local_transaction_bytes / 4` source bytes per window; a commit past that window stops catch-up at that commit. A source publication writes three rows per descriptor, and one capture batch carries up to 32 units of 64 KiB, so the fixture's `LIMIT` of 1,000,000 for all of them admits windows of only 61 rows and 250,000 source bytes, and a publication of 21 descriptors, which a session of a few dozen tool calls produces, stops catch-up. These values admit windows of 4,096 rows, 8 MiB of payload, and 8 MiB of source, four times a whole capture batch's text.
+const WINDOW_LIMITS: [(&str, u64); 5] = [
     ("local_transaction_rows", 2 * 4096),
     ("local_transaction_bytes", 4 * 4096 * 4096),
     ("catchup_batch_encoded_bytes", 2 * (8 << 20)),
+    ("catchup_batch_source_bytes", 8 << 20),
+    ("export_live_decoded_bytes", 2 * (8 << 20)),
 ];
 
 /// The runtime manifest and campaign evidence records for the parsed bundle manifest `bundle`.

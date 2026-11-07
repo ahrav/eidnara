@@ -523,8 +523,12 @@ describe("scanSnapshotForLexicalSearch", () => {
         expect(scan.rows.map((row) => row.object.object_id)).not.toContain(target);
     });
 
-    /** A client whose first page is truncated and whose second read answers `second`. */
-    function twoPageClient(second: unknown): { client: KernelClient; reads: unknown[] } {
+    /** A client whose first page is truncated and whose second read answers `second`; `afterFirst` names the connection identity after page 1. */
+    function twoPageClient(
+        second: unknown,
+        afterFirst = "connection",
+    ): { client: KernelClient; reads: unknown[] } {
+        const connection = { current: "connection" };
         const first = readRow({
             objectId: OBJECT_A,
             decisionKind: "ARCHITECTURE",
@@ -533,9 +537,11 @@ describe("scanSnapshotForLexicalSearch", () => {
         });
         const reads: unknown[] = [];
         const client = {
+            connectionIdentity: () => connection.current,
             read: async (args: unknown) => {
                 reads.push(args);
                 if (reads.length === 1) {
+                    connection.current = afterFirst;
                     return {
                         state: { kind: "available" },
                         known_as_of: 9,
@@ -589,6 +595,7 @@ describe("scanSnapshotForLexicalSearch", () => {
         });
         let reads = 0;
         const client = {
+            connectionIdentity: () => "connection",
             read: async () => {
                 reads += 1;
                 if (reads === 1) {
@@ -691,6 +698,125 @@ describe("scanSnapshotForLexicalSearch", () => {
         expect(scan).toMatchObject({ ok: true, truncated: false });
         if (!scan.ok) return;
         expect(scan.rows.map((row) => row.object.object_id).sort()).toEqual([OBJECT_A, OBJECT_B]);
+    });
+
+    test("stops as partial when a later page arrives over another daemon connection", async () => {
+        const same = readRow({
+            objectId: OBJECT_B,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 4,
+        });
+        const { client } = twoPageClient(
+            {
+                state: { kind: "available" },
+                known_as_of: 9,
+                tip: 9,
+                gated: false,
+                truncated: false,
+                rows: [same],
+            },
+            "replacement",
+        );
+        const scan = await scanWith(client);
+        expect(scan).toMatchObject({ ok: true, truncated: true });
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([OBJECT_A]);
+    });
+
+    test("orders a same-commit tie by UTF-8 bytes, as the daemon does", async () => {
+        // U+E000 sorts before U+10000 in UTF-8 and after it in UTF-16 code units.
+        const low = readRow({
+            objectId: "mem_\uE000",
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 5,
+        });
+        const high = readRow({
+            objectId: "mem_\u{10000}",
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 5,
+        });
+        const reads: unknown[] = [];
+        const client = {
+            connectionIdentity: () => "connection",
+            read: async (args: unknown) => {
+                reads.push(args);
+                return reads.length === 1
+                    ? {
+                          state: { kind: "available" },
+                          known_as_of: 9,
+                          tip: 9,
+                          gated: false,
+                          truncated: true,
+                          rows: [low],
+                      }
+                    : {
+                          state: { kind: "available" },
+                          known_as_of: 9,
+                          tip: 9,
+                          gated: false,
+                          truncated: false,
+                          rows: [high],
+                      };
+            },
+        } as unknown as KernelClient;
+        const scan = await scanWith(client);
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        if (!scan.ok) return;
+        expect(scan.rows).toHaveLength(2);
+    });
+
+    test("stops at a same-commit row that UTF-8 orders before the cursor, though UTF-16 orders it after", async () => {
+        const high = readRow({
+            objectId: "mem_\u{10000}",
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 5,
+        });
+        const low = readRow({
+            objectId: "mem_\uE000",
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 5,
+        });
+        const page = (rows: ReadRow[], truncated: boolean) => ({
+            state: { kind: "available" },
+            known_as_of: 9,
+            tip: 9,
+            gated: false,
+            truncated,
+            rows,
+        });
+        let reads = 0;
+        const client = {
+            connectionIdentity: () => "connection",
+            read: async () => {
+                reads += 1;
+                return reads === 1 ? page([high], true) : page([low], false);
+            },
+        } as unknown as KernelClient;
+        const scan = await scanWith(client);
+        expect(scan).toMatchObject({ ok: true, truncated: true });
+        if (!scan.ok) return;
+        expect(scan.rows).toHaveLength(1);
+    });
+
+    test("caches mutation tokens for the first page only", async () => {
+        const { kernel } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        const client = clientOver(new FakeKernelTransport(kernel));
+        const scan = await scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        expect(client.tokens.size("/tmp/paged")).toBe(100);
     });
 
     test("stops as partial when a later page answers another snapshot", async () => {

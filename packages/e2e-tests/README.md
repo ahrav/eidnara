@@ -265,9 +265,9 @@ is a built payload's `payload-manifest.json`. The fixture then:
   `search_admission_records` example writes, under its `--state-root`. The
   records carry no qualification measurement: they admit the projection under
   every hook with the daemon integration tests' fixture values, except a
-  catch-up lag of 1,000,000 commits and catch-up windows of 4,096 rows and
-  8 MiB, which `search_admission_records/records.rs` sets so one capture batch
-  or source publication fits in a window.
+  catch-up lag of 1,000,000 commits and catch-up windows of 4,096 rows, 8 MiB
+  of payload, and 8 MiB of source, which `search_admission_records/records.rs`
+  sets so one capture batch or source publication fits in a window.
 
 ModelExecution side calls keep the fixture's own routing: its controlled
 backend, a cassette, or the closures `--harness-runtime` names. The memory
