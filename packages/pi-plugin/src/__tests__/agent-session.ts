@@ -36,12 +36,14 @@ export async function createTestAgentSession(args: {
     settings?: Record<string, unknown>;
     /** Tool names to enable; none when unset. */
     tools?: string[];
+    tokenSize?: { min?: number; max?: number };
 }): Promise<TestAgentSession> {
     const faux = registerFauxProvider({
         provider: "faux",
         models: [
             { id: "faux-model", contextWindow: args.contextWindow ?? 200_000, maxTokens: 8_192 },
         ],
+        ...(args.tokenSize ? { tokenSize: args.tokenSize } : {}),
     });
     const requests: { messages: unknown[]; systemPrompt: string | undefined }[] = [];
     const script: FauxResponseStep[] = [];
