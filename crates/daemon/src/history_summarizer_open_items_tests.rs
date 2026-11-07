@@ -466,6 +466,22 @@ const LIVE_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";
 const LIVE_MODEL: &str = "EIDNARA_FIDELITY_REAL_MODEL";
 const LIVE_WAIT_SECONDS: &str = "EIDNARA_FIDELITY_REAL_WAIT_SECONDS";
 
+/// Folds the fixture through a real summarizer model until a fold publishes, at most twice. A
+/// model answer the validator rejects as a whole publishes nothing, and the second fold gives the
+/// model one more answer.
+async fn published_fold(
+    factory: &Arc<RealHistorySummarizerProducerFactory>,
+    model: &str,
+    wait: Duration,
+    fixture: fn(u64) -> Vec<IngressMessage>,
+) -> Vec<StoredHistorySegment> {
+    let rows = live_fold(factory, model, wait, fixture(1)).await;
+    if !rows.is_empty() {
+        return rows;
+    }
+    live_fold(factory, model, wait, fixture(1)).await
+}
+
 /// Folds `messages` once through a real summarizer model and returns the stored rows.
 async fn live_fold(
     factory: &Arc<RealHistorySummarizerProducerFactory>,
@@ -554,7 +570,7 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
     let model = required(LIVE_MODEL);
     let wait = Duration::from_secs(required(LIVE_WAIT_SECONDS).parse().unwrap());
 
-    let rows = live_fold(&factory, &model, wait, answered(1)).await;
+    let rows = published_fold(&factory, &model, wait, answered).await;
     assert!(!rows.is_empty());
     assert!(open_lines(&rows, 1).is_empty(), "{rows:#?}");
     assert!(
@@ -562,7 +578,7 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
         "{rows:#?}"
     );
 
-    let rows = live_fold(&factory, &model, wait, unanswered(1)).await;
+    let rows = published_fold(&factory, &model, wait, unanswered).await;
     assert!(
         open_lines(&rows, 1)
             .iter()
@@ -570,7 +586,7 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
         "{rows:#?}"
     );
 
-    let rows = live_fold(&factory, &model, wait, lifted(1)).await;
+    let rows = published_fold(&factory, &model, wait, lifted).await;
     assert!(open_lines(&rows, 1).is_empty(), "{rows:#?}");
     // `p1` may quote the constraint where the user set it; the later tiers state only its lifted form.
     for row in &rows {
