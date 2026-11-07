@@ -299,8 +299,8 @@ fn a_lifted_constraint_is_carried_as_lifted_and_settles_the_question_it_answered
     );
     let p2 = format!("{constraint}\n{waiting}\n{lifted_line}\nTwo PRs, one per parser fix.");
     let p3 = format!("{constraint}\n{lifted_line}\nTwo parser fixes in separate PRs.");
-    // The model emits the lift's claim before the constraint's; only the lift's claim is anchored
-    // on the segment's settling line, so it is the one claim validation sees for the key.
+    // The model emits the lift's claim before the constraint's; the constraint's claim is anchored
+    // on the constraint line retirement removes from `p1`, so it leaves with that line.
     let text = output(
         1,
         4,
