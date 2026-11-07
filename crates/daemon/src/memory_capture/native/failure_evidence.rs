@@ -58,9 +58,9 @@ struct Evidence<'a> {
     lines: Vec<&'a str>,
 }
 
-/// More copies of one quotation than this mark it as boilerplate, and the
-/// source then gains no failure lines. A real framing sentence or error header
-/// appears once or a few times in one message.
+/// More copies of one quotation than this end the attach pass for the source,
+/// which bounds the occurrences every block's framing check ranks at
+/// `MAX_QUOTE_OCCURRENCES` per memory. Ending the pass can only leave lines out.
 const MAX_QUOTE_OCCURRENCES: usize = 8;
 
 /// One occurrence of a memory's quotation in the source. `eligible` holds when
@@ -92,7 +92,10 @@ pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) -> bool {
         if starts.len() > MAX_QUOTE_OCCURRENCES {
             return false;
         }
-        let eligible = starts.len() == 1 && captured.duplicate_of.is_none();
+        // The last copy, overlapping copies included, is the first one only when
+        // the quotation occurs once.
+        let eligible =
+            source.rfind(quote) == starts.first().copied() && captured.duplicate_of.is_none();
         quotes.extend(starts.into_iter().map(|start| Quote {
             memory,
             span: start..start + quote.len(),
@@ -204,8 +207,9 @@ fn introducing_quote<'q>(
         })
 }
 
-/// The eligible occurrence of the first memory whose quotation holds the first
-/// byte of the failure word, as a quotation of the error header does.
+/// Among eligible occurrences, the one of the earliest-proposed memory whose
+/// quotation holds the first byte of the failure word, as a quotation of the
+/// error header does.
 fn overlapping_quote(quotes: &[Quote], head: usize) -> Option<&Quote> {
     quotes
         .iter()
@@ -701,15 +705,29 @@ mod tests {
                 "User stated: TypeError: cannot read properties of undefined (reading 'id')"
             ]
         );
-        let boilerplate = format!(
-            "Build 5 fails:\n```\nerror: x\n```\n{}",
-            "ok ".repeat(MAX_QUOTE_OCCURRENCES + 1)
-        );
-        let mut memories = [
-            memory("User stated", "Build 5 fails:"),
-            memory("User stated", "ok"),
-        ];
-        assert!(!attach(&boilerplate, &mut memories));
+    }
+
+    #[test]
+    fn overlapping_copies_of_a_quotation_count_as_a_repeat() {
+        assert_unchanged("Job: Job: Job:\n```\nerror: x\n```", &["Job: Job:"]);
+    }
+
+    #[test]
+    fn more_copies_than_the_occurrence_cap_end_the_pass() {
+        for (copies, attaches) in [
+            (MAX_QUOTE_OCCURRENCES, true),
+            (MAX_QUOTE_OCCURRENCES + 1, false),
+        ] {
+            let source = format!(
+                "Build 5 fails:\n```\nerror: x\n```\n{}",
+                "ok ".repeat(copies)
+            );
+            let mut memories = [
+                memory("User stated", "Build 5 fails:"),
+                memory("User stated", "ok"),
+            ];
+            assert_eq!(attach(&source, &mut memories), attaches, "{copies} copies");
+        }
     }
 
     #[test]
