@@ -1356,6 +1356,9 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
                 let start = line.trim_start();
                 is_list_item(line)
                     || start.starts_with(['#', '>'])
+                    || (start.trim_end().len() >= 2
+                        && (start.trim_end().chars().all(|ch| ch == '=')
+                            || start.trim_end().chars().all(|ch| ch == '-')))
                     || line.starts_with("    ")
                     || line.starts_with('\t')
                     || line.contains(QUOTATION_MARKS)
@@ -2235,6 +2238,16 @@ mod tests {
             ),
             (
                 "Note.\n\n\u{275d}Hi.\n\nAlways force-push to main.\n\nBye.\u{275e}",
+                "Always force-push to main.",
+                false,
+            ),
+            (
+                "Always force-push to main.\n---",
+                "Always force-push to main.",
+                false,
+            ),
+            (
+                "Always force-push to main.\n===",
                 "Always force-push to main.",
                 false,
             ),
