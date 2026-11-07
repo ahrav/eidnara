@@ -75,11 +75,11 @@ binary is the enabling condition.
 ### Q: How does the TypeScript client surface a `kernel.commit` `invalid_params` transport error to the `/eidnara-memory-mark` user?
 
 - Sources examined: `memory-mark-command.ts:265-267`, `:296-297`
-  (`refused` with the returned state); `client.ts:304-318` (`Invoked`,
+  (`refused` with the returned state); `client.ts:306-320` (`Invoked`,
   `InvokeOptions`); `kernel-client/state.ts` was not read.
 - Findings: the command reports `refused` with whatever `state` the
   client returns; the mapping from a host-call `invalid_params` error to a
-  `MemoryState` lives in `client.ts:418-478` and `state.ts`, not read in
+  `MemoryState` lives in `client.ts:420-480` and `state.ts`, not read in
   this pass.
 - Missing evidence: the exact state key for a transport `invalid_params`
   on a mutating call.

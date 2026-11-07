@@ -20,22 +20,22 @@ consumer of the unbounded Kernel API. Lens: resource boundaries; C6.
   heap's max is the row a sort-then-truncate drops first.
 - `read.rs:146-180` `NewestRows`: `push` pops when `len > cap` and sets
   `dropped`; `finish` returns `into_sorted_vec` and `dropped`.
-- `read.rs:182-283` `read_visible`:
-  - `:201-219` Kernel read with `project.scope_term()`.
-  - `:220-229` `ScopeFilter` then `NewestRows::new(MAX_READ_ROWS)`; the
+- `read.rs:182-292` `read_visible`, which delegates to `read_visible_page`:
+  - `:201-218` Kernel read with `project.scope_term()`.
+  - `:219-230` `ScopeFilter`, the `before` cursor filter, then `NewestRows::new(MAX_READ_ROWS)`; the
     comment explains the bound cannot be a SQL `LIMIT`.
-  - `:196-212` payload sizes read via `decision_payload_sizes_as_of` for the
+  - `:232-241` payload sizes read via `decision_payload_sizes_as_of` for the
     kept decision ids before any payload; comment: "a project can retain
     `MAX_READ_ROWS` decisions of ~1 MiB each, and materializing them all
     would allocate gigabytes".
-  - `:213-219` a kept decision without a size entry is
+  - `:242-251` a kept decision without a size entry is
     `CorruptCanonicalRow`.
-  - `:220-234` cumulative cut where payload bytes pass
+  - `:252-268` cumulative cut where payload bytes pass
     `MAX_READ_ROW_BYTES`; `truncated = true` on cut.
-  - `:235-243` `decisions_for_objects_as_of` for the retained ids; a missing
+  - `:269-284` `decisions_for_objects_as_of` for the retained ids; a missing
     row is `CorruptCanonicalRow`.
 - `read.rs:85-95` `ReadResponse.truncated` doc: byte-budget truncation also
-  happens at serialization (`:512-533`), so the wire flag can be `true` while
+  happens at serialization (`:490-514`), so the wire flag can be `true` while
   this one is `false`.
 - Tests: `crates/daemon/tests/kernel_routes.rs:1958`
   `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`;

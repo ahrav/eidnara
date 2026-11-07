@@ -204,7 +204,7 @@ C4 `admission.rs:3165-3167`: domain and kind matched in SQL before any row is
 read; a corrupt row outside the domain never fails this read.
 C5 `admission.rs:3138-3144`: the scope restriction is a superset of the
 algebra's verdict.
-C6 `read.rs:26`, `:220`: the row bound applies after the filter; `:231`:
+C6 `read.rs:26`, `:222`: the row bound applies after the filter; `:232`:
 payload sizes read before any payload.
 C7 `slice/read.rs:121`: a single decision larger than the bound is returned
 alone; the wait for a pooled reader stops at the budget.

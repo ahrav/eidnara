@@ -40,7 +40,7 @@ Existing paths have distinct classifications:
 | Existing path | Classification and current evidence |
 | --- | --- |
 | LocalEmbeddings composition and disabled fallback | `default-production`: `crates/daemon/src/bin/eidnara_host/serve.rs:1135` composes it; a Linux generation missing the ORT library or the bundle manifest uses `new(None)` at `:1076`, `:1085` and reports `degraded`. |
-| Certified inference, bundle validation, and live JobTable serving | `default-production` for payloads built by `scripts/build-host-payload.ts`, which stage the locked bundle and ORT library; the generation's bundle manifest and ORT digests bind them (`serve.rs:1069-1094`), and `lane_limits` (`serve.rs:1100-1105`) admits one text per inference call, the shape certification exercises. Only the macOS branch reports `unsupported` (`serve.rs:1054`). |
+| Certified inference, bundle validation, and live JobTable serving | `default-production` for payloads built by `scripts/build-host-payload.ts`, which stage the locked bundle and ORT library; the generation's bundle manifest and ORT digests bind them (`payload_local_embeddings.rs:8-24`, called from `serve.rs:1192-1202`), and `LocalEmbeddingsLimits::shipped_lane()` (`payload_local_embeddings.rs:22`) admits one text per inference call, the shape certification exercises. Only the macOS branch reports `unsupported` (`serve.rs:1171`). |
 | Claude accounting calls | `default-production`: `crates/daemon/Cargo.toml:32` and `crates/daemon/src/token_cache.rs:133` contradict the old tokenizer catalog's absent-caller premise. |
 | MemoryClassifier scheduler loop | `default-production` after store open: `crates/daemon/src/lib.rs:3649-3663`. |
 | Due review-user-memories slots | `explicit-config-only`: scheduled MODULE projects come from `lib.rs:13992-14040`. Actual scheduled model dispatch has only test-installed inputs (`lib.rs:3087-3108`, `:14054-14057`). |
@@ -375,8 +375,8 @@ Exercised: partial - the scheduler queues, priority, the ninth grant, and the
 fifth-waiter refusal behind a background holder are constructed
 (`scheduler.rs:271-315`, `mod.rs:1814-1866`,
 `crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). The shipped
-lane lets four queries wait (`crates/daemon/src/bin/eidnara_host/serve.rs`
-`lane_limits` returns `LocalEmbeddingsLimits::shipped_lane()`). The ignored
+lane lets four queries wait (`crates/daemon/src/bin/eidnara_host/payload_local_embeddings.rs`
+passes `LocalEmbeddingsLimits::shipped_lane()`). The ignored
 `crates/host-runtime/tests/local_embeddings_reference_load.rs` drives the
 certified production bundle with continuous backfill and 1,000 open-loop
 queries at 2 per second; the #895 runs on four pinned cores had zero busy

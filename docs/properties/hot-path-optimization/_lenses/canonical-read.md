@@ -31,7 +31,7 @@ a performance claim. No query-plan experiment runs here.
 [pass]: ../../../../crates/daemon/src/lib.rs#L8203-L8283
 [retry]: ../../../../crates/daemon/src/lib.rs#L8350-L8454
 [sql]: ../../../../crates/kernel/src/admission.rs#L3208-L3374
-[read]: ../../../../crates/daemon/src/kernel_routes/read.rs#L178-L282
+[read]: ../../../../crates/daemon/src/kernel_routes/read.rs#L182-L292
 [convert]: ../../../../crates/daemon/src/canonical_memory.rs#L184-L212
 [indexes]: ../../../../crates/kernel/src/schema.rs#L93
 [reference]: ../catalog.md#fixed-reference-identity

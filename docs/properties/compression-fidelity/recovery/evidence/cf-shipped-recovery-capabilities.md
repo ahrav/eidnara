@@ -29,13 +29,13 @@ record. No permanent prohibition on adding capabilities is inferred.
   exposes memory-only sources and calls `executeEidnaraSearch`. Its
   [execution, lines 170-246](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L155)
   performs kernel-client reads. The
-  [client, lines 528-545](../../../../../packages/opencode-plugin/src/shared/kernel-client/client.ts#L528)
+  [client, lines 530-547](../../../../../packages/opencode-plugin/src/shared/kernel-client/client.ts#L530)
   sends `kernel.read`, not an `eidnara_search` facade request.
 - [Separate daemon facade, lines 11887-11945](../../../../../crates/daemon/src/lib.rs#L11899)
   calls `search_history_segments_and_notes_for_session` and emits history
   title/body or note snippets. A direct facade test is not a registered
   model-tool witness and does not expose exact native occurrence bytes.
-- [Memory ranking, lines 252-261](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L252)
+- [Memory ranking, lines 253-262](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L253)
   emits exact object-id matches over memory decisions. The word `exact`
   here does not certify native occurrence/revision fidelity.
 - [Pi entrypoint, lines 84-89, 367-370](../../../../../packages/pi-plugin/src/index.ts#L84)

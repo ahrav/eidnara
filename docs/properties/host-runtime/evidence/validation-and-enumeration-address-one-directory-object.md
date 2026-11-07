@@ -50,9 +50,9 @@ the deliberate escape hatch, documented at `:580-586` as requiring every consume
 to perform its own validation. One consumer honours the descriptor:
 `generation_launcher` (`crates/daemon/src/bin/eidnara-host.rs:929-945`) uses
 `open_verified_file`. The other does not:
-`crates/daemon/src/bin/eidnara_host/serve.rs:507` and `:527` hand
-`generation.path().join(BUNDLE_DIR)` and `generation.path().join(ORT_LIBRARY)`
-downstream as pathnames. The comment at `serve.rs:508-515` states the hazard in
+`crates/daemon/src/bin/eidnara_host/payload_local_embeddings.rs:18-19`, which
+`serve.rs:1192-1202` calls with the generation's `descriptor_root_path()`, hand
+`root.join(BUNDLE_DIR)` and `root.join(ORT_LIBRARY)` downstream as pathnames. The comment at `serve.rs:508-515` states the hazard in
 the property's own terms - "a directory replaced after validation could serve
 different embedding bytes under a generation the daemon still reported as valid"
 
@@ -123,7 +123,7 @@ prevents a fourth instance appearing at the `path()` boundary.
   (`eidnara-host.rs:929-945`, `serve.rs:490-531`).
 - Findings: as above. Zero remaining instances of the directory-level shape
   inside `generation.rs`; two pathname handoffs of store objects at
-  `serve.rs:507` and `:527`; three entry-level double resolutions under an
+  `payload_local_embeddings.rs:18-19`; three entry-level double resolutions under an
   identical pinned parent.
 - Missing evidence: whether `load_bundle` and the ORT loader actually verify the
   forwarded hashes against the bytes they read. `crates/host-runtime/src/local_embeddings/`
