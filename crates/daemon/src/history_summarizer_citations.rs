@@ -222,7 +222,7 @@ pub(crate) fn is_claim_key(key: &str) -> bool {
 /// an anchor within its bound that the segment's trimmed `p1` contains (else
 /// no anchor). A claim failing a rule before the anchor is dropped. Each
 /// segment then keeps the last claim per key and the first
-/// [`CLAIMS_PER_SEGMENT`] of those, in emitted order; a claim's position is
+/// [`CLAIMS_PER_SEGMENT`] of those, in input order (emission order as open-item retirement leaves it); a claim's position is
 /// its index. Returns the claims per segment, aligned with `segments`, and the
 /// counts.
 pub fn check_claim_set(

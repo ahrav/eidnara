@@ -22,15 +22,16 @@
 //!   settling line for the key and `p2` ends it with one, an open line with that key in any other
 //!   tier gives way to that settling line. A tier that already states
 //!   an outcome for the key just loses the open line, a tier gets the outcome once, and a settling
-//!   line past the claim anchor bound settles the tier without being copied.
-//! - A question asked again after its answer stays open in `p1` and `p2`.
+//!   line past the claim anchor bound changes only its own tier.
+//! - A question asked again in `p1` after its answer stays open, because `p1` decides the outcome.
 //! - Every other line that begins `Waiting on user (` leaves `p3` and `p4`, whatever its key.
 //!   Those tiers render once a segment has aged past its recent tiers, and they carry outcomes.
 //!
-//! In a segment whose `p1` or `p2` settles a key, the claim candidates of that key whose one
-//! citation names a message in the segment run in cited-message order, so claim validation, which
-//! keeps the last claim per key, keeps the claim on the latest message, the user's answer,
-//! whatever order the model emitted them in.
+//! In a segment whose `p1` or `p2` settles a key, a claim candidate of that key whose one citation
+//! names a message in the segment and whose anchor is an open line of the key that the final `p1`
+//! no longer holds leaves with its line, and the other such candidates run in cited-message order,
+//! so claim validation, which keeps the last claim per key, keeps the claim on the latest message,
+//! the user's answer, whatever order the model emitted them in.
 //!
 //! An item asked in one segment and settled in a later segment or a later fold is settled by its
 //! claims. The prompt has each status line carry a claim with its key, citing the asking part for a
@@ -116,52 +117,51 @@ pub(crate) fn retire_settled_lines<'o>(
     &output.history_segments
 }
 
-/// Retires one segment's settled open lines and aged waiting lines, and returns the keys its `p1`
-/// or `p2` settles.
-fn retire_in_segment(segment: &mut ParsedHistorySegment) -> BTreeSet<String> {
-    let settled: BTreeSet<String> = [segment.p1.as_deref(), segment.p2.as_deref()]
-        .into_iter()
-        .flatten()
-        .flat_map(str::lines)
-        .filter_map(status_line)
-        .filter(|(status, _)| *status == Status::Settled)
-        .map(|(_, key)| key.to_owned())
-        .collect();
-    let Some(p1) = segment.p1.as_deref() else {
-        return settled;
-    };
-    // Each key's outcome: the settling line that ends its status lines in `p1`, or else in `p2`
-    // when `p1` names the key only in open lines or not at all. A line past the anchor bound every
-    // status line keeps to settles the key without being copied.
-    let last_status = |tier: Option<&str>| {
-        let mut last: BTreeMap<String, (Status, String)> = BTreeMap::new();
-        for line in tier.unwrap_or_default().lines() {
-            if let Some((status, key)) = status_line(line) {
-                last.insert(key.to_owned(), (status, unbulleted(line).to_owned()));
-            }
-        }
-        last
-    };
-    let p1_settles: BTreeSet<&str> = p1
-        .lines()
+/// The keys `text` names in settling status lines.
+fn settling_keys(text: &str) -> BTreeSet<&str> {
+    text.lines()
         .filter_map(status_line)
         .filter(|(status, _)| *status == Status::Settled)
         .map(|(_, key)| key)
-        .collect();
-    let mut ends = last_status(segment.p2.as_deref());
-    ends.retain(|key, _| !p1_settles.contains(key.as_str()));
+        .collect()
+}
+
+/// Each key's last status line in `text`, with its status.
+fn last_status_lines(text: &str) -> BTreeMap<&str, (Status, &str)> {
+    let mut last = BTreeMap::new();
+    for line in text.lines() {
+        if let Some((status, key)) = status_line(line) {
+            last.insert(key, (status, unbulleted(line)));
+        }
+    }
+    last
+}
+
+/// Retires one segment's settled open lines and aged waiting lines, and returns the keys its `p1`
+/// or `p2` settles.
+fn retire_in_segment(segment: &mut ParsedHistorySegment) -> BTreeSet<String> {
+    let p2 = segment.p2.clone().unwrap_or_default();
+    let mut settled: BTreeSet<String> = settling_keys(&p2).into_iter().map(str::to_owned).collect();
+    let Some(p1) = segment.p1.as_deref() else {
+        return settled;
+    };
+    let p1_settles = settling_keys(p1);
+    settled.extend(p1_settles.iter().map(|key| (*key).to_owned()));
+    // Each key's outcome: the settling line that ends its status lines in `p1`, or in `p2` when
+    // `p1` has no settling line for the key. Only a line within the anchor bound every status line
+    // keeps to is an outcome; a longer one changes only its own tier.
+    let mut ends = last_status_lines(&p2);
     ends.extend(
-        last_status(Some(p1))
+        last_status_lines(p1)
             .into_iter()
-            .filter(|(key, _)| p1_settles.contains(key.as_str())),
+            .filter(|(key, _)| p1_settles.contains(key)),
     );
-    let outcome: BTreeMap<String, Option<String>> = ends
+    let outcome: BTreeMap<String, String> = ends
         .into_iter()
-        .filter(|(_, (status, _))| *status == Status::Settled)
-        .map(|(key, (_, line))| {
-            let copy = (line.len() <= CLAIM_ANCHOR_MAX_BYTES).then_some(line);
-            (key, copy)
+        .filter(|(_, (status, line))| {
+            *status == Status::Settled && line.len() <= CLAIM_ANCHOR_MAX_BYTES
         })
+        .map(|(key, (_, line))| (key.to_owned(), line.to_owned()))
         .collect();
     for (tier, text) in [
         (1, &mut segment.p1),
@@ -173,12 +173,8 @@ fn retire_in_segment(segment: &mut ParsedHistorySegment) -> BTreeSet<String> {
             continue;
         };
         // The keys whose outcome this tier states, including outcomes it receives below.
-        let mut stated: BTreeSet<String> = text
-            .lines()
-            .filter_map(status_line)
-            .filter(|(status, _)| *status == Status::Settled)
-            .map(|(_, key)| key.to_owned())
-            .collect();
+        let mut stated: BTreeSet<String> =
+            settling_keys(text).into_iter().map(str::to_owned).collect();
         retire_in(text, &mut |line: &str, rest: &[&str]| {
             let parsed = status_line(line);
             let aged = tier >= 3 && unbulleted(line).starts_with(WAITING_PREFIX);
@@ -192,9 +188,10 @@ fn retire_in_segment(segment: &mut ParsedHistorySegment) -> BTreeSet<String> {
             if let Some(key) = key
                 && let Some(settling) = outcome.get(key)
             {
-                return match settling {
-                    Some(line) if stated.insert(key.to_owned()) => Fate::Replace(line.clone()),
-                    _ => Fate::Drop,
+                return if stated.insert(key.to_owned()) {
+                    Fate::Replace(settling.clone())
+                } else {
+                    Fate::Drop
                 };
             }
             if aged { Fate::Drop } else { Fate::Keep }
@@ -232,9 +229,28 @@ fn order_settled_claims(
                 .then_some((segment, ordinal))
         })
         .collect();
+    // A placed candidate anchored on an open line of its key that its segment's final `p1` no
+    // longer holds is the claim of a retired open line, and it leaves.
+    let retired: Vec<bool> = output
+        .claims
+        .iter()
+        .enumerate()
+        .map(|(at, candidate)| {
+            placed[at].is_some_and(|(segment, _)| {
+                candidate.anchor.as_deref().is_some_and(|anchor| {
+                    status_line(anchor) == Some((Status::Open, candidate.key.as_str()))
+                        && !segments[segment]
+                            .p1
+                            .as_deref()
+                            .unwrap_or_default()
+                            .contains(anchor)
+                })
+            })
+        })
+        .collect();
     let mut queues: BTreeMap<(usize, &str), VecDeque<usize>> = BTreeMap::new();
     for (at, candidate) in output.claims.iter().enumerate() {
-        if let Some((segment, _)) = placed[at] {
+        if let Some((segment, _)) = placed[at].filter(|_| !retired[at]) {
             queues
                 .entry((segment, candidate.key.as_str()))
                 .or_default()
@@ -246,13 +262,15 @@ fn order_settled_claims(
             .make_contiguous()
             .sort_by_key(|&at| placed[at].map(|(_, ordinal)| ordinal));
     }
-    // Each placed position takes the next candidate of its segment and key in message order.
+    // Each queued position takes the next candidate of its segment and key in message order; a
+    // queue holds one entry per position that pops it, so every pop finds one.
     let order: Vec<usize> = (0..output.claims.len())
+        .filter(|&at| !retired[at])
         .map(|at| match placed[at] {
             Some((segment, _)) => queues
                 .get_mut(&(segment, output.claims[at].key.as_str()))
                 .and_then(VecDeque::pop_front)
-                .unwrap_or(at),
+                .expect("each queued position pops its own queue once"),
             None => at,
         })
         .collect();
@@ -520,18 +538,29 @@ mod tests {
     }
 
     #[test]
-    fn a_settling_line_past_the_anchor_bound_settles_a_tier_without_being_copied() {
-        let long = format!("Decided (a.b): {}", "y".repeat(CLAIM_ANCHOR_MAX_BYTES));
-        let p1 = format!("Waiting on user (a.b): ask?\n{long}");
-        let [p1_after, p2, ..] = retired(vec![segment(
-            &p1,
-            "Short.\nWaiting on user (a.b): ask?",
-            "Done.",
-            "",
-        )])
-        .remove(0);
-        assert_eq!(p1_after, long);
-        assert_eq!(p2, "Short.");
+    fn only_a_settling_line_within_the_anchor_bound_is_copied() {
+        for (extra, copied) in [(0, true), (1, false)] {
+            let prefix = "Decided (a.b): ";
+            let long = format!(
+                "{prefix}{}",
+                "y".repeat(CLAIM_ANCHOR_MAX_BYTES - prefix.len() + extra)
+            );
+            let p1 = format!("Waiting on user (a.b): ask?\n{long}");
+            let [p1_after, p2, ..] = retired(vec![segment(
+                &p1,
+                "Short.\nWaiting on user (a.b): ask?",
+                "Done.",
+                "",
+            )])
+            .remove(0);
+            assert_eq!(p1_after, long, "the line's own tier settles at any length");
+            let expected = if copied {
+                format!("Short.\n{long}")
+            } else {
+                "Short.\nWaiting on user (a.b): ask?".to_owned()
+            };
+            assert_eq!(p2, expected, "{} bytes", long.len());
+        }
     }
 
     #[test]
@@ -589,7 +618,15 @@ mod tests {
         );
         (second.start_message, second.end_message) = (3, 6);
         let mut output = output(vec![first, second]);
+        // The second segment's `p2` alone settles `g.h`, and its `p1` open line on `c.d` leaves.
+        output.history_segments[1].p2 = Some("Decided (g.h): fine.".into());
         output.claims = vec![
+            ClaimCandidate {
+                anchor: Some("Waiting on user (c.d): other?".into()),
+                ..candidate("c.d", "[s3:0-1]")
+            },
+            candidate("g.h", "[s6:0-1]"),
+            candidate("g.h", "[s4:0-1]"),
             candidate("c.d", "[s6:0-1]"),
             candidate("a.b", "[s5:0-1]"),
             candidate("a.b", "[s2:0-1]"),
@@ -603,11 +640,14 @@ mod tests {
             .iter()
             .map(|c| (c.key.as_str(), c.cite.as_str()))
             .collect();
-        // The second segment's two single-cite claims on `c.d` swap into message order; the first
-        // segment's claim on `a.b`, the two-cite claim, and the unsettled key stay where they were.
+        // The claim anchored on the retired `c.d` question leaves; each settled key's single-cite
+        // claims in the second segment run in message order; the first segment's claim on `a.b`,
+        // the two-cite claim, and the unsettled key stay where they were.
         assert_eq!(
             kept,
             [
+                ("g.h", "[s4:0-1]"),
+                ("g.h", "[s6:0-1]"),
                 ("c.d", "[s3:0-1]"),
                 ("a.b", "[s5:0-1]"),
                 ("a.b", "[s2:0-1]"),
