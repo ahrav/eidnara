@@ -28,8 +28,8 @@
 //! - A question asked again in `p1` after its answer stays open, because `p1` decides the outcome.
 //! - Every other line that begins `Waiting on user (` leaves `p3` and `p4`, whatever its key.
 //!   Those tiers render once a segment has aged past its recent tiers, and they carry outcomes.
-//!   A `p3` that retirement leaves empty takes `p2`'s text without its waiting lines, as the
-//!   parser fills a missing tier from the denser one.
+//!   A `p3` that retirement leaves empty takes `p2`'s text, or `p1`'s, without its waiting lines,
+//!   as the parser fills a missing tier from the denser one.
 //!
 //! Claim candidates follow the segment whose message their one citation names. A candidate whose
 //! anchor the final `p1` lacks leaves when the anchor lies in an open line of its key that
@@ -99,10 +99,6 @@ pub(crate) fn status_line(line: &str) -> Option<(Status, &str)> {
         .find_map(|(prefix, status)| line.strip_prefix(prefix).map(|rest| (*status, rest)))?;
     let (key, text) = rest.split_once("):")?;
     (is_claim_key(key) && !text.trim().is_empty()).then_some((status, key))
-}
-
-fn settles(line: &str, key: &str) -> bool {
-    status_line(line) == Some((Status::Settled, key))
 }
 
 /// The open lines one segment's `p1` lost to retirement, and the keys it has an outcome for.
@@ -192,11 +188,21 @@ fn retire_in_segment(segment: &mut ParsedHistorySegment) -> SegmentRetirement {
         emptied_p3 |= tier == 3 && kept.is_empty();
         *text = kept;
     }
-    // A `p3` that held only aged waiting lines takes `p2`'s text without its waiting lines, as the
-    // parser fills a missing tier from the denser one; the third tier's rules apply to the refill.
-    if emptied_p3 && let Some(p2) = segment.p2.as_deref() {
-        let refill = retire_tier(p2, 3, &outcome).map_or_else(|| p2.to_owned(), |(kept, _)| kept);
-        segment.p3 = Some(refill);
+    // A `p3` that held only aged waiting lines takes `p2`'s text, or `p1`'s when `p2` holds only
+    // waiting lines too, without its waiting lines, as the parser fills a missing tier from the
+    // denser one; the third tier's rules apply to the refill.
+    if emptied_p3 {
+        let as_p3 = |text: &str| {
+            retire_tier(text, 3, &outcome).map_or_else(|| text.to_owned(), |(kept, _)| kept)
+        };
+        let refill = [segment.p2.as_deref(), segment.p1.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(as_p3)
+            .find(|refill| !refill.is_empty());
+        if let Some(refill) = refill {
+            segment.p3 = Some(refill);
+        }
     }
     if let Some(p1) = &segment.p1 {
         segment.content.clone_from(p1);
@@ -218,14 +224,22 @@ fn retire_tier(
     outcome: &BTreeMap<String, String>,
 ) -> Option<(String, Vec<String>)> {
     let lines: Vec<&str> = text.lines().collect();
+    let parsed: Vec<Option<(Status, &str)>> = lines.iter().map(|line| status_line(line)).collect();
+    // Each key's last settling line in this tier, so a line's settled-below test reads one entry.
+    let mut last_settling: BTreeMap<&str, usize> = BTreeMap::new();
+    for (at, status) in parsed.iter().enumerate() {
+        if let Some((Status::Settled, key)) = status {
+            last_settling.insert(key, at);
+        }
+    }
     // The keys whose selected outcome line this tier holds, including outcomes it receives below.
+    let held: BTreeSet<&str> = lines
+        .iter()
+        .map(|line| unbulleted(line).trim_end())
+        .collect();
     let mut stated: BTreeSet<&str> = outcome
         .iter()
-        .filter(|(_, settling)| {
-            lines
-                .iter()
-                .any(|line| unbulleted(line).trim_end() == unbulleted(settling))
-        })
+        .filter(|(_, settling)| held.contains(unbulleted(settling)))
         .map(|(key, _)| key.as_str())
         .collect();
     let mut kept: Vec<&str> = Vec::new();
@@ -233,13 +247,12 @@ fn retire_tier(
     // An upper bound on the tier's length after the changes so far.
     let mut length = text.len();
     for (at, line) in lines.iter().enumerate() {
-        let parsed = status_line(line);
         let aged = tier >= 3 && unbulleted(line).starts_with(WAITING_PREFIX);
-        let open = matches!(parsed, Some((Status::Open, _)));
+        let open = matches!(parsed[at], Some((Status::Open, _)));
         if aged || open {
-            let key = parsed.map(|(_, key)| key);
+            let key = parsed[at].map(|(_, key)| key);
             let settled_below =
-                key.is_some_and(|key| lines[at + 1..].iter().any(|line| settles(line, key)));
+                key.is_some_and(|key| last_settling.get(key).is_some_and(|&last| last > at));
             let copy = key
                 .and_then(|key| outcome.get_key_value(key))
                 .filter(|_| !settled_below);
@@ -264,7 +277,16 @@ fn retire_tier(
         }
         kept.push(line);
     }
-    (!retired.is_empty()).then(|| (kept.join("\n").trim().to_owned(), retired))
+    // Blank lines leave the edges, and a surviving line keeps its own indentation.
+    let first = kept
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(kept.len());
+    kept.drain(..first);
+    while kept.last().is_some_and(|line| line.trim().is_empty()) {
+        kept.pop();
+    }
+    (!retired.is_empty()).then(|| (kept.join("\n").trim_end().to_owned(), retired))
 }
 
 /// Removes a claim candidate whose one citation names a segment and whose anchor the segment's
@@ -570,6 +592,20 @@ mod tests {
         )])
         .remove(0);
         assert_eq!(p3, "Moved the plugin.");
+    }
+
+    #[test]
+    fn a_surviving_line_keeps_its_indentation_and_p3_falls_back_to_p1() {
+        let [p1, _, p3, _] = retired(vec![segment(
+            "Waiting on user (a.b): ask?\n    cargo test\nDecided (a.b): yes.",
+            "Waiting on user (c.d): publish?",
+            "Waiting on user (c.d): publish?",
+            "",
+        )])
+        .remove(0);
+        assert_eq!(p1, "    cargo test\nDecided (a.b): yes.");
+        // `p2` holds only a waiting line, so the emptied `p3` takes `p1` without its waiting lines.
+        assert_eq!(p3, "    cargo test\nDecided (a.b): yes.");
     }
 
     #[test]
