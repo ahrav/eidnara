@@ -53,10 +53,8 @@ to perform its own validation. One consumer honours the descriptor:
 `crates/daemon/src/bin/eidnara_host/payload_local_embeddings.rs:18-19`, which
 `serve.rs:1192-1202` calls with the generation's `descriptor_root_path()`, hand
 `root.join(BUNDLE_DIR)` and `root.join(ORT_LIBRARY)` downstream as pathnames. The comment at `serve.rs:1188-1190` states the hazard in
-the property's own terms - "a directory replaced after validation could serve
-different embedding bytes under a generation the daemon still reported as valid"
-
-- and mitigates it by forwarding the manifest's SHA-256 so the loader verifies
+the property's own terms - "a replaced bundle can remain self-consistent while
+serving different embeddings" - and mitigates it by forwarding the manifest's SHA-256 so the loader verifies
 content. So two store objects are addressed by re-resolved pathname, guarded by
 content hash rather than by descriptor pinning.
 
