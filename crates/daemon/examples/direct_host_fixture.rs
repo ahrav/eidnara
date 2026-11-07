@@ -1600,7 +1600,10 @@ mod unix {
             (listener, own_socket)
         };
         if let Some(production) = &production {
-            production.install(&root)?;
+            // A refused install unlinks the socket this process bound, so the next start finds the state root free.
+            production.install(&root).inspect_err(|_| {
+                let _ = unlink_own_control_socket(&control_path, own_socket);
+            })?;
         }
         let production_lane = production.map(|production| production.lane);
         let publication =
