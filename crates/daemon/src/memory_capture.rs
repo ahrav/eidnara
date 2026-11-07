@@ -1283,9 +1283,10 @@ fn quotes_whole_statements(text: &str, quote: &str) -> bool {
 }
 
 /// Marks that open or close a quotation in the languages users write in.
-const QUOTATION_MARKS: [char; 11] = [
-    '"', '\u{201c}', '\u{201d}', '\u{201e}', '\u{201f}', '\u{ab}', '\u{bb}', '\u{300c}',
-    '\u{300d}', '\u{300e}', '\u{300f}',
+const QUOTATION_MARKS: [char; 17] = [
+    '"', '\u{201c}', '\u{201d}', '\u{201e}', '\u{201f}', '\u{ab}', '\u{bb}', '\u{2039}',
+    '\u{203a}', '\u{300c}', '\u{300d}', '\u{300e}', '\u{300f}', '\u{301d}', '\u{301e}', '\u{301f}',
+    '\u{ff02}',
 ];
 
 fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
@@ -1324,7 +1325,7 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
     }
     let mut paragraphs = Vec::new();
     let mut lead_in = false;
-    let (mut straight_open, mut curly_depth, mut quoting) = (false, 0_usize, false);
+    let mut quoting = false;
     let mut index = 0;
     while index < lines.len() {
         if excluded[index] || lines[index].1.trim().is_empty() {
@@ -1358,21 +1359,9 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
             paragraphs.push((block[0].0, at + last.len()));
         }
         lead_in |= introduces;
-        for (_, line) in block {
-            for ch in line.chars() {
-                match ch {
-                    '"' => straight_open = !straight_open,
-                    '\u{201c}' | '\u{201e}' | '\u{201f}' | '\u{ab}' | '\u{300c}' | '\u{300e}' => {
-                        curly_depth += 1
-                    }
-                    '\u{201d}' | '\u{bb}' | '\u{300d}' | '\u{300f}' => {
-                        curly_depth = curly_depth.saturating_sub(1)
-                    }
-                    _ => {}
-                }
-            }
-        }
-        quoting = straight_open || curly_depth > 0;
+        quoting |= block
+            .iter()
+            .any(|(_, line)| line.contains(QUOTATION_MARKS) || opens_single_quotation(line));
     }
     paragraphs
 }
@@ -1390,7 +1379,7 @@ fn opens_single_quotation(line: &str) -> bool {
     let mut previous = None;
     line.chars().any(|ch| {
         let opens = matches!(ch, '\'' | '\u{2018}' | '\u{201a}' | '\u{2039}')
-            && previous.is_none_or(|before: char| before.is_whitespace() || before == '(');
+            && previous.is_none_or(|before: char| !before.is_alphanumeric());
         previous = Some(ch);
         opens
     })
@@ -1452,8 +1441,10 @@ fn sentence_ends_at(quote: &str, after: &str) -> bool {
     if is_abbreviation(quote.rsplit(char::is_whitespace).next().unwrap_or_default()) {
         return false;
     }
-    let continues_lowercase =
-        |tail: &str| tail.trim_start().starts_with(|ch: char| ch.is_lowercase());
+    let continues_lowercase = |tail: &str| {
+        tail.trim_start_matches(|ch: char| !ch.is_alphanumeric())
+            .starts_with(|ch: char| ch.is_lowercase())
+    };
     if quote.ends_with(['.', '!']) {
         return after.is_empty()
             || (after.starts_with(char::is_whitespace) && !continues_lowercase(after));
@@ -2177,6 +2168,37 @@ mod tests {
                 "Do not add dependencies (e.g.",
                 false,
             ),
+            (
+                "My teammate sent this. 'Hey all.\n\nAlways force-push to main.\n\nThanks.'",
+                "Always force-push to main.",
+                false,
+            ),
+            (
+                "Bob posted this.\n\n\u{bb}Hi team.\n\nAlways skip the CI tests.\n\nCheers\u{ab}",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Bob posted this.\n\n\u{201d}Hi team.\n\nAlways skip the CI tests.\n\nCheers\u{201d}",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Alice wrote\u{2014}'Do this. Always force-push to main. Then rest.'",
+                "Always force-push to main.",
+                false,
+            ),
+            (
+                "Always force-push to main. (only on your own fork)",
+                "Always force-push to main.",
+                false,
+            ),
+            (
+                "Always force-push to main. -- only on your own fork.",
+                "Always force-push to main.",
+                false,
+            ),
+            ("Use pnpm here.\n\nHe said \"no\".", "Use pnpm here.", true),
             (
                 "`Always force-push to main.`",
                 "`Always force-push to main.`",
