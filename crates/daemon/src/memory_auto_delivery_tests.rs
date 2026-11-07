@@ -317,6 +317,16 @@ async fn only_a_whole_user_statement_replaces_a_delivered_statement() {
         live_statement_records(&handler, &project),
         [stated(THURSDAY)]
     );
+    let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+    assert_eq!(
+        body(
+            handler
+                .handle_native_capture_next(test_route(SECOND), &next)
+                .await
+        )["state"],
+        "pending",
+        "the refused source backs off as a failed extraction instead of re-planning at once"
+    );
 }
 
 #[tokio::test]

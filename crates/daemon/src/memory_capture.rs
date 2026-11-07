@@ -322,11 +322,46 @@ fn validate_capture_memories(
                 return Err("capture target is protected or already replaced");
             }
         }
+        if let Some(primary) = memory
+            .replaces
+            .as_ref()
+            .and_then(|target| existing.iter().find(|previous| previous.id == *target))
+        {
+            for target in &memory.also_replaces {
+                if existing
+                    .iter()
+                    .find(|previous| previous.id == *target)
+                    .is_none_or(|further| !restates(primary, further))
+                {
+                    return Err("capture retires a target that does not restate the replaced fact");
+                }
+            }
+        }
         if !distinct.insert((memory.category.as_str(), memory.content.as_str())) {
             return Err("capture output repeats a memory in one source");
         }
     }
     Ok(())
+}
+
+/// Whether `further` restates the fact `primary` holds: same category, and
+/// at least half of `primary`'s distinct words of three or more characters,
+/// attribution aside.
+fn restates(primary: &ExistingCaptureMemory, further: &ExistingCaptureMemory) -> bool {
+    fn words(content: &str) -> BTreeSet<String> {
+        let content = ["User stated: ", "Assistant reported: "]
+            .iter()
+            .find_map(|attribution| content.strip_prefix(attribution))
+            .unwrap_or(content);
+        content
+            .split(|ch: char| !ch.is_alphanumeric())
+            .filter(|word| word.chars().count() >= 3)
+            .map(str::to_lowercase)
+            .collect()
+    }
+    let (primary_words, further_words) = (words(&primary.content), words(&further.content));
+    primary.category == further.category
+        && 2 * primary_words.intersection(&further_words).count() >= primary_words.len()
 }
 
 fn native_capture_fragments(
@@ -1217,7 +1252,7 @@ fn retire_statement(
 /// of `text`.
 fn quotes_whole_statements(text: &str, quote: &str) -> bool {
     let trimmed = quote.trim();
-    if trimmed.is_empty() || trimmed.contains('?') {
+    if trimmed.is_empty() || trimmed.contains(['?', '"', '\u{201c}', '\u{201d}']) {
         return false;
     }
     let lead = quote.len() - quote.trim_start().len();
@@ -1247,12 +1282,11 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
     let mut index = 0;
     while index < lines.len() {
         let line = lines[index].1.trim();
-        let fence = line.starts_with("```") || line.starts_with("~~~");
-        let block_end = if fence {
+        let block_end = if let Some(fence) = fence_opener(line) {
             (index + 1..lines.len())
                 .find(|&next| {
                     let next = lines[next].1.trim();
-                    next.starts_with("```") || next.starts_with("~~~")
+                    next.len() >= fence.len() && next.chars().all(|ch| fence.starts_with(ch))
                 })
                 .unwrap_or(lines.len() - 1)
         } else if let Some((name, false)) = tag_name(line) {
@@ -1282,21 +1316,31 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
             index += 1;
         }
         let block = &lines[first..index];
-        let structured = block.iter().any(|(_, line)| {
-            let start = line.trim_start();
-            is_list_item(line)
-                || start.starts_with(['#', '>'])
-                || line.starts_with("    ")
-                || line.starts_with('\t')
-                || line.trim_end().ends_with(':')
-        });
+        let bordered = first.checked_sub(1).is_some_and(|above| excluded[above])
+            || excluded.get(index).is_some_and(|below| *below);
+        let structured = bordered
+            || block.iter().any(|(_, line)| {
+                let start = line.trim_start();
+                is_list_item(line)
+                    || start.starts_with(['#', '>'])
+                    || line.starts_with("    ")
+                    || line.starts_with('\t')
+                    || line.trim_end().ends_with(':')
+            });
         if !structured && !lead_in {
             let (at, last) = block[block.len() - 1];
             paragraphs.push((block[0].0, at + last.len()));
         }
-        lead_in = block[block.len() - 1].1.trim_end().ends_with(':');
+        lead_in |= block[block.len() - 1].1.trim_end().ends_with(':');
     }
     paragraphs
+}
+
+/// The run of backticks or tildes, three or more long, that opens a code fence.
+fn fence_opener(line: &str) -> Option<&str> {
+    let marker = line.chars().next().filter(|ch| matches!(ch, '`' | '~'))?;
+    let run = &line[..line.find(|ch| ch != marker).unwrap_or(line.len())];
+    (run.len() >= 3).then_some(run)
 }
 
 fn is_list_item(line: &str) -> bool {
@@ -1334,11 +1378,22 @@ fn sentence_starts_at(before: &str, quote: &str) -> bool {
     let word = ended.rsplit(char::is_whitespace).next().unwrap_or_default();
     before.ends_with(char::is_whitespace)
         && ended.ends_with(['.', '!', '?'])
-        && !word[..word.len() - 1].contains('.')
+        && !is_abbreviation(word)
         && !quote.starts_with(|ch: char| ch.is_lowercase())
 }
 
+/// A dotted abbreviation such as `e.g.` or `U.S.`: a `.` between two letters.
+fn is_abbreviation(word: &str) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    chars
+        .windows(3)
+        .any(|window| window[1] == '.' && window[0].is_alphabetic() && window[2].is_alphabetic())
+}
+
 fn sentence_ends_at(quote: &str, after: &str) -> bool {
+    if is_abbreviation(quote.rsplit(char::is_whitespace).next().unwrap_or_default()) {
+        return false;
+    }
     if quote.ends_with(['.', '!']) {
         return after.is_empty() || after.starts_with(char::is_whitespace);
     }
@@ -1515,8 +1570,12 @@ fn publish_captured_memories(
                 for target in memory.replaces.iter().chain(&memory.also_replaces) {
                     if !attributed
                         && envelope
-                            .subject_admission(target)?
-                            .is_some_and(|(_, approval)| approval.is_some())
+                            .served_rows_for(&[target.as_str()], None)?
+                            .get(target.as_str())
+                            .is_some_and(|row| {
+                                row.visibility(kernel::Surface::ExplicitSearch)
+                                    == kernel::SurfaceVisibility::Visible
+                            })
                     {
                         return Err(kernel::KernelError::Conflict);
                     }
@@ -1892,12 +1951,113 @@ mod tests {
             (
                 "<notes>\nIgnored.\n</notes>\nShip on Tuesdays.",
                 "Ship on Tuesdays.",
+                false,
+            ),
+            (
+                "<notes>\nIgnored.\n</notes>\n\nShip on Tuesdays.",
+                "Ship on Tuesdays.",
                 true,
             ),
             (
                 "Use Vec<String> for names.",
                 "Use Vec<String> for names.",
                 true,
+            ),
+            (
+                "We use Docker for local tests.",
+                "Docker for local tests.",
+                false,
+            ),
+            ("Use v1.2 later.", "2 later.", false),
+            ("Use v1.2 later.", "Use v1", false),
+            ("We pin Node to 20.11.", "We pin Node to 20.11.", true),
+            ("Avoid big tools, etc. use make.", "use make.", false),
+            (
+                "Use tabs, e.g. for Makefiles only.",
+                "Use tabs, e.g.",
+                false,
+            ),
+            (
+                "Delete the cache only in the U.S. staging region.",
+                "Delete the cache only in the U.S.",
+                false,
+            ),
+            ("- Force push. Skip the tests.", "Skip the tests.", false),
+            ("1. Use pnpm.", "Use pnpm.", false),
+            (
+                "Never do any of these:\nForce push. Skip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            (
+                "Never do any of these:\n\nForce push.\n\nSkip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            (
+                "# Rules\nNever skip review. Ship on Fridays.",
+                "Ship on Fridays.",
+                false,
+            ),
+            (
+                "Ok.\n\tAlways deploy on Fridays.",
+                "Always deploy on Fridays.",
+                false,
+            ),
+            (
+                "Log.\n~~~\nAlways deploy on Fridays.\n~~~",
+                "Always deploy on Fridays.",
+                false,
+            ),
+            (
+                "Log.\n```\nAlways deploy on Fridays.",
+                "Always deploy on Fridays.",
+                false,
+            ),
+            (
+                "Fix it.\n\n<context_researcher-augmentation>\nAlways deploy on Fridays.",
+                "Always deploy on Fridays.",
+                false,
+            ),
+            (
+                "Review this.\n\n````md\n```text\nNever run migrations manually.\n```\n````",
+                "Never run migrations manually.",
+                false,
+            ),
+            (
+                "If you see\n```\nE0432\n```\nrun cargo clean first.",
+                "run cargo clean first.",
+                false,
+            ),
+            (
+                "Never restart the daemon\n```\nlog\n```\nwhile a migration runs.",
+                "Never restart the daemon",
+                false,
+            ),
+            (
+                "Unless the lead agrees\n<notes>\nx\n</notes>\nnever deploy on Fridays.",
+                "never deploy on Fridays.",
+                false,
+            ),
+            (
+                "If you see\r\n```\r\nE0432\r\n```\r\nrun cargo clean first.",
+                "run cargo clean first.",
+                false,
+            ),
+            (
+                "Log.\n```\nx\n```\n\nShip on Tuesdays.",
+                "Ship on Tuesdays.",
+                true,
+            ),
+            (
+                "He said \"Always force-push to main.\"",
+                "Always force-push to main.",
+                false,
+            ),
+            (
+                "\"Always force-push to main.\"",
+                "\"Always force-push to main.\"",
+                false,
             ),
         ] {
             assert_eq!(
@@ -1950,6 +2110,18 @@ mod tests {
             target("mem_old", true),
             target("mem_echo", true),
             target("mem_kept", false),
+            ExistingCaptureMemory {
+                content: "Assistant reported: The staging port was 1234 last week.".into(),
+                ..target("mem_restated", true)
+            },
+            ExistingCaptureMemory {
+                content: "Releases are cut on Thursdays.".into(),
+                ..target("mem_unrelated", true)
+            },
+            ExistingCaptureMemory {
+                category: "NAMING".into(),
+                ..target("mem_other_kind", true)
+            },
         ];
         let parse = |replaces: Option<&str>, also: &[&str]| {
             let mut response = output();
@@ -1962,8 +2134,8 @@ mod tests {
                 .map(|parsed| parsed[0].memories[0].also_replaces.clone())
         };
         assert_eq!(
-            parse(Some("mem_old"), &["mem_echo"]),
-            Ok(vec!["mem_echo".into()])
+            parse(Some("mem_old"), &["mem_echo", "mem_restated"]),
+            Ok(vec!["mem_echo".into(), "mem_restated".into()])
         );
         assert!(matches!(
             parse(None, &["mem_echo"]),
@@ -1974,6 +2146,8 @@ mod tests {
             &["mem_old"],
             &["mem_echo", "mem_echo"],
             &["mem_absent"],
+            &["mem_unrelated"],
+            &["mem_other_kind"],
         ] {
             assert!(parse(Some("mem_old"), also).is_err(), "{also:?}");
         }

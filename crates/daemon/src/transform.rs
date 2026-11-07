@@ -619,6 +619,14 @@ impl ProducerContext<'_> {
 }
 
 /// Assigns the pinned read's composition to `meta` at a HARD freeze site and reports that this attempt froze one; the caller of the pass checks whether the read was Available.
+fn memory_render_identity(base: String, ctx: &ProducerContext<'_>) -> String {
+    if ctx.memory_auto_inject {
+        base
+    } else {
+        format!("{base}|memory-auto-inject-off")
+    }
+}
+
 fn freeze_project_memory(meta: &mut ModuleMeta, ctx: &ProducerContext<'_>) -> bool {
     meta.project_memory = ctx.project_memory_composition();
     true
@@ -2915,7 +2923,10 @@ fn apply_additive_only(
         m0_content_epoch_for_pass(req, serializer_profile, tagging_surface_requested);
     let additive_render_identity = format!(
         "additive-only-v2|{}",
-        render_identity_base(req, &content_epoch.prompt_surface_epoch)
+        memory_render_identity(
+            render_identity_base(req, &content_epoch.prompt_surface_epoch),
+            ctx
+        )
     );
     let effective_render_config_base =
         fold_m0_content_epoch(&additive_render_identity, &content_epoch);
@@ -3153,7 +3164,7 @@ fn apply_additive_only(
                 &req.session_id,
                 &additive_meta,
                 meta.expiry_cutoff_ms,
-                ctx.memory_enabled,
+                ctx.injects_memory(),
                 ctx.user_profile_budget_tokens,
                 ctx.temporal_awareness,
                 m1_row_cap_for(req.geometry.as_ref()),
@@ -3628,7 +3639,10 @@ fn apply_once(
 
     let mut content_epoch =
         m0_content_epoch_for_pass(req, serializer_profile, tagging_surface_requested);
-    let render_identity = render_identity_base(req, &content_epoch.prompt_surface_epoch);
+    let render_identity = memory_render_identity(
+        render_identity_base(req, &content_epoch.prompt_surface_epoch),
+        ctx,
+    );
 
     let stable_effective_render_config_base =
         fold_m0_content_epoch(&render_identity, &content_epoch);
@@ -4775,7 +4789,7 @@ fn apply_once(
                     &req.session_id,
                     &meta,
                     meta.expiry_cutoff_ms,
-                    ctx.memory_enabled,
+                    ctx.injects_memory(),
                     ctx.user_profile_budget_tokens,
                     ctx.temporal_awareness,
                     m1_row_cap_for(req.geometry.as_ref()),
@@ -13929,6 +13943,40 @@ pub(crate) mod tests {
             [(true, true, true), (false, false, false)],
             "the switch removes both blocks and records no composition for them"
         );
+    }
+
+    #[test]
+    fn switching_auto_inject_off_rebuilds_m0_without_the_profile_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .with_fenced_conn_for_test(|tx| {
+                tx.execute(
+                    "INSERT INTO user_memories (id, content, status, promoted_at)
+                     VALUES (1, 'Prefers short commit subjects.', 'active', 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let request = req(
+            "auto-inject-toggle",
+            "cfg",
+            vec![item("u1", 1, "live prompt")],
+        );
+        let mut ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
+        ctx.project_memory = Some(CanonicalMemoryRead::Withheld(
+            crate::kernel_routes::KernelOutcome::unavailable(
+                crate::kernel_routes::UnavailableReason::StoreStarting,
+            ),
+        ));
+        let first = transform(&store, &request, &ctx).unwrap();
+        assert!(served_bytes(&first).contains("Prefers short commit subjects."));
+        assert_ne!(transform(&store, &request, &ctx).unwrap().action, "HARD");
+        ctx.memory_auto_inject = false;
+        let off = transform(&store, &request, &ctx).unwrap();
+        assert_eq!(off.action, "HARD", "the switch alone rebuilds m0");
+        assert!(!served_bytes(&off).contains("Prefers short commit subjects."));
     }
 
     #[test]

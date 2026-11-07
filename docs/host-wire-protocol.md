@@ -1031,18 +1031,21 @@ list is ignored with a warning, and each plugin strips it from the project
 tier. `memory.auto_capture` and
 `memory.auto_promote` gate only model-extracted facts from redacted text.
 A captured fact is the user's statement when its source message has the user
-role and reaches capture as one source, not as fragments of a message longer
-than one capture source; its stored text is `User stated: ` followed by a
-verbatim quotation of that message; and the quotation is one or more whole
-sentences of a plain-prose paragraph. Plain prose leaves out code fences, each
-block a line holding only a markup tag opens through the last line closing
-that tag (such as `<context_researcher-augmentation>`), and every paragraph
-holding a list item, a heading, a blockquote, an indented code line, or a line
-ending in `:`, along with the paragraph after one ending in `:`. The quotation
-starts the paragraph or follows a `.`, `!`, or `?` and whitespace, with a
-preceding word holding no other `.` and a first character that is not
-lowercase; it ends with `.` or `!`, directly before one, or at the paragraph's
-end; and it contains no `?`. Capture records each such fact with a statement record in the
+role and reaches capture under its own message id (a source id of the form
+`<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
+and hashed ids, never qualifies); its stored text is `User stated: ` followed
+by a verbatim quotation of that message; and the quotation is one or more
+whole sentences of a plain-prose paragraph. Plain prose leaves out code fences
+(closed by a run of the opener's character at least as long), each block a
+line holding only a markup tag opens through the last line closing that tag
+(such as `<context_researcher-augmentation>`), every paragraph holding a list
+item, a heading, a blockquote, an indented code line, or a line ending in `:`,
+every paragraph after a line ending in `:`, and every paragraph that a fence
+or tag line borders without a blank line. The quotation starts the paragraph
+or follows a `.`, `!`, or `?` and whitespace, with a first character that is
+not lowercase; it ends with `.` or `!`, directly before one, or at the
+paragraph's end; neither boundary falls at a dotted abbreviation such as
+`e.g.`; and it contains no `?` and no double quotation mark. Capture records each such fact with a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and admits the fact on that approval, so the Kernel serves it on
 automatic surfaces. Every other captured fact remains labeled model inference
