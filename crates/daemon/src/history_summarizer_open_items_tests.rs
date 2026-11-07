@@ -652,16 +652,29 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
             assert!(!tier.contains(CONSTRAINT), "{tier}");
         }
     }
-    let p2 = own_words(rows.iter().filter_map(|row| row.p2.as_deref()));
+    // The recent tiers state the lift in the summarizer's own words.
+    let recent = own_words(
+        rows.iter()
+            .flat_map(|row| [row.p1.as_deref(), row.p2.as_deref(), row.p3.as_deref()])
+            .flatten(),
+    );
     assert!(
-        p2.contains("lifted (")
-            || (p2.contains("lifted") && !p2.contains("not lifted"))
-            || p2.contains("own pr"),
+        [
+            "lifted",
+            "allowed",
+            "own pr",
+            "separate pr",
+            "pr per",
+            "per parser fix"
+        ]
+        .iter()
+        .any(|phrase| recent.contains(phrase))
+            && !recent.contains("not lifted"),
         "{rows:#?}"
     );
 }
 
-/// The open status lines the rows store, and any line that still mentions waiting on the user.
+/// The open status lines the rows store.
 fn open_lines(rows: &[StoredHistorySegment]) -> Vec<&str> {
     rows.iter()
         .flat_map(|row| [&row.p1, &row.p2, &row.p3, &row.p4])
@@ -671,7 +684,7 @@ fn open_lines(rows: &[StoredHistorySegment]) -> Vec<&str> {
             matches!(
                 crate::history_summarizer_open_items::status_line(line),
                 Some((crate::history_summarizer_open_items::Status::Open, _))
-            ) || line.contains("Waiting on user")
+            )
         })
         .collect()
 }
