@@ -570,10 +570,10 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     pi.on("context", async (event, ctx) => {
         const sessionId = sessionIdFromContext(ctx);
         if (!sessionId) return;
+        taggedSessions.delete(sessionId);
         try {
             const deps = resolveCurrentProjectDeps(ctx);
             const eidnaraFolds = isCompactionEnabled(deps.config);
-            taggedSessions.delete(sessionId);
             if (!eidnaraFolds && !deps.projectIdentity) return undefined;
             const model = ctx.model;
             const geometry = model

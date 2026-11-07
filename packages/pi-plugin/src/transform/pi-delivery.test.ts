@@ -376,24 +376,27 @@ describe("Pi context handler in compaction-off mode", () => {
         expect(message.content[0]?.text).toBe(shown);
     });
 
-    it("streams and saves an answer as written when the daemon serves under native authority", async () => {
-        const native = (body: Json) => ({
-            ...additive(body),
-            history_summarizer: { no_fire: "native_authority" },
-        });
-        const { h, updates } = await streamedTurns(CHAIN, STREAMED, [0], native);
+    it("streams and saves an answer as written once the daemon serves under native authority", async () => {
+        let passes = 0;
+        const serve = (body: Json) => {
+            passes += 1;
+            const served = additive(body, { mid: rowsOf(body).at(-1)?.id, sequence: 1 });
+            return passes === 1
+                ? { ...served, history_summarizer: { fired: false } }
+                : { ...served, history_summarizer: { no_fire: "native_authority" } };
+        };
+        const { h, updates } = await streamedTurns(CHAIN, STREAMED, [0, 1], serve);
+        expect(passes).toBe(2);
+        expect(assistantTexts(h)).toEqual([SHOWN, ` ${STREAMED}`]);
         expect(updates.some((update) => update.includes("\u00a712\u00a7"))).toBe(true);
-        expect(assistantTexts(h)).toEqual([STREAMED]);
     });
 
     it("strips a tagged answer in a project whose configuration the daemon does not admit", async () => {
-        const { updates } = await streamedTurns(
-            CHAIN,
-            STREAMED,
-            [0],
-            undefined,
-            unresolvedProject(),
-        );
+        const serve = (body: Json) => ({
+            ...additive(body, { mid: rowsOf(body).at(-1)?.id, sequence: 1 }),
+            history_summarizer: { fired: false },
+        });
+        const { updates } = await streamedTurns(CHAIN, STREAMED, [0], serve, unresolvedProject());
         for (const update of updates) expect(update).not.toMatch(/\u00a7\d/u);
     });
 
