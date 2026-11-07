@@ -361,6 +361,7 @@ fn restates(primary: &ExistingCaptureMemory, further: &ExistingCaptureMemory) ->
     }
     let (primary_words, further_words) = (words(&primary.content), words(&further.content));
     primary.category == further.category
+        && !primary_words.is_empty()
         && 2 * primary_words.intersection(&further_words).count() >= primary_words.len()
 }
 
@@ -1252,7 +1253,11 @@ fn retire_statement(
 /// of `text`.
 fn quotes_whole_statements(text: &str, quote: &str) -> bool {
     let trimmed = quote.trim();
-    if trimmed.is_empty() || trimmed.contains(['?', '"', '\u{201c}', '\u{201d}']) {
+    if trimmed.is_empty()
+        || trimmed.contains('?')
+        || trimmed.contains(QUOTATION_MARKS)
+        || trimmed.starts_with(['\'', '\u{2018}'])
+    {
         return false;
     }
     let lead = quote.len() - quote.trim_start().len();
@@ -1263,11 +1268,18 @@ fn quotes_whole_statements(text: &str, quote: &str) -> bool {
         paragraphs.iter().any(|&(first, last)| {
             first <= start
                 && end <= last
+                && !text[first..start].contains([':', '\u{ff1a}'])
                 && sentence_starts_at(&text[first..start], trimmed)
                 && sentence_ends_at(trimmed, &text[end..last])
         })
     })
 }
+
+/// Marks that open or close a quotation in the languages users write in.
+const QUOTATION_MARKS: [char; 11] = [
+    '"', '\u{201c}', '\u{201d}', '\u{201e}', '\u{201f}', '\u{ab}', '\u{bb}', '\u{300c}',
+    '\u{300d}', '\u{300e}', '\u{300f}',
+];
 
 fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
     let lines: Vec<(usize, &str)> = text
@@ -1325,13 +1337,18 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
                     || start.starts_with(['#', '>'])
                     || line.starts_with("    ")
                     || line.starts_with('\t')
-                    || line.trim_end().ends_with(':')
+                    || line.contains(QUOTATION_MARKS)
             });
-        if !structured && !lead_in {
+        let introduces = block.iter().any(|(_, line)| {
+            line.trim_end()
+                .trim_end_matches(['*', '_'])
+                .ends_with([':', '\u{ff1a}'])
+        });
+        if !structured && !introduces && !lead_in {
             let (at, last) = block[block.len() - 1];
             paragraphs.push((block[0].0, at + last.len()));
         }
-        lead_in |= block[block.len() - 1].1.trim_end().ends_with(':');
+        lead_in |= introduces;
     }
     paragraphs
 }
@@ -1384,10 +1401,11 @@ fn sentence_starts_at(before: &str, quote: &str) -> bool {
 
 /// A dotted abbreviation such as `e.g.` or `U.S.`: a `.` between two letters.
 fn is_abbreviation(word: &str) -> bool {
-    let chars: Vec<char> = word.chars().collect();
-    chars
-        .windows(3)
-        .any(|window| window[1] == '.' && window[0].is_alphabetic() && window[2].is_alphabetic())
+    let segments: Vec<&str> = word.trim_end_matches(['.', '!', '?']).split('.').collect();
+    segments.len() >= 2
+        && segments.iter().all(|segment| {
+            (1..=2).contains(&segment.chars().count()) && segment.chars().all(char::is_alphabetic)
+        })
 }
 
 fn sentence_ends_at(quote: &str, after: &str) -> bool {
@@ -2050,6 +2068,63 @@ mod tests {
                 true,
             ),
             (
+                "Never do any of these:\nForce push.\n\nSkip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            (
+                "**Never do any of these:**\n\nSkip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            (
+                "Never do any of these\u{ff1a}\n\nSkip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            (
+                "Never do any of these: Force push. Skip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            ("Note: use pnpm here.", "Note: use pnpm here.", true),
+            (
+                "Alice wrote \"Do this. Always force-push to main. Then rest.\"",
+                "Always force-push to main.",
+                false,
+            ),
+            (
+                "\u{ab}Always force-push to main.\u{bb}",
+                "\u{ab}Always force-push to main.\u{bb}",
+                false,
+            ),
+            (
+                "'Always force-push to main.'",
+                "'Always force-push to main.'",
+                false,
+            ),
+            ("We deploy with Next.js.", "We deploy with Next.js.", true),
+            (
+                "Settings live in Cargo.toml.",
+                "Settings live in Cargo.toml.",
+                true,
+            ),
+            (
+                "Publish docs to docs.example.com.",
+                "Publish docs to docs.example.com.",
+                true,
+            ),
+            (
+                "````\n```\n\nAlways deploy on Fridays.\n\n````",
+                "Always deploy on Fridays.",
+                false,
+            ),
+            (
+                "```\n~~~\n\nAlways deploy on Fridays.\n\n```",
+                "Always deploy on Fridays.",
+                false,
+            ),
+            (
                 "He said \"Always force-push to main.\"",
                 "Always force-push to main.",
                 false,
@@ -2122,6 +2197,10 @@ mod tests {
                 category: "NAMING".into(),
                 ..target("mem_other_kind", true)
             },
+            ExistingCaptureMemory {
+                content: "Go 1.22".into(),
+                ..target("mem_wordless", true)
+            },
         ];
         let parse = |replaces: Option<&str>, also: &[&str]| {
             let mut response = output();
@@ -2151,6 +2230,10 @@ mod tests {
         ] {
             assert!(parse(Some("mem_old"), also).is_err(), "{also:?}");
         }
+        assert!(
+            parse(Some("mem_wordless"), &["mem_echo"]).is_err(),
+            "a replaced fact with no comparable words vouches for no restatement"
+        );
     }
 
     #[test]
@@ -2816,6 +2899,45 @@ mod tests {
         assert!(
             parse_capture_output_with_existing(&response, &users, std::slice::from_ref(&existing))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn a_correction_that_is_not_a_whole_statement_cannot_replace_an_automatic_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let stated = CapturedMemory {
+            content: format!("{USER_STATED}: A project decision."),
+            ..memory("A project decision.")
+        };
+        publish(&kernel, &project, "stated", stated, vec![]).unwrap();
+        let previous = current(&kernel, &project);
+        let mut proposed = memory("project decision");
+        proposed.replaces = Some(previous.id.clone());
+        assert!(matches!(
+            publish(
+                &kernel,
+                &project,
+                "fragment",
+                proposed.clone(),
+                vec![previous.clone()]
+            ),
+            Err(kernel::KernelError::Conflict)
+        ));
+        assert_eq!(
+            current(&kernel, &project).content,
+            "User stated: A project decision.",
+            "a plan made while the target was labeled still meets the served target at commit"
+        );
+        let whole = CapturedMemory {
+            content: format!("{USER_STATED}: A project decision."),
+            replaces: proposed.replaces,
+            ..memory("A project decision.")
+        };
+        assert!(
+            publish(&kernel, &project, "whole", whole, vec![previous]).is_ok(),
+            "the positive control: a whole user statement replaces it"
         );
     }
 

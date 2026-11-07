@@ -618,7 +618,6 @@ impl ProducerContext<'_> {
     }
 }
 
-/// Assigns the pinned read's composition to `meta` at a HARD freeze site and reports that this attempt froze one; the caller of the pass checks whether the read was Available.
 fn memory_render_identity(base: String, ctx: &ProducerContext<'_>) -> String {
     if ctx.memory_auto_inject {
         base
@@ -627,6 +626,7 @@ fn memory_render_identity(base: String, ctx: &ProducerContext<'_>) -> String {
     }
 }
 
+/// Assigns the pinned read's composition to `meta` at a HARD freeze site and reports that this attempt froze one; the caller of the pass checks whether the read was Available.
 fn freeze_project_memory(meta: &mut ModuleMeta, ctx: &ProducerContext<'_>) -> bool {
     meta.project_memory = ctx.project_memory_composition();
     true
