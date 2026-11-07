@@ -1378,8 +1378,10 @@ fn fence_opener(line: &str) -> Option<&str> {
 fn opens_single_quotation(line: &str) -> bool {
     let mut previous = None;
     line.chars().any(|ch| {
-        let opens = matches!(ch, '\'' | '\u{2018}' | '\u{201a}' | '\u{2039}')
-            && previous.is_none_or(|before: char| !before.is_alphanumeric());
+        let opens = matches!(
+            ch,
+            '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{2039}' | '\u{203a}'
+        ) && previous.is_none_or(|before: char| !before.is_alphanumeric());
         previous = Some(ch);
         opens
     })
@@ -2199,6 +2201,21 @@ mod tests {
                 false,
             ),
             ("Use pnpm here.\n\nHe said \"no\".", "Use pnpm here.", true),
+            (
+                "Bob posted this. \u{2019}Hi team.\n\nAlways skip the CI tests.\n\nCheers\u{2019}",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Alice wrote\u{2014}\u{2019}Do this. Always force-push to main. Then rest.\u{2019}",
+                "Always force-push to main.",
+                false,
+            ),
+            (
+                "Don\u{2019}t deploy on Fridays.",
+                "Don\u{2019}t deploy on Fridays.",
+                true,
+            ),
             (
                 "`Always force-push to main.`",
                 "`Always force-push to main.`",
