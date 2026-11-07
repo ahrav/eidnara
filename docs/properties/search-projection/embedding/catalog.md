@@ -39,7 +39,7 @@ Existing paths have distinct classifications:
 
 | Existing path | Classification and current evidence |
 | --- | --- |
-| LocalEmbeddings composition and disabled fallback | `default-production`: `crates/daemon/src/bin/eidnara_host/serve.rs:1135` composes it; a Linux generation missing the ORT library or the bundle manifest uses `new(None)` at `:1076`, `:1085` and reports `degraded`. |
+| LocalEmbeddings composition and disabled fallback | `default-production`: `crates/daemon/src/bin/eidnara_host/serve.rs:1232` builds it from the generation (`:1167-1202`), and `:1292` and `:1298` attach and compose it; a Linux generation missing the ORT library or the bundle manifest uses `new(None)` at `payload_local_embeddings.rs:15` and reports `degraded`. |
 | Certified inference, bundle validation, and live JobTable serving | `default-production` for payloads built by `scripts/build-host-payload.ts`, which stage the locked bundle and ORT library; the generation's bundle manifest and ORT digests bind them (`payload_local_embeddings.rs:8-24`, called from `serve.rs:1192-1202`), and `LocalEmbeddingsLimits::shipped_lane()` (`payload_local_embeddings.rs:22`) admits one text per inference call, the shape certification exercises. Only the macOS branch reports `unsupported` (`serve.rs:1171`). |
 | Claude accounting calls | `default-production`: `crates/daemon/Cargo.toml:32` and `crates/daemon/src/token_cache.rs:133` contradict the old tokenizer catalog's absent-caller premise. |
 | MemoryClassifier scheduler loop | `default-production` after store open: `crates/daemon/src/lib.rs:3649-3663`. |

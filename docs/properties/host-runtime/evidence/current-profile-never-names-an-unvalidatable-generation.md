@@ -117,9 +117,9 @@ inertness of residue, not crash recovery.
   (`exchange_dirs`), `:53-79` (`rename_no_replace`); every `GenerationStore`
   construction site
   (`crates/daemon/src/bin/eidnara-host.rs:845`, `:966`, `:1001`;
-  `crates/daemon/src/bin/eidnara_host/serve.rs:542`); `preflight_generation`
+  `crates/daemon/src/bin/eidnara_host/serve.rs:1213`); `preflight_generation`
   (`eidnara-host.rs:813-847`), `resolve_generation` (`:952-1010`),
-  `serve::run` (`serve.rs:536-545`).
+  `serve::run` (`serve.rs:1213-1218`).
 - Findings: the crash outcome itself is decidable and safe, for the reason given
   above - same digest string, exchanged content, temp removed by prune. The
   observability half is not. `read_current` and `validate` take no lock
@@ -128,7 +128,7 @@ inertness of residue, not crash recovery.
   store state "is observable under the lock we already hold", and
   `resolve_generation` is reached inside the serialized transaction (`:1268`,
   `:1510`). The one reader that takes no transaction lock is the spawned
-  daemon's own revalidation, `serve::run` at `serve.rs:542-545`, in a different
+  daemon's own revalidation, `serve::run` at `serve.rs:1213-1218`, in a different
   process. `GenerationStore::prune` has exactly one production caller,
   `eidnara-host.rs:975`, under the lock.
 - Missing evidence: whether the launcher's lock hold extends across the child's
