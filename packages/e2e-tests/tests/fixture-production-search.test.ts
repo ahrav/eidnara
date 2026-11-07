@@ -257,7 +257,7 @@ describe.skipIf(!PAYLOAD_DIR)("direct-host fixture with the production search ro
         async () => {
             const arms = { legacy: legacy as Arm, production: production as Arm };
             const ranks = { legacy: [] as (number | null)[], production: [] as (number | null)[] };
-            // The embedding lane ranks rows for paraphrases; a route serving lexical and exact lanes alone would leave this at zero.
+            // Questions whose target the embedding lane helped rank; a route serving lexical and exact lanes alone would leave this at zero.
             let denseRanked = 0;
             for (const [question, target] of QUESTIONS) {
                 for (const name of ["legacy", "production"] as const) {
@@ -266,7 +266,8 @@ describe.skipIf(!PAYLOAD_DIR)("direct-host fixture with the production search ro
                     expect(result.includes(FALLBACK)).toBe(name === "legacy");
                     const rank = rankedIds(result).indexOf(arm.ids[target] as string);
                     ranks[name].push(rank < 0 ? null : rank + 1);
-                    if (name === "production" && / match=fused lanes=[a-z,]*dense/.test(result)) {
+                    const targetHeader = headerFor(result, arm.ids[target] as string);
+                    if (name === "production" && /lanes=[a-z,]*dense/.test(targetHeader ?? "")) {
                         denseRanked += 1;
                     }
                 }
