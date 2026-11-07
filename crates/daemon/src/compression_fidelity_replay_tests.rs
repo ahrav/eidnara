@@ -3069,11 +3069,12 @@ struct RealCapture {
 }
 
 fn published_p1(output: &str) -> Option<String> {
-    let mut segments = crate::history_summarizer_validate::parse_history_segment_output(output)
-        .ok()?
-        .history_segments;
-    crate::history_summarizer_validate::open_items::retire_settled_lines(&mut segments);
-    segments.into_iter().next()?.p1
+    let mut parsed =
+        crate::history_summarizer_validate::parse_history_segment_output(output).ok()?;
+    crate::history_summarizer_open_items::retire_settled_lines(&mut parsed)
+        .first()?
+        .p1
+        .clone()
 }
 
 #[test]

@@ -14,7 +14,7 @@ integrity, lifecycle, compatibility. Inspected 2026-09-19 at
 - [history_summarizer_validate.rs:320-341](../../../../../crates/daemon/src/history_summarizer_validate.rs#L320-L341)
   fills absent P2 with P1, absent P3 with P2 or P1, and absent P4 with empty text.
   Retained producer XML is needed to distinguish authored from repaired tiers.
-- [history_summarizer_validate.rs:1677-1698](../../../../../crates/daemon/src/history_summarizer_validate.rs#L1677-L1698)
+- [history_summarizer_validate.rs:1656-1677](../../../../../crates/daemon/src/history_summarizer_validate.rs#L1656-L1677)
   checks P1-only acceptance and these exact fallback values; status unaudited.
 - [m1_compose.rs:202-207](../../../../../crates/daemon/src/m1_compose.rs#L202-L207)
   selects rows beyond `folded_history_segment_seq`.

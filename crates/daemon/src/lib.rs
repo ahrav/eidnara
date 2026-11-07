@@ -45026,6 +45026,8 @@ mod tests {
     mod history_summarizer_open_items_tests;
 }
 
+pub(crate) mod history_summarizer_open_items;
+
 #[cfg(test)]
 mod release_contract_tests {
     use serde_json::{Value, json};

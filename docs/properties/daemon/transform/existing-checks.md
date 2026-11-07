@@ -165,7 +165,7 @@ returns **zero matches**.
 So: 228 executing tests plus 70 caller tests plus 15 replay tests sit next to
 263 non-executing tests, and **nothing compares the two implementations.**
 Unlike Part 4a, 4b has no in-crate TypeScript-oracle golden driver at all;
-there is no counterpart to `history_summarizer_validate.rs:1402`
+there is no counterpart to `history_summarizer_validate.rs:1384`
 `validate_golden_matches_typescript_oracle`
 (`../history_summarizer/existing-checks.md:124-129`).
 

@@ -62,7 +62,7 @@ floor should exceed an earlier one's.
 Three independent refusals:
 
 - `history_summarizer_validate.rs:487-491`, empty history_segments after parsing.
-- `history_summarizer_validate.rs:628-638`, no forward progress.
+- `history_summarizer_validate.rs:625-635`, no forward progress.
 - `memory-store:12614-12616`, `append_history_segments_tx` treats an empty list as
   `Appended` and writes nothing, but that list cannot be empty by the above.
 
@@ -134,7 +134,7 @@ Dependencies:
 ## Investigation log
 
 No open questions. The derivation was traced end to end at `HEAD` across
-`history_summarizer_validate.rs:641`, `history_summarizer.rs:1725` and `:523`, and
+`history_summarizer_validate.rs:638`, `history_summarizer.rs:1725` and `:523`, and
 `memory-store:9484-9488`, and the three empty-coverage refusals were each read. The
 one thing this record deliberately does not settle is whether the floor's *value*
 is the right one for boundary quality; that is a boundary-lens question. This

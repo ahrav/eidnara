@@ -4,7 +4,7 @@
 
 Task item 4 asks about output whose declared counts disagree with its content.
 `<unprocessed_from>` is the well-guarded declared value, cross-checked at
-`crates/daemon/src/history_summarizer_validate.rs:1072-1092`. The other declared
+`crates/daemon/src/history_summarizer_validate.rs:1054-1074`. The other declared
 numeric is `importance`, which the gate parses and never checks. Following it to
 storage found a truncating `u64 -> i32` cast.
 
@@ -12,7 +12,7 @@ storage found a truncating `u64 -> i32` cast.
 
 The full path of an `importance` value, every step read at HEAD.
 
-1. Regex, no bound: `history_summarizer_validate.rs:1211-1214`
+1. Regex, no bound: `history_summarizer_validate.rs:1193-1196`
 
 ```rust
 fn attr_importance_regex() -> &'static Regex {
@@ -159,7 +159,7 @@ so the low end matters as much as the overflow.
 ### Q: Does the TypeScript side bound importance, making this a Rust-only divergence?
 
 - Sources examined: `testdata/validate-golden.json` (all 16 cases inspected for
-  their importance values), `history_summarizer_validate.rs:1385-1393` (the test helper,
+  their importance values), `history_summarizer_validate.rs:1367-1375` (the test helper,
   which hardcodes `importance="50"`), `history_summarizer.rs:1912` and `:4008-4009`,
   `:4076` (inline fixtures, using `50` and `60`).
 - Findings: Every fixture in the tree uses an in-band value, so the golden oracle

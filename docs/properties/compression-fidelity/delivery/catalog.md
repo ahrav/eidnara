@@ -136,7 +136,7 @@ their authored form, materialize m1 and later P1-P4 m0, and remove covered raw
 source from the tail; construct fallback and stored-legacy controls separately.
 Confidence: medium - [evidence](evidence/cf-tier-transitions-preserve-qualified-meaning.md).
 Parser, m1, and renderer mechanisms are verified; semantic satisfaction is not.
-Existing check: `history_summarizer_validate.rs:1677-1751` checks parser
+Existing check: `history_summarizer_validate.rs:1656-1730` checks parser
 fallback; `transform.rs:21111-21216` checks seeded m1 and replay; both are
 unaudited and do not establish end-to-end meaning.
 Impact: Rejection can become acceptance, planned work can become completed

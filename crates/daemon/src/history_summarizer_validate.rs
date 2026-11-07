@@ -605,11 +605,8 @@ pub fn validate_history_summarizer_output(
         chunk.end_index,
     );
 
-    // Open lines a later status line of this output settles leave before the tiers are copied.
-    let retired = open_items::retire_settled_lines(&mut parsed.history_segments);
-
     let emitted = map_parsed_history_segments_to_chunk(
-        &parsed.history_segments,
+        crate::history_summarizer_open_items::retire_settled_lines(&mut parsed),
         chunk,
         options.sequence_offset,
     )
@@ -726,26 +723,11 @@ pub fn validate_history_summarizer_output(
                     )
                 })
                 .collect();
-            let (retired_claims, candidates): (Vec<_>, Vec<_>) = parsed
-                .claims
-                .into_iter()
-                .partition(|candidate| open_items::claims_retired_line(candidate, &retired));
-            let (claims, outcome) = check_claim_set(&candidates, &chunk.aliases, &ranges);
+            let (claims, outcome) = check_claim_set(&parsed.claims, &chunk.aliases, &ranges);
             for (segment, claims) in history_segments.iter_mut().zip(claims) {
                 segment.claims = claims;
             }
-            match outcome {
-                ClaimsOutcome::Accepted {
-                    kept,
-                    dropped,
-                    anchor_missing,
-                } => ClaimsOutcome::Accepted {
-                    kept,
-                    dropped: dropped + retired_claims.len(),
-                    anchor_missing,
-                },
-                other => other,
-            }
+            outcome
         }
     };
     // Discarding the last history_segment requires validation to skip unanchored producer output because its source history_segment cannot be proven.
@@ -1495,9 +1477,6 @@ fn side_channel_anchor_regex() -> &'static Regex {
         .unwrap()
     })
 }
-
-#[path = "history_summarizer_open_items.rs"]
-pub(crate) mod open_items;
 
 #[cfg(test)]
 mod tests {

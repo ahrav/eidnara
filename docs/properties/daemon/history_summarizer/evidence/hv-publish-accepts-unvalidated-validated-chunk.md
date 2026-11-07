@@ -60,7 +60,7 @@ Enumerated every production construction and every call:
 ```
 rg -n "ValidatedChunk\s*\{" crates/daemon/src/*.rs
   history_summarizer_validate.rs:227   (the definition)
-  history_summarizer_validate.rs:631   (the gate's own Ok return)
+  history_summarizer_validate.rs:628   (the gate's own Ok return)
   history_summarizer.rs:4476           (test code)
 ```
 
@@ -100,8 +100,8 @@ still write arbitrary `title`, `content`, `p1`..`p4`, `importance`,
 ### What a bypass would skip
 
 All 22 rejecting checks. Most consequentially, the ones that protect durable
-coverage: endpoint existence in the pinned chunk (`history_summarizer_validate.rs:959-975`),
-endpoint anchorability (`:976-981`), range contiguity and non-overlap
+coverage: endpoint existence in the pinned chunk (`history_summarizer_validate.rs:941-957`),
+endpoint anchorability (`:958-963`), range contiguity and non-overlap
 (`:1039-1050`), the `<unprocessed_from>` cross-check (`:1054-1074`), the
 completed-arc terminal boundary (`:525-534`), and forward progress (`:565-570`).
 

@@ -31,7 +31,7 @@ evidence. Inspected 2026-09-19 at
 - [memory_render.rs:79-88](../../../../../crates/daemon/src/memory_render.rs#L79-L88)
   caps each content string at 64 KiB before XML escaping. Object presence alone
   does not prove that a trailing qualifier reached the provider.
-- [history_summarizer_validate.rs:692-710](../../../../../crates/daemon/src/history_summarizer_validate.rs#L692-L710)
+- [history_summarizer_validate.rs:689-707](../../../../../crates/daemon/src/history_summarizer_validate.rs#L689-L707)
   can reject extracted facts without rejecting valid history. Successful history
   publication is therefore neither fact acceptance nor canonical admission.
 - [crates/daemon/tests/transform_canonical_memory.rs:48-217](../../../../../crates/daemon/tests/transform_canonical_memory.rs#L48-L217)

@@ -43,13 +43,13 @@ implementing code exists in this repository, which is the highest-value column.
 | C7 | "The publish predicate proves the producer still matches the exact firing that created the chunk; stale reattaches or a second racing publisher fail before any rows are appended." (`memory-store/src/lib.rs:9345-9348`) | A stale or duplicate publisher cannot write. | Seven gates at `memory-store:9373-9455`. Verified. Qualified by C8 and lead L2: the phase gate admits two phases. |
 | C8 | "if it still observes a publishing row, the transaction did not commit, so the stale single-flight is abandoned" (`history_summarizer.rs:616-619`) | A crash before commit leaves no partial fold and does not wedge the session. | `handle_restart_load` at `history_summarizer.rs:620-655`, phases mapped at `:648-653`. Verified. Lens A `crash-before-publish-commit-refires-without-partial-state`. |
 | C9 | "insertion/removal and type/id changes alter the fingerprint, while unrelated metadata drift and same-length content edits do not stale a snapshot" (`history_summarizer.rs:141-143`) | The fingerprint is deliberately blind to same-length content edits; something else must catch those. | `chunk_fingerprint` at `history_summarizer.rs:151-160`. The compensating control is `selected_range_identities` (`memory-store:9413-9425`). The claim is accurate and names its own hole. |
-| C10 | "A history_segment must end on an anchorable block so publication cannot mint an impossible coverage boundary." (`history_summarizer_validate.rs:36-37`) | No published boundary names a block that does not exist. | `history_summarizer_validate.rs:976-981`. Verified; test `history_segment_end_must_be_anchorable` (`:1686`). |
+| C10 | "A history_segment must end on an anchorable block so publication cannot mint an impossible coverage boundary." (`history_summarizer_validate.rs:36-37`) | No published boundary names a block that does not exist. | `history_summarizer_validate.rs:958-963`. Verified; test `history_segment_end_must_be_anchorable` (`:1665`). |
 | C11 | "make the matching firing immediately idle so the caller never leaves a durable Publishing wedge behind" (`history_summarizer.rs:550-551`) | A losing race never blocks all future firings for the session. | Four differentiated abandon arms at `history_summarizer.rs:533-593`. Verified. |
 | C12 | "Authorizing fallback starts a second potentially billable run, so this needs positive proof, not the absence of one known-bad code." (`history_summarizer.rs:1228-1229`) | A second model attempt runs only after the first is proven stopped. | Enforced on the output branch (`history_summarizer.rs:1401`). **Not enforced on the start-failure branch** (`:1290-1329`). Lens A `uncertain-producer-start-authorizes-a-second-billable-run`. |
 | C13 | "The id must be unique per (lineage, firing), not per (project, firing)" (`history_summarizer.rs:1004-1005`) | Concurrent subagent lineages cannot cross their producer runs and lose a commit. | `history_summarizer.rs:1013-1035`, full 64-bit FNV-1a rendering justified at `:1034-1035`. Tests `full_lineage_hash_separates_keys_that_collided_at_32_bits` (`:2146`), `producer_session_ids_are_lineage_scoped_under_one_project` (`:2163`). |
 | C14 | "an unknown `session.send` outcome is retried at most once with the exact frozen bytes under the same route identity (ModelExecution's session fingerprint makes that recovery idempotent)" (`ARCHITECTURE.md:37`) | An ambiguous send cannot become two billable runs. | `send_frozen_once` (`history_summarizer_producer.rs:929`) plus `replay_frozen_once` (`:949`), fenced at `:999-1000` and reported at `:492`. Holds **within one attempt**. Does not cover the cross-model chain: see lead L3. |
 | C15 | "`run.status` handling is closed over the exact wire vocabulary (undocumented statuses fail loud instead of guessing)" (`ARCHITECTURE.md:37`) | An unknown provider status never gets guessed into a publish or an abandon. | Test `run_state_mapping_is_closed_over_known_states` (`history_summarizer_producer.rs:2175`) exists. The production mapping was not read end to end in this pass; recorded as unverified. |
-| C16 | "Skips unanchored fact, observation, and primer promotion on the discarded tail to prevent double-storing when the range is re-processed." (`ARCHITECTURE.md:117`) | A re-processed range does not promote its facts twice. | `keep_side_channel` (`history_summarizer_validate.rs:1104-1116`); doc comments at `:145-147` and `:177-179` state the same rule. Tests `:1795`, `:1836`, `:1870`. Verified. |
+| C16 | "Skips unanchored fact, observation, and primer promotion on the discarded tail to prevent double-storing when the range is re-processed." (`ARCHITECTURE.md:117`) | A re-processed range does not promote its facts twice. | `keep_side_channel` (`history_summarizer_validate.rs:1086-1098`); doc comments at `:145-147` and `:177-179` state the same rule. Tests `:1774`, `:1815`, `:1849`. Verified. |
 | C17 | "Guarded by progress (`k≥2`) and emergency-disabled." (`ARCHITECTURE.md:117`) | The weak-lookahead terminal boundary is withheld for re-derivation. | `history_summarizer_validate.rs:539` guards on `history_segments.len() >= 2`, **not** on a lookahead `k`. The lookahead test is separate, at `:554`. The doc's `k≥2` names the wrong quantity. Lens B `hv-single-history_segment-skips-lookahead-discard`. |
 | C18 | "The history_summarizer's in-flight snapshot is validated by `computeRawRangeFingerprint`, which hashes **raw content only** (ids, part types, content lengths) — never tag/drop state — so a concurrent drop can't invalidate it." (`ARCHITECTURE.md:88`) | A concurrent tag or drop cannot abort a firing. | The Rust analogue is `chunk_fingerprint` (`history_summarizer.rs:151-160`), which matches the description. But the Rust publish also fences on `selected_range_identities` (`memory-store:9413-9425`), a second freshness input the doc does not mention. See lead L4. |
 | C19 | "repeated failures show a `Eidnara — history comparting needs attention` notice" (`README.md:98`); "A warning only appears in `/eidnara-status` after multiple consecutive failures." (`troubleshooting.md:93`) | A persistently failing history_summarizer is visible to the user. | **NOT FOUND for the Rust leg.** `buildHistorySummarizerFailureNotice` (`history_segment-runner-validation.ts:210`) is called only from `history_segment-runner-incremental.ts` (`:208`, `:396`, `:493`, `:546`, `:912`), the TypeScript runner. Nothing in `packages/plugin/src` reads `publish_health_degraded` or `consecutive_publish_failures`. See lead L5. |
@@ -215,7 +215,7 @@ Claims whose only enforcement is a comment telling a caller what to do.
    Lens A found the durable enforcement one layer down, in the store's
    single-writer lease, which lives outside this repository.
 7. **The tier parser "must never swallow a following tier's opener"**
-   (`history_summarizer_validate.rs:1240`, guard at `:1146`). A regex contract stated as
+   (`history_summarizer_validate.rs:1222`, guard at `:1128`). A regex contract stated as
    an obligation on future edits.
 
 ## Existing-check inventory
@@ -362,7 +362,7 @@ set the repo has (reuse deferred, see plan scope)."
 So the executing per-PR coverage measures a **parallel TypeScript
 implementation** of the same contract. The only thing tying the Rust
 implementation to it is one in-crate test,
-`validate_golden_matches_typescript_oracle` (`history_summarizer_validate.rs:1402`),
+`validate_golden_matches_typescript_oracle` (`history_summarizer_validate.rs:1384`),
 driven by a checked-in `testdata/validate-golden.json` — and that test does not
 run in CI either. Nothing executing anywhere compares the two implementations.
 
@@ -385,13 +385,13 @@ assertions of either kind in any of them. All invariant enforcement is by
 - `history_summarizer.rs:1492` `RestartAction::ReattachProducer { .. } => unreachable!()`
   — the only `unreachable!`, `panic!`, or `todo!` in production code across the
   four files.
-- `history_summarizer_validate.rs:947`
+- `history_summarizer_validate.rs:929`
   `.expect("non-empty omitted present ordinals checked above")` — the only
   `.expect` in the four files, inside the gap-healing path.
 
 **Infallible-by-construction unwraps.** 27 in `history_summarizer_validate.rs` and 8 in
 `history_summarizer_chunk.rs`, and every one I sampled is a static regex compilation
-inside a `OnceLock::get_or_init` (`history_summarizer_validate.rs:1177-1213`,
+inside a `OnceLock::get_or_init` (`history_summarizer_validate.rs:1159-1195`,
 `history_summarizer_chunk.rs:1133-1168`). None depend on runtime data. Zero unwraps in
 `history_summarizer.rs` and `history_summarizer_producer.rs` production paths.
 
@@ -436,8 +436,8 @@ Ranked by the gap between what is claimed and what could detect a violation.
 2. **Nothing executing anywhere compares the Rust validator to the TypeScript
    one, and the two are documented as a matched pair.** Five in-crate test names
    assert TypeScript parity by construction —
-   `validate_golden_matches_typescript_oracle` (`history_summarizer_validate.rs:1402`),
-   `five_message_narrative_gap_rejects_like_typescript_validator` (`:1444`),
+   `validate_golden_matches_typescript_oracle` (`history_summarizer_validate.rs:1384`),
+   `five_message_narrative_gap_rejects_like_typescript_validator` (`:1426`),
    `twenty_message_tool_only_gap_heals_like_typescript_validator` (`:1443`), plus
    the two golden-fixture drivers in `history_summarizer_chunk.rs` (`:1962`, `:2045`). All
    are ungated. Meanwhile the TypeScript lane's frozen corpus is described in its
@@ -495,7 +495,7 @@ Ranked by the gap between what is claimed and what could detect a violation.
    compare against checked-in fixtures, so a change that alters what is captured
    fails the fixture rather than an invariant — and neither runs in CI.
 10. **The `unreachable!()` at `history_summarizer.rs:1492` and the `.expect()` at
-    `history_summarizer_validate.rs:947` are the subsystem's only two panic sites and
+    `history_summarizer_validate.rs:929` are the subsystem's only two panic sites and
     neither has a named test.** Both are reachable only through a state the
     author believed impossible, which is exactly the class a fresh test should
     attack.
@@ -510,7 +510,7 @@ Ranked by the gap between what is claimed and what could detect a violation.
   convert the repo's only executing history_summarizer coverage into coverage of the Rust
   implementation as well. It needs a decision on who owns the harness and whether
   the deliberate divergences lens B recorded (the empty-input error-string
-  carve-out at `history_summarizer_validate.rs:1409-1417`) become failures or documented
+  carve-out at `history_summarizer_validate.rs:1391-1399`) become failures or documented
   exceptions. (needs human input)
 - Are `history_summarizer.two_pass` and `history_summarizer_timeout_ms` TypeScript-leg-only
   features, and if so should `CONFIGURATION.md` annotate keys by leg? A user on

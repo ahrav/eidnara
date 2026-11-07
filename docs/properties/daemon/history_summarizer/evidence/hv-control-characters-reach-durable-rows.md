@@ -12,8 +12,8 @@ renderer.
 
 ### The gate performs no sanitation
 
-The only text transform in `crates/daemon/src/history_summarizer_validate.rs:1-1322` is
-`unescape_xml` (`:1166-1172`):
+The only text transform in `crates/daemon/src/history_summarizer_validate.rs:1-1304` is
+`unescape_xml` (`:1148-1154`):
 
 ```rust
 fn unescape_xml(s: &str) -> String {

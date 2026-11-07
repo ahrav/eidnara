@@ -131,7 +131,7 @@ Rust target either.
 So: the executing per-PR coverage measures a TypeScript implementation of the
 same contract. The only artifact tying the Rust implementation to it is one
 in-crate test, `validate_golden_matches_typescript_oracle`
-(`history_summarizer_validate.rs:1402`), driven by a checked-in
+(`history_summarizer_validate.rs:1384`), driven by a checked-in
 `testdata/validate-golden.json` with 16 cases, and that test does not run in CI
 either. **Nothing executing anywhere compares the two implementations.**
 
@@ -273,7 +273,7 @@ guards.
   across the four files; the eight other `unreachable!()` occurrences in
   `history_summarizer.rs` (`:2903`, `:2964`, `:3045`, `:3160`, `:3213`, `:3802`, `:4552`,
   `:4613`) are all inside the test module that opens at `:1862`.
-- `history_summarizer_validate.rs:947`,
+- `history_summarizer_validate.rs:929`,
   `.expect("non-empty omitted present ordinals checked above")`, the only
   `.expect` in the four files, inside the gap-healing path.
 
@@ -281,7 +281,7 @@ Neither has a named test.
 
 **Infallible-by-construction unwraps.** 27 in `history_summarizer_validate.rs` and 8 in
 `history_summarizer_chunk.rs`; every one sampled is a static regex compilation inside a
-`OnceLock::get_or_init` (`history_summarizer_validate.rs:1177-1213`,
+`OnceLock::get_or_init` (`history_summarizer_validate.rs:1159-1195`,
 `history_summarizer_chunk.rs:1133-1168`). None depends on runtime data. Zero unwraps in
 `history_summarizer.rs` and `history_summarizer_producer.rs` production paths.
 
@@ -316,7 +316,7 @@ actually live, since there are no assertions:
   (`:9436-9455`), and the range-overlap backstop in `append_history_segments_tx`
   (`:12634-12652`).
 - **The 22 rejecting validation checks** enumerated by lens B
-  (`history_summarizer_validate.rs:267-1099`), plus one reject that fires before the gate
+  (`history_summarizer_validate.rs:267-1081`), plus one reject that fires before the gate
   is entered: `history_summarizer.rs:1666-1671` refuses an output the producer marked
   `length_capped`.
 - **The nine silent parse-time drops** (`history_summarizer_validate.rs:289-296`,
@@ -336,7 +336,7 @@ actually live, since there are no assertions:
 - **The wrapup per-round progress check** (`lib.rs:6977-6989`) and the deadline
   re-check before each round (`:6831-6834`).
 - **Restart-load phase mapping** (`history_summarizer.rs:648-653`) and **the side-channel
-  anchor filter** (`history_summarizer_validate.rs:1104-1116`).
+  anchor filter** (`history_summarizer_validate.rs:1086-1098`).
 
 ## Test support and fault-injection seams
 
@@ -414,8 +414,8 @@ proves.
 2. **Nothing executing anywhere compares the Rust validator to the TypeScript
    one, and the two are documented as a matched pair.** Five in-crate test names
    assert TypeScript parity by construction:
-   `validate_golden_matches_typescript_oracle` (`history_summarizer_validate.rs:1402`),
-   `five_message_narrative_gap_rejects_like_typescript_validator` (`:1444`),
+   `validate_golden_matches_typescript_oracle` (`history_summarizer_validate.rs:1384`),
+   `five_message_narrative_gap_rejects_like_typescript_validator` (`:1426`),
    `twenty_message_tool_only_gap_heals_like_typescript_validator` (`:1443`), and
    the two golden-fixture drivers in `history_summarizer_chunk.rs` (`:1962`, `:2045`). All
    are ungated. Meanwhile the TypeScript lane's frozen corpus is described in its
@@ -504,7 +504,7 @@ proves.
     fails a fixture rather than an invariant, and neither runs in CI.
 
 11. **The subsystem's only two panic sites have no named test.**
-    `history_summarizer.rs:1492` and `history_summarizer_validate.rs:947` are each reachable only
+    `history_summarizer.rs:1492` and `history_summarizer_validate.rs:929` are each reachable only
     through a state the author believed impossible, which is exactly the class a
     fresh test should attack.
 

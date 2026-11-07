@@ -537,16 +537,8 @@ async fn live_fold(
     rows
 }
 
-fn stored_lines(rows: &[StoredHistorySegment]) -> Vec<&str> {
-    rows.iter()
-        .flat_map(|row| [&row.p1, &row.p2, &row.p3, &row.p4])
-        .flatten()
-        .flat_map(|tier| tier.lines())
-        .collect()
-}
-
 /// The three fixtures through a real summarizer model: the answered question leaves no waiting
-/// line, the unanswered one keeps one in `p1`, and the lifted constraint is stated as lifted.
+/// line, the unanswered one keeps one in `p1` or `p2`, and the lifted constraint is stated as lifted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "opt-in live summarizer run; needs EIDNARA_FIDELITY_REAL_CONNECTION_FILE naming a \
             host that admits sends without a credential claim (direct_host_fixture without \
@@ -563,51 +555,68 @@ async fn a_live_summarizer_resolves_open_items_against_the_user_turns() {
     let wait = Duration::from_secs(required(LIVE_WAIT_SECONDS).parse().unwrap());
 
     let rows = live_fold(&factory, &model, wait, answered(1)).await;
-    let lines = stored_lines(&rows);
     assert!(!rows.is_empty());
+    assert!(open_lines(&rows, 1).is_empty(), "{rows:#?}");
     assert!(
-        !lines.iter().any(|line| line.contains("Waiting on user")),
-        "{lines:#?}"
-    );
-    assert!(
-        rows[0]
-            .p1
-            .as_deref()
-            .unwrap_or_default()
-            .contains("own file"),
+        own_words(&rows, |row| [&row.p1, &row.p2]).contains("own file"),
         "{rows:#?}"
     );
 
     let rows = live_fold(&factory, &model, wait, unanswered(1)).await;
-    let waiting_p1 = rows
-        .iter()
-        .filter_map(|row| row.p1.as_deref())
-        .flat_map(str::lines)
-        .any(|line| line.trim_start().starts_with("Waiting on user ("));
-    assert!(waiting_p1, "{rows:#?}");
+    assert!(
+        open_lines(&rows, 1)
+            .iter()
+            .any(|line| line.contains("Waiting on user (")),
+        "{rows:#?}"
+    );
 
     let rows = live_fold(&factory, &model, wait, lifted(1)).await;
-    let lines = stored_lines(&rows);
-    assert!(
-        !lines.iter().any(|line| line.contains("Waiting on user")),
-        "{lines:#?}"
-    );
+    assert!(open_lines(&rows, 1).is_empty(), "{rows:#?}");
     // `p1` may quote the constraint where the user set it; the later tiers state only its lifted form.
     for row in &rows {
         for tier in [&row.p2, &row.p3, &row.p4].into_iter().flatten() {
             assert!(!tier.contains(CONSTRAINT), "{tier}");
         }
     }
-    // `p2` states the lift in the summarizer's own words, outside any quoted `U:` line.
-    let p2_own_words: String = rows
-        .iter()
-        .filter_map(|row| row.p2.as_deref())
-        .flat_map(str::lines)
-        .filter(|line| !line.contains("U:"))
-        .map(str::to_lowercase)
-        .collect();
+    let p2 = own_words(&rows, |row| [&row.p2, &None]);
     assert!(
-        p2_own_words.contains("lifted") || p2_own_words.contains("own pr"),
+        p2.contains("lifted (")
+            || (p2.contains("lifted") && !p2.contains("not lifted"))
+            || p2.contains("own pr"),
         "{rows:#?}"
     );
+}
+
+/// The open status lines the rows store in tiers `from` through 4.
+fn open_lines(rows: &[StoredHistorySegment], from: usize) -> Vec<&str> {
+    rows.iter()
+        .flat_map(|row| {
+            [&row.p1, &row.p2, &row.p3, &row.p4]
+                .into_iter()
+                .skip(from - 1)
+        })
+        .flatten()
+        .flat_map(|tier| tier.lines())
+        .filter(|line| {
+            matches!(
+                crate::history_summarizer_open_items::status_line(line),
+                Some((crate::history_summarizer_open_items::Status::Open, _))
+            ) || line.contains("Waiting on user")
+        })
+        .collect()
+}
+
+/// The lowercased lines of the chosen tiers, without any line that quotes a `U:` message.
+fn own_words(
+    rows: &[StoredHistorySegment],
+    tiers: impl Fn(&StoredHistorySegment) -> [&Option<String>; 2],
+) -> String {
+    rows.iter()
+        .flat_map(tiers)
+        .flatten()
+        .flat_map(|tier| tier.lines())
+        .filter(|line| !line.contains("U:"))
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join("\n")
 }

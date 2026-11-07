@@ -425,7 +425,7 @@ one (lead L5). This is the same shape Part 4a found for the history_summarizer
 coverage measures the TypeScript twin. **Nothing executing anywhere compares the
 two transform implementations.** Unlike the history_summarizer, 4b has no in-crate
 TypeScript-oracle golden driver at all — there is no 4b counterpart to
-`history_summarizer_validate.rs:1402 validate_golden_matches_typescript_oracle`.
+`history_summarizer_validate.rs:1384 validate_golden_matches_typescript_oracle`.
 
 ### Production assertions and guards (clustered)
 
@@ -623,7 +623,7 @@ proves.
 
 12. **There is no TypeScript-oracle golden driver for the transform.** Part 4a
     at least has `validate_golden_matches_typescript_oracle`
-    (`history_summarizer_validate.rs:1402`) tying the two validators together, ungated
+    (`history_summarizer_validate.rs:1384`) tying the two validators together, ungated
     though it is. 4b has no counterpart: no in-crate test compares the Rust
     engine's output to the TypeScript transform's, and the executing per-PR suite
     covers the TypeScript twin exclusively.

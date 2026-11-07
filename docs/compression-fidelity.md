@@ -470,7 +470,7 @@ writes. The evaluation reads one arm directory, so both directories are that
 arm directory. For each source the test reads the published
 `daemon.compression_fidelity.real_capture` record of that model whose
 `output_origin` is `real producer through the host`, takes the attempt output
-whose P1, as the validator's parser reads it, is the published row's, and
+whose P1, after the validator's parse and open-item retirement, is the published row's, and
 folds it under that model through the real validation and publication path.
 It then records P1 at m0 on the first fold, P1 in the m1 window after a
 test-authored baseline, and each decayed tier at m0 under test-authored newer
