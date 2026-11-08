@@ -54,7 +54,7 @@
 //!
 //! The pass removes lines, removes and reorders claim candidates, puts one of the segment's own
 //! settling lines where one open line stood, at most once per key in each tier, and refills a `p3`
-//! it emptied from `p2`, so every line it adds is a line the model wrote for the segment, and no
+//! it emptied from `p2` or `p1`, so every line it adds is a line the model wrote for the segment, and no
 //! outcome copy takes a tier past the durable text bound.
 
 use std::collections::{BTreeMap, BTreeSet};
