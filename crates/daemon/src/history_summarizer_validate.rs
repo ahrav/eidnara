@@ -606,7 +606,7 @@ pub fn validate_history_summarizer_output(
     );
 
     let emitted = map_parsed_history_segments_to_chunk(
-        &parsed.history_segments,
+        crate::history_summarizer_open_items::retire_settled_lines(&mut parsed, &chunk.aliases),
         chunk,
         options.sequence_offset,
     )

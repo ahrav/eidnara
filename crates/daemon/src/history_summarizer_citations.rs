@@ -186,8 +186,9 @@ pub struct ClaimCandidate {
 
 /// The claims block's own verdict, independent of the segments and the facts:
 /// no block, an unreadable block, or the claims kept after the per-claim rules.
-/// `dropped` counts every emitted claim not kept: a rule failure, a claim a
-/// later one with its key superseded, or one past the per-segment cap.
+/// `dropped` counts every candidate claim not kept: a rule failure, a claim a
+/// later one with its key superseded, or one past the per-segment cap. The
+/// candidates open-item retirement removes before these rules are not counted.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimsOutcome {
@@ -204,7 +205,7 @@ pub enum ClaimsOutcome {
 }
 
 /// The D-7 claim-key grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within the byte bound.
-fn is_claim_key(key: &str) -> bool {
+pub(crate) fn is_claim_key(key: &str) -> bool {
     let part = |part: &str| {
         !part.is_empty()
             && part
@@ -221,7 +222,7 @@ fn is_claim_key(key: &str) -> bool {
 /// an anchor within its bound that the segment's trimmed `p1` contains (else
 /// no anchor). A claim failing a rule before the anchor is dropped. Each
 /// segment then keeps the last claim per key and the first
-/// [`CLAIMS_PER_SEGMENT`] of those, in emitted order; a claim's position is
+/// [`CLAIMS_PER_SEGMENT`] of those, in input order (emission order as open-item retirement leaves it); a claim's position is
 /// its index. Returns the claims per segment, aligned with `segments`, and the
 /// counts.
 pub fn check_claim_set(
