@@ -30,7 +30,7 @@ states:
 | State | Meaning |
 |---|---|
 | Absent | No projection exists. Installed admission records let the slice loop record the first build (`Cause::Registration`). |
-| Intent | A rebuild or authorized recovery is in progress. The record fixes the cause, attempt identity, consumer binding, allowance, and deadline. A restart resumes it as recorded. A rebuild whose deadline passes is renewed by the slice loop (see [Expiry and renewal](#expiry-and-renewal)). |
+| Intent | A rebuild or authorized recovery is in progress. The record fixes the cause, attempt identity, consumer binding, allowance, and deadline. A restart resumes it as recorded. A rebuild whose deadline passes before its replacement is selected is renewed by the slice loop (see [Expiry and renewal](#expiry-and-renewal)). |
 | Current | The selected family reached its fixed target. Later slices judge it on its coverage and catch it up toward the kernel tip. |
 | Disabled | Admission is closed. Only an authorized recovery reopens the record. |
 | Unavailable | The record cannot be trusted. Every hook is denied and nothing is released. |
