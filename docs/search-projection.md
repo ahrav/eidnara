@@ -141,8 +141,10 @@ longer by the size of the step.
 
 A slice over an active record whose deadline has passed, or whose renewal is
 due, installs the records with no coverage, so every hook is denied and a
-cleanup keeps its evidence. When the renewal is due the slice first hands back a
-running embedding supervisor, which the loop drains, then reports
+cleanup keeps its evidence. When the renewal is due and an embedding
+supervisor is still running, that slice reports `RotateMaintenance` and the
+loop drains the supervisor; a drain that does not resolve is reported as a
+blocked slice and the renewal waits. The next slice reports
 `SliceOutcome::Expired`, and the slice loop calls
 `SearchLifecycleOwner::renew_expired_rebuild`. That call reads the records and
 lane, refreshes admission on the selected family, and has
@@ -155,10 +157,12 @@ lane, refreshes admission on the selected family, and has
   recording time, so the renewed attempt is one `B_recovery_ms` from a
   recording on the current clock.
 
-A `B_recovery_ms` within the one-second start margin is refused before
-anything is installed. A supervisor running under an identity or coverage bounds
-other than the reloaded records yield refuses the renewal as it refuses a
-request: admission closes and the loop is woken to rotate it. A record whose renewal is no longer due at the clock
+A manifest that cannot bound the renewed attempt (its replacement
+specification, coverage bounds, or `B_recovery_ms`) refuses the renewal and
+closes admission, as a slice's preparation would. A `B_recovery_ms` within
+the one-second start margin is refused before anything is installed. A
+renewal that still finds an embedding supervisor running refuses and wakes
+the loop, so the next slice hands it back. A record whose renewal is no longer due at the clock
 read just before the write, as when a clock-step lead decays during the
 waits, records nothing, leaves the records installed with no coverage, and
 counts as an attempt; the loop is woken so the next slice judges the active

@@ -181,7 +181,7 @@ pub struct SearchLifecycleOwner {
     roster: ProjectRoster,
     /// Woken when a disable hands the manager back, so a shutdown that found the manager disabling can retry.
     disabled: tokio::sync::Notify,
-    /// Woken when a request or renewal is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it; when a renewal finds a renewable record no longer due, so the next slice judges it at once; and when a request or renewal finds a supervisor running under records a reload replaced, so the next slice rotates it.
+    /// Woken when a request or renewal is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it; when a renewal finds a renewable record no longer due, so the next slice judges it at once; and when a request finds a supervisor running under records a reload replaced, or a renewal finds any supervisor running, so the next slice rotates or hands it back.
     requested: tokio::sync::Notify,
     /// The project digest whose supervisor ran last, how many slices it has had, and the bounds it started under; `None` before the first tenure.
     /// The tenant, its slice count, the bounds its supervisor runs under, and the `B_recovery_ms` those bounds were derived from.
@@ -720,7 +720,7 @@ impl SearchLifecycleOwner {
     ///
     /// # Errors
     ///
-    /// Returns a [`BuildError`] when the owner is disabled or shut down, the records or lane are unavailable, the record names another kernel incarnation, the manifest cannot bound the renewed attempt or leaves it no time past the start margin, a supervisor runs under records a reload replaced (admission closes and the loop is woken to rotate it), admission is closed, or the lifecycle refuses the write.
+    /// Returns a [`BuildError`] when the owner is disabled or shut down, the records or lane are unavailable, the record names another kernel incarnation, the manifest cannot bound the renewed attempt or leaves it no time past the start margin, an embedding supervisor is still running (the loop is woken so the next slice hands it back), admission is closed, or the lifecycle refuses the write.
     pub fn renew_expired_rebuild(
         &self,
         budget: &EvalBudget,
@@ -758,15 +758,31 @@ impl SearchLifecycleOwner {
             &expired.consumer.generation_id,
         )
         .and_then(|_| coverage_bounds(inputs.manifest()))
-        .and_then(|_| limit(inputs.manifest(), expired.transition.duration_limit()))
-        .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+        .and_then(|_| limit(inputs.manifest(), expired.transition.duration_limit()));
+        let bound = match bound {
+            Ok(bound) => bound,
+            // The refusal is the manifest's, so the gate closes as a slice's preparation would close it.
+            Err(refusal) => {
+                self.close_gate(refusal.code());
+                return Err(BuildError::Invalid(
+                    "manifest limits cannot bound the request",
+                ));
+            }
+        };
         if bound <= DEADLINE_MARGIN_MS {
             return Err(BuildError::Invalid(
                 "the renewed deadline leaves no time past the start margin",
             ));
         }
-        // A supervisor still running under the identity or bounds a reload replaced is rotated before the gate renews on the new records, as for a request.
-        self.refuse_stale_supervisor(&mut managed, &inputs, &identity)?;
+        // A slice hands a running supervisor back before it reports the record expired; a renewal that still finds one refuses and wakes the loop, so admission never renews while a supervisor takes grants.
+        if let Managed::Selection(selection) = &mut *managed
+            && selection.maintenance().is_some()
+        {
+            self.requested.notify_one();
+            return Err(BuildError::Invalid(
+                "an embedding supervisor is running; retry after the next slice hands it back",
+            ));
+        }
         let selection = match &*managed {
             Managed::Selection(selection) => Some(&**selection),
             _ => None,
@@ -1106,14 +1122,13 @@ impl SearchLifecycleOwner {
         let budget = match deadline_at {
             Some(at) if renewal_due || at <= Instant::now() => {
                 self.install_without_coverage(&inputs, &identity);
-                // A supervisor still running is handed back first, so the renewal that follows refreshes admission with no supervisor taking grants before the renewed record is durable.
-                if renewal_due && let Some(handle) = selection.maintenance() {
-                    return SliceOutcome::RotateMaintenance(handle);
+                if !renewal_due {
+                    return SliceOutcome::Blocked("the record's deadline has passed".to_owned());
                 }
-                return if renewal_due {
-                    SliceOutcome::Expired
-                } else {
-                    SliceOutcome::Blocked("the record's deadline has passed".to_owned())
+                // A supervisor still running is handed back first, so the renewal that follows refreshes admission with no supervisor taking grants before the renewed record is durable.
+                return match selection.maintenance() {
+                    Some(handle) => SliceOutcome::RotateMaintenance(handle),
+                    None => SliceOutcome::Expired,
                 };
             }
             Some(at) => budget.bounded_by(at),
