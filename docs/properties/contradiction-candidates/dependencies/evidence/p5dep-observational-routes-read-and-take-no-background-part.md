@@ -28,7 +28,7 @@ boundaries; lifecycle.
   already selected. This is the only view background work reads: the
   MemoryReviewer worker's projects, the scheduler's roots and schedules, and
   the search maintenance roster."
-- `crates/daemon/src/kernel_routes/mod.rs:422-448`: `kernel_route_scope`
+- `crates/daemon/src/kernel_routes/mod.rs:415-441`: `kernel_route_scope`
   carries `harness: binding.harness` but makes no decision on it; the project
   check and store lookup are harness-independent.
 - `crates/daemon/src/memory_reviewer/wire.rs`: no reference to harness; list

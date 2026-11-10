@@ -38,11 +38,11 @@ C13; D6.
 - `wire.rs:222-258` `handle_review_list`: after binding, `after` validated as
   lower-hex sha256 (`:77-90`), `limit` default `MAX_RECEIPT_PAGE`; the store
   read in `blocking`; `Err(_) => terminal("store_unavailable")` (`:255`).
-- `crates/daemon/src/kernel_routes/mod.rs:422-448` `kernel_route_scope`:
+- `crates/daemon/src/kernel_routes/mod.rs:415-441` `kernel_route_scope`:
   `management_binding` (session/route authorization), `project_root` required
   (`:422-426`), `project.accepts(requested_root)` else `project_mismatch`
   (`:428-432`), `kernel_store()` else its state.
-- `kernel_routes/mod.rs:453-462` `kernel_request`: scope first, then `parse_request_body`.
+- `kernel_routes/mod.rs:446-455` `kernel_request`: scope first, then `parse_request_body`.
 - `mod.rs:461-473`: `ENVELOPE_KEYS = ["method", "kind", "session_id",
   "project_root"]` removed before `serde_json::from_value::<T>`; a failure is
   `invalid_params_error("invalid {operation}: {error}")`.
@@ -82,7 +82,7 @@ there is `store_unavailable`.
 
 ### Q: D6. Is `kind` an intended envelope key?
 
-- Sources examined: `crates/daemon/src/kernel_routes/mod.rs:468-480`, `host-wire-protocol.md:829`, `:861`.
+- Sources examined: `crates/daemon/src/kernel_routes/mod.rs:461-473`, `host-wire-protocol.md:829`, `:861`.
 - Findings: the code strips `kind` with the three documented keys; the doc
   does not name it. A body with a `kind` field is accepted silently.
 - Missing evidence: author intent; whether the transport ever adds `kind`.

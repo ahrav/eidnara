@@ -29,7 +29,7 @@ carries so R3's join is specified against the real columns.
   cause` and is `deny_unknown_fields` (`crates/daemon/src/kernel_routes/
   project.rs:138-146`); `into_intent` namespaces the key (`:148-163`).
 - `session_id` is an envelope key stripped before parsing
-  (`kernel_routes/mod.rs:468`); the binding knows the session but nothing
+  (`kernel_routes/mod.rs:461`); the binding knows the session but nothing
   writes it to the Kernel on this path. `source_kind` is consumed by
   `resolve_classes` (`commit.rs:1137-1144`) and copied into inserted specs
   (`:290-296`), never into `commit_log`.

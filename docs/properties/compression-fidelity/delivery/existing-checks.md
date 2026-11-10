@@ -94,14 +94,14 @@ provenance assertion was found. Existing generic tests should be reused.
 | Location and check | What its assertions cover | Status |
 | --- | --- | --- |
 | [canonical_memory.rs:453-484](../../../../crates/daemon/src/canonical_memory.rs#L453-L484), `injectable_rows_are_visible_decisions_in_a_positive_category` | Drops negative category, labeled row, and nondecision row. | unaudited |
-| [canonical_memory.rs:423-516](../../../../crates/daemon/src/canonical_memory.rs#L423-L516), revision tests | Digest follows rendered rows, not read timestamp, dropped rows, or edits past the render cap. | unaudited |
-| [canonical_memory.rs:520-562](../../../../crates/daemon/src/canonical_memory.rs#L520-L562), `rows_past_the_memory_budget_are_neither_injected_nor_digested` | Oversized row is absent and cannot move the revision. | unaudited |
-| [canonical_memory.rs:565-582](../../../../crates/daemon/src/canonical_memory.rs#L565-L582), `withheld_reads_record_the_verdict_and_inject_nothing` | Withheld and available-empty reads differ despite both having no rows. | unaudited |
+| [canonical_memory.rs:525-620](../../../../crates/daemon/src/canonical_memory.rs#L525-L620), revision tests | Digest follows rendered rows, not read timestamp, dropped rows, or edits past the render cap. | unaudited |
+| [canonical_memory.rs:622-670](../../../../crates/daemon/src/canonical_memory.rs#L622-L670), `rows_past_the_memory_budget_are_neither_injected_nor_digested` | Oversized row is absent and cannot move the revision. | unaudited |
+| [canonical_memory.rs:673-690](../../../../crates/daemon/src/canonical_memory.rs#L673-L690), `withheld_reads_record_the_verdict_and_inject_nothing` | Withheld and available-empty reads differ despite both having no rows. | unaudited |
 | [memory_render.rs:365-388,416-443](../../../../crates/daemon/src/memory_render.rs#L365-L443) | Nonpositive categories drop; UTF-8 truncation respects the 64 KiB content cap. | unaudited |
 | [m0_compose.rs:299-355](../../../../crates/daemon/src/m0_compose.rs#L299-L355), budget boundary and reference-model tests | Skip-and-continue selection matches the retained reference loop. | unaudited |
 | [crates/daemon/tests/transform_canonical_memory.rs:48-217](../../../../crates/daemon/tests/transform_canonical_memory.rs#L48-L217) | Candidate, retired, superseded, negative-category, wrong-project, and wrong-domain examples do not appear; quarantine changes the next pass; warm state remains stable. | unaudited |
 | [crates/daemon/tests/transform_canonical_memory.rs:240-339](../../../../crates/daemon/tests/transform_canonical_memory.rs#L240-L339) | A consumer stalled past the lag thresholds leaves memory served from the canonical rows at the tip. | unaudited |
-| [crates/daemon/tests/transform_canonical_memory.rs:347-381](../../../../crates/daemon/tests/transform_canonical_memory.rs#L347-L381) | Disabled memory takes no canonical read. | unaudited |
+| [crates/daemon/tests/transform_canonical_memory.rs:343-379](../../../../crates/daemon/tests/transform_canonical_memory.rs#L343-L379) | Disabled memory takes no canonical read. | unaudited |
 | [crates/daemon/tests/transform_canonical_memory.rs:380-472](../../../../crates/daemon/tests/transform_canonical_memory.rs#L380-L472) | Configured budget removes oversized memory at the reader. | unaudited |
 
 The `REJECTED_APPROACH` category is not an explicitly rejected admission state.

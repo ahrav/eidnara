@@ -12,7 +12,7 @@ re-verified at this branch tip.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Scope: `kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:421`).
+- Scope: `kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:414`).
 - Correction: `memory_reviewer_wire.rs:409` tests `review.accept`, not reads.
 
 - Guarantee under test: `review.*` reads authorize by the connection bearer key

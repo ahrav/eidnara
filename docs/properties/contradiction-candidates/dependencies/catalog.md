@@ -499,7 +499,7 @@ Type: safety
 Reachability: default-production - `decision_page_within_budget` is a public
 Kernel API with one production caller at HEAD: the claim materializer's
 bootstrap page (`crates/daemon/src/claim_sources.rs:802`), run from the
-search lifecycle owner (`crates/daemon/src/search_lifecycle_owner.rs:574`).
+search lifecycle owner (`crates/daemon/src/search_lifecycle_owner.rs:570`).
 Tests call it at `crates/kernel/tests/kernel_slice.rs:1637-1775`. P5 would be
 its second production caller. (Refinement R2 proposed `test-only`; the
 bundle pass found the production caller and kept the label.)
@@ -847,7 +847,7 @@ Required faults and enabling state: a route bound to another root; a body
 with an unknown field; a root without MODULE authority; an injected store
 read failure.
 Confidence: high - [evidence](evidence/p5dep-review-reads-parse-strict-bodies-after-the-envelope.md).
-Read `wire.rs:32-51`, `:145-153`, `:217-234`; `kernel_routes/mod.rs:422-481`.
+Read `wire.rs:32-51`, `:145-153`, `:217-234`; `kernel_routes/mod.rs:415-474`.
 Existing check: the wire tests above; the literal-set test at
 `wire.rs:448-463+`. Status unaudited.
 Re-exercised by #1168: `review.candidates` joins the family through
@@ -865,7 +865,7 @@ joined the family after `3a3b916b7`: it reads the Kernel alone and has no
 `disabled` terminal (`host-wire-protocol.md:855`); this record does not
 cover it.
 Open questions:
-- D6: `kind` is stripped as an envelope key (`crates/daemon/src/kernel_routes/mod.rs:468`, `:474-477`) but the doc at
+- D6: `kind` is stripped as an envelope key (`crates/daemon/src/kernel_routes/mod.rs:461`, `:467-470`) but the doc at
   `host-wire-protocol.md:829` names three envelope fields. Is a body field
   `kind` meant to be accepted silently? (needs human input)
 

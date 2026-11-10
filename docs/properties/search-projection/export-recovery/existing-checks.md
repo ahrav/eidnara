@@ -55,7 +55,7 @@ inventoried below; other tables include checks bearing directly on this domain.
 | `crates/kernel/src/cas/gc.rs:437-534` | Separate artifact reclaim checks for purge, references, pins, reservations, and grace periods. | No evidence this is an export retention fence. | unaudited |
 | `crates/daemon/src/kernel_routes/serving.rs:19-52` | Inclusive lag thresholds; zero consumers unavailable for gated reads. The canonical memory tip read takes no serving decision. | Pause/deregister surface distinction. | unaudited |
 | `crates/daemon/src/kernel_routes/serving.rs:57-89` | Lag is stale on explicit search and abstained on automatic surfaces. | Existing withheld semantics are reused. | unaudited |
-| `crates/daemon/src/canonical_memory.rs:147-173` | Store, tip, lag, or visible-read failures return a withheld canonical read. | Authority unavailability is not emptiness. | unaudited |
+| `crates/daemon/src/canonical_memory.rs:231-256` | Store, tip, or visible-read failures return a withheld canonical read; consumer lag leaves it served. | Authority unavailability is not emptiness. | unaudited |
 | `crates/daemon/src/kernel_routes/eligibility.rs:132-173` | Checks retraction, supersession, revision, scope, sensitivity, visibility, and artifact eligibility. | Existing authority policy, not proposed kernel eligibility API. | unaudited |
 | `crates/host-runtime/src/generation.rs:442-550` | Profile decoding and generation validation reject malformed/missing/inconsistent files; unknown schema quarantines. | Generic publication check reused by link. | unaudited |
 | `crates/host-runtime/src/generation.rs:572-632` | Stages/promotes before profile replacement and checks named directory identity. | Payload-generation precedent only. | unaudited |

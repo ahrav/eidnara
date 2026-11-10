@@ -7158,6 +7158,9 @@ async fn a_rebuild_expired_by_a_clock_step_is_renewed_and_its_consumer_reaches_t
         "an expired record admits no reader"
     );
     let later = corpus.publish("later", "later text");
+    for index in 0..=LAG_LIMIT {
+        corpus.publish(&format!("more-{index}"), "more text");
+    }
 
     let renewed = owner
         .renew_expired_rebuild(&slice_budget())
@@ -7348,3 +7351,4 @@ fn renewal_backoff_doubles_from_the_idle_period_to_its_cap() {
     assert_eq!(renewal_backoff(8), RENEWAL_BACKOFF_CAP);
     assert_eq!(renewal_backoff(u32::MAX), RENEWAL_BACKOFF_CAP);
 }
+

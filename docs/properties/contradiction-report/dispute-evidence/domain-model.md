@@ -45,8 +45,8 @@ Corrections to [`../fact-sheet.md`](../fact-sheet.md) found while verifying:
 - The "carry a scope and an evidence citation" doc comment is at
   `crates/kernel/src/envelope.rs:1923-1924`, not "about 1870".
 - The transport envelope keys are at
-  `crates/daemon/src/kernel_routes/mod.rs:468` and the stripping function
-  `parse_request_body` at `:470-480`, not `:465-478`.
+  `crates/daemon/src/kernel_routes/mod.rs:461` and the stripping function
+  `parse_request_body` at `:463-473`, not `:458-471`.
 - The 512 KiB redaction bound is `secret_scanner::MAX_INPUT_BYTES`
   (`crates/secret-scanner/src/api.rs:6`) re-exported as
   `context_core::redaction::MAX_REDACTABLE_BYTES`
@@ -91,7 +91,7 @@ Writer categories known today (FACT):
 Caller-visible crossings: the bearer-authenticated connection
 (`docs/host-wire-protocol.md:26`: the key is the authority; `harness`,
 `session`, `role` are claims). The route binds project and harness
-server-side (`RouteScope`, `crates/daemon/src/kernel_routes/mod.rs:412-418`)
+server-side (`RouteScope`, `crates/daemon/src/kernel_routes/mod.rs:405-411`)
 and strips `session_id` and `project_root` from the body before parsing
 (`mod.rs:461-473`).
 

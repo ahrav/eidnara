@@ -210,8 +210,8 @@ excluded variant; omit raw history and verify the actual provider body.
 Confidence: high - [evidence](evidence/cf-memory-credit-requires-admitted-visible-content.md).
 Pinned reads, visibility filtering, scope filtering, and budget trimming are
 verified; semantic credit remains a claim under test.
-Existing check: `crates/daemon/tests/transform_canonical_memory.rs:48-217,240-472` and
-`canonical_memory.rs:349-378,520-562`; status unaudited. They do not join memory
+Existing check: `crates/daemon/tests/transform_canonical_memory.rs:48-217,243-449` and
+`canonical_memory.rs:282-311,412-454`; status unaudited. They do not join memory
 to compression-fidelity obligations at the provider boundary.
 Impact: A test can falsely claim retention by reading private candidates or
 can change admission policy to make a lost constraint appear retained.
@@ -365,7 +365,7 @@ The body guard, separate wrapper retries, hint bounds, pinned read, and cache
 checks are verified in source; compliance with R9 remains a claim under test.
 Existing check: `crates/daemon/src/decay_render.rs:1020-1037,1599-1770`,
 `crates/daemon/src/transform.rs:22965-22984,21111-21216`, and
-`crates/daemon/tests/transform_canonical_memory.rs:48-217,240-472`, plus
+`crates/daemon/tests/transform_canonical_memory.rs:48-217,243-449`, plus
 `packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts:7-55`;
 status unaudited. No joined check for all R9 serving-work restrictions was found.
 Impact: A fidelity result can conceal extra production work, weakened admission,

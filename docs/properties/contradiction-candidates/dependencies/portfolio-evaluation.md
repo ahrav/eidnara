@@ -46,7 +46,7 @@ named function; no wrong file, no wrong claim).
 | `local_file.rs:64-70`, `:245-247`, `:487-501` | confirmed |
 | `slice/write.rs:42-54`, `:569`, `:585`, `:606-608` Conflict | confirmed |
 | `schema.rs:136` retention comment | confirmed |
-| `kernel_routes/mod.rs:468` `ENVELOPE_KEYS` includes `kind` | confirmed (D6 holds) |
+| `kernel_routes/mod.rs:461` `ENVELOPE_KEYS` includes `kind` | confirmed (D6 holds) |
 | `wire.rs:131-139` `authority_project` | confirmed |
 | `host-wire-protocol.md:823-827`, `:847-851` | confirmed |
 | `types.ts:6`, `:24`, `:27-29`; `tools.ts:72-74`, `:125-138` | confirmed at `3a3b916b7`; at the #1164 tip the allowlist default is `tools.ts:103-106` and `isEidnaraMemoryMutation` is `types.ts:26-29` (#1161) |
@@ -378,7 +378,7 @@ Refinements applied in this bundle: R1 (both S6 records, their index rows,
 and the reachability-classes note), R2 (applied with a correction: the bundle
 pass found a production caller of `decision_page_within_budget` at
 `crates/daemon/src/claim_sources.rs:802`, reached from
-`crates/daemon/src/search_lifecycle_owner.rs:574`, so the record keeps
+`crates/daemon/src/search_lifecycle_owner.rs:570`, so the record keeps
 `default-production` and names that caller; the `test-only` label proposed
 by R2 rests on a claim that does not hold at HEAD), R3, R4, R5 (both S6
 records), R6 (catalog record and evidence file), R7 (catalog, system-model

@@ -194,7 +194,7 @@ in the records' open questions.
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
 [t-usage]: ../../../../crates/kernel/tests/kernel_artifact_usage.rs
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L469-L475
+[blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643-L673
 [a1]: catalog.md#admission-chain-charges-before-decode-and-refuses-effect-free
 [a2]: catalog.md#route-and-typed-decode-are-independent-of-entry-path

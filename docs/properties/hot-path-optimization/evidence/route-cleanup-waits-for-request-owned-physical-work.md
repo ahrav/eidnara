@@ -205,7 +205,7 @@ exclusion.
 [cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L1194
 [close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1466-L1649
 [close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1524-L1592
-[daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L469
+[daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
 [t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L653-L701
 [t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L748-L800

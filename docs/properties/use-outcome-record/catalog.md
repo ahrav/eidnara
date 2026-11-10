@@ -1152,8 +1152,8 @@ a record whose `served_set` read answers zero decision ids, while a `deadline`, 
 fence leaves no record until a later HARD fold at the same served set writes or
 replays it (`uo-p-served-set-once-per-session-revision`).
 Fault/timing angle: A Kernel Ready for the write but starting at the read.
-Required faults and enabling state: A Kernel starting or a refusing serving
-verdict at read time, then a HARD fold.
+Required faults and enabling state: A Kernel starting or a refused tip or
+visible-row read at read time, then a HARD fold.
 Confidence: high - [evidence](evidence/uo-p-no-row-for-withheld-composition.md).
 the writer acts only on `CanonicalMemoryRead::Available` (`record_use_outcome`
 (`crates/daemon/src/lib.rs:9733`)).
