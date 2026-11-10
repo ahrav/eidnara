@@ -32,7 +32,7 @@ which makes the provenance of `source_kind` part of the dispute record.
   that differs from the channel's bound session with `session_mismatch`
   (`crates/daemon/src/lib.rs:6641-6676`). `kernel_request` then strips
   `method`, `kind`, `session_id`, and `project_root` before parsing the
-  body (`ENVELOPE_KEYS`, `mod.rs:461`; `parse_request_body`,
+  body (`ENVELOPE_KEYS`, `mod.rs:468`; `parse_request_body`,
   `:463-474`), so the session reaches no Kernel row.
 - The Kernel redacts `actor` and `cause` before the `commit_log` insert
   (`RedactedIntent`; insert at `crates/kernel/src/envelope.rs:1484-1499`).
@@ -77,7 +77,7 @@ runs before body parsing for every `kernel.*` route.
 
 ### Q: Does the route verify `actor` against `RouteScope.harness`?
 
-- Sources examined: `mod.rs:405-441`, `commit.rs:1097-1241`,
+- Sources examined: `mod.rs:412-448`, `commit.rs:1097-1241`,
   `project.rs:138-165`.
 - Findings: no. `harness` is bound and unused on `kernel.commit`; `actor`
   is copied from the body.

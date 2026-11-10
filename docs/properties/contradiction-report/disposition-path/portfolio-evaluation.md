@@ -28,7 +28,7 @@ all 14 `always` checks hold over per-request state.
 | classes | route-level daemon test | reads the written row; store helpers exist (`kernel_routes.rs:4340`) |
 | maturity | kernel unit (evaluator) plus one route row read | `evaluate_admission` is pure (`admission.rs:280-367`) |
 | restrictiveness | kernel unit (7x5 grid) plus route cases for lateral moves | table at `admission.rs:4244-4251` |
-| no-evidence | route-level, raw JSON body | parse refusal at `mod.rs:463-471` |
+| no-evidence | route-level, raw JSON body | parse refusal at `mod.rs:470-478` |
 | evidence-existence | kernel integration (store API) | the route set `None` at `3a3b916b7`; PR A sets a checked id (`commit.rs:738`) |
 | slice-liveness | kernel integration; one route case for the `not_found` mapping | helpers private to `write.rs` |
 | evidence-scope | route-level for `not_found`; kernel unit for `scope_id == None` | see R3 |
@@ -56,8 +56,8 @@ the subject's classes). Missing: a record that `actor`, `cause`, and
 `source_kind` are caller-asserted. `resolve_classes` only refuses
 over-declaration relative to the asserted `source_kind`
 (`commit.rs:413-446`); `RouteScope` holds `harness` and the binding
-(`mod.rs:405-412`) but nothing compares them to the intent; `session_id`
-is stripped (`mod.rs:461`). Gap G1; the proposed set has only question Q4.
+(`mod.rs:412-419`) but nothing compares them to the intent; `session_id`
+is stripped (`mod.rs:468`). Gap G1; the proposed set has only question Q4.
 
 Replay safely: replay, preview, command; per-identity accounting is the
 primary oracle.
@@ -139,7 +139,7 @@ differ, prior above Candidate, retired id cited); none negates a check.
 
 ## Gaps queued
 
-- G1: read `kernel_route_scope` (`mod.rs:415-441`), `IntentRequest`
+- G1: read `kernel_route_scope` (`mod.rs:422-448`), `IntentRequest`
   (`project.rs:138-146`), `resolve_classes`; one record on what the daemon
   verifies about the intent and `source_kind`.
 - G2: read `PreviewRun` (`commit.rs:822-881`); owner decides whether

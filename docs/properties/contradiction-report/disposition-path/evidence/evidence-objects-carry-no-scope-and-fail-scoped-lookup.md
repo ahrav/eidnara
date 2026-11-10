@@ -55,7 +55,7 @@ only`).
 
 None in time. Structural: the schema has no project binding for evidence.
 Evidence enters through `kernel.artifact.ingest.*` routes, which are
-project-bound at the route level (`kernel_route_scope`, `mod.rs:415-441`)
+project-bound at the route level (`kernel_route_scope`, `mod.rs:422-448`)
 but store no scope on the row.
 
 ## What a test must construct

@@ -26,7 +26,7 @@ the change is measured against.
   `serde_json::from_value`, mapping any error to
   `invalid_params_error("invalid kernel.commit: ...")`
   (`kernel_routes/mod.rs:470-478`). This runs after
-  `kernel_route_scope` binds the project (`mod.rs:452-453`) and before any
+  `kernel_route_scope` binds the project (`mod.rs:459-460`) and before any
   store access, so nothing is written.
 - `disposition_request` sets `trigger_object_id: None` (`commit.rs:736`)
   and, at the PR A tip, `evidence_id: evidence_id.map(..)` and the

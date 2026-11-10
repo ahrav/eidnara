@@ -38,7 +38,7 @@ the difference noted.
 - `kernel_request` binds the route scope from the channel's management
   binding and the body's `project_root` (`kernel_routes/mod.rs:422-448`),
   then strips `method, kind, session_id, project_root` before strict
-  parsing (`mod.rs:458-471`). The session id reaches the daemon only
+  parsing (`mod.rs:465-478`). The session id reaches the daemon only
   through the channel binding; no body field or commit-log column carries
   it.
 - `CommitRequest` (`commit.rs:107-127`) is `deny_unknown_fields`;

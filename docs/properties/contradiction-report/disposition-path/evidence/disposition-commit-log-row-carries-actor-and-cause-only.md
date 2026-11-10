@@ -81,7 +81,7 @@ None in time. Depends on `RedactedIntent::new`'s validation
 - Sources examined: P4 R3, U1 Verification ("the receipt and commit log
   carry actor, cause, and session for the event"), U3 (typed reporter
   columns in Batch K1), OQ4-1; `schema.rs:26`; `envelope.rs:1484-1499`;
-  `mod.rs:461`.
+  `mod.rs:468`.
 - Findings: the commit log carries `actor` and `cause`. The session id is
   dropped at the envelope boundary. OQ4-1 puts the reporter class into a
   structured `reason` for PR A; nothing in the plan adds a session column

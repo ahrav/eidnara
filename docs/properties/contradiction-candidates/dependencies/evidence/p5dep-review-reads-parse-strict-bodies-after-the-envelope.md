@@ -43,7 +43,7 @@ C13; D6.
   (`:422-426`), `project.accepts(requested_root)` else `project_mismatch`
   (`:428-432`), `kernel_store()` else its state.
 - `kernel_routes/mod.rs:453-462` `kernel_request`: scope first, then `parse_request_body`.
-- `mod.rs:461-473`: `ENVELOPE_KEYS = ["method", "kind", "session_id",
+- `mod.rs:468-480`: `ENVELOPE_KEYS = ["method", "kind", "session_id",
   "project_root"]` removed before `serde_json::from_value::<T>`; a failure is
   `invalid_params_error("invalid {operation}: {error}")`.
 - `crates/daemon/src/kernel_routes/read.rs:34-55` `ReadRequest` for
