@@ -16,32 +16,32 @@ Verified at HEAD.
 
 - `crates/daemon/src/canonical_memory.rs`: `CanonicalMemoryRead` has two
   variants, `Available(CanonicalMemorySnapshot)` and `Withheld(KernelOutcome)`
-  (`:91-97`). `composition()` (`:101-112`) maps `Available` to
+  (`:157-161`). `composition()` (`:165-176`) maps `Available` to
   `ProjectMemoryComposition::Canonical { known_as_of, truncated, revision }` and
   `Withheld` to `ProjectMemoryComposition::Withheld { state }` with
-  `state = verdict.state_key()`. `revision()` (`:115-120`) is `None` when
-  withheld. `rows()` (`:123-128`) returns the snapshot rows or an empty slice.
+  `state = verdict.state_key()`. `revision()` (`:179-184`) is `None` when
+  withheld. `rows()` (`:187-192`) returns the snapshot rows or an empty slice.
   Each is a single `match` with no default arm.
-- `crates/daemon/src/canonical_memory.rs:141-175` (`read_project_memory`): the
-  store phase (`KernelOpenCoordinator::kernel_store`), the `tip` read, the
-  `outbox_lag` read, the serving decision
-  `serving::project(serving::decide_for_tip_read(&lag), Surface::AutoInject)`,
-  and the `read_visible` call each return `Withheld` carrying a
-  `KernelOutcome`; only a served read constructs `Available`, and it does so
-  through `injectable_snapshot` (`:184-212`), which filters to visible
+- `crates/daemon/src/canonical_memory.rs` (`read_project_memory` and
+  `read_at_tip`): the store phase (`KernelOpenCoordinator::kernel_store`), the
+  `tip` read, and the `read_visible` call each return `Withheld` carrying a
+  `KernelOutcome`. Outbox consumers maintain derived state, so their lag never
+  withholds the read; the reader issues no lag query and marks a served read
+  for its log report from the lag facts of the kernel health block the
+  coordinator last published, while that block is fresh. A served read without
+  fresh facts keeps the report's last served or lagging verdict, and counts as
+  served after a withheld read or before any verdict. Only a served read
+  constructs `Available`, and it does so
+  through `injectable_snapshot` (`:329-364`), which filters to visible
   positive-category decisions, trims them to the memory budget, and hands the
-  trimmed rows to `CanonicalMemorySnapshot::new` (`:50`), which digests exactly
+  trimmed rows to `CanonicalMemorySnapshot::new` (`:52`), which digests exactly
   those rows once as the lines the renderer emits. The read passes
   `RowSelection::DomainDecisions(MEMORY_DOMAIN_ID)` (`kernel_routes/read.rs`),
   so only memory-domain decisions reach the row and byte caps and another
-  domain's rows cannot crowd them out. The tip is read before the lag sample
-  and passed to `read_visible` as `as_of`, the same order `handle_kernel_read`
-  uses for a gated read, so the rows a served read pins are the rows the
-  freshness verdict covered.
-- `crates/daemon/src/kernel_routes/serving.rs:58-63` (`decide_for_tip_read`):
-  zero registered consumers is served; otherwise `decide` applies the route's
-  lag thresholds. So in a deployment with no outbox consumer, the withheld arm
-  is reached only through store phase or read errors.
+  domain's rows cannot crowd them out. The tip is read first and passed to
+  `read_visible` as `as_of`, so the rows a served read pins are the canonical
+  rows at that commit. The withheld arm is reached only through store phase
+  or read errors.
 - `crates/daemon/src/kernel_routes/state.rs` (`KernelOutcome::state_key`):
   the recorded reason is the serialized `kind` tag joined with the serialized
   `reason` by `:`, read from the same wire object the TypeScript client derives
@@ -93,8 +93,8 @@ rematerialized when the store became ready.
 ## Timing windows and dependencies
 
 - The window between the read (`lib.rs:7994`) and the commit is closed to the
-  verdict: the read result is a value in the context, and a phase or lag change
-  after it cannot alter what the pass records.
+  verdict: the read result is a value in the context, and a phase change after
+  it cannot alter what the pass records.
 - The property depends on the two-variant enum staying exhaustive; a third
   variant fails to compile at both `match` sites.
 - The distinction reaches the m1 revision signal through
@@ -119,11 +119,13 @@ rematerialized when the store became ready.
 
 `withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`
 (`transform.rs:13282`) constructs exactly this at the injected-context seam;
-`a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it`
-(`tests/transform_canonical_memory.rs`) reaches the withheld arm through the
-reader itself, with a registered consumer trailing the published outbox by the
-position threshold, and then shows the block return once the consumer
-acknowledges.
+`a_stalled_consumer_leaves_project_memory_served_from_current_canonical_rows`
+(`tests/transform_canonical_memory.rs`) is the control for the served arm: it
+withholds nothing, and it registers a consumer trailing the
+published outbox by the position threshold, shows a gated `kernel.read` report
+`stale` over that store, and shows the transform still serves the block from
+the canonical rows at the tip, including a statement committed while the
+consumer stays stalled.
 
 For the history_summarizer, the same three steps run over `HistorySummarizerAssemblerConfig`
 and the fired `HistorySummarizerDiagnostics`:
@@ -159,8 +161,7 @@ the store tip.
 ### Q: Is `Canonical { known_as_of: 0, .. }` reachable in production?
 
 - Sources examined: `read_project_memory` (`canonical_memory.rs`), which reads
-  `store.tip()` before the lag sample and passes it to `read_visible` as
-  `as_of`; `KernelStore::tip`
+  `store.tip()` and passes it to `read_visible` as `as_of`; `KernelStore::tip`
   (`crates/kernel/src/envelope.rs:569-575`, `COALESCE(MAX(commit_seq), 0)`).
 - Findings: a kernel store with no commits reports `tip() == 0`, so a served
   read of an empty store records `Canonical { known_as_of: 0, truncated: false,

@@ -172,15 +172,17 @@ covers an artifact ingested with `object_kind` `decision`, whose class lives
 on `evidence_meta`.
 Guarantee: Selection optimization preserves the canonical memory result for
 the same valid store state, requested snapshot, project, and budget.
-Check: `always` - Compare the ordered selected rows, rendered memory bytes,
-revision, truncation flag, known-as-of value, and available/withheld outcome
-with the [fixed baseline pipeline](#fixed-reference-identity); every evaluated
-result must agree. The oracle must not reuse candidate selection helpers.
+Check: `always` - With every registered outbox consumer inside the serving
+thresholds, where the fixed baseline's lag gate and the current reader agree,
+compare the ordered selected rows, rendered memory bytes, revision, truncation
+flag, known-as-of value, and available/withheld outcome with the
+[fixed baseline pipeline](#fixed-reference-identity); every evaluated result
+must agree. The oracle must not reuse candidate selection helpers.
 Fault/timing angle: A commit, sensitivity change, or scope change crosses the
 read boundary while query filtering or materialization changes.
 Required faults and enabling state: Construct admission and lineage histories,
 uncertain scopes, tie-ordered rows, excluded categories, and payload pressure;
-hold the baseline and candidate to the same governing snapshot and lag sample.
+hold the baseline and candidate to the same governing snapshot.
 Confidence: high - [Evidence](evidence/canonical-memory-result-preserves-current-selection-pipeline.md).
 The read, selection, trimming, and pass-level pinning are source-verified.
 Existing check: [Canonical checks](existing-checks.md#canonical-read) cover
@@ -188,6 +190,10 @@ composition and budgets; their status is unaudited.
 Impact: Memory bytes, revision-driven materialization, or withholding can drift.
 Open questions:
 
+- Resolved (#1208, owner decision): outbox
+  consumer lag no longer withholds the memory read, so the fixed baseline,
+  which withholds on consumer lag, is compared only with every registered
+  consumer inside the serving thresholds.
 - Resolved (#443, owner decision): a corrupt row outside the memory domain no
   longer withholds the memory read, because the pushed-down query never reads
   it; reads that serve that row still decode it and fail on it.
@@ -357,7 +363,7 @@ Open questions:
   paged and slow-disk durations are unmeasured. Later Emergency95 units may skip
   on cancellation, with derived state recomputed or superseded. (answered)
 - `kernel_routes::blocking`
-  ([mod.rs:462-468](../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468))
+  ([mod.rs:485-491](../../../crates/daemon/src/kernel_routes/mod.rs#L485-L491))
   is a bare `spawn_blocking` whose result an aborted handler drops unread, so
   route-gone can run while a kernel-route worker is still live and its panics
   reach the default hook. Does it move onto `RequestCtx::run_blocking`, or is
@@ -771,7 +777,7 @@ them without creating implementation tickets.
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8759
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L141-L212
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L195-L364
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522

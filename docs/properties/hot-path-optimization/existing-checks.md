@@ -58,7 +58,7 @@ than redirected to different checks after test consolidation.
 | [Memory budget][memory-budget-test] | Budget-excluded rows are neither injected nor digested. | unaudited |
 | [Withheld read][withheld-test] | The verdict is recorded with no injected rows. | unaudited |
 | [Production transform composition][transform-memory-test] | The integration path observes canonical memory and its removal. | unaudited |
-| [Lag and acknowledgement][lag-test] | Consumer lag withholds the block; acknowledgement restores serving. | unaudited |
+| [Stalled consumer][lag-test] | A consumer stalled past the lag thresholds leaves the block served from the canonical rows at the tip. | unaudited |
 | [Disabled memory][disabled-test] | A disabled pass takes no canonical read. | unaudited |
 | [Configured memory budget][configured-budget-test] | The reader drops rows beyond the configured budget. | unaudited |
 | [Generic row cap][row-cap-test] | Newest rows survive and truncation is reported. | unaudited |
@@ -459,16 +459,16 @@ above mean no check was identified in the stated inspected scope, not a claim
 that no related check exists anywhere in the repository.
 
 [read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L182-L292
-[injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L282
-[revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L315
-[dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L373
-[suffix-test]: ../../../crates/daemon/src/canonical_memory.rs#L390
-[memory-budget-test]: ../../../crates/daemon/src/canonical_memory.rs#L412
-[withheld-test]: ../../../crates/daemon/src/canonical_memory.rs#L457
-[transform-memory-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L43
-[lag-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L230
-[disabled-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L309
-[configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L345
+[injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L550
+[revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L622
+[dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L680
+[suffix-test]: ../../../crates/daemon/src/canonical_memory.rs#L697
+[memory-budget-test]: ../../../crates/daemon/src/canonical_memory.rs#L719
+[withheld-test]: ../../../crates/daemon/src/canonical_memory.rs#L770
+[transform-memory-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L46
+[lag-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L242
+[disabled-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L349
+[configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L385
 [row-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2002
 [byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
 [permits]: ../../../crates/host-runtime/src/dispatch.rs#L981-L1008

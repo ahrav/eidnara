@@ -14,12 +14,13 @@ evidence. Inspected 2026-09-19 at
   reads canonical memory only when enabled and pins one read for the pass.
   The later [pass assembly](../../../../../crates/daemon/src/lib.rs#L9269-L9283)
   shares it with composition and producer preparation.
-- [canonical_memory.rs:147-174](../../../../../crates/daemon/src/canonical_memory.rs#L147-L174)
-  captures the kernel tip, evaluates freshness, and reads the bound project's
-  `auto_inject` memory-domain decisions. Failure returns `Withheld`.
+- [canonical_memory.rs:220-253](../../../../../crates/daemon/src/canonical_memory.rs#L220-L253)
+  captures the kernel tip and reads the bound project's `auto_inject`
+  memory-domain decisions at it, at any consumer lag. Failure returns
+  `Withheld`.
 - [kernel_routes/read.rs:181-230](../../../../../crates/daemon/src/kernel_routes/read.rs#L181-L230)
   filters by the bound project and scope before applying row limits.
-- [canonical_memory.rs:195-211](../../../../../crates/daemon/src/canonical_memory.rs#L195-L211)
+- [canonical_memory.rs:329-364](../../../../../crates/daemon/src/canonical_memory.rs#L329-L364)
   keeps visible positive decisions, then trims to the memory budget.
 - [admission.rs:3743-3753](../../../../../crates/kernel/src/admission.rs#L3743-L3753)
   distinguishes verified active automatic visibility from candidate/labeled,
@@ -36,7 +37,7 @@ evidence. Inspected 2026-09-19 at
   publication is therefore neither fact acceptance nor canonical admission.
 - [crates/daemon/tests/transform_canonical_memory.rs:48-217](../../../../../crates/daemon/tests/transform_canonical_memory.rs#L48-L217)
   checks candidate, scope, category, lifecycle exclusion, and warm reuse.
-  [canonical_memory.rs:412-474](../../../../../crates/daemon/src/canonical_memory.rs#L412-L474)
+  [canonical_memory.rs:698-767](../../../../../crates/daemon/src/canonical_memory.rs#L698-L767)
   checks budget exclusion and withheld-versus-empty metadata. Status: unaudited.
 
 Reachability is **default-production**: memory defaults enabled at

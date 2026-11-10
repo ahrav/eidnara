@@ -12,14 +12,15 @@ The preservation target is the selected result, not a particular SQL shape.
 
 - [daemon/lib.rs:8190-8270][pass] pins one read before the synchronous transform.
   Reruns at [8264, 8291, 8317, and 8372][reruns] reuse that captured result.
-- [canonical_memory.rs:141-174][entry] captures tip before lag sampling and
-  passes that tip to the auto-inject read; failures become withheld outcomes.
+- [canonical_memory.rs:219-244][entry] captures the tip and passes it to the
+  auto-inject read; failures become withheld outcomes, and consumer lag leaves
+  the read served.
 - [admission.rs:3485-3699][query] builds the served query over admission
   decisions, folds own/lineage authority and sensitivity in Rust, and collects
   rows. [admission.rs:3193][order] sorts the collected rows by object ID.
 - [read.rs:182-292][selection] applies domain/kind and scope selection, keeps
   newest rows, checks typed-row completeness, and trims the payload prefix.
-- [canonical_memory.rs:184-212][conversion] applies Visible and positive-category
+- [canonical_memory.rs:329-364][conversion] applies Visible and positive-category
   filters only after those caps, then trims memory and creates the snapshot.
 
 ## Failure scenario
@@ -30,7 +31,9 @@ The final block, revision, or withholding state then changes under optimization.
 
 ## Timing windows and dependencies
 
-The reference and candidate need identical governing snapshots and lag inputs.
+The reference and candidate need identical governing snapshots, with every
+registered consumer inside the serving thresholds, since the fixed baseline
+withholds on consumer lag and the candidate serves at any lag.
 Serving rank is `created_commit_seq DESC, object_id ASC`, not query iteration
 order. The canonical path uses the read's payload-prefix bound; it does not
 gain permission to replace it with a different serializer-budget algorithm.
@@ -69,8 +72,8 @@ baseline commit's rendered bytes does not run yet.
 
 [pass]: ../../../../crates/daemon/src/lib.rs#L8202-L8282
 [reruns]: ../../../../crates/daemon/src/lib.rs#L8349-L8453
-[entry]: ../../../../crates/daemon/src/canonical_memory.rs#L141-L174
+[entry]: ../../../../crates/daemon/src/canonical_memory.rs#L219-L244
 [query]: ../../../../crates/kernel/src/admission.rs#L3485-L3699
 [order]: ../../../../crates/kernel/src/admission.rs#L3193
 [selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L182-L292
-[conversion]: ../../../../crates/daemon/src/canonical_memory.rs#L184-L212
+[conversion]: ../../../../crates/daemon/src/canonical_memory.rs#L349-L384
