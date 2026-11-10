@@ -476,9 +476,10 @@ async fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing
     expiring.deadline = now() + 1_500;
     owner.request(&expiring, now(), &slice_budget()).unwrap();
     std::thread::sleep(Duration::from_millis(600));
+    // A slowed run that starts past the deadline finds the renewable record expired; either way no episode starts.
     assert!(matches!(
         owner.run_slice(&slice_budget()),
-        SliceOutcome::Blocked(_)
+        SliceOutcome::Blocked(_) | SliceOutcome::Expired
     ));
     let ControlState::Intent(intent) = control(home) else {
         panic!("the expiring record stays recorded");
@@ -2765,7 +2766,10 @@ fn a_slice_ends_by_the_records_deadline_while_the_projection_is_held() {
         waited < Duration::from_secs(4),
         "the slice ran {waited:?} on a record with 2.5 s left: {outcome:?}"
     );
-    assert!(matches!(outcome, SliceOutcome::Blocked(_)), "{outcome:?}");
+    assert!(
+        matches!(outcome, SliceOutcome::Blocked(_) | SliceOutcome::Expired),
+        "{outcome:?}"
+    );
 }
 
 #[test]
@@ -2922,8 +2926,10 @@ fn a_slice_inside_the_deadline_margin_is_bounded_by_the_record_deadline() {
         waited < Duration::from_secs(2),
         "the slice ran {waited:?} on a record with 600 ms left: {outcome:?}"
     );
+    // A slowed run that starts past the deadline finds the renewable record expired; either way no work starts.
     assert!(
-        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline")),
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline"))
+            || matches!(outcome, SliceOutcome::Expired),
         "{outcome:?}"
     );
 }
@@ -7143,8 +7149,10 @@ async fn a_rebuild_expired_by_a_clock_step_is_renewed_and_its_consumer_reaches_t
         .unwrap();
     assert!(registered.is_some());
 
+    let fixed = corpus.tip();
     rewrite_record(home, |intent| {
         intent.episodes.consumed = intent.episodes.allowance;
+        intent.recovery_target = Some(RecoveryTarget { commit_seq: fixed });
     });
     let recorded = step_clock_past_deadline(home);
     assert_eq!(recorded.episodes.consumed, recorded.episodes.allowance);
@@ -7504,5 +7512,40 @@ async fn a_refused_renewal_leaves_the_expired_record_and_admits_no_reader() {
             .unwrap()
             .is_some()
     );
+    owner.shutdown().await.unwrap();
+}
+
+/// A manifest whose `B_recovery_ms` lies within the one-second start margin leaves a renewal no time any slice could start in, so the renewal is refused before admission is touched: the expired record stays as written and admits no reader.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_renewal_with_no_time_past_the_start_margin_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    owner
+        .request_rebuild(Cause::CatchUpHoldLost, now(), &slice_budget())
+        .unwrap()
+        .expect("a Current record takes the rebuild");
+    step_clock_past_deadline(home);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Expired
+    ));
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("B_recovery_ms", 1_000)]),
+        &campaign_json(&identity),
+    );
+    let record = home.join("search-lifecycle").join("intent.json");
+    let bytes = std::fs::read(&record).unwrap();
+    let refused = owner.renew_expired_rebuild(&slice_budget());
+    assert!(
+        matches!(&refused, Err(BuildError::Invalid(reason)) if reason.contains("start margin")),
+        "{refused:?}"
+    );
+    assert_eq!(std::fs::read(&record).unwrap(), bytes);
+    assert!(owner.pin(&slice_budget()).is_err());
     owner.shutdown().await.unwrap();
 }

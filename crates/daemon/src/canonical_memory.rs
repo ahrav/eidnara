@@ -210,11 +210,9 @@ pub(crate) fn read_project_memory(
     let facts = (!published.is_stale())
         .then_some(published.block.facts.as_ref())
         .flatten();
-    kernel
-        .memory_read_report()
-        .observe(observed(&read, facts), |line| {
-            eprintln!("daemon: project memory {line}");
-        });
+    if let Some(line) = kernel.memory_read_report().observe(observed(&read, facts)) {
+        eprintln!("daemon: project memory {line}");
+    }
     read
 }
 
@@ -285,8 +283,8 @@ pub(crate) enum Observed {
 pub(crate) struct ReadReport(std::sync::Mutex<Option<Observed>>);
 
 impl ReadReport {
-    /// Records `observed` and passes the line to log to `emit`, under the report's lock, when its verdict differs from the last one recorded; concurrent reads therefore emit their lines in the order they recorded them.
-    pub(crate) fn observe(&self, observed: Observed, emit: impl FnOnce(&str)) {
+    /// Records `observed` and returns the line to log when its verdict differs from the last one recorded. The verdict is recorded before the caller logs, so a failed log write repeats nothing, and the caller logs outside the report's lock, so a blocked stderr write holds up no other read.
+    pub(crate) fn observe(&self, observed: Observed) -> Option<String> {
         let mut last = self
             .0
             .lock()
@@ -295,9 +293,7 @@ impl ReadReport {
             (
                 Some(Observed::Served | Observed::ServedWhileDerivedLag { .. }),
                 Observed::ServedUnsampled,
-            ) => {
-                return;
-            }
+            ) => return None,
             (_, Observed::ServedUnsampled) => Observed::Served,
             (_, observed) => observed,
         };
@@ -321,10 +317,8 @@ impl ReadReport {
             )),
             (_, Observed::Withheld(state)) => Some(format!("withheld state={state}")),
         };
-        if let Some(line) = line {
-            emit(&line);
-        }
         *last = Some(observed);
+        line
     }
 }
 
@@ -405,7 +399,7 @@ mod tests {
         ));
         assert_eq!(
             observed(&withheld, Some(&facts(true))),
-            Observed::Withheld(withheld_state(&withheld))
+            Observed::Withheld("unavailable:store_starting".to_owned())
         );
         assert_eq!(observed(&served, None), Observed::ServedUnsampled);
         assert_eq!(observed(&served, Some(&facts(false))), Observed::Served);
@@ -419,22 +413,11 @@ mod tests {
         );
     }
 
-    fn withheld_state(read: &CanonicalMemoryRead) -> String {
-        match read {
-            CanonicalMemoryRead::Withheld(verdict) => verdict.state_key(),
-            CanonicalMemoryRead::Available(_) => unreachable!(),
-        }
-    }
-
     /// Each change of verdict yields one line, a repeat yields none, a lag sample that moves within the lagging verdict yields none, and the first plainly served read after a withheld or lagging one yields `served`.
     #[test]
     fn the_read_report_logs_each_change_of_verdict_once() {
         let report = ReadReport::default();
-        let observe = |observed: Observed| {
-            let mut line = None;
-            report.observe(observed, |emitted| line = Some(emitted.to_owned()));
-            line
-        };
+        let observe = |observed: Observed| report.observe(observed);
         assert_eq!(observe(Observed::Served), None);
         assert_eq!(observe(Observed::Served), None);
         assert_eq!(

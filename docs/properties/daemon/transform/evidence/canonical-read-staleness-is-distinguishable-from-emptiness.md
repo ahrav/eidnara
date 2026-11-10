@@ -28,8 +28,9 @@ Verified at HEAD.
   `KernelOutcome`. Outbox consumers maintain derived state, so their lag never
   withholds the read; the reader issues no lag query and marks a served read
   for its log report from the lag facts of the kernel health block the
-  coordinator last published. Only a served read constructs `Available`, and it does so
-  through `injectable_snapshot` (`:331-366`), which filters to visible
+  coordinator last published, while that block is fresh. A served read without
+  fresh facts keeps the report's last served or lagging verdict. Only a served read constructs `Available`, and it does so
+  through `injectable_snapshot` (`:325-360`), which filters to visible
   positive-category decisions, trims them to the memory budget, and hands the
   trimmed rows to `CanonicalMemorySnapshot::new` (`:52`), which digests exactly
   those rows once as the lines the renderer emits. The read passes
@@ -90,8 +91,8 @@ rematerialized when the store became ready.
 ## Timing windows and dependencies
 
 - The window between the read (`lib.rs:7994`) and the commit is closed to the
-  verdict: the read result is a value in the context, and a phase or lag change
-  after it cannot alter what the pass records.
+  verdict: the read result is a value in the context, and a phase change after
+  it cannot alter what the pass records.
 - The property depends on the two-variant enum staying exhaustive; a third
   variant fails to compile at both `match` sites.
 - The distinction reaches the m1 revision signal through

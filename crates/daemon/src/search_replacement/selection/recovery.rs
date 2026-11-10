@@ -330,7 +330,7 @@ impl SearchSelection {
             }
         }
         if !is_selected {
-            // A rebuild's builder releases a target the tip has passed; a recovery keeps the target it was recorded with.
+            // A rebuild's builder releases a target the tip has reached; a recovery keeps the target it was recorded with.
             if intent.transition == Transition::AuthorizedRecovery
                 && let Some(target) = intent.recovery_target
             {

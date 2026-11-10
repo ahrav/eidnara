@@ -306,10 +306,8 @@ async fn a_stalled_consumer_leaves_project_memory_served_from_current_canonical_
         "{served}"
     );
     assert_eq!(served["project_memory"]["kind"], "canonical", "{served}");
-    assert!(
-        served["project_memory"]["known_as_of"].as_i64().unwrap() >= read_from,
-        "{served}"
-    );
+    let pinned = served["project_memory"]["known_as_of"].as_i64().unwrap();
+    assert!((read_from..=daemon.tip()).contains(&pinned), "{served}");
 
     // A statement committed while the consumer stays stalled reaches the next pass, read at the new tip.
     commit_verified_memory(
@@ -337,10 +335,8 @@ async fn a_stalled_consumer_leaves_project_memory_served_from_current_canonical_
         text.contains("mem-port: Serve the API on the configured port."),
         "{text}"
     );
-    assert!(
-        current["project_memory"]["known_as_of"].as_i64().unwrap() >= tip,
-        "{current}"
-    );
+    let pinned = current["project_memory"]["known_as_of"].as_i64().unwrap();
+    assert!((tip..=daemon.tip()).contains(&pinned), "{current}");
     gated["as_of"] = json!(tip);
     assert_eq!(state_kind(&daemon.call(gated).await), "stale");
     daemon.shutdown().await;

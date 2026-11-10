@@ -767,19 +767,24 @@ impl SearchLifecycleOwner {
         if let Refresh::Closed(_) = self.refresh(&inputs, selection, &identity, budget) {
             return Err(BuildError::Invalid("admission is closed"));
         }
-        // The record is stamped at the clock read after the waits above, so the renewed attempt gets its whole bound.
-        let renew = || -> Result<LifecycleIntent, BuildError> {
+        // The record is stamped at a clock read after the waits above and after the lifecycle handle opens, so the renewed attempt gets its whole bound; a renewal the waits made no longer due records nothing.
+        let renew = || -> Result<Option<LifecycleIntent>, BuildError> {
+            let lifecycle = ProjectionLifecycle::open(&self.home)?;
             let now = crate::now_ms();
-            Ok(ProjectionLifecycle::open(&self.home)?.renew_expired(
+            if !expired.renewal_due(now) {
+                return Ok(None);
+            }
+            Ok(Some(lifecycle.renew_expired(
                 self.admission.gate(),
                 &expired,
                 now.saturating_add(i64::try_from(bound).unwrap_or(i64::MAX)),
                 now,
-            )?)
+            )?))
         };
-        let renewed = renew().inspect_err(|_| self.install_without_coverage(&inputs, &identity))?;
-        self.requested.notify_one();
-        Ok(Some(renewed))
+        let renewed = renew()
+            .inspect_err(|_| self.install_without_coverage(&inputs, &identity))?
+            .inspect(|_| self.requested.notify_one());
+        Ok(renewed)
     }
 
     /// Installs `inputs` with no coverage, so every hook is denied while a cleanup keeps the evidence the records approve.

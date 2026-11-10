@@ -1112,7 +1112,7 @@ fn interrupted_export_restarts_at_fresh_s_without_renewing_allowance() {
     assert_eq!(candidate.staged().verification.occurrences, 6);
 }
 
-/// A rebuild's retry after the tip passed its fixed target releases the target once the cleanup cleared the capture, captures a fresh S at the tip, and fixes the target there, spending one more episode and keeping the deadline; the consumer stays registered at its acknowledgement until the new candidate's catch-up acknowledges past it.
+/// A rebuild's retry after the tip passed its fixed target releases the target once the cleanup cleared the capture, captures a fresh S at the tip, and fixes the target again after its baseline, spending one more episode and keeping the deadline; the consumer stays registered at its acknowledgement until the new candidate's catch-up acknowledges past it.
 #[test]
 fn a_retry_with_s_beyond_the_recorded_target_recaptures_and_fixes_a_later_t() {
     let root = tempfile::tempdir().unwrap();
@@ -2093,6 +2093,72 @@ fn kernel_writer_wait_ends_at_the_deadline_and_a_released_holder_allows_construc
         assert!(matches!(failure.cleanup_error, Some(BuildError::Expired)));
         failure.cleanup(&budget(Duration::from_secs(30))).unwrap();
     }
+}
+
+/// A rebuild recorded with its target at the tip releases the target after its cleanup: its own registration commit moves the tip, so the capture's snapshot lies past the recorded target, and the attempt builds a candidate and fixes the target again past the recorded one, spending one episode.
+#[test]
+fn a_rebuild_target_at_the_tip_is_released_and_fixed_again_past_it() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("one", "12345678");
+    let gate = open_gate();
+    let at_tip = corpus.tip();
+    record(
+        root.path(),
+        &gate,
+        Some(at_tip),
+        &spec(root.path()).identity,
+    );
+    let candidate = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, spec(root.path()))
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+    assert!(candidate.staged().verification.snapshot_commit_seq > at_tip);
+    let built = control(root.path());
+    assert!(
+        built
+            .recovery_target
+            .is_some_and(|target| target.commit_seq > at_tip),
+        "{built:?}"
+    );
+    assert_eq!(built.episodes.consumed, 1);
+}
+
+/// A rebuild whose allowance is spent refuses before its target is released, so the record keeps its target and its bytes.
+#[test]
+fn a_spent_rebuild_keeps_its_target() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("one", "12345678");
+    let gate = open_gate();
+    record(
+        root.path(),
+        &gate,
+        Some(corpus.tip()),
+        &spec(root.path()).identity,
+    );
+    let lifecycle = support::flock::open_lifecycle(root.path());
+    for _ in 0..3 {
+        lifecycle.consume_episode(&gate, now()).unwrap();
+    }
+    drop(lifecycle);
+    let record_path = root.path().join("search-lifecycle").join("intent.json");
+    let bytes = std::fs::read(&record_path).unwrap();
+    let failure = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, spec(root.path()))
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Intent(daemon::projection_lifecycle::IntentRefusal::AllowanceExhausted)
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(std::fs::read(&record_path).unwrap(), bytes);
 }
 
 #[test]

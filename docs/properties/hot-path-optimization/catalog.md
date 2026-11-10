@@ -190,7 +190,7 @@ composition and budgets; their status is unaudited.
 Impact: Memory bytes, revision-driven materialization, or withholding can drift.
 Open questions:
 
-- Resolved (owner decision, search/projection-rebuild-recovery): outbox
+- Resolved (#1208, owner decision): outbox
   consumer lag no longer withholds the memory read, so the fixed baseline,
   which withholds on consumer lag, is compared only with every registered
   consumer inside the serving thresholds.
@@ -777,7 +777,7 @@ them without creating implementation tickets.
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8759
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L195-L366
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L195-L360
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522

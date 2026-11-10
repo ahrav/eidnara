@@ -169,9 +169,10 @@ per cap interval. A record that reaches Current starts the schedule again.
 Two kinds of expired record stay in their intent record with every hook
 denied and report the slice blocked on the deadline. An authorized recovery
 keeps the bound its operator authorized. A rebuild that holds a staged seed
-keeps its accounting, because the staged family's certificate binds the
-record's episode accounting and recording time, whether or not the seed is
-selected yet. An operator's disable reconciles a selected staged family. For an
+keeps its accounting by policy: once selection has written the staged
+family's certificate, that certificate binds the record's episode accounting
+and recording time, and a seed pinned before then is left with the same
+rule. An operator's disable reconciles a selected staged family. For an
 unselected staged seed the disable records the stop and reports that the
 disabled selection differs from the handoff; the stop then waits for an
 authorized recovery. `request_rebuild` records only over a
@@ -181,8 +182,9 @@ An unselected rebuild whose fixed target the kernel tip has reached cannot
 count on capturing at that target again, since a capture is taken at the tip
 and any commit before it moves the tip past the target. Its builder clears the
 capture first and then releases the target through
-`ProjectionLifecycle::release_target`, and the next capture fixes the target
-at the tip it captures. A target ahead of the tip, as after a kernel restore,
+`ProjectionLifecycle::release_target`; the attempt captures a fresh source
+snapshot at the tip and, after building its baseline from it, fixes the
+target again at the kernel tip it then reads. A target ahead of the tip, as after a kernel restore,
 still refuses the attempt with `TargetBeyondTip`. An authorized recovery keeps its target and reports
 `SnapshotBeyondTarget`.
 

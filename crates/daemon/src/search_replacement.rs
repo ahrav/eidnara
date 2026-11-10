@@ -418,7 +418,7 @@ impl<'a> ReplacementBuilder<'a> {
         }
     }
 
-    /// Runs one attempt under `budget` and the intent's recorded allowance and deadline. A Rebuilding attempt whose fixed target the tip has passed releases the target after its cleanup and fixes it again at its own capture.
+    /// Runs one attempt under `budget` and the intent's recorded allowance and deadline. A Rebuilding attempt whose fixed target the tip has reached releases the target after its cleanup; the target is fixed again after the attempt's own capture and baseline.
     /// On failure, retain the returned owner until cleanup succeeds or ownership is handed off.
     /// Synchronous filesystem and COMMIT completion require healthy I/O; cancellation cannot preempt them.
     /// The catch-up episode observes a caller interrupt at its next event boundary; only `budget`'s deadline ends a kernel wait inside the episode.
@@ -563,7 +563,7 @@ impl<'a> ReplacementBuilder<'a> {
         let mut expected = intent;
         if !staging {
             expected.replacement_capture = None;
-            // The cleanup above cleared the capture; a fixed target at or behind the tip is released so this capture fixes the target again at its own snapshot, which a commit landing before the capture would otherwise carry past the target.
+            // The cleanup above cleared the capture. A fixed target the tip has reached is released: any commit before this attempt's capture, such as its own registration, would put the capture's snapshot past the target, and the attempt fixes its target again after its baseline.
             if expected.transition == Transition::Rebuilding
                 && expected
                     .recovery_target

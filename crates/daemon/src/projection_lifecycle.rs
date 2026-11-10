@@ -218,7 +218,7 @@ impl LifecycleIntent {
         Ok(())
     }
 
-    /// Whether the slice loop renews this record once it lapses: a Rebuilding record that holds no staged seed. A staged seed's family certificate binds the record's episode accounting and recording time, so a record holding one keeps them, and an authorized recovery keeps the bound its operator authorized.
+    /// Whether the slice loop renews this record once it lapses: a Rebuilding record that holds no staged seed. A record holding a staged seed keeps its accounting: once selection writes the staged family's certificate, that certificate binds the record's episode accounting and recording time, and a seed pinned before then follows the same rule. An authorized recovery keeps the bound its operator authorized.
     pub fn renewable(&self) -> bool {
         self.transition == Transition::Rebuilding && self.staged_seed_digest.is_none()
     }
@@ -957,11 +957,11 @@ impl ProjectionLifecycle {
         Ok(intent)
     }
 
-    /// Clears the recovery target of `expected`, a Rebuilding record that holds no capture and no staged seed. A capture taken at a kernel tip past a fixed target cannot end at that target, so an unselected rebuild releases the target and fixes it again at its next capture.
+    /// Clears the recovery target of `expected`, a Rebuilding record that holds no capture and no staged seed. A capture is taken at the kernel tip, so once the tip reaches a fixed target any commit before the capture puts its snapshot past the target; an unselected rebuild releases the target and fixes it again after its next capture.
     ///
     /// # Errors
     ///
-    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when `transition != Transition::Rebuilding` or the record holds a capture or staged seed, [`IntentRefusal::DeadlineExpired`] when `now > episodes.deadline`, [`IntentRefusal::AllowanceExhausted`] when every episode is consumed, and the refusals of [`Self::admitted_intent`]. Each refusal leaves the record unchanged.
+    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when `transition != Transition::Rebuilding` or the record holds a capture or staged seed, [`IntentRefusal::DeadlineExpired`] when `now > episodes.deadline`, [`IntentRefusal::AllowanceExhausted`] when every episode is consumed, and the refusals of [`Self::admitted_intent`]; each of these leaves the record unchanged. A write error after the rename, such as [`IntentRefusal::DurabilityUnknown`], can leave the released target visible.
     pub(crate) fn release_target(
         &self,
         gate: &HookGate,
