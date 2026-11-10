@@ -22,26 +22,22 @@ Verified at HEAD.
   `state = verdict.state_key()`. `revision()` (`:115-120`) is `None` when
   withheld. `rows()` (`:123-128`) returns the snapshot rows or an empty slice.
   Each is a single `match` with no default arm.
-- `crates/daemon/src/canonical_memory.rs:141-175` (`read_project_memory`): the
-  store phase (`KernelOpenCoordinator::kernel_store`), the `tip` read, the
-  `outbox_lag` read, the serving decision
-  `serving::project(serving::decide_for_tip_read(&lag), Surface::AutoInject)`,
-  and the `read_visible` call each return `Withheld` carrying a
-  `KernelOutcome`; only a served read constructs `Available`, and it does so
+- `crates/daemon/src/canonical_memory.rs` (`read_project_memory` and
+  `read_at_tip`): the store phase (`KernelOpenCoordinator::kernel_store`), the
+  `tip` read, and the `read_visible` call each return `Withheld` carrying a
+  `KernelOutcome`. Outbox consumers maintain derived state, so their lag is
+  sampled after a served read only for the reader's log report and never
+  withholds it. Only a served read constructs `Available`, and it does so
   through `injectable_snapshot` (`:184-212`), which filters to visible
   positive-category decisions, trims them to the memory budget, and hands the
   trimmed rows to `CanonicalMemorySnapshot::new` (`:50`), which digests exactly
   those rows once as the lines the renderer emits. The read passes
   `RowSelection::DomainDecisions(MEMORY_DOMAIN_ID)` (`kernel_routes/read.rs`),
   so only memory-domain decisions reach the row and byte caps and another
-  domain's rows cannot crowd them out. The tip is read before the lag sample
-  and passed to `read_visible` as `as_of`, the same order `handle_kernel_read`
-  uses for a gated read, so the rows a served read pins are the rows the
-  freshness verdict covered.
-- `crates/daemon/src/kernel_routes/serving.rs:58-63` (`decide_for_tip_read`):
-  zero registered consumers is served; otherwise `decide` applies the route's
-  lag thresholds. So in a deployment with no outbox consumer, the withheld arm
-  is reached only through store phase or read errors.
+  domain's rows cannot crowd them out. The tip is read first and passed to
+  `read_visible` as `as_of`, so the rows a served read pins are the canonical
+  rows at that commit. The withheld arm is reached only through store phase
+  or read errors.
 - `crates/daemon/src/kernel_routes/state.rs` (`KernelOutcome::state_key`):
   the recorded reason is the serialized `kind` tag joined with the serialized
   `reason` by `:`, read from the same wire object the TypeScript client derives
@@ -119,11 +115,12 @@ rematerialized when the store became ready.
 
 `withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`
 (`transform.rs:13282`) constructs exactly this at the injected-context seam;
-`a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it`
-(`tests/transform_canonical_memory.rs`) reaches the withheld arm through the
-reader itself, with a registered consumer trailing the published outbox by the
-position threshold, and then shows the block return once the consumer
-acknowledges.
+`a_stalled_consumer_leaves_project_memory_served_from_current_canonical_rows`
+(`tests/transform_canonical_memory.rs`) registers a consumer trailing the
+published outbox by the position threshold, shows a gated `kernel.read` report
+`stale` over that store, and shows the transform still serves the block from
+the canonical rows at the tip, including a statement committed while the
+consumer stays stalled.
 
 For the history_summarizer, the same three steps run over `HistorySummarizerAssemblerConfig`
 and the fired `HistorySummarizerDiagnostics`:

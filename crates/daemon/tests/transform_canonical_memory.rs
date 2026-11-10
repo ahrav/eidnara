@@ -237,8 +237,9 @@ fn emit_outbox_rows(store: &KernelStore, first: i64, count: i64) {
         .unwrap();
 }
 
+/// A registered outbox consumer that stops acknowledging, as a search projection whose rebuild stalls does, maintains derived state only. The automatic memory read keeps serving the canonical rows at the tip, so a statement committed while the consumer is stalled reaches the next pass, while a gated `kernel.read` over the same store still reports the lag.
 #[tokio::test]
-async fn a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it() {
+async fn a_stalled_consumer_leaves_project_memory_served_from_current_canonical_rows() {
     let daemon = KernelDaemon::start().await;
     let asserted = daemon.commit("asserted", vec![insert_decision(1)]).await;
     assert_eq!(state_kind(&asserted), "available");
@@ -256,8 +257,7 @@ async fn a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it() 
         "Keep the public contract.",
     );
 
-    // A registered consumer that trails the published outbox by the position
-    // threshold makes the tip read abstain, exactly as `kernel.read gated` does.
+    // The consumer registers and acknowledges once, then stops while the outbox moves past it by the position threshold.
     let registered = store
         .commit(intent("register-indexer"), |envelope| {
             envelope.register_outbox_consumer("indexer", 1)?;
@@ -280,36 +280,61 @@ async fn a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it() 
     store
         .mark_outbox_published_through(newest_boundary, 1)
         .unwrap();
-
-    let withheld = daemon.call(transform_request()).await;
-    assert_eq!(withheld["status"], "ok", "{withheld}");
-    assert_eq!(withheld["action"], "HARD", "{withheld}");
+    let lag = store.outbox_lag(i64::MAX / 2).unwrap();
     assert!(
-        !served_text(&withheld).contains("<project-memory>"),
-        "{withheld}"
+        daemon::kernel_routes::serving::lag_threshold_tripped(&lag),
+        "{lag:?}"
     );
-    assert_eq!(
-        withheld["project_memory"],
-        json!({"kind": "withheld", "state": "abstained"}),
-        "{withheld}"
-    );
+    let mut gated = json!({
+        "method": "kernel.read",
+        "session_id": SESSION,
+        "project_root": daemon.project().to_str().unwrap(),
+        "surface": "explicit_search",
+        "as_of": null,
+        "gated": true,
+    });
+    let stale = daemon.call(gated.clone()).await;
+    assert_eq!(state_kind(&stale), "stale", "{stale}");
 
-    // Once the consumer catches up the same pass serves the block.
-    store
-        .acknowledge_outbox("indexer", daemon.tip(), 1)
-        .unwrap();
     let served = daemon.call(transform_request()).await;
     assert_eq!(served["status"], "ok", "{served}");
     assert_eq!(served["action"], "HARD", "{served}");
-    assert_eq!(
-        served["materialize_reason"], "project_memory_epoch",
-        "{served}"
-    );
     assert!(
         served_text(&served).contains("mem-rule: Keep the public contract."),
         "{served}"
     );
-    assert_eq!(served["project_memory"]["kind"], "canonical");
+    assert_eq!(served["project_memory"]["kind"], "canonical", "{served}");
+    assert_eq!(served["project_memory"]["known_as_of"], daemon.tip());
+
+    // A statement committed while the consumer stays stalled reaches the next pass, read at the new tip.
+    commit_verified_memory(
+        &store,
+        "port",
+        "mem-port",
+        &scope_id,
+        "PROJECT_RULES",
+        "Serve the API on the configured port.",
+    );
+    let tip = daemon.tip();
+    let current = daemon.call(transform_request()).await;
+    assert_eq!(current["status"], "ok", "{current}");
+    assert_eq!(current["action"], "HARD", "{current}");
+    assert_eq!(
+        current["materialize_reason"], "project_memory_epoch",
+        "{current}"
+    );
+    let text = served_text(&current);
+    assert!(
+        text.contains("mem-rule: Keep the public contract."),
+        "{text}"
+    );
+    assert!(
+        text.contains("mem-port: Serve the API on the configured port."),
+        "{text}"
+    );
+    assert_eq!(current["project_memory"]["known_as_of"], tip);
+    gated["as_of"] = json!(tip);
+    assert_eq!(state_kind(&daemon.call(gated).await), "stale");
     daemon.shutdown().await;
 }
 

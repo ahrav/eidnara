@@ -195,17 +195,42 @@ impl CanonicalMemoryRead {
 /// Reads the project's injectable memory at the kernel tip, trimmed to
 /// `memory_budget_tokens`.
 ///
-/// The tip is captured before the lag sample, and the visible-row read is bound to it, so a commit published between them cannot admit rows the freshness verdict did not cover.
+/// The visible-row read is bound to the tip captured first, so the rows a served read pins are the canonical rows at that commit.
 ///
 /// The read admits only memory-domain decisions before the row and byte caps apply, so a project whose other domains or observations are busy cannot crowd its memory rows out of the bounded read.
 ///
-/// The store phase, the serving decision for a tip read on the `auto_inject`
-/// surface, and the visible-row read each withhold the composition with the
-/// `KernelOutcome` the `kernel.read` route would answer with.
+/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. A served read samples the lag for the report, which logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`. Each change of verdict logs one line.
 pub(crate) fn read_project_memory(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
     now_ms: i64,
+    memory_budget_tokens: f64,
+) -> CanonicalMemoryRead {
+    let read = read_at_tip(kernel, project, memory_budget_tokens);
+    let observed = match &read {
+        CanonicalMemoryRead::Withheld(verdict) => Observed::Withheld(verdict.state_key()),
+        CanonicalMemoryRead::Available(_) => match kernel
+            .kernel_store()
+            .ok()
+            .and_then(|store| store.outbox_lag(now_ms).ok())
+        {
+            Some(lag) if serving::lag_threshold_tripped(&lag) => Observed::ServedWhileDerivedLag {
+                consumers: lag.consumer_count,
+                lag_positions: lag.position_lag.unwrap_or(0),
+                oldest_unconsumed_age_ms: lag.oldest_unconsumed_age_ms.unwrap_or(0),
+            },
+            _ => Observed::Served,
+        },
+    };
+    if let Some(line) = kernel.memory_read_report().observe(observed) {
+        eprintln!("daemon: project memory {line}");
+    }
+    read
+}
+
+fn read_at_tip(
+    kernel: &KernelOpenCoordinator,
+    project: &ProjectBinding,
     memory_budget_tokens: f64,
 ) -> CanonicalMemoryRead {
     let store = match kernel.kernel_store() {
@@ -216,14 +241,6 @@ pub(crate) fn read_project_memory(
         Ok(tip) => tip,
         Err(error) => return CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     };
-    let lag = match store.outbox_lag(now_ms) {
-        Ok(lag) => lag,
-        Err(error) => return CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
-    };
-    let verdict = serving::project(serving::decide_for_tip_read(&lag), Surface::AutoInject);
-    if !verdict.is_available() {
-        return CanonicalMemoryRead::Withheld(verdict);
-    }
     match read_visible(
         &store,
         project,
@@ -235,6 +252,56 @@ pub(crate) fn read_project_memory(
             CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
         }
         Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
+    }
+}
+
+/// One read's verdict as the report compares it with the last one logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Observed {
+    Served,
+    /// Served while a registered outbox consumer trails past a serving threshold; the fields are the lag sample.
+    ServedWhileDerivedLag {
+        consumers: u64,
+        lag_positions: i64,
+        oldest_unconsumed_age_ms: i64,
+    },
+    /// Withheld under the verdict's state key.
+    Withheld(String),
+}
+
+/// The last verdict the canonical memory reader logged, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either.
+#[derive(Debug, Default)]
+pub(crate) struct ReadReport(std::sync::Mutex<Option<Observed>>);
+
+impl ReadReport {
+    /// Records `observed` and returns the line to log, if its verdict differs from the last one recorded.
+    pub(crate) fn observe(&self, observed: Observed) -> Option<String> {
+        let mut last = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let line = match (&*last, &observed) {
+            (
+                Some(Observed::ServedWhileDerivedLag { .. }),
+                Observed::ServedWhileDerivedLag { .. },
+            ) => None,
+            (previous, _) if previous.as_ref() == Some(&observed) => None,
+            (None, Observed::Served) => None,
+            (_, Observed::Served) => Some("served".to_owned()),
+            (
+                _,
+                Observed::ServedWhileDerivedLag {
+                    consumers,
+                    lag_positions,
+                    oldest_unconsumed_age_ms,
+                },
+            ) => Some(format!(
+                "served from canonical rows while derived consumers lag: consumers={consumers} lag_positions={lag_positions} oldest_unconsumed_age_ms={oldest_unconsumed_age_ms}"
+            )),
+            (_, Observed::Withheld(state)) => Some(format!("withheld state={state}")),
+        };
+        *last = Some(observed);
+        line
     }
 }
 
@@ -283,6 +350,47 @@ mod tests {
 
     use super::*;
     use crate::kernel_routes::UnavailableReason;
+
+    fn lagging(lag_positions: i64) -> Observed {
+        Observed::ServedWhileDerivedLag {
+            consumers: 2,
+            lag_positions,
+            oldest_unconsumed_age_ms: 61_000,
+        }
+    }
+
+    /// Each change of verdict yields one line, a repeat yields none, a lag sample that moves within the lagging verdict yields none, and the first plainly served read after a withheld or lagging one yields `served`.
+    #[test]
+    fn the_read_report_logs_each_change_of_verdict_once() {
+        let report = ReadReport::default();
+        assert_eq!(report.observe(Observed::Served), None);
+        assert_eq!(report.observe(Observed::Served), None);
+        assert_eq!(
+            report.observe(lagging(10_000)).as_deref(),
+            Some(
+                "served from canonical rows while derived consumers lag: consumers=2 lag_positions=10000 oldest_unconsumed_age_ms=61000"
+            )
+        );
+        assert_eq!(report.observe(lagging(12_000)), None);
+        assert_eq!(report.observe(Observed::Served).as_deref(), Some("served"));
+        assert_eq!(
+            report
+                .observe(Observed::Withheld("unavailable:store_starting".to_owned()))
+                .as_deref(),
+            Some("withheld state=unavailable:store_starting")
+        );
+        assert_eq!(
+            report.observe(Observed::Withheld("unavailable:store_starting".to_owned())),
+            None
+        );
+        assert_eq!(
+            report
+                .observe(Observed::Withheld("unavailable:io".to_owned()))
+                .as_deref(),
+            Some("withheld state=unavailable:io")
+        );
+        assert!(report.observe(lagging(10_000)).is_some());
+    }
 
     fn visible_row(
         object_id: &str,
