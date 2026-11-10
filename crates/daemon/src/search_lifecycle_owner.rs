@@ -181,7 +181,7 @@ pub struct SearchLifecycleOwner {
     roster: ProjectRoster,
     /// Woken when a disable hands the manager back, so a shutdown that found the manager disabling can retry.
     disabled: tokio::sync::Notify,
-    /// Woken when a request is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it, and when a renewal finds a renewable record no longer due, so the next slice judges it at once.
+    /// Woken when a request or renewal is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it; when a renewal finds a renewable record no longer due, so the next slice judges it at once; and when a request or renewal finds a supervisor running under records a reload replaced, so the next slice rotates it.
     requested: tokio::sync::Notify,
     /// The project digest whose supervisor ran last, how many slices it has had, and the bounds it started under; `None` before the first tenure.
     /// The tenant, its slice count, the bounds its supervisor runs under, and the `B_recovery_ms` those bounds were derived from.
@@ -765,17 +765,7 @@ impl SearchLifecycleOwner {
             ));
         }
         // A supervisor still running under the identity or bounds a reload replaced is rotated before the gate renews on the new records, as for a request.
-        if let Managed::Selection(selection) = &mut *managed
-            && selection.maintenance().is_some()
-            && (*selection.identity() != identity
-                || coverage_bounds(inputs.manifest()).ok() != Some(selection.bounds()))
-        {
-            self.close_gate(None);
-            self.requested.notify_one();
-            return Err(BuildError::Invalid(
-                "maintenance runs under records a reload replaced; retry after the next slice rotates it",
-            ));
-        }
+        self.refuse_stale_supervisor(&mut managed, &inputs, &identity)?;
         let selection = match &*managed {
             Managed::Selection(selection) => Some(&**selection),
             _ => None,
@@ -804,6 +794,27 @@ impl SearchLifecycleOwner {
             .inspect_err(|_| self.install_without_coverage(&inputs, &identity))?
             .inspect(|_| self.requested.notify_one());
         Ok(renewed)
+    }
+
+    /// Refuses when a supervisor still runs under an identity or coverage bounds other than `inputs` and `identity` yield: admission closes and the slice loop is woken to rotate the supervisor.
+    fn refuse_stale_supervisor(
+        &self,
+        managed: &mut Managed,
+        inputs: &AdmissionInputs,
+        identity: &ProjectionIdentity,
+    ) -> Result<(), BuildError> {
+        if let Managed::Selection(selection) = managed
+            && selection.maintenance().is_some()
+            && (*selection.identity() != *identity
+                || coverage_bounds(inputs.manifest()).ok() != Some(selection.bounds()))
+        {
+            self.close_gate(None);
+            self.requested.notify_one();
+            return Err(BuildError::Invalid(
+                "maintenance runs under records a reload replaced; retry after the next slice rotates it",
+            ));
+        }
+        Ok(())
     }
 
     /// Installs `inputs` with no coverage, so every hook is denied while a cleanup keeps the evidence the records approve.
@@ -1494,17 +1505,7 @@ impl SearchLifecycleOwner {
             ));
         }
         // A supervisor still running under the identity or bounds a reload replaced is not re-admitted under the new records: admission closes, the slice loop is woken to rotate it, and the request is refused until then.
-        if let Managed::Selection(selection) = &mut *managed
-            && selection.maintenance().is_some()
-            && (*selection.identity() != identity
-                || coverage_bounds(inputs.manifest()).ok() != Some(selection.bounds()))
-        {
-            self.close_gate(None);
-            self.requested.notify_one();
-            return Err(BuildError::Invalid(
-                "maintenance runs under records a reload replaced; retry after the next slice rotates it",
-            ));
-        }
+        self.refuse_stale_supervisor(&mut managed, &inputs, &identity)?;
         // The records just read are installed before the request's own sizing is judged, so a refused request still leaves the gate on the current records rather than on the evidence the last slice installed or, before the first slice, on its initial closed state; a reload that changed them cancels the earlier grants here.
         let selection = match &*managed {
             Managed::Selection(selection) => Some(&**selection),

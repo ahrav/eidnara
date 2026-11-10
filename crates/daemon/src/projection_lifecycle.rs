@@ -218,14 +218,9 @@ impl LifecycleIntent {
         Ok(())
     }
 
-    /// Whether the slice loop renews this record once it lapses: a Rebuilding record that holds no staged seed and no persisted stage certificate. A record holding a staged seed keeps its accounting: once selection writes the staged family's certificate, that certificate binds the record's episode accounting and recording time, and a seed pinned before then follows the same rule. An authorized recovery keeps the bound its operator authorized.
+    /// Whether the slice loop renews this record once it lapses: a Rebuilding record that holds no staged seed. A stage certificate persisted in the capture binds the capture and its snapshot, and the renewed attempt's cleanup discards the unpinned stage. A record holding a staged seed keeps its accounting: once selection writes the staged family's certificate, that certificate binds the record's episode accounting and recording time, and a seed pinned before then follows the same rule. An authorized recovery keeps the bound its operator authorized.
     pub fn renewable(&self) -> bool {
-        self.transition == Transition::Rebuilding
-            && self.staged_seed_digest.is_none()
-            && self
-                .replacement_capture
-                .as_deref()
-                .is_none_or(|capture| capture.stage.is_none())
+        self.transition == Transition::Rebuilding && self.staged_seed_digest.is_none()
     }
 
     /// Whether the slice loop renews this record at `now`: it is renewable, and its deadline has passed or it was recorded more than [`CLOCK_STEP_TOLERANCE_MS`] after `now`, as when the wall clock stepped back past its recording. Renewal stamps the record again from `now`, so a clock stepped back past a recording leaves the renewed attempt one `B_recovery_ms` from the current clock. A step back smaller than the record's age leaves its recording behind the clock, and the attempt runs longer by the size of the step.

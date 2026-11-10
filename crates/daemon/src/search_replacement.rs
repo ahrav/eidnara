@@ -549,24 +549,21 @@ impl<'a> ReplacementBuilder<'a> {
                 "budget must end within the original episode deadline",
             ));
         };
-        let fresh = self.checked_target(budget)?;
         let staging = self
             .capture
             .as_ref()
             .is_some_and(|capture| capture.stage.is_some())
             && self.family.seed().is_some();
-        if staging {
-            self.check_hold(budget)?;
-        } else {
-            self.cleanup(budget)?;
-        }
-        let mut expected = intent;
-        // The tip is read again after the cleanup, so a commit that landed during it is judged by the release and the target check below.
+        // A construction attempt reads the tip after its cleanup, which itself refuses another kernel first, so a commit that landed during the cleanup is judged by the release and the target check below.
         let fresh = if staging {
+            let fresh = self.checked_target(budget)?;
+            self.check_hold(budget)?;
             fresh
         } else {
+            self.cleanup(budget)?;
             self.checked_target(budget)?
         };
+        let mut expected = intent;
         if !staging {
             expected.replacement_capture = None;
             // The cleanup above cleared the capture. A fixed target the tip has reached is released: any commit before this attempt's capture, such as its own registration, would put the capture's snapshot past the target, and the attempt fixes its target again after its baseline.
