@@ -100,9 +100,9 @@ provenance assertion was found. Existing generic tests should be reused.
 | [memory_render.rs:365-388,416-443](../../../../crates/daemon/src/memory_render.rs#L365-L443) | Nonpositive categories drop; UTF-8 truncation respects the 64 KiB content cap. | unaudited |
 | [m0_compose.rs:299-355](../../../../crates/daemon/src/m0_compose.rs#L299-L355), budget boundary and reference-model tests | Skip-and-continue selection matches the retained reference loop. | unaudited |
 | [crates/daemon/tests/transform_canonical_memory.rs:48-217](../../../../crates/daemon/tests/transform_canonical_memory.rs#L48-L217) | Candidate, retired, superseded, negative-category, wrong-project, and wrong-domain examples do not appear; quarantine changes the next pass; warm state remains stable. | unaudited |
-| [crates/daemon/tests/transform_canonical_memory.rs:240-339](../../../../crates/daemon/tests/transform_canonical_memory.rs#L240-L339) | A consumer stalled past the lag thresholds leaves memory served from the canonical rows at the tip. | unaudited |
-| [crates/daemon/tests/transform_canonical_memory.rs:341-375](../../../../crates/daemon/tests/transform_canonical_memory.rs#L341-L375) | Disabled memory takes no canonical read. | unaudited |
-| [crates/daemon/tests/transform_canonical_memory.rs:377-472](../../../../crates/daemon/tests/transform_canonical_memory.rs#L377-L472) | Configured budget removes oversized memory at the reader. | unaudited |
+| [crates/daemon/tests/transform_canonical_memory.rs:240-347](../../../../crates/daemon/tests/transform_canonical_memory.rs#L240-L347) | A consumer stalled past the lag thresholds leaves memory served from the canonical rows at the tip. | unaudited |
+| [crates/daemon/tests/transform_canonical_memory.rs:349-383](../../../../crates/daemon/tests/transform_canonical_memory.rs#L349-L383) | Disabled memory takes no canonical read. | unaudited |
+| [crates/daemon/tests/transform_canonical_memory.rs:385-480](../../../../crates/daemon/tests/transform_canonical_memory.rs#L385-L480) | Configured budget removes oversized memory at the reader. | unaudited |
 
 The `REJECTED_APPROACH` category is not an explicitly rejected admission state.
 No provider-level fidelity pair for an `ExplicitReject` row was found in the

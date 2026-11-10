@@ -307,7 +307,7 @@ Confidence: high -
 `project_memory_read` wraps the read in `cfg.memory_enabled.then(...)`
 (`project_memory_read` (`crates/daemon/src/lib.rs:5554`)).
 Existing check: `a_memory_disabled_pass_takes_no_canonical_read`
-(`crates/daemon/tests/transform_canonical_memory.rs:345`). Status: unaudited.
+(`crates/daemon/tests/transform_canonical_memory.rs:353`). Status: unaudited.
 Impact: A disabled route that still read and recorded would breach the consent
 rule (C2).
 Open questions: None.

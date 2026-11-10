@@ -66,7 +66,7 @@ consumer identity even if a replacement consumer is registered later.
 6. Record `search_projection_disable_pending_consumer`, `search_projection_disable_last_consumer`, and
    `search_projection_abandon_request_with_barrier` independently of transition success.
 7. Reuse the transform catalog's withheld-versus-empty property and its real
-   daemon test at `crates/daemon/tests/transform_canonical_memory.rs:240-339`.
+   daemon test at `crates/daemon/tests/transform_canonical_memory.rs:240-347`.
 
 ## Investigation log
 

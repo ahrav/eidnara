@@ -467,8 +467,8 @@ that no related check exists anywhere in the repository.
 [withheld-test]: ../../../crates/daemon/src/canonical_memory.rs#L724
 [transform-memory-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L46
 [lag-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L242
-[disabled-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L345
-[configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L381
+[disabled-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L353
+[configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L389
 [row-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2002
 [byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
 [permits]: ../../../crates/host-runtime/src/dispatch.rs#L981-L1008

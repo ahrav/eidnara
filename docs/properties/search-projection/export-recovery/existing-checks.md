@@ -112,7 +112,7 @@ infer test execution merely from a workspace test command in a plan.
 | `crates/daemon/src/kernel_routes/serving.rs:113-149` | No consumers takes precedence over thresholds, including missing age. | unaudited |
 | `crates/daemon/src/kernel_routes/serving.rs:152-179` | Explicit stale versus automatic abstention; available maps identically. | unaudited |
 | `crates/daemon/src/kernel_routes/serving.rs:182-197` | Unavailability names its reason only on explicit search. | unaudited |
-| `crates/daemon/tests/transform_canonical_memory.rs:240-339` | Real daemon/kernel fixture serves memory from canonical rows while a consumer stays stalled past the lag thresholds, and a gated read reports stale. | unaudited |
+| `crates/daemon/tests/transform_canonical_memory.rs:240-347` | Real daemon/kernel fixture serves memory from canonical rows while a consumer stays stalled past the lag thresholds, and a gated read reports stale. | unaudited |
 | `crates/host-runtime/src/generation.rs:2164-2195` | Stage, validate, read selected digest, and repeat same-digest stage. | unaudited |
 | `crates/host-runtime/src/generation.rs:2472-2598` | Tampered generation shapes are rejected. | unaudited |
 | `crates/host-runtime/src/generation.rs:2601-2674` | Unknown manifest/profile schema is quarantined; mutation is refused; message: `quarantined bytes must be preserved exactly`. | unaudited |
