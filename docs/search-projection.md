@@ -177,11 +177,13 @@ disabled selection differs from the handoff; the stop then waits for an
 authorized recovery. `request_rebuild` records only over a
 Current record.
 
-An unselected rebuild whose fixed target the kernel tip has passed cannot
-capture at that target again, since a capture is taken at the tip. Its
-builder clears the capture first and then releases the target through
+An unselected rebuild whose fixed target the kernel tip has reached cannot
+count on capturing at that target again, since a capture is taken at the tip
+and any commit before it moves the tip past the target. Its builder clears the
+capture first and then releases the target through
 `ProjectionLifecycle::release_target`, and the next capture fixes the target
-at the tip it captures. An authorized recovery keeps its target and reports
+at the tip it captures. A target ahead of the tip, as after a kernel restore,
+still refuses the attempt with `TargetBeyondTip`. An authorized recovery keeps its target and reports
 `SnapshotBeyondTarget`.
 
 A rebuild's construction is admitted on the loaded predecessor family's

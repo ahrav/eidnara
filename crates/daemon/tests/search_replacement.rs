@@ -2097,7 +2097,7 @@ fn kernel_writer_wait_ends_at_the_deadline_and_a_released_holder_allows_construc
 
 #[test]
 fn admission_bounds_and_fixed_target_refuse_without_a_candidate() {
-    for case in ["closed", "bytes", "pages", "target", "future-target"] {
+    for case in ["closed", "bytes", "pages", "future-target"] {
         let root = tempfile::tempdir().unwrap();
         let corpus = Corpus::open(root.path());
         corpus.seed();
@@ -2108,7 +2108,6 @@ fn admission_bounds_and_fixed_target_refuse_without_a_candidate() {
             root.path(),
             &gate,
             match case {
-                "target" => Some(corpus.tip()),
                 "future-target" => Some(corpus.tip() + 1),
                 _ => None,
             },
@@ -2136,12 +2135,6 @@ fn admission_bounds_and_fixed_target_refuse_without_a_candidate() {
             .build(&budget(Duration::from_secs(30)), &mut |_| {})
             .err()
             .unwrap();
-        if case == "target" {
-            assert!(matches!(
-                failure.error,
-                BuildError::SnapshotBeyondTarget { .. }
-            ));
-        }
         if case == "future-target" {
             assert!(matches!(
                 failure.error,
