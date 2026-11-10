@@ -20,7 +20,7 @@ The preservation target is the selected result, not a particular SQL shape.
   rows. [admission.rs:3193][order] sorts the collected rows by object ID.
 - [read.rs:163-258][selection] applies domain/kind and scope selection, keeps
   newest rows, checks typed-row completeness, and trims the payload prefix.
-- [canonical_memory.rs:325-360][conversion] applies Visible and positive-category
+- [canonical_memory.rs:329-364][conversion] applies Visible and positive-category
   filters only after those caps, then trims memory and creates the snapshot.
 
 ## Failure scenario
@@ -76,4 +76,4 @@ baseline commit's rendered bytes does not run yet.
 [query]: ../../../../crates/kernel/src/admission.rs#L3485-L3699
 [order]: ../../../../crates/kernel/src/admission.rs#L3193
 [selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L163-L258
-[conversion]: ../../../../crates/daemon/src/canonical_memory.rs#L325-L360
+[conversion]: ../../../../crates/daemon/src/canonical_memory.rs#L329-L364

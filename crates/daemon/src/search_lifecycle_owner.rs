@@ -720,19 +720,15 @@ impl SearchLifecycleOwner {
     ///
     /// # Errors
     ///
-    /// Returns a [`BuildError`] when the owner is disabled or shut down, the records or lane are unavailable, the record names another kernel incarnation, the manifest cannot bound the renewed attempt or leaves it no time past the start margin, admission is closed, or the lifecycle refuses the write.
+    /// Returns a [`BuildError`] when the owner is disabled or shut down, the records or lane are unavailable, the record names another kernel incarnation, the manifest cannot bound the renewed attempt or leaves it no time past the start margin, a supervisor runs under records a reload replaced (admission closes and the loop is woken to rotate it), admission is closed, or the lifecycle refuses the write.
     pub fn renew_expired_rebuild(
         &self,
         budget: &EvalBudget,
     ) -> Result<Option<LifecycleIntent>, BuildError> {
-        let managed = self.lock_within(budget)?;
-        let selection = match &*managed {
-            Managed::Selection(selection) => Some(&**selection),
-            Managed::None => None,
-            Managed::Disabling | Managed::ShutDown(_) => {
-                return Err(BuildError::Invalid("the owner is disabled or shut down"));
-            }
-        };
+        let mut managed = self.lock_within(budget)?;
+        if matches!(*managed, Managed::Disabling | Managed::ShutDown(_)) {
+            return Err(BuildError::Invalid("the owner is disabled or shut down"));
+        }
         let ControlState::Intent(expired) = ProjectionLifecycle::read_at(&self.home) else {
             return Ok(None);
         };
@@ -768,6 +764,22 @@ impl SearchLifecycleOwner {
                 "the renewed deadline leaves no time past the start margin",
             ));
         }
+        // A supervisor still running under the identity or bounds a reload replaced is rotated before the gate renews on the new records, as for a request.
+        if let Managed::Selection(selection) = &mut *managed
+            && selection.maintenance().is_some()
+            && (*selection.identity() != identity
+                || coverage_bounds(inputs.manifest()).ok() != Some(selection.bounds()))
+        {
+            self.close_gate(None);
+            self.requested.notify_one();
+            return Err(BuildError::Invalid(
+                "maintenance runs under records a reload replaced; retry after the next slice rotates it",
+            ));
+        }
+        let selection = match &*managed {
+            Managed::Selection(selection) => Some(&**selection),
+            _ => None,
+        };
         if let Refresh::Closed(_) = self.refresh(&inputs, selection, &identity, budget) {
             return Err(BuildError::Invalid("admission is closed"));
         }

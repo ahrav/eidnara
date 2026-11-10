@@ -93,8 +93,8 @@ Deregistration refuses a lagging consumer (`crates/kernel/src/outbox.rs:133-135`
 Abandonment records operator facts and then removes the consumer (`:172-283`).
 Pause keeps it registered. Removing the last consumer makes pruning return
 `NoRequiredConsumers`, not resume freely (`:577-588`). Gated route reads become
-unavailable (`crates/daemon/src/kernel_routes/serving.rs:41-52`); the daemon's
-canonical memory tip read is served at any consumer count and lag. Lead: preserve these
+unavailable (`crates/daemon/src/kernel_routes/serving.rs:41-52`); since #1208 the
+daemon's canonical memory tip read is served at any consumer count and lag. Lead: preserve these
 distinctions in default disable behavior, with the pending-consumer decision open.
 
 ## Dependencies

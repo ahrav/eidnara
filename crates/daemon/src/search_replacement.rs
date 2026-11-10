@@ -561,6 +561,12 @@ impl<'a> ReplacementBuilder<'a> {
             self.cleanup(budget)?;
         }
         let mut expected = intent;
+        // The tip is read again after the cleanup, so a commit that landed during it is judged by the release and the target check below.
+        let fresh = if staging {
+            fresh
+        } else {
+            self.checked_target(budget)?
+        };
         if !staging {
             expected.replacement_capture = None;
             // The cleanup above cleared the capture. A fixed target the tip has reached is released: any commit before this attempt's capture, such as its own registration, would put the capture's snapshot past the target, and the attempt fixes its target again after its baseline.

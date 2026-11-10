@@ -280,15 +280,16 @@ pub(crate) enum Observed {
 
 /// The last verdict the canonical memory reader recorded, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either. An unsampled served read says nothing about the consumers: it keeps a served or lagging verdict as recorded and counts as plainly served after a withheld read or before any verdict.
 #[derive(Debug, Default)]
-pub(crate) struct ReadReport(std::sync::Mutex<Option<Observed>>);
+pub(crate) struct ReadReport(std::sync::Mutex<(Option<Observed>, u64)>);
 
 impl ReadReport {
-    /// Records `observed` and returns the line to log when its verdict differs from the last one recorded. The verdict is recorded before the caller logs, so a failed log write repeats nothing, and the caller logs outside the report's lock, so other reads record their verdicts while a log write is blocked, though reads that emit a line share stderr's own lock; lines from concurrent reads can print in either order.
+    /// Records `observed` and returns the line to log when its verdict differs from the last one recorded. The verdict is recorded before the caller logs, so a failed log write repeats nothing, and the caller logs outside the report's lock, so other reads record their verdicts while a log write is blocked, though reads that emit a line share stderr's own lock; lines from concurrent reads can print in either order, and each line carries `verdict_seq`, the count of verdict changes recorded through it, so a log reader orders them.
     pub(crate) fn observe(&self, observed: Observed) -> Option<String> {
-        let mut last = self
+        let mut guard = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (last, changes) = &mut *guard;
         let observed = match (&*last, observed) {
             (
                 Some(Observed::Served | Observed::ServedWhileDerivedLag { .. }),
@@ -318,7 +319,10 @@ impl ReadReport {
             (_, Observed::Withheld(state)) => Some(format!("withheld state={state}")),
         };
         *last = Some(observed);
-        line
+        line.map(|line| {
+            *changes += 1;
+            format!("{line} verdict_seq={changes}")
+        })
     }
 }
 
@@ -422,7 +426,7 @@ mod tests {
         assert_eq!(
             report.observe(lagging(10_000)).as_deref(),
             Some(
-                "served from canonical rows while derived consumers lag: consumers=2 lag_positions=10000 oldest_unconsumed_age_ms=61000"
+                "served from canonical rows while derived consumers lag: consumers=2 lag_positions=10000 oldest_unconsumed_age_ms=61000 verdict_seq=1"
             )
         );
         assert_eq!(report.observe(lagging(12_000)), None);
@@ -436,12 +440,15 @@ mod tests {
             None,
             "the lagging verdict stands"
         );
-        assert_eq!(report.observe(Observed::Served).as_deref(), Some("served"));
+        assert_eq!(
+            report.observe(Observed::Served).as_deref(),
+            Some("served verdict_seq=2")
+        );
         assert_eq!(
             report
                 .observe(Observed::Withheld("unavailable:store_starting".to_owned()))
                 .as_deref(),
-            Some("withheld state=unavailable:store_starting")
+            Some("withheld state=unavailable:store_starting verdict_seq=3")
         );
         assert_eq!(
             report.observe(Observed::Withheld("unavailable:store_starting".to_owned())),
@@ -451,11 +458,11 @@ mod tests {
             report
                 .observe(Observed::Withheld("unavailable:io".to_owned()))
                 .as_deref(),
-            Some("withheld state=unavailable:io")
+            Some("withheld state=unavailable:io verdict_seq=4")
         );
         assert_eq!(
             report.observe(Observed::ServedUnsampled).as_deref(),
-            Some("served"),
+            Some("served verdict_seq=5"),
             "an unsampled read after a withheld one is served"
         );
         assert!(report.observe(lagging(10_000)).is_some());
