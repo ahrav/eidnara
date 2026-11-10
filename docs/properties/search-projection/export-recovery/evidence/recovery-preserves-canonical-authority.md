@@ -15,7 +15,7 @@ end-to-end obligation rather than assume a successful rebuild implies it.
 
 ## Evidence trail
 
-- `crates/daemon/src/canonical_memory.rs:219-244` returns withheld outcomes
+- `crates/daemon/src/canonical_memory.rs:221-246` returns withheld outcomes
   on unavailable kernel, failed tip reads, or failed visible reads; consumer
   lag leaves the read served.
 - `crates/daemon/src/kernel_routes/eligibility.rs:132-173` evaluates current

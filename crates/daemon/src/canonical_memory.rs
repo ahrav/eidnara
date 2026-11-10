@@ -210,9 +210,11 @@ pub(crate) fn read_project_memory(
     let facts = (!published.is_stale())
         .then_some(published.block.facts.as_ref())
         .flatten();
-    if let Some(line) = kernel.memory_read_report().observe(observed(&read, facts)) {
-        eprintln!("daemon: project memory {line}");
-    }
+    kernel
+        .memory_read_report()
+        .observe(observed(&read, facts), |line| {
+            eprintln!("daemon: project memory {line}");
+        });
     read
 }
 
@@ -243,7 +245,7 @@ fn read_at_tip(
     }
 }
 
-/// The verdict the report compares for `read`, marked with `facts`, the lag facts of a fresh health block.
+/// The verdict the report compares for `read`, marked with `facts`, the lag facts of a fresh health block; a served read without them is unsampled.
 fn observed(
     read: &CanonicalMemoryRead,
     facts: Option<&crate::kernel_routes::health::KernelFactsBlock>,
@@ -257,7 +259,8 @@ fn observed(
                 oldest_unconsumed_age_ms: facts.oldest_unconsumed_age_ms.unwrap_or(0),
             }
         }
-        (CanonicalMemoryRead::Available(_), _) => Observed::Served,
+        (CanonicalMemoryRead::Available(_), Some(_)) => Observed::Served,
+        (CanonicalMemoryRead::Available(_), None) => Observed::ServedUnsampled,
     }
 }
 
@@ -265,6 +268,8 @@ fn observed(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Observed {
     Served,
+    /// Served with no fresh lag facts, before the first health sample, after a failed one, or after the published block went stale.
+    ServedUnsampled,
     /// Served while a registered outbox consumer trails past a serving threshold; the fields are the lag sample.
     ServedWhileDerivedLag {
         consumers: u64,
@@ -275,17 +280,27 @@ pub(crate) enum Observed {
     Withheld(String),
 }
 
-/// The last verdict the canonical memory reader logged, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either. A read served before the first health sample, after a failed one, or after the published block went stale has no lag facts and counts as plainly served.
+/// The last verdict the canonical memory reader logged, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either. An unsampled served read says nothing about the consumers: it keeps a served or lagging verdict as recorded and counts as plainly served after a withheld read or before any verdict.
 #[derive(Debug, Default)]
 pub(crate) struct ReadReport(std::sync::Mutex<Option<Observed>>);
 
 impl ReadReport {
-    /// Records `observed` and returns the line to log, if its verdict differs from the last one recorded.
-    pub(crate) fn observe(&self, observed: Observed) -> Option<String> {
+    /// Records `observed` and passes the line to log to `emit`, under the report's lock, when its verdict differs from the last one recorded; concurrent reads therefore emit their lines in the order they recorded them.
+    pub(crate) fn observe(&self, observed: Observed, emit: impl FnOnce(&str)) {
         let mut last = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let observed = match (&*last, observed) {
+            (
+                Some(Observed::Served | Observed::ServedWhileDerivedLag { .. }),
+                Observed::ServedUnsampled,
+            ) => {
+                return;
+            }
+            (_, Observed::ServedUnsampled) => Observed::Served,
+            (_, observed) => observed,
+        };
         let line = match (&*last, &observed) {
             (
                 Some(Observed::ServedWhileDerivedLag { .. }),
@@ -293,7 +308,7 @@ impl ReadReport {
             ) => None,
             (previous, _) if previous.as_ref() == Some(&observed) => None,
             (None, Observed::Served) => None,
-            (_, Observed::Served) => Some("served".to_owned()),
+            (_, Observed::Served | Observed::ServedUnsampled) => Some("served".to_owned()),
             (
                 _,
                 Observed::ServedWhileDerivedLag {
@@ -306,8 +321,10 @@ impl ReadReport {
             )),
             (_, Observed::Withheld(state)) => Some(format!("withheld state={state}")),
         };
+        if let Some(line) = line {
+            emit(&line);
+        }
         *last = Some(observed);
-        line
     }
 }
 
@@ -365,7 +382,7 @@ mod tests {
         }
     }
 
-    /// A withheld read is observed by its state key whatever the lag facts; a served read is lagging only with fresh facts whose threshold tripped, and otherwise plainly served.
+    /// A withheld read is observed by its state key whatever the lag facts; a served read is lagging with fresh facts whose threshold tripped, plainly served with fresh facts below it, and unsampled without fresh facts.
     #[test]
     fn a_read_is_observed_by_its_verdict_and_the_fresh_lag_facts() {
         use crate::kernel_routes::health::KernelFactsBlock;
@@ -390,7 +407,7 @@ mod tests {
             observed(&withheld, Some(&facts(true))),
             Observed::Withheld(withheld_state(&withheld))
         );
-        assert_eq!(observed(&served, None), Observed::Served);
+        assert_eq!(observed(&served, None), Observed::ServedUnsampled);
         assert_eq!(observed(&served, Some(&facts(false))), Observed::Served);
         assert_eq!(
             observed(&served, Some(&facts(true))),
@@ -413,33 +430,45 @@ mod tests {
     #[test]
     fn the_read_report_logs_each_change_of_verdict_once() {
         let report = ReadReport::default();
-        assert_eq!(report.observe(Observed::Served), None);
-        assert_eq!(report.observe(Observed::Served), None);
+        let observe = |observed: Observed| {
+            let mut line = None;
+            report.observe(observed, |emitted| line = Some(emitted.to_owned()));
+            line
+        };
+        assert_eq!(observe(Observed::Served), None);
+        assert_eq!(observe(Observed::Served), None);
         assert_eq!(
-            report.observe(lagging(10_000)).as_deref(),
+            observe(lagging(10_000)).as_deref(),
             Some(
                 "served from canonical rows while derived consumers lag: consumers=2 lag_positions=10000 oldest_unconsumed_age_ms=61000"
             )
         );
-        assert_eq!(report.observe(lagging(12_000)), None);
-        assert_eq!(report.observe(Observed::Served).as_deref(), Some("served"));
+        assert_eq!(observe(lagging(12_000)), None);
         assert_eq!(
-            report
-                .observe(Observed::Withheld("unavailable:store_starting".to_owned()))
-                .as_deref(),
+            observe(Observed::ServedUnsampled),
+            None,
+            "an unsampled read keeps the lagging verdict"
+        );
+        assert_eq!(observe(lagging(12_000)), None, "the lagging verdict stands");
+        assert_eq!(observe(Observed::Served).as_deref(), Some("served"));
+        assert_eq!(
+            observe(Observed::Withheld("unavailable:store_starting".to_owned())).as_deref(),
             Some("withheld state=unavailable:store_starting")
         );
         assert_eq!(
-            report.observe(Observed::Withheld("unavailable:store_starting".to_owned())),
+            observe(Observed::Withheld("unavailable:store_starting".to_owned())),
             None
         );
         assert_eq!(
-            report
-                .observe(Observed::Withheld("unavailable:io".to_owned()))
-                .as_deref(),
+            observe(Observed::Withheld("unavailable:io".to_owned())).as_deref(),
             Some("withheld state=unavailable:io")
         );
-        assert!(report.observe(lagging(10_000)).is_some());
+        assert_eq!(
+            observe(Observed::ServedUnsampled).as_deref(),
+            Some("served"),
+            "an unsampled read after a withheld one is served"
+        );
+        assert!(observe(lagging(10_000)).is_some());
     }
 
     fn visible_row(

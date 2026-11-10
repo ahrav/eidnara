@@ -961,7 +961,7 @@ impl ProjectionLifecycle {
     ///
     /// # Errors
     ///
-    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when `transition != Transition::Rebuilding` or the record holds a capture or staged seed, [`IntentRefusal::DeadlineExpired`] when `now > episodes.deadline`, and the refusals of [`Self::admitted_intent`].
+    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when `transition != Transition::Rebuilding` or the record holds a capture or staged seed, [`IntentRefusal::DeadlineExpired`] when `now > episodes.deadline`, [`IntentRefusal::AllowanceExhausted`] when every episode is consumed, and the refusals of [`Self::admitted_intent`]. Each refusal leaves the record unchanged.
     pub(crate) fn release_target(
         &self,
         gate: &HookGate,
@@ -983,6 +983,9 @@ impl ProjectionLifecycle {
         }
         if now > intent.episodes.deadline {
             return Err(IntentRefusal::DeadlineExpired);
+        }
+        if intent.episodes.consumed >= intent.episodes.allowance {
+            return Err(IntentRefusal::AllowanceExhausted);
         }
         intent.recovery_target = None;
         self.replace(&intent, &admission)?;

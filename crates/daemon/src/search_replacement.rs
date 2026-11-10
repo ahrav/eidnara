@@ -563,11 +563,11 @@ impl<'a> ReplacementBuilder<'a> {
         let mut expected = intent;
         if !staging {
             expected.replacement_capture = None;
-            // The cleanup above cleared the capture; a fixed target the tip has passed is released so this capture fixes the target again.
+            // The cleanup above cleared the capture; a fixed target at or behind the tip is released so this capture fixes the target again at its own snapshot, which a commit landing before the capture would otherwise carry past the target.
             if expected.transition == Transition::Rebuilding
                 && expected
                     .recovery_target
-                    .is_some_and(|target| target.commit_seq < fresh.through_commit)
+                    .is_some_and(|target| target.commit_seq <= fresh.through_commit)
             {
                 expected = self
                     .lifecycle

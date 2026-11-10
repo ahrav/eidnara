@@ -16,11 +16,11 @@ Verified at HEAD.
 
 - `crates/daemon/src/canonical_memory.rs`: `CanonicalMemoryRead` has two
   variants, `Available(CanonicalMemorySnapshot)` and `Withheld(KernelOutcome)`
-  (`:91-97`). `composition()` (`:101-112`) maps `Available` to
+  (`:157-161`). `composition()` (`:165-176`) maps `Available` to
   `ProjectMemoryComposition::Canonical { known_as_of, truncated, revision }` and
   `Withheld` to `ProjectMemoryComposition::Withheld { state }` with
-  `state = verdict.state_key()`. `revision()` (`:115-120`) is `None` when
-  withheld. `rows()` (`:123-128`) returns the snapshot rows or an empty slice.
+  `state = verdict.state_key()`. `revision()` (`:179-184`) is `None` when
+  withheld. `rows()` (`:187-192`) returns the snapshot rows or an empty slice.
   Each is a single `match` with no default arm.
 - `crates/daemon/src/canonical_memory.rs` (`read_project_memory` and
   `read_at_tip`): the store phase (`KernelOpenCoordinator::kernel_store`), the
@@ -29,9 +29,9 @@ Verified at HEAD.
   withholds the read; the reader issues no lag query and marks a served read
   for its log report from the lag facts of the kernel health block the
   coordinator last published. Only a served read constructs `Available`, and it does so
-  through `injectable_snapshot` (`:184-212`), which filters to visible
+  through `injectable_snapshot` (`:331-366`), which filters to visible
   positive-category decisions, trims them to the memory budget, and hands the
-  trimmed rows to `CanonicalMemorySnapshot::new` (`:50`), which digests exactly
+  trimmed rows to `CanonicalMemorySnapshot::new` (`:52`), which digests exactly
   those rows once as the lines the renderer emits. The read passes
   `RowSelection::DomainDecisions(MEMORY_DOMAIN_ID)` (`kernel_routes/read.rs`),
   so only memory-domain decisions reach the row and byte caps and another

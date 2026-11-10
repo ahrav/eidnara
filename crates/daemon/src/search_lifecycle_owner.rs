@@ -767,7 +767,9 @@ impl SearchLifecycleOwner {
         if let Refresh::Closed(_) = self.refresh(&inputs, selection, &identity, budget) {
             return Err(BuildError::Invalid("admission is closed"));
         }
+        // The record is stamped at the clock read after the waits above, so the renewed attempt gets its whole bound.
         let renew = || -> Result<LifecycleIntent, BuildError> {
+            let now = crate::now_ms();
             Ok(ProjectionLifecycle::open(&self.home)?.renew_expired(
                 self.admission.gate(),
                 &expired,
