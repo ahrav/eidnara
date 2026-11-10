@@ -459,16 +459,16 @@ above mean no check was identified in the stated inspected scope, not a claim
 that no related check exists anywhere in the repository.
 
 [read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L163-L258
-[injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L282
-[revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L315
-[dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L373
-[suffix-test]: ../../../crates/daemon/src/canonical_memory.rs#L390
-[memory-budget-test]: ../../../crates/daemon/src/canonical_memory.rs#L412
-[withheld-test]: ../../../crates/daemon/src/canonical_memory.rs#L457
+[injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L349
+[revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L423
+[dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L481
+[suffix-test]: ../../../crates/daemon/src/canonical_memory.rs#L498
+[memory-budget-test]: ../../../crates/daemon/src/canonical_memory.rs#L520
+[withheld-test]: ../../../crates/daemon/src/canonical_memory.rs#L565
 [transform-memory-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L43
 [lag-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L230
-[disabled-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L309
-[configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L345
+[disabled-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L303
+[configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L370
 [row-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2002
 [byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
 [permits]: ../../../crates/host-runtime/src/dispatch.rs#L981-L1008

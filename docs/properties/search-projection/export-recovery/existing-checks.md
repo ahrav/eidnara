@@ -53,8 +53,8 @@ inventoried below; other tables include checks bearing directly on this domain.
 | `crates/kernel/src/slice/read.rs:344-354` | JSON conversion error becomes `CorruptCanonicalRow`; other row errors use SQLite classification. | Failed decode must not look like empty export. | unaudited |
 | `crates/kernel/src/open.rs:459-467` | Refuse poisoned restore before and after writer lock acquisition. | Ack locking and recovery authority. | unaudited |
 | `crates/kernel/src/cas/gc.rs:437-534` | Separate artifact reclaim checks for purge, references, pins, reservations, and grace periods. | No evidence this is an export retention fence. | unaudited |
-| `crates/daemon/src/kernel_routes/serving.rs:19-63` | Inclusive lag thresholds; zero consumers unavailable for gated reads but available for canonical tip reads. | Pause/deregister surface distinction. | unaudited |
-| `crates/daemon/src/kernel_routes/serving.rs:68-100` | Lag is stale on explicit search and abstained on automatic surfaces. | Existing withheld semantics are reused. | unaudited |
+| `crates/daemon/src/kernel_routes/serving.rs:19-52` | Inclusive lag thresholds; zero consumers unavailable for gated reads. The canonical memory tip read takes no serving decision. | Pause/deregister surface distinction. | unaudited |
+| `crates/daemon/src/kernel_routes/serving.rs:57-89` | Lag is stale on explicit search and abstained on automatic surfaces. | Existing withheld semantics are reused. | unaudited |
 | `crates/daemon/src/canonical_memory.rs:147-173` | Store, tip, lag, or visible-read failures return a withheld canonical read. | Authority unavailability is not emptiness. | unaudited |
 | `crates/daemon/src/kernel_routes/eligibility.rs:132-173` | Checks retraction, supersession, revision, scope, sensitivity, visibility, and artifact eligibility. | Existing authority policy, not proposed kernel eligibility API. | unaudited |
 | `crates/host-runtime/src/generation.rs:442-550` | Profile decoding and generation validation reject malformed/missing/inconsistent files; unknown schema quarantines. | Generic publication check reused by link. | unaudited |
@@ -108,12 +108,11 @@ infer test execution merely from a workspace test command in a plan.
 
 | Location | Check and semantics | Status |
 | --- | --- | --- |
-| `crates/daemon/src/kernel_routes/serving.rs:116-121` | Thresholds are inclusive; absent lag does not trip them. | unaudited |
-| `crates/daemon/src/kernel_routes/serving.rs:124-160` | No consumers takes precedence over thresholds, including missing age. | unaudited |
-| `crates/daemon/src/kernel_routes/serving.rs:163-176` | Tip and gated policies diverge only without a consumer. | unaudited |
-| `crates/daemon/src/kernel_routes/serving.rs:179-206` | Explicit stale versus automatic abstention; available maps identically. | unaudited |
-| `crates/daemon/src/kernel_routes/serving.rs:209-224` | Unavailability names its reason only on explicit search. | unaudited |
-| `crates/daemon/tests/transform_canonical_memory.rs:230-302` | Real daemon/kernel fixture withholds memory under lag and restores it after ack. | unaudited |
+| `crates/daemon/src/kernel_routes/serving.rs:105-110` | Thresholds are inclusive; absent lag does not trip them. | unaudited |
+| `crates/daemon/src/kernel_routes/serving.rs:113-149` | No consumers takes precedence over thresholds, including missing age. | unaudited |
+| `crates/daemon/src/kernel_routes/serving.rs:152-179` | Explicit stale versus automatic abstention; available maps identically. | unaudited |
+| `crates/daemon/src/kernel_routes/serving.rs:182-197` | Unavailability names its reason only on explicit search. | unaudited |
+| `crates/daemon/tests/transform_canonical_memory.rs:240-339` | Real daemon/kernel fixture serves memory from canonical rows while a consumer stays stalled past the lag thresholds, and a gated read reports stale. | unaudited |
 | `crates/host-runtime/src/generation.rs:2164-2195` | Stage, validate, read selected digest, and repeat same-digest stage. | unaudited |
 | `crates/host-runtime/src/generation.rs:2472-2598` | Tampered generation shapes are rejected. | unaudited |
 | `crates/host-runtime/src/generation.rs:2601-2674` | Unknown manifest/profile schema is quarantined; mutation is refused; message: `quarantined bytes must be preserved exactly`. | unaudited |

@@ -93,8 +93,8 @@ Deregistration refuses a lagging consumer (`crates/kernel/src/outbox.rs:133-135`
 Abandonment records operator facts and then removes the consumer (`:172-283`).
 Pause keeps it registered. Removing the last consumer makes pruning return
 `NoRequiredConsumers`, not resume freely (`:577-588`). Gated route reads become
-unavailable; direct canonical tip reads permit an empty consumer set
-(`crates/daemon/src/kernel_routes/serving.rs:41-63`). Lead: preserve these
+unavailable (`crates/daemon/src/kernel_routes/serving.rs:41-52`); the daemon's
+canonical memory tip read is served at any consumer count and lag. Lead: preserve these
 distinctions in default disable behavior, with the pending-consumer decision open.
 
 ## Dependencies
@@ -109,9 +109,9 @@ outbox rows does not establish that source bytes remain readable at S.
 ## Product context
 
 An incomplete replacement can omit required context or resurrect a deleted
-occurrence. A paused projection consumer can also withhold existing canonical
-memory. The latter already has a transform property and a real-kernel
-integration fixture at `crates/daemon/tests/transform_canonical_memory.rs:230-302`.
+occurrence. A paused projection consumer leaves the canonical memory block
+served; the transform property and its real-kernel integration fixture at
+`crates/daemon/tests/transform_canonical_memory.rs:240-339` cover that read.
 Reuse its property rather than create another withheld-versus-empty record.
 
 ## Unproven assumptions

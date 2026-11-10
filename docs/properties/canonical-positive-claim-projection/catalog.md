@@ -203,8 +203,8 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - the search maintenance loop calls
-`run_claim_slice` (`crates/daemon/src/search_lifecycle_owner.rs:2216`), which
-runs `ClaimMaterializer` (`:551`, the materializer call at `:570`) and grants
+`run_claim_slice` (`crates/daemon/src/search_lifecycle_owner.rs:2311`), which
+runs `ClaimMaterializer` (`:555`, the materializer call at `:574`) and grants
 and checks no projection-gate admission before it publishes claim source
 descriptors. Claim validation on the query route is `explicit-config-only`:
 `validate_claims` (`crates/daemon/src/query_route.rs:1712`) runs inside the
@@ -659,8 +659,8 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
-(`crates/daemon/src/search_lifecycle_owner.rs:1129`) runs
-`SearchCatchUp::run_episode` (`:1173`) over the claim commits the claim slice
+(`crates/daemon/src/search_lifecycle_owner.rs:1211`) runs
+`SearchCatchUp::run_episode` (`:1255`) over the claim commits the claim slice
 publishes, after an installed search admission admits `EmbeddingBootstrap`
 and `GitDurableRows` (`:1148-1154`).
 Status: active
@@ -768,8 +768,8 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
-(`crates/daemon/src/search_lifecycle_owner.rs:1129`) runs claim catch-up under
-a budget linked to the caller's (`:1172`) and cancels the episode when an
+(`crates/daemon/src/search_lifecycle_owner.rs:1211`) runs claim catch-up under
+a budget linked to the caller's (`:1254`) and cancels the episode when an
 admission grant is invalidated (`:1180-1182`), after an installed search
 admission admits `EmbeddingBootstrap` and `GitDurableRows` (`:1148-1154`).
 Status: active

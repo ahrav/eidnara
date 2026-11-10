@@ -234,7 +234,7 @@ panic test, a destructor-panic matrix, or a proof covering arbitrary panics.
 [mapping]: ../../../../../crates/daemon/src/lib.rs#L16427
 [panic-test]: ../../../../../crates/daemon/src/transform_unit/host_tests.rs#L375
 [failure-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L867
-[kernel-live]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L462
+[kernel-live]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L469
 [receipt]: ../../existing-checks.md#transform-unit-execution-receipt-2026-09-13
 
 ## Upstream redaction evidence, e451a2b4

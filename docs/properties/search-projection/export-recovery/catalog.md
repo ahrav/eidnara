@@ -386,9 +386,9 @@ Confidence: medium - [evidence](evidence/catchup-and-authorized-recovery-converg
 P defines CatchingUp/Current and operator recovery; current kernel primitives
 do not implement that production controller, which justifies `test-only`.
 Existing check: None for either complete episode. The real-kernel fixture at
-`crates/daemon/tests/transform_canonical_memory.rs:230-302` shows withholding
-and restoration after a manual ack, not autonomous catch-up or authorization;
-status `unaudited`.
+`crates/daemon/tests/transform_canonical_memory.rs:240-339` shows the memory
+block served while a consumer stays stalled, not autonomous catch-up or
+authorization; status `unaudited`.
 Impact: A safe projection can remain stale or Disabled indefinitely despite
 healthy conditions and an accepted recovery request.
 Open questions:
@@ -424,7 +424,7 @@ The kernel guards are verified; the subject is the unimplemented retrieval
 transition, so its classification is `test-only`.
 Existing check: `crates/kernel/tests/kernel_outbox.rs:247-330`,
 `crates/kernel/tests/kernel_deletion.rs:212-292`, and
-`crates/daemon/src/kernel_routes/serving.rs:116-224`; status `unaudited`. Reuse
+`crates/daemon/src/kernel_routes/serving.rs:93-197`; status `unaudited`. Reuse
 [canonical-read-staleness-is-distinguishable-from-emptiness](../../daemon/transform/catalog.md#canonical-read-staleness-is-distinguishable-from-emptiness)
 for withheld rendering.
 Impact: Disable can lose required history or silently degrade unrelated reads.

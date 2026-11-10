@@ -357,7 +357,7 @@ Open questions:
   paged and slow-disk durations are unmeasured. Later Emergency95 units may skip
   on cancellation, with derived state recomputed or superseded. (answered)
 - `kernel_routes::blocking`
-  ([mod.rs:462-468](../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468))
+  ([mod.rs:462-468](../../../crates/daemon/src/kernel_routes/mod.rs#L469-L475))
   is a bare `spawn_blocking` whose result an aborted handler drops unread, so
   route-gone can run while a kernel-route worker is still live and its panics
   reach the default hook. Does it move onto `RequestCtx::run_blocking`, or is
@@ -771,7 +771,7 @@ them without creating implementation tickets.
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8759
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L141-L212
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L195-L343
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522

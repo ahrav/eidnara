@@ -79,8 +79,8 @@ subject's facts, so no store scan can evaluate it.
 ### Q: Does the route verify `source_kind` against the binding?
 
 - Sources examined: `kernel_route_scope`
-  (`crates/daemon/src/kernel_routes/mod.rs:415-441`), `RouteScope`
-  (`:405-412`), `handle_kernel_commit` (`commit.rs:1097-1241`).
+  (`crates/daemon/src/kernel_routes/mod.rs:422-448`), `RouteScope`
+  (`:412-419`), `handle_kernel_commit` (`commit.rs:1097-1241`).
 - Findings: no. `RouteScope.harness` is bound but `handle_kernel_commit`
   reads only `scope.project` and `scope.store` (`commit.rs:1152`,
   `:1175`, `:1178`); `source_kind` is whatever the body says. The
