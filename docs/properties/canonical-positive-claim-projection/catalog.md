@@ -662,7 +662,7 @@ Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
 (`crates/daemon/src/search_lifecycle_owner.rs:1258`) runs
 `SearchCatchUp::run_episode` (`:1302`) over the claim commits the claim slice
 publishes, after an installed search admission admits `EmbeddingBootstrap`
-and `GitDurableRows` (`:1148-1154`).
+and `GitDurableRows` (`:1277-1283`).
 Status: active
 Exercised: partial - claim rows travel through the RP2.1 shared catch-up.
 `claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early`
@@ -770,8 +770,8 @@ Type: safety
 Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
 (`crates/daemon/src/search_lifecycle_owner.rs:1258`) runs claim catch-up under
 a budget linked to the caller's (`:1301`) and cancels the episode when an
-admission grant is invalidated (`:1180-1182`), after an installed search
-admission admits `EmbeddingBootstrap` and `GitDurableRows` (`:1148-1154`).
+admission grant is invalidated (`:1309-1311`), after an installed search
+admission admits `EmbeddingBootstrap` and `GitDurableRows` (`:1277-1283`).
 Status: active
 Exercised: partial -
 `cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger`
