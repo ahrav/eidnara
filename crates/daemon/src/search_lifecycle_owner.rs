@@ -181,7 +181,7 @@ pub struct SearchLifecycleOwner {
     roster: ProjectRoster,
     /// Woken when a disable hands the manager back, so a shutdown that found the manager disabling can retry.
     disabled: tokio::sync::Notify,
-    /// Woken when a request is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it.
+    /// Woken when a request is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it, and when a renewal finds a renewable record no longer due, so the next slice judges it at once.
     requested: tokio::sync::Notify,
     /// The project digest whose supervisor ran last, how many slices it has had, and the bounds it started under; `None` before the first tenure.
     /// The tenant, its slice count, the bounds its supervisor runs under, and the `B_recovery_ms` those bounds were derived from.
@@ -738,6 +738,10 @@ impl SearchLifecycleOwner {
         };
         let now = crate::now_ms();
         if !expired.renewal_due(now) {
+            // A renewable record that stopped being due, as when a clock-step lead decayed, wakes the loop to judge it now.
+            if expired.renewable() {
+                self.requested.notify_one();
+            }
             return Ok(None);
         }
         let inputs = AdmissionInputs::read(&self.home)
@@ -2279,7 +2283,7 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
     }
 }
 
-/// When the slice loop may next attempt to renew a lapsed rebuild. The first attempt runs at once, including the first after a restart. Every attempt, recorded or refused, spaces the next one from it by `SLICE_IDLE` doubled per earlier attempt, up to `RENEWAL_BACKOFF_CAP`, and the spacing runs alongside the renewed record's own `B_recovery_ms`. A record that reaches Current starts the schedule again.
+/// When the slice loop may next attempt to renew a rebuild whose renewal is due. The first attempt runs at once, including the first after a restart. Every attempt, whether it records a renewal, is refused, or finds the record no longer due, spaces the next one from it by `SLICE_IDLE` doubled per earlier attempt, up to `RENEWAL_BACKOFF_CAP`, and the spacing runs alongside the renewed record's own `B_recovery_ms`. A record that reaches Current starts the schedule again.
 #[derive(Debug)]
 struct RenewalSchedule {
     attempts: u32,

@@ -139,7 +139,7 @@ pub(crate) struct KernelOpenCoordinator {
     /// cannot host one reports `unavailable` on the routes without pulling
     /// daemon health down, since nothing is missing that was promised.
     expected: AtomicBool,
-    /// The canonical memory reader's last logged verdict.
+    /// The canonical memory reader's last recorded verdict.
     memory_read_report: crate::canonical_memory::ReadReport,
 }
 

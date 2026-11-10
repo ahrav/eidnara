@@ -154,7 +154,8 @@ A `B_recovery_ms` within the one-second start margin is refused before
 anything is installed. A record whose renewal is no longer due at the clock
 read just before the write, as when a clock-step lead decays during the
 waits, records nothing, leaves the records installed with no coverage, and
-counts as an attempt. A refused renewal write installs the records with no
+counts as an attempt; the loop is woken so the next slice judges the active
+record at once. A refused renewal write installs the records with no
 coverage again. The attempt identity keys the construction's consumer
 registration, so the renewed attempt replays that registration's receipt and
 reads through the consumer the expired attempt registered. No consumer is left
@@ -162,7 +163,8 @@ registered without a record that names it, and the replaced family's consumer
 retires when the renewed rebuild completes.
 
 The loop attempts the first renewal at once, including one the first slice
-after a restart finds. Each attempt, recorded or refused, spaces the next one
+after a restart finds. Each attempt, whether it records a renewal, is refused,
+or finds the record no longer due, spaces the next one
 from it by `SLICE_IDLE` doubled per earlier attempt, running alongside the
 renewed record's own `B_recovery_ms`. The spacing reaches
 `RENEWAL_BACKOFF_CAP` (10 minutes) at the eighth attempt; from then on a

@@ -2762,15 +2762,16 @@ fn a_slice_ends_by_the_records_deadline_while_the_projection_is_held() {
         held.wait();
         let started = Instant::now();
         let outcome = owner.run_slice(&slice_budget());
-        (started.elapsed(), outcome)
+        (started.elapsed(), (outcome, now()))
     });
+    let (outcome, ended) = outcome;
     assert!(
         waited < Duration::from_secs(4),
         "the slice ran {waited:?} on a record with 2.5 s left: {outcome:?}"
     );
     assert!(
         matches!(outcome, SliceOutcome::Blocked(_))
-            || (matches!(outcome, SliceOutcome::Expired) && now() > again.deadline),
+            || (matches!(outcome, SliceOutcome::Expired) && ended > again.deadline),
         "{outcome:?}"
     );
 }
@@ -2912,7 +2913,7 @@ fn a_slice_inside_the_deadline_margin_is_bounded_by_the_record_deadline() {
     std::thread::sleep(Duration::from_millis(1_000));
     let remaining = again.deadline - now();
     assert!(
-        remaining > 0 && remaining < 1_000,
+        remaining < 1_000,
         "the slice starts inside the margin with {remaining} ms left"
     );
 
@@ -2923,8 +2924,9 @@ fn a_slice_inside_the_deadline_margin_is_bounded_by_the_record_deadline() {
         held.wait();
         let started = Instant::now();
         let outcome = owner.run_slice(&slice_budget());
-        (started.elapsed(), outcome)
+        (started.elapsed(), (outcome, now()))
     });
+    let (outcome, ended) = outcome;
     assert!(
         waited < Duration::from_secs(2),
         "the slice ran {waited:?} on a record with 600 ms left: {outcome:?}"
@@ -2932,7 +2934,7 @@ fn a_slice_inside_the_deadline_margin_is_bounded_by_the_record_deadline() {
     // A slowed run that starts past the deadline finds the renewable record expired; either way no work starts.
     assert!(
         matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline"))
-            || (matches!(outcome, SliceOutcome::Expired) && now() > again.deadline),
+            || (matches!(outcome, SliceOutcome::Expired) && ended > again.deadline),
         "{outcome:?}"
     );
 }
@@ -3440,15 +3442,15 @@ fn a_refresh_that_ends_inside_the_margin_starts_no_recovery() {
 
     let reader = owner.pin(&slice_budget()).unwrap();
     let held = std::sync::Barrier::new(2);
-    let outcome = std::thread::scope(|scope| {
+    let (outcome, ended) = std::thread::scope(|scope| {
         hold_projection(scope, &reader, &held, Duration::from_millis(1_800));
         held.wait();
-        owner.run_slice(&slice_budget())
+        (owner.run_slice(&slice_budget()), now())
     });
     // A slowed run that starts past the deadline finds the renewable record expired; either way no episode starts.
     assert!(
         matches!(&outcome, SliceOutcome::Blocked(reason) if reason == "the record's deadline has passed")
-            || (matches!(outcome, SliceOutcome::Expired) && now() > again.deadline),
+            || (matches!(outcome, SliceOutcome::Expired) && ended > again.deadline),
         "{outcome:?}"
     );
     let ControlState::Intent(intent) = control(home) else {

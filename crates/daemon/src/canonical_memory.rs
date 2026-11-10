@@ -262,7 +262,7 @@ fn observed(
     }
 }
 
-/// One read's verdict as the report compares it with the last one logged.
+/// One read's verdict as the report compares it with the last one recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Observed {
     Served,
@@ -278,12 +278,12 @@ pub(crate) enum Observed {
     Withheld(String),
 }
 
-/// The last verdict the canonical memory reader logged, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either. An unsampled served read says nothing about the consumers: it keeps a served or lagging verdict as recorded and counts as plainly served after a withheld read or before any verdict.
+/// The last verdict the canonical memory reader recorded, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either. An unsampled served read says nothing about the consumers: it keeps a served or lagging verdict as recorded and counts as plainly served after a withheld read or before any verdict.
 #[derive(Debug, Default)]
 pub(crate) struct ReadReport(std::sync::Mutex<Option<Observed>>);
 
 impl ReadReport {
-    /// Records `observed` and returns the line to log when its verdict differs from the last one recorded. The verdict is recorded before the caller logs, so a failed log write repeats nothing, and the caller logs outside the report's lock, so a blocked stderr write holds up no other read; lines from concurrent reads can therefore print in either order.
+    /// Records `observed` and returns the line to log when its verdict differs from the last one recorded. The verdict is recorded before the caller logs, so a failed log write repeats nothing, and the caller logs outside the report's lock, so other reads record their verdicts while a log write is blocked, though reads that emit a line share stderr's own lock; lines from concurrent reads can print in either order.
     pub(crate) fn observe(&self, observed: Observed) -> Option<String> {
         let mut last = self
             .0
