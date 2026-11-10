@@ -283,7 +283,7 @@ pub(crate) enum Observed {
 pub(crate) struct ReadReport(std::sync::Mutex<Option<Observed>>);
 
 impl ReadReport {
-    /// Records `observed` and returns the line to log when its verdict differs from the last one recorded. The verdict is recorded before the caller logs, so a failed log write repeats nothing, and the caller logs outside the report's lock, so a blocked stderr write holds up no other read.
+    /// Records `observed` and returns the line to log when its verdict differs from the last one recorded. The verdict is recorded before the caller logs, so a failed log write repeats nothing, and the caller logs outside the report's lock, so a blocked stderr write holds up no other read; lines from concurrent reads can therefore print in either order.
     pub(crate) fn observe(&self, observed: Observed) -> Option<String> {
         let mut last = self
             .0
@@ -417,41 +417,48 @@ mod tests {
     #[test]
     fn the_read_report_logs_each_change_of_verdict_once() {
         let report = ReadReport::default();
-        let observe = |observed: Observed| report.observe(observed);
-        assert_eq!(observe(Observed::Served), None);
-        assert_eq!(observe(Observed::Served), None);
+        assert_eq!(report.observe(Observed::Served), None);
+        assert_eq!(report.observe(Observed::Served), None);
         assert_eq!(
-            observe(lagging(10_000)).as_deref(),
+            report.observe(lagging(10_000)).as_deref(),
             Some(
                 "served from canonical rows while derived consumers lag: consumers=2 lag_positions=10000 oldest_unconsumed_age_ms=61000"
             )
         );
-        assert_eq!(observe(lagging(12_000)), None);
+        assert_eq!(report.observe(lagging(12_000)), None);
         assert_eq!(
-            observe(Observed::ServedUnsampled),
+            report.observe(Observed::ServedUnsampled),
             None,
             "an unsampled read keeps the lagging verdict"
         );
-        assert_eq!(observe(lagging(12_000)), None, "the lagging verdict stands");
-        assert_eq!(observe(Observed::Served).as_deref(), Some("served"));
         assert_eq!(
-            observe(Observed::Withheld("unavailable:store_starting".to_owned())).as_deref(),
+            report.observe(lagging(12_000)),
+            None,
+            "the lagging verdict stands"
+        );
+        assert_eq!(report.observe(Observed::Served).as_deref(), Some("served"));
+        assert_eq!(
+            report
+                .observe(Observed::Withheld("unavailable:store_starting".to_owned()))
+                .as_deref(),
             Some("withheld state=unavailable:store_starting")
         );
         assert_eq!(
-            observe(Observed::Withheld("unavailable:store_starting".to_owned())),
+            report.observe(Observed::Withheld("unavailable:store_starting".to_owned())),
             None
         );
         assert_eq!(
-            observe(Observed::Withheld("unavailable:io".to_owned())).as_deref(),
+            report
+                .observe(Observed::Withheld("unavailable:io".to_owned()))
+                .as_deref(),
             Some("withheld state=unavailable:io")
         );
         assert_eq!(
-            observe(Observed::ServedUnsampled).as_deref(),
+            report.observe(Observed::ServedUnsampled).as_deref(),
             Some("served"),
             "an unsampled read after a withheld one is served"
         );
-        assert!(observe(lagging(10_000)).is_some());
+        assert!(report.observe(lagging(10_000)).is_some());
     }
 
     fn visible_row(

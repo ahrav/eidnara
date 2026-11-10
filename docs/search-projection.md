@@ -151,7 +151,10 @@ lane, refreshes admission on the selected family, and has
   recording on the current clock.
 
 A `B_recovery_ms` within the one-second start margin is refused before
-anything is installed. A refused renewal write installs the records with no
+anything is installed. A record whose renewal is no longer due at the clock
+read just before the write, as when a clock-step lead decays during the
+waits, records nothing, leaves the records installed with no coverage, and
+counts as an attempt. A refused renewal write installs the records with no
 coverage again. The attempt identity keys the construction's consumer
 registration, so the renewed attempt replays that registration's receipt and
 reads through the consumer the expired attempt registered. No consumer is left
@@ -183,10 +186,11 @@ count on capturing at that target again, since a capture is taken at the tip
 and any commit before it moves the tip past the target. Its builder clears the
 capture first and then releases the target through
 `ProjectionLifecycle::release_target`; the attempt captures a fresh source
-snapshot at the tip and, after building its baseline from it, fixes the
-target again at the kernel tip it then reads. A target ahead of the tip, as after a kernel restore,
-still refuses the attempt with `TargetBeyondTip`. An authorized recovery keeps its target and reports
-`SnapshotBeyondTarget`.
+snapshot at the tip and, after building its baseline from it, fixes the target
+again at the kernel tip it then reads. A target ahead of the tip, as after a
+kernel restore, still refuses the attempt with `TargetBeyondTip`. An
+authorized recovery keeps its target and reports `SnapshotBeyondTarget` once
+the tip has passed it.
 
 A rebuild's construction is admitted on the loaded predecessor family's
 coverage. While the owner holds a predecessor that trails the kernel by more
@@ -371,7 +375,9 @@ staged seed left for the operator
 (`an_expired_authorized_recovery_is_left_for_the_operator`,
 `an_expired_rebuild_holding_an_unselected_staged_seed_is_left_for_the_operator`),
 a refused renewal write
-(`a_refused_renewal_leaves_the_expired_record_and_admits_no_reader`), the release
+(`a_refused_renewal_leaves_the_expired_record_and_admits_no_reader`), a renewal
+refused for the start margin
+(`a_renewal_with_no_time_past_the_start_margin_is_refused`), the release
 of a target the tip passed
 (`an_unselected_rebuild_behind_the_tip_releases_its_target_and_completes`), the real daemon loop rebuilding after a post-restart
 commit, direct FTS5 probes over a Current family, and exact-proof invalidation
@@ -383,6 +389,10 @@ selected), `TokenizerMismatch`, and `EmbeddingModelMismatch` (model and table
 epoch). The build-constant dimensions are covered by the cause mapping's unit
 tests and by `crates/daemon/tests/search_replacement/recovery.rs`, which
 rebuilds each mismatch cause through the recovery coordinator.
+`crates/daemon/tests/search_replacement.rs` covers the release of a target at
+the tip (`a_rebuild_target_at_the_tip_is_released_and_fixed_again_past_it`)
+and the refusal of a spent rebuild before its target is released
+(`a_spent_rebuild_keeps_its_target`).
 `crates/daemon/tests/search_replacement/` covers construction, selection,
 retirement, disable, and recovery, including child-process cuts.
 `crates/kernel/tests/kernel_outbox.rs` covers consumer retirement past later

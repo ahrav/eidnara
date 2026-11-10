@@ -37,7 +37,7 @@ evidence. Inspected 2026-09-19 at
   publication is therefore neither fact acceptance nor canonical admission.
 - [crates/daemon/tests/transform_canonical_memory.rs:48-217](../../../../../crates/daemon/tests/transform_canonical_memory.rs#L48-L217)
   checks candidate, scope, category, lifecycle exclusion, and warm reuse.
-  [canonical_memory.rs:684-753](../../../../../crates/daemon/src/canonical_memory.rs#L684-L753)
+  [canonical_memory.rs:691-760](../../../../../crates/daemon/src/canonical_memory.rs#L691-L760)
   checks budget exclusion and withheld-versus-empty metadata. Status: unaudited.
 
 Reachability is **default-production**: memory defaults enabled at

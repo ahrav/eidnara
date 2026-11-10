@@ -716,7 +716,7 @@ impl SearchLifecycleOwner {
         self.request(&request, now, budget)
     }
 
-    /// Renews the active record when its renewal is due (see [`LifecycleIntent::renewal_due`]), for another attempt: the record keeps its attempt identity and consumer binding and takes an allowance of the same size with nothing consumed and a deadline one `B_recovery_ms` from now. Returns `None` for any other record. The records and lane are read and admission is refreshed on the selected family first, as a request does, so the renewal is admitted on the evidence a slice of the renewed record installs; a refused write installs the records with no coverage again, as a slice over the expired record does. A `B_recovery_ms` within `DEADLINE_MARGIN_MS` is refused before anything is installed, since no slice could start inside the renewed deadline.
+    /// Renews the active record when its renewal is due (see [`LifecycleIntent::renewal_due`]), for another attempt: the record keeps its attempt identity and consumer binding and takes an allowance of the same size with nothing consumed and a deadline one `B_recovery_ms` from now. Returns `None` for any other record. The records and lane are read and admission is refreshed on the selected family first, as a request does, so the renewal is admitted on the evidence a slice of the renewed record installs; a refused write installs the records with no coverage again, as a slice over the expired record does. A `B_recovery_ms` within `DEADLINE_MARGIN_MS` is refused before anything is installed, since no slice could start inside the renewed deadline. A record whose renewal is no longer due at the clock read just before the write, as when a clock-step lead decays during the waits, records nothing and leaves the records installed with no coverage for the next slice to judge.
     ///
     /// # Errors
     ///
@@ -772,6 +772,9 @@ impl SearchLifecycleOwner {
             let lifecycle = ProjectionLifecycle::open(&self.home)?;
             let now = crate::now_ms();
             if !expired.renewal_due(now) {
+                // The record is active again; the gate stays as the expired slice left it until the next slice, which the loop is woken for, judges it.
+                self.install_without_coverage(&inputs, &identity);
+                self.requested.notify_one();
                 return Ok(None);
             }
             Ok(Some(lifecycle.renew_expired(

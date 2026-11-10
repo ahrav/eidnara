@@ -5578,9 +5578,9 @@ impl HandlerCore {
 
     /// The canonical memory read for one pass, trimmed to the configured memory
     /// budget; `None` when memory is disabled, so a disabled deployment never
-    /// touches the kernel store for it. The read takes no clock: it serves the
-    /// canonical rows at the kernel tip at any outbox consumer lag, and marks
-    /// that lag from the published kernel health block.
+    /// touches the kernel store for it. The read takes no clock argument: it
+    /// serves the canonical rows at the kernel tip at any outbox consumer lag,
+    /// and marks that lag from a fresh published kernel health block.
     fn project_memory_read(
         &self,
         binding: &SessionBinding,

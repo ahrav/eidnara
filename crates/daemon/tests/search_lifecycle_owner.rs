@@ -477,10 +477,12 @@ async fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing
     owner.request(&expiring, now(), &slice_budget()).unwrap();
     std::thread::sleep(Duration::from_millis(600));
     // A slowed run that starts past the deadline finds the renewable record expired; either way no episode starts.
-    assert!(matches!(
-        owner.run_slice(&slice_budget()),
-        SliceOutcome::Blocked(_) | SliceOutcome::Expired
-    ));
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Blocked(_))
+            || (matches!(outcome, SliceOutcome::Expired) && now() > expiring.deadline),
+        "{outcome:?}"
+    );
     let ControlState::Intent(intent) = control(home) else {
         panic!("the expiring record stays recorded");
     };
@@ -2767,7 +2769,8 @@ fn a_slice_ends_by_the_records_deadline_while_the_projection_is_held() {
         "the slice ran {waited:?} on a record with 2.5 s left: {outcome:?}"
     );
     assert!(
-        matches!(outcome, SliceOutcome::Blocked(_) | SliceOutcome::Expired),
+        matches!(outcome, SliceOutcome::Blocked(_))
+            || (matches!(outcome, SliceOutcome::Expired) && now() > again.deadline),
         "{outcome:?}"
     );
 }
@@ -2929,7 +2932,7 @@ fn a_slice_inside_the_deadline_margin_is_bounded_by_the_record_deadline() {
     // A slowed run that starts past the deadline finds the renewable record expired; either way no work starts.
     assert!(
         matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline"))
-            || matches!(outcome, SliceOutcome::Expired),
+            || (matches!(outcome, SliceOutcome::Expired) && now() > again.deadline),
         "{outcome:?}"
     );
 }
@@ -3442,8 +3445,10 @@ fn a_refresh_that_ends_inside_the_margin_starts_no_recovery() {
         held.wait();
         owner.run_slice(&slice_budget())
     });
+    // A slowed run that starts past the deadline finds the renewable record expired; either way no episode starts.
     assert!(
-        matches!(&outcome, SliceOutcome::Blocked(reason) if reason == "the record's deadline has passed"),
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason == "the record's deadline has passed")
+            || (matches!(outcome, SliceOutcome::Expired) && now() > again.deadline),
         "{outcome:?}"
     );
     let ControlState::Intent(intent) = control(home) else {
@@ -7447,7 +7452,7 @@ async fn an_expired_authorized_recovery_is_left_for_the_operator() {
     owner.shutdown().await.unwrap();
 }
 
-/// A rebuild that expires while it holds a staged seed the selector does not name keeps its accounting, which the staged family's certificate binds: the slice reports the deadline and the renewal declines it.
+/// A rebuild that expires while it holds a staged seed the selector does not name keeps its accounting by policy, as one whose staged family's certificate binds it does: the slice reports the deadline and the renewal declines it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn an_expired_rebuild_holding_an_unselected_staged_seed_is_left_for_the_operator() {
     let root = tempfile::tempdir().unwrap();

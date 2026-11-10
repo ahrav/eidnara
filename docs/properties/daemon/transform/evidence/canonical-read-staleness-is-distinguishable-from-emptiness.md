@@ -29,7 +29,8 @@ Verified at HEAD.
   withholds the read; the reader issues no lag query and marks a served read
   for its log report from the lag facts of the kernel health block the
   coordinator last published, while that block is fresh. A served read without
-  fresh facts keeps the report's last served or lagging verdict. Only a served read constructs `Available`, and it does so
+  fresh facts keeps the report's last served or lagging verdict, and counts as
+  served after a withheld read or before any verdict. Only a served read constructs `Available`, and it does so
   through `injectable_snapshot` (`:325-360`), which filters to visible
   positive-category decisions, trims them to the memory budget, and hands the
   trimmed rows to `CanonicalMemorySnapshot::new` (`:52`), which digests exactly
