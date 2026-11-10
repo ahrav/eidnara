@@ -128,9 +128,11 @@ deadline has passed.
 A rebuild's deadline is a wall-clock time in the durable record, so a host
 suspend, a clock step, or a stall longer than the time left expires it while
 the daemon is idle. A renewable record is a Rebuilding record that holds no
-staged seed; a stage certificate persisted in its capture binds only the
-capture and its snapshot, and the renewed attempt's cleanup discards the
-unpinned stage. Its renewal is due (`LifecycleIntent::renewal_due`) when its
+staged seed. A stage certificate persisted in its capture names the capture's
+hold and snapshot, the seed digest a later pin must match, and the checkpoint
+the fixed target equals; renewal keeps the capture and target, and the
+renewed attempt's cleanup discards the unpinned stage before it captures
+again. Its renewal is due (`LifecycleIntent::renewal_due`) when its
 deadline has passed, or when it was recorded more than
 `CLOCK_STEP_TOLERANCE_MS` (1 second) after the current wall clock, as after
 the clock stepped back past its recording. A step back smaller than the
@@ -153,9 +155,9 @@ lane, refreshes admission on the selected family, and has
   recording on the current clock.
 
 A `B_recovery_ms` within the one-second start margin is refused before
-anything is installed. A supervisor running under records a reload replaced
-refuses the renewal as it refuses a request: admission closes and the loop is
-woken to rotate it. A record whose renewal is no longer due at the clock
+anything is installed. A supervisor running under an identity or coverage bounds
+other than the reloaded records yield refuses the renewal as it refuses a
+request: admission closes and the loop is woken to rotate it. A record whose renewal is no longer due at the clock
 read just before the write, as when a clock-step lead decays during the
 waits, records nothing, leaves the records installed with no coverage, and
 counts as an attempt; the loop is woken so the next slice judges the active

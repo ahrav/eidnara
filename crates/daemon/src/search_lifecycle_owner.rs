@@ -225,7 +225,7 @@ pub enum SliceEvent {
     Episode(EpisodeEvent),
     /// A handed-back supervisor's drain begins under the grace given.
     Draining(Duration),
-    /// The slice loop enters its idle wait, which a recorded request ends early.
+    /// The slice loop enters its idle wait, which a wake of the owner's `requested` signal ends early.
     Idle,
     /// A request has taken its entry clock reading and is about to wait for the manager.
     RequestEntered,
@@ -2285,7 +2285,7 @@ fn replacement_spec(
     })
 }
 
-/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first, and a request recorded during the idle wait ends it. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
+/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first, and a wake of the owner's `requested` signal, such as a recorded request or renewal, ends the idle wait. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     run_slice_loop(Arc::clone(&owner), cancel).await;
     let releasing = Arc::clone(&owner);

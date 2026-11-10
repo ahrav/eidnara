@@ -417,7 +417,7 @@ mod tests {
         );
     }
 
-    /// Each change of verdict yields one line, a repeat yields none, a lag sample that moves within the lagging verdict yields none, and the first plainly served read after a withheld or lagging one yields `served`.
+    /// Each change of verdict yields one line carrying the next `verdict_seq`, a repeat yields none, a lag sample that moves within the lagging verdict yields none, and the first plainly served read after a withheld or lagging one yields `served`.
     #[test]
     fn the_read_report_logs_each_change_of_verdict_once() {
         let report = ReadReport::default();
