@@ -21,8 +21,8 @@ which makes the provenance of `source_kind` part of the dispute record.
   the derivation (`commit.rs:413-446`); the handler passes the resolved
   taint to the dispute reason (`commit.rs:1137-1151`).
 - `kernel_route_scope` binds the store, the project, the root, the
-  harness, and the capabilities (`crates/daemon/src/kernel_routes/mod.rs:415-441`;
-  `RouteScope` at `:405-412`). `handle_kernel_commit` reads
+  harness, and the capabilities (`crates/daemon/src/kernel_routes/mod.rs:422-448`;
+  `RouteScope` at `:412-419`). `handle_kernel_commit` reads
   `scope.project` and `scope.store` (`commit.rs:1152`, `:1175`, `:1178`)
   and, since #1162, `scope.harness` with the bound `session_id` into the
   `DisputeReporter` (`commit.rs:1172-1173`) that `record_disposition`
@@ -32,8 +32,8 @@ which makes the provenance of `source_kind` part of the dispute record.
   that differs from the channel's bound session with `session_mismatch`
   (`crates/daemon/src/lib.rs:6641-6676`). `kernel_request` then strips
   `method`, `kind`, `session_id`, and `project_root` before parsing the
-  body (`ENVELOPE_KEYS`, `mod.rs:461`; `parse_request_body`,
-  `:463-474`), so the session reaches no Kernel row.
+  body (`ENVELOPE_KEYS`, `mod.rs:468`; `parse_request_body`,
+  `:470-481`), so the session reaches no Kernel row.
 - The Kernel redacts `actor` and `cause` before the `commit_log` insert
   (`RedactedIntent`; insert at `crates/kernel/src/envelope.rs:1484-1499`).
 - The commands send `actor = "user:opencode"`
@@ -77,7 +77,7 @@ runs before body parsing for every `kernel.*` route.
 
 ### Q: Does the route verify `actor` against `RouteScope.harness`?
 
-- Sources examined: `mod.rs:405-441`, `commit.rs:1097-1241`,
+- Sources examined: `mod.rs:412-448`, `commit.rs:1097-1241`,
   `project.rs:138-165`.
 - Findings: no. `harness` is bound and unused on `kernel.commit`; `actor`
   is copied from the body.

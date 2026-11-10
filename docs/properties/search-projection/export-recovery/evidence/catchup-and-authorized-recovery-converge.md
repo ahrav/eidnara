@@ -28,11 +28,11 @@ author. It adds one bounded obligation with two explicitly admitted modes.
   checkpoint. It does not run a backlog worker or authorize retrieval recovery.
 - `crates/kernel/src/outbox.rs:133-156` refuses pending deregistration. A
   Disabled episode may still own obligations that recovery must reconcile.
-- `crates/daemon/src/kernel_routes/serving.rs:41-63` classifies lag/no-consumer
+- `crates/daemon/src/kernel_routes/serving.rs:41-52` classifies lag/no-consumer
   state; classification alone does not drain work or admit recovery.
-- `crates/daemon/tests/transform_canonical_memory.rs:230-302` restores a
-  canonical block after a test manually acks. Status: unaudited; it is not
-  production catch-up or an authorized Disabled-to-Current controller.
+- `crates/daemon/tests/transform_canonical_memory.rs:240-343` serves a
+  canonical block while a test consumer stays stalled. Status: unaudited; it is
+  not production catch-up or an authorized Disabled-to-Current controller.
 - That production controller and approved bounds are absent at HEAD. Hence
   `Reachability: test-only`, `Exercised: not yet`, and RP2.9-blocked execution.
 

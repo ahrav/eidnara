@@ -22,7 +22,7 @@ revision.
 - Guarantee under test: A route bound with `memory.enabled` off takes no Kernel
   read, so the pass has no composition.
 - Existing check: `a_memory_disabled_pass_takes_no_canonical_read`
-  (`crates/daemon/tests/transform_canonical_memory.rs:320`). Status: unaudited.
+  (`crates/daemon/tests/transform_canonical_memory.rs:349`). Status: unaudited.
 
 ## Failure scenario
 

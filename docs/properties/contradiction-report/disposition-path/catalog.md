@@ -300,7 +300,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - `lib.rs:14529`; strict parsing applies
-to every body after envelope keys are stripped (`mod.rs:461-473`).
+to every body after envelope keys are stripped (`mod.rs:468-480`).
 Status: invalidated
 Exercised: not yet - the record was invalidated by PR A before a test
 pinned it. The strict-parsing half still holds; no test sends an unknown
@@ -900,8 +900,8 @@ harness other than the binding's; `source_kind: "user"` from a model
 tool; a `producer` naming another plugin.
 Confidence: high - [evidence](evidence/commit-actor-cause-and-source-kind-are-caller-asserted.md).
 Read `IntentRequest::into_intent` (`project.rs:148-165`),
-`kernel_route_scope` (`mod.rs:415-441`), the envelope keys stripped before
-body parsing (`ENVELOPE_KEYS`, `mod.rs:461`), and every use of the bound
+`kernel_route_scope` (`mod.rs:422-448`), the envelope keys stripped before
+body parsing (`ENVELOPE_KEYS`, `mod.rs:468`), and every use of the bound
 scope in `handle_kernel_commit` (`commit.rs:1152`, `:1175`, `:1178`).
 Existing check: `kernel_routes.rs:5723` for `actor` and `cause` stored as
 sent on a `test` binding. Status unaudited.
@@ -912,7 +912,7 @@ claim below `user_explicit`, so the claim cannot raise standing, but a
 reader cannot tell the command arm from a client asserting it.
 Open questions:
 - Should the route bind `actor` to `RouteScope.harness`
-  (`mod.rs:405-412`) and `source_kind` to the calling surface? (needs
+  (`mod.rs:412-419`) and `source_kind` to the calling surface? (needs
   human input)
 - The bound session is checked and then discarded; no Kernel row records
   it. PR B ([#1162](https://github.com/ahrav/eidnara/issues/1162)) adds

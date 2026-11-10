@@ -55,7 +55,7 @@ only`).
 
 None in time. Structural: the schema has no project binding for evidence.
 Evidence enters through `kernel.artifact.ingest.*` routes, which are
-project-bound at the route level (`kernel_route_scope`, `mod.rs:415-441`)
+project-bound at the route level (`kernel_route_scope`, `mod.rs:422-448`)
 but store no scope on the row.
 
 ## What a test must construct
@@ -75,7 +75,7 @@ but store no scope on the row.
 
 - Sources examined: P4 R2 and U1 Approach step 2; `envelope.rs:1899-1925`;
   `project.rs:199-206`; `schema.rs:94`, `:139`; `kernel_routes/mod.rs:
-  415-441`; `docs/host-wire-protocol.md:26` (bearer key, no per-actor
+  422-448`; `docs/host-wire-protocol.md:26` (bearer key, no per-actor
   principal).
 - Findings: no column, join, or route-level record ties an evidence row to
   a project. The ingest route is project-bound when it runs, but the

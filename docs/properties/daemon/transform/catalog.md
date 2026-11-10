@@ -677,8 +677,9 @@ through the compaction-off engine and compares each frozen composition with the
 empty canonical composition; `withheld_reads_record_the_verdict_and_inject_nothing`
 (`canonical_memory.rs`) pins the record-level distinction; the integration tests
 in `tests/transform_canonical_memory.rs` pin `known_as_of` and `truncated` over a
-real kernel store, reach the withheld arm through the reader with a lagging
-registered consumer (`a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it`),
+real kernel store, show the block served from current canonical rows while a
+registered consumer is stalled past the lag thresholds
+(`a_stalled_consumer_leaves_project_memory_served_from_current_canonical_rows`),
 and show a memory-disabled pass records no composition at all
 (`a_memory_disabled_pass_takes_no_canonical_read`). On the history_summarizer side,
 `a_withheld_memory_read_renders_no_block_and_records_its_verdict`
@@ -698,8 +699,9 @@ an open, empty store and shows both prompts lack the block while the two
 (`lib.rs:28576`) shows the field is absent from the wire, not `null`, both for
 a pass that did not fire and for a firing under a memory-disabled binding. All
 run in CI under `cargo test --workspace`.
-Guarantee: A HARD pass whose canonical memory read was not served (stale,
-abstained, or unavailable) composes no `<project-memory>` block and records
+Guarantee: A HARD pass whose canonical memory read was not served (withheld
+with the outcome of a store phase other than ready or a failed tip or
+visible-row read) composes no `<project-memory>` block and records
 `ProjectMemoryComposition::Withheld { state }` in `ModuleMeta.project_memory`
 and in the response, and a history_summarizer firing whose read was not served renders
 no block and records the same `Withheld { state }` in
@@ -724,7 +726,7 @@ not carry.
 Fault/timing angle: The read is taken once per pass in `lib.rs:7994`, through
 `Handler::project_memory_read` (`lib.rs:4834`), before the `run_transform`
 closure, and the same value is handed to a history_summarizer firing the pass triggers
-(`lib.rs:5104`), so a store phase change or lag change after that point cannot
+(`lib.rs:5104`), so a store phase change after that point cannot
 split one pass between a served block and a withheld record on either surface.
 Equality between `ModuleMeta.project_memory` and
 `HistorySummarizerDiagnostics.project_memory` in one response is not claimed:
@@ -736,14 +738,12 @@ changed `truncated` over the same rendered rows, or moved from one withheld
 state to another, therefore carries a `meta.project_memory` frozen by an
 earlier pass beside a history_summarizer record taken this pass. The
 verdict-to-record mapping is total over `KernelOutcome`
-(`canonical_memory.rs:101-112`, `state.rs` `state_key`).
+(`canonical_memory.rs:165-176`, `state.rs` `state_key`).
 Required faults and enabling state: A `KernelOpenCoordinator` phase other than
-`Ready` (store starting or unavailable), an `outbox_lag` or `read_visible`
-error, or a registered consumer past either lag threshold
-(`serving.rs:58-63`, `decide_for_tip_read`). With no registered consumer the
-tip read is served, so the withheld arm needs one of those faults; the unit
-test injects the verdict directly; the integration test registers a consumer
-and publishes 10,000 outbox positions past its checkpoint.
+`Ready` (store starting or unavailable), or a `tip` or `read_visible` error.
+Outbox consumers maintain derived state, so the tip read is served at any
+consumer lag, and the withheld arm needs one of those faults; the unit test
+injects the verdict directly.
 Confidence: high - [evidence](evidence/canonical-read-staleness-is-distinguishable-from-emptiness.md).
 Read the three `meta.project_memory` writers, the accessors every consumer goes
 through (`rows()` empty and `composition()` withheld are produced by one

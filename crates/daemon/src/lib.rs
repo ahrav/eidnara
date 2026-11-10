@@ -5578,18 +5578,18 @@ impl HandlerCore {
 
     /// The canonical memory read for one pass, trimmed to the configured memory
     /// budget; `None` when memory is disabled, so a disabled deployment never
-    /// touches the kernel store for it.
+    /// touches the kernel store for it. It serves the canonical rows at the tip
+    /// at any consumer lag; lag marks come from a fresh kernel health block,
+    /// and a read without one keeps the report's prior verdict.
     fn project_memory_read(
         &self,
         binding: &SessionBinding,
         cfg: &DaemonConfig,
-        now_ms: i64,
     ) -> Option<canonical_memory::CanonicalMemoryRead> {
         cfg.memory_enabled.then(|| {
             canonical_memory::read_project_memory(
                 &self.kernel,
                 &binding.kernel_project,
-                now_ms,
                 cfg.memory_budget_tokens,
             )
         })
@@ -6138,7 +6138,7 @@ impl HandlerCore {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
-                project_memory: self.project_memory_read(binding, &cfg, now),
+                project_memory: self.project_memory_read(binding, &cfg),
                 model_chain: cfg.model_chain.clone(),
                 token_budget: derive_history_summarizer_chunk_tokens(
                     cfg.history_summarizer_context_limit_tokens,
@@ -9658,7 +9658,7 @@ impl HandlerCore {
         // every attempt the transform makes, composes from the same pinned
         // snapshot. `None` when memory is disabled, so the kernel store is not
         // touched for a block that is never rendered.
-        let project_memory = self.project_memory_read(&binding, &binding.config, pass_now);
+        let project_memory = self.project_memory_read(&binding, &binding.config);
         let env = PassEnv {
             store,
             parsed,
@@ -25027,10 +25027,10 @@ mod tests {
             "User stated: Use port 4321 for staging.",
             "store the attributed source quotation, not the extractor's broadened environment"
         );
+        // The canonical read pins the kernel tip the capture just committed.
         let injected = canonical_memory::read_project_memory(
             &handler.kernel,
             &kernel_routes::ProjectBinding::new(&project),
-            now_ms(),
             4000.0,
         );
         assert!(

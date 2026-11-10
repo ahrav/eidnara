@@ -1112,8 +1112,9 @@ fn interrupted_export_restarts_at_fresh_s_without_renewing_allowance() {
     assert_eq!(candidate.staged().verification.occurrences, 6);
 }
 
+/// A rebuild's retry after the tip passed its fixed target releases the target once the cleanup cleared the capture, captures a fresh S at the tip, and fixes the target again after its baseline, spending one more episode and keeping the deadline; the consumer stays registered at its acknowledgement until the new candidate's catch-up acknowledges past it.
 #[test]
-fn a_retry_with_s_beyond_the_recorded_target_blocks_instead_of_moving_t() {
+fn a_retry_with_s_beyond_the_recorded_target_recaptures_and_fixes_a_later_t() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
     corpus.seed();
@@ -1131,23 +1132,30 @@ fn a_retry_with_s_beyond_the_recorded_target_blocks_instead_of_moving_t() {
         .err()
         .unwrap();
     let original = control(root.path());
-    let acknowledged = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    let fixed = original.recovery_target.unwrap().commit_seq;
     corpus.publish("later", "beyond fixed target");
-    let failure = failure
+    let later_tip = corpus.tip();
+    assert!(later_tip > fixed);
+    let candidate = failure
         .retry(&budget(Duration::from_secs(30)), &mut |_| {})
-        .err()
         .unwrap();
-    assert!(
-        matches!(failure.error, BuildError::SnapshotBeyondTarget { snapshot, target } if snapshot > target)
-    );
-    assert!(failure.cleanup_error.is_none());
-    let refused = control(root.path());
-    assert_eq!(refused.recovery_target, original.recovery_target);
-    assert_eq!(refused.episodes.deadline, original.episodes.deadline);
-    assert_eq!(refused.episodes.consumed, 2);
     assert_eq!(
-        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
-        acknowledged
+        candidate.staged().verification.snapshot_commit_seq,
+        later_tip
+    );
+    let retried = control(root.path());
+    assert_eq!(
+        retried.recovery_target.map(|target| target.commit_seq),
+        Some(later_tip)
+    );
+    assert_eq!(retried.episodes.deadline, original.episodes.deadline);
+    assert_eq!(retried.episodes.consumed, 2);
+    assert!(
+        corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap()
+            .is_some_and(|acknowledged| acknowledged >= fixed)
     );
 }
 
@@ -2087,9 +2095,75 @@ fn kernel_writer_wait_ends_at_the_deadline_and_a_released_holder_allows_construc
     }
 }
 
+/// A rebuild recorded with its target at the tip releases the target after its cleanup: its own registration commit moves the tip, so the capture's snapshot lies past the recorded target, and the attempt builds a candidate and fixes the target again past the recorded one, spending one episode.
+#[test]
+fn a_rebuild_target_at_the_tip_is_released_and_fixed_again_past_it() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("one", "12345678");
+    let gate = open_gate();
+    let at_tip = corpus.tip();
+    record(
+        root.path(),
+        &gate,
+        Some(at_tip),
+        &spec(root.path()).identity,
+    );
+    let candidate = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, spec(root.path()))
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+    assert!(candidate.staged().verification.snapshot_commit_seq > at_tip);
+    let built = control(root.path());
+    assert!(
+        built
+            .recovery_target
+            .is_some_and(|target| target.commit_seq > at_tip),
+        "{built:?}"
+    );
+    assert_eq!(built.episodes.consumed, 1);
+}
+
+/// A rebuild whose allowance is spent refuses before its target is released, so the record keeps its target and its bytes.
+#[test]
+fn a_spent_rebuild_keeps_its_target() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("one", "12345678");
+    let gate = open_gate();
+    record(
+        root.path(),
+        &gate,
+        Some(corpus.tip()),
+        &spec(root.path()).identity,
+    );
+    let lifecycle = support::flock::open_lifecycle(root.path());
+    for _ in 0..3 {
+        lifecycle.consume_episode(&gate, now()).unwrap();
+    }
+    drop(lifecycle);
+    let record_path = root.path().join("search-lifecycle").join("intent.json");
+    let bytes = std::fs::read(&record_path).unwrap();
+    let failure = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, spec(root.path()))
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Intent(daemon::projection_lifecycle::IntentRefusal::AllowanceExhausted)
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(std::fs::read(&record_path).unwrap(), bytes);
+}
+
 #[test]
 fn admission_bounds_and_fixed_target_refuse_without_a_candidate() {
-    for case in ["closed", "bytes", "pages", "target", "future-target"] {
+    for case in ["closed", "bytes", "pages", "future-target"] {
         let root = tempfile::tempdir().unwrap();
         let corpus = Corpus::open(root.path());
         corpus.seed();
@@ -2100,7 +2174,6 @@ fn admission_bounds_and_fixed_target_refuse_without_a_candidate() {
             root.path(),
             &gate,
             match case {
-                "target" => Some(corpus.tip()),
                 "future-target" => Some(corpus.tip() + 1),
                 _ => None,
             },
@@ -2128,12 +2201,6 @@ fn admission_bounds_and_fixed_target_refuse_without_a_candidate() {
             .build(&budget(Duration::from_secs(30)), &mut |_| {})
             .err()
             .unwrap();
-        if case == "target" {
-            assert!(matches!(
-                failure.error,
-                BuildError::SnapshotBeyondTarget { .. }
-            ));
-        }
         if case == "future-target" {
             assert!(matches!(
                 failure.error,

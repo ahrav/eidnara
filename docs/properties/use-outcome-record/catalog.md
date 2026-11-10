@@ -157,13 +157,13 @@ read at `crates/daemon/src/canonical_memory.rs:55-58`; the revision is a
 `DefaultHasher` `u64`, which is why #1154 keys the record by a separate
 served-set digest.
 Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-(`crates/daemon/src/canonical_memory.rs:418`);
+(`crates/daemon/src/canonical_memory.rs:602`);
 `rows_the_renderer_drops_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:476`);
+(`crates/daemon/src/canonical_memory.rs:660`);
 `bytes_past_the_render_cap_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:493`);
+(`crates/daemon/src/canonical_memory.rs:677`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:515`). Status: unaudited.
+(`crates/daemon/src/canonical_memory.rs:699`). Status: unaudited.
 Impact: A revision that moved without a byte change would record a second serve
 of the same rows.
 Open questions:
@@ -273,7 +273,7 @@ commit.
 Confidence: high -
 [evidence](evidence/uo-known-as-of-is-the-tip-bound-read-sequence.md).
 `read_project_memory` captures the tip and passes it as the requested snapshot
-(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:205`)); the route
+(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:203`)); the route
 returns `known_as_of` from the visible read
 (`crates/daemon/src/kernel_routes/read.rs:252`).
 Existing check:
@@ -307,7 +307,7 @@ Confidence: high -
 `project_memory_read` wraps the read in `cfg.memory_enabled.then(...)`
 (`project_memory_read` (`crates/daemon/src/lib.rs:5554`)).
 Existing check: `a_memory_disabled_pass_takes_no_canonical_read`
-(`crates/daemon/tests/transform_canonical_memory.rs:320`). Status: unaudited.
+(`crates/daemon/tests/transform_canonical_memory.rs:349`). Status: unaudited.
 Impact: A disabled route that still read and recorded would breach the consent
 rule (C2).
 Open questions: None.
@@ -736,7 +736,7 @@ Required faults and enabling state: An observational route and an ordinary route
 bound to one project.
 Confidence: high -
 [evidence](evidence/uo-review-reads-authorize-by-bearer-and-project-binding-not-owner.md).
-`kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:414`);
+`kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:421`);
 `bind_review` (`crates/daemon/src/memory_reviewer/wire.rs:203`);
 `crates/daemon/src/lib.rs:276`.
 Existing check:
@@ -1091,9 +1091,9 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `a_dispute_between_folds_records_the_next_served_set_without_it`
 (`crates/daemon/src/use_outcome_writer_tests.rs:528`);
 `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
-(`crates/daemon/src/canonical_memory.rs:380`);
+(`crates/daemon/src/canonical_memory.rs:564`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:515`);
+(`crates/daemon/src/canonical_memory.rs:699`);
 `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
 (`crates/daemon/src/use_outcome_writer_tests.rs:1191`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`
@@ -1152,8 +1152,8 @@ a record whose `served_set` read answers zero decision ids, while a `deadline`, 
 fence leaves no record until a later HARD fold at the same served set writes or
 replays it (`uo-p-served-set-once-per-session-revision`).
 Fault/timing angle: A Kernel Ready for the write but starting at the read.
-Required faults and enabling state: A Kernel starting or a refusing serving
-verdict at read time, then a HARD fold.
+Required faults and enabling state: A Kernel starting or a refused tip or
+visible-row read at read time, then a HARD fold.
 Confidence: high - [evidence](evidence/uo-p-no-row-for-withheld-composition.md).
 the writer acts only on `CanonicalMemoryRead::Available` (`record_use_outcome`
 (`crates/daemon/src/lib.rs:9733`)).

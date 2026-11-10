@@ -24,6 +24,7 @@ use crate::projection_gates::{
 };
 use crate::projection_lifecycle::{
     IntentRefusal, LifecycleIntent, ProjectionLifecycle, RecoveryTarget, ReplacementCapture,
+    Transition,
 };
 use crate::search_catchup::{
     Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeEvent, SearchCatchUp,
@@ -417,7 +418,7 @@ impl<'a> ReplacementBuilder<'a> {
         }
     }
 
-    /// Runs one attempt under `budget` and the intent's original allowance and deadline.
+    /// Runs one attempt under `budget` and the intent's recorded allowance and deadline. A Rebuilding attempt whose fixed target the tip has reached releases the target after its cleanup; the target is fixed again after the attempt's own capture and baseline.
     /// On failure, retain the returned owner until cleanup succeeds or ownership is handed off.
     /// Synchronous filesystem and COMMIT completion require healthy I/O; cancellation cannot preempt them.
     /// The catch-up episode observes a caller interrupt at its next event boundary; only `budget`'s deadline ends a kernel wait inside the episode.
@@ -548,20 +549,33 @@ impl<'a> ReplacementBuilder<'a> {
                 "budget must end within the original episode deadline",
             ));
         };
-        let fresh = self.checked_target(budget)?;
         let staging = self
             .capture
             .as_ref()
             .is_some_and(|capture| capture.stage.is_some())
             && self.family.seed().is_some();
-        if staging {
+        // A construction attempt reads the tip after its cleanup, which itself refuses another kernel first, so a commit that landed during the cleanup is judged by the release and the target check below.
+        let fresh = if staging {
+            let fresh = self.checked_target(budget)?;
             self.check_hold(budget)?;
+            fresh
         } else {
             self.cleanup(budget)?;
-        }
-        let mut expected = intent.clone();
+            self.checked_target(budget)?
+        };
+        let mut expected = intent;
         if !staging {
             expected.replacement_capture = None;
+            // The cleanup above cleared the capture. A fixed target the tip has reached is released: any commit before this attempt's capture, such as its own registration, would put the capture's snapshot past the target, and the attempt fixes its target again after its baseline.
+            if expected.transition == Transition::Rebuilding
+                && expected
+                    .recovery_target
+                    .is_some_and(|target| target.commit_seq <= fresh.through_commit)
+            {
+                expected = self
+                    .lifecycle
+                    .release_target(self.gate, &expected, wall_ms()?)?;
+            }
         }
         self.lifecycle
             .consume_expected_episode(self.gate, &expected, wall_ms()?)?;
@@ -578,7 +592,7 @@ impl<'a> ReplacementBuilder<'a> {
             return self.stage(&run, observer);
         }
         self.incarnation = Some(fresh.incarnation);
-        self.target = match intent.recovery_target {
+        self.target = match expected.recovery_target {
             Some(fixed) if fixed.commit_seq > fresh.through_commit => {
                 return Err(BuildError::Blocked(Blocked::Read(
                     CommitReadError::TargetBeyondTip,

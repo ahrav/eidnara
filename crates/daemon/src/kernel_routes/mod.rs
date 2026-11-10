@@ -139,6 +139,8 @@ pub(crate) struct KernelOpenCoordinator {
     /// cannot host one reports `unavailable` on the routes without pulling
     /// daemon health down, since nothing is missing that was promised.
     expected: AtomicBool,
+    /// The canonical memory reader's last recorded verdict and its count of verdict changes, which each logged line carries as `verdict_seq`.
+    memory_read_report: crate::canonical_memory::ReadReport,
 }
 
 impl KernelOpenCoordinator {
@@ -151,7 +153,12 @@ impl KernelOpenCoordinator {
             uploads: Mutex::new(ingest::UploadCoordinator::default()),
             background_sampler: AtomicBool::new(true),
             expected: AtomicBool::new(true),
+            memory_read_report: crate::canonical_memory::ReadReport::default(),
         }
+    }
+
+    pub(crate) fn memory_read_report(&self) -> &crate::canonical_memory::ReadReport {
+        &self.memory_read_report
     }
 
     pub(crate) fn set_expected(&self, expected: bool) {

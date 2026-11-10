@@ -55,7 +55,7 @@ writer_epoch, producer, operation_key, request_digest, recorded_at, actor,
 cause` (`schema.rs:26`; insert `envelope.rs:1484-1499`). `IntentRequest`
 carries `producer, operation_key, request_digest, actor, cause`
 (`project.rs:139-146`). The transport strips `session_id` before the body
-is parsed (`mod.rs:461-473`). `operation_key` is
+is parsed (`mod.rs:468-480`). `operation_key` is
 `sha256(producer, actor, operationId)` on the client (`client.ts:284-290`),
 so the session inside `operationId` is not recoverable from the stored
 key.
@@ -94,7 +94,7 @@ Evidence: before #1161 both harnesses sent the constant `agent:opencode`;
 (`packages/opencode-plugin/src/tools/eidnara-memory/execute.ts:50`) and
 gives the Pi tool `agent:pi`
 (`packages/pi-plugin/src/tools/eidnara-memory.ts:58`). The daemon knows
-the bound harness (`RouteScope.harness`, `mod.rs:410`) and does not check
+the bound harness (`RouteScope.harness`, `mod.rs:417`) and does not check
 the actor against it; the actor is a claim (`docs/host-wire-protocol.md:
 26`).
 
@@ -241,7 +241,7 @@ text should change.
 Options:
 
 - (a) Verify: refuse `invalid_input` when `actor` starts with `agent:` and
-  the suffix differs from `RouteScope.harness` (`mod.rs:410`). The class
+  the suffix differs from `RouteScope.harness` (`mod.rs:417`). The class
   still comes from `source_kind`.
 - (b) Do not verify; the actor is a claim (bearer-only authority,
   `docs/host-wire-protocol.md:26`), consistent with every other route.
