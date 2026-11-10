@@ -137,7 +137,7 @@ S7 routed reads. `docs/host-wire-protocol.md:824-828` and `:848-856`
 (`:33-60`, `deny_unknown_fields`); `bind_review` (`:203-220`) calls
 `kernel_request` (`crates/daemon/src/kernel_routes/mod.rs:453-462`) which
 binds scope (`kernel_route_scope` `:422-448`, project check at `:435-439`)
-before `parse_request_body` (`:463-474`, removes `ENVELOPE_KEYS` `:461`:
+before `parse_request_body` (`:470-481`, removes `ENVELOPE_KEYS` `:468`:
 `method`, `kind`, `session_id`, `project_root`). `authority_project`
 (`wire.rs:131-139`) maps NotModule to `disabled`, store error to
 `store_unavailable`. Observational harness `cli`

@@ -33,7 +33,7 @@ which makes the provenance of `source_kind` part of the dispute record.
   (`crates/daemon/src/lib.rs:6641-6676`). `kernel_request` then strips
   `method`, `kind`, `session_id`, and `project_root` before parsing the
   body (`ENVELOPE_KEYS`, `mod.rs:468`; `parse_request_body`,
-  `:463-474`), so the session reaches no Kernel row.
+  `:470-481`), so the session reaches no Kernel row.
 - The Kernel redacts `actor` and `cause` before the `commit_log` insert
   (`RedactedIntent`; insert at `crates/kernel/src/envelope.rs:1484-1499`).
 - The commands send `actor = "user:opencode"`

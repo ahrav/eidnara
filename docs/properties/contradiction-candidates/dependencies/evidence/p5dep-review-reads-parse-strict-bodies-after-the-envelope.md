@@ -40,8 +40,8 @@ C13; D6.
   read in `blocking`; `Err(_) => terminal("store_unavailable")` (`:255`).
 - `crates/daemon/src/kernel_routes/mod.rs:422-448` `kernel_route_scope`:
   `management_binding` (session/route authorization), `project_root` required
-  (`:422-426`), `project.accepts(requested_root)` else `project_mismatch`
-  (`:428-432`), `kernel_store()` else its state.
+  (`:429-433`), `project.accepts(requested_root)` else `project_mismatch`
+  (`:435-439`), `kernel_store()` else its state.
 - `kernel_routes/mod.rs:453-462` `kernel_request`: scope first, then `parse_request_body`.
 - `mod.rs:468-480`: `ENVELOPE_KEYS = ["method", "kind", "session_id",
   "project_root"]` removed before `serde_json::from_value::<T>`; a failure is
