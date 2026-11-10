@@ -757,6 +757,7 @@ impl SearchLifecycleOwner {
             expired.episodes.allowance,
             &expired.consumer.generation_id,
         )
+        .and_then(|_| coverage_bounds(inputs.manifest()))
         .and_then(|_| limit(inputs.manifest(), expired.transition.duration_limit()))
         .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
         if bound <= DEADLINE_MARGIN_MS {
@@ -1105,6 +1106,10 @@ impl SearchLifecycleOwner {
         let budget = match deadline_at {
             Some(at) if renewal_due || at <= Instant::now() => {
                 self.install_without_coverage(&inputs, &identity);
+                // A supervisor still running is handed back first, so the renewal that follows refreshes admission with no supervisor taking grants before the renewed record is durable.
+                if renewal_due && let Some(handle) = selection.maintenance() {
+                    return SliceOutcome::RotateMaintenance(handle);
+                }
                 return if renewal_due {
                     SliceOutcome::Expired
                 } else {

@@ -21,8 +21,8 @@ which makes the provenance of `source_kind` part of the dispute record.
   the derivation (`commit.rs:413-446`); the handler passes the resolved
   taint to the dispute reason (`commit.rs:1137-1151`).
 - `kernel_route_scope` binds the store, the project, the root, the
-  harness, and the capabilities (`crates/daemon/src/kernel_routes/mod.rs:415-441`;
-  `RouteScope` at `:405-412`). `handle_kernel_commit` reads
+  harness, and the capabilities (`crates/daemon/src/kernel_routes/mod.rs:422-448`;
+  `RouteScope` at `:412-419`). `handle_kernel_commit` reads
   `scope.project` and `scope.store` (`commit.rs:1152`, `:1175`, `:1178`)
   and, since #1162, `scope.harness` with the bound `session_id` into the
   `DisputeReporter` (`commit.rs:1172-1173`) that `record_disposition`

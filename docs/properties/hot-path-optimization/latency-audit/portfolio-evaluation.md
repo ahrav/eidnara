@@ -147,7 +147,7 @@ previous hook with the full payload (`:46`). The host wraps the handler
 future in `redact_sync` and `redact` (`dispatch.rs:928-934`), which sets the
 depth on the runtime worker that polls it. A `spawn_blocking` worker thread
 has depth zero. The daemon already runs kernel work that way:
-`kernel_routes::blocking` (`crates/daemon/src/kernel_routes/mod.rs:462-468`)
+`kernel_routes::blocking` (`crates/daemon/src/kernel_routes/mod.rs:469-475`)
 wraps `tokio::task::spawn_blocking` at ten call sites, including the ingest
 finish that calls `store.ingest_artifact` (`kernel_routes/ingest.rs:577`,
 inside the closure at `:797`) and the page decode at `:722`; `MemoryStore::open`
@@ -298,7 +298,7 @@ Anchor verification against HEAD. Every anchor below was read; none is off.
 
 New anchors this evaluation adds, all read at HEAD:
 `crates/host-runtime/src/panic_boundary.rs:11-13`, `:30-34`, `:36-50`,
-`:52-55`, `:60-72`; `crates/daemon/src/kernel_routes/mod.rs:462-468`;
+`:52-55`, `:60-72`; `crates/daemon/src/kernel_routes/mod.rs:469-475`;
 `crates/daemon/src/kernel_routes/ingest.rs:513-517`, `:716-722`, `:577`,
 `:797`; `crates/daemon/src/lib.rs:3811`, `:3863`;
 `crates/host-runtime/src/routing.rs:591`;
@@ -352,7 +352,7 @@ Constructibility per group, against the test infrastructure found:
 The catalog frames execution topology as unresolved and `spawn_blocking` as a
 future relocation (`catalog.md:62-64`; W8 and W11). The daemon already runs
 that topology for kernel routes: `kernel_routes::blocking`
-(`crates/daemon/src/kernel_routes/mod.rs:462-468`) at ten call sites, with a
+(`crates/daemon/src/kernel_routes/mod.rs:469-475`) at ten call sites, with a
 stated ownership convention. The ingest page path moves its staging
 reservation into the worker's result so the charge is released when the work
 ends, not when the handler future is dropped, because "a dropped

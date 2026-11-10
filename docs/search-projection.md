@@ -141,7 +141,8 @@ longer by the size of the step.
 
 A slice over an active record whose deadline has passed, or whose renewal is
 due, installs the records with no coverage, so every hook is denied and a
-cleanup keeps its evidence. When the renewal is due the slice reports
+cleanup keeps its evidence. When the renewal is due the slice first hands back a
+running embedding supervisor, which the loop drains, then reports
 `SliceOutcome::Expired`, and the slice loop calls
 `SearchLifecycleOwner::renew_expired_rebuild`. That call reads the records and
 lane, refreshes admission on the selected family, and has
