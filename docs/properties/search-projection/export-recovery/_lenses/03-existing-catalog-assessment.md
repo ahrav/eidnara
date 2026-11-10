@@ -20,7 +20,7 @@ not relabeled independent, and disposition is not independent re-review.
   [canonical-read-staleness-is-distinguishable-from-emptiness](../../../daemon/transform/catalog.md#canonical-read-staleness-is-distinguishable-from-emptiness)
   for the exact existing withheld/empty distinction. Its real-kernel fixture
   registers a consumer and leaves it stalled at
-  `crates/daemon/tests/transform_canonical_memory.rs:240-339`. The RP2.1 delta
+  `crates/daemon/tests/transform_canonical_memory.rs:240-342`. The RP2.1 delta
   is lifecycle orchestration, not another formatter property.
 - **Refinement:** Reuse
   [current-profile-never-names-an-unvalidatable-generation](../../../host-runtime/catalog.md#current-profile-never-names-an-unvalidatable-generation)

@@ -418,7 +418,7 @@ impl<'a> ReplacementBuilder<'a> {
         }
     }
 
-    /// Runs one attempt under `budget` and the intent's original allowance and deadline.
+    /// Runs one attempt under `budget` and the intent's recorded allowance and deadline. A Rebuilding attempt whose fixed target the tip has passed releases the target after its cleanup and fixes it again at its own capture.
     /// On failure, retain the returned owner until cleanup succeeds or ownership is handed off.
     /// Synchronous filesystem and COMMIT completion require healthy I/O; cancellation cannot preempt them.
     /// The catch-up episode observes a caller interrupt at its next event boundary; only `budget`'s deadline ends a kernel wait inside the episode.
@@ -560,7 +560,7 @@ impl<'a> ReplacementBuilder<'a> {
         } else {
             self.cleanup(budget)?;
         }
-        let mut expected = intent.clone();
+        let mut expected = intent;
         if !staging {
             expected.replacement_capture = None;
             // The cleanup above cleared the capture; a fixed target the tip has passed is released so this capture fixes the target again.

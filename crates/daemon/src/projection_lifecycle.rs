@@ -33,6 +33,8 @@ const DISABLED_SCHEMA: u32 = 3;
 const CURRENT_SCHEMA: u32 = 4;
 /// A record larger than this is not decoded; it is reported unavailable.
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024;
+/// How far a record's recording time may lie ahead of the wall clock before a renewable record counts as lapsed. A request stamps its record with the clock it read plus the time it waited, so a lead past one second means the wall clock stepped back.
+pub const CLOCK_STEP_TOLERANCE_MS: i64 = 1_000;
 
 /// The two transitions that persist intent. Every other projection state is derived from the database itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,7 +102,7 @@ pub struct RecoveryTarget {
     pub commit_seq: i64,
 }
 
-/// How many episodes the transition may run and how many it has consumed. A restart consumes nothing and grants nothing back.
+/// How many episodes the transition may run and how many it has consumed. A restart consumes nothing and grants nothing back; a renewal of a lapsed rebuild (`ProjectionLifecycle::renew_expired`) grants the allowance again with a fresh deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpisodeAccounting {
@@ -214,6 +216,17 @@ impl LifecycleIntent {
             }
         }
         Ok(())
+    }
+
+    /// Whether the slice loop renews this record once it lapses: a Rebuilding record that holds no staged seed. A staged seed's family certificate binds the record's episode accounting and recording time, so a record holding one keeps them, and an authorized recovery keeps the bound its operator authorized.
+    pub fn renewable(&self) -> bool {
+        self.transition == Transition::Rebuilding && self.staged_seed_digest.is_none()
+    }
+
+    /// Whether this attempt's wall-clock time is spent at `now`: its deadline has passed, or the record is renewable and was recorded more than [`CLOCK_STEP_TOLERANCE_MS`] after `now`, as when the wall clock stepped back past its recording. Renewal stamps a lapsed record again from `now`, so a clock step in either direction leaves a renewable rebuild at most one `B_recovery_ms` from its recording.
+    pub fn lapsed(&self, now: i64) -> bool {
+        now > self.episodes.deadline
+            || (self.renewable() && self.recorded_at > now.saturating_add(CLOCK_STEP_TOLERANCE_MS))
     }
 
     /// Whether `request` is a replay of this record: the same intent in every field the caller supplies.
@@ -876,7 +889,7 @@ impl ProjectionLifecycle {
         Ok(intent)
     }
 
-    /// Fixes the recorded intent's recovery target under the gate's admission, for a transition recorded before its target was known. The same target again changes nothing; another target is refused, because a fixed target moves only forward through `Self::recertify_target`.
+    /// Fixes the recorded intent's recovery target under the gate's admission, for a transition recorded before its target was known. The same target again changes nothing; another target is refused. A fixed target moves forward through `Self::recertify_target` after selection, and `Self::release_target` clears it for an unselected rebuild whose capture is gone.
     ///
     /// # Errors
     ///
@@ -975,11 +988,11 @@ impl ProjectionLifecycle {
         Ok(intent)
     }
 
-    /// Renews `expected`, a Rebuilding record whose deadline passed before `now`, for another attempt. The renewed record keeps every field but the episode accounting and `recorded_at`: the allowance keeps its size with nothing consumed, the deadline becomes `deadline`, and `recorded_at` becomes `now`. The attempt identity stays, so the construction's registration commit, keyed by it, replays its receipt and the renewed attempt reads through the consumer the expired one registered.
+    /// Renews `expected`, a renewable record that has lapsed at `now` (see [`LifecycleIntent::renewable`] and [`LifecycleIntent::lapsed`]), for another attempt. The renewed record keeps every field but the episode accounting and `recorded_at`: the allowance keeps its size with nothing consumed, the deadline becomes `deadline`, and `recorded_at` becomes `now`. The attempt identity stays, so the construction's registration commit, keyed by it, replays its receipt and the renewed attempt reads through the consumer the expired one registered.
     ///
     /// # Errors
     ///
-    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when `transition != Transition::Rebuilding` or `now <= episodes.deadline`, [`IntentRefusal::DeadlineExpired`] when `deadline <= now`, and the refusals of [`Self::admitted_intent`].
+    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when the record is not renewable or has not lapsed at `now`, [`IntentRefusal::DeadlineExpired`] when `deadline <= now`, and the refusals of [`Self::admitted_intent`].
     pub(crate) fn renew_expired(
         &self,
         gate: &HookGate,
@@ -994,7 +1007,7 @@ impl ProjectionLifecycle {
                 attempt_id: intent.attempt_id,
             });
         }
-        if intent.transition != Transition::Rebuilding || now <= intent.episodes.deadline {
+        if !intent.renewable() || !intent.lapsed(now) {
             return Err(IntentRefusal::IllegalCombination);
         }
         if deadline <= now {

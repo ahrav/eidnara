@@ -30,7 +30,7 @@ author. It adds one bounded obligation with two explicitly admitted modes.
   Disabled episode may still own obligations that recovery must reconcile.
 - `crates/daemon/src/kernel_routes/serving.rs:41-52` classifies lag/no-consumer
   state; classification alone does not drain work or admit recovery.
-- `crates/daemon/tests/transform_canonical_memory.rs:240-339` serves a
+- `crates/daemon/tests/transform_canonical_memory.rs:240-342` serves a
   canonical block while a test consumer stays stalled. Status: unaudited; it is
   not production catch-up or an authorized Disabled-to-Current controller.
 - That production controller and approved bounds are absent at HEAD. Hence

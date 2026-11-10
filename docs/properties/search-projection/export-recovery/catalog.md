@@ -386,7 +386,7 @@ Confidence: medium - [evidence](evidence/catchup-and-authorized-recovery-converg
 P defines CatchingUp/Current and operator recovery; current kernel primitives
 do not implement that production controller, which justifies `test-only`.
 Existing check: None for either complete episode. The real-kernel fixture at
-`crates/daemon/tests/transform_canonical_memory.rs:240-339` shows the memory
+`crates/daemon/tests/transform_canonical_memory.rs:240-342` shows the memory
 block served while a consumer stays stalled, not autonomous catch-up or
 authorization; status `unaudited`.
 Impact: A safe projection can remain stale or Disabled indefinitely despite

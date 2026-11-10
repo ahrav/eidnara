@@ -12,7 +12,7 @@ use kernel::{Surface, SurfaceVisibility};
 use memory_store::ProjectMemoryComposition;
 
 use crate::kernel_routes::read::{ReadResponse, RowSelection, read_visible};
-use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding, serving};
+use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding};
 use crate::m0_compose::trim_memories_to_budget;
 use crate::memory_render::{is_positive_memory_category, render_memory_line};
 
@@ -199,25 +199,20 @@ impl CanonicalMemoryRead {
 ///
 /// The read admits only memory-domain decisions before the row and byte caps apply, so a project whose other domains or observations are busy cannot crowd its memory rows out of the bounded read.
 ///
-/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. A served read samples the lag for the report, which logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`. Each change of verdict logs one line.
+/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag of the kernel health block the coordinator last published, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`. Each change of verdict logs one line.
 pub(crate) fn read_project_memory(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
-    now_ms: i64,
     memory_budget_tokens: f64,
 ) -> CanonicalMemoryRead {
     let read = read_at_tip(kernel, project, memory_budget_tokens);
     let observed = match &read {
         CanonicalMemoryRead::Withheld(verdict) => Observed::Withheld(verdict.state_key()),
-        CanonicalMemoryRead::Available(_) => match kernel
-            .kernel_store()
-            .ok()
-            .and_then(|store| store.outbox_lag(now_ms).ok())
-        {
-            Some(lag) if serving::lag_threshold_tripped(&lag) => Observed::ServedWhileDerivedLag {
-                consumers: lag.consumer_count,
-                lag_positions: lag.position_lag.unwrap_or(0),
-                oldest_unconsumed_age_ms: lag.oldest_unconsumed_age_ms.unwrap_or(0),
+        CanonicalMemoryRead::Available(_) => match &kernel.health_block().block.facts {
+            Some(facts) if facts.lag_threshold_tripped => Observed::ServedWhileDerivedLag {
+                consumers: facts.required_consumer_count,
+                lag_positions: facts.outbox_position_lag.unwrap_or(0),
+                oldest_unconsumed_age_ms: facts.oldest_unconsumed_age_ms.unwrap_or(0),
             },
             _ => Observed::Served,
         },
@@ -269,7 +264,7 @@ pub(crate) enum Observed {
     Withheld(String),
 }
 
-/// The last verdict the canonical memory reader logged, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either.
+/// The last verdict the canonical memory reader logged, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either. A read served before the first health sample, or after a failed one, has no lag facts and counts as plainly served.
 #[derive(Debug, Default)]
 pub(crate) struct ReadReport(std::sync::Mutex<Option<Observed>>);
 

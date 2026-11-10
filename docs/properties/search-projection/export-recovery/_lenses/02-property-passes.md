@@ -63,7 +63,7 @@ Recovery may replace derived state, not rewrite canonical truth to match it.
 An obsolete schema/tokenizer/model/policy/identity bundle must not regain
 authority by falling back to a stale projection. The existing canonical reader
 returns a withheld verdict on store or read failure and serves at any
-consumer lag (`crates/daemon/src/canonical_memory.rs:231-256`). Publication validation and
+consumer lag (`crates/daemon/src/canonical_memory.rs:226-251`). Publication validation and
 canonical authority therefore remain different properties.
 
 ## Distributed coordination
