@@ -33,7 +33,7 @@ details do not authorize a weaker acceptance threshold.
   result limit. Fidelity wording changes do not authorize broader searches.
 - [lib.rs:9257-9271](../../../../../crates/daemon/src/lib.rs#L9269-L9283)
   pins one canonical read for the pass. The
-  [reader](../../../../../crates/daemon/src/canonical_memory.rs#L195-L338)
+  [reader](../../../../../crates/daemon/src/canonical_memory.rs#L195-L349)
   applies scope, category, and budget selection before rendering, at any
   consumer lag.
 - [transform.rs:22965-22984,21111-21216](../../../../../crates/daemon/src/transform.rs#L22965-L22984)

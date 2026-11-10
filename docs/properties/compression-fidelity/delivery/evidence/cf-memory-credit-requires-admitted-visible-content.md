@@ -14,13 +14,13 @@ evidence. Inspected 2026-09-19 at
   reads canonical memory only when enabled and pins one read for the pass.
   The later [pass assembly](../../../../../crates/daemon/src/lib.rs#L9269-L9283)
   shares it with composition and producer preparation.
-- [canonical_memory.rs:226-251](../../../../../crates/daemon/src/canonical_memory.rs#L226-L251)
+- [canonical_memory.rs:219-244](../../../../../crates/daemon/src/canonical_memory.rs#L219-L244)
   captures the kernel tip and reads the bound project's `auto_inject`
   memory-domain decisions at it, at any consumer lag. Failure returns
   `Withheld`.
 - [kernel_routes/read.rs:162-186](../../../../../crates/daemon/src/kernel_routes/read.rs#L162-L186)
   filters by the bound project and scope before applying row limits.
-- [canonical_memory.rs:303-338](../../../../../crates/daemon/src/canonical_memory.rs#L303-L338)
+- [canonical_memory.rs:314-349](../../../../../crates/daemon/src/canonical_memory.rs#L314-L349)
   keeps visible positive decisions, then trims to the memory budget.
 - [admission.rs:3743-3753](../../../../../crates/kernel/src/admission.rs#L3743-L3753)
   distinguishes verified active automatic visibility from candidate/labeled,
@@ -37,7 +37,7 @@ evidence. Inspected 2026-09-19 at
   publication is therefore neither fact acceptance nor canonical admission.
 - [crates/daemon/tests/transform_canonical_memory.rs:48-217](../../../../../crates/daemon/tests/transform_canonical_memory.rs#L48-L217)
   checks candidate, scope, category, lifecycle exclusion, and warm reuse.
-  [canonical_memory.rs:617-686](../../../../../crates/daemon/src/canonical_memory.rs#L617-L686)
+  [canonical_memory.rs:672-741](../../../../../crates/daemon/src/canonical_memory.rs#L672-L741)
   checks budget exclusion and withheld-versus-empty metadata. Status: unaudited.
 
 Reachability is **default-production**: memory defaults enabled at

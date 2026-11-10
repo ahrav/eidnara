@@ -699,8 +699,9 @@ an open, empty store and shows both prompts lack the block while the two
 (`lib.rs:28576`) shows the field is absent from the wire, not `null`, both for
 a pass that did not fire and for a firing under a memory-disabled binding. All
 run in CI under `cargo test --workspace`.
-Guarantee: A HARD pass whose canonical memory read was not served (stale,
-abstained, or unavailable) composes no `<project-memory>` block and records
+Guarantee: A HARD pass whose canonical memory read was not served (withheld
+with the outcome of a store phase other than ready or a failed tip or
+visible-row read) composes no `<project-memory>` block and records
 `ProjectMemoryComposition::Withheld { state }` in `ModuleMeta.project_memory`
 and in the response, and a history_summarizer firing whose read was not served renders
 no block and records the same `Withheld { state }` in
@@ -725,7 +726,7 @@ not carry.
 Fault/timing angle: The read is taken once per pass in `lib.rs:7994`, through
 `Handler::project_memory_read` (`lib.rs:4834`), before the `run_transform`
 closure, and the same value is handed to a history_summarizer firing the pass triggers
-(`lib.rs:5104`), so a store phase change or lag change after that point cannot
+(`lib.rs:5104`), so a store phase change after that point cannot
 split one pass between a served block and a withheld record on either surface.
 Equality between `ModuleMeta.project_memory` and
 `HistorySummarizerDiagnostics.project_memory` in one response is not claimed:

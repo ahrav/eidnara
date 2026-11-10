@@ -223,10 +223,11 @@ impl LifecycleIntent {
         self.transition == Transition::Rebuilding && self.staged_seed_digest.is_none()
     }
 
-    /// Whether this attempt's wall-clock time is spent at `now`: its deadline has passed, or the record is renewable and was recorded more than [`CLOCK_STEP_TOLERANCE_MS`] after `now`, as when the wall clock stepped back past its recording. Renewal stamps a lapsed record again from `now`, so a clock step in either direction leaves a renewable rebuild at most one `B_recovery_ms` from its recording.
-    pub fn lapsed(&self, now: i64) -> bool {
-        now > self.episodes.deadline
-            || (self.renewable() && self.recorded_at > now.saturating_add(CLOCK_STEP_TOLERANCE_MS))
+    /// Whether the slice loop renews this record at `now`: it is renewable, and its deadline has passed or it was recorded more than [`CLOCK_STEP_TOLERANCE_MS`] after `now`, as when the wall clock stepped back past its recording. Renewal stamps the record again from `now`, so a clock stepped back past a recording leaves the renewed attempt one `B_recovery_ms` from the current clock. A step back smaller than the record's age leaves its recording behind the clock, and the attempt runs longer by the size of the step.
+    pub fn renewal_due(&self, now: i64) -> bool {
+        self.renewable()
+            && (now > self.episodes.deadline
+                || self.recorded_at > now.saturating_add(CLOCK_STEP_TOLERANCE_MS))
     }
 
     /// Whether `request` is a replay of this record: the same intent in every field the caller supplies.
@@ -988,11 +989,11 @@ impl ProjectionLifecycle {
         Ok(intent)
     }
 
-    /// Renews `expected`, a renewable record that has lapsed at `now` (see [`LifecycleIntent::renewable`] and [`LifecycleIntent::lapsed`]), for another attempt. The renewed record keeps every field but the episode accounting and `recorded_at`: the allowance keeps its size with nothing consumed, the deadline becomes `deadline`, and `recorded_at` becomes `now`. The attempt identity stays, so the construction's registration commit, keyed by it, replays its receipt and the renewed attempt reads through the consumer the expired one registered.
+    /// Renews `expected`, a record whose renewal is due at `now` (see [`LifecycleIntent::renewal_due`]), for another attempt. The renewed record keeps every field but the episode accounting and `recorded_at`: the allowance keeps its size with nothing consumed, the deadline becomes `deadline`, and `recorded_at` becomes `now`. The attempt identity stays, so the construction's registration commit, keyed by it, replays its receipt and the renewed attempt reads through the consumer the expired one registered.
     ///
     /// # Errors
     ///
-    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when the record is not renewable or has not lapsed at `now`, [`IntentRefusal::DeadlineExpired`] when `deadline <= now`, and the refusals of [`Self::admitted_intent`].
+    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when the record's renewal is not due at `now`, [`IntentRefusal::DeadlineExpired`] when `deadline <= now`, and the refusals of [`Self::admitted_intent`].
     pub(crate) fn renew_expired(
         &self,
         gate: &HookGate,
@@ -1007,7 +1008,7 @@ impl ProjectionLifecycle {
                 attempt_id: intent.attempt_id,
             });
         }
-        if !intent.renewable() || !intent.lapsed(now) {
+        if !intent.renewal_due(now) {
             return Err(IntentRefusal::IllegalCombination);
         }
         if deadline <= now {
@@ -1809,6 +1810,47 @@ mod tests {
             replacement_capture: None,
             recorded_at: 1,
             prior_disabled: None,
+        }
+    }
+
+    /// A renewal is due one millisecond past the deadline and one millisecond past the tolerance for a recording ahead of the clock, and never for a record holding a staged seed or for an authorized recovery.
+    #[test]
+    fn renewal_is_due_past_the_deadline_or_the_clock_step_tolerance_for_renewable_records() {
+        use super::CLOCK_STEP_TOLERANCE_MS;
+        let record = active();
+        assert!(!record.renewal_due(9));
+        assert!(record.renewal_due(10));
+        let ahead = LifecycleIntent {
+            recorded_at: 100 + CLOCK_STEP_TOLERANCE_MS,
+            episodes: EpisodeAccounting {
+                deadline: 1_000_000,
+                ..record.episodes
+            },
+            ..record.clone()
+        };
+        assert!(!ahead.renewal_due(100));
+        assert!(ahead.renewal_due(99));
+        for kept in [
+            LifecycleIntent {
+                staged_seed_digest: Some("d".repeat(64)),
+                ..record.clone()
+            },
+            LifecycleIntent {
+                transition: Transition::AuthorizedRecovery,
+                cause: Cause::DisabledRecovery,
+                authorization_ref: Some("operator:ok".to_owned()),
+                ..record.clone()
+            },
+        ] {
+            assert!(!kept.renewable());
+            assert!(!kept.renewal_due(10));
+            assert!(
+                !LifecycleIntent {
+                    recorded_at: 100 + CLOCK_STEP_TOLERANCE_MS + 1,
+                    ..kept
+                }
+                .renewal_due(99)
+            );
         }
     }
 

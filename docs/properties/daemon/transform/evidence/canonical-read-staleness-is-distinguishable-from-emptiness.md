@@ -25,9 +25,10 @@ Verified at HEAD.
 - `crates/daemon/src/canonical_memory.rs` (`read_project_memory` and
   `read_at_tip`): the store phase (`KernelOpenCoordinator::kernel_store`), the
   `tip` read, and the `read_visible` call each return `Withheld` carrying a
-  `KernelOutcome`. Outbox consumers maintain derived state, so their lag is
-  sampled after a served read only for the reader's log report and never
-  withholds it. Only a served read constructs `Available`, and it does so
+  `KernelOutcome`. Outbox consumers maintain derived state, so their lag never
+  withholds the read; the reader issues no lag query and marks a served read
+  for its log report from the lag facts of the kernel health block the
+  coordinator last published. Only a served read constructs `Available`, and it does so
   through `injectable_snapshot` (`:184-212`), which filters to visible
   positive-category decisions, trims them to the memory budget, and hands the
   trimmed rows to `CanonicalMemorySnapshot::new` (`:50`), which digests exactly
@@ -116,7 +117,8 @@ rematerialized when the store became ready.
 `withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`
 (`transform.rs:13282`) constructs exactly this at the injected-context seam;
 `a_stalled_consumer_leaves_project_memory_served_from_current_canonical_rows`
-(`tests/transform_canonical_memory.rs`) registers a consumer trailing the
+(`tests/transform_canonical_memory.rs`) is the control for the served arm: it
+withholds nothing, and it registers a consumer trailing the
 published outbox by the position threshold, shows a gated `kernel.read` report
 `stale` over that store, and shows the transform still serves the block from
 the canonical rows at the tip, including a statement committed while the
@@ -156,8 +158,7 @@ the store tip.
 ### Q: Is `Canonical { known_as_of: 0, .. }` reachable in production?
 
 - Sources examined: `read_project_memory` (`canonical_memory.rs`), which reads
-  `store.tip()` before the lag sample and passes it to `read_visible` as
-  `as_of`; `KernelStore::tip`
+  `store.tip()` and passes it to `read_visible` as `as_of`; `KernelStore::tip`
   (`crates/kernel/src/envelope.rs:569-575`, `COALESCE(MAX(commit_seq), 0)`).
 - Findings: a kernel store with no commits reports `tip() == 0`, so a served
   read of an empty store records `Canonical { known_as_of: 0, truncated: false,

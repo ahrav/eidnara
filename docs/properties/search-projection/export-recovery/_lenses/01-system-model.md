@@ -111,7 +111,7 @@ outbox rows does not establish that source bytes remain readable at S.
 An incomplete replacement can omit required context or resurrect a deleted
 occurrence. A paused projection consumer leaves the canonical memory block
 served; the transform property and its real-kernel integration fixture at
-`crates/daemon/tests/transform_canonical_memory.rs:240-342` cover that read.
+`crates/daemon/tests/transform_canonical_memory.rs:240-339` cover that read.
 Reuse its property rather than create another withheld-versus-empty record.
 
 ## Unproven assumptions

@@ -127,15 +127,18 @@ deadline has passed.
 
 A rebuild's deadline is a wall-clock time in the durable record, so a host
 suspend, a clock step, or a stall longer than the time left expires it while
-the daemon is idle. A record is lapsed when its deadline has passed, and a
-renewable record is also lapsed when it was recorded more than
+the daemon is idle. A renewable record is a Rebuilding record that holds no
+staged seed. Its renewal is due (`LifecycleIntent::renewal_due`) when its
+deadline has passed, or when it was recorded more than
 `CLOCK_STEP_TOLERANCE_MS` (1 second) after the current wall clock, as after
-the clock stepped back past its recording. A renewable record is a Rebuilding
-record that holds no staged seed.
+the clock stepped back past its recording. A step back smaller than the
+record's age leaves its recording behind the clock, and the attempt runs
+longer by the size of the step.
 
-A slice over a lapsed active record installs the records with no coverage, so
-every hook is denied and a cleanup keeps its evidence. For a renewable record
-the slice reports `SliceOutcome::Expired`, and the slice loop calls
+A slice over an active record whose deadline has passed, or whose renewal is
+due, installs the records with no coverage, so every hook is denied and a
+cleanup keeps its evidence. When the renewal is due the slice reports
+`SliceOutcome::Expired`, and the slice loop calls
 `SearchLifecycleOwner::renew_expired_rebuild`. That call reads the records and
 lane, refreshes admission on the selected family, and has
 `ProjectionLifecycle::renew_expired` rewrite the record for another attempt:
@@ -144,31 +147,35 @@ lane, refreshes admission on the selected family, and has
   target, and capture stay as recorded.
 - The allowance keeps its size with nothing consumed, the deadline becomes one
   `B_recovery_ms` from the renewal, and the renewal is the record's new
-  recording time. A clock step in either direction therefore leaves the
-  renewed attempt one `B_recovery_ms` from a recording on the current clock.
+  recording time, so the renewed attempt is one `B_recovery_ms` from a
+  recording on the current clock.
 
-A refused renewal write installs the records with no coverage again. The
-attempt identity keys the construction's consumer registration, so the
-renewed attempt replays that registration's receipt and reads through the
-consumer the expired attempt registered. No consumer is left registered
-without a record that names it, and the replaced family's consumer retires
-when the renewed rebuild completes.
+A `B_recovery_ms` within the one-second start margin is refused before
+anything is installed. A refused renewal write installs the records with no
+coverage again. The attempt identity keys the construction's consumer
+registration, so the renewed attempt replays that registration's receipt and
+reads through the consumer the expired attempt registered. No consumer is left
+registered without a record that names it, and the replaced family's consumer
+retires when the renewed rebuild completes.
 
 The loop attempts the first renewal at once, including one the first slice
 after a restart finds. Each attempt, recorded or refused, spaces the next one
-from it by `SLICE_IDLE` doubled per earlier attempt, up to
-`RENEWAL_BACKOFF_CAP` (10 minutes). The spacing runs alongside the renewed
-record's own `B_recovery_ms`, so a rebuild that keeps lapsing for a persistent
-cause is attempted at most once per cap interval. A record that reaches
-Current starts the schedule again.
+from it by `SLICE_IDLE` doubled per earlier attempt, running alongside the
+renewed record's own `B_recovery_ms`. The spacing reaches
+`RENEWAL_BACKOFF_CAP` (10 minutes) at the eighth attempt; from then on a
+rebuild that keeps expiring for a persistent cause is attempted at most once
+per cap interval. A record that reaches Current starts the schedule again.
 
-Two kinds of lapsed record stay in their intent record with every hook denied
-and report the slice blocked on the deadline. An authorized recovery keeps the
-bound its operator authorized. A rebuild that holds a staged seed keeps its
-accounting, because the staged family's certificate binds the record's episode
-accounting and recording time, whether or not the seed is selected yet. An
-operator's disable reconciles the staged family. `request_rebuild` records
-only over a Current record.
+Two kinds of expired record stay in their intent record with every hook
+denied and report the slice blocked on the deadline. An authorized recovery
+keeps the bound its operator authorized. A rebuild that holds a staged seed
+keeps its accounting, because the staged family's certificate binds the
+record's episode accounting and recording time, whether or not the seed is
+selected yet. An operator's disable reconciles a selected staged family. For an
+unselected staged seed the disable records the stop and reports that the
+disabled selection differs from the handoff; the stop then waits for an
+authorized recovery. `request_rebuild` records only over a
+Current record.
 
 An unselected rebuild whose fixed target the kernel tip has passed cannot
 capture at that target again, since a capture is taken at the tip. Its
@@ -183,10 +190,11 @@ than `catchup_lag_commits`, construction and renewal are denied `Stale`; a
 daemon restart loads no predecessor for an unselected rebuild, and the rebuild
 and its renewal are admitted on the unregistered observation.
 
-The daemon logs `search lifecycle rebuild expired: the record's deadline has
-passed` when a slice first finds a renewable record lapsed, and
-`search lifecycle renewed expired rebuild: attempt=<id> consumer=<id>
-cause=<cause> renewal_attempts=<n> deadline=<ms>` for each renewal.
+The daemon logs `search lifecycle rebuild expired: its deadline passed or the
+wall clock stepped back past its recording` when a slice first finds a
+record's renewal due, and `search lifecycle renewed expired rebuild:
+attempt=<id> consumer=<id> cause=<cause> renewal_attempts=<n> deadline=<ms>`
+for each renewal.
 
 ## Rollback
 
@@ -354,8 +362,12 @@ the slice loop's renewal of an expired rebuild found after a restart
 (`the_slice_loop_renews_an_expired_rebuild_found_after_a_restart`), the renewal
 of a record stamped ahead of a clock stepped back
 (`a_rebuild_recorded_ahead_of_a_clock_stepped_back_is_renewed_from_the_current_clock`),
-an expired authorized recovery left for the operator
-(`an_expired_authorized_recovery_is_left_for_the_operator`), the release
+an expired authorized recovery and an expired rebuild holding an unselected
+staged seed left for the operator
+(`an_expired_authorized_recovery_is_left_for_the_operator`,
+`an_expired_rebuild_holding_an_unselected_staged_seed_is_left_for_the_operator`),
+a refused renewal write
+(`a_refused_renewal_leaves_the_expired_record_and_admits_no_reader`), the release
 of a target the tip passed
 (`an_unselected_rebuild_behind_the_tip_releases_its_target_and_completes`), the real daemon loop rebuilding after a post-restart
 commit, direct FTS5 probes over a Current family, and exact-proof invalidation

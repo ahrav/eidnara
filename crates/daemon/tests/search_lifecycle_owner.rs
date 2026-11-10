@@ -5338,14 +5338,14 @@ fn an_expired_active_record_is_still_judged_on_the_current_observation() {
     gate.admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
         .expect("the selected family is fresh");
 
-    // Inside the deadline margin no slice starts work; the kernel keeps moving.
+    // The kernel moves past the family, then the slice runs inside the deadline margin, where no slice starts work. The commits land before the wait so the slice starts right after it, inside the margin rather than past the deadline.
+    for index in 0..=LAG_LIMIT {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
     let until_margin = short.deadline - 1_000 - now();
     std::thread::sleep(Duration::from_millis(
         u64::try_from(until_margin).unwrap_or(0) + 50,
     ));
-    for index in 0..=LAG_LIMIT {
-        corpus.publish(&format!("later-{index}"), "later text");
-    }
     let outcome = owner.run_slice(&slice_budget());
     assert!(
         matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline")),
@@ -7024,7 +7024,6 @@ async fn a_retried_operator_recovery_reopens_the_admission_an_unsynced_record_la
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_operator_recovery_of_an_unfinished_build_keeps_its_registered_consumer() {
-    use sha2::Digest as _;
     let root = tempfile::tempdir().unwrap();
     let home = root.path();
     let corpus = Corpus::open(home);
@@ -7033,25 +7032,13 @@ async fn an_operator_recovery_of_an_unfinished_build_keeps_its_registered_consum
     records(home);
     let owner = owner(home, &corpus.kernel);
     let _ = owner.run_slice(&slice_budget());
-    let request = rebuild(home);
-    owner.request(&request, now(), &slice_budget()).unwrap();
+    let recorded = owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap()
+        .expect("the rebuild is recorded")
+        .intent;
     // This commit reproduces the build's pre-construction consumer registration.
-    corpus
-        .kernel
-        .commit(
-            kernel::CommitIntent {
-                producer: "search-replacement".to_owned(),
-                operation_key: request.attempt_id.clone(),
-                request_digest: format!("{:x}", sha2::Sha256::digest(CONSUMER.as_bytes())),
-                actor: "daemon".to_owned(),
-                cause: "replacement capture".to_owned(),
-            },
-            |envelope| {
-                envelope.register_outbox_consumer(CONSUMER, now())?;
-                Ok(String::new())
-            },
-        )
-        .unwrap();
+    register_as_the_attempt_does(&corpus, &recorded);
     let unfinished = owner.disable(&slice_budget(), &mut |_| {}).await;
     assert!(unfinished.is_err(), "{unfinished:?}");
     assert!(matches!(control(home), ControlState::Disabled(_)));
@@ -7174,11 +7161,20 @@ async fn a_rebuild_expired_by_a_clock_step_is_renewed_and_its_consumer_reaches_t
         .renew_expired_rebuild(&slice_budget())
         .unwrap()
         .expect("the expired rebuild is renewed");
-    assert_eq!(renewed.attempt_id, recorded.attempt_id);
-    assert_eq!(renewed.consumer, recorded.consumer);
+    assert_eq!(
+        renewed,
+        daemon::projection_lifecycle::LifecycleIntent {
+            episodes: daemon::projection_lifecycle::EpisodeAccounting {
+                consumed: 0,
+                deadline: renewed.episodes.deadline,
+                ..recorded.episodes
+            },
+            recorded_at: renewed.recorded_at,
+            ..recorded.clone()
+        },
+        "only the episode accounting and the recording time change"
+    );
     assert_eq!(renewed.cause, Cause::CatchUpHoldLost);
-    assert_eq!(renewed.episodes.allowance, recorded.episodes.allowance);
-    assert_eq!(renewed.episodes.consumed, 0);
     assert_eq!(
         renewed.episodes.deadline - renewed.recorded_at,
         i64::try_from(LIMIT).unwrap()
@@ -7440,5 +7436,73 @@ async fn an_expired_authorized_recovery_is_left_for_the_operator() {
             .is_none()
     );
     assert_eq!(std::fs::read(&record).unwrap(), bytes);
+    owner.shutdown().await.unwrap();
+}
+
+/// A rebuild that expires while it holds a staged seed the selector does not name keeps its accounting, which the staged family's certificate binds: the slice reports the deadline and the renewal declines it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_expired_rebuild_holding_an_unselected_staged_seed_is_left_for_the_operator() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    owner
+        .request_rebuild(Cause::CatchUpHoldLost, now(), &slice_budget())
+        .unwrap()
+        .expect("a Current record takes the rebuild");
+    rewrite_record(home, |intent| {
+        intent.staged_seed_digest = Some("e".repeat(64));
+    });
+    let staged = step_clock_past_deadline(home);
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline")),
+        "{outcome:?}"
+    );
+    assert!(
+        owner
+            .renew_expired_rebuild(&slice_budget())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(control(home), ControlState::Intent(staged));
+    owner.shutdown().await.unwrap();
+}
+
+/// A renewal whose lifecycle write is refused, here because another holder has the lifecycle directory locked, leaves the expired record as it was and installs the records with no coverage again, so no reader pins the expired record; the renewal succeeds once the lock is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_refused_renewal_leaves_the_expired_record_and_admits_no_reader() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    owner
+        .request_rebuild(Cause::CatchUpHoldLost, now(), &slice_budget())
+        .unwrap()
+        .expect("a Current record takes the rebuild");
+    step_clock_past_deadline(home);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Expired
+    ));
+    let record = home.join("search-lifecycle").join("intent.json");
+    let bytes = std::fs::read(&record).unwrap();
+    let held = std::fs::File::open(home.join("search-lifecycle")).unwrap();
+    rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    assert!(owner.renew_expired_rebuild(&slice_budget()).is_err());
+    assert_eq!(std::fs::read(&record).unwrap(), bytes);
+    assert!(
+        owner.pin(&slice_budget()).is_err(),
+        "the expired record admits no reader"
+    );
+    drop(held);
+    assert!(
+        owner
+            .renew_expired_rebuild(&slice_budget())
+            .unwrap()
+            .is_some()
+    );
     owner.shutdown().await.unwrap();
 }

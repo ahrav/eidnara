@@ -199,25 +199,18 @@ impl CanonicalMemoryRead {
 ///
 /// The read admits only memory-domain decisions before the row and byte caps apply, so a project whose other domains or observations are busy cannot crowd its memory rows out of the bounded read.
 ///
-/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag of the kernel health block the coordinator last published, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`. Each change of verdict logs one line.
+/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag facts of the kernel health block the coordinator last published, while that block is fresh, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`. Each change of verdict logs one line.
 pub(crate) fn read_project_memory(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
     memory_budget_tokens: f64,
 ) -> CanonicalMemoryRead {
     let read = read_at_tip(kernel, project, memory_budget_tokens);
-    let observed = match &read {
-        CanonicalMemoryRead::Withheld(verdict) => Observed::Withheld(verdict.state_key()),
-        CanonicalMemoryRead::Available(_) => match &kernel.health_block().block.facts {
-            Some(facts) if facts.lag_threshold_tripped => Observed::ServedWhileDerivedLag {
-                consumers: facts.required_consumer_count,
-                lag_positions: facts.outbox_position_lag.unwrap_or(0),
-                oldest_unconsumed_age_ms: facts.oldest_unconsumed_age_ms.unwrap_or(0),
-            },
-            _ => Observed::Served,
-        },
-    };
-    if let Some(line) = kernel.memory_read_report().observe(observed) {
+    let published = kernel.health_block();
+    let facts = (!published.is_stale())
+        .then_some(published.block.facts.as_ref())
+        .flatten();
+    if let Some(line) = kernel.memory_read_report().observe(observed(&read, facts)) {
         eprintln!("daemon: project memory {line}");
     }
     read
@@ -250,6 +243,24 @@ fn read_at_tip(
     }
 }
 
+/// The verdict the report compares for `read`, marked with `facts`, the lag facts of a fresh health block.
+fn observed(
+    read: &CanonicalMemoryRead,
+    facts: Option<&crate::kernel_routes::health::KernelFactsBlock>,
+) -> Observed {
+    match (read, facts) {
+        (CanonicalMemoryRead::Withheld(verdict), _) => Observed::Withheld(verdict.state_key()),
+        (CanonicalMemoryRead::Available(_), Some(facts)) if facts.lag_threshold_tripped => {
+            Observed::ServedWhileDerivedLag {
+                consumers: facts.required_consumer_count,
+                lag_positions: facts.outbox_position_lag.unwrap_or(0),
+                oldest_unconsumed_age_ms: facts.oldest_unconsumed_age_ms.unwrap_or(0),
+            }
+        }
+        (CanonicalMemoryRead::Available(_), _) => Observed::Served,
+    }
+}
+
 /// One read's verdict as the report compares it with the last one logged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Observed {
@@ -264,7 +275,7 @@ pub(crate) enum Observed {
     Withheld(String),
 }
 
-/// The last verdict the canonical memory reader logged, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either. A read served before the first health sample, or after a failed one, has no lag facts and counts as plainly served.
+/// The last verdict the canonical memory reader logged, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either. A read served before the first health sample, after a failed one, or after the published block went stale has no lag facts and counts as plainly served.
 #[derive(Debug, Default)]
 pub(crate) struct ReadReport(std::sync::Mutex<Option<Observed>>);
 
@@ -351,6 +362,50 @@ mod tests {
             consumers: 2,
             lag_positions,
             oldest_unconsumed_age_ms: 61_000,
+        }
+    }
+
+    /// A withheld read is observed by its state key whatever the lag facts; a served read is lagging only with fresh facts whose threshold tripped, and otherwise plainly served.
+    #[test]
+    fn a_read_is_observed_by_its_verdict_and_the_fresh_lag_facts() {
+        use crate::kernel_routes::health::KernelFactsBlock;
+        let facts = |tripped| KernelFactsBlock {
+            core_file_bytes: 0,
+            core_file_warn: false,
+            artifact_usage_bytes: 0,
+            artifact_cap_bytes: 0,
+            artifact_warn: false,
+            outbox_position_lag: Some(12_000),
+            oldest_unconsumed_age_ms: Some(61_000),
+            retained_outbox_rows: 0,
+            required_consumer_count: 2,
+            lag_threshold_tripped: tripped,
+        };
+        let served =
+            CanonicalMemoryRead::Available(CanonicalMemorySnapshot::new(4, false, Vec::new()));
+        let withheld = CanonicalMemoryRead::Withheld(KernelOutcome::unavailable(
+            UnavailableReason::StoreStarting,
+        ));
+        assert_eq!(
+            observed(&withheld, Some(&facts(true))),
+            Observed::Withheld(withheld_state(&withheld))
+        );
+        assert_eq!(observed(&served, None), Observed::Served);
+        assert_eq!(observed(&served, Some(&facts(false))), Observed::Served);
+        assert_eq!(
+            observed(&served, Some(&facts(true))),
+            Observed::ServedWhileDerivedLag {
+                consumers: 2,
+                lag_positions: 12_000,
+                oldest_unconsumed_age_ms: 61_000,
+            }
+        );
+    }
+
+    fn withheld_state(read: &CanonicalMemoryRead) -> String {
+        match read {
+            CanonicalMemoryRead::Withheld(verdict) => verdict.state_key(),
+            CanonicalMemoryRead::Available(_) => unreachable!(),
         }
     }
 
