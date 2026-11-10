@@ -24,6 +24,7 @@ use crate::projection_gates::{
 };
 use crate::projection_lifecycle::{
     IntentRefusal, LifecycleIntent, ProjectionLifecycle, RecoveryTarget, ReplacementCapture,
+    Transition,
 };
 use crate::search_catchup::{
     Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeEvent, SearchCatchUp,
@@ -562,6 +563,16 @@ impl<'a> ReplacementBuilder<'a> {
         let mut expected = intent.clone();
         if !staging {
             expected.replacement_capture = None;
+            // The cleanup above cleared the capture; a fixed target the tip has passed is released so this capture fixes the target again.
+            if expected.transition == Transition::Rebuilding
+                && expected
+                    .recovery_target
+                    .is_some_and(|target| target.commit_seq < fresh.through_commit)
+            {
+                expected = self
+                    .lifecycle
+                    .release_target(self.gate, &expected, wall_ms()?)?;
+            }
         }
         self.lifecycle
             .consume_expected_episode(self.gate, &expected, wall_ms()?)?;
@@ -578,7 +589,7 @@ impl<'a> ReplacementBuilder<'a> {
             return self.stage(&run, observer);
         }
         self.incarnation = Some(fresh.incarnation);
-        self.target = match intent.recovery_target {
+        self.target = match expected.recovery_target {
             Some(fixed) if fixed.commit_seq > fresh.through_commit => {
                 return Err(BuildError::Blocked(Blocked::Read(
                     CommitReadError::TargetBeyondTip,

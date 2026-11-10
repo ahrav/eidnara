@@ -330,7 +330,10 @@ impl SearchSelection {
             }
         }
         if !is_selected {
-            if let Some(target) = intent.recovery_target {
+            // A rebuild's builder releases a target the tip has passed; a recovery keeps the target it was recorded with.
+            if intent.transition == Transition::AuthorizedRecovery
+                && let Some(target) = intent.recovery_target
+            {
                 let fresh = kernel
                     .capture_commit_read_target_within_budget(budget)
                     .map_err(BuildError::from)?;

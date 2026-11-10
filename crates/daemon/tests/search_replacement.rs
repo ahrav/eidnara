@@ -1112,8 +1112,9 @@ fn interrupted_export_restarts_at_fresh_s_without_renewing_allowance() {
     assert_eq!(candidate.staged().verification.occurrences, 6);
 }
 
+/// A rebuild's retry after the tip passed its fixed target releases the target once the cleanup cleared the capture, captures a fresh S at the tip, and fixes the target there, spending one more episode and keeping the deadline; the consumer stays registered at its acknowledgement until the new candidate's catch-up acknowledges past it.
 #[test]
-fn a_retry_with_s_beyond_the_recorded_target_blocks_instead_of_moving_t() {
+fn a_retry_with_s_beyond_the_recorded_target_recaptures_and_fixes_a_later_t() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
     corpus.seed();
@@ -1131,23 +1132,30 @@ fn a_retry_with_s_beyond_the_recorded_target_blocks_instead_of_moving_t() {
         .err()
         .unwrap();
     let original = control(root.path());
-    let acknowledged = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    let fixed = original.recovery_target.unwrap().commit_seq;
     corpus.publish("later", "beyond fixed target");
-    let failure = failure
+    let later_tip = corpus.tip();
+    assert!(later_tip > fixed);
+    let candidate = failure
         .retry(&budget(Duration::from_secs(30)), &mut |_| {})
-        .err()
         .unwrap();
-    assert!(
-        matches!(failure.error, BuildError::SnapshotBeyondTarget { snapshot, target } if snapshot > target)
-    );
-    assert!(failure.cleanup_error.is_none());
-    let refused = control(root.path());
-    assert_eq!(refused.recovery_target, original.recovery_target);
-    assert_eq!(refused.episodes.deadline, original.episodes.deadline);
-    assert_eq!(refused.episodes.consumed, 2);
     assert_eq!(
-        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
-        acknowledged
+        candidate.staged().verification.snapshot_commit_seq,
+        later_tip
+    );
+    let retried = control(root.path());
+    assert_eq!(
+        retried.recovery_target.map(|target| target.commit_seq),
+        Some(later_tip)
+    );
+    assert_eq!(retried.episodes.deadline, original.episodes.deadline);
+    assert_eq!(retried.episodes.consumed, 2);
+    assert!(
+        corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap()
+            .is_some_and(|acknowledged| acknowledged >= fixed)
     );
 }
 

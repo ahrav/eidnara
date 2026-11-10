@@ -93,7 +93,7 @@ pub struct ConsumerBinding {
     pub generation_id: String,
 }
 
-/// The kernel commit the transition must reach; fixed when first established, never moved by a retry, and moved forward only by `ProjectionLifecycle::recertify_target` after selection.
+/// The kernel commit the transition must reach; fixed when first established and kept by a retry that resumes the construction. `ProjectionLifecycle::recertify_target` moves it forward after selection, and `ProjectionLifecycle::release_target` clears it for an unselected rebuild whose capture is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryTarget {
@@ -939,6 +939,73 @@ impl ProjectionLifecycle {
             return Err(IntentRefusal::DeadlineExpired);
         }
         intent.recovery_target = Some(target);
+        self.replace(&intent, &admission)?;
+        Ok(intent)
+    }
+
+    /// Clears the recovery target of `expected`, a Rebuilding record that holds no capture and no staged seed. A capture taken at a kernel tip past a fixed target cannot end at that target, so an unselected rebuild releases the target and fixes it again at its next capture.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when `transition != Transition::Rebuilding` or the record holds a capture or staged seed, [`IntentRefusal::DeadlineExpired`] when `now > episodes.deadline`, and the refusals of [`Self::admitted_intent`].
+    pub(crate) fn release_target(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+        now: i64,
+    ) -> Result<LifecycleIntent, IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        if intent.transition != Transition::Rebuilding
+            || intent.staged_seed_digest.is_some()
+            || intent.replacement_capture.is_some()
+        {
+            return Err(IntentRefusal::IllegalCombination);
+        }
+        if now > intent.episodes.deadline {
+            return Err(IntentRefusal::DeadlineExpired);
+        }
+        intent.recovery_target = None;
+        self.replace(&intent, &admission)?;
+        Ok(intent)
+    }
+
+    /// Renews `expected`, a Rebuilding record whose deadline passed before `now`, for another attempt. The renewed record keeps every field but the episode accounting and `recorded_at`: the allowance keeps its size with nothing consumed, the deadline becomes `deadline`, and `recorded_at` becomes `now`. The attempt identity stays, so the construction's registration commit, keyed by it, replays its receipt and the renewed attempt reads through the consumer the expired one registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when `transition != Transition::Rebuilding` or `now <= episodes.deadline`, [`IntentRefusal::DeadlineExpired`] when `deadline <= now`, and the refusals of [`Self::admitted_intent`].
+    pub(crate) fn renew_expired(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+        deadline: i64,
+        now: i64,
+    ) -> Result<LifecycleIntent, IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        if intent.transition != Transition::Rebuilding || now <= intent.episodes.deadline {
+            return Err(IntentRefusal::IllegalCombination);
+        }
+        if deadline <= now {
+            return Err(IntentRefusal::DeadlineExpired);
+        }
+        intent.episodes = EpisodeAccounting {
+            allowance: intent.episodes.allowance,
+            consumed: 0,
+            deadline,
+        };
+        intent.recorded_at = now;
         self.replace(&intent, &admission)?;
         Ok(intent)
     }

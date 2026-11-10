@@ -30,7 +30,7 @@ states:
 | State | Meaning |
 |---|---|
 | Absent | No projection exists. Installed admission records let the slice loop record the first build (`Cause::Registration`). |
-| Intent | A rebuild or authorized recovery is in progress. The record fixes the cause, attempt identity, consumer binding, allowance, and deadline. A restart resumes it and renews nothing. |
+| Intent | A rebuild or authorized recovery is in progress. The record fixes the cause, attempt identity, consumer binding, allowance, and deadline. A restart resumes it as recorded. A rebuild whose deadline passes is renewed by the slice loop (see [Expiry and renewal](#expiry-and-renewal)). |
 | Current | The selected family reached its fixed target. Later slices judge it on its coverage and catch it up toward the kernel tip. |
 | Disabled | Admission is closed. Only an authorized recovery reopens the record. |
 | Unavailable | The record cannot be trusted. Every hook is denied and nothing is released. |
@@ -49,7 +49,10 @@ Each lifecycle slice:
    episode toward the tip under the family's source hold.
 
 A slice ends within the manifest's `supervisor_slice_ms`, within the caller's
-budget, and for an Intent within the record's own deadline.
+budget, and for an Intent within the record's own deadline. The time a slice
+takes as left before that deadline is at most the record's own duration, its
+deadline less the time it was recorded, so a wall clock stepped back cannot
+extend an attempt past the bound it was recorded under.
 
 ## Rebuilds of a Current family
 
@@ -110,7 +113,8 @@ acknowledges it through the tip, and the Current family catches up or
 rebuilds from there. A family that applied the tip before the restart
 recertifies and completes. Each slice that stops before the family reaches
 the tip spends one episode, so a record whose slices keep stopping short is
-blocked once its allowance is spent.
+blocked once its allowance is spent, until its deadline passes and the slice
+loop renews it.
 
 The completion slice validates the selected family's rows against the kernel
 inventory before it retires the old consumer. The reopen at the start of the
@@ -121,8 +125,57 @@ receipt transaction as its only change since, the selected consumer's
 acknowledgement lies inside the validated prefix, and no pending job's episode
 deadline has passed.
 
-A record whose deadline passes before it completes stays in its intent record
-with every hook denied; `request_rebuild` records only over a Current record.
+## Expiry and renewal
+
+A rebuild's deadline is a wall-clock time in the durable record, so a host
+suspend, a clock step, or a stall longer than the time left expires it while
+the daemon is idle. A slice over an active record whose deadline has passed
+installs the records with no coverage, so every hook is denied and a cleanup
+keeps its evidence. For a Rebuilding record whose staged seed, if any, is not
+the selected generation, the slice reports `SliceOutcome::Expired`. The slice loop then
+calls `SearchLifecycleOwner::renew_expired_rebuild`, which reads the records
+and lane, refreshes admission on the selected family, and has
+`ProjectionLifecycle::renew_expired` rewrite the record for another attempt:
+
+- The transition, generations, consumer binding, cause, attempt identity,
+  target, capture, and staged seed stay as recorded.
+- The allowance keeps its size with nothing consumed, the deadline becomes one
+  `B_recovery_ms` from the renewal, and the renewal is the record's new
+  recording time.
+
+The attempt identity keys the construction's consumer registration, so the
+renewed attempt replays that registration's receipt and reads through the
+consumer the expired attempt registered. No consumer is left registered
+without a record that names it, and the replaced family's consumer still
+retires when the renewed rebuild completes. A renewed record disposes of any
+staged seed and starts its construction again.
+
+The loop renews the first expiry it sees at once, including one found by the
+first slice after a restart. Each later renewal before the record reaches
+Current waits `SLICE_IDLE` doubled per earlier renewal, up to
+`RENEWAL_BACKOFF_CAP` (10 minutes), so a rebuild that keeps failing for a
+persistent cause costs at most one attempt per cap interval beyond its own
+`B_recovery_ms`. A record that reaches Current resets the count. A refused
+renewal is retried at the next slice.
+
+Two expired records stay in their intent record with every hook denied and
+report the slice blocked on the deadline: an authorized recovery, whose bound
+is the one the operator authorized, and a rebuild whose staged seed is already
+selected, since the selected family's certificate binds the record's deadline.
+An operator's disable reconciles the selected rebuild's family. `request_rebuild`
+records only over a Current record.
+
+An unselected rebuild whose fixed target the kernel tip has passed cannot
+capture at that target again, since a capture is taken at the tip. Its
+builder clears the capture first and then releases the target through
+`ProjectionLifecycle::release_target`, and the next capture fixes the target
+at the tip it captures. An authorized recovery keeps its target and reports
+`SnapshotBeyondTarget`.
+
+The daemon logs `search lifecycle rebuild expired: the record's deadline has
+passed` when a slice first finds the record expired, and
+`search lifecycle renewed expired rebuild: attempt=<id> consumer=<id>
+cause=<cause> renewal=<n> deadline=<ms>` for each renewal.
 
 ## Rollback
 
@@ -284,7 +337,12 @@ audited abandonment is the operator action that releases it.
 ## Witnesses
 
 `crates/daemon/tests/search_lifecycle_owner.rs` covers registration, restart
-resumption, catch-up, the real daemon loop rebuilding after a post-restart
+resumption, catch-up, the renewal of a rebuild a clock step expired
+(`a_rebuild_expired_by_a_clock_step_is_renewed_and_its_consumer_reaches_the_tip`),
+the slice loop's renewal of an expired rebuild found after a restart
+(`the_slice_loop_renews_an_expired_rebuild_found_after_a_restart`), the release
+of a target the tip passed
+(`an_unselected_rebuild_behind_the_tip_releases_its_target_and_completes`), the real daemon loop rebuilding after a post-restart
 commit, direct FTS5 probes over a Current family, and exact-proof invalidation
 across a daemon restart. Rebuilds driven through the owner reach Current for
 `CatchUpHoldLost` (after a restart, after a released hold within one lease, and

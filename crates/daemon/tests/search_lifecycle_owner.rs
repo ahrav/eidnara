@@ -11,7 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use daemon::projection_admission::{ADMISSION_DIR, EVIDENCE_RECORD, InputRefusal};
 use daemon::projection_gates::{Denial, EntryPoint, Gate, ProjectionHook};
 use daemon::projection_lifecycle::{
-    Cause, ConsumerBinding, ControlState, LifecycleRequest, ProjectionLifecycle, Transition,
+    Cause, ConsumerBinding, ControlState, LifecycleRequest, ProjectionLifecycle, RecoveryTarget,
+    Transition,
 };
 use daemon::search_catchup::{
     Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeEvent, SearchCatchUp,
@@ -3391,10 +3392,17 @@ async fn an_expired_record_keeps_the_evidence_a_disable_needs() {
         SliceOutcome::Advanced(RecoveryProgress::Selected)
     ));
     tokio::time::sleep(Duration::from_millis(4_100)).await;
+    // The selected family's certificate binds the record's deadline, so the record is left for the operator rather than renewed.
     let outcome = owner.run_slice(&slice_budget());
     assert!(
         matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline")),
         "{outcome:?}"
+    );
+    assert!(
+        owner
+            .renew_expired_rebuild(&slice_budget())
+            .unwrap()
+            .is_none()
     );
     owner
         .disable(&slice_budget(), &mut |_| {})
@@ -7071,4 +7079,272 @@ async fn an_operator_recovery_of_an_unfinished_build_keeps_its_registered_consum
         ControlState::Current(intent) => assert_eq!(intent.consumer.consumer_id, CONSUMER),
         state => panic!("the recovery did not reach Current: {state:?}"),
     }
+}
+
+/// Steps the wall clock past the active record's deadline, as a host suspend or a clock step longer than the time left does. The record's timestamps move back by the time left plus one second, which is the record a forward step of the clock leaves behind, and the record keeps its own duration. The record is replaced by rename at owner-only mode, as the lifecycle writes it.
+fn step_clock_past_deadline(home: &Path) -> daemon::projection_lifecycle::LifecycleIntent {
+    let ControlState::Intent(mut intent) = control(home) else {
+        panic!("an active record");
+    };
+    let step = intent.episodes.deadline - now() + 1_000;
+    intent.episodes.deadline -= step;
+    intent.recorded_at -= step;
+    let dir = home.join("search-lifecycle");
+    let temp = dir.join("intent.step.tmp");
+    std::fs::write(&temp, serde_json::to_vec(&intent).unwrap()).unwrap();
+    std::fs::set_permissions(&temp, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    std::fs::rename(&temp, dir.join("intent.json")).unwrap();
+    assert_eq!(control(home), ControlState::Intent(intent.clone()));
+    intent
+}
+
+/// Drives `owner` until `done`, as the slice loop does without its backoff: a rebuild the slice asks for is recorded and an expired rebuild is renewed. Returns the slices run and the renewals recorded.
+async fn drive_renewing(
+    owner: &SearchLifecycleOwner,
+    limit: usize,
+    mut done: impl FnMut() -> bool,
+) -> (usize, usize) {
+    let mut renewals = 0;
+    for slice in 1..=limit {
+        if done() {
+            return (slice - 1, renewals);
+        }
+        match owner.run_slice(&slice_budget()) {
+            SliceOutcome::RotateMaintenance(handle) => {
+                owner.stop_maintenance(&handle).await.unwrap();
+            }
+            SliceOutcome::Rebuild(cause) => {
+                owner
+                    .request_rebuild(cause, now(), &slice_budget())
+                    .unwrap()
+                    .expect("a Current record takes the rebuild");
+            }
+            SliceOutcome::Expired => {
+                owner
+                    .renew_expired_rebuild(&slice_budget())
+                    .unwrap()
+                    .expect("an expired rebuild is renewed");
+                renewals += 1;
+            }
+            SliceOutcome::Blocked(reason) => panic!("blocked: {reason}"),
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+    (limit, renewals)
+}
+
+/// A rebuild whose deadline a wall-clock step passes before it completes, as a host suspend longer than `B_recovery_ms` does, reports itself expired with every hook denied; renewing it keeps the attempt and its consumer, grants a fresh allowance and deadline, and the renewed rebuild reaches Current holding a commit made after the step, with its consumer at the kernel tip and the replaced family's consumer retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_rebuild_expired_by_a_clock_step_is_renewed_and_its_consumer_reaches_the_tip() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let recorded = owner
+        .request_rebuild(Cause::CatchUpHoldLost, now(), &slice_budget())
+        .unwrap()
+        .expect("a Current record takes the rebuild")
+        .intent;
+    assert_eq!(recorded.consumer.consumer_id, "search-projection-1");
+
+    let recorded = step_clock_past_deadline(home);
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Expired), "{outcome:?}");
+    assert_eq!(control(home), ControlState::Intent(recorded.clone()));
+    assert!(
+        owner.pin(&slice_budget()).is_err(),
+        "an expired record admits no reader"
+    );
+    let later = corpus.publish("later", "later text");
+
+    let renewed = owner
+        .renew_expired_rebuild(&slice_budget())
+        .unwrap()
+        .expect("the expired rebuild is renewed");
+    assert_eq!(renewed.attempt_id, recorded.attempt_id);
+    assert_eq!(renewed.consumer, recorded.consumer);
+    assert_eq!(renewed.cause, Cause::CatchUpHoldLost);
+    assert_eq!(renewed.episodes.allowance, recorded.episodes.allowance);
+    assert_eq!(renewed.episodes.consumed, 0);
+    assert_eq!(
+        renewed.episodes.deadline - renewed.recorded_at,
+        i64::try_from(LIMIT).unwrap()
+    );
+    assert!(renewed.recorded_at > recorded.episodes.deadline);
+    assert_eq!(control(home), ControlState::Intent(renewed.clone()));
+    assert!(
+        owner
+            .renew_expired_rebuild(&slice_budget())
+            .unwrap()
+            .is_none(),
+        "a record whose deadline is ahead is not renewed"
+    );
+
+    let (slices, renewals) = drive_renewing(&owner, 20, || {
+        matches!(control(home), ControlState::Current(ref current) if current.attempt_id == renewed.attempt_id)
+    })
+    .await;
+    assert!(slices < 20, "the renewed rebuild reached Current");
+    assert_eq!(
+        renewals, 0,
+        "the renewed rebuild completes within its deadline"
+    );
+    let mut settled = false;
+    for _ in 0..10 {
+        if matches!(owner.run_slice(&slice_budget()), SliceOutcome::Current) {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "the rebuilt family settles at the tip");
+    assert!(indexed_objects(&owner).contains(&later));
+    assert_eq!(
+        corpus
+            .kernel
+            .outbox_consumer_checkpoint("search-projection-1")
+            .unwrap(),
+        Some(corpus.tip())
+    );
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None,
+        "retirement deregisters the replaced family's consumer"
+    );
+    owner.shutdown().await.unwrap();
+}
+
+/// An unselected rebuild whose fixed target the kernel tip has passed, as one whose first capture was lost after it fixed the target, releases the target before its next capture and reaches Current at a later target, holding the commit that moved the tip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_unselected_rebuild_behind_the_tip_releases_its_target_and_completes() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let ControlState::Current(current) = control(home) else {
+        panic!("the first rebuild reached Current");
+    };
+    let fixed = corpus.tip();
+    let mut again = rebuild(home);
+    again.selected_generation = current.staged_seed_digest.clone().unwrap();
+    again.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    again.attempt_id = "rebuild-again".to_owned();
+    again.recovery_target = Some(RecoveryTarget { commit_seq: fixed });
+    owner.request(&again, now(), &slice_budget()).unwrap();
+    let later = corpus.publish("later", "later text");
+    assert!(corpus.tip() > fixed);
+
+    let (slices, _) = drive_renewing(&owner, 20, || {
+        matches!(control(home), ControlState::Current(ref current) if current.attempt_id == "rebuild-again")
+    })
+    .await;
+    assert!(slices < 20, "the rebuild reached Current");
+    let ControlState::Current(done) = control(home) else {
+        unreachable!()
+    };
+    assert!(
+        done.recovery_target
+            .is_some_and(|target| target.commit_seq > fixed),
+        "{done:?}"
+    );
+    assert!(indexed_objects(&owner).contains(&later));
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None
+    );
+    owner.shutdown().await.unwrap();
+}
+
+/// An expired rebuild persisted across a daemon restart is renewed by the restarted daemon's slice loop, which drives it to Current with its consumer at the kernel tip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_slice_loop_renews_an_expired_rebuild_found_after_a_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    converge_once(home, &corpus).await;
+
+    // A restart ends the family's hold, so the next commit earns a rebuild, which is recorded and left unfinished at the next restart.
+    drop(corpus);
+    let corpus = Corpus::open(home);
+    let first = owner(home, &corpus.kernel);
+    assert!(matches!(
+        first.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let later = corpus.publish("later", "later text");
+    let outcome = first.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::CatchUpHoldLost)),
+        "{outcome:?}"
+    );
+    first
+        .request_rebuild(Cause::CatchUpHoldLost, now(), &slice_budget())
+        .unwrap()
+        .expect("a Current record takes the rebuild");
+    first.shutdown().await.unwrap();
+    drop(first);
+    drop(corpus);
+
+    let recorded = step_clock_past_deadline(home);
+    let corpus = Corpus::open(home);
+    let restarted = Arc::new(owner(home, &corpus.kernel));
+    assert!(matches!(
+        restarted.run_slice(&slice_budget()),
+        SliceOutcome::Expired
+    ));
+    assert_eq!(control(home), ControlState::Intent(recorded.clone()));
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let loop_task = tokio::spawn(daemon::search_lifecycle_owner::run_slices(
+        Arc::clone(&restarted),
+        cancel.clone(),
+    ));
+    let started = Instant::now();
+    loop {
+        if let ControlState::Current(current) = control(home)
+            && current.attempt_id == recorded.attempt_id
+            && corpus
+                .kernel
+                .outbox_consumer_checkpoint(&recorded.consumer.consumer_id)
+                .unwrap()
+                == Some(corpus.tip())
+        {
+            assert!(
+                current.recorded_at > recorded.episodes.deadline,
+                "{current:?}"
+            );
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the renewed rebuild did not reach Current: {:?}",
+            control(home)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cancel.cancel();
+    loop_task.await.unwrap();
+    assert!(indexed_objects(&restarted).contains(&later));
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None
+    );
+    restarted.shutdown().await.unwrap();
+}
+
+/// The loop renews the first expiry at once and doubles its wait from `SLICE_IDLE` per renewal that has not reached Current, up to the cap.
+#[test]
+fn renewal_backoff_doubles_from_the_idle_period_to_its_cap() {
+    use daemon::search_lifecycle_owner::{RENEWAL_BACKOFF_CAP, SLICE_IDLE, renewal_backoff};
+    assert_eq!(renewal_backoff(0), Duration::ZERO);
+    assert_eq!(renewal_backoff(1), SLICE_IDLE);
+    assert_eq!(renewal_backoff(2), SLICE_IDLE * 2);
+    assert_eq!(renewal_backoff(4), SLICE_IDLE * 8);
+    assert_eq!(renewal_backoff(8), RENEWAL_BACKOFF_CAP);
+    assert_eq!(renewal_backoff(u32::MAX), RENEWAL_BACKOFF_CAP);
 }
