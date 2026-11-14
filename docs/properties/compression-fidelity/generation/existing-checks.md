@@ -73,14 +73,14 @@ retry, tier-floor, and renderer checks retain their endpoint ownership.
 | [tool-registry.test.ts:32-44,69-82][registry-tests] | The enabled registry has `eidnara_reduce`, `eidnara_search`, `eidnara_note`, and `eidnara_memory`; the disabled plugin registers nothing. This does not review the summarizer's recovery promises. | unaudited |
 | [tool-registry.test.ts:272-319][registry-tests], `keeps guidance within the registered memory address and search-source contracts` | Checks memory addresses and memory-only search guidance in four named daemon assets. The summarizer prompt and generated hint footer are not among those assets. | unaudited |
 | [search tools.test.ts:151-182,202-232][search-tests] | Empty sources issue no read, unsupported sources report errors, and text search ranks canonical memory summaries through `explicit_search`. | unaudited |
-| [search tools.test.ts:428-439][search-tests], `advertises only the memory source in both the full and light descriptions` | Pins memory-only description strings. It does not establish arbitrary guidance meaning or exact-source recovery. | unaudited |
+| [search tools.test.ts:452-463][search-tests], `advertises only the memory source in both the full and light descriptions` | Pins memory-only description strings. It does not establish arbitrary guidance meaning or exact-source recovery. | unaudited |
 | [transform.rs:8609-8634][transform], `render_user_hint` | The UTF-16 cap assertion bounds hint size. Since #926 the footer offers a project-memory search for the fragments' topic instead of full-context recovery; the cap does not validate the footer's meaning. | unaudited |
 | [history_summarizer.rs:3186-3219][driver], `stored_history_segment_importance_is_clamped_before_narrowing` | Checks default/clamp conversion of importance. It does not compare real importance outputs or effective serving after rubric changes. | unaudited |
 
 The contradiction is inspected, not inferred from test names: prompt lines
 [130,212][system-prompt] assume search recovery while [17,362][system-prompt]
 disclaim it; [history hint candidates:8286-8316][transform] feed the footer,
-but [the registered executor:172-260][search-execute] searches memory only.
+but [the registered executor:170-268][search-execute] searches memory only.
 This is static evidence for a named false premise, not an executed consumer
 incident or a waiver of U5's witness and dependency requirements.
 
