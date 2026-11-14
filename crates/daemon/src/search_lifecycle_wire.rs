@@ -124,10 +124,23 @@ impl HandlerCore {
             Ok(()) => json!({ "state": "admitted" }),
             Err(reason) => json!({ "state": "refused", "reason": reason }),
         };
+        let (progress, tip) = owner.progress(&budget());
         response(json!({
             "kind": "status",
             "record": record_json(&owner.lifecycle_record()),
             "admission": admission,
+            "progress": {
+                "tip": tip,
+                "checkpoint": progress.checkpoint,
+                "lag_commits": tip.zip(progress.checkpoint).map(|(tip, checkpoint)| tip.saturating_sub(checkpoint).max(0)),
+                "observed_at": progress.observed_at,
+                "rebuilds": {
+                    "recorded": progress.rebuilds_recorded,
+                    "completed": progress.rebuilds_completed,
+                    "renewed": progress.rebuilds_renewed,
+                },
+                "blocked": progress.blocked,
+            },
         }))
     }
 

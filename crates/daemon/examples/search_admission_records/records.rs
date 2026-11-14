@@ -28,6 +28,9 @@ const REBUILD_ALLOWANCE: u64 = 3;
 
 const HOUR_MS: u64 = 60 * 60 * 1000;
 
+/// Commits a reader's family may trail the kernel by. The slice loop applies new commits once per idle period of five seconds, so a caught-up family trails by the commits of one period; 1,024 admits a reader through a period of 200 commits per second, above what the kernel's single writer sustains. A family that falls further behind is refused to readers until its catch-up brings it back.
+pub const READER_LAG_COMMITS: u64 = 1024;
+
 /// The runtime manifest and campaign evidence records for the parsed bundle manifest `bundle`.
 pub fn records(bundle: &Value) -> Result<(Value, Value), String> {
     let text = |key: &str| {
@@ -79,7 +82,7 @@ pub fn records(bundle: &Value) -> Result<(Value, Value), String> {
         ("B_recovery_ms", 4 * HOUR_MS),
         ("B_authorized_recovery_ms", 4 * HOUR_MS),
         ("physical_drain_ms", 4 * HOUR_MS),
-        ("catchup_lag_commits", 64),
+        ("catchup_lag_commits", READER_LAG_COMMITS),
     ];
     // Probe override, removed before review: `R2_LIMITS` is a JSON object of limit values.
     let probe: std::collections::BTreeMap<String, u64> = std::env::var("R2_LIMITS")

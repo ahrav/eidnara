@@ -5142,9 +5142,9 @@ async fn shutdown_with_no_grace_releases_a_free_manager() {
     owner.shutdown().await.unwrap();
 }
 
-/// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
+/// A Current family that trails the kernel past the freshness limit is judged on its own coverage: the slice refuses it as stale, as a reader's pin is refused, and still runs the family's catch-up episode, which applies the commits it trails by. Readers pin it again at the tip once the slice ends.
 #[test]
-fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {
+fn a_current_family_that_trails_the_kernel_past_the_limit_is_refused_as_stale_and_caught_up() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path();
     let corpus = Corpus::open(home);
@@ -5178,37 +5178,44 @@ fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {
     assert!(lag > i64::try_from(LAG_LIMIT).unwrap());
     let outcome = owner.run_slice(&slice_budget());
     assert!(
-        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains(&format!("trails the kernel by {lag}"))),
+        matches!(&outcome, SliceOutcome::CaughtUp(report) if report.batches_applied > 0),
         "{outcome:?}"
     );
-    assert_eq!(
-        owner
-            .admission()
-            .gate()
-            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
-            .unwrap_err(),
-        Denial::Stale {
-            lag,
-            max: LAG_LIMIT
-        }
-    );
-    // The next slice observes the family's coverage again; the gate's denial does not hide it.
-    let outcome = owner.run_slice(&slice_budget());
+    let gate = owner.admission().gate();
+    let ledger = gate.ledger();
+    let stale = Denial::Stale {
+        lag,
+        max: LAG_LIMIT,
+    };
     assert!(
-        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains(&format!("trails the kernel by {lag}"))),
-        "{outcome:?}"
+        ledger.iter().any(|entry| {
+            entry.hook == ProjectionHook::EmbeddingBootstrap
+                && entry.entry == EntryPoint::Reload
+                && entry.verdict == Err(stale.clone())
+        }),
+        "the slice judged the family on its own coverage and refused it as stale: {ledger:?}"
     );
+    assert!(
+        ledger.iter().any(|entry| {
+            entry.hook == ProjectionHook::GitDurableRows
+                && entry.entry == EntryPoint::Dispatch
+                && entry.verdict == Ok(())
+        }),
+        "the catch-up episode was admitted past the limit: {ledger:?}"
+    );
+    // The slice observed the family again after its episode, so readers and maintenance are admitted at the tip.
     assert_eq!(
         owner
-            .admission()
-            .gate()
-            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
-            .unwrap_err(),
-        Denial::Stale {
-            lag,
-            max: LAG_LIMIT
-        }
+            .pin(&slice_budget())
+            .unwrap()
+            .coverage(&slice_budget())
+            .unwrap()
+            .checkpoint
+            .checkpoint_commit_seq,
+        corpus.tip()
     );
+    gate.admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .expect("the caught-up family is fresh");
 }
 
 /// Disabling `EmbeddingBootstrap` blocks that hook without stopping the coverage observation the enabled hooks are judged on; restoring the manifest re-admits it in the same process.

@@ -29,7 +29,7 @@ use crate::projection_admission::{
     AdmissionInputs, Closed, InputRefusal, ProjectionAdmission, Refresh, SelectedProjection,
 };
 use crate::projection_gates::{
-    Denial, EntryPoint, Gate, InvalidationIdentity, ProjectionHook, RuntimeManifest,
+    Denial, EntryPoint, Gate, ProjectionHook, RuntimeManifest,
 };
 use crate::projection_lifecycle::{
     Cause, ConsumerBinding, ControlState, IntentRefusal, LifecycleIntent, LifecycleRequest,
@@ -201,10 +201,31 @@ pub struct SearchLifecycleOwner {
     claim_batch: std::sync::atomic::AtomicUsize,
     /// `preparation_refused` preserves the last slice's [`SpecRefusal::code`] so status can report the refusal while the gate reports `no_manifest`.
     preparation_refused: Mutex<Option<&'static str>>,
+    /// What the slices of this daemon process observed and recorded, for the status surface.
+    progress: Mutex<ProjectionProgress>,
     /// Makes the directory sync after the next authorized recovery's record rename fail once, on every selection this owner creates.
     #[cfg(feature = "test-support")]
     /// `(armed, _)`: while armed, the directory sync after the next record rename in a recovery write fails once, on whichever selection this owner created.
     recovery_sync_failure: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// How far the selected family trails the kernel and what the slice loop did about it, since this daemon process started. The status surface reports it, so an operator or a test harness reads the projection's lag and its rebuild outcomes without parsing the log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectionProgress {
+    /// The commit the selected family had applied at the last slice's observation of it; `None` until a slice observes a selected family, and again once a slice finds none it can read.
+    pub checkpoint: Option<i64>,
+    /// The wall-clock time of that observation, in milliseconds since the Unix epoch.
+    pub observed_at: Option<i64>,
+    /// First builds and rebuilds the loop recorded.
+    pub rebuilds_recorded: u64,
+    /// Recorded builds that reached Current.
+    pub rebuilds_completed: u64,
+    /// Renewals of a rebuild whose deadline lapsed.
+    pub rebuilds_renewed: u64,
+    /// The reason the last slice gave for leaving the record where it was, followed by the reason the selected family's coverage could not be observed when that is what denied it; `None` after a slice that advanced or found the family current.
+    pub blocked: Option<String>,
+    /// Why the last observation of the selected family failed; `None` after one that succeeded.
+    unobserved: Option<String>,
 }
 
 #[cfg(feature = "test-support")]
@@ -286,6 +307,7 @@ impl SearchLifecycleOwner {
             claims_paused: Arc::default(),
             claim_batch: std::sync::atomic::AtomicUsize::new(CLAIM_SLICE_BOUNDS.batch.get()),
             preparation_refused: Mutex::new(None),
+            progress: Mutex::new(ProjectionProgress::default()),
             #[cfg(feature = "test-support")]
             recovery_sync_failure: Arc::default(),
         }
@@ -850,6 +872,61 @@ impl SearchLifecycleOwner {
         ProjectionLifecycle::read_at(&self.home)
     }
 
+    /// The progress the slices of this process observed, and the kernel tip read now, so the lag describes what a reader meets at this moment; the tip is `None` when the kernel cannot be read within `budget`.
+    pub fn progress(&self, budget: &EvalBudget) -> (ProjectionProgress, Option<i64>) {
+        let progress = self.lock_progress().clone();
+        (progress, self.kernel.tip_within_budget(budget).ok())
+    }
+
+    fn lock_progress(&self) -> MutexGuard<'_, ProjectionProgress> {
+        self.progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Keeps a slice's observation of the selected family: the commit it had applied, or why it could not be read.
+    fn observed(&self, checkpoint: Result<i64, String>) {
+        let mut progress = self.lock_progress();
+        progress.observed_at = Some(crate::now_ms());
+        match checkpoint {
+            Ok(checkpoint) => {
+                progress.checkpoint = Some(checkpoint);
+                progress.unobserved = None;
+            }
+            Err(reason) => {
+                progress.checkpoint = None;
+                progress.unobserved = Some(reason);
+            }
+        }
+    }
+
+    /// Keeps what a slice's outcome says about the record for the status surface, and logs a build that reached Current with the time its record took, so a log reader sees each rebuild's end as well as its start.
+    fn observe_outcome(&self, outcome: &SliceOutcome) {
+        let completed = matches!(outcome, SliceOutcome::Advanced(RecoveryProgress::Current));
+        {
+            let mut progress = self.lock_progress();
+            progress.blocked = stalled(outcome).map(|(_, detail)| match &progress.unobserved {
+                Some(reason) => format!("{detail}; coverage: {reason}"),
+                None => detail,
+            });
+            if completed {
+                progress.rebuilds_completed += 1;
+            }
+        }
+        if completed && let ControlState::Current(record) = self.lifecycle_record() {
+            eprintln!(
+                "daemon: search lifecycle rebuild completed: attempt={} consumer={} cause={:?} target={} elapsed_ms={}",
+                record.attempt_id,
+                record.consumer.consumer_id,
+                record.cause,
+                record
+                    .recovery_target
+                    .map_or_else(|| "none".to_owned(), |target| target.commit_seq.to_string()),
+                crate::now_ms().saturating_sub(record.recorded_at),
+            );
+        }
+    }
+
     /// Records an operator's rebuild of the Current family through the next registered consumer, under the bounds a slice's rebuild takes; `None` when the record is not Current.
     ///
     /// # Errors
@@ -1164,7 +1241,17 @@ impl SearchLifecycleOwner {
         }
         if completed && selection.holds_operation(&intent) {
             // The family was reopened and revalidated when this owner first held it; a later slice judges it on its coverage and kernel without reopening it.
-            return match selection.check_selected(&self.kernel, self.admission.gate(), &budget) {
+            let checked = match selection.check_selected(
+                &self.kernel,
+                self.admission.gate(),
+                &budget,
+            ) {
+                // A family that trails the kernel past the freshness limit is refused to readers and still caught up: the episode applies the commits it trails by, and the refresh after it re-admits readers once the family is back inside the limit.
+                Err(BuildError::Denied(Denial::Stale { .. })) => selection
+                    .check_selected_for_catch_up(&self.kernel, self.admission.gate(), &budget),
+                checked => checked,
+            };
+            return match checked {
                 Ok(()) => {
                     self.settle_current(selection, &inputs, &spec, &intent, &identity, &budget)
                 }
@@ -1273,20 +1360,16 @@ impl SearchLifecycleOwner {
         {
             return Ok(None);
         }
-        let reader = selection.pin(&self.kernel, self.admission.gate(), budget)?;
-        let grants = self.admission.gate().admit_all(
+        // The episode is admitted on every gate except freshness, which it restores.
+        let reader = selection.pin_for_catch_up(&self.kernel, self.admission.gate(), budget)?;
+        let grants = self.admission.gate().admit_catch_up(
             &[
                 ProjectionHook::EmbeddingBootstrap,
                 ProjectionHook::GitDurableRows,
             ],
-            EntryPoint::Dispatch,
+            identity,
+            &spec.catchup_page_charges(),
         )?;
-        let expected = InvalidationIdentity::from(identity);
-        for grant in &grants {
-            self.admission
-                .gate()
-                .check_limits(grant, &expected, &spec.catchup_page_charges())?;
-        }
         let consumer = CatchUpConsumer {
             binding: SourceHoldBinding {
                 consumer_id: reader.consumer().consumer_id.clone(),
@@ -1468,12 +1551,21 @@ impl SearchLifecycleOwner {
                     && *selection.identity() == *identity
                     && !selection.selected_over_another_kernel(&self.kernel, budget) =>
             {
-                selection
-                    .observe_selected(budget)
+                let observed = selection.observe_selected(budget);
+                self.observed(
+                    observed
+                        .as_ref()
+                        .map(|report| report.checkpoint.checkpoint_commit_seq)
+                        .map_err(ToString::to_string),
+                );
+                observed
                     .ok()
                     .map(|report| ProjectionCoverage::unjudged(report, tip))
             }
-            _ => Some(ProjectionCoverage::unregistered(identity, tip)),
+            _ => {
+                self.observed(Err("no family is selected under the running identity".to_owned()));
+                Some(ProjectionCoverage::unregistered(identity, tip))
+            }
         };
         self.admission.refresh_with(
             inputs.clone(),
@@ -2426,6 +2518,7 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
         if let Some(report) = reporter.report(&outcome, Instant::now()) {
             eprintln!("daemon: search lifecycle {report}");
         }
+        owner.observe_outcome(&outcome);
         if cancel.is_cancelled() {
             return;
         }
@@ -2465,6 +2558,13 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
                 // A recording that succeeds ends the run of refusals, so the first refusal of a later stall is printed.
                 if recorded.is_some() {
                     registration_reporter = SliceReporter::default();
+                    let mut progress = owner.lock_progress();
+                    match recording {
+                        Recording::Renewal => progress.rebuilds_renewed += 1,
+                        Recording::Registration | Recording::Rebuild(_) => {
+                            progress.rebuilds_recorded += 1;
+                        }
+                    }
                 }
                 recorded.is_some()
             }
@@ -2570,43 +2670,42 @@ struct SliceReporter {
     last: Option<(ReportKind, String, Instant)>,
 }
 
+/// The kind and text of a slice outcome that left the record short of Current, or `None` for an outcome that advanced it, found it current, or handed work back.
+fn stalled(outcome: &SliceOutcome) -> Option<(ReportKind, String)> {
+    Some(match outcome {
+        SliceOutcome::Blocked(reason) => (ReportKind::Blocked, format!("did not advance: {reason}")),
+        SliceOutcome::Unavailable(reason) => (
+            ReportKind::Unavailable,
+            format!("did not advance: {reason}"),
+        ),
+        SliceOutcome::Closed(refusal) => (ReportKind::Closed, format!("admission closed: {refusal}")),
+        SliceOutcome::CaughtUp(EpisodeReport {
+            end: EpisodeEnd::Blocked(blocked),
+            ..
+        }) => (
+            ReportKind::CatchUpBlocked,
+            format!("catch-up blocked: {blocked:?}"),
+        ),
+        SliceOutcome::Rebuild(cause) => (ReportKind::Rebuild, format!("rebuild required: {cause:?}")),
+        SliceOutcome::Expired => (
+            ReportKind::Expired,
+            "rebuild expired: its deadline passed or the wall clock stepped back past its recording"
+                .to_owned(),
+        ),
+        SliceOutcome::Unregistered
+        | SliceOutcome::Advanced(_)
+        | SliceOutcome::Current
+        | SliceOutcome::CaughtUp(_)
+        | SliceOutcome::RotateMaintenance(_)
+        | SliceOutcome::Disabled => return None,
+    })
+}
+
 impl SliceReporter {
     fn report(&mut self, outcome: &SliceOutcome, now: Instant) -> Option<String> {
-        let (kind, detail) = match outcome {
-            SliceOutcome::Blocked(reason) => {
-                (ReportKind::Blocked, format!("did not advance: {reason}"))
-            }
-            SliceOutcome::Unavailable(reason) => (
-                ReportKind::Unavailable,
-                format!("did not advance: {reason}"),
-            ),
-            SliceOutcome::Closed(refusal) => {
-                (ReportKind::Closed, format!("admission closed: {refusal}"))
-            }
-            SliceOutcome::CaughtUp(EpisodeReport {
-                end: EpisodeEnd::Blocked(blocked),
-                ..
-            }) => (
-                ReportKind::CatchUpBlocked,
-                format!("catch-up blocked: {blocked:?}"),
-            ),
-            SliceOutcome::Rebuild(cause) => {
-                (ReportKind::Rebuild, format!("rebuild required: {cause:?}"))
-            }
-            SliceOutcome::Expired => (
-                ReportKind::Expired,
-                "rebuild expired: its deadline passed or the wall clock stepped back past its recording"
-                    .to_owned(),
-            ),
-            SliceOutcome::Unregistered
-            | SliceOutcome::Advanced(_)
-            | SliceOutcome::Current
-            | SliceOutcome::CaughtUp(_)
-            | SliceOutcome::RotateMaintenance(_)
-            | SliceOutcome::Disabled => {
-                self.last = None;
-                return None;
-            }
+        let Some((kind, detail)) = stalled(outcome) else {
+            self.last = None;
+            return None;
         };
         let print = match &self.last {
             Some((last_kind, last_detail, printed_at)) if *last_kind == kind => {
@@ -2625,7 +2724,7 @@ impl SliceReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::projection_gates::REQUIRED_LIMITS;
+    use crate::projection_gates::{InvalidationIdentity, REQUIRED_LIMITS};
 
     fn claim_report(end: MaterializationEnd, scanned: usize) -> MaterializationReport {
         MaterializationReport {

@@ -546,6 +546,28 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
         }),
         "a checkpoint past the observed tip is not a fresh observation"
     );
+    // The catch-up episode applies the commits a trailing family lacks, so it is admitted past the limit while every other gate still judges it; a checkpoint past the observed tip is refused for it too.
+    assert_eq!(stale.judge_catch_up(hook), Ok(()));
+    assert_eq!(
+        ahead.judge_catch_up(hook),
+        Err(Denial::Stale {
+            lag: -1,
+            max: u64::MAX
+        })
+    );
+    let mut stale_unmeasured = stale.clone();
+    stale_unmeasured.evidence.resource = None;
+    assert_eq!(
+        stale_unmeasured.judge_catch_up(hook),
+        Err(Denial::Missing(Gate::Resource)),
+        "a trailing family's catch-up is still judged on the gates after freshness"
+    );
+    let mut stale_disabled = stale.clone();
+    stale_disabled.manifest.enabled.insert(hook, false);
+    assert_eq!(
+        stale_disabled.judge_catch_up(hook),
+        Err(Denial::Disabled(hook))
+    );
 
     let mut charge_observer = passing();
     charge_observer.evidence.resource.as_mut().unwrap().observer =

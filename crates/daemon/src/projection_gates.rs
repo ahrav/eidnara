@@ -709,6 +709,15 @@ pub enum Renewal {
     Disabled,
 }
 
+/// Whether an admission is judged on the freshness gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Freshness {
+    /// The family's coverage observation is within `catchup_lag_commits` of the kernel.
+    Required,
+    /// The admitted work applies the commits the family trails by.
+    Restored,
+}
+
 /// One manifest, the projection identity the daemon runs with, one evidence packet, and the compression binding the daemon itself runs under, when it knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceEvaluator {
@@ -745,8 +754,24 @@ impl EvidenceEvaluator {
         self.compression()
     }
 
+    /// Judges `hook` for the catch-up episode of the selected family: every gate [`Self::judge`] applies, with a family that trails the kernel past `catchup_lag_commits` admitted. The episode applies the commits the family trails by, so it is the work that brings a family back inside the freshness limit, and its readers stay judged by [`Self::judge`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Denial`].
+    pub fn judge_catch_up(&self, hook: ProjectionHook) -> Result<(), Denial> {
+        if !self.manifest.enabled.get(&hook).copied().unwrap_or(false) {
+            return Err(Denial::Disabled(hook));
+        }
+        self.gates_with(hook, Freshness::Restored)
+    }
+
     /// Both identities, then class coverage for `hook`, freshness, resource, capability, and both-harness evidence.
     fn gates(&self, hook: ProjectionHook) -> Result<(), Denial> {
+        self.gates_with(hook, Freshness::Required)
+    }
+
+    fn gates_with(&self, hook: ProjectionHook, freshness: Freshness) -> Result<(), Denial> {
         if self.manifest.identity != self.current {
             return Err(Denial::ManifestIdentity);
         }
@@ -759,7 +784,12 @@ impl EvidenceEvaluator {
             .as_ref()
             .ok_or(Denial::Missing(Gate::ClassCoverage))?;
         self.class_coverage(hook, coverage)?;
-        self.freshness(coverage)?;
+        match (self.freshness(coverage), freshness) {
+            (Ok(()), _) => {}
+            // Catch-up applies the commits a trailing family lacks. A checkpoint past the observed tip has none to apply and is refused for catch-up as for a reader.
+            (Err(Denial::Stale { lag, .. }), Freshness::Restored) if lag > 0 => {}
+            (Err(denial), _) => return Err(denial),
+        }
         self.resource()?;
         self.capability()?;
         self.both_harness()
@@ -1335,6 +1365,73 @@ impl HookGate {
                     }),
             );
         verdicts.into_iter().collect()
+    }
+
+    /// Admits `hooks` for the catch-up episode of the selected family and checks `expected` and `requested` as [`Self::check_limits`] does, under one gate state. Each hook is judged by [`EvidenceEvaluator::judge_catch_up`], so a family that trails the kernel past `catchup_lag_commits` is still caught up while every other admission refuses it as stale. The grants carry the invalidation token every grant carries. With `test-support`, the ledger records each verdict at [`EntryPoint::Dispatch`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`Denial`] in `hooks` order, then the identity or limit denial.
+    pub(crate) fn admit_catch_up(
+        &self,
+        hooks: &[ProjectionHook],
+        expected: &ProjectionIdentity,
+        requested: &[(&str, u64)],
+    ) -> Result<Vec<Admission>, Denial> {
+        if hooks.is_empty() {
+            return Err(Denial::NoManifest);
+        }
+        let entry = EntryPoint::Dispatch;
+        let mut state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
+        let observed = self.observe_stop(state.as_deref_mut());
+        let verdicts: Vec<Result<Admission, Denial>> = hooks
+            .iter()
+            .map(|hook| {
+                observed.clone()?;
+                let state = state.as_deref().ok_or(Denial::NoManifest)?;
+                if state.disabled {
+                    return Err(Denial::RecoveryRequired);
+                }
+                let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
+                evaluator.judge_catch_up(*hook)?;
+                Ok(Admission {
+                    hook: *hook,
+                    entry,
+                    invalidated: state.invalidated.clone(),
+                })
+            })
+            .collect();
+        let limits = state
+            .as_deref()
+            .and_then(|state| state.evaluator.as_ref())
+            .ok_or(Denial::NoManifest)
+            .and_then(|evaluator| {
+                if evaluator.current != *expected {
+                    return Err(Denial::EvidenceIdentity);
+                }
+                requested_within(evaluator, requested)
+            });
+        drop(state);
+        #[cfg(feature = "test-support")]
+        self.ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(
+                hooks
+                    .iter()
+                    .zip(&verdicts)
+                    .map(|(hook, verdict)| LedgerEntry {
+                        hook: *hook,
+                        entry,
+                        verdict: verdict.as_ref().map(|_| ()).map_err(Clone::clone),
+                    }),
+            );
+        let grants: Vec<Admission> = verdicts.into_iter().collect::<Result<_, _>>()?;
+        limits?;
+        if grants.iter().any(|grant| grant.invalidated.is_cancelled()) {
+            return Err(Denial::Invalidated);
+        }
+        Ok(grants)
     }
 
     /// # Errors
