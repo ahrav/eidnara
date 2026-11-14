@@ -33,7 +33,7 @@ outside the domain never fails this read." Lens: protocol contracts; C4.
 - Daemon re-check: `crates/daemon/src/kernel_routes/read.rs:108-116`
   `RowSelection::keeps` re-checks `object_kind == "decision" && domain_id ==
   domain_id` on each returned row ("Applied in the kernel query as well;
-  `keeps` re-checks each returned row", `:84`).
+  `keeps` re-checks each returned row", `:103`).
 - Tests: `crates/kernel/tests/kernel_canonical_read.rs:227`
   `the_domain_selection_equals_the_filtered_full_read`; `:448`
   `the_domain_selection_reads_no_row_of_another_domains_payload_pressure`;

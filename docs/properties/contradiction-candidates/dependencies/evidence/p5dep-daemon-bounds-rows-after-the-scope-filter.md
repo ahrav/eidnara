@@ -5,7 +5,8 @@ HEAD `3a3b916b7`. Surface S2.
 ## Discovery trigger
 
 Plan U1 "Patterns to follow: `crates/daemon/src/kernel_routes/read.rs:216`
-for the scope-filtered decision read." The daemon read is the only bounded
+for the scope-filtered decision read." (the plan cited line 185; the call is
+at line 216 now). The daemon read is the only bounded
 consumer of the unbounded Kernel API. Lens: resource boundaries; C6.
 
 ## Evidence trail
@@ -22,8 +23,11 @@ consumer of the unbounded Kernel API. Lens: resource boundaries; C6.
   `dropped`; `finish` returns `into_sorted_vec` and `dropped`.
 - `read.rs:182-292` `read_visible`, which delegates to `read_visible_page`:
   - `:201-218` Kernel read with `project.scope_term()`.
-  - `:219-230` `ScopeFilter`, the `before` cursor filter, then `NewestRows::new(MAX_READ_ROWS)`; the
-    comment explains the bound cannot be a SQL `LIMIT`.
+  - `:219-230` builds `ScopeFilter` and `NewestRows::new(MAX_READ_ROWS)`, then
+    pushes each row that passes `selection.keeps`, the `before` cursor
+    (`ReadCursor::precedes`, `:78-82`; set by `kernel.read` alone), and
+    `ScopeFilter::matches`, in that order; the comment explains the bound
+    cannot be a SQL `LIMIT`.
   - `:232-241` payload sizes read via `decision_payload_sizes_as_of` for the
     kept decision ids before any payload; comment: "a project can retain
     `MAX_READ_ROWS` decisions of ~1 MiB each, and materializing them all

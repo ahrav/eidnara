@@ -309,8 +309,9 @@ Open questions:
 ### p5dep-daemon-bounds-rows-after-the-scope-filter
 
 Type: safety
-Reachability: default-production - `read_visible` (`read.rs:182`) is the
-only path behind `kernel.read` and the in-process `DomainDecisions` callers.
+Reachability: default-production - `read_visible_page` (`read.rs:193`) is the
+only path behind `kernel.read` (`read.rs:482`) and, through `read_visible`
+(`read.rs:182`), the in-process `DomainDecisions` callers.
 Status: active
 Exercised: yes - `crates/daemon/tests/kernel_routes.rs:1958`, `:2080`,
 `:2112` construct over-cap row counts and over-budget payloads.
@@ -344,8 +345,8 @@ Re-exercised by #1167: the pass bounds its candidate set with `NewestRows`
 after the scope filter; the test at
 `crates/daemon/src/candidate_pass_tests.rs:665` cuts the two oldest at a
 reduced cap.
-Impact: a P5 pass that copies this pattern (plan U1 "patterns to follow"
-`read.rs:216`) inherits a bound that is applied after full materialization of
+Impact: a P5 pass that copies this pattern (plan U1 "patterns to follow",
+cited there as line 185 and now at `read.rs:216`) inherits a bound that is applied after full materialization of
 the Kernel rows; see the next record.
 Open questions: None.
 

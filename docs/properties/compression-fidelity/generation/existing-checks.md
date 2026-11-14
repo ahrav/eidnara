@@ -80,7 +80,7 @@ retry, tier-floor, and renderer checks retain their endpoint ownership.
 The contradiction is inspected, not inferred from test names: prompt lines
 [130,212][system-prompt] assume search recovery while [17,362][system-prompt]
 disclaim it; [history hint candidates:8286-8316][transform] feed the footer,
-but [the registered executor:170-268][search-execute] searches memory only.
+but [the registered executor:168-263][search-execute] searches memory only.
 This is static evidence for a named false premise, not an executed consumer
 incident or a waiver of U5's witness and dependency requirements.
 
