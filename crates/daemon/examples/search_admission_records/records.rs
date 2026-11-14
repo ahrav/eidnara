@@ -11,17 +11,22 @@ use serde_json::Value;
 
 use crate::projection_gate;
 
-/// Replaces the fixture's four-commit `LAG_LIMIT` with `LIMIT`. Each tool turn commits its transcript to the kernel, so a four-commit lag marks a reader stale between slices, and `LIMIT` lets a search read the family while it catches up.
-const LAG_COMMITS: u64 = projection_gate::LIMIT;
+/// Encoded evidence the records admit one source hold to pin: the kernel's artifact cap (`DEFAULT_ARTIFACT_CAP` in `crates/kernel/src/cas/mod.rs`), so a hold over every live descriptor is admitted on any store the kernel admits.
+const EVIDENCE_BYTES: u64 = 4 << 30;
 
-/// Catch-up applies each commit within one window of at most `local_transaction_rows / 2` and `local_transaction_bytes / 4 / 4096` rows and `catchup_batch_encoded_bytes / 2` payload bytes, and exports at most the least of `catchup_batch_source_bytes`, `export_live_decoded_bytes / 2`, and `local_transaction_bytes / 4` source bytes per window; a commit past that window stops catch-up at that commit. A source publication writes three rows per descriptor, and one capture batch carries up to 32 units of 64 KiB, so the fixture's `LIMIT` of 1,000,000 for all of them admits windows of only 61 rows and 250,000 source bytes, and a publication of 21 descriptors, which a session of a few dozen tool calls produces, stops catch-up. These values admit windows of 4,096 rows, 8 MiB of payload, and 8 MiB of source, four times a whole capture batch's text.
-const WINDOW_LIMITS: [(&str, u64); 5] = [
-    ("local_transaction_rows", 2 * 4096),
-    ("local_transaction_bytes", 4 * 4096 * 4096),
-    ("catchup_batch_encoded_bytes", 2 * (8 << 20)),
-    ("catchup_batch_source_bytes", 8 << 20),
-    ("export_live_decoded_bytes", 2 * (8 << 20)),
-];
+/// Decoded source text the records admit. A descriptor exports a span of its evidence, and descriptors that share an artifact each export their span, so the text is bounded at twice the evidence.
+const TEXT_BYTES: u64 = 2 * EVIDENCE_BYTES;
+
+/// Source descriptor revisions the records admit.
+const DESCRIPTORS: u64 = 1 << 20;
+
+/// Bytes the closed projection file may occupy. The file stores each occurrence's text twice (payload and lexical content), its lexical index, one 768-float vector, and about 2 KiB of row keys.
+const PROJECTION_BYTES: u64 = 8 * EVIDENCE_BYTES;
+
+/// Episodes a rebuild record carries; the seed bound divides the disk limit across them and two more.
+const REBUILD_ALLOWANCE: u64 = 3;
+
+const HOUR_MS: u64 = 60 * 60 * 1000;
 
 /// The runtime manifest and campaign evidence records for the parsed bundle manifest `bundle`.
 pub fn records(bundle: &Value) -> Result<(Value, Value), String> {
@@ -53,8 +58,41 @@ pub fn records(bundle: &Value) -> Result<(Value, Value), String> {
         vector_dimension: u32::try_from(number("dims")?).map_err(|error| error.to_string())?,
         generation_epoch: number("table_epoch")?,
     };
-    let mut overrides = vec![("catchup_lag_commits", LAG_COMMITS)];
-    overrides.extend(WINDOW_LIMITS);
+    let mut overrides: Vec<(&str, u64)> = vec![
+        ("local_transaction_rows", 12 * DESCRIPTORS),
+        ("export_page_rows", DESCRIPTORS),
+        ("capture_reference_count", DESCRIPTORS),
+        ("pending_count", DESCRIPTORS),
+        ("pending_bytes", 256 * DESCRIPTORS),
+        ("catchup_batch_source_bytes", TEXT_BYTES),
+        ("export_live_decoded_bytes", 2 * TEXT_BYTES),
+        ("local_transaction_bytes", 4 * TEXT_BYTES),
+        ("catchup_batch_encoded_bytes", 2 * EVIDENCE_BYTES),
+        (
+            "capture_disk_bytes",
+            (4 * EVIDENCE_BYTES).max(2 * (REBUILD_ALLOWANCE + 2) * (PROJECTION_BYTES + (64 << 10))),
+        ),
+        ("export_page_encoded_bytes", 1 << 20),
+        ("export_row_standalone_encoded_bytes", 1 << 20),
+        ("capture_hold_expiry_ms", 30 * 24 * HOUR_MS),
+        ("supervisor_slice_ms", HOUR_MS),
+        ("B_recovery_ms", 4 * HOUR_MS),
+        ("B_authorized_recovery_ms", 4 * HOUR_MS),
+        ("physical_drain_ms", 4 * HOUR_MS),
+        ("catchup_lag_commits", 64),
+    ];
+    // Probe override, removed before review: `R2_LIMITS` is a JSON object of limit values.
+    let probe: std::collections::BTreeMap<String, u64> = std::env::var("R2_LIMITS")
+        .ok()
+        .map(|text| serde_json::from_str(&text).expect("R2_LIMITS is a JSON object of integers"))
+        .unwrap_or_default();
+    let names: Vec<&'static str> = daemon::projection_gates::REQUIRED_LIMITS.to_vec();
+    for name in names {
+        if let Some(value) = probe.get(name) {
+            overrides.retain(|(known, _)| *known != name);
+            overrides.push((name, *value));
+        }
+    }
     let manifest = projection_gate::manifest_json_with(&identity, &ProjectionHook::ALL, &overrides);
     let campaign = projection_gate::campaign_json(&identity);
     Ok((manifest, campaign))

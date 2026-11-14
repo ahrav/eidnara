@@ -237,8 +237,32 @@ pub(crate) fn map_sqlite(error: rusqlite::Error) -> KernelError {
 /// Wall-clock milliseconds since the Unix epoch, saturating rather than failing so
 /// a clock before the epoch cannot abort a durable write.
 fn current_time_ms() -> i64 {
-    std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+        .unwrap_or(0);
+    #[cfg(feature = "test-support")]
+    let now = now.saturating_add(test_clock::offset_ms());
+    now
+}
+
+/// A step of the wall clock every kernel timestamp and expiry reads, while monotonic time keeps
+/// its pace: what a host suspend, an NTP correction, or an operator's clock change does to a
+/// running process. The step is process-wide, so a test binary that steps it runs those tests
+/// serially.
+#[cfg(feature = "test-support")]
+pub mod test_clock {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    static OFFSET_MS: AtomicI64 = AtomicI64::new(0);
+
+    /// Moves the wall clock by `step_ms`; a negative step moves it back.
+    pub fn step(step_ms: i64) {
+        OFFSET_MS.fetch_add(step_ms, Ordering::SeqCst);
+    }
+
+    /// The sum of every step so far, in milliseconds.
+    pub fn offset_ms() -> i64 {
+        OFFSET_MS.load(Ordering::SeqCst)
+    }
 }
