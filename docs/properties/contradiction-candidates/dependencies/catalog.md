@@ -315,17 +315,19 @@ only path behind `kernel.read` (`read.rs:482`) and, through `read_visible`
 Status: active
 Exercised: yes - `crates/daemon/tests/kernel_routes.rs:1958`, `:2080`,
 `:2112` construct over-cap row counts and over-budget payloads.
-Guarantee: after the Kernel read and the daemon `ScopeFilter`, `read_visible`
-keeps at most `MAX_READ_ROWS` (8192) newest rows by `(created_commit_seq
-desc, object_id)`, sets `truncated` when any row was dropped, reads
+Guarantee: after the Kernel read, the optional `before` cursor of
+`kernel.read`, and the daemon `ScopeFilter` (`read.rs:224-226`),
+`read_visible_page` keeps at most `MAX_READ_ROWS` (8192) newest rows by
+`(created_commit_seq desc, object_id)`, sets `truncated` when any row was dropped, reads
 `decision_payload_sizes_as_of` for the kept decision ids before loading any
 payload, cuts the row list where cumulative payload bytes pass
 `MAX_READ_ROW_BYTES`, and only then loads `decisions_for_objects_as_of` for
 the retained ids; a kept decision without a payload size or row fails the
 read as `CorruptCanonicalRow`.
 Check: `always` - `rows.len() <= 8192`; `truncated == (filtered_count >
-8192 || payload_cut)`; the kept set equals sort-then-truncate of the filtered
-set; no `decisions_for_objects_as_of` call names an id outside the retained
+8192 || payload_cut)`, where the filtered set holds the rows that pass the
+selection, the cursor, and the scope filter; the kept set equals
+sort-then-truncate of the filtered set; no `decisions_for_objects_as_of` call names an id outside the retained
 set; and `sum(payload_sizes[retained]) <= MAX_READ_ROW_BYTES` or the retained
 set is exactly the prefix the cut allows. `always` because every read must
 hold these bounds.

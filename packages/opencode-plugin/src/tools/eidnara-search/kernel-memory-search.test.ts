@@ -506,6 +506,45 @@ describe("scanSnapshotForLexicalSearch", () => {
         expect(paged.rows.length).toBe(10);
     });
 
+    test("keeps later pages at the first page's snapshot when a memory is committed during the scan", async () => {
+        const { kernel, target } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        const snapshot = kernel.tip;
+        const committed = `mem_${"9".repeat(32)}`;
+        /** Commits one matching memory when the first page's reply leaves the daemon. */
+        class CommitAfterFirstRead extends FakeKernelTransport {
+            override async call(args: Parameters<FakeKernelTransport["call"]>[0]) {
+                const reply = await super.call(args);
+                if (kernel.tip === snapshot && args.method === "kernel.read") {
+                    kernel.seedDecision({
+                        object_id: committed,
+                        decision_kind: "PROJECT_RULES",
+                        summary: "The nightly backup job copies database dumps offsite.",
+                    });
+                }
+                return reply;
+            }
+        }
+        const transport = new CommitAfterFirstRead(kernel);
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(transport),
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(kernel.tip).toBeGreaterThan(snapshot);
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        if (!scan.ok) return;
+        const bodies = transport.calls.map((call) => call.body as { as_of: number | null });
+        expect(bodies).toHaveLength(5);
+        expect(bodies.slice(1).map((body) => body.as_of)).toEqual(Array(4).fill(snapshot));
+        const ids = scan.rows.map((row) => row.object.object_id);
+        expect(ids).toContain(target);
+        expect(ids).not.toContain(committed);
+    });
+
     test("reports truncation when the page bound stops the scan before the oldest rows", async () => {
         const { kernel, target } = storeLargerThanOnePage(450);
         kernel.readRowCap = 100;
@@ -693,27 +732,52 @@ describe("scanSnapshotForLexicalSearch", () => {
     });
 
     test("bounds a scan started with no deadline by one ten-second deadline", async () => {
-        const { client, reads } = twoPageClient({
+        const page = (truncated: boolean) => ({
             state: { kind: "available" },
             known_as_of: 9,
             tip: 9,
             gated: false,
-            truncated: false,
-            rows: [],
+            truncated,
+            rows: truncated
+                ? [
+                      readRow({
+                          objectId: OBJECT_A,
+                          decisionKind: "ARCHITECTURE",
+                          summary: "backup volume",
+                          seq: 5,
+                      }),
+                  ]
+                : [],
         });
+        const budgets: (number | undefined)[] = [];
+        const client = {
+            connectionIdentity: () => "connection",
+            // The first page takes twenty milliseconds, which the second page's budget no longer holds.
+            read: async (read: { deadlineMs?: number }) => {
+                budgets.push(read.deadlineMs);
+                if (budgets.length > 1) return page(false);
+                await Bun.sleep(20);
+                return page(true);
+            },
+        } as unknown as KernelClient;
         await scanWith(client);
-        const budgets = reads.map((args) => (args as { deadlineMs?: number }).deadlineMs);
         expect(budgets).toHaveLength(2);
         const [first, second] = budgets as [number, number];
-        expect(first).toBeGreaterThan(0);
+        expect(first).toBeGreaterThan(9_000);
         expect(first).toBeLessThanOrEqual(10_000);
-        expect(second).toBeLessThanOrEqual(first);
+        expect(first - second).toBeGreaterThanOrEqual(10);
     });
 
     test("stops before a later page once the shared deadline has expired", async () => {
         const { kernel, target } = storeLargerThanOnePage(450);
         kernel.readRowCap = 100;
-        const transport = new FakeKernelTransport(kernel);
+        const client = clientOver(new FakeKernelTransport(kernel));
+        const read = client.read.bind(client);
+        let reads = 0;
+        client.read = (args) => {
+            reads += 1;
+            return read(args);
+        };
         let now = 0;
         const clock = () => {
             const at = now;
@@ -721,7 +785,7 @@ describe("scanSnapshotForLexicalSearch", () => {
             return at;
         };
         const scan = await scanSnapshotForLexicalSearch({
-            client: clientOver(transport),
+            client,
             surface: "explicit_search",
             gated: false,
             query: BACKUP_QUERY,
@@ -732,7 +796,8 @@ describe("scanSnapshotForLexicalSearch", () => {
         });
         expect(scan).toMatchObject({ ok: true, truncated: true });
         if (!scan.ok) return;
-        expect(transport.calls).toHaveLength(1);
+        // The scan stops by its own check: the client receives the first page's read alone.
+        expect(reads).toBe(1);
         expect(scan.rows).toHaveLength(10);
         expect(scan.rows.map((row) => row.object.object_id)).not.toContain(target);
     });

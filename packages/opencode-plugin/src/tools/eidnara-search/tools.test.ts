@@ -563,7 +563,11 @@ describe("eidnara_search expiry across the legacy scan", () => {
         }
     }
 
-    async function searchWith(transport: (kernel: FakeKernel) => FakeKernelTransport) {
+    async function searchWith(
+        transport: (kernel: FakeKernel) => FakeKernelTransport,
+        antiMemory: { expiresAt: number } = { expiresAt: START + 5_000 },
+        limit?: number,
+    ) {
         const kernel = new FakeKernel();
         seed(kernel, OBJECT_A, "Session caching uses the embedded store.");
         seed(
@@ -573,7 +577,7 @@ describe("eidnara_search expiry across the legacy scan", () => {
                 trigger: "session caching store",
                 rejectedStrategy: "Redis",
                 rejectionReason: "it creates split ownership",
-                expiresAt: START + 5_000,
+                expiresAt: antiMemory.expiresAt,
             }),
             "REJECTED_APPROACH",
         );
@@ -586,7 +590,11 @@ describe("eidnara_search expiry across the legacy scan", () => {
         setSystemTime(new Date(START));
         try {
             return await tools.eidnara_search.execute(
-                { query: "session caching store", sources: ["memory"] },
+                {
+                    query: "session caching store",
+                    sources: ["memory"],
+                    ...(limit === undefined ? {} : { limit }),
+                },
                 toolContext(),
             );
         } finally {
@@ -604,5 +612,20 @@ describe("eidnara_search expiry across the legacy scan", () => {
         const result = await searchWith((kernel) => new ClockAdvancingTransport(kernel));
         expect(result).toContain(`id=${OBJECT_A}`);
         expect(result).not.toContain(`id=${OBJECT_B}`);
+    });
+
+    it("gives the single result slot to a live memory over an anti-memory that expired before the scan", async () => {
+        // The anti-memory matches as well as the memory and is newer, so it ranks first among unexpired rows.
+        const live = await searchWith((kernel) => new FakeKernelTransport(kernel), undefined, 1);
+        expect(live).toContain(`id=${OBJECT_B}`);
+        expect(live).not.toContain(`id=${OBJECT_A}`);
+
+        const expired = await searchWith(
+            (kernel) => new FakeKernelTransport(kernel),
+            { expiresAt: START - 1 },
+            1,
+        );
+        expect(expired).toContain(`id=${OBJECT_A}`);
+        expect(expired).not.toContain(`id=${OBJECT_B}`);
     });
 });
