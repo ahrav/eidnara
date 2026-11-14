@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Deadline } from "../../shared/host-client";
 import { KernelClient, MAX_READ_OBJECT_IDS, type ReadRow } from "../../shared/kernel-client";
 import {
     ANTI_MEMORY_CATEGORY,
@@ -9,6 +10,7 @@ import {
     memoryResultFromRow,
     parseObjectIdQuery,
     readObjectRowsChunked,
+    scanSnapshotForLexicalSearch,
     searchKernelMemoryRows,
 } from "./kernel-memory-search";
 
@@ -426,5 +428,550 @@ describe("readObjectRowsChunked filter bound", () => {
         ]);
         expect(bodies.flatMap((body) => body.object_ids ?? []).sort()).toEqual([...ids].sort());
         expect(bodies.map((body) => body.as_of)).toEqual([null, count]);
+    });
+});
+
+/** A store whose oldest memory answers the query, under `newer` later memories that share only one query word with it. */
+function storeLargerThanOnePage(newer: number): { kernel: FakeKernel; target: string } {
+    const kernel = new FakeKernel();
+    const target = `mem_${"f".repeat(32)}`;
+    kernel.seedDecision({
+        object_id: target,
+        decision_kind: "PROJECT_RULES",
+        summary: "The nightly backup job writes database dumps to the cold storage volume.",
+    });
+    for (let index = 0; index < newer; index += 1) {
+        kernel.seedDecision({
+            object_id: `mem_${String(index).padStart(32, "0")}`,
+            decision_kind: "ARCHITECTURE",
+            summary: `Module ${index} reads its settings from the database at startup.`,
+        });
+    }
+    return { kernel, target };
+}
+
+function clientOver(transport: FakeKernelTransport): KernelClient {
+    return new KernelClient({
+        transport,
+        enabled: true,
+        sessionId: "ses-paged",
+        projectRoot: "/tmp/paged",
+    });
+}
+
+const BACKUP_QUERY = "nightly backup database dumps";
+
+describe("scanSnapshotForLexicalSearch", () => {
+    test("finds the oldest memory of a store larger than one read page, which a single read misses", async () => {
+        const { kernel, target } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        const transport = new FakeKernelTransport(kernel);
+        const client = clientOver(transport);
+        const scan = (maxPages?: number) =>
+            scanSnapshotForLexicalSearch({
+                client,
+                surface: "explicit_search",
+                gated: false,
+                query: BACKUP_QUERY,
+                limit: 10,
+                nowMs: 0,
+                ...(maxPages === undefined ? {} : { maxPages }),
+            });
+
+        // One page is the single capped read the scan replaced.
+        const single = await scan(1);
+        expect(single.ok && single.truncated).toBe(true);
+        if (!single.ok) return;
+        expect(single.rows.map((row) => row.object.object_id)).not.toContain(target);
+
+        transport.calls.length = 0;
+        const paged = await scan();
+        expect(paged.ok).toBe(true);
+        if (!paged.ok) return;
+        expect(paged.truncated).toBe(false);
+        const hits = searchKernelMemoryRows({
+            rows: paged.rows,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(hits?.[0]?.objectId).toBe(target);
+        const bodies = transport.calls.map(
+            (call) => call.body as { as_of: number | null; before?: { object_id: string } },
+        );
+        // 451 rows at 100 per page: five pages, every page after the first pinned to the first page's snapshot.
+        expect(bodies).toHaveLength(5);
+        expect(bodies[0]?.before).toBeUndefined();
+        expect(new Set(bodies.slice(1).map((body) => body.as_of))).toEqual(new Set([kernel.tip]));
+        expect(paged.rows.length).toBe(10);
+    });
+
+    test("reports truncation when the page bound stops the scan before the oldest rows", async () => {
+        const { kernel, target } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+            maxPages: 4,
+        });
+        expect(scan.ok && scan.truncated).toBe(true);
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id)).not.toContain(target);
+    });
+
+    /** A client whose first page is truncated and whose second read answers `second`; `afterFirst` names the connection identity after page 1. */
+    function twoPageClient(
+        second: unknown,
+        afterFirst = "connection",
+    ): { client: KernelClient; reads: unknown[] } {
+        const connection = { current: "connection" };
+        const first = readRow({
+            objectId: OBJECT_A,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup volume",
+            seq: 5,
+        });
+        const reads: unknown[] = [];
+        const client = {
+            connectionIdentity: () => connection.current,
+            read: async (args: unknown) => {
+                reads.push(args);
+                if (reads.length === 1) {
+                    connection.current = afterFirst;
+                    return {
+                        state: { kind: "available" },
+                        known_as_of: 9,
+                        tip: 9,
+                        gated: false,
+                        truncated: true,
+                        rows: [first],
+                    };
+                }
+                return second;
+            },
+        } as unknown as KernelClient;
+        return { client, reads };
+    }
+
+    const scanWith = (client: KernelClient) =>
+        scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated: true,
+            query: "backup",
+            limit: 10,
+            nowMs: 0,
+        });
+
+    test("keeps the first page's rows as partial when a later page is refused", async () => {
+        const { client, reads } = twoPageClient({
+            state: { kind: "unavailable", reason: "daemon_absent" },
+        });
+        const scan = await scanWith(client);
+        expect(scan).toEqual({
+            ok: true,
+            rows: [
+                expect.objectContaining({
+                    object: expect.objectContaining({ object_id: OBJECT_A }),
+                }),
+            ],
+            truncated: true,
+        });
+        // Only the first page is gated.
+        expect(reads.map((args) => (args as { gated: boolean }).gated)).toEqual([true, false]);
+    });
+
+    test("answers the cancelled state when the caller's signal aborts after the first page", async () => {
+        const controller = new AbortController();
+        const first = readRow({
+            objectId: OBJECT_A,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup volume",
+            seq: 5,
+        });
+        let reads = 0;
+        const client = {
+            connectionIdentity: () => "connection",
+            read: async () => {
+                reads += 1;
+                if (reads === 1) {
+                    controller.abort();
+                    return {
+                        state: { kind: "available" },
+                        known_as_of: 9,
+                        tip: 9,
+                        gated: false,
+                        truncated: true,
+                        rows: [first],
+                    };
+                }
+                return { state: { kind: "cancelled" } };
+            },
+        } as unknown as KernelClient;
+        const scan = await scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated: false,
+            query: "backup",
+            limit: 10,
+            nowMs: 0,
+            signal: controller.signal,
+        });
+        expect(scan).toEqual({ ok: false, state: { kind: "cancelled" } });
+    });
+
+    test("passes one deadline's remainder to every page", async () => {
+        const { client, reads } = twoPageClient({
+            state: { kind: "available" },
+            known_as_of: 9,
+            tip: 9,
+            gated: false,
+            truncated: false,
+            rows: [],
+        });
+        let now = 0;
+        const clock = () => {
+            const at = now;
+            now += 1_000;
+            return at;
+        };
+        await scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated: false,
+            query: "backup",
+            limit: 10,
+            nowMs: 0,
+            deadline: Deadline.start(60_000, clock),
+        });
+        // The clock reads 0 at the start, 1,000 for page 1's budget, then 2,000 for page 2's expiry check and 3,000 for its budget.
+        expect(reads.map((args) => (args as { deadlineMs?: number }).deadlineMs)).toEqual([
+            59_000, 57_000,
+        ]);
+    });
+
+    test("keeps the rows already ranked when the shared deadline expires during a later page", async () => {
+        const { kernel, target } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        let now = 0;
+        const clock = () => {
+            const at = now;
+            now += 400;
+            return at;
+        };
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+            // Page 1 receives 600 ms; page 2 passes its expiry check at 800 and receives no budget at 1,200, which the client reports as `cancelled`.
+            deadline: Deadline.start(1_000, clock),
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: true });
+        if (!scan.ok) return;
+        expect(scan.rows).toHaveLength(10);
+        expect(scan.rows.map((row) => row.object.object_id)).not.toContain(target);
+    });
+
+    test("continues inside one commit: a later page may start with that commit's greater ids", async () => {
+        const sibling = readRow({
+            objectId: OBJECT_B,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 5,
+        });
+        const { client } = twoPageClient({
+            state: { kind: "available" },
+            known_as_of: 9,
+            tip: 9,
+            gated: false,
+            truncated: false,
+            rows: [sibling],
+        });
+        const scan = await scanWith(client);
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id).sort()).toEqual([OBJECT_A, OBJECT_B]);
+    });
+
+    test("stops as partial when a later page arrives over another daemon connection", async () => {
+        const same = readRow({
+            objectId: OBJECT_B,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 4,
+        });
+        const { client } = twoPageClient(
+            {
+                state: { kind: "available" },
+                known_as_of: 9,
+                tip: 9,
+                gated: false,
+                truncated: false,
+                rows: [same],
+            },
+            "replacement",
+        );
+        const scan = await scanWith(client);
+        expect(scan).toMatchObject({ ok: true, truncated: true });
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([OBJECT_A]);
+    });
+
+    test("orders a same-commit tie by UTF-8 bytes, as the daemon does", async () => {
+        // U+E000 sorts before U+10000 in UTF-8 and after it in UTF-16 code units.
+        const low = readRow({
+            objectId: "mem_\uE000",
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 5,
+        });
+        const high = readRow({
+            objectId: "mem_\u{10000}",
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 5,
+        });
+        const reads: unknown[] = [];
+        const client = {
+            connectionIdentity: () => "connection",
+            read: async (args: unknown) => {
+                reads.push(args);
+                return reads.length === 1
+                    ? {
+                          state: { kind: "available" },
+                          known_as_of: 9,
+                          tip: 9,
+                          gated: false,
+                          truncated: true,
+                          rows: [low],
+                      }
+                    : {
+                          state: { kind: "available" },
+                          known_as_of: 9,
+                          tip: 9,
+                          gated: false,
+                          truncated: false,
+                          rows: [high],
+                      };
+            },
+        } as unknown as KernelClient;
+        const scan = await scanWith(client);
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        if (!scan.ok) return;
+        expect(scan.rows).toHaveLength(2);
+    });
+
+    test("stops at a same-commit row that UTF-8 orders before the cursor, though UTF-16 orders it after", async () => {
+        const high = readRow({
+            objectId: "mem_\u{10000}",
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 5,
+        });
+        const low = readRow({
+            objectId: "mem_\uE000",
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 5,
+        });
+        const page = (rows: ReadRow[], truncated: boolean) => ({
+            state: { kind: "available" },
+            known_as_of: 9,
+            tip: 9,
+            gated: false,
+            truncated,
+            rows,
+        });
+        let reads = 0;
+        const client = {
+            connectionIdentity: () => "connection",
+            read: async () => {
+                reads += 1;
+                return reads === 1 ? page([high], true) : page([low], false);
+            },
+        } as unknown as KernelClient;
+        const scan = await scanWith(client);
+        expect(scan).toMatchObject({ ok: true, truncated: true });
+        if (!scan.ok) return;
+        expect(scan.rows).toHaveLength(1);
+    });
+
+    test("pages a same-commit pair through the fake kernel in the daemon's UTF-8 order", async () => {
+        const kernel = new FakeKernel();
+        const first = kernel.seedDecision({
+            object_id: "mem_\u{10000}",
+            decision_kind: "ARCHITECTURE",
+            summary: "backup",
+        });
+        const second = kernel.seedDecision({
+            object_id: "mem_\uE000",
+            decision_kind: "ARCHITECTURE",
+            summary: "backup",
+        });
+        second.created_commit_seq = first.created_commit_seq;
+        kernel.readRowCap = 1;
+        const transport = new FakeKernelTransport(kernel);
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(transport),
+            surface: "explicit_search",
+            gated: false,
+            query: "backup",
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        if (!scan.ok) return;
+        expect(scan.rows).toHaveLength(2);
+        // The ids first differ at UTF-8 bytes EE (U+E000) and F0 (U+10000), so the first page serves U+E000 and the next page continues after it.
+        const secondPage = transport.calls[1]?.body as { before?: { object_id: string } };
+        expect(secondPage.before?.object_id).toBe("mem_\uE000");
+    });
+
+    test("caches mutation tokens for the first page only", async () => {
+        const { kernel } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        const client = clientOver(new FakeKernelTransport(kernel));
+        const scan = await scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        expect(client.tokens.size("/tmp/paged")).toBe(100);
+    });
+
+    test("stops as partial when a later page answers another snapshot", async () => {
+        const moved = readRow({
+            objectId: OBJECT_B,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup",
+            seq: 4,
+        });
+        const { client } = twoPageClient({
+            state: { kind: "available" },
+            known_as_of: 10,
+            tip: 10,
+            gated: false,
+            truncated: false,
+            rows: [moved],
+        });
+        const scan = await scanWith(client);
+        expect(scan.ok && scan.truncated).toBe(true);
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([OBJECT_A]);
+    });
+
+    test("stops as partial when a later page serves a row at or before the cursor", async () => {
+        const repeated = readRow({
+            objectId: OBJECT_A,
+            decisionKind: "ARCHITECTURE",
+            summary: "backup volume",
+            seq: 5,
+        });
+        const { client } = twoPageClient({
+            state: { kind: "available" },
+            known_as_of: 9,
+            tip: 9,
+            gated: false,
+            truncated: true,
+            rows: [repeated],
+        });
+        const scan = await scanWith(client);
+        expect(scan.ok && scan.truncated).toBe(true);
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([OBJECT_A]);
+    });
+});
+
+describe("scanSnapshotForLexicalSearch over several pages", () => {
+    const NOW = 1_700_000_000_000;
+
+    test("ranks as one search over every row: strong hits on the newest and oldest pages both stay", async () => {
+        const { kernel, target } = storeLargerThanOnePage(450);
+        const newest = `mem_${"e".repeat(32)}`;
+        kernel.seedDecision({
+            object_id: newest,
+            decision_kind: "PROJECT_RULES",
+            summary: "The nightly backup job keeps database dumps for thirty days.",
+        });
+        kernel.readRowCap = 100;
+        const paged = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(paged.ok && !paged.truncated).toBe(true);
+        if (!paged.ok) return;
+        const pagedHits = searchKernelMemoryRows({
+            rows: paged.rows,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        kernel.readRowCap = null;
+        const whole = await clientOver(new FakeKernelTransport(kernel)).read({
+            surface: "explicit_search",
+        });
+        if (whole.state.kind !== "available") throw new Error("uncapped read unavailable");
+        const wholeHits = searchKernelMemoryRows({
+            rows: (whole as { rows: ReadRow[] }).rows,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(pagedHits?.map((hit) => hit.objectId)).toEqual(
+            wholeHits?.map((hit) => hit.objectId),
+        );
+        expect(
+            pagedHits
+                ?.slice(0, 2)
+                .map((hit) => hit.objectId)
+                .sort(),
+        ).toEqual([newest, target].sort());
+    });
+
+    test("an expired anti-memory that matches better takes no slot from an eligible memory", async () => {
+        const kernel = new FakeKernel();
+        const target = `mem_${"f".repeat(32)}`;
+        kernel.seedDecision({
+            object_id: target,
+            decision_kind: "PROJECT_RULES",
+            summary: "Session caching uses the embedded store.",
+        });
+        kernel.seedDecision({
+            object_id: `mem_${"d".repeat(32)}`,
+            decision_kind: ANTI_MEMORY_CATEGORY,
+            summary: renderAntiMemoryContent({
+                trigger: "session caching store",
+                rejectedStrategy: "Redis",
+                rejectionReason: "it creates split ownership",
+                expiresAt: NOW - 1,
+            }),
+        });
+        kernel.readRowCap = 1;
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: "session caching store",
+            limit: 1,
+            nowMs: NOW,
+        });
+        expect(scan.ok && !scan.truncated).toBe(true);
+        if (!scan.ok) return;
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([target]);
     });
 });

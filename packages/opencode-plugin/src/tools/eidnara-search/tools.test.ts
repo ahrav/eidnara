@@ -269,6 +269,30 @@ describe("createEidnaraSearchTools", () => {
         expect(result).toContain(`id=${OBJECT_A}`);
     });
 
+    it("pages past the daemon's row cap to find the oldest memory", async () => {
+        const harness = kernelHarness();
+        seed(harness.kernel, OBJECT_A, "Release tags are signed with the team's hardware key.");
+        seedMany(
+            harness.kernel,
+            250,
+            (index) => `Release notes for build ${index} list the fixed issues.`,
+        );
+        harness.kernel.readRowCap = 100;
+        const tools = createEidnaraSearchTools(harness.deps);
+
+        const result = await tools.eidnara_search.execute(
+            { query: "how are release tags signed", sources: ["memory"] },
+            toolContext(),
+        );
+
+        expect(result).toContain(`[1] [memory]`);
+        expect(result.split("\n").find((line) => line.startsWith("[1] "))).toContain(
+            `id=${OBJECT_A}`,
+        );
+        expect(result).not.toContain("the memory read was truncated");
+        expect(kernelReads(harness)).toHaveLength(3);
+    });
+
     it("resolves an object-id query through the filtered read", async () => {
         const harness = kernelHarness();
         seed(harness.kernel, OBJECT_A, "Direct id hit.");
