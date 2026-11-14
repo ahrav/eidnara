@@ -53,13 +53,13 @@ one snapshot through `served_rows` (`:3484-3500`), which runs
 o.object_kind='decision'` (`:3581-3583`). The scope prefilter is the `WHERE`
 tail at `:3649-3667`. Rows are then sorted by `object_id` (`:3223`). No row
 limit and no budget parameter exist on this API. The daemon consumer is
-`read_visible` in `crates/daemon/src/kernel_routes/read.rs:163-258`: SQL
-prefilter with `project.scope_term()` (`:178`,
+`read_visible` in `crates/daemon/src/kernel_routes/read.rs:182-292`: SQL
+prefilter with `project.scope_term()` (`:209`,
 `crates/daemon/src/kernel_routes/project.rs:106-111`), then `ScopeFilter`
 (`project.rs:186-222`) judges each kept row, then `NewestRows` heap of
-`MAX_READ_ROWS = 8192` (`read.rs:26`, `:128-161`, `:191-196`), then payload
-sizes before payloads (`:198-234`), then `decisions_for_objects_as_of` for the
-retained ids (`:235-250`).
+`MAX_READ_ROWS = 8192` (`read.rs:26`, `:147-180`, `:222-230`), then payload
+sizes before payloads (`:232-268`), then `decisions_for_objects_as_of` for the
+retained ids (`:269-284`).
 
 S3 budgeted Kernel reads. `decision_page_within_budget`
 (`crates/kernel/src/slice/read.rs:126-220`): keyset page over the whole
@@ -204,7 +204,7 @@ C4 `admission.rs:3165-3167`: domain and kind matched in SQL before any row is
 read; a corrupt row outside the domain never fails this read.
 C5 `admission.rs:3138-3144`: the scope restriction is a superset of the
 algebra's verdict.
-C6 `read.rs:26`, `:189`: the row bound applies after the filter; `:197`:
+C6 `read.rs:26`, `:222`: the row bound applies after the filter; `:232`:
 payload sizes read before any payload.
 C7 `slice/read.rs:121`: a single decision larger than the bound is returned
 alone; the wait for a pooled reader stops at the budget.

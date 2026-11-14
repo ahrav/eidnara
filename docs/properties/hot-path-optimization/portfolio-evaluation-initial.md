@@ -101,7 +101,7 @@ This keeps the invariant safety-shaped. Any promise that work eventually
 releases a reservation needs a separate bounded liveness record.
 
 **Finding 3, K3 gap.** Row pressure and byte pressure are distinct failure
-classes in `crates/daemon/src/kernel_routes/read.rs:181-224`. One disjunctive
+classes in `crates/daemon/src/kernel_routes/read.rs:212-258`. One disjunctive
 marker can pass while the other cap is never stressed. Targeted discovery must
 split the two precondition witnesses or require two fixed campaign markers.
 

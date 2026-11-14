@@ -160,7 +160,7 @@ and counted, never queued without bound. Kind: state predicate on runtime
 R-C1 Candidate set bounded. The id read uses the project scope term prefilter
 (`admission.rs:3138-3144`, `project.rs:106-111`) and the `ScopeFilter` judge,
 then keeps at most N decisions by a deterministic newest-first order
-(`read.rs:170-200` pattern), counting a truncation when more were eligible;
+(`read.rs:201-234` pattern), counting a truncation when more were eligible;
 summary bytes are bounded by `decision_payload_sizes_as_of` before any payload
 is loaded, or by `decision_page_within_budget`'s `max_payload_bytes`
 (`slice/read.rs:126-133`). Kind: state predicate on the pass's read set

@@ -24,8 +24,8 @@ resource boundaries, vacuity.
   .into_iter().map(..).collect()`; also a full `Vec`.
 - `crates/kernel/src/open.rs:595-607` `lock_reader`: the plain reader lock
   used by `read_snapshot` has no deadline.
-- Daemon: `read.rs:191-192` applies `NewestRows` after the full `Vec` is
-  returned; `visible.rows` is consumed by the `for` loop at `:192` with no
+- Daemon: `read.rs:222-223` applies `NewestRows` after the full `Vec` is
+  returned; `visible.rows` is consumed by the `for` loop at `:223` with no
   intermediate binding, so the observable is the Kernel API's return value.
 - The daemon cap test `kernel_routes.rs:1958` constructs over-cap rows but
   observes only the wire response; the Kernel-side count is not asserted.

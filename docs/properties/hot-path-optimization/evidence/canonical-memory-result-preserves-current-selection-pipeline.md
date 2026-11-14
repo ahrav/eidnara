@@ -17,7 +17,7 @@ The preservation target is the selected result, not a particular SQL shape.
 - [admission.rs:3485-3699][query] builds the served query over admission
   decisions, folds own/lineage authority and sensitivity in Rust, and collects
   rows. [admission.rs:3193][order] sorts the collected rows by object ID.
-- [read.rs:163-258][selection] applies domain/kind and scope selection, keeps
+- [read.rs:182-292][selection] applies domain/kind and scope selection, keeps
   newest rows, checks typed-row completeness, and trims the payload prefix.
 - [canonical_memory.rs:184-212][conversion] applies Visible and positive-category
   filters only after those caps, then trims memory and creates the snapshot.
@@ -72,5 +72,5 @@ baseline commit's rendered bytes does not run yet.
 [entry]: ../../../../crates/daemon/src/canonical_memory.rs#L141-L174
 [query]: ../../../../crates/kernel/src/admission.rs#L3485-L3699
 [order]: ../../../../crates/kernel/src/admission.rs#L3193
-[selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L163-L258
+[selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L182-L292
 [conversion]: ../../../../crates/daemon/src/canonical_memory.rs#L184-L212
