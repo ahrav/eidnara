@@ -41,7 +41,7 @@ pub(crate) struct ReadRequest {
     /// Filters the read to these objects before the row cap applies, so a targeted lookup addresses a row the bounded unfiltered read drops; `None` reads the whole surface.
     #[serde(default)]
     object_ids: Option<Vec<String>>,
-    /// Serves only the rows after this row in serving order; a caller sets it to the last row of the previous page to read the next page.
+    /// Serves only the rows after this row in serving order; a caller sets it to the last row of the previous page to read the next page, and sets `as_of` to the first page's `known_as_of` so every page reads one snapshot.
     #[serde(default)]
     before: Option<ReadCursor>,
     /// Whether the serving policy judges freshness before rows are returned.

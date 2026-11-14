@@ -6,6 +6,34 @@
       "decision": {
         "decision_kind": "memory",
         "payload": {
+          "rationale": "because 4",
+          "summary": "decision 4"
+        }
+      },
+      "labeled": true,
+      "object": {
+        "created_commit_seq": 4,
+        "domain_id": "domain",
+        "invalidated_commit_seq": null,
+        "object_id": "decision-object-4",
+        "object_kind": "decision",
+        "sensitivity": "normal",
+        "source_id": "memory-lineage",
+        "source_kind": "assistant",
+        "source_revision": 4,
+        "superseded_by": null
+      },
+      "scope_id": "project:<digest>",
+      "token": {
+        "known_as_of": 4,
+        "object_id": "decision-object-4"
+      },
+      "visibility": "labeled"
+    },
+    {
+      "decision": {
+        "decision_kind": "memory",
+        "payload": {
           "rationale": "because 2",
           "summary": "decision 2"
         }

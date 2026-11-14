@@ -552,7 +552,10 @@ export class FakeKernel {
     }
 
     /** The daemon's serving order: newest commit first, then object ids in UTF-8 byte order. */
-    private static servingOrder(left: FakeObject, right: FakeObject): number {
+    private static servingOrder(
+        left: Pick<FakeObject, "created_commit_seq" | "object_id">,
+        right: Pick<FakeObject, "created_commit_seq" | "object_id">,
+    ): number {
         if (left.created_commit_seq !== right.created_commit_seq) {
             return right.created_commit_seq - left.created_commit_seq;
         }
@@ -598,15 +601,7 @@ export class FakeKernel {
         }
         const before = body.before as { created_commit_seq: number; object_id: string } | undefined;
         if (before !== undefined) {
-            visible = visible.filter(
-                (object) =>
-                    object.created_commit_seq < before.created_commit_seq ||
-                    (object.created_commit_seq === before.created_commit_seq &&
-                        Buffer.compare(
-                            Buffer.from(object.object_id, "utf8"),
-                            Buffer.from(before.object_id, "utf8"),
-                        ) > 0),
-            );
+            visible = visible.filter((object) => FakeKernel.servingOrder(object, before) > 0);
         }
         // The daemon serves rows newest first, then by object id, and keeps that order's prefix when a cap binds. The row cap never binds a filtered read (a filter names at most `MAX_READ_OBJECT_IDS` rows, far under the cap), so it applies to unfiltered reads alone; the filtered cap stands in for the byte budget, which binds either way.
         visible.sort(FakeKernel.servingOrder);

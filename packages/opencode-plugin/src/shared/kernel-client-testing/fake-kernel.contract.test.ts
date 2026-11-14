@@ -117,8 +117,20 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
 
     test("a read after a cursor serves the older rows", async () => {
         const h = harness();
-        for (const index of [1, 2, 3]) {
-            const created = await h.client().create(decisionSpec(index), intent(`create-${index}`));
+        // Decisions 3 and 4 share one commit, so the page after decision 3 starts inside that commit.
+        for (const [key, indices] of [
+            ["create-1", [1]],
+            ["create-2", [2]],
+            ["create-pair", [3, 4]],
+        ] as const) {
+            const created = await h.client().commit({
+                ...intent(key),
+                operations: indices.map((index) => ({
+                    op: "insert_decision" as const,
+                    spec: decisionSpec(index),
+                })),
+                tokens: [],
+            });
             expect(created.state).toEqual({ kind: "available" });
         }
         const newest = await h.client().read({ surface: "explicit_search" });
@@ -133,6 +145,11 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
                 createdCommitSeq: cursor?.created_commit_seq ?? 0,
                 objectId: cursor?.object_id ?? "",
             },
+        });
+        // The request names the cursor with the field names the route test sends the daemon.
+        expect((h.transport.calls.at(-1)?.body as { before?: unknown }).before).toEqual({
+            created_commit_seq: 4,
+            object_id: "decision-object-3",
         });
         expect(withScopePlaceholder(h.transport.lastReply())).toEqual(readExplicitAfterCursor);
     });

@@ -6896,19 +6896,23 @@ async fn a_plugin_route_cannot_write_rows_under_the_verifier_id_prefixes() {
 async fn recorded_read_after_a_cursor_serves_the_older_rows() {
     let daemon = Daemon::start().await;
     seed_domain(&daemon.store());
-    for index in 1..=3 {
-        let created = daemon
-            .commit(
-                &format!("create-{index}"),
-                vec![insert_decision(index)],
-                vec![],
-            )
-            .await;
+    // Decisions 3 and 4 share one commit, so the page after decision 3 starts inside that commit.
+    for (key, indices) in [
+        ("create-1", vec![1]),
+        ("create-2", vec![2]),
+        ("create-pair", vec![3, 4]),
+    ] {
+        let operations = indices.into_iter().map(insert_decision).collect();
+        let created = daemon.commit(key, operations, vec![]).await;
         assert_state(&created, "available", None);
     }
     let newest = daemon.read("explicit_search", None).await;
     let cursor = &newest["rows"][0]["object"];
     assert_eq!(cursor["object_id"], "decision-object-3");
+    assert_eq!(
+        newest["rows"][1]["object"]["created_commit_seq"],
+        cursor["created_commit_seq"]
+    );
     let mut request = read_request(&daemon.project, SESSION, "explicit_search", None);
     request["before"] = json!({
         "created_commit_seq": cursor["created_commit_seq"],
@@ -6917,9 +6921,19 @@ async fn recorded_read_after_a_cursor_serves_the_older_rows() {
     let page = daemon.call(daemon.route, request).await;
     assert_state(&page, "available", None);
     assert_eq!(page["truncated"], false);
+    let served: Vec<&str> = page["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["object"]["object_id"].as_str().unwrap())
+        .collect();
     assert_eq!(
-        object_ids(&page),
-        ["decision-object-1", "decision-object-2"]
+        served,
+        [
+            "decision-object-4",
+            "decision-object-2",
+            "decision-object-1"
+        ]
     );
     assert_matches_route_fixture(
         &with_scope_placeholder(&daemon.project, page),
@@ -6970,7 +6984,7 @@ async fn paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once(
     assert_eq!(first["truncated"], true);
     assert!(!object_ids(&first).contains(&oldest));
     let snapshot = first["known_as_of"].as_i64().unwrap();
-    // Later pages read the pinned `snapshot`: a decision committed after the first page stays out of them, and the oldest decision, retired after the first page, stays in them.
+    // The cursor keeps a decision committed after the first page out of later pages. The oldest decision, retired after the first page, stays in them because they read the pinned `snapshot`.
     let inserted = daemon
         .commit(
             "after-first-page",
@@ -6991,6 +7005,15 @@ async fn paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once(
     at_tip["object_ids"] = json!([oldest]);
     let at_tip = daemon.call(daemon.route, at_tip).await;
     assert!(object_ids(&at_tip).is_empty(), "{at_tip}");
+
+    // A cursor ahead of every row serves the first page again, so the row cap binds a cursor read as it binds an unfiltered one.
+    let mut ahead = read_request(&daemon.project, SESSION, "explicit_search", Some(snapshot));
+    ahead["before"] = json!({ "created_commit_seq": snapshot + 1, "object_id": "" });
+    let ahead = daemon.call(daemon.route, ahead).await;
+    assert_state(&ahead, "available", None);
+    assert_eq!(ahead["truncated"], true);
+    assert_eq!(ahead["rows"].as_array().unwrap().len(), MAX_READ_ROWS);
+    assert_eq!(ahead["rows"], first["rows"]);
 
     let mut served: Vec<(i64, String)> = Vec::new();
     let mut page = first;
@@ -7013,6 +7036,8 @@ async fn paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once(
         page = daemon.call(daemon.route, request).await;
         assert_state(&page, "available", None);
         assert_eq!(page["known_as_of"], snapshot);
+        // The first page ends inside a commit, so the cursor's object-id order decides where the next page starts.
+        assert_eq!(page["rows"][0]["object"]["created_commit_seq"], seq);
         pages += 1;
         assert!(pages <= 2, "paging did not advance past the first page");
     }

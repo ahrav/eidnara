@@ -523,6 +523,42 @@ describe("scanSnapshotForLexicalSearch", () => {
         expect(scan.rows.map((row) => row.object.object_id)).not.toContain(target);
     });
 
+    test("stops after sixteen pages by default and reports the unread rows as truncation", async () => {
+        // Seventeen rows at one row per page: the oldest row sits on the seventeenth page.
+        const { kernel, target } = storeLargerThanOnePage(16);
+        kernel.readRowCap = 1;
+        const transport = new FakeKernelTransport(kernel);
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(transport),
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: true });
+        if (!scan.ok) return;
+        expect(transport.calls).toHaveLength(16);
+        expect(scan.rows.map((row) => row.object.object_id)).not.toContain(target);
+    });
+
+    test("reads one page for a query that carries no ranking term", async () => {
+        const { kernel } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        const transport = new FakeKernelTransport(kernel);
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(transport),
+            surface: "explicit_search",
+            gated: false,
+            // Every operand is shorter than the two characters a ranking term needs.
+            query: "a ?",
+            limit: 10,
+            nowMs: 0,
+        });
+        expect(scan).toEqual({ ok: true, rows: [], truncated: true });
+        expect(transport.calls).toHaveLength(1);
+    });
+
     /** A client whose first page is truncated and whose second read answers `second`; `afterFirst` names the connection identity after page 1. */
     function twoPageClient(
         second: unknown,
@@ -593,23 +629,25 @@ describe("scanSnapshotForLexicalSearch", () => {
             summary: "backup volume",
             seq: 5,
         });
+        const page = (rows: ReadRow[], truncated: boolean) => ({
+            state: { kind: "available" },
+            known_as_of: 9,
+            tip: 9,
+            gated: false,
+            truncated,
+            rows,
+        });
         let reads = 0;
         const client = {
             connectionIdentity: () => "connection",
-            read: async () => {
+            // The second read answers as the client does: `cancelled` for the aborted signal it receives.
+            read: async (read: { signal?: AbortSignal }) => {
                 reads += 1;
                 if (reads === 1) {
                     controller.abort();
-                    return {
-                        state: { kind: "available" },
-                        known_as_of: 9,
-                        tip: 9,
-                        gated: false,
-                        truncated: true,
-                        rows: [first],
-                    };
+                    return page([first], true);
                 }
-                return { state: { kind: "cancelled" } };
+                return read.signal?.aborted ? { state: { kind: "cancelled" } } : page([], false);
             },
         } as unknown as KernelClient;
         const scan = await scanSnapshotForLexicalSearch({
@@ -652,6 +690,51 @@ describe("scanSnapshotForLexicalSearch", () => {
         expect(reads.map((args) => (args as { deadlineMs?: number }).deadlineMs)).toEqual([
             59_000, 57_000,
         ]);
+    });
+
+    test("bounds a scan started with no deadline by one ten-second deadline", async () => {
+        const { client, reads } = twoPageClient({
+            state: { kind: "available" },
+            known_as_of: 9,
+            tip: 9,
+            gated: false,
+            truncated: false,
+            rows: [],
+        });
+        await scanWith(client);
+        const budgets = reads.map((args) => (args as { deadlineMs?: number }).deadlineMs);
+        expect(budgets).toHaveLength(2);
+        const [first, second] = budgets as [number, number];
+        expect(first).toBeGreaterThan(0);
+        expect(first).toBeLessThanOrEqual(10_000);
+        expect(second).toBeLessThanOrEqual(first);
+    });
+
+    test("stops before a later page once the shared deadline has expired", async () => {
+        const { kernel, target } = storeLargerThanOnePage(450);
+        kernel.readRowCap = 100;
+        const transport = new FakeKernelTransport(kernel);
+        let now = 0;
+        const clock = () => {
+            const at = now;
+            now += 500;
+            return at;
+        };
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(transport),
+            surface: "explicit_search",
+            gated: false,
+            query: BACKUP_QUERY,
+            limit: 10,
+            nowMs: 0,
+            // Page 1 receives 500 ms; the clock reads 1,000 at page 2's expiry check, so page 2 is left unread.
+            deadline: Deadline.start(1_000, clock),
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: true });
+        if (!scan.ok) return;
+        expect(transport.calls).toHaveLength(1);
+        expect(scan.rows).toHaveLength(10);
+        expect(scan.rows.map((row) => row.object.object_id)).not.toContain(target);
     });
 
     test("keeps the rows already ranked when the shared deadline expires during a later page", async () => {
@@ -943,7 +1026,7 @@ describe("scanSnapshotForLexicalSearch over several pages", () => {
         ).toEqual([newest, target].sort());
     });
 
-    test("an expired anti-memory that matches better takes no slot from an eligible memory", async () => {
+    test("an expired anti-memory that ranks first takes no slot from an eligible memory", async () => {
         const kernel = new FakeKernel();
         const target = `mem_${"f".repeat(32)}`;
         kernel.seedDecision({

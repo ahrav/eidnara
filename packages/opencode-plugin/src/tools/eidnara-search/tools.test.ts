@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setSystemTime } from "bun:test";
 import { resolveSessionDirectory } from "../../hooks/context/session-directory";
 import { KernelClient, MAX_READ_OBJECT_IDS } from "../../shared/kernel-client";
 import { renderAntiMemoryContent } from "../../shared/kernel-client/anti-memory";
@@ -548,5 +548,61 @@ describe("executeEidnaraSearch", () => {
         expect(execution.text).toStartWith(`${LEGACY_NOTE}\nMemory: the memory read was truncated`);
         expect(execution.tokenCount).toBe(estimateTokens(execution.text));
         expect(execution.tokenCount).toBeLessThanOrEqual(MAX_RENDERED_RESULT_TOKENS);
+    });
+});
+
+describe("eidnara_search expiry across the legacy scan", () => {
+    const START = 1_700_000_000_000;
+
+    /** Moves the wall clock ten seconds forward when the scan's read returns. */
+    class ClockAdvancingTransport extends FakeKernelTransport {
+        override async call(args: Parameters<FakeKernelTransport["call"]>[0]): Promise<unknown> {
+            const reply = await super.call(args);
+            if (args.method === "kernel.read") setSystemTime(new Date(START + 10_000));
+            return reply;
+        }
+    }
+
+    async function searchWith(transport: (kernel: FakeKernel) => FakeKernelTransport) {
+        const kernel = new FakeKernel();
+        seed(kernel, OBJECT_A, "Session caching uses the embedded store.");
+        seed(
+            kernel,
+            OBJECT_B,
+            renderAntiMemoryContent({
+                trigger: "session caching store",
+                rejectedStrategy: "Redis",
+                rejectionReason: "it creates split ownership",
+                expiresAt: START + 5_000,
+            }),
+            "REJECTED_APPROACH",
+        );
+        const wire = transport(kernel);
+        const tools = createEidnaraSearchTools({
+            kernelClient: ({ sessionId, projectRoot }) =>
+                new KernelClient({ transport: wire, enabled: true, sessionId, projectRoot }),
+            resolveProjectPath: () => "git:repo-project",
+        });
+        setSystemTime(new Date(START));
+        try {
+            return await tools.eidnara_search.execute(
+                { query: "session caching store", sources: ["memory"] },
+                toolContext(),
+            );
+        } finally {
+            setSystemTime();
+        }
+    }
+
+    it("returns an anti-memory that is live when the scan completes", async () => {
+        const result = await searchWith((kernel) => new FakeKernelTransport(kernel));
+        expect(result).toContain(`id=${OBJECT_A}`);
+        expect(result).toContain(`id=${OBJECT_B}`);
+    });
+
+    it("leaves out an anti-memory that expires while the scan reads", async () => {
+        const result = await searchWith((kernel) => new ClockAdvancingTransport(kernel));
+        expect(result).toContain(`id=${OBJECT_A}`);
+        expect(result).not.toContain(`id=${OBJECT_B}`);
     });
 });

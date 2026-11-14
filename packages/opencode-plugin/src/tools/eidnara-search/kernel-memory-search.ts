@@ -6,7 +6,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
-import type { Deadline } from "../../shared/host-client";
+import { Deadline } from "../../shared/host-client";
 import {
     isAvailable,
     isMemoryDecisionRow,
@@ -298,13 +298,20 @@ function rankLexicalRows(
         .slice(0, limit);
 }
 
-/** The daemon breaks commit ties by UTF-8 byte order, so ids compare as bytes here too; `cursor.id` is the cursor's id encoded once per page. */
-function followsCursor(cursor: ReadCursor & { id: Buffer }, row: ReadRow): boolean {
+/** A later page's position: the first page's snapshot and the last row served so far, whose id is encoded once per page. */
+interface ScanPosition {
+    asOf: number;
+    before: ReadCursor;
+    beforeId: Buffer;
+}
+
+/** The daemon breaks commit ties by UTF-8 byte order, so ids compare as bytes here too. */
+function followsCursor(position: ScanPosition, row: ReadRow): boolean {
     const seq = row.object.created_commit_seq;
     return (
-        seq < cursor.createdCommitSeq ||
-        (seq === cursor.createdCommitSeq &&
-            Buffer.compare(Buffer.from(row.object.object_id, "utf8"), cursor.id) > 0)
+        seq < position.before.createdCommitSeq ||
+        (seq === position.before.createdCommitSeq &&
+            Buffer.compare(Buffer.from(row.object.object_id, "utf8"), position.beforeId) > 0)
     );
 }
 
@@ -313,10 +320,10 @@ function followsCursor(cursor: ReadCursor & { id: Buffer }, row: ReadRow): boole
  * 8,192 rows and 8 MiB of row bytes, so sixteen pages cover 131,072 memories (a project that keeps
  * 100 memories a day for more than three years) and transfer at most 128 MiB.
  */
-export const MAX_SNAPSHOT_SCAN_PAGES = 16;
+const MAX_SNAPSHOT_SCAN_PAGES = 16;
 
 /** One scan spends at most the deadline one memory read had before the scan paged, so the fallback answers no later than it did; pages the deadline leaves unread are reported as truncation. */
-export const SNAPSHOT_SCAN_DEADLINE_MS = 10_000;
+const SNAPSHOT_SCAN_DEADLINE_MS = 10_000;
 
 /** The rows a lexical search ranks: memory decisions, minus anti-memories past their expiry. */
 function isSearchableMemoryRow(row: ReadRow, nowMs: number): boolean {
@@ -330,9 +337,10 @@ export type SnapshotScan =
 /**
  * Reads the surface page by page at the first page's snapshot. The retained rows preserve the
  * top `limit` lexical results among eligible rows from the pages read. Only the first page is
- * gated; later pages read the snapshot that gate admitted. `truncated` reports rows left unread,
- * after `maxPages` pages, past `deadline`, or when the daemon refuses a later page or answers it from
- * another snapshot or another connection. A search the caller's signal cancels answers its state, as a refused first page does.
+ * gated; later pages read the snapshot that gate admitted. `truncated` reports rows left unread:
+ * after `maxPages` pages, past the deadline, or when the daemon refuses a later page or answers it
+ * from another snapshot, over another connection, or with a row at or before the cursor. A search
+ * the caller's signal cancels answers its state, as a refused first page does.
  */
 export async function scanSnapshotForLexicalSearch(args: {
     client: KernelClient;
@@ -340,49 +348,50 @@ export async function scanSnapshotForLexicalSearch(args: {
     gated: boolean;
     query: string;
     limit: number;
-    nowMs: number;
+    /** The instant that decides which anti-memories have expired; the scan's start by default. */
+    nowMs?: number;
     signal?: AbortSignal;
-    /** Each page's read receives this deadline's remainder. */
+    /** Each page's read receives this deadline's remainder; the scan starts a `SNAPSHOT_SCAN_DEADLINE_MS` deadline by default. */
     deadline?: Deadline;
     maxPages?: number;
 }): Promise<SnapshotScan> {
     const terms = queryTerms(args.query);
+    const nowMs = args.nowMs ?? Date.now();
+    const deadline = args.deadline ?? Deadline.start(SNAPSHOT_SCAN_DEADLINE_MS);
     const maxPages = args.maxPages ?? MAX_SNAPSHOT_SCAN_PAGES;
-    let kept: ReadRow[] = [];
-    let asOf: number | null = null;
-    let before: ReadCursor | undefined;
     const connection = args.client.connectionIdentity();
+    let kept: ReadRow[] = [];
+    let position: ScanPosition | null = null;
     for (let page = 0; page < maxPages; page += 1) {
-        if (page > 0 && args.deadline?.isExpired())
+        // `prior` is null on the first page alone.
+        const prior = position;
+        if (prior !== null && deadline.isExpired()) {
             return { ok: true, rows: kept, truncated: true };
+        }
         const read = await args.client.read({
             surface: args.surface,
-            gated: page === 0 && args.gated,
+            gated: prior === null && args.gated,
             // The first page caches tokens as the single read did; later pages' rows mostly fall out of the ranking.
-            cacheTokens: page === 0,
-            ...(asOf === null ? {} : { asOf }),
-            ...(before === undefined ? {} : { before }),
+            cacheTokens: prior === null,
+            ...(prior === null ? {} : { asOf: prior.asOf, before: prior.before }),
             ...(args.signal ? { signal: args.signal } : {}),
-            ...(args.deadline ? { deadlineMs: args.deadline.remainingMs() } : {}),
+            deadlineMs: deadline.remainingMs(),
         });
         if (!isAvailable(read)) {
             // The client reports an expired deadline as `cancelled` too, so only the caller's own signal marks a cancelled search.
             const cancelled = args.signal?.aborted === true;
-            return asOf === null || cancelled
+            return prior === null || cancelled
                 ? { ok: false, state: read.state }
                 : { ok: true, rows: kept, truncated: true };
         }
-        const cursor =
-            before === undefined ? null : { ...before, id: Buffer.from(before.objectId, "utf8") };
         // A reply from another daemon connection can reuse the same `known_as_of` for a different store state.
         const continuesSnapshot =
-            asOf === null ||
-            (read.known_as_of === asOf &&
+            prior === null ||
+            (read.known_as_of === prior.asOf &&
                 args.client.connectionIdentity() === connection &&
-                (cursor === null || read.rows.every((row) => followsCursor(cursor, row))));
+                read.rows.every((row) => followsCursor(prior, row)));
         if (!continuesSnapshot) return { ok: true, rows: kept, truncated: true };
-        asOf = read.known_as_of;
-        const candidates = read.rows.filter((row) => isSearchableMemoryRow(row, args.nowMs));
+        const candidates = read.rows.filter((row) => isSearchableMemoryRow(row, nowMs));
         kept = rankLexicalRows([...kept, ...candidates], terms, args.limit).map(
             (entry) => entry.row,
         );
@@ -390,9 +399,14 @@ export async function scanSnapshotForLexicalSearch(args: {
         if (!read.truncated || last === undefined || terms.length === 0) {
             return { ok: true, rows: kept, truncated: read.truncated };
         }
-        before = {
+        const before = {
             createdCommitSeq: last.object.created_commit_seq,
             objectId: last.object.object_id,
+        };
+        position = {
+            asOf: read.known_as_of,
+            before,
+            beforeId: Buffer.from(before.objectId, "utf8"),
         };
     }
     return { ok: true, rows: kept, truncated: true };
