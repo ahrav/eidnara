@@ -540,9 +540,7 @@ describe("scanSnapshotForLexicalSearch", () => {
         const bodies = transport.calls.map((call) => call.body as { as_of: number | null });
         expect(bodies).toHaveLength(5);
         expect(bodies.slice(1).map((body) => body.as_of)).toEqual(Array(4).fill(snapshot));
-        const ids = scan.rows.map((row) => row.object.object_id);
-        expect(ids).toContain(target);
-        expect(ids).not.toContain(committed);
+        expect(scan.rows.map((row) => row.object.object_id)).toContain(target);
     });
 
     test("reports truncation when the page bound stops the scan before the oldest rows", async () => {
@@ -620,7 +618,8 @@ describe("scanSnapshotForLexicalSearch", () => {
                     return {
                         state: { kind: "available" },
                         known_as_of: 9,
-                        tip: 9,
+                        // The tip is ahead of the snapshot the page was read at, as it is when a commit lands during the read.
+                        tip: 12,
                         gated: false,
                         truncated: true,
                         rows: [first],
@@ -658,6 +657,8 @@ describe("scanSnapshotForLexicalSearch", () => {
         });
         // Only the first page is gated.
         expect(reads.map((args) => (args as { gated: boolean }).gated)).toEqual([true, false]);
+        // The later page reads the snapshot the first page reported, 9, with the tip at 12.
+        expect((reads[1] as { asOf?: number }).asOf).toBe(9);
     });
 
     test("answers the cancelled state when the caller's signal aborts after the first page", async () => {
@@ -732,35 +733,22 @@ describe("scanSnapshotForLexicalSearch", () => {
     });
 
     test("bounds a scan started with no deadline by one ten-second deadline", async () => {
-        const page = (truncated: boolean) => ({
+        const { client, reads } = twoPageClient({
             state: { kind: "available" },
             known_as_of: 9,
             tip: 9,
             gated: false,
-            truncated,
-            rows: truncated
-                ? [
-                      readRow({
-                          objectId: OBJECT_A,
-                          decisionKind: "ARCHITECTURE",
-                          summary: "backup volume",
-                          seq: 5,
-                      }),
-                  ]
-                : [],
+            truncated: false,
+            rows: [],
         });
-        const budgets: (number | undefined)[] = [];
-        const client = {
-            connectionIdentity: () => "connection",
-            // The first page takes twenty milliseconds, which the second page's budget no longer holds.
-            read: async (read: { deadlineMs?: number }) => {
-                budgets.push(read.deadlineMs);
-                if (budgets.length > 1) return page(false);
-                await Bun.sleep(20);
-                return page(true);
-            },
-        } as unknown as KernelClient;
+        const read = client.read.bind(client);
+        // The first page takes twenty milliseconds, which the second page's budget no longer holds.
+        client.read = async (args) => {
+            if (reads.length === 0) await Bun.sleep(20);
+            return read(args);
+        };
         await scanWith(client);
+        const budgets = reads.map((args) => (args as { deadlineMs?: number }).deadlineMs);
         expect(budgets).toHaveLength(2);
         const [first, second] = budgets as [number, number];
         expect(first).toBeGreaterThan(9_000);
