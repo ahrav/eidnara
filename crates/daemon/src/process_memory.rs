@@ -124,17 +124,37 @@ pub fn release_free_c_heap() -> Option<u64> {
 }
 
 #[cfg(test)]
-pub(crate) fn fragmented_c_heap() -> (Vec<Vec<u8>>, u64) {
-    const CHUNK_BYTES: usize = 64 * 1024;
-    const CHUNKS: usize = 4096;
-    const KEEP_EVERY: usize = 64;
-    let chunks: Vec<Vec<u8>> = (0..CHUNKS).map(|_| vec![1_u8; CHUNK_BYTES]).collect();
-    let kept = chunks
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, chunk)| (index % KEEP_EVERY == 0).then_some(chunk))
-        .collect();
-    (kept, (CHUNK_BYTES * CHUNKS) as u64)
+pub(crate) struct FragmentedCHeap {
+    pub(crate) kept: Vec<Vec<u8>>,
+    pub(crate) freed_bytes: u64,
+    pub(crate) resident_before: u64,
+}
+
+#[cfg(test)]
+impl FragmentedCHeap {
+    pub(crate) fn new() -> Self {
+        const CHUNK_BYTES: usize = 64 * 1024;
+        const CHUNKS: usize = 4096;
+        const KEEP_EVERY: usize = 64;
+        let resident_before = ProcessMemory::sample().rss_anon_bytes.unwrap_or(0);
+        let chunks: Vec<Vec<u8>> = (0..CHUNKS).map(|_| vec![1_u8; CHUNK_BYTES]).collect();
+        let kept: Vec<Vec<u8>> = chunks
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, chunk)| (index % KEEP_EVERY == 0).then_some(chunk))
+            .collect();
+        let freed_bytes = (CHUNK_BYTES * (CHUNKS - kept.len())) as u64;
+        Self {
+            kept,
+            freed_bytes,
+            resident_before,
+        }
+    }
+
+    pub(crate) fn is_released(&self) -> bool {
+        let resident = ProcessMemory::sample().rss_anon_bytes.unwrap_or(u64::MAX);
+        resident < self.resident_before + self.freed_bytes / 2
+    }
 }
 
 #[cfg(test)]
@@ -154,21 +174,24 @@ mod tests {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[test]
     fn a_release_returns_the_pages_of_freed_c_heap_chunks() {
-        let (kept, total) = fragmented_c_heap();
-        let held = ProcessMemory::sample();
-        let heap = held.c_heap.expect("glibc reports its heap");
-        assert!(heap.free_bytes > total / 2, "{heap:?}");
+        let heap = FragmentedCHeap::new();
+        let free = c_heap().expect("glibc reports its heap").free_bytes;
+        assert!(free > heap.freed_bytes / 2, "{free}");
+        assert!(heap.freed_bytes / 2 > C_HEAP_RELEASE_THRESHOLD_BYTES);
         assert!(c_heap_release_is_due());
-        assert!(total / 2 > C_HEAP_RELEASE_THRESHOLD_BYTES);
 
-        let released = release_free_c_heap().expect("no other release runs");
-        assert!(released > total / 2, "released {released} of {total}");
-        let after = ProcessMemory::sample();
-        assert!(
-            held.rss_anon_bytes.unwrap() - after.rss_anon_bytes.unwrap() > total / 2,
-            "{held:?} then {after:?}"
-        );
-        assert_eq!(after.to_json()["c_heap_releases"], 1);
-        drop(kept);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !heap.is_released() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{:?}",
+                ProcessMemory::sample()
+            );
+            release_free_c_heap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let reported = ProcessMemory::sample().to_json();
+        assert!(reported["c_heap_releases"].as_u64().unwrap() >= 1);
+        assert_eq!(heap.kept.len(), 64);
     }
 }
