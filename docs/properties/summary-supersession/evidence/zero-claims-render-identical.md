@@ -53,7 +53,7 @@ Tests:
   only added lines to `render-golden.json` (cases 7 and 8 carry
   corrections; cases 0 to 6 carry none, and `corrections` defaults to empty
   in the fixture struct) and changed no other file under
-  `crates/daemon/testdata`. No later commit touches that directory.
+  `crates/daemon/testdata`. No later commit touches the two render goldens.
 
 - `crates/daemon/src/history_open_items.rs::tests::rows_that_retire_no_line_keep_their_tiers_byte_for_byte`
   projects rows that hold a status form in running text, blank runs, a
@@ -93,7 +93,7 @@ rows whose status lines all stay, projected borrowed and owned.
 - Missing evidence: none for the narrowed clause.
 - Conclusion: resolved with answer; m1 is identical only when the new rows
   carry no claims, per A7. m0 is identical whenever no loaded claim is
-  superseded.
+  superseded and no loaded row retires an open-item line.
 
 ### Q: Is the m1 comparison against literal pre-change bytes?
 
@@ -111,5 +111,14 @@ rows whose status lines all stay, projected borrowed and owned.
 - Sources examined: `cargo +1.98 nextest run -p daemon --all-features --locked --lib -E 'test(decay_render::) | test(correction) | test(every_loaded_claim)'`
   at `c38af85a`.
 - Findings: 28 passed, including both render goldens and the compose test.
+- Missing evidence: none.
+- Conclusion: resolved with answer.
+
+### Q: Do the checks pass with open-item retirement in the row projection?
+
+- Sources examined: `cargo test --locked -p daemon --lib -- decay_render:: correction every_loaded_claim history_open_items`
+  on the branch that adds `crates/daemon/src/history_open_items.rs`.
+- Findings: every selected test passes, including both render goldens, the
+  compose test, and `rows_that_retire_no_line_keep_their_tiers_byte_for_byte`.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

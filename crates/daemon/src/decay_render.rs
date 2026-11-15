@@ -201,7 +201,7 @@ fn with_corrections(
                 row.start_date = None;
                 row.end_date = None;
             }
-            row.corrections = corrections;
+            row.corrections = crate::history_open_items::beside_open_lines(corrections);
             row
         })
         .collect()

@@ -102,31 +102,9 @@ fn fold(
         ..ValidateOptions::default()
     };
     let validated = validate_history_summarizer_output(text, chunk, &[], options).unwrap();
-    stored.extend(
-        validated
-            .history_segments
-            .iter()
-            .map(|segment| StoredHistorySegment {
-                sequence: segment.sequence as i64,
-                start_message: segment.start_message as i64,
-                end_message: segment.end_message as i64,
-                start_message_id: segment.start_message_id.clone(),
-                end_message_id: segment.end_message_id.clone(),
-                start_date: None,
-                end_date: None,
-                title: segment.title.clone(),
-                content: segment.content.clone(),
-                p1: segment.p1.clone(),
-                p2: segment.p2.clone(),
-                p3: segment.p3.clone(),
-                p4: segment.p4.clone(),
-                importance: 50,
-                episode_type: segment.episode_type.clone(),
-                legacy: 0,
-                created_at: 0,
-                claims: segment.claims.clone(),
-            }),
-    );
+    stored.extend(validated.history_segments.iter().map(|segment| {
+        crate::history_summarizer::to_stored_history_segment(segment, 0, &BTreeMap::new())
+    }));
     validated.history_segments
 }
 
@@ -421,16 +399,7 @@ fn constraint_then_other_work(messages: &[IngressMessage]) -> Vec<StoredHistoryS
     let first_chunk = chunk_of(messages, 1, 3);
     let p1 =
         format!("{CONSTRAINT_LINE}\nI measured the baseline and left two parser bugs unfixed.");
-    let first = output(
-        &[segment_xml(1, 2, [&p1, &p1, &p1, ""])],
-        &[claim(
-            "policy.baseline-fixes",
-            &cite(&first_chunk, 1, CONSTRAINT),
-            CONSTRAINT,
-            CONSTRAINT_LINE,
-        )],
-        3,
-    );
+    let first = output(&[segment_xml(1, 2, [&p1, &p1, &p1, ""])], &[], 3);
     let mut stored = Vec::new();
     fold(&mut stored, &first, &first_chunk);
     let p1 = "I wrote up the measurement method.";
@@ -463,11 +432,9 @@ fn a_constraint_stands_in_every_tier_until_a_later_fold_stores_its_lift_claim() 
 
     let history = rendered_tiers(&stored);
     for tier in &history[0] {
-        assert_eq!(open_lines(tier), Vec::<&str>::new());
-        // The constraint's own claim is superseded, so the row lists the live value.
-        assert!(
-            tier.ends_with(&format!("[corrections: policy.baseline-fixes = {LIFT} @5]")),
-            "{tier}"
+        assert_eq!(
+            tier,
+            "## 1-2 \u{b7} Work 1-2\nI measured the baseline and left two parser bugs unfixed."
         );
     }
     for tier in &history[2] {
@@ -709,16 +676,23 @@ fn with_tail(mut messages: Vec<IngressMessage>) -> Vec<IngressMessage> {
     messages
 }
 
-/// The first fold ends waiting on the user and records a user constraint; the second fold holds
-/// the user's answer and the lift. Both folds run through the production handler. The next
-/// request carries the outcomes in the rows above its frozen baseline, and the baseline the next
+/// The first fold ends waiting on the user and records a user constraint. The second fold holds
+/// the user's answer and the lift, then a second question and its answer, in two segments. Both
+/// folds run through the production handler. The next request carries the outcomes in the rows
+/// above its frozen baseline with the second question retired there, and the baseline the next
 /// rebuild writes holds the outcomes alone.
 #[tokio::test(flavor = "current_thread")]
 async fn a_fold_that_settles_open_items_reaches_the_next_request_and_the_next_baseline() {
-    let case = &ANSWERED[0];
-    let (asking, answering) = question_under_a_constraint(case);
+    let (case, follow_up) = (&ANSWERED[0], &ANSWERED[2]);
+    let (asking, mut answering) = question_under_a_constraint(case);
+    answering.extend([
+        assistant(5, &format!("One more point. {}", follow_up.question)),
+        user(6, &format!("{}.", follow_up.answer)),
+        assistant(7, "The poller keeps its interval."),
+        user(8, "Now check the changelog entry for this release."),
+        assistant(9, "The changelog entry is in place."),
+    ]);
     let first_messages = with_tail(asking.clone());
-    let first_chunk = chunk_of(&first_messages, 1, 3);
     let first_p1 = format!(
         "{CONSTRAINT_LINE}\nI finished the first migration step.\n{}",
         case.waiting_line()
@@ -734,37 +708,33 @@ async fn a_fold_that_settles_open_items_reaches_the_next_request_and_the_next_ba
                 "",
             ],
         )],
-        &[claim(
-            "policy.baseline-fixes",
-            &cite(&first_chunk, 1, CONSTRAINT),
-            CONSTRAINT,
-            CONSTRAINT_LINE,
-        )],
+        &[],
         3,
     );
     let second_messages = with_tail([asking, answering].concat());
-    let second_chunk = chunk_of(&second_messages, 3, 5);
-    let second_p1 = format!(
-        "{}\n{LIFTED_LINE}\nI finished the remaining steps.",
-        case.decided_line()
+    let second_chunk = chunk_of(&second_messages, 3, 10);
+    let settled = format!(
+        "{}\n{LIFTED_LINE}\nI finished the remaining steps.\n{}",
+        case.decided_line(),
+        follow_up.waiting_line()
     );
+    let answered = format!("{}\nThe poller is unchanged.", follow_up.decided_line());
+    // Validation withholds the answer's last segment for the next fold to derive again, so a
+    // third segment follows the two this test reads.
+    let checked = "I checked the changelog entry.";
     let second_output = output(
-        &[segment_xml(3, 4, [&second_p1, &second_p1, &second_p1, ""])],
         &[
-            claim(
-                case.key,
-                &cite(&second_chunk, 3, case.answer),
-                case.answer,
-                &case.decided_line(),
-            ),
-            claim(
-                "policy.baseline-fixes",
-                &cite(&second_chunk, 3, LIFT),
-                LIFT,
-                LIFTED_LINE,
-            ),
+            segment_xml(3, 5, [&settled, &settled, &settled, ""]),
+            segment_xml(6, 7, [&answered, &answered, &answered, ""]),
+            segment_xml(8, 9, [checked, checked, checked, ""]),
         ],
-        5,
+        &[claim(
+            "policy.baseline-fixes",
+            &cite(&second_chunk, 3, LIFT),
+            LIFT,
+            LIFTED_LINE,
+        )],
+        10,
     );
     let producer = Arc::new(ProducerState::default());
     producer
@@ -801,39 +771,39 @@ async fn a_fold_that_settles_open_items_reaches_the_next_request_and_the_next_ba
 
     // The stored rows keep both folds as written.
     let rows = store.load_history_segments("ses").unwrap();
-    assert_eq!(rows.len(), 2, "{rows:?}");
-    assert!(
-        rows[0]
-            .p1
-            .as_deref()
-            .unwrap()
-            .contains(&case.waiting_line())
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(open_lines(rows[0].p1.as_deref().unwrap()), open);
+    assert_eq!(
+        open_lines(rows[1].p1.as_deref().unwrap()),
+        [follow_up.waiting_line()]
     );
-    assert!(rows[0].p1.as_deref().unwrap().contains(CONSTRAINT_LINE));
 
-    // The frozen baseline keeps its bytes until its next rebuild. The rows above it state both
-    // outcomes and hold no open line, and the update block names the lift under the
-    // constraint's key.
+    // The frozen baseline keeps its bytes until its next rebuild. The rows above it state the
+    // outcomes, the second question leaves the older of them, and the update block names the
+    // lift under the constraint's key.
     let served = pass(second_messages).await;
     let (baseline, since) = (synthetic_text(&served, 0), synthetic_text(&served, 1));
     assert_eq!(open_lines(&baseline), open, "{baseline}");
     assert_eq!(open_lines(&since), Vec::<&str>::new(), "{since}");
-    assert!(since.contains(&case.decided_line()), "{since}");
-    assert!(since.contains(LIFTED_LINE), "{since}");
-    assert!(
-        since.contains(&format!("policy.baseline-fixes = {LIFT} @3")),
-        "{since}"
-    );
+    for outcome in [
+        case.decided_line().as_str(),
+        LIFTED_LINE,
+        follow_up.decided_line().as_str(),
+        &format!("policy.baseline-fixes = {LIFT} @3"),
+    ] {
+        assert!(since.contains(outcome), "{since}");
+    }
 
     // The baseline the next rebuild writes from the stored rows holds the outcomes alone.
     let rebuilt = composed_baseline(&store);
     assert_eq!(open_lines(&rebuilt), Vec::<&str>::new(), "{rebuilt}");
-    assert!(rebuilt.contains(&case.decided_line()), "{rebuilt}");
-    assert!(rebuilt.contains(LIFTED_LINE), "{rebuilt}");
-    assert!(
-        rebuilt.contains(&format!("[corrections: policy.baseline-fixes = {LIFT} @3]")),
-        "{rebuilt}"
-    );
+    for outcome in [
+        case.decided_line().as_str(),
+        LIFTED_LINE,
+        follow_up.decided_line().as_str(),
+    ] {
+        assert!(rebuilt.contains(outcome), "{rebuilt}");
+    }
 }
 
 const LIVE_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";

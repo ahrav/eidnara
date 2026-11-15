@@ -55,6 +55,8 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review
 | `rendered_corrections_hold_nothing_the_secret_scanner_flags` | same | rendered m0 splices and m1 entries hold no scanner detection | unaudited |
 | `a_hostile_value_in_m1_renders_escaped_and_indented_in_the_updates_block` | same | the m1 block escapes and guards hostile values | unaudited |
 | `rows_that_retire_no_line_keep_their_tiers_byte_for_byte` | `crates/daemon/src/history_open_items.rs` | rows whose open-item lines all stay (running text that names a form, a constraint with no lift, a waiting line in the newest row) project to the stored `content` and tiers, borrowed and owned | unaudited |
+| `a_row_whose_p1_empties_still_renders_its_tiers_and_its_corrections` | same | a row whose `p1` retirement empties renders its heading, its remaining tiers, and the footer entry of the correction whose anchor stood in the retired line | unaudited |
+| `a_later_claim_under_a_standing_constraints_key_lists_beside_the_line` | same | a correction anchored on an open status line of its own key renders on the footer and leaves the line; other anchors keep their splice | unaudited |
 | `a_correction_rides_m1_until_the_next_hard_splices_it_into_m0` | `crates/daemon/src/transform.rs` | m0 frozen across SOFT passes after two correcting folds; m1 names each; the next HARD splices the newest value | unaudited |
 
 ## Scale
