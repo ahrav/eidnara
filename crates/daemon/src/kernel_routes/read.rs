@@ -83,6 +83,9 @@ pub(crate) enum RowSelection<'a> {
     Objects(&'a [String]),
     /// Applied in the kernel query as well; `keeps` re-checks each returned row.
     DomainDecisions(&'a str),
+    /// The decisions of one domain except the named objects, which spend
+    /// neither the row cap nor the byte cap.
+    DomainDecisionsExcept(&'a str, &'a std::collections::HashSet<String>),
 }
 
 impl RowSelection<'_> {
@@ -91,6 +94,11 @@ impl RowSelection<'_> {
             Self::All | Self::Objects(_) => true,
             Self::DomainDecisions(domain_id) => {
                 row.object.object_kind == "decision" && row.object.domain_id == domain_id
+            }
+            Self::DomainDecisionsExcept(domain_id, excluded) => {
+                row.object.object_kind == "decision"
+                    && row.object.domain_id == domain_id
+                    && !excluded.contains(&row.object.object_id)
             }
         }
     }
@@ -167,6 +175,25 @@ pub(crate) fn read_visible(
     as_of: Option<i64>,
     selection: RowSelection<'_>,
 ) -> Result<ReadResponse, KernelError> {
+    read_visible_within(
+        store,
+        project,
+        surface,
+        as_of,
+        selection,
+        (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
+    )
+}
+
+/// [`read_visible`] under the given row and payload-byte caps.
+pub(crate) fn read_visible_within(
+    store: &KernelStore,
+    project: &ProjectBinding,
+    surface: Surface,
+    as_of: Option<i64>,
+    selection: RowSelection<'_>,
+    (max_rows, max_row_bytes): (usize, usize),
+) -> Result<ReadResponse, KernelError> {
     let requested = match as_of {
         Some(as_of) => as_of,
         None => store.tip()?,
@@ -181,14 +208,15 @@ pub(crate) fn read_visible(
         RowSelection::Objects(ids) => {
             store.visible_as_of_in_scope(surface, requested, Some(ids), scope)?
         }
-        RowSelection::DomainDecisions(domain_id) => {
+        RowSelection::DomainDecisions(domain_id)
+        | RowSelection::DomainDecisionsExcept(domain_id, _) => {
             store.visible_domain_decisions_as_of_in_scope(surface, requested, domain_id, scope)?
         }
     };
     let mut filter = ScopeFilter::new(project);
     let mut terms = stored_terms(store);
     // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
-    let mut newest = NewestRows::new(MAX_READ_ROWS);
+    let mut newest = NewestRows::new(max_rows);
     for row in visible.rows {
         if selection.keeps(&row) && filter.matches(row.scope_id.as_deref(), &mut terms)? {
             newest.push(row);
@@ -223,7 +251,7 @@ pub(crate) fn read_visible(
         }
         cumulative_payload_bytes = cumulative_payload_bytes
             .saturating_add(*payload_sizes.get(&row.object.object_id).unwrap_or(&0));
-        if cumulative_payload_bytes > MAX_READ_ROW_BYTES as u64 {
+        if cumulative_payload_bytes > max_row_bytes as u64 {
             cutoff = index;
             break;
         }

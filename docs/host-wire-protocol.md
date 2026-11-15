@@ -688,7 +688,7 @@ text, an identity, a path, a digest, or a project.
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `decisions_cited`, `decisions_source_capture_off`, `decisions_source_id_unjoinable`, `decisions_publish_budget_expired`, `decisions_descriptor_not_found` | unsigned integer | memory-capture decisions committed, by citation reason: cited a captured message; source or memory consent off; a hashed source id that names no descriptor; the session's source publish was refused, ended on its deadline, or outlasted its 5 s budget while the submit waited, and the lookup found no descriptor; no live descriptor of the message |
 | `decisions_anchored`, `decisions_head_unavailable` | unsigned integer | memory-capture decisions committed, by anchor reason: anchored at the frozen checkout HEAD; no readable HEAD |
-| `decisions_approval_refused` | unsigned integer | user statements committed as labeled memories for explicit search after the Kernel's admission policy refused their statement record |
+| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record; every user statement of that plan is counted |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
@@ -896,6 +896,11 @@ IDs are distinct, nonempty, at most 256 UTF-8 bytes, and contain no control
 characters. Role is `user` or `assistant`. Text is nonblank and its aggregate
 size is at most 65,536 bytes. Clients split larger native text on UTF-8
 boundaries. Reasoning, tool output, and synthetic summaries are excluded.
+A `pi` transform also checkpoints the text of its window. Pi gives the wire
+role `user` to bash executions, extension messages, and branch and compaction
+summaries; a window message is a source only when its own native row's role
+is `user` or `assistant`, and a window whose native rows and messages differ
+in number yields no source.
 Optional `model` is a nonempty provider/model identifier of at most 512 bytes
 without control characters. A checkpoint never invokes a model, with or
 without this hint.
@@ -912,13 +917,18 @@ and 8,192 overall.
 
 A connected harness requests work with the common envelope and
 `method: "memory.capture.next"`; optional `model` supplies the current native
-model when no history-summarizer model chain is configured. The host first
-attempts already-frozen commits, which need no model. It then reserves at most
-one batch per project/harness pair, with at most 16 reservations overall.
-Each call reads two windows of the project's ripe sources, oldest first: at
-most 32 frozen plans awaiting a commit, and at most 32 sources awaiting
-extraction. The windows are independent, so a source awaiting extraction is
-issued in the first call after it is stored however many frozen plans wait.
+model when no history-summarizer model chain is configured. The host reserves
+at most one batch per project/harness pair, with at most 16 reservations
+overall, and then attempts already-frozen commits, which need no model.
+Each call reads two windows of the pair's ripe sources, oldest first: at
+most 32 frozen plans awaiting a commit, within 1 MiB of retained text and plan
+bytes, and at most 32 sources awaiting extraction, within 64 KiB of source
+text. The windows are independent, so frozen plans take no place in the
+extraction window. The frozen commits of one call share a 10 s budget; a plan
+the budget does not reach stays queued for the next call. A source in the
+extraction window is issued when the call holds the reservation, a model is
+configured, the batch fits the prompt ceiling, and the source is at the
+failure stage of the window's oldest source.
 
 A `work` response contains:
 
@@ -937,10 +947,13 @@ A stale reply cannot remove or publish against a successor reservation.
 Leases are process-local; source jobs and frozen plans are durable. Capture
 queues and leases key on the same canonical project identity the kernel scope
 uses, so a symlinked spelling of one root is the same project and two roots
-that differ only in raw path bytes stay distinct. A dispatch is recorded only
-when work is issued; a `next` request cancelled during preparation records
-none, except that a source whose prompt exceeds the ceiling even alone is
-failed as soon as it is discovered, whatever becomes of the request.
+that differ only in raw path bytes stay distinct. A model dispatch is recorded
+only when work is issued; a `next` request cancelled during preparation
+records none, except that a source whose prompt exceeds the ceiling even alone
+is failed as soon as it is discovered, whatever becomes of the request. A
+frozen plan whose commit the Kernel refuses also records one dispatch per
+refused publication, including in a `next` request that is later cancelled; a
+publication the labeled commit recovers records none.
 
 Other `next` states are `ready`, `pending`, `stale`, `disabled`,
 `store_failed`, and `unavailable`. `ready` means the project has no pending
@@ -1007,11 +1020,17 @@ model/output failure of that source, so later sources are not held behind it.
 Dispatches are capped at nine per source across owners: a model/output failure
 on or after the ninth dispatch abandons the source. A frozen plan the Kernel
 refuses on admission policy, invalid input, or a missing object, and a frozen
-plan the host cannot decode, records one dispatch per refused commit: the
+plan the host cannot decode, records one dispatch per refused publication: the
 retry delay doubles with the count, and the refusal that reaches the ninth
 dispatch abandons the source with the error `kernel_write_refused` or
-`invalid_preparation`. Any other Kernel failure keeps the plan, records
-`kernel_write_failed`, and retries after the delay of the current count. An
+`invalid_preparation`. A Kernel conflict, which means a target moved under the
+plan or the Kernel holds another receipt for the source, releases the plan
+with the error `reconciliation_conflict`; the source is extracted again after
+the delay of its count, and the conflict met on the ninth dispatch abandons
+it. Each recovery applies to the plan the commit read, so a late answer about
+an earlier plan leaves a newer one as it is. Any other Kernel failure keeps
+the plan, records `kernel_write_failed`, and retries after the delay of the
+current count. An
 abandoned source keeps
 its replay identity and its last error, releases its text and frozen plan, no longer counts
 toward the pending quota or the `pending` status count, is never returned as
@@ -1072,17 +1091,24 @@ the first 32 hexadecimal digits of the capture source's identity, revision 1.
 The Kernel bounds the authority-bearing accepted decisions of one source
 lineage at 64 and one batch proposes at most 64 memories, so the statements of
 one message fit its lineage and the number of live statements in a project has
-no ceiling; a statement leaves when a correction supersedes or retires it. A
-statement record written under the bare source id `memory_capture_statement`
-is retired with its fact in the same way. When the Kernel's admission policy
-refuses a statement record, the same frozen plan commits with each of its user
+no ceiling; a statement leaves when a correction supersedes or retires it.
+When the Kernel's admission policy refuses a statement record, or the
+admission that rests on it, the same frozen plan commits with each of its user
 statements as a labeled memory for explicit search, and
-`decisions_approval_refused` counts them. Every other captured fact remains labeled model inference
+`decisions_approval_refused` counts them. The labeled commit applies the
+plan's replacements as the approving commit would, so a fact it supersedes or
+retires leaves `auto_inject` while the correction is labeled. Every other captured fact remains labeled model inference
 for explicit search, not human approval or automatic-context eligibility. The
 `<project-memory>` block of a session's m0 holds the live, project-scoped,
 positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
-and leaves out facts captured from that session's own messages. A user message may correct earlier facts, and only
+and leaves out facts captured from that session's own messages. Those facts
+are left out of the bounded read of the newest 8,192 facts and 8 MiB, so they
+take no place from another session's facts; the read is repeated at the same
+snapshot at most four times to pass over them. The extractor's reference
+memories are ranked from two such reads at one snapshot, the newest facts on
+`explicit_search` and the newest on `auto_inject`; a fact older than both
+windows is not offered. A user message may correct earlier facts, and only
 the user's statement may replace a fact served on `auto_inject`: its fact
 supersedes the captured fact it `replaces` (which must share its category
 and at least one content word), retires each further fact it names

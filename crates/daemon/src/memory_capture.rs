@@ -766,7 +766,12 @@ impl HandlerCore {
     ///
     /// Only `pi` sources are taken from the transform. Pi joins text blocks with
     /// `\n` exactly as `native_capture_fragments` does and marks synthetic text
-    /// per message. OpenCode marks synthetic text per part (`@file` contents,
+    /// per message. Pi also gives the wire role `user` to bash executions,
+    /// extension messages, and branch and compaction summaries, which the user
+    /// did not type. A request that carries its native rows holds one row per
+    /// message, and a message is a source only when its own row's role is
+    /// `user` or `assistant`; a request whose rows and messages differ in
+    /// number yields no source. OpenCode marks synthetic text per part (`@file` contents,
     /// reminders) and that flag is not carried on the wire, so only the OpenCode
     /// plugin's own derivation is authoritative there; a daemon copy would
     /// enqueue different text for the same message id and store scaffolding as
@@ -791,13 +796,26 @@ impl HandlerCore {
             return None;
         }
         let start = request.messages.len().saturating_sub(trailing_messages);
+        let native = request.native_messages.as_deref();
+        if native.is_some_and(|rows| rows.len() != request.messages.len()) {
+            return None;
+        }
+        let typed_or_spoken = |index: usize| {
+            native.is_none_or(|rows| {
+                matches!(
+                    rows[index].pointer("/message/role").and_then(Value::as_str),
+                    Some("user" | "assistant")
+                )
+            })
+        };
         let project = capture_project(binding);
         let mut fragments = Vec::new();
         let mut refused = false;
         let epoch = {
             let mut memo = self.capture_memo.lock().expect("capture memo mutex");
-            for message in &request.messages[start..] {
+            for (index, message) in request.messages.iter().enumerate().skip(start) {
                 if !matches!(message.ck.role.as_str(), "user" | "assistant")
+                    || !typed_or_spoken(index)
                     || message.ck.meta.synthetic
                     || message.ck.meta.summary
                     || message.ck.meta.errored
@@ -1037,7 +1055,15 @@ impl CaptureWork {
             .filter(|word| word.chars().count() >= 3)
             .map(str::to_lowercase)
             .collect();
-        select_existing_memories(&kernel, &self.binding.kernel_project, &words)
+        select_existing_memories(
+            &kernel,
+            &self.binding.kernel_project,
+            &words,
+            (
+                kernel_routes::read::MAX_READ_ROWS,
+                kernel_routes::read::MAX_READ_ROW_BYTES,
+            ),
+        )
     }
 
     /// Transport, provider, store, and kernel outcomes say nothing about the
@@ -1067,12 +1093,17 @@ impl CaptureWork {
     }
 
     /// `settlement` is what the session's source publish reached when the
-    /// submit took its citation lookup.
-    fn publish(&self, job: &CaptureJob, settlement: SettlementOutcome) -> Result<(), &'static str> {
-        let kernel = self
-            .kernel
-            .kernel_store()
-            .map_err(|_| "kernel_unavailable")?;
+    /// submit took its citation lookup. The Kernel writer is awaited until
+    /// `deadline`. A failure carries the plan bytes the commit read, so the
+    /// recovery acts on that plan and on no later one.
+    fn publish(
+        &self,
+        job: &CaptureJob,
+        settlement: SettlementOutcome,
+        deadline: Instant,
+    ) -> Result<(), (Unpublished, String)> {
+        let retained = || (Unpublished::Retained, String::new());
+        let kernel = self.kernel.kernel_store().map_err(|_| retained())?;
         // Session deletion takes the same gate. No await occurs while it is
         // held, and deletion cannot race a post-check capture publication.
         let _gate = self.commit_gate.lock().expect("capture publication mutex");
@@ -1081,17 +1112,16 @@ impl CaptureWork {
             .prepare_memory_capture(
                 &job.project,
                 &job.job_id,
-                job.prepared.as_deref().ok_or("missing_preparation")?,
+                job.prepared.as_deref().ok_or_else(retained)?,
             )
-            .map_err(|_| "store_failed")?
+            .map_err(|_| retained())?
         else {
             return Ok(());
         };
-        let output: PreparedCapture =
-            serde_json::from_str(&prepared).map_err(|_| "invalid_preparation")?;
-        if output.version != CAPTURE_SCHEMA_VERSION {
-            return Err("invalid_preparation");
-        }
+        let output = match serde_json::from_str::<PreparedCapture>(&prepared) {
+            Ok(output) if output.version == CAPTURE_SCHEMA_VERSION => output,
+            _ => return Err((Unpublished::Refused("invalid_preparation"), prepared)),
+        };
         let settlement = if citation_consent(&self.binding.config) {
             settlement
         } else {
@@ -1104,79 +1134,143 @@ impl CaptureWork {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let mut reasons = Vec::new();
-        let receipt = publish_captured_memories(
+        let receipt = match publish_captured_memories(
             &kernel,
             &self.binding.kernel_project,
             job,
             &output,
             &prepared,
             settlement,
+            deadline,
             &mut reasons,
-        )
-        .map_err(|error| match error {
-            kernel::KernelError::Conflict => "reconciliation_conflict",
-            kernel::KernelError::AdmissionPolicy
-            | kernel::KernelError::InvalidInput
-            | kernel::KernelError::NotFound => COMMIT_REFUSED,
-            _ => "kernel_write_failed",
-        })?;
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => return Err((unpublished(error), prepared)),
+        };
         if !receipt.replayed {
             self.source_capture.record_capture_decisions(&reasons);
         }
         self.store
             .complete_memory_capture(&job.project, &job.job_id, receipt.commit_seq)
-            .map_err(|_| "store_failed")?;
+            .map_err(|_| retained())?;
         Ok(())
     }
 
-    /// A rejected kernel transaction wrote nothing. A revision conflict means a
-    /// target moved under the frozen plan, so the source is re-planned. A
-    /// refusal of the plan as frozen counts as a dispatch, so its backoff
-    /// doubles and the source is abandoned at the dispatch cap. Any other
-    /// kernel failure keeps the plan and retries on the dispatch backoff.
+    /// A rejected kernel transaction wrote nothing, and each recovery acts
+    /// on the plan the commit read. A conflict means a target moved under the
+    /// frozen plan or the Kernel holds another receipt for the job: the plan
+    /// is released and the source is extracted again after the dispatch
+    /// backoff, until the dispatch cap abandons it. A refusal of the plan as
+    /// frozen counts as a dispatch, so its backoff doubles and the source is
+    /// abandoned at the dispatch cap. Any other failure keeps the plan and
+    /// retries on the dispatch backoff.
     fn publish_or_recover(
         &self,
         job: &CaptureJob,
         settlement: SettlementOutcome,
+        deadline: Instant,
     ) -> Result<(), &'static str> {
-        let Err(code) = self.publish(job, settlement) else {
+        use memory_store::memory_capture::CaptureRefusal;
+        let Err((recovery, frozen)) = self.publish(job, settlement, deadline) else {
             return Ok(());
         };
         let now = now_ms();
         let retry_at = now.saturating_add(capture_retry_delay_ms(job.attempts));
-        match code {
-            "reconciliation_conflict" => self
-                .store
-                .retry_memory_capture_reconciliation(
+        let (outcome, code) = match recovery {
+            Unpublished::Replan => (
+                self.store.retry_memory_capture_reconciliation(
                     &job.project,
                     &job.job_id,
-                    job.prepared.as_deref().unwrap_or_default(),
-                )
-                .map_err(|_| "store_failed"),
-            COMMIT_REFUSED | "invalid_preparation" => {
-                if self
-                    .store
-                    .refuse_memory_capture_commit(&job.project, &job.job_id, code, retry_at, now)
-                    .map_err(|_| "store_failed")?
-                {
-                    eprintln!("daemon: memory capture source abandoned: {code}");
-                }
-                Ok(())
-            }
-            _ => self
-                .store
-                .fail_memory_capture(
-                    &job.project,
-                    &job.job_id,
-                    "kernel_write_failed",
+                    &frozen,
                     retry_at,
-                    false,
                     now,
-                )
-                .map_err(|_| "store_failed"),
+                ),
+                "reconciliation_conflict",
+            ),
+            Unpublished::Refused(code) => (
+                self.store.refuse_memory_capture_commit(
+                    &job.project,
+                    &job.job_id,
+                    &frozen,
+                    code,
+                    retry_at,
+                    now,
+                ),
+                code,
+            ),
+            Unpublished::Retained => {
+                return self
+                    .store
+                    .fail_memory_capture(
+                        &job.project,
+                        &job.job_id,
+                        "kernel_write_failed",
+                        retry_at,
+                        false,
+                        now,
+                    )
+                    .map_err(|_| "store_failed");
+            }
+        };
+        if outcome.map_err(|_| "store_failed")? == CaptureRefusal::Abandoned {
+            eprintln!("daemon: memory capture source abandoned: {code}");
         }
+        Ok(())
     }
 }
+
+/// How the capture queue recovers a publication that did not commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unpublished {
+    /// The plan is released and the source is extracted again.
+    Replan,
+    /// The plan as frozen cannot commit until canonical state changes; one
+    /// dispatch is recorded under the code.
+    Refused(&'static str),
+    /// The failure says nothing about the plan, which is kept and retried.
+    Retained,
+}
+
+/// The recovery for each Kernel error a capture commit can return. A conflict
+/// names a moved target or another receipt for the job. A policy, input, or
+/// missing-object error judges the plan as frozen. Every other error reports
+/// the store's availability or integrity and leaves the plan unjudged.
+fn unpublished(error: kernel::KernelError) -> Unpublished {
+    use kernel::KernelError as Kernel;
+    match error {
+        Kernel::Conflict => Unpublished::Replan,
+        Kernel::AdmissionPolicy | Kernel::InvalidInput | Kernel::NotFound => {
+            Unpublished::Refused(COMMIT_REFUSED)
+        }
+        Kernel::Held
+        | Kernel::EngineUnsupported
+        | Kernel::Foreign
+        | Kernel::Inconclusive
+        | Kernel::Io
+        | Kernel::Busy
+        | Kernel::IdentityMismatch
+        | Kernel::FenceLost
+        | Kernel::CorruptCanonicalRow
+        | Kernel::PreviewAuthorityChanged
+        | Kernel::FutureSnapshot
+        | Kernel::InvalidCheckpoint
+        | Kernel::NoRequiredConsumers
+        | Kernel::ConsumerPending
+        | Kernel::Fault
+        | Kernel::Deadline
+        | Kernel::UnsafeDestination
+        | Kernel::InvalidBackup
+        | Kernel::InvalidRestore => Unpublished::Retained,
+    }
+}
+
+/// How long one capture commit waits for the Kernel writer.
+pub(super) const COMMIT_WAIT: Duration = Duration::from_secs(5);
+/// How long one drain call spends committing frozen plans before it prepares
+/// the extraction window: a third of the 30 s a harness allows one
+/// `memory.capture.next` exchange. Plans the budget does not reach stay
+/// queued for the next call.
+pub(super) const PLAN_COMMIT_BUDGET: Duration = Duration::from_secs(10);
 
 /// The error code of a frozen plan the Kernel refuses on policy, input, or a
 /// missing object: committing the same plan again meets the same refusal
@@ -1194,36 +1288,58 @@ const REPLACEABLE_SOURCES: [&str; 2] = [CAPTURE_SOURCE_ID, "eidnara_memory"];
 /// The attribution native capture prefixes to a user message's quotation.
 const USER_STATED: &str = "User stated";
 
+/// The plain-prose paragraphs of one message, parsed when first needed, so
+/// every check of one job's memories shares a single parse.
+pub(super) struct Prose<'a> {
+    text: &'a str,
+    paragraphs: std::cell::OnceCell<Vec<(usize, usize)>>,
+}
+
+impl<'a> Prose<'a> {
+    pub(super) fn of(text: &'a str) -> Self {
+        Self {
+            text,
+            paragraphs: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn paragraphs(&self) -> &[(usize, usize)] {
+        self.paragraphs.get_or_init(|| prose_paragraphs(self.text))
+    }
+}
+
 /// A captured memory qualifies as the user's own words when it is an
-/// attributed quotation spanning whole statements of a user message.
-fn user_attributed(job: &CaptureJob, memory: &CapturedMemory) -> bool {
+/// attributed quotation spanning whole statements of a user message that the
+/// job holds whole. `prose` is the job's text.
+fn user_attributed(job: &CaptureJob, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
     job.role == "user"
-        && holds_whole_message(job)
+        && !cite::is_hashed_source_id(&job.message_id)
         && memory
             .content
             .strip_prefix(USER_STATED)
             .and_then(|rest| rest.strip_prefix(": "))
             == Some(memory.quote.as_str())
-        && quotes_whole_statements(&job.text, &memory.quote)
+        && quotes_whole_statements(prose, &memory.quote)
 }
 
-fn holds_whole_message(job: &CaptureJob) -> bool {
-    let fragment = job
-        .message_id
-        .rsplit_once(':')
-        .is_some_and(|(source, offset)| {
-            source.len() == 64
-                && source.bytes().all(|byte| byte.is_ascii_hexdigit())
-                && offset.bytes().all(|byte| byte.is_ascii_digit())
-        });
-    !fragment
+#[cfg(test)]
+fn user_attributed_alone(job: &CaptureJob, memory: &CapturedMemory) -> bool {
+    user_attributed(job, &Prose::of(&job.text), memory)
+}
+
+/// Whether each memory of the plan, by index, is the user's own statement.
+fn attributions(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<bool> {
+    let prose = Prose::of(&job.text);
+    memories
+        .iter()
+        .map(|memory| user_attributed(job, &prose, memory))
+        .collect()
 }
 
 /// The domain of the statement records that approve user-attributed captures;
 /// memory reads select the `memory` domain.
 const STATEMENT_DOMAIN_ID: &str = "user-statements";
-/// The prefix of every statement record's source id. A record written before
-/// statements had one lineage per message carries the prefix alone.
+/// The prefix of every statement record's source id.
 const STATEMENT_SOURCE_ID: &str = "memory_capture_statement";
 
 /// The source of a statement record is the user message it quotes: the id
@@ -1238,10 +1354,16 @@ fn statement_source_id(job: &CaptureJob) -> String {
     format!("{STATEMENT_SOURCE_ID}:{message}")
 }
 
-fn is_statement_source(source_id: &str) -> bool {
-    source_id
-        .strip_prefix(STATEMENT_SOURCE_ID)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+/// Whether `object` is a statement record: a user-sourced decision of the
+/// statement domain whose source id names a capture job.
+fn is_statement_record(object: &kernel::ObjectRow) -> bool {
+    object.source_kind == "user"
+        && object.domain_id == STATEMENT_DOMAIN_ID
+        && object
+            .source_id
+            .strip_prefix(STATEMENT_SOURCE_ID)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .is_some_and(|message| !message.is_empty())
 }
 
 /// The decision kind the Kernel's approval predicate requires.
@@ -1297,8 +1419,7 @@ fn retire_statement(
         return Ok(());
     };
     if envelope.object_state(&approval)?.is_some_and(|state| {
-        state.object.invalidated_commit_seq.is_none()
-            && is_statement_source(&state.object.source_id)
+        state.object.invalidated_commit_seq.is_none() && is_statement_record(&state.object)
     }) {
         envelope.retire_decision(&approval)?;
     }
@@ -1306,8 +1427,9 @@ fn retire_statement(
 }
 
 /// Whether `quote` is one or more whole sentences of a plain-prose paragraph
-/// of `text`.
-fn quotes_whole_statements(text: &str, quote: &str) -> bool {
+/// of the message.
+fn quotes_whole_statements(prose: &Prose<'_>, quote: &str) -> bool {
+    let text = prose.text;
     let trimmed = quote.trim();
     if trimmed.is_empty()
         || trimmed.contains('?')
@@ -1320,7 +1442,7 @@ fn quotes_whole_statements(text: &str, quote: &str) -> bool {
         return false;
     }
     let lead = quote.len() - quote.trim_start().len();
-    let paragraphs = prose_paragraphs(text);
+    let paragraphs = prose.paragraphs();
     text.match_indices(quote).any(|(at, _)| {
         let start = at + lead;
         let end = start + trimmed.len();
@@ -1341,7 +1463,15 @@ const QUOTATION_MARKS: [char; 24] = [
     '\u{ff02}', '\u{275b}', '\u{275c}', '\u{275d}', '\u{275e}', '\u{276e}', '\u{276f}', '\u{3003}',
 ];
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread parsed a message into paragraphs.
+    static PROSE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
+    #[cfg(test)]
+    PROSE_PARSES.with(|parses| parses.set(parses.get() + 1));
     let lines: Vec<(usize, &str)> = text
         .split_inclusive('\n')
         .scan(0, |offset, line| {
@@ -1350,6 +1480,14 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
             Some((at, line.trim_end_matches(['\n', '\r'])))
         })
         .collect();
+    // The last line that closes each tag name, found in one pass, so an
+    // opener finds its closer by lookup however many tag pairs a message holds.
+    let mut last_closer: HashMap<&str, usize> = HashMap::new();
+    for (index, (_, line)) in lines.iter().enumerate() {
+        if let Some((name, true)) = tag_name(line) {
+            last_closer.insert(name, index);
+        }
+    }
     let mut excluded = vec![false; lines.len()];
     let mut index = 0;
     while index < lines.len() {
@@ -1362,9 +1500,10 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
                 })
                 .unwrap_or(lines.len() - 1)
         } else if let Some((name, false)) = tag_name(line) {
-            (index + 1..lines.len())
-                .rev()
-                .find(|&next| tag_name(lines[next].1) == Some((name, true)))
+            last_closer
+                .get(name)
+                .copied()
+                .filter(|&closer| closer > index)
                 .unwrap_or(lines.len() - 1)
         } else if tag_name(line).is_some() {
             index
@@ -1514,29 +1653,49 @@ fn sentence_ends_at(quote: &str, after: &str) -> bool {
 
 /// The bounded candidate set for one batch: the 64 memory decisions sharing
 /// the most of the batch's lowercase words, newest first among ties.
+///
+/// The candidates are ranked from two bounded reads at one tip, each under
+/// `caps`: the newest memories served on explicit search, and the newest
+/// served on `auto_inject`. A project's assistant reports outnumber its
+/// approved statements, so the second read reaches statements older than the
+/// first read's window, and a correction can still name the statement it
+/// corrects.
 fn select_existing_memories(
     kernel: &kernel::KernelStore,
     project: &ProjectBinding,
     words: &HashSet<String>,
+    caps: (usize, usize),
 ) -> Result<Vec<ExistingCaptureMemory>, &'static str> {
-    let read = kernel_routes::read::read_visible(
-        kernel,
-        project,
-        kernel::Surface::ExplicitSearch,
-        None,
-        kernel_routes::read::RowSelection::DomainDecisions("memory"),
-    )
-    .map_err(|_| "kernel_unavailable")?;
-    // Score borrows the read; only the 64 kept candidates are materialized.
+    let tip = kernel.tip().map_err(|_| "kernel_unavailable")?;
+    let window = |surface: kernel::Surface| {
+        kernel_routes::read::read_visible_within(
+            kernel,
+            project,
+            surface,
+            Some(tip),
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+            caps,
+        )
+        .map_err(|_| "kernel_unavailable")
+    };
+    let read = window(kernel::Surface::ExplicitSearch)?;
+    let served = window(kernel::Surface::AutoInject)?;
+    let older = served
+        .rows
+        .iter()
+        .filter(|row| !read.decisions.contains_key(&row.object.object_id))
+        .filter_map(|row| Some((row, served.decisions.get(&row.object.object_id)?)));
+    // Score borrows the reads; only the 64 kept candidates are materialized.
     let mut lowered = String::new();
     let mut candidates: Vec<(usize, &kernel::VisibleRow, &kernel::DecisionRow)> = read
         .rows
         .iter()
-        .filter_map(|row| {
+        .filter_map(|row| Some((row, read.decisions.get(&row.object.object_id)?)))
+        .chain(older)
+        .filter_map(|(row, decision)| {
             if row.object.sensitivity != kernel::Sensitivity::Normal {
                 return None;
             }
-            let decision = read.decisions.get(&row.object.object_id)?;
             if !MEMORY_CATEGORY_ORDER.contains(&decision.decision_kind.as_str())
                 || decision.payload.summary.len() > MAX_CAPTURE_MEMORY_BYTES + 32
             {
@@ -1627,11 +1786,14 @@ fn checked_capture_target(
 /// and one anchor reason per decision the commit writes; a replayed receipt
 /// writes nothing and adds none.
 ///
-/// When the Kernel's admission policy refuses a statement record, the
-/// refused transaction has written nothing, and the same plan commits with
-/// every memory admitted as labeled inference. `reasons` then also receives
-/// one approval-refused reason per user-attributed memory, so the user's
-/// words stay on explicit search and the refusal is counted.
+/// When the Kernel's admission policy refuses a statement record, or the
+/// admission that rests on one, the refused transaction has written nothing,
+/// and the same plan commits with every memory admitted as labeled inference.
+/// `reasons` then also receives one approval-refused reason per
+/// user-attributed memory the labeled commit wrote, so the user's words stay
+/// on explicit search and the refusal is counted. Both commits wait for the
+/// Kernel writer until `deadline`, and each starts from an empty `reasons`.
+#[allow(clippy::too_many_arguments)]
 fn publish_captured_memories(
     kernel: &kernel::KernelStore,
     project: &ProjectBinding,
@@ -1639,11 +1801,16 @@ fn publish_captured_memories(
     output: &PreparedCapture,
     frozen: &str,
     settlement: SettlementOutcome,
+    deadline: Instant,
     reasons: &mut Vec<crate::source_capture::Count>,
 ) -> Result<kernel::CommitReceipt, kernel::KernelError> {
     use sha2::{Digest, Sha256};
-    let commit = |approve: bool, reasons: &mut Vec<crate::source_capture::Count>| {
+    // The job's text is parsed once, before either commit takes the writer.
+    let attributed = attributions(job, &output.memories);
+    let approval_refused = std::cell::Cell::new(false);
+    let commit = |approval: Approval, reasons: &mut Vec<crate::source_capture::Count>| {
         reasons.clear();
+        approval_refused.set(false);
         let intent = kernel::CommitIntent {
             producer: "memory_capture".into(),
             operation_key: project
@@ -1653,45 +1820,71 @@ fn publish_captured_memories(
             actor: "agent:memory_capture".into(),
             cause: "automatic project memory capture".into(),
         };
-        kernel.commit_before(
-            Instant::now() + Duration::from_secs(5),
-            intent,
-            |envelope| {
-                write_captured_memories(
-                    envelope, project, job, output, settlement, approve, reasons,
-                )
-            },
-        )
+        let plan = Publication {
+            project,
+            job,
+            output,
+            settlement,
+            attributed: &attributed,
+            approval,
+            approval_refused: &approval_refused,
+        };
+        kernel.commit_before(deadline, intent, |envelope| {
+            write_captured_memories(envelope, &plan, reasons)
+        })
     };
-    match commit(true, reasons) {
-        Err(kernel::KernelError::AdmissionPolicy)
-            if output
-                .memories
-                .iter()
-                .any(|memory| user_attributed(job, memory)) =>
-        {
+    match commit(Approval::Record, reasons) {
+        Err(kernel::KernelError::AdmissionPolicy) if approval_refused.get() => {
+            let receipt = commit(Approval::Refused, reasons)?;
             eprintln!(
-                "daemon: memory capture statement approval refused; storing its memories for explicit search"
+                "daemon: memory capture statement approval refused; its memories are stored for explicit search"
             );
-            commit(false, reasons)
+            Ok(receipt)
         }
         outcome => outcome,
     }
 }
 
+/// How a commit admits the plan's user-attributed memories.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Approval {
+    /// Writes a statement record for each and admits the memory on it.
+    Record,
+    /// Admits each as labeled inference and counts it as approval-refused.
+    Refused,
+}
+
+/// One source's frozen plan and the facts its commit reads.
+struct Publication<'a> {
+    project: &'a ProjectBinding,
+    job: &'a CaptureJob,
+    output: &'a PreparedCapture,
+    settlement: SettlementOutcome,
+    /// Whether each memory of the plan, by index, is the user's own statement.
+    attributed: &'a [bool],
+    approval: Approval,
+    /// Set when the Kernel's admission policy refuses a statement record or
+    /// the admission that rests on it.
+    approval_refused: &'a std::cell::Cell<bool>,
+}
+
 /// Writes the plan's decisions inside one commit and returns how many it
-/// wrote. `approve` records a statement record for each user-attributed
-/// memory and admits the memory on it.
+/// wrote.
 fn write_captured_memories(
     envelope: &mut kernel::Envelope<'_>,
-    project: &ProjectBinding,
-    job: &CaptureJob,
-    output: &PreparedCapture,
-    settlement: SettlementOutcome,
-    approve: bool,
+    plan: &Publication<'_>,
     reasons: &mut Vec<crate::source_capture::Count>,
 ) -> Result<String, kernel::KernelError> {
     use sha2::{Digest, Sha256};
+    let &Publication {
+        project,
+        job,
+        output,
+        settlement,
+        attributed,
+        approval,
+        approval_refused,
+    } = plan;
     let mut domains = HashSet::new();
     let mut ready = false;
     let mut refusal = None;
@@ -1711,7 +1904,7 @@ fn write_captured_memories(
             checked_capture_target(envelope, project, output, target, false)?;
             continue;
         }
-        let attributed = user_attributed(job, memory);
+        let attributed = attributed[index];
         for target in memory.replaces.iter().chain(&memory.also_replaces) {
             if !attributed
                 && envelope
@@ -1800,22 +1993,30 @@ fn write_captured_memories(
             retire_statement(envelope, target)?;
         }
         cite::append_citations(envelope, &decision_id, &evidence, recorded_at)?;
-        let approval = if attributed && approve {
-            Some(record_statement(
-                envelope,
-                project,
-                job,
-                memory,
-                id,
-                &mut domains,
-            )?)
+        // A policy refusal of the statement record, or of the admission that
+        // rests on it, is the one refusal a labeled commit recovers.
+        let on_approval = |error: kernel::KernelError| {
+            approval_refused.set(error == kernel::KernelError::AdmissionPolicy);
+            error
+        };
+        let statement = if attributed && approval == Approval::Record {
+            Some(
+                record_statement(envelope, project, job, memory, id, &mut domains)
+                    .map_err(on_approval)?,
+            )
         } else {
             if attributed {
                 reasons.push(crate::source_capture::Count::DecisionsApprovalRefused);
             }
             None
         };
-        kernel_routes::commit::admit_capture(envelope, id, approval.as_deref())?;
+        match &statement {
+            Some(statement) => {
+                kernel_routes::commit::admit_capture(envelope, id, Some(statement))
+                    .map_err(on_approval)?;
+            }
+            None => kernel_routes::commit::admit_capture(envelope, id, None)?,
+        }
         written += 1;
     }
     Ok(written.to_string())
@@ -1825,6 +2026,28 @@ fn write_captured_memories(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// One publication that waits for the Kernel writer as a drain does.
+    fn publish_now(
+        kernel: &kernel::KernelStore,
+        project: &ProjectBinding,
+        job: &CaptureJob,
+        output: &PreparedCapture,
+        frozen: &str,
+        settlement: SettlementOutcome,
+        reasons: &mut Vec<crate::source_capture::Count>,
+    ) -> Result<kernel::CommitReceipt, kernel::KernelError> {
+        publish_captured_memories(
+            kernel,
+            project,
+            job,
+            output,
+            frozen,
+            settlement,
+            Instant::now() + COMMIT_WAIT,
+            reasons,
+        )
+    }
 
     fn render_capture_prompt(messages: &[CaptureMessage]) -> Result<String, &'static str> {
         render_capture_prompt_with_existing(messages, &[])
@@ -1872,19 +2095,63 @@ mod tests {
             statement_source_id(&job(&second)),
             "two messages are two lineages"
         );
-        for source in [
-            "memory_capture_statement",
-            statement_source_id(&job(&first)).as_str(),
+        let object = |kind: &str, domain: &str, source: &str| kernel::ObjectRow {
+            object_id: "stm_1".into(),
+            object_kind: "decision".into(),
+            domain_id: domain.into(),
+            source_kind: kind.into(),
+            source_id: source.into(),
+            source_revision: 1,
+            created_commit_seq: 1,
+            invalidated_commit_seq: None,
+            superseded_by: None,
+            sensitivity: kernel::Sensitivity::Normal,
+        };
+        let source = statement_source_id(&job(&first));
+        assert!(is_statement_record(&object(
+            "user",
+            STATEMENT_DOMAIN_ID,
+            &source
+        )));
+        for (kind, domain, source) in [
+            ("assistant", STATEMENT_DOMAIN_ID, source.as_str()),
+            ("user", "memory", source.as_str()),
+            ("user", STATEMENT_DOMAIN_ID, "memory_capture_statement"),
+            ("user", STATEMENT_DOMAIN_ID, "memory_capture_statement:"),
+            ("user", STATEMENT_DOMAIN_ID, "memory_capture_statements:ab"),
+            ("user", STATEMENT_DOMAIN_ID, "memory_capture"),
+            ("user", STATEMENT_DOMAIN_ID, "eidnara_memory"),
         ] {
-            assert!(is_statement_source(source), "{source}");
+            assert!(
+                !is_statement_record(&object(kind, domain, source)),
+                "{kind} {domain} {source}"
+            );
         }
-        for source in [
-            "memory_capture",
-            "memory_capture_statements",
-            "eidnara_memory",
-        ] {
-            assert!(!is_statement_source(source), "{source}");
+    }
+
+    /// Every Kernel error has one recovery, and only a judgment of the plan
+    /// as frozen spends a dispatch.
+    #[test]
+    fn each_kernel_error_selects_one_recovery_for_an_uncommitted_plan() {
+        use kernel::KernelError as Kernel;
+        for error in Kernel::ALL {
+            let expected = match error {
+                Kernel::Conflict => Unpublished::Replan,
+                Kernel::AdmissionPolicy | Kernel::InvalidInput | Kernel::NotFound => {
+                    Unpublished::Refused("kernel_write_refused")
+                }
+                _ => Unpublished::Retained,
+            };
+            assert_eq!(unpublished(*error), expected, "{error:?}");
         }
+        assert_eq!(
+            Kernel::ALL
+                .iter()
+                .filter(|error| unpublished(**error) == Unpublished::Retained)
+                .count(),
+            Kernel::ALL.len() - 4,
+            "four errors judge the plan; the rest report the store"
+        );
     }
 
     #[test]
@@ -2063,7 +2330,11 @@ mod tests {
             ("2 builds", false),
             ("", false),
         ] {
-            assert_eq!(quotes_whole_statements(text, quote), whole, "{quote:?}");
+            assert_eq!(
+                quotes_whole_statements(&Prose::of(text), quote),
+                whole,
+                "{quote:?}"
+            );
         }
         for (text, quote, whole) in [
             ("First.  Second one.", " Second one.", true),
@@ -2410,7 +2681,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                quotes_whole_statements(text, quote),
+                quotes_whole_statements(&Prose::of(text), quote),
                 whole,
                 "{text:?} / {quote:?}"
             );
@@ -2430,12 +2701,15 @@ mod tests {
             ..job("fragment")
         };
         let hashed = "a".repeat(64);
-        assert!(user_attributed(&job("m1", "Use pnpm.".into()), &memory));
+        assert!(user_attributed_alone(
+            &job("m1", "Use pnpm.".into()),
+            &memory
+        ));
         for offset in [0, 16384] {
             let fragment = job(&format!("{hashed}:{offset}"), "Use pnpm.".into());
-            assert!(!user_attributed(&fragment, &memory), "{offset}");
+            assert!(!user_attributed_alone(&fragment, &memory), "{offset}");
         }
-        assert!(!user_attributed(
+        assert!(!user_attributed_alone(
             &CaptureJob {
                 role: "assistant".into(),
                 ..job("m1", "Use pnpm.".into())
@@ -2720,7 +2994,7 @@ mod tests {
         let kernel = kernel::KernelStore::open(kernel_root).unwrap();
         let frozen = serde_json::to_string(output).unwrap();
         let mut reasons = Vec::new();
-        publish_captured_memories(
+        publish_now(
             &kernel,
             project,
             job,
@@ -2794,6 +3068,198 @@ mod tests {
         assert!(decisions.iter().all(|decision| decision.2.is_none()));
     }
 
+    /// A user job whose text is `statements` joined by spaces, and the plan
+    /// that quotes each one as the user's own statement.
+    fn stated_job(key: &str, statements: &[String]) -> (CaptureJob, PreparedCapture) {
+        let mut source = job(key);
+        source.text = statements.join(" ");
+        let output = PreparedCapture {
+            version: CAPTURE_SCHEMA_VERSION,
+            model: "test/model".into(),
+            existing: vec![],
+            memories: statements
+                .iter()
+                .map(|statement| CapturedMemory {
+                    content: format!("{USER_STATED}: {statement}"),
+                    ..memory(statement)
+                })
+                .collect(),
+            head: FrozenHead::HeadUnavailable,
+        };
+        (source, output)
+    }
+
+    /// A message with as many statements as one extraction returns is parsed
+    /// into paragraphs once for the whole publication, and once more would be
+    /// once per commit: the labeled commit after a refused approval reuses
+    /// the first parse.
+    #[test]
+    fn one_publication_parses_its_message_once_for_every_memory_and_both_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let statements: Vec<String> = (0..MAX_CAPTURE_MEMORIES)
+            .map(|index| format!("Service {index} listens on port {}.", 4000 + index))
+            .collect();
+        let publish = |source: &CaptureJob, output: &PreparedCapture| {
+            let before = PROSE_PARSES.with(std::cell::Cell::get);
+            let mut reasons = Vec::new();
+            publish_now(
+                &kernel,
+                &project,
+                source,
+                output,
+                &serde_json::to_string(output).unwrap(),
+                SettlementOutcome::Settled,
+                &mut reasons,
+            )
+            .unwrap();
+            (PROSE_PARSES.with(std::cell::Cell::get) - before, reasons)
+        };
+        let (source, output) = stated_job("job-approved", &statements);
+        let (parses, reasons) = publish(&source, &output);
+        assert_eq!(
+            parses, 1,
+            "one parse serves all {MAX_CAPTURE_MEMORIES} memories"
+        );
+        assert!(
+            !reasons.contains(&crate::source_capture::Count::DecisionsApprovalRefused),
+            "every statement was approved"
+        );
+
+        // A full lineage refuses the approving commit, and the plan commits labeled.
+        let (source, output) = stated_job("job-refused", &statements[..2]);
+        let lineage = statement_source_id(&source);
+        kernel
+            .commit_before(
+                Instant::now() + COMMIT_WAIT,
+                kernel::CommitIntent {
+                    producer: "test".into(),
+                    operation_key: project.operation_key("test", "fill-lineage").unwrap(),
+                    request_digest: "0".repeat(64),
+                    actor: "test".into(),
+                    cause: "fill one statement lineage".into(),
+                },
+                |envelope| {
+                    let (mut domains, mut ready, mut refusal) = (HashSet::new(), false, None);
+                    kernel_routes::commit::ensure_domain(
+                        envelope,
+                        STATEMENT_DOMAIN_ID,
+                        &mut domains,
+                    )?;
+                    kernel_routes::commit::ensure_scope(
+                        envelope,
+                        &project,
+                        &mut ready,
+                        &mut domains,
+                        &mut refusal,
+                    )?;
+                    for index in 0..64 {
+                        let id = format!("stm_fill{index}");
+                        envelope.insert_decision(kernel::DecisionSpec {
+                            decision_id: format!("dst_fill{index}"),
+                            object_id: id.clone(),
+                            domain_id: STATEMENT_DOMAIN_ID.into(),
+                            proposition_id: None,
+                            scope_id: Some(project.scope_id()),
+                            anchor_id: None,
+                            evidence_id: None,
+                            decision_kind: ACCEPTED_DECISION_KIND.into(),
+                            payload: kernel::DecisionPayload {
+                                summary: format!("Earlier statement {index}."),
+                                rationale: "{}".into(),
+                            },
+                            source_kind: "user".into(),
+                            source_id: lineage.clone(),
+                            source_revision: 1,
+                            sensitivity: kernel::Sensitivity::Normal,
+                        })?;
+                        kernel_routes::commit::accept_statement(envelope, &id)?;
+                    }
+                    Ok("64".into())
+                },
+            )
+            .unwrap();
+        let (parses, reasons) = publish(&source, &output);
+        assert_eq!(parses, 1, "the labeled commit reuses the parse");
+        assert_eq!(
+            reasons
+                .iter()
+                .filter(|reason| **reason == crate::source_capture::Count::DecisionsApprovalRefused)
+                .count(),
+            2,
+            "both statements of the refused plan are counted"
+        );
+    }
+
+    /// A project's newest memories are assistant reports, more than one
+    /// bounded read keeps, and an older approved statement lies beyond that
+    /// window. The statement is still a candidate: the candidates are ranked
+    /// from the newest rows of explicit search and of automatic delivery.
+    #[test]
+    fn an_approved_statement_older_than_the_search_window_is_still_a_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let publish = |source: &CaptureJob, output: &PreparedCapture| {
+            publish_now(
+                &kernel,
+                &project,
+                source,
+                output,
+                &serde_json::to_string(output).unwrap(),
+                SettlementOutcome::Settled,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        };
+        let statement = "The staging cluster alias is harbor-east.".to_string();
+        let (source, output) = stated_job("job-statement", std::slice::from_ref(&statement));
+        publish(&source, &output);
+        for index in 0..5 {
+            let report = format!("Run {index} finished the staging cluster checks.");
+            let mut source = job(&format!("job-report-{index}"));
+            source.role = "assistant".into();
+            source.text = report.clone();
+            let output = PreparedCapture {
+                version: CAPTURE_SCHEMA_VERSION,
+                model: "test/model".into(),
+                existing: vec![],
+                memories: vec![memory(&report)],
+                head: FrozenHead::HeadUnavailable,
+            };
+            publish(&source, &output);
+        }
+        let words: HashSet<String> = ["staging", "cluster", "alias", "harbor"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let offered = |caps| -> Vec<(String, bool)> {
+            select_existing_memories(&kernel, &project, &words, caps)
+                .unwrap()
+                .into_iter()
+                .map(|candidate| (candidate.content, candidate.automatic))
+                .collect()
+        };
+        let stated = (format!("{USER_STATED}: {statement}"), true);
+        let all = offered((1_000, 1 << 20));
+        assert_eq!(all.len(), 6);
+        assert_eq!(all[0], stated, "the statement shares the most words");
+        let windowed = offered((3, 1 << 20));
+        assert_eq!(
+            windowed.len(),
+            4,
+            "the three newest reports and the statement, each once: {windowed:?}"
+        );
+        assert_eq!(windowed[0], stated);
+        assert!(
+            windowed[1..]
+                .iter()
+                .all(|(content, automatic)| { content.starts_with("Run ") && !automatic }),
+            "{windowed:?}"
+        );
+    }
+
     /// A publish refused after its anchor and first decision were written
     /// rolls back whole, so the retry writes the same rows into the same
     /// Kernel with no leftover anchor to conflict with.
@@ -2818,7 +3284,7 @@ mod tests {
         let kernel = kernel::KernelStore::open(&kernel_root).unwrap();
         let mut reasons = Vec::new();
         assert!(matches!(
-            publish_captured_memories(
+            publish_now(
                 &kernel,
                 &project,
                 &source,
@@ -2875,7 +3341,7 @@ mod tests {
             };
             let frozen = serde_json::to_string(&output).unwrap();
             let started = Instant::now();
-            publish_captured_memories(
+            publish_now(
                 &kernel,
                 &project,
                 &source,
@@ -2998,7 +3464,7 @@ mod tests {
             head: FrozenHead::HeadUnavailable,
         };
         let frozen = serde_json::to_string(&output).unwrap();
-        publish_captured_memories(
+        publish_now(
             kernel,
             project,
             &job(key),
@@ -3261,7 +3727,7 @@ mod tests {
         let mut source = job("assistant");
         source.role = "assistant".into();
         assert!(matches!(
-            publish_captured_memories(
+            publish_now(
                 &kernel,
                 &project,
                 &source,

@@ -11,7 +11,9 @@ use std::hash::{Hash, Hasher};
 use kernel::{Surface, SurfaceVisibility};
 use memory_store::ProjectMemoryComposition;
 
-use crate::kernel_routes::read::{ReadResponse, RowSelection, read_visible};
+use crate::kernel_routes::read::{
+    MAX_READ_ROW_BYTES, MAX_READ_ROWS, ReadResponse, RowSelection, read_visible_within,
+};
 use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding, serving};
 use crate::m0_compose::trim_memories_to_budget;
 use crate::memory_render::{is_positive_memory_category, render_memory_line};
@@ -199,6 +201,8 @@ impl CanonicalMemoryRead {
 ///
 /// The read admits only memory-domain decisions before the row and byte caps apply, so a project whose other domains or observations are busy cannot crowd its memory rows out of the bounded read.
 ///
+/// Capture rows whose rationale names `session_id` are left out: the reading session holds those statements in its own conversation. They are left out of the bounded read itself (see [`read_other_sessions`]), so they spend none of its caps, and the token budget trims what remains.
+///
 /// The store phase, the serving decision for a tip read on the `auto_inject`
 /// surface, and the visible-row read each withhold the composition with the
 /// `KernelOutcome` the `kernel.read` route would answer with.
@@ -225,24 +229,77 @@ pub(crate) fn read_project_memory(
     if !verdict.is_available() {
         return CanonicalMemoryRead::Withheld(verdict);
     }
-    match read_visible(
+    match read_other_sessions(
         &store,
         project,
-        Surface::AutoInject,
-        Some(tip),
-        RowSelection::DomainDecisions(MEMORY_DOMAIN_ID),
+        session_id,
+        tip,
+        (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
     ) {
-        Ok(mut response) => {
-            let decisions = &response.decisions;
-            response.rows.retain(|row| {
-                row.object.source_id != crate::memory_capture::CAPTURE_SOURCE_ID
-                    || decisions.get(&row.object.object_id).is_none_or(|decision| {
-                        capture_session(&decision.payload.rationale).as_deref() != Some(session_id)
-                    })
-            });
+        Ok(response) => {
             CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
         }
         Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
+    }
+}
+
+/// Further bounded reads one pass makes to pass over the reading session's
+/// own captures. Each skips every such row the reads before it kept, up to
+/// the row cap per read, so four cover a session that wrote more than 32,000
+/// of the project's newest memories, and a pass costs five reads at most.
+const SESSION_REFILL_READS: usize = 4;
+
+/// The project's injectable memory rows at `tip` without the capture rows
+/// whose rationale names `session_id`, under the given row and byte caps.
+///
+/// A row's session is in its decision payload, which a bounded read loads
+/// only for the rows it keeps. When a read reaches a cap and holds rows of
+/// the reading session, it is repeated at the same tip with those rows left
+/// out before the caps apply, so older rows of other sessions take their
+/// places. A read that reached no cap holds every eligible row already. After
+/// [`SESSION_REFILL_READS`] repeats the pass serves the rows of other
+/// sessions the last read kept.
+pub(crate) fn read_other_sessions(
+    store: &kernel::KernelStore,
+    project: &ProjectBinding,
+    session_id: &str,
+    tip: i64,
+    caps: (usize, usize),
+) -> Result<ReadResponse, kernel::KernelError> {
+    let mut own = std::collections::HashSet::new();
+    let mut refills = 0;
+    loop {
+        let mut response = read_visible_within(
+            store,
+            project,
+            Surface::AutoInject,
+            Some(tip),
+            RowSelection::DomainDecisionsExcept(MEMORY_DOMAIN_ID, &own),
+            caps,
+        )?;
+        let decisions = &response.decisions;
+        let mine: std::collections::HashSet<String> = response
+            .rows
+            .iter()
+            .filter(|row| {
+                row.object.source_id == crate::memory_capture::CAPTURE_SOURCE_ID
+                    && decisions
+                        .get(&row.object.object_id)
+                        .is_some_and(|decision| {
+                            capture_session(&decision.payload.rationale).as_deref()
+                                == Some(session_id)
+                        })
+            })
+            .map(|row| row.object.object_id.clone())
+            .collect();
+        if mine.is_empty() || !response.truncated || refills == SESSION_REFILL_READS {
+            response
+                .rows
+                .retain(|row| !mine.contains(&row.object.object_id));
+            return Ok(response);
+        }
+        own.extend(mine);
+        refills += 1;
     }
 }
 

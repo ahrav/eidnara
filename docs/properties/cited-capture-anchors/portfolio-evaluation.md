@@ -30,7 +30,7 @@ that order and splits the fixture-rows item into its two tables.
 | R7 | Mark the receipt-conflict coverage marker test-only | applied to `p2-capture-commit-replays-by-job-key-and-frozen-digest` |
 | R8 | Fix the offset `memory_capture.rs:126` | applied: the prompt's quote rule is at `crates/daemon/src/memory_capture.rs:140` at the branch tip |
 | R9 | Fix the offset `anchor.rs:329` | applied: references to the decoder use `crates/kernel/src/anchor.rs:273` (`AnchorCondition::decode`) and the interval check inside it |
-| R10 | Fix the offset `source_capture.rs:601` | applied: `into_job` is `crates/daemon/src/source_capture.rs:711` and `CAPTURE_BUDGET` is `:41` at the branch tip |
+| R10 | Fix the offset 598 of `source_capture.rs` | applied: `into_job` is `crates/daemon/src/source_capture.rs:725` and `CAPTURE_BUDGET` is `:42` at the branch tip |
 
 Line drift between `a0e3f2993` and the branch tip moved several daemon
 references: the `crates/daemon/src/lib.rs` capture tests by 31 lines and
@@ -57,7 +57,7 @@ catalog's `insert_anchor_inner` reference had named line 320, inside
 | G4 | Lineage succession of a re-published message revision and what a narrowed read returns | U3 reads the lineage's one live descriptor, so a re-published revision cites its newest live row; no test publishes two revisions of one message yet |
 | G5 | `snapshot_checkout` HEAD semantics: detached accepted, unborn `NoHead` (OQ2-11) | U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)) reads HEAD through `git_sources::open` instead and matches the owner decision: detached anchors, unborn is `head_unavailable`; the engine's `snapshot_checkout` stays as it was |
 | G6 | Memo eviction of `Pending` units | U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136)) settles on job end and reads no memo state, so a deferred or evicted `Pending` unit reports `descriptor_not_found` after the job ends (`a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found`); republication after memo eviction stays the receipts' job, as `p2-deferred-source-units-publish-on-a-later-pass` records |
-| G7 | `Deadline` publish failures map to `kernel_write_failed` and retry on the dispatch backoff with no dispatch bound; `InvalidInput`, `AdmissionPolicy`, and `NotFound` map to `kernel_write_refused` and abandon the source at `MAX_CAPTURE_ATTEMPTS` | unassigned |
+| G7 | `Deadline` and the other availability and integrity failures of a publish map to `kernel_write_failed` and retry on the dispatch backoff with no dispatch bound; `InvalidInput`, `AdmissionPolicy`, and `NotFound` map to `kernel_write_refused` and a plan the host cannot decode to `invalid_preparation`, each recording one dispatch per refused publication and abandoning the source at `MAX_CAPTURE_ATTEMPTS`; `Conflict` releases the plan for another extraction after the dispatch backoff and abandons the source when met on the last dispatch | unassigned |
 
 ## Biases for a human
 

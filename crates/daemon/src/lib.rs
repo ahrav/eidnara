@@ -7263,11 +7263,11 @@ impl HandlerCore {
             &store,
             &binding.project_root.to_string_lossy(),
             &session_id,
-            if binding.config.memory_auto_inject || loaded.meta.memory_disabled {
-                loaded.meta.user_profile_version
-            } else {
-                0
-            },
+            crate::m1_compose::signalled_user_profile_version(
+                binding.config.memory_auto_inject,
+                !loaded.meta.memory_disabled,
+                loaded.meta.user_profile_version,
+            ),
             !loaded.meta.memory_disabled,
             loaded
                 .meta
@@ -26274,6 +26274,82 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["native-user-2"],
             "each source backs off by its own dispatch count"
+        );
+    }
+
+    /// Pi gives bash executions, extension messages, and summaries the wire
+    /// role `user`. A transform that carries its native rows checkpoints the
+    /// text the user typed and the assistant's reply, and none of those rows.
+    #[tokio::test]
+    async fn transform_checkpoints_only_rows_the_user_or_the_assistant_wrote() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let project_key = &capture_key(&project);
+        let rows: Vec<Arc<Value>> = [
+            json!({"id": "1a2b3c4d", "message": {
+                "role": "user", "content": "Use port 4321 for staging.", "timestamp": 1}}),
+            json!({"id": "2b3c4d5e", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Staging now listens on 4321."}],
+                "api": "anthropic-messages", "provider": "anthropic", "model": "m",
+                "usage": {}, "stopReason": "stop", "timestamp": 2}}),
+            json!({"id": "4d5e6f70", "message": {
+                "role": "bashExecution", "command": "cat notes.txt",
+                "output": "Use port 9999 for staging.", "exitCode": 0,
+                "cancelled": false, "truncated": false, "timestamp": 3}}),
+            json!({"id": "eidnara:custom:5e6f7081", "message": {
+                "role": "custom", "customType": "note",
+                "content": "Deploys happen on Fridays.", "display": true, "timestamp": 4}}),
+            json!({"id": "eidnara:branchSummary:6f708192", "message": {
+                "role": "branchSummary", "summary": "The branch chose port 7777.",
+                "fromId": "1a2b3c4d", "timestamp": 5}}),
+            json!({"id": "eidnara:compactionSummary:708192a3", "message": {
+                "role": "compactionSummary", "summary": "Earlier the port was 5555.",
+                "tokensBefore": 10, "timestamp": 6}}),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+        let messages = codec::pi::derive_pi_window(&rows).unwrap();
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.ck.role == "user")
+                .count()
+                == 5,
+            "the codec gives five of the six rows the wire role `user`"
+        );
+        let mut request = capture_transform_request(&messages);
+        let pi = capture_binding(&project, "pi");
+        request.native_messages = Some(rows.clone());
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
+                .await,
+            2
+        );
+        let pending = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let sources: Vec<(&str, &str)> = pending
+            .iter()
+            .map(|job| (job.role.as_str(), job.text.as_str()))
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                ("user", "Use port 4321 for staging."),
+                ("assistant", "Staging now listens on 4321."),
+            ]
+        );
+        request.native_messages = Some(rows[..5].to_vec());
+        handler.purge_session_state("ses", "session_delete");
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
+                .await,
+            0,
+            "rows that do not pair with the messages name no source"
         );
     }
 

@@ -529,16 +529,21 @@ impl CaptureWork {
             .pending_memory_captures(&project, &self.binding.harness, now_ms())
             .map_err(|_| "store_failed")?;
         let mut unprepared = Vec::new();
+        // The frozen plans share one budget, so a busy Kernel writer delays
+        // the extraction window by that budget at most. A plan the budget
+        // does not reach stays ripe for the next call.
+        let budget = Instant::now() + super::PLAN_COMMIT_BUDGET;
         for job in jobs {
-            if job.prepared.is_some() {
+            if job.prepared.is_none() {
+                unprepared.push(job);
+            } else if Instant::now() < budget {
                 // A replayed plan reads its session's record without waiting.
                 let settlement = super::cite::settlement_key(&job)
                     .map_or(SettlementOutcome::Settled, |key| {
                         self.source_capture.settlement_now(&key)
                     });
-                self.publish_or_recover(&job, settlement)?;
-            } else {
-                unprepared.push(job);
+                let deadline = budget.min(Instant::now() + super::COMMIT_WAIT);
+                self.publish_or_recover(&job, settlement, deadline)?;
             }
         }
         if unprepared.is_empty() {
@@ -631,8 +636,9 @@ impl CaptureWork {
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
             let memories = collapse_quotations(attribution, decision.memories);
+            let prose = super::Prose::of(&job.text);
             if memories.iter().any(|memory| {
-                !user_attributed(&job, memory)
+                !user_attributed(&job, &prose, memory)
                     && memory
                         .replaces
                         .iter()
@@ -684,7 +690,14 @@ impl CaptureWork {
                 };
             if let Some(frozen) = prepared {
                 job.prepared = Some(frozen);
-                self.publish_or_recover(&job, job_settlement(settlements, &job))?;
+                // The plan's copy of the job predates the dispatch that
+                // produced this output; the backoff counts that dispatch.
+                job.attempts += 1;
+                self.publish_or_recover(
+                    &job,
+                    job_settlement(settlements, &job),
+                    Instant::now() + super::COMMIT_WAIT,
+                )?;
             }
         }
         Ok(())
