@@ -133,7 +133,7 @@ fn c_heap() -> Option<CHeap> {
 pub fn limit_c_heap_arenas() {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let operator_set = arena_limit_is_operator_set(
-        std::env::var_os("MALLOC_ARENA_MAX").is_some_and(|value| !value.is_empty()),
+        std::env::var("MALLOC_ARENA_MAX").ok().as_deref(),
         std::env::var("GLIBC_TUNABLES").ok().as_deref(),
     );
     if status_field(&status, "Threads") != Some(1) || operator_set {
@@ -147,13 +147,16 @@ pub fn limit_c_heap_arenas() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub fn limit_c_heap_arenas() {}
 
-fn arena_limit_is_operator_set(malloc_arena_max: bool, glibc_tunables: Option<&str>) -> bool {
+fn arena_limit_is_operator_set(
+    malloc_arena_max: Option<&str>,
+    glibc_tunables: Option<&str>,
+) -> bool {
     let sets_arena_max = |tunable: &str| {
         tunable
             .split_once('=')
             .is_some_and(|(name, value)| name == "glibc.malloc.arena_max" && !value.is_empty())
     };
-    malloc_arena_max
+    malloc_arena_max.is_some_and(|value| !value.is_empty())
         || glibc_tunables.is_some_and(|tunables| tunables.split(':').any(sets_arena_max))
 }
 
@@ -214,24 +217,29 @@ impl Releases {
     }
 }
 
+/// Runs one trim when a release is due and reports whether it ran one.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[allow(unsafe_code)]
-pub fn release_free_c_heap_when_due() {
+pub fn release_free_c_heap_when_due() -> bool {
     if RELEASING.swap(true, Ordering::AcqRel) {
-        return;
+        return false;
     }
     let before = ProcessMemory::sample().heap_reading(0);
-    if RELEASES.is_due(before) {
+    let due = RELEASES.is_due(before);
+    if due {
         // SAFETY: `malloc_trim` takes one integer and releases pages of free chunks only.
         let trimmed = unsafe { libc::malloc_trim(0) } == 1;
         let after = ProcessMemory::sample().heap_reading(before.resident_bytes);
         RELEASES.record(before, after, trimmed);
     }
     RELEASING.store(false, Ordering::Release);
+    due
 }
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-pub fn release_free_c_heap_when_due() {}
+pub fn release_free_c_heap_when_due() -> bool {
+    false
+}
 
 #[cfg(test)]
 mod tests {
@@ -327,6 +335,8 @@ mod tests {
             releases.resident_drop_bytes.load(Ordering::Relaxed),
             280 * MIB
         );
+        assert_eq!(releases.free_floor.load(Ordering::Relaxed), 280 * MIB);
+        assert_eq!(releases.resident_floor.load(Ordering::Relaxed), 520 * MIB);
         assert!(!releases.is_due(reading(Some(280 * MIB), 520 * MIB)));
         assert!(releases.is_due(reading(Some(280 * MIB + THRESHOLD), 520 * MIB)));
     }
@@ -371,22 +381,23 @@ mod tests {
 
     #[test]
     fn an_operator_arena_setting_is_read_from_either_glibc_variable() {
-        assert!(!arena_limit_is_operator_set(false, None));
+        assert!(!arena_limit_is_operator_set(None, None));
         assert!(!arena_limit_is_operator_set(
-            false,
+            None,
             Some("glibc.malloc.tcache_count=0")
         ));
-        assert!(arena_limit_is_operator_set(true, None));
+        assert!(arena_limit_is_operator_set(Some("8"), None));
+        assert!(!arena_limit_is_operator_set(Some(""), None));
         assert!(arena_limit_is_operator_set(
-            false,
+            None,
             Some("glibc.malloc.arena_max=8")
         ));
         assert!(arena_limit_is_operator_set(
-            false,
+            None,
             Some("glibc.malloc.tcache_count=0:glibc.malloc.arena_max=2")
         ));
         assert!(!arena_limit_is_operator_set(
-            false,
+            None,
             Some("glibc.malloc.arena_maximum=8:glibc.malloc.arena_max=")
         ));
     }

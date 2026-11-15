@@ -134,7 +134,10 @@ async fn a_health_probe_releases_freed_c_heap_pages_once_per_growth_past_the_thr
     assert!(reported["rss_anon_bytes"].is_u64() && reported["rss_file_bytes"].is_u64());
     assert!(reported["threads"].as_u64().expect("threads") >= 1);
 
-    daemon::process_memory::release_free_c_heap_when_due();
+    assert!(
+        !daemon::process_memory::release_free_c_heap_when_due(),
+        "a check after a release runs no trim"
+    );
     assert_eq!(
         releases(&daemon).await,
         releases_before + 1,
