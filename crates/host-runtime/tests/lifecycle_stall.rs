@@ -175,6 +175,13 @@ impl RunningHost {
         self.shutdown.cancel();
         self.run.await.expect("run task")
     }
+
+    async fn stopped_within(self, budget: Duration) -> Result<(), HostError> {
+        tokio::time::timeout(budget, self.run)
+            .await
+            .expect("the host stops inside the budget")
+            .expect("run task")
+    }
 }
 
 async fn settle() {
@@ -247,7 +254,7 @@ async fn a_health_callback_that_never_returns_is_fatal_at_the_deadline() {
     host.until(entered.entered(1)).await;
     let started = tokio::time::Instant::now();
 
-    expect_health_fatal(host.run.await.expect("run task"));
+    expect_health_fatal(host.stopped_within(deadline * 4).await);
     let waited = started.elapsed();
     assert!(
         waited >= deadline && waited < deadline + Duration::from_secs(1),
@@ -269,7 +276,7 @@ async fn a_health_callback_that_hangs_through_a_clock_jump_is_fatal_one_deadline
     assert!(!host.run.is_finished(), "the jump alone is not fatal");
     let resumed = tokio::time::Instant::now();
 
-    expect_health_fatal(host.run.await.expect("run task"));
+    expect_health_fatal(host.stopped_within(deadline * 4).await);
     let waited = resumed.elapsed();
     assert!(
         waited >= deadline - Duration::from_secs(1) && waited < deadline + Duration::from_secs(1),
@@ -337,7 +344,9 @@ async fn a_clock_jump_during_a_route_gone_callback_leaves_the_host_running() {
     assert!(!host.run.is_finished(), "the jump fails no route-gone");
 
     host.handler.route_gone.open();
+    let handler = host.handler.inner.clone();
     host.stop().await.expect("graceful shutdown");
+    assert_eq!(handler.route_gones().len(), 1);
 }
 
 #[tokio::test]
@@ -350,7 +359,7 @@ async fn a_clock_jump_during_the_shutdown_callback_leaves_the_shutdown_graceful(
     drop(host.client().await);
     host.shutdown.cancel();
     let entered = host.handler.shutdown.clone();
-    entered.entered(1).await;
+    host.until(entered.entered(1)).await;
 
     jump(deadline * 3).await;
     assert!(!host.run.is_finished(), "the callback still runs");
@@ -365,12 +374,15 @@ async fn a_clock_jump_during_the_shutdown_callback_leaves_the_shutdown_graceful(
 const ROLE_ENV: &str = "EIDNARA_HOST_STALL_ROLE";
 const ROLE_SLOW_PROBE: &str = "slow-probe";
 const ROLE_HUNG_PROBE: &str = "hung-probe";
+const ROLE_SPINNING_PROBE: &str = "spinning-probe";
+const SPIN: Duration = Duration::from_millis(300);
 const CHILD_DEADLINE: Duration = Duration::from_secs(2);
 
 struct TimedHealthHandler {
     inner: TestHandler,
     probes: AtomicUsize,
     hang_from: Option<usize>,
+    spin: bool,
 }
 
 impl HostHandler for TimedHealthHandler {
@@ -408,6 +420,12 @@ impl HostHandler for TimedHealthHandler {
         if self.hang_from.is_some_and(|first| probe >= first) {
             std::future::pending::<()>().await;
         }
+        if self.spin {
+            let started = std::time::Instant::now();
+            while started.elapsed() < SPIN {
+                std::hint::spin_loop();
+            }
+        }
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -436,6 +454,7 @@ fn stall_role_host() {
         inner: TestHandler::new(),
         probes: AtomicUsize::new(0),
         hang_from: (role == ROLE_HUNG_PROBE).then_some(3),
+        spin: role == ROLE_SPINNING_PROBE,
     };
     let config = host_config(
         data_root.path(),
@@ -513,10 +532,11 @@ impl HostProcess {
         rustix::process::kill_process(pid, signal).expect("signal the host process");
     }
 
-    fn stop_inside_a_probe(&self) -> usize {
+    fn stop_inside_a_probe(&self, after_entry: Duration) -> usize {
         for _ in 0..10 {
             let entered = self.expect_line("ENTER ");
             let probe: usize = entered["ENTER ".len()..].parse().expect("probe number");
+            std::thread::sleep(after_entry);
             self.signal(rustix::process::Signal::STOP);
             std::thread::sleep(Duration::from_millis(100));
             let finished = format!("PROBE {probe}");
@@ -526,6 +546,23 @@ impl HostProcess {
             self.signal(rustix::process::Signal::CONT);
         }
         panic!("no stop landed inside a health probe");
+    }
+
+    fn resume_after(&mut self, stopped_in: usize, stopped_for: Duration) {
+        std::thread::sleep(stopped_for);
+        assert_eq!(
+            self.lines.try_iter().next(),
+            None,
+            "a stopped host writes nothing"
+        );
+        self.signal(rustix::process::Signal::CONT);
+
+        self.expect_line(&format!("PROBE {stopped_in}"));
+        self.expect_line(&format!("PROBE {}", stopped_in + 2));
+        drop(self.child.stdin.take());
+        assert_eq!(self.expect_line("STOPPED"), "STOPPED graceful");
+        let status = self.child.wait().expect("host exit status");
+        assert!(status.success(), "the host role exits cleanly: {status:?}");
     }
 }
 
@@ -540,18 +577,16 @@ impl Drop for HostProcess {
 fn a_host_process_stopped_past_the_deadline_during_a_health_probe_keeps_serving() {
     let mut host = HostProcess::spawn(ROLE_SLOW_PROBE);
     host.expect_line("PROBE 1");
+    let stopped_in = host.stop_inside_a_probe(Duration::from_millis(20));
+    host.resume_after(stopped_in, CHILD_DEADLINE * 2);
+}
 
-    let stopped_in = host.stop_inside_a_probe();
-    std::thread::sleep(CHILD_DEADLINE * 2);
-    host.signal(rustix::process::Signal::CONT);
-
-    host.expect_line(&format!("PROBE {stopped_in}"));
-    host.expect_line(&format!("PROBE {}", stopped_in + 2));
-
-    drop(host.child.stdin.take());
-    assert_eq!(host.expect_line("STOPPED"), "STOPPED graceful");
-    let status = host.child.wait().expect("host exit status");
-    assert!(status.success(), "the host role exits cleanly: {status:?}");
+#[test]
+fn a_host_process_stopped_past_the_deadline_inside_a_health_callback_poll_keeps_serving() {
+    let mut host = HostProcess::spawn(ROLE_SPINNING_PROBE);
+    host.expect_line("PROBE 1");
+    let stopped_in = host.stop_inside_a_probe(SPIN / 3);
+    host.resume_after(stopped_in, CHILD_DEADLINE * 2);
 }
 
 #[test]

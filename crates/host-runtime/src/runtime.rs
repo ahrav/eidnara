@@ -25,6 +25,8 @@ use crate::wire::ByteBudget;
 
 #[cfg(test)]
 mod close_tests;
+#[cfg(test)]
+mod poll_time_tests;
 
 /// HostError reports failures that prevent graceful completion.
 #[derive(Debug)]
@@ -184,8 +186,13 @@ impl<H: HostHandler> HostShared<H> {
         what: &'static str,
         mut task: JoinHandle<T>,
     ) -> Result<T, LifecycleFailure<T>> {
-        match crate::lifecycle_deadline::within(self.timing.lifecycle_callback_deadline, &mut task)
-            .await
+        let join_polls = crate::lifecycle_deadline::PollTime::default();
+        match crate::lifecycle_deadline::within_timed(
+            self.timing.lifecycle_callback_deadline,
+            &mut task,
+            &join_polls,
+        )
+        .await
         {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(join_err)) => {
