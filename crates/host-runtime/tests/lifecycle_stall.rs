@@ -3,28 +3,40 @@ mod support;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use host_runtime::{CancellationToken, HostConfig, HostError, HostHandler, HostLimits, HostTiming};
 
-use support::TestHandler;
+use support::raw_client::{self, RawClient, TY_RESPONSE};
+use support::{LINKED_MODULE_ID, TestHandler, connection_file};
 
-#[derive(Clone)]
-struct GatedHealthHandler {
-    inner: TestHandler,
+const BUDGET: Duration = Duration::from_secs(20);
+const ROOT: &str = "/workspace/project";
+
+#[derive(Clone, Default)]
+struct Gate {
+    armed: Arc<AtomicBool>,
     entered: Arc<tokio::sync::watch::Sender<usize>>,
-    gate: Arc<tokio::sync::watch::Sender<bool>>,
+    open: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
-impl GatedHealthHandler {
-    fn new() -> Self {
-        Self {
-            inner: TestHandler::new(),
-            entered: Arc::new(tokio::sync::watch::Sender::new(0)),
-            gate: Arc::new(tokio::sync::watch::Sender::new(false)),
+impl Gate {
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    async fn pass(&self) {
+        if !self.armed.load(Ordering::SeqCst) {
+            return;
         }
+        self.entered.send_modify(|entered| *entered += 1);
+        self.open
+            .subscribe()
+            .wait_for(|open| *open)
+            .await
+            .expect("the gate outlives its callbacks");
     }
 
     async fn entered(&self, count: usize) {
@@ -32,15 +44,38 @@ impl GatedHealthHandler {
             .subscribe()
             .wait_for(|entered| *entered >= count)
             .await
-            .expect("the handler owns the entry counter");
+            .expect("the gate outlives its callbacks");
     }
 
     fn open(&self) {
-        self.gate.send_replace(true);
+        self.open.send_replace(true);
     }
 }
 
-impl HostHandler for GatedHealthHandler {
+#[derive(Clone)]
+struct GatedHandler {
+    inner: TestHandler,
+    initialize: Gate,
+    bind: Gate,
+    route_gone: Gate,
+    health: Gate,
+    shutdown: Gate,
+}
+
+impl GatedHandler {
+    fn new() -> Self {
+        Self {
+            inner: TestHandler::new(),
+            initialize: Gate::default(),
+            bind: Gate::default(),
+            route_gone: Gate::default(),
+            health: Gate::default(),
+            shutdown: Gate::default(),
+        }
+    }
+}
+
+impl HostHandler for GatedHandler {
     fn manifests(&self) -> Vec<host_runtime::ManifestSnapshot> {
         self.inner.manifests()
     }
@@ -49,6 +84,7 @@ impl HostHandler for GatedHealthHandler {
         &self,
         init: host_runtime::HostInit,
     ) -> Result<(), host_runtime::InitError> {
+        self.initialize.pass().await;
         self.inner.initialize(init).await
     }
 
@@ -58,6 +94,7 @@ impl HostHandler for GatedHealthHandler {
         target: host_runtime::RouteTarget,
         identity: host_runtime::RouteIdentity,
     ) -> host_runtime::BindOutcome {
+        self.bind.pass().await;
         self.inner.bind(route, target, identity).await
     }
 
@@ -66,20 +103,17 @@ impl HostHandler for GatedHealthHandler {
     }
 
     async fn route_gone(&self, route: host_runtime::RouteHandle) {
+        self.route_gone.pass().await;
         self.inner.route_gone(route).await;
     }
 
     async fn health(&self) -> host_runtime::HealthReport {
-        self.entered.send_modify(|entered| *entered += 1);
-        self.gate
-            .subscribe()
-            .wait_for(|open| *open)
-            .await
-            .expect("the handler owns the gate");
+        self.health.pass().await;
         self.inner.health().await
     }
 
     async fn shutdown(&self) {
+        self.shutdown.pass().await;
         self.inner.shutdown().await;
     }
 }
@@ -98,27 +132,48 @@ fn host_config(data_root: &std::path::Path, timing: HostTiming) -> HostConfig {
 }
 
 struct RunningHost {
-    handler: GatedHealthHandler,
+    handler: GatedHandler,
     shutdown: CancellationToken,
     run: tokio::task::JoinHandle<Result<(), HostError>>,
-    _data_root: tempfile::TempDir,
+    data_root: tempfile::TempDir,
 }
 
-async fn start_host_in_first_probe() -> RunningHost {
-    let data_root = tempfile::tempdir().expect("temp data root");
-    let handler = GatedHealthHandler::new();
-    let shutdown = CancellationToken::new();
-    let config = host_config(data_root.path(), HostTiming::default());
-    let mut run = tokio::spawn(host_runtime::run(handler.clone(), config, shutdown.clone()));
-    tokio::select! {
-        result = &mut run => panic!("the host stopped before its first health probe: {result:?}"),
-        () = handler.entered(1) => {}
+impl RunningHost {
+    fn start(handler: GatedHandler, timing: HostTiming) -> Self {
+        let data_root = tempfile::tempdir().expect("temp data root");
+        let shutdown = CancellationToken::new();
+        let config = host_config(data_root.path(), timing);
+        let run = tokio::spawn(host_runtime::run(handler.clone(), config, shutdown.clone()));
+        Self {
+            handler,
+            shutdown,
+            run,
+            data_root,
+        }
     }
-    RunningHost {
-        handler,
-        shutdown,
-        run,
-        _data_root: data_root,
+
+    async fn until<T>(&mut self, reached: impl Future<Output = T>) -> T {
+        tokio::select! {
+            result = &mut self.run => panic!("the host stopped early: {result:?}"),
+            output = reached => output,
+        }
+    }
+
+    async fn client(&mut self) -> RawClient {
+        let publication = connection_file(self.data_root.path());
+        self.until(async {
+            while !publication.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let info = raw_client::discover(&publication).expect("publication validates");
+        RawClient::connect(&info).await.expect("client connects")
+    }
+
+    async fn stop(self) -> Result<(), HostError> {
+        self.shutdown.cancel();
+        self.run.await.expect("run task")
     }
 }
 
@@ -126,6 +181,28 @@ async fn settle() {
     for _ in 0..16 {
         tokio::task::yield_now().await;
     }
+}
+
+async fn jump(by: Duration) {
+    tokio::time::pause();
+    tokio::time::advance(by).await;
+    settle().await;
+    tokio::time::resume();
+}
+
+fn short_deadline() -> HostTiming {
+    HostTiming {
+        lifecycle_callback_deadline: Duration::from_secs(2),
+        ..Default::default()
+    }
+}
+
+fn route_open() -> serde_json::Value {
+    serde_json::json!({
+        "op": "route.open",
+        "target": {"kind": "tool_provider", "module_id": LINKED_MODULE_ID},
+        "identity": {"project_root": ROOT, "harness": "opencode", "session": "stalled"}
+    })
 }
 
 fn expect_health_fatal(result: Result<(), HostError>) {
@@ -139,8 +216,12 @@ fn expect_health_fatal(result: Result<(), HostError>) {
 
 #[tokio::test(start_paused = true)]
 async fn a_clock_jump_past_the_deadline_during_a_health_probe_leaves_the_host_running() {
-    let mut host = start_host_in_first_probe().await;
+    let handler = GatedHandler::new();
+    handler.health.arm();
+    let mut host = RunningHost::start(handler, HostTiming::default());
     let deadline = HostTiming::default().lifecycle_callback_deadline;
+    let entered = host.handler.health.clone();
+    host.until(entered.entered(1)).await;
 
     tokio::time::advance(deadline * 3).await;
     settle().await;
@@ -149,27 +230,25 @@ async fn a_clock_jump_past_the_deadline_during_a_health_probe_leaves_the_host_ru
         "a clock jump while the callback waits must leave the host running"
     );
 
-    host.handler.open();
-    tokio::select! {
-        result = &mut host.run => panic!("the host stopped after the clock jump: {result:?}"),
-        () = host.handler.entered(2) => {}
-    }
-
-    host.shutdown.cancel();
-    host.run
+    host.handler.health.open();
+    host.until(entered.entered(2)).await;
+    host.stop()
         .await
-        .expect("run task")
         .expect("the host shuts down gracefully after the stall");
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_health_callback_that_never_returns_is_fatal_at_the_deadline() {
-    let host = start_host_in_first_probe().await;
+    let handler = GatedHandler::new();
+    handler.health.arm();
+    let mut host = RunningHost::start(handler, HostTiming::default());
     let deadline = HostTiming::default().lifecycle_callback_deadline;
-    let entered = tokio::time::Instant::now();
+    let entered = host.handler.health.clone();
+    host.until(entered.entered(1)).await;
+    let started = tokio::time::Instant::now();
 
     expect_health_fatal(host.run.await.expect("run task"));
-    let waited = entered.elapsed();
+    let waited = started.elapsed();
     assert!(
         waited >= deadline && waited < deadline + Duration::from_secs(1),
         "the latch trips once the callback has waited {deadline:?}, waited {waited:?}"
@@ -178,8 +257,12 @@ async fn a_health_callback_that_never_returns_is_fatal_at_the_deadline() {
 
 #[tokio::test(start_paused = true)]
 async fn a_health_callback_that_hangs_through_a_clock_jump_is_fatal_one_deadline_later() {
-    let host = start_host_in_first_probe().await;
+    let handler = GatedHandler::new();
+    handler.health.arm();
+    let mut host = RunningHost::start(handler, HostTiming::default());
     let deadline = HostTiming::default().lifecycle_callback_deadline;
+    let entered = host.handler.health.clone();
+    host.until(entered.entered(1)).await;
 
     tokio::time::advance(deadline * 3).await;
     settle().await;
@@ -194,11 +277,95 @@ async fn a_health_callback_that_hangs_through_a_clock_jump_is_fatal_one_deadline
     );
 }
 
+#[tokio::test]
+async fn a_clock_jump_during_initialization_leaves_startup_running() {
+    let handler = GatedHandler::new();
+    handler.initialize.arm();
+    let timing = short_deadline();
+    let deadline = timing.lifecycle_callback_deadline;
+    let mut host = RunningHost::start(handler, timing);
+    let entered = host.handler.initialize.clone();
+    host.until(entered.entered(1)).await;
+
+    jump(deadline * 3).await;
+    assert!(!host.run.is_finished(), "the jump fails no initialization");
+
+    host.handler.initialize.open();
+    drop(host.client().await);
+    host.stop().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn a_clock_jump_during_a_bind_callback_leaves_the_route_opening() {
+    let handler = GatedHandler::new();
+    handler.bind.arm();
+    let timing = short_deadline();
+    let deadline = timing.lifecycle_callback_deadline;
+    let mut host = RunningHost::start(handler, timing);
+    let mut client = host.client().await;
+    let corr = client.control(&route_open()).await.expect("route open");
+    let entered = host.handler.bind.clone();
+    host.until(entered.entered(1)).await;
+
+    jump(deadline * 3).await;
+    assert!(!host.run.is_finished(), "the jump fails no bind");
+
+    host.handler.bind.open();
+    let frame = client.frame_within(BUDGET).await.expect("route reply");
+    assert_eq!((frame.corr, frame.ty), (corr, TY_RESPONSE));
+    drop(client);
+    host.stop().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn a_clock_jump_during_a_route_gone_callback_leaves_the_host_running() {
+    let handler = GatedHandler::new();
+    handler.route_gone.arm();
+    let timing = short_deadline();
+    let deadline = timing.lifecycle_callback_deadline;
+    let mut host = RunningHost::start(handler, timing);
+    let mut client = host.client().await;
+    client
+        .route_open(LINKED_MODULE_ID, ROOT, "opencode", "stalled")
+        .await
+        .expect("route opens");
+    drop(client);
+    let entered = host.handler.route_gone.clone();
+    host.until(entered.entered(1)).await;
+
+    jump(deadline * 3).await;
+    assert!(!host.run.is_finished(), "the jump fails no route-gone");
+
+    host.handler.route_gone.open();
+    host.stop().await.expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn a_clock_jump_during_the_shutdown_callback_leaves_the_shutdown_graceful() {
+    let handler = GatedHandler::new();
+    handler.shutdown.arm();
+    let timing = short_deadline();
+    let deadline = timing.lifecycle_callback_deadline;
+    let mut host = RunningHost::start(handler, timing);
+    drop(host.client().await);
+    host.shutdown.cancel();
+    let entered = host.handler.shutdown.clone();
+    entered.entered(1).await;
+
+    jump(deadline * 3).await;
+    assert!(!host.run.is_finished(), "the callback still runs");
+
+    host.handler.shutdown.open();
+    host.run
+        .await
+        .expect("run task")
+        .expect("graceful shutdown");
+}
+
 const ROLE_ENV: &str = "EIDNARA_HOST_STALL_ROLE";
 const ROLE_SLOW_PROBE: &str = "slow-probe";
 const ROLE_HUNG_PROBE: &str = "hung-probe";
 const CHILD_DEADLINE: Duration = Duration::from_secs(2);
-const BUDGET: Duration = Duration::from_secs(20);
 
 struct TimedHealthHandler {
     inner: TestHandler,
@@ -345,6 +512,21 @@ impl HostProcess {
         let pid = rustix::process::Pid::from_child(&self.child);
         rustix::process::kill_process(pid, signal).expect("signal the host process");
     }
+
+    fn stop_inside_a_probe(&self) -> usize {
+        for _ in 0..10 {
+            let entered = self.expect_line("ENTER ");
+            let probe: usize = entered["ENTER ".len()..].parse().expect("probe number");
+            self.signal(rustix::process::Signal::STOP);
+            std::thread::sleep(Duration::from_millis(100));
+            let finished = format!("PROBE {probe}");
+            if self.lines.try_iter().all(|line| line != finished) {
+                return probe;
+            }
+            self.signal(rustix::process::Signal::CONT);
+        }
+        panic!("no stop landed inside a health probe");
+    }
 }
 
 impl Drop for HostProcess {
@@ -359,14 +541,12 @@ fn a_host_process_stopped_past_the_deadline_during_a_health_probe_keeps_serving(
     let mut host = HostProcess::spawn(ROLE_SLOW_PROBE);
     host.expect_line("PROBE 1");
 
-    host.expect_line("ENTER ");
-    host.signal(rustix::process::Signal::STOP);
+    let stopped_in = host.stop_inside_a_probe();
     std::thread::sleep(CHILD_DEADLINE * 2);
     host.signal(rustix::process::Signal::CONT);
 
-    let resumed = host.expect_line("PROBE ");
-    let resumed: usize = resumed["PROBE ".len()..].parse().expect("probe number");
-    host.expect_line(&format!("PROBE {}", resumed + 2));
+    host.expect_line(&format!("PROBE {stopped_in}"));
+    host.expect_line(&format!("PROBE {}", stopped_in + 2));
 
     drop(host.child.stdin.take());
     assert_eq!(host.expect_line("STOPPED"), "STOPPED graceful");
