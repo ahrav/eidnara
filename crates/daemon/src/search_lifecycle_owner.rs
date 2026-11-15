@@ -28,9 +28,7 @@ use crate::embedding_supervisor::{DrainReport, Maintained, SliceBounds, Unresolv
 use crate::projection_admission::{
     AdmissionInputs, Closed, InputRefusal, ProjectionAdmission, Refresh, SelectedProjection,
 };
-use crate::projection_gates::{
-    Denial, EntryPoint, Gate, ProjectionHook, RuntimeManifest,
-};
+use crate::projection_gates::{Denial, EntryPoint, Gate, ProjectionHook, RuntimeManifest};
 use crate::projection_lifecycle::{
     Cause, ConsumerBinding, ControlState, IntentRefusal, LifecycleIntent, LifecycleRequest,
     MAX_RECORD_BYTES, ProjectionLifecycle, Recorded, Transition,
@@ -1241,16 +1239,13 @@ impl SearchLifecycleOwner {
         }
         if completed && selection.holds_operation(&intent) {
             // The family was reopened and revalidated when this owner first held it; a later slice judges it on its coverage and kernel without reopening it.
-            let checked = match selection.check_selected(
-                &self.kernel,
-                self.admission.gate(),
-                &budget,
-            ) {
-                // A family that trails the kernel past the freshness limit is refused to readers and still caught up: the episode applies the commits it trails by, and the refresh after it re-admits readers once the family is back inside the limit.
-                Err(BuildError::Denied(Denial::Stale { .. })) => selection
-                    .check_selected_for_catch_up(&self.kernel, self.admission.gate(), &budget),
-                checked => checked,
-            };
+            let checked =
+                match selection.check_selected(&self.kernel, self.admission.gate(), &budget) {
+                    // A family that trails the kernel past the freshness limit is refused to readers and still caught up: the episode applies the commits it trails by, and the refresh after it re-admits readers once the family is back inside the limit.
+                    Err(BuildError::Denied(Denial::Stale { .. })) => selection
+                        .check_selected_for_catch_up(&self.kernel, self.admission.gate(), &budget),
+                    checked => checked,
+                };
             return match checked {
                 Ok(()) => {
                     self.settle_current(selection, &inputs, &spec, &intent, &identity, &budget)
@@ -1563,7 +1558,9 @@ impl SearchLifecycleOwner {
                     .map(|report| ProjectionCoverage::unjudged(report, tip))
             }
             _ => {
-                self.observed(Err("no family is selected under the running identity".to_owned()));
+                self.observed(Err(
+                    "no family is selected under the running identity".to_owned()
+                ));
                 Some(ProjectionCoverage::unregistered(identity, tip))
             }
         };

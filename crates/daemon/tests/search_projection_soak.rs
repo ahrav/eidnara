@@ -36,11 +36,54 @@ const SLICE_IDLE: Duration = daemon::search_lifecycle_owner::SLICE_IDLE;
 
 /// Words of ordinary engineering prose; a seeded sequence of them is one source text.
 const WORDS: [&str; 48] = [
-    "request", "handler", "returns", "cache", "entry", "after", "retry", "when", "the", "worker",
-    "queue", "drains", "before", "shutdown", "config", "loads", "from", "file", "and", "falls",
-    "back", "to", "defaults", "test", "asserts", "timeout", "error", "path", "logs", "each",
-    "connection", "closes", "on", "idle", "parser", "rejects", "empty", "input", "index",
-    "rebuilds", "nightly", "migration", "adds", "column", "with", "default", "value", "branch",
+    "request",
+    "handler",
+    "returns",
+    "cache",
+    "entry",
+    "after",
+    "retry",
+    "when",
+    "the",
+    "worker",
+    "queue",
+    "drains",
+    "before",
+    "shutdown",
+    "config",
+    "loads",
+    "from",
+    "file",
+    "and",
+    "falls",
+    "back",
+    "to",
+    "defaults",
+    "test",
+    "asserts",
+    "timeout",
+    "error",
+    "path",
+    "logs",
+    "each",
+    "connection",
+    "closes",
+    "on",
+    "idle",
+    "parser",
+    "rejects",
+    "empty",
+    "input",
+    "index",
+    "rebuilds",
+    "nightly",
+    "migration",
+    "adds",
+    "column",
+    "with",
+    "default",
+    "value",
+    "branch",
 ];
 
 /// A deterministic text of about `bytes` bytes, distinct per `seed`.
@@ -100,7 +143,7 @@ fn publish(kernel: &KernelStore, scope: &str, first: u64, count: u64) {
     kernel
         .commit(intent(&format!("publish-{first}")), |envelope| {
             for (index, key, text, handle) in &staged {
-                let tool = index % 2 == 1;
+                let tool = !index.is_multiple_of(2);
                 let identity: Vec<(&str, &str)> = if tool {
                     vec![
                         ("project_id", "soak"),
@@ -223,9 +266,11 @@ async fn query(daemon: &KernelDaemon, text: &str) -> Result<Value, String> {
 
 /// Whether a fused answer ranks memory `index`.
 fn ranks(answer: &Value, index: u64) -> bool {
-    answer["entries"].as_array().unwrap().iter().any(|entry| {
-        entry["canonical"]["decision_object_id"] == Value::String(memory_id(index))
-    })
+    answer["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["canonical"]["decision_object_id"] == Value::String(memory_id(index)))
 }
 
 async fn status(daemon: &KernelDaemon, route: host_runtime::RouteHandle) -> Value {
@@ -272,7 +317,11 @@ fn caught_up(status: &Value) -> bool {
 fn env_number(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
-        .map(|value| value.parse().unwrap_or_else(|_| panic!("{name} is a number")))
+        .map(|value| {
+            value
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} is a number"))
+        })
         .unwrap_or(default)
 }
 
@@ -414,7 +463,7 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
                 .unwrap();
             next += 2;
         }
-        if tick % 5 == 0 {
+        if tick.is_multiple_of(5) {
             remember(&daemon, memory).await;
             pending.push((memory, Instant::now()));
             memory += 1;
@@ -436,7 +485,11 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
             Err(code) => errors.push(code),
         }
         let observed = status(&daemon, route).await;
-        max_lag = max_lag.max(observed["progress"]["lag_commits"].as_i64().unwrap_or(i64::MAX));
+        max_lag = max_lag.max(
+            observed["progress"]["lag_commits"]
+                .as_i64()
+                .unwrap_or(i64::MAX),
+        );
         if last_step.elapsed() >= Duration::from_secs(5) {
             let by = steps_ms[step % steps_ms.len()];
             kernel::test_clock::step(by);
@@ -543,7 +596,11 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
         json!({"recorded": 1, "completed": 1, "renewed": 0}),
         "{stepped_ms} ms of clock steps inside the hold lifetime record no rebuild: {after_steady}"
     );
-    assert_eq!(after_steady["progress"]["blocked"], Value::Null, "{after_steady}");
+    assert_eq!(
+        after_steady["progress"]["blocked"],
+        Value::Null,
+        "{after_steady}"
+    );
     assert_eq!(
         rebuilt["progress"]["rebuilds"],
         json!({"recorded": 2, "completed": 2, "renewed": 0}),
@@ -589,7 +646,10 @@ async fn unit_sized_limits_stop_serving_a_grown_store_and_the_status_names_the_b
         |status| status["admission"]["state"] == "refused",
     )
     .await;
-    assert_eq!(blocked["admission"]["reason"], "evidence_missing", "{blocked}");
+    assert_eq!(
+        blocked["admission"]["reason"], "evidence_missing",
+        "{blocked}"
+    );
     let reason = blocked["progress"]["blocked"].as_str().unwrap_or_default();
     assert!(
         reason.contains("coverage exceeds its observation bound"),

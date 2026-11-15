@@ -1110,15 +1110,12 @@ impl Run {
 }
 
 fn wall_ms() -> Result<i64, BuildError> {
-    let now = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|time| i64::try_from(time.as_millis()).ok())
-        .ok_or(BuildError::Expired)?;
-    // The replacement's deadlines and the kernel's hold expiries are judged on one clock under a stepped test clock too.
-    #[cfg(feature = "test-support")]
-    let now = now.saturating_add(kernel::test_clock::offset_ms());
-    Ok(now)
+        .map(|now| now.saturating_add(kernel::wall_clock_step_ms()))
+        .ok_or(BuildError::Expired)
 }
 
 #[cfg(test)]

@@ -237,13 +237,21 @@ pub(crate) fn map_sqlite(error: rusqlite::Error) -> KernelError {
 /// Wall-clock milliseconds since the Unix epoch, saturating rather than failing so
 /// a clock before the epoch cannot abort a durable write.
 fn current_time_ms() -> i64 {
-    let now = std::time::SystemTime::now()
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
+        .map_or(0, |now| now.saturating_add(wall_clock_step_ms()))
+}
+
+/// The milliseconds a test has stepped the wall clock by through [`test_clock::step`], which
+/// every kernel timestamp and expiry adds to the system clock; zero in a build without
+/// `test-support`. A caller that judges its own deadlines against kernel expiries adds the
+/// same step, so both are judged on one clock.
+pub fn wall_clock_step_ms() -> i64 {
     #[cfg(feature = "test-support")]
-    let now = now.saturating_add(test_clock::offset_ms());
-    now
+    return test_clock::offset_ms();
+    #[cfg(not(feature = "test-support"))]
+    0
 }
 
 /// A step of the wall clock every kernel timestamp and expiry reads, while monotonic time keeps
@@ -262,7 +270,7 @@ pub mod test_clock {
     }
 
     /// The sum of every step so far, in milliseconds.
-    pub fn offset_ms() -> i64 {
+    pub(crate) fn offset_ms() -> i64 {
         OFFSET_MS.load(Ordering::SeqCst)
     }
 }

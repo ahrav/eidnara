@@ -14848,14 +14848,10 @@ fn json_type_name(value: &Value) -> &'static str {
 /// Storing the first HARD cutoff keeps later materializations byte-stable.
 /// Later passes use the stored cutoff so expiry cannot change rendered bytes between passes.
 pub(crate) fn now_ms() -> i64 {
-    let now = std::time::SystemTime::now()
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    // The daemon and the kernel read one clock, so a stepped test clock moves record deadlines and hold expiries together.
-    #[cfg(feature = "test-support")]
-    let now = now.saturating_add(kernel::test_clock::offset_ms());
-    now
+        .map_or(0, |now| now.saturating_add(kernel::wall_clock_step_ms()))
 }
 
 /// The answer to a window the coverage resolution refused: `boundary_unknown` or `invalid_params`.

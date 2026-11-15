@@ -47,14 +47,19 @@ fn terminal(code: &str) -> PreparedOutcome {
     response(json!({ "kind": "terminal", "terminal": code }))
 }
 
-fn refused(reason: impl std::fmt::Display) -> PreparedOutcome {
-    let reason = reason.to_string();
+/// `reason` cut to its first `REASON_CHARS` characters.
+fn bounded(reason: &str) -> &str {
     let end = reason
         .char_indices()
         .map(|(index, _)| index)
         .nth(REASON_CHARS)
         .unwrap_or(reason.len());
-    response(json!({ "kind": "terminal", "terminal": "refused", "reason": &reason[..end] }))
+    &reason[..end]
+}
+
+fn refused(reason: impl std::fmt::Display) -> PreparedOutcome {
+    let reason = reason.to_string();
+    response(json!({ "kind": "terminal", "terminal": "refused", "reason": bounded(&reason) }))
 }
 
 /// The budget includes time spent waiting for a blocking worker.
@@ -139,7 +144,7 @@ impl HandlerCore {
                     "completed": progress.rebuilds_completed,
                     "renewed": progress.rebuilds_renewed,
                 },
-                "blocked": progress.blocked,
+                "blocked": progress.blocked.as_deref().map(bounded),
             },
         }))
     }

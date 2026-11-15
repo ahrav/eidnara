@@ -376,7 +376,7 @@ and its rebuild outcomes without parsing the log:
 | `rebuilds.recorded` | First builds and rebuilds the slice loop recorded since the daemon started. |
 | `rebuilds.completed` | Builds that reached Current since the daemon started, whoever recorded them. |
 | `rebuilds.renewed` | Renewals of a lapsed rebuild since the daemon started. |
-| `blocked` | The last slice's reason for leaving the record short of Current, the text the log line `search lifecycle <reason>` carries, followed by `; coverage: <reason>` when the selected family's coverage could not be observed; `null` after a slice that advanced the record or found the family current. |
+| `blocked` | The last slice's reason for leaving the record short of Current, the text the log line `search lifecycle <reason>` carries, followed by `; coverage: <reason>` when the selected family's coverage could not be observed, bounded to 512 characters; `null` after a slice that advanced the record or found the family current. |
 
 The counters and the observation live in the daemon process and start from
 zero at each start. The slice loop logs `search lifecycle rebuild completed:
