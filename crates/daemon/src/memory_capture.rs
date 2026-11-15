@@ -272,8 +272,15 @@ fn parse_capture_batch(
                     row.get("message_id").and_then(Value::as_str) == Some(message.id.as_str())
                 })
                 .ok_or("capture output omits a source message")?;
-            let decision = MessageDecision::deserialize(row)
+            let mut decision = MessageDecision::deserialize(row)
                 .map_err(|_| "capture output does not match the JSON schema")?;
+            let released =
+                release_unsupported_targets(&mut decision.memories, message, existing, &replaced);
+            if released > 0 {
+                eprintln!(
+                    "daemon: native memory capture released {released} target links that failed their checks"
+                );
+            }
             let mut staged = replaced.clone();
             validate_capture_memories(&decision.memories, message, existing, &mut staged)?;
             replaced = staged;
@@ -283,6 +290,100 @@ fn parse_capture_batch(
             })
         })
         .collect())
+}
+
+/// Drops each link from a proposed memory to an existing one that fails the
+/// check [`validate_capture_memories`] applies to it, and returns how many it
+/// dropped. The memory itself is kept: its quotation is checked against the
+/// source on its own, so a target the extractor named wrongly costs that
+/// retirement and never the fact.
+///
+/// A replacement is dropped, with the further targets that depend on it, when
+/// its target is unprovided, protected, already claimed in `replaced` or by an
+/// earlier memory of this source, of another category, or shares no content
+/// word with the quotation. A further target is dropped when it is
+/// unprovided, protected, claimed, or no restatement of the replaced memory.
+/// A duplicate link is dropped when its target is unprovided or the memory
+/// also replaces. A contest is dropped when its target is unprovided, shares
+/// no content word with the quotation, or is also replaced. Only a user
+/// message replaces, so the replacements an assistant message names become
+/// contests under the same check.
+fn release_unsupported_targets(
+    memories: &mut [CapturedMemory],
+    source: &CaptureMessage,
+    existing: &[ExistingCaptureMemory],
+    replaced: &BTreeSet<String>,
+) -> usize {
+    let provided = |target: &str| existing.iter().find(|previous| previous.id == target);
+    let same_fact = |quote: &str, previous: &ExistingCaptureMemory| {
+        content_words(quote)
+            .intersection(&content_words(&previous.content))
+            .next()
+            .is_some()
+    };
+    let links = |memory: &CapturedMemory| {
+        usize::from(memory.replaces.is_some())
+            + memory.also_replaces.len()
+            + usize::from(memory.duplicate_of.is_some())
+            + memory.contests.len()
+    };
+    let mut claimed = replaced.clone();
+    let mut released = 0;
+    for memory in memories {
+        let named = links(memory);
+        if source.role != CaptureRole::User {
+            let replacements = memory
+                .replaces
+                .take()
+                .into_iter()
+                .chain(std::mem::take(&mut memory.also_replaces));
+            memory.contests.extend(replacements);
+        }
+        let primary = memory
+            .replaces
+            .as_deref()
+            .and_then(provided)
+            .filter(|previous| {
+                previous.can_replace
+                    && previous.category == memory.category
+                    && same_fact(&memory.quote, previous)
+                    && claimed.insert(previous.id.clone())
+            });
+        match primary {
+            Some(primary) => {
+                memory.also_replaces.retain(|target| {
+                    provided(target)
+                        .is_some_and(|further| further.can_replace && restates(primary, further))
+                        && claimed.insert(target.clone())
+                });
+                memory.duplicate_of = None;
+            }
+            None => {
+                memory.replaces = None;
+                memory.also_replaces.clear();
+                if memory
+                    .duplicate_of
+                    .as_deref()
+                    .is_some_and(|target| provided(target).is_none())
+                {
+                    memory.duplicate_of = None;
+                }
+            }
+        }
+        let mut contests = Vec::new();
+        for target in std::mem::take(&mut memory.contests) {
+            if provided(&target).is_some_and(|previous| same_fact(&memory.quote, previous))
+                && memory.replaces.as_ref() != Some(&target)
+                && !memory.also_replaces.contains(&target)
+                && !contests.contains(&target)
+            {
+                contests.push(target);
+            }
+        }
+        memory.contests = contests;
+        released += named - links(memory);
+    }
+    released
 }
 
 /// One source's proposed memories against its own text and the provided
@@ -3168,17 +3269,46 @@ mod tests {
             ),
             Ok(Vec::new())
         );
-        for (memory, refusal) in [
-            (
-                user(json!({"contests": ["mem_absent"]})),
-                "capture names an unprovided memory target",
-            ),
-            (
-                user(json!({"contests": ["mem_release"]})),
-                "capture contests a memory that states a different fact",
-            ),
+        for (target, why) in [
+            ("mem_absent", "an unprovided target"),
+            ("mem_release", "a memory that states a different fact"),
         ] {
-            assert_eq!(parse(1, memory), Err(refusal));
+            assert_eq!(
+                parse(1, user(json!({"contests": [target, "mem_port"]}))),
+                Ok(vec!["mem_port".to_string()]),
+                "{why} is released and the related contest stands"
+            );
+        }
+        assert_eq!(
+            parse(
+                1,
+                user(
+                    json!({"replaces": "mem_absent", "duplicate_of": "mem_absent", "contests": ["mem_port", "mem_port"]})
+                )
+            ),
+            Ok(vec!["mem_port".to_string()]),
+            "a target is contested once"
+        );
+        for refusal in [
+            CapturedMemory {
+                contests: vec!["mem_absent".into()],
+                ..memory("Use port 4321 for staging.")
+            },
+            CapturedMemory {
+                contests: vec!["mem_release".into()],
+                ..memory("Use port 4321 for staging.")
+            },
+        ] {
+            assert!(
+                validate_capture_memories(
+                    std::slice::from_ref(&refusal),
+                    &sources()[0],
+                    &existing,
+                    &mut BTreeSet::new()
+                )
+                .is_err(),
+                "validation still refuses a link the release step would drop"
+            );
         }
         let assistant = CaptureMessage {
             id: "native-2".into(),
@@ -3255,6 +3385,7 @@ mod tests {
                 ..target("mem_npm", true)
             },
         ];
+        // The parsed memory's surviving `(replaces, also_replaces)` links.
         let parse = |replaces: Option<&str>, also: &[&str]| {
             let mut response = output();
             let memory = &mut response["decisions"][1]["memories"][0];
@@ -3262,42 +3393,60 @@ mod tests {
                 memory["replaces"] = json!(replaces);
             }
             memory["also_replaces"] = json!(also);
-            parse_capture_output_with_existing(&response.to_string(), &sources(), &existing)
-                .map(|parsed| parsed[0].memories[0].also_replaces.clone())
+            let parsed =
+                parse_capture_output_with_existing(&response.to_string(), &sources(), &existing)
+                    .expect("a link that fails its check never refuses the source");
+            let memory = &parsed[0].memories[0];
+            assert_eq!(memory.quote, "Use port 4321 for staging.");
+            (memory.replaces.clone(), memory.also_replaces.clone())
         };
+        let old = Some("mem_old".to_string());
         assert_eq!(
             parse(Some("mem_old"), &["mem_echo", "mem_restated"]),
-            Ok(vec!["mem_echo".into(), "mem_restated".into()])
+            (old.clone(), vec!["mem_echo".into(), "mem_restated".into()])
         );
-        assert!(matches!(
+        assert_eq!(
             parse(None, &["mem_echo"]),
-            Err("capture retires further targets only beside a replacement")
-        ));
+            (None, Vec::new()),
+            "further targets are retired only beside a replacement"
+        );
         for also in [
             &["mem_kept"][..],
             &["mem_old"],
-            &["mem_echo", "mem_echo"],
             &["mem_absent"],
             &["mem_unrelated"],
             &["mem_other_kind"],
         ] {
-            assert!(parse(Some("mem_old"), also).is_err(), "{also:?}");
+            assert_eq!(
+                parse(Some("mem_old"), also),
+                (old.clone(), Vec::new()),
+                "{also:?} is released and the replacement stands"
+            );
         }
-        assert!(
-            parse(Some("mem_other_kind"), &[]).is_err(),
+        assert_eq!(
+            parse(Some("mem_old"), &["mem_echo", "mem_echo"]),
+            (old.clone(), vec!["mem_echo".into()]),
+            "a target is retired once"
+        );
+        assert_eq!(
+            parse(Some("mem_other_kind"), &["mem_echo"]),
+            (None, Vec::new()),
             "a correction replaces only a memory of its own category"
         );
-        assert!(
-            parse(Some("mem_unrelated"), &[]).is_err(),
+        assert_eq!(
+            parse(Some("mem_unrelated"), &[]),
+            (None, Vec::new()),
             "a correction replaces only a memory it shares a content word with"
         );
-        assert!(
-            parse(Some("mem_npm"), &["mem_filler"]).is_err(),
-            "one shared function word is no restatement"
+        assert_eq!(
+            parse(Some("mem_npm"), &["mem_filler"]),
+            (None, Vec::new()),
+            "one shared function word relates no memory to the correction"
         );
-        assert!(
-            parse(Some("mem_wordless"), &["mem_echo"]).is_err(),
-            "a replaced fact with no comparable words vouches for no restatement"
+        assert_eq!(
+            parse(Some("mem_wordless"), &["mem_echo"]),
+            (None, Vec::new()),
+            "a memory with no comparable words is no replacement target"
         );
     }
 
@@ -3912,24 +4061,33 @@ mod tests {
             )
             .is_ok()
         );
+        let links = |sources: &[CaptureMessage], existing: &[ExistingCaptureMemory]| {
+            let parsed =
+                parse_capture_output_with_existing(&response.to_string(), sources, existing)
+                    .expect("the memory is kept whatever becomes of its target");
+            let memory = parsed[0].memories[0].clone();
+            (memory.replaces, memory.contests)
+        };
         let mut assistant_sources = sources();
         assistant_sources[0].role = CaptureRole::Assistant;
-        assert!(matches!(
-            parse_capture_output_with_existing(
-                &response.to_string(),
-                &assistant_sources,
-                std::slice::from_ref(&existing),
-            ),
-            Err("only user statements may replace captured memories")
-        ));
-        assert!(parse_capture_output(&response.to_string(), &sources()).is_err());
+        assert_eq!(
+            links(&assistant_sources, std::slice::from_ref(&existing)),
+            (None, vec!["mem_old".to_string()]),
+            "an assistant message replaces nothing; the target it names is contested"
+        );
+        assert_eq!(
+            links(&sources(), &[]),
+            (None, Vec::new()),
+            "an unprovided target is released"
+        );
         let protected = ExistingCaptureMemory {
             can_replace: false,
             ..existing
         };
-        assert!(
-            parse_capture_output_with_existing(&response.to_string(), &sources(), &[protected])
-                .is_err()
+        assert_eq!(
+            links(&sources(), &[protected]),
+            (None, Vec::new()),
+            "a protected target is released"
         );
     }
 
@@ -3953,18 +4111,14 @@ mod tests {
         .to_string();
         let batch =
             parse_capture_batch(&response, &users, std::slice::from_ref(&existing)).unwrap();
-        assert!(batch[0].is_ok(), "the first claimant keeps its replacement");
-        assert!(
-            matches!(
-                batch[1],
-                Err("capture target is protected or already replaced")
-            ),
-            "a second source cannot claim the same target: {:?}",
-            batch[1].as_ref().map(|_| ())
-        );
-        assert!(
-            parse_capture_output_with_existing(&response, &users, std::slice::from_ref(&existing))
-                .is_err()
+        let claims: Vec<Option<String>> = batch
+            .iter()
+            .map(|source| source.as_ref().unwrap().memories[0].replaces.clone())
+            .collect();
+        assert_eq!(
+            claims,
+            [Some("mem_old".to_string()), None],
+            "the first claimant keeps its replacement; the second keeps its fact and no target"
         );
     }
 

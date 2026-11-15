@@ -974,7 +974,8 @@ content-free `error`: `cancelled`, `provider_unavailable`, `model_failed`, or
 
 `processed` acknowledges processing the proposal, not successful capture of
 every source. Malformed or source-local invalid proposals leave sources
-pending with failures recorded. Valid decisions from other sources may still
+pending with failures recorded; a proposal whose only defect is a link to a
+reference memory keeps its fact and loses that link. Valid decisions from other sources may still
 commit. Clients must request `next` again and see `ready` before reporting
 completion. Other submission states include `stale`, `pending`, `disabled`,
 and `store_failed`; mismatched models and malformed envelopes are errors.
@@ -1126,7 +1127,17 @@ contradicts without the user changing the fact, each sharing at least one
 content word with the quotation. A user quotation that does not meet the
 statement rule replaces no fact served on `auto_inject`: each such target
 named in `replaces` or `also_replaces` becomes a contest, and when the
-`replaces` target is one, every target of the proposal does. A contested fact
+`replaces` target is one, every target of the proposal does. A link from a
+proposed fact to a reference memory that fails its check is released and the
+fact is still stored: a `replaces` target that is unprovided, protected,
+already claimed in the batch, of another category, or shares no content word
+with the quotation is released with its `also_replaces` targets; an
+`also_replaces` target that is unprovided, protected, claimed, or no
+restatement of the replaced fact is released alone; a `duplicate_of` target
+that is unprovided, or named beside `replaces`, is released; a `contests`
+target that is unprovided, shares no content word with the quotation, or is
+also replaced is released; and the `replaces` and `also_replaces` targets an
+assistant source names become contests under the contest check. A contested fact
 stays live, and its rationale records the contest under `contests`. When the
 contested fact is a capture-owned fact admitted on an approval and holds no
 earlier contest, the commit supersedes it with a fact of the same text,
