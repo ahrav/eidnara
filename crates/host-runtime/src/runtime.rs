@@ -186,13 +186,8 @@ impl<H: HostHandler> HostShared<H> {
         what: &'static str,
         mut task: JoinHandle<T>,
     ) -> Result<T, LifecycleFailure<T>> {
-        let join_polls = crate::lifecycle_deadline::PollTime::default();
-        match crate::lifecycle_deadline::within_timed(
-            self.timing.lifecycle_callback_deadline,
-            &mut task,
-            &join_polls,
-        )
-        .await
+        match crate::lifecycle_deadline::within(self.timing.lifecycle_callback_deadline, &mut task)
+            .await
         {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(join_err)) => {

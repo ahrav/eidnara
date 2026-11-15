@@ -74,7 +74,8 @@ pub(crate) async fn within<F: Future>(deadline: Duration, future: F) -> Result<F
 ///
 /// Each step waits `min(HEARTBEAT, remaining)` and charges its measured length. A step whose wake
 /// arrives more than `HEARTBEAT` late, after subtracting the thread CPU time `polls` gained,
-/// charges that CPU time, and at least its `step` when the step before it was late too.
+/// charges that CPU time up to `step + HEARTBEAT`, and at least its `step` when the step before
+/// it was late too.
 pub(crate) async fn within_timed<F: Future>(
     deadline: Duration,
     future: F,
