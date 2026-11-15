@@ -192,8 +192,9 @@ once per process (`identity.rs:13-18`) and `ANALYSIS_CONTRACT_EPOCH` is a
 public constant (`crates/retrieval/src/lexical/mod.rs:40`).
 Status: active
 Exercised: yes - `identity_pins_the_manifest`
-(`tests/lexical_analysis.rs:389-412`) asserts the epoch string and the
-digest literal on every test run.
+(`tests/lexical_analysis.rs:389-419`) asserts the epoch string and the
+digest literal recorded for the running toolchain's Unicode version on every
+test run.
 Guarantee: the analysis contract is pinned by `ANALYSIS_CONTRACT_EPOCH =
 "identifier-analysis.v1"` and by `AnalysisIdentity::current()`, a SHA-256 over
 a length-delimited manifest of the epoch, `char::UNICODE_VERSION`, the FTS5
@@ -215,8 +216,8 @@ Re-exercised by #1164: the matcher preimage names `ANALYSIS_CONTRACT_EPOCH`
 and the Unicode version
 (`crates/daemon/src/contradiction_candidates/scorer.rs:661-663`), and
 `the_matcher_digest_pins_every_rule`
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:348-400`) asserts the whole
-preimage, including both fields, and the digest literal. `identity_pins_the_manifest` and the retrieval crate are unchanged
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:348-406`) asserts the whole
+preimage, including both fields, and the digest literal recorded for the running Unicode version. Both tests record a literal for Unicode 17.0.0 (the pinned 1.98) and 18.0.0 (stable 1.100) and fail on any other version; the retrieval crate's sources are unchanged
 since `3a3b916b7`.
 Impact: a P5 consumer that records only the epoch string with its derived
 rows cannot detect a toolchain-driven change in atom boundaries; a consumer

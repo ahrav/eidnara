@@ -392,10 +392,16 @@ fn the_matcher_digest_pins_every_rule() {
         CANDIDATE_MATCHER_EPOCH,
         "contradiction-candidate-matcher.v1"
     );
+    // The preimage names the toolchain's Unicode version, so each version CI runs has its own digest: 17.0.0 under the pinned 1.98 and 18.0.0 under stable 1.100.
+    let pinned = match (major, minor, update) {
+        (17, 0, 0) => "63a46048304e06a0ff71bf491c9f83effd1c606d2cd393963695670c0a94b0bd",
+        (18, 0, 0) => "92a5bd0e3e3b4c212a317c72b8f3077138f68ef165743b3ee6e14f04065b6187",
+        version => panic!("no matcher digest is recorded for Unicode {version:?}"),
+    };
     assert_eq!(
         matcher_digest(),
-        "63a46048304e06a0ff71bf491c9f83effd1c606d2cd393963695670c0a94b0bd",
-        "a changed matcher rule changes the digest; update the epoch and the digest together"
+        pinned,
+        "a changed matcher rule changes the digest; update the epoch and the digests together"
     );
 }
 
