@@ -297,9 +297,10 @@ pub(crate) fn beside_open_lines(
     row: &DecayRenderHistorySegment,
     mut corrections: Vec<Correction>,
 ) -> Vec<Correction> {
-    // Whether one of the lines that the first occurrence of `anchor` in `text` touches, the
-    // occurrence a splice replaces, is an open status line.
+    // Whether one of the lines that the first occurrence of `anchor` in the trimmed tier touches,
+    // the occurrence a splice replaces, is an open status line.
     let in_open_line = |text: &str, anchor: &str| {
+        let text = text.trim();
         text.find(anchor).is_some_and(|start| {
             let end = start + anchor.len();
             let from = text[..start].rfind('\n').map_or(0, |at| at + 1);
@@ -872,6 +873,7 @@ mod tests {
         let closed = "Constraint (policy.port): Keep port 5432 closed.";
         for (tiers, tier) in [
             ([narrative, closed, "", ""], 2),
+            ([narrative, "", closed, ""], 3),
             ([narrative, "", "", closed], 4),
         ] {
             assert_eq!(
@@ -880,6 +882,22 @@ mod tests {
                 "tier {tier}"
             );
         }
+        // The start of an open line that ends its tier, and the line break after an open line.
+        assert_eq!(
+            render_history_segment_at_tier(&corrected([narrative, closed, "", ""], "Con"), 2),
+            format!("{heading}\n{closed}\n{footer}")
+        );
+        let after = format!("{closed}\nport 9 starts here.");
+        assert_eq!(
+            render_history_segment_at_tier(&corrected([&after, "", "", ""], ".\nport 9"), 1),
+            format!("{heading}\n{after}\n{footer}")
+        );
+        // A tier that opens with whitespace is searched as the renderer trims it.
+        let indented = format!("  port 5432 is the port.\n{freeze} Keep  port 5432");
+        assert_eq!(
+            render_history_segment_at_tier(&corrected([&indented, "", "", ""], "  port 5432"), 1),
+            format!("{heading}\n{}\n{footer}", indented.trim())
+        );
     }
 
     #[test]
