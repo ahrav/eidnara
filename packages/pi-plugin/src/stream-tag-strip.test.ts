@@ -454,6 +454,58 @@ describe("stripStreamedTags", () => {
         expect(inner.assistantMessageEvent.delta).toBe("zz");
     });
 
+    it("copies a streamed part after streaming it, and a whole message's part before stripping it", () => {
+        const growing = () => {
+            const part = { type: "text", text: "ab" };
+            Object.defineProperty(part, "extra", {
+                enumerable: true,
+                get() {
+                    part.text += `${S}1${S}cd`;
+                    return 1;
+                },
+            });
+            return part;
+        };
+        const streamed = {
+            message: { role: "assistant", content: [growing()] },
+            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "ab" },
+        };
+        stripStreamedTags(streamed);
+        expect(streamed.message.content[0]?.text).toBe("ab");
+        const whole = { message: { role: "assistant", content: [growing()] } };
+        stripStreamedTags(whole);
+        expect(whole.message.content[0]?.text).toBe("abcd");
+    });
+
+    it("shows what a strip of the same part from its accessor released", () => {
+        let reads = 0;
+        const part = {
+            get type() {
+                reads += 1;
+                if (reads === 2) {
+                    part.text += " more";
+                    stripStreamedTags({
+                        message: { role: "assistant", content: [part] },
+                        assistantMessageEvent: {
+                            type: "text_delta",
+                            contentIndex: 0,
+                            delta: " more",
+                        },
+                    });
+                }
+                return "text";
+            },
+            text: "hi",
+        };
+        const event = {
+            message: { role: "assistant", content: [part] as Part[] },
+            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi" },
+        };
+        stripStreamedTags(event);
+        expect((event.message.content[0] as Part).text).toBe("hi more");
+        expect(event.assistantMessageEvent.delta).toBe("hi");
+    });
+
     it("keeps an update's delta when a reentrant strip fails inside a part's accessor", () => {
         const failing = {
             get type(): string {
