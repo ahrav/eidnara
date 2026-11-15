@@ -1003,12 +1003,19 @@ reaches capture under its own message id and lies inside one plain-prose
 paragraph is first widened to the whole sentence of that paragraph that
 contains it, when that sentence meets the statement rule below and fits one
 memory's 2,048 bytes: a quotation that leaves out a lead-in clause, a
-negation, or a condition is stored as the user's whole sentence. Widening adds
-words of the quotation's own line and sentence only. A quotation is stored as
-proposed when it already meets the statement rule; when its sentence does not
-qualify; when the words widening would add hold a line break, a `.`, `!`, or
-question mark before whitespace other than an abbreviation's period, or a
-sentence terminator of another script (`。`, `｡`, `．`, `！`, `।`); when the
+negation, or a condition is stored as the user's whole sentence. The widened
+text is approved as the user's statement, so words are added only up to a
+plain sentence edge. An edge of the quotation that the statement rule accepts
+as a sentence edge is kept. Otherwise the statement runs back to the
+paragraph's start or the word after an exclamation or question mark, and on
+to the paragraph's end or the next exclamation or question mark. A period
+before whitespace may end a sentence or an abbreviation, so it is no plain
+edge. A quotation is stored as proposed when it already meets the statement
+rule; when the widened sentence does not qualify; when the words widening
+would add hold a line break (line feed, carriage return, or a Unicode line
+or paragraph separator), a `.`, `!`, or `?` before whitespace, or a sentence
+terminator of another script (such as `。`, `｡`, `．`, `！`, `？`, `।`, `…`);
+when the quotation ends in a terminator and its sentence goes on; when the
 occurrences the search yields lie in qualifying sentences that differ; and
 when it and a proposal of another category name one sentence. A proposal that
 names `replaces` or `also_replaces` is stored as proposed, so only a
@@ -1017,12 +1024,11 @@ fact served on `auto_inject`. A sentence with a reporting clause before a
 colon, such as `My teammate wrote: always rebase.`, is the user's sentence
 and is stored whole with that clause. Memories of one source that share a
 category and quotation freeze as one memory, keeping any replacement target
-among them; two quotations that differ only in the sentence's closing `.` or
-`!` are one quotation, stored with the mark; distinct replacement targets
+among them; distinct replacement targets
 keep one memory each, since a memory supersedes exactly one predecessor. The
 frozen memory names `duplicate_of` only when every memory it joins names the
 same target, and a frozen memory that still names `duplicate_of` and whose
-stored text equals, up to its closing mark, a reference memory served on
+stored text equals a reference memory served on
 `auto_inject` is a duplicate of that memory whichever target it named. Relevant and sufficiently complete quote selection still depends
 on model quality. Only user-source proposals may replace capture-owned
 memories; parsing and kernel publication both enforce this rule, and one
@@ -1105,22 +1111,21 @@ line holding only a markup tag opens through the last line closing that tag
 item, a heading, a blockquote, an indented code line, a double quotation mark
 of any script, a single opening quotation mark that starts a word, or a line
 ending in `:` (also after closing `*` or `_`, and the fullwidth colon), every paragraph
-after such a line, every paragraph inside a quotation an earlier paragraph
-left open, and
+after such a line, every paragraph after one whose quotations do not close
+in it, and
 every paragraph that a fence or tag line borders without a blank
-line. A paragraph leaves a double quotation open, or closes the open one of
-the same style, when it holds an odd number of the marks of one style
-(straight, curly, angle, corner, or ornamental); a paragraph whose marks pair
-up ends its quotations itself, and a mark of one style closes no quotation of
-another. Pairing is trusted only when the prose of the whole message holds an
-even number of each style's marks and every mark, read in order, sits where a
-quotation can open or close and takes its turn: a mark after the line start,
-whitespace, an opening bracket, or a mark that opened, and before a character
-that is not whitespace, opens, and its style has no quotation open; any other
-mark after a character that is not whitespace closes, and its style has one
-open. A straight mark directly after a number is read as an inch or seconds
-sign. Otherwise, as for a second opening mark inside an open quotation, every
-paragraph after the first one holding a double mark is left out. A paragraph
+line. A paragraph's double quotations close in it when every mark of each
+style (straight, curly, angle, corner, or ornamental), read in order, takes
+its turn and none is left open: a mark after the line start, whitespace, an
+opening bracket, or a mark that opened, and before a character that is not
+whitespace, opens, and its style has no quotation open; a mark after a
+letter, closing punctuation, or a mark that closed, with no letter or digit
+after it, closes, and its style has one open. A mark of one style closes no
+quotation of another. A second opening mark inside an open quotation, a mark
+in any other place, and a mark after a number, which may be an inch or
+seconds sign, leave the paragraph's quotations unknown. A quotation that
+crosses paragraphs is not tracked to its end: every paragraph after the one
+that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
 later paragraph. A single mark closes a quotation of one word when it ends a
 word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
@@ -1136,11 +1141,10 @@ follows it past any punctuation; the paragraph's indentation and trailing
 spaces border its sentences as its edges do; neither boundary falls
 at a dotted abbreviation, a word of two or more one- or two-letter segments
 such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
-`Prof`, `Sr`, `Jr`, `St`), at a single letter or at `vs`, `cf`, `viz`, or
-`ca` when text follows, or before a number at `No`, `Nos`, `Fig`, `Vol`,
-`Ch`, `Sec`, `Eq`, or `Approx` in any letter case and at any word of up to
-five letters; these lists are a heuristic, and a period they keep inside a
-sentence joins two sentences into one span and never cuts one; and its trimmed text contains
+`Prof`, `Sr`, `Jr`, `St`), or at `No`, `Nos`, `Fig`, `Vol`, `Ch`, `Sec`, `Eq`,
+or `Approx` in any letter case before a number; these lists are a heuristic
+for a quotation the extractor chose whole, and widening adds no words across
+a period; and its trimmed text contains
 no ASCII, fullwidth, or Arabic question mark, contains no double
 quotation mark, does not start with a backtick, and neither starts nor closes
 a single quotation. The rule reads sentence ends in `.` and `!` only, so text
@@ -1179,10 +1183,10 @@ and leaves out facts captured from that session's own messages. Those facts
 are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
 however many of them are newer, they take no place from another session's
 facts. The extractor's reference memories are ranked from two bounded reads
-at one snapshot: the newest facts on `explicit_search`, and the facts a
-transform would deliver to each session whose messages the batch holds, so a
-fact a session is shown is a fact its correction can name; a fact older than
-both windows is not offered. A user message may correct earlier facts, and only
+at one snapshot: the newest facts on `explicit_search`, and the facts served
+on `auto_inject` in the plain newest window and in the delivery of each
+session whose messages the batch holds; a fact older than every window is
+not offered. A user message may correct earlier facts, and only
 the user's statement may replace a fact served on `auto_inject`: its fact
 supersedes the captured fact it `replaces` (which must share its category
 and at least one content word), retires each further fact it names

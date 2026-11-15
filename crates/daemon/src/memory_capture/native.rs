@@ -110,7 +110,7 @@ fn messages_for(jobs: &[CaptureJob]) -> Vec<CaptureMessage> {
         .enumerate()
         .map(|(index, job)| CaptureMessage {
             id: format!("source_{}", index + 1),
-            role: if job.role == "user" {
+            role: if super::is_user_source(job) {
                 CaptureRole::User
             } else {
                 CaptureRole::Assistant
@@ -449,9 +449,7 @@ impl HandlerCore {
     }
 }
 
-/// Memories of one source sharing a category and quotation freeze as one;
-/// two quotations that differ only in the sentence's closing mark are one
-/// quotation.
+/// Memories of one source sharing a category and quotation freeze as one.
 /// A replacement target survives the collapse so the correction it carries
 /// is not lost; one quotation superseding two memories keeps one entry per
 /// target, since a decision supersedes exactly one predecessor. The
@@ -467,18 +465,12 @@ pub(super) fn collapse_quotations(
         memory.content = format!("{attribution}: {}", memory.quote);
         match memories.iter_mut().find(|kept| {
             kept.category == memory.category
-                && statement_key(&kept.content) == statement_key(&memory.content)
+                && kept.content == memory.content
                 && (kept.replaces.is_none()
                     || memory.replaces.is_none()
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
-                // The joined memory keeps the quotation that holds the
-                // sentence's closing mark.
-                if memory.content.len() > kept.content.len() {
-                    kept.content = memory.content;
-                    kept.quote = memory.quote;
-                }
                 if kept.replaces.is_none() && memory.replaces.is_some() {
                     kept.replaces = memory.replaces;
                     kept.also_replaces = memory.also_replaces;
@@ -491,13 +483,6 @@ pub(super) fn collapse_quotations(
         }
     }
     memories
-}
-
-/// A statement's text for comparison: without edge whitespace and without
-/// its closing `.` or `!`, so a sentence quoted with and without its closing
-/// mark is one statement.
-fn statement_key(text: &str) -> &str {
-    text.trim().trim_end_matches(['.', '!'])
 }
 
 /// Widens each cut quotation of a user message to the whole sentence that
@@ -527,8 +512,7 @@ fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory
         };
         let shared = proposed.iter().zip(&widened).any(|(other, other_widened)| {
             other.category != proposed[index].category
-                && statement_key(other_widened.unwrap_or(other.quote.as_str()))
-                    == statement_key(statement)
+                && other_widened.unwrap_or(other.quote.as_str()).trim() == statement
         });
         if !shared {
             proposed[index].quote = statement.to_owned();
@@ -714,14 +698,14 @@ impl CaptureWork {
                     continue;
                 }
             };
-            let attribution = if job.role == "user" {
+            let attribution = if super::is_user_source(&job) {
                 USER_STATED
             } else {
                 super::ASSISTANT_REPORTED
             };
             let prose = super::Prose::of(&job.text);
             let mut proposed = decision.memories;
-            if job.role == "user" && !super::cite::is_hashed_source_id(&job.message_id) {
+            if super::is_user_source(&job) && !super::cite::is_hashed_source_id(&job.message_id) {
                 widen_cut_quotations(&prose, &mut proposed);
             }
             // The stored text is the attributed quotation, so two facts citing
@@ -732,10 +716,10 @@ impl CaptureWork {
             // word duplicates that memory, whichever copy the extractor named.
             for memory in &mut memories {
                 if memory.duplicate_of.is_some()
-                    && let Some(approved) = plan.existing.iter().find(|previous| {
-                        previous.automatic
-                            && statement_key(&previous.content) == statement_key(&memory.content)
-                    })
+                    && let Some(approved) = plan
+                        .existing
+                        .iter()
+                        .find(|previous| previous.automatic && previous.content == memory.content)
                 {
                     memory.duplicate_of = Some(approved.id.clone());
                 }

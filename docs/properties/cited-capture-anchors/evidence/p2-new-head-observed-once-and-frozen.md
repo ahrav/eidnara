@@ -10,9 +10,9 @@ that each anchor's oid equals its plan's frozen head.
 
 ## Evidence trail
 
-`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:691`)
+`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:675`)
 parses the submission's output, then calls `observe_head` once
-(`:614`) on the binding's canonical project root before the loop that
+(`:652`) on the binding's canonical project root before the loop that
 builds and freezes one `PreparedCapture` per job. Each plan carries the
 same `head` value (`crates/daemon/src/memory_capture.rs:1055`), serialized
 as `{"commit":"<40 hex>"}` or `"head_unavailable"`
@@ -23,11 +23,11 @@ branch, to the end of its chain, as the Kernel's checkout snapshot
 (`head_id`, `crates/kernel/src/applicability/checkout.rs:699`) does; when its first store lookup exhausts the store's index
 slots, only the object lookup repeats, for the same id, in a store opened
 with the default slot sizing (`reopened_kind`, `:70`). The store freezes a plan
-once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:414`,
+once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:415`,
 returns the stored text to a later call), and `publish` reads the stored
 text, so a retry publishes the value frozen at submit. The commit's request
 digest is the SHA-256 of the frozen text
-(`crates/daemon/src/memory_capture.rs:2353`), so the receipt covers the head.
+(`crates/daemon/src/memory_capture.rs:2324`), so the receipt covers the head.
 
 The observation runs inside the `kernel_routes::blocking` hop of the submit
 handler (`crates/daemon/src/memory_capture/native.rs:439`), before `publish`
@@ -87,7 +87,7 @@ aliased branch loose and in `packed-refs`.
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
   without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:4806`).
+  (`crates/daemon/src/memory_capture.rs:4847`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 

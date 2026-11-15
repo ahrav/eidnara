@@ -118,11 +118,12 @@ pub struct CaptureQueueStatus {
     pub failed: i64,
 }
 
-/// What a refused or conflicting kernel commit did to its capture job.
+/// What a refused, conflicting, or failed kernel commit did to its capture
+/// job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureRefusal {
-    /// The job holds another plan or none, is complete, or is abandoned; it
-    /// is left as it is.
+    /// The job holds another plan, a later freeze of the same bytes, or
+    /// none, is complete, or is abandoned; it is left as it is.
     Stale,
     /// The job stays queued for its next retry.
     Retried,
@@ -447,21 +448,21 @@ impl MemoryStore {
         })
     }
 
-    /// The dispatch count of a job that holds a frozen plan. Each freeze
-    /// follows a dispatch, and each refused commit records one, so the count
-    /// read beside a plan names that freeze of it: a later freeze of the same
-    /// bytes carries a higher count.
-    pub fn frozen_memory_capture_attempts(
+    /// The frozen plan a pending job holds and the job's dispatch count, in
+    /// one read that writes nothing. Each freeze follows a dispatch, and each
+    /// refused commit records one, so the count read beside a plan names that
+    /// freeze of it: a later freeze of the same bytes carries a higher count.
+    pub fn frozen_memory_capture(
         &self,
         project: &str,
         job: &str,
-    ) -> Result<Option<u32>, MemoryStoreError> {
+    ) -> Result<Option<(String, u32)>, MemoryStoreError> {
         self.inner
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT attempts FROM memory_capture_jobs WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NOT NULL",
+                    "SELECT prepared_json,attempts FROM memory_capture_jobs WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NOT NULL",
                     params![project, job],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
             })
@@ -1147,10 +1148,12 @@ mod tests {
                     .unwrap()
                     .is_some()
             );
-            store
-                .frozen_memory_capture_attempts("/project", &id)
+            let (frozen, attempts) = store
+                .frozen_memory_capture("/project", &id)
                 .unwrap()
-                .expect("the job holds a plan")
+                .expect("the job holds a plan");
+            assert_eq!(frozen, plan);
+            attempts
         };
         let row = || -> (u32, Option<String>, String, Option<String>, i64) {
             store
@@ -1180,9 +1183,7 @@ mod tests {
             CaptureRefusal::Retried
         );
         assert_eq!(
-            store
-                .frozen_memory_capture_attempts("/project", &id)
-                .unwrap(),
+            store.frozen_memory_capture("/project", &id).unwrap(),
             None,
             "a released job holds no plan"
         );
