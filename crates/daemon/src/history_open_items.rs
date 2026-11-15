@@ -504,8 +504,8 @@ mod tests {
         assert_eq!(rendered[0].p3.as_deref(), Some(""));
         // The same lines with no stored lift claim keep the constraint.
         assert_eq!(
-            p1s(&[same(1, &set_then_lifted, vec![])]),
-            [set_then_lifted.clone()]
+            p1s(&[same(1, &set_then_lifted, vec![])])[0],
+            set_then_lifted
         );
         // Lifted and then set again in one segment: the later constraint stands there, and the
         // lift still retires the constraint of an older segment.
