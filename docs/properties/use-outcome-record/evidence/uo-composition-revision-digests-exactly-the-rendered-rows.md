@@ -25,13 +25,13 @@ revision.
   rendered positive-category rows, sorted by object id, after the token-budget
   trim.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:700`);
+  (`crates/daemon/src/canonical_memory.rs:748`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:758`);
+  (`crates/daemon/src/canonical_memory.rs:806`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:775`);
+  (`crates/daemon/src/canonical_memory.rs:823`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:797`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:845`). Status: unaudited.
 
 ## Failure scenario
 

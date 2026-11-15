@@ -475,11 +475,28 @@ mod tests {
             line("withheld state=unavailable:io", 4, &project)
         );
         assert_eq!(
+            observe(withheld("unavailable:io")),
+            None,
+            "the later withheld state replaced the earlier one"
+        );
+        assert_eq!(
             observe(Observed::ServedUnsampled),
             line("served", 5, &project),
             "an unsampled read after a withheld one is served"
         );
-        assert!(observe(lagging(10_000)).is_some());
+        assert_eq!(
+            observe(Observed::ServedUnsampled),
+            None,
+            "the unsampled read removed the withheld verdict"
+        );
+        assert_eq!(
+            observe(lagging(10_000)),
+            line(
+                "served from canonical rows while derived consumers lag: consumers=2 lag_positions=10000 oldest_unconsumed_age_ms=61000",
+                6,
+                &project
+            )
+        );
     }
 
     #[test]
@@ -538,6 +555,7 @@ mod tests {
             .map(|index| project(&format!("/projects/{index}")))
             .collect();
         let (past_the_bound, recorded) = projects.split_last().unwrap();
+        let recorded_count = u64::try_from(recorded.len()).unwrap();
         assert!(report.observe(&recorded[0], corrupt()).is_some());
         for served in &projects[1..] {
             assert_eq!(report.observe(served, Observed::Served), None);
@@ -557,12 +575,42 @@ mod tests {
                 "a verdict within the bound stays recorded"
             );
         }
-        assert!(report.observe(past_the_bound, corrupt()).is_some());
-        assert!(
-            report.observe(&recorded[0], corrupt()).is_some(),
+        assert_eq!(
+            report.observe(&recorded[0], withheld("unavailable:io")),
+            line(
+                "withheld state=unavailable:io",
+                recorded_count + 1,
+                &recorded[0]
+            ),
+            "a recorded project changes verdict in place at the bound"
+        );
+        assert_eq!(
+            report.observe(&recorded[1], corrupt()),
+            None,
+            "the change in place keeps the other recorded verdicts"
+        );
+        assert_eq!(
+            report.observe(&recorded[0], withheld("unavailable:io")),
+            None
+        );
+        assert_eq!(
+            report.observe(past_the_bound, corrupt()),
+            line(
+                "withheld state=unavailable:store_unsupported",
+                recorded_count + 2,
+                past_the_bound
+            )
+        );
+        assert_eq!(
+            report.observe(&recorded[1], corrupt()),
+            line(
+                "withheld state=unavailable:store_unsupported",
+                recorded_count + 3,
+                &recorded[1]
+            ),
             "a verdict dropped at the bound logs once more"
         );
-        assert_eq!(report.observe(&recorded[0], corrupt()), None);
+        assert_eq!(report.observe(&recorded[1], corrupt()), None);
         assert_eq!(report.observe(past_the_bound, corrupt()), None);
     }
 

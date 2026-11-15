@@ -58,11 +58,11 @@ Every location was read at the #1157 branch tip.
 
 | Check | Location | Records | Status |
 | --- | --- | --- | --- |
-| `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes` | `crates/daemon/src/canonical_memory.rs:662` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
-| `revision_changes_only_when_the_rendered_inputs_change` | `crates/daemon/src/canonical_memory.rs:700` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
-| `rows_the_renderer_drops_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:758` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
-| `bytes_past_the_render_cap_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:775` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
-| `rows_past_the_memory_budget_are_neither_injected_nor_digested` | `crates/daemon/src/canonical_memory.rs:797` | `uo-composition-revision-digests-exactly-the-rendered-rows`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes` | `crates/daemon/src/canonical_memory.rs:710` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `revision_changes_only_when_the_rendered_inputs_change` | `crates/daemon/src/canonical_memory.rs:748` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
+| `rows_the_renderer_drops_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:806` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
+| `bytes_past_the_render_cap_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:823` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
+| `rows_past_the_memory_budget_are_neither_injected_nor_digested` | `crates/daemon/src/canonical_memory.rs:845` | `uo-composition-revision-digests-exactly-the-rendered-rows`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
 | `a_subagent_pass_under_native_authority_reports_native_authority` | `crates/daemon/src/fold_authority_handler_tests.rs:143` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds` | unaudited |
 | `route_teardown_keeps_an_admitted_checkpoint_alive` | `crates/daemon/src/lib.rs:25416` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
 | `session_delete_waits_for_the_capture_gate_off_the_runtime_worker` | `crates/daemon/src/lib.rs:26466` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
