@@ -1166,4 +1166,44 @@ describe("scanSnapshotForLexicalSearch over several pages", () => {
         expect(ranked(NOW)).toEqual([newestAntiMemory]);
         expect(ranked(NOW + 5_000)).toEqual([newestMemory]);
     });
+
+    test("counts an anti-memory that carries no expiry among the rows that stay eligible", async () => {
+        const kernel = new FakeKernel();
+        const memory = `mem_${"1".repeat(32)}`;
+        const lasting = `mem_${"2".repeat(32)}`;
+        const expiring = `mem_${"3".repeat(32)}`;
+        kernel.seedDecision({
+            object_id: memory,
+            decision_kind: "PROJECT_RULES",
+            summary: "Session caching uses the embedded store.",
+        });
+        for (const [object_id, expiresAt] of [
+            [lasting, undefined],
+            [expiring, NOW + 5_000],
+        ] as const) {
+            kernel.seedDecision({
+                object_id,
+                decision_kind: ANTI_MEMORY_CATEGORY,
+                summary: renderAntiMemoryContent({
+                    trigger: "session caching store",
+                    rejectedStrategy: "Redis",
+                    rejectionReason: "it creates split ownership",
+                    ...(expiresAt === undefined ? {} : { expiresAt }),
+                }),
+            });
+        }
+        kernel.readRowCap = 1;
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: "session caching store",
+            limit: 1,
+            nowMs: NOW,
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        if (!scan.ok) return;
+        // The anti-memory without an expiry outranks the memory for the one slot of rows that stay eligible.
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([expiring, lasting]);
+    });
 });

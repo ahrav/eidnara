@@ -553,6 +553,7 @@ describe("executeEidnaraSearch", () => {
 
 describe("eidnara_search expiry across the legacy scan", () => {
     const START = 1_700_000_000_000;
+    const QUERY = "session caching store";
 
     /** Moves the wall clock ten seconds forward when the scan's read returns. */
     class ClockAdvancingTransport extends FakeKernelTransport {
@@ -563,25 +564,30 @@ describe("eidnara_search expiry across the legacy scan", () => {
         }
     }
 
-    async function searchWith(
-        transport: (kernel: FakeKernel) => FakeKernelTransport,
-        antiMemory: { expiresAt: number } = { expiresAt: START + 5_000 },
-        limit?: number,
-    ) {
-        const kernel = new FakeKernel();
-        seed(kernel, OBJECT_A, "Session caching uses the embedded store.");
+    function seedAntiMemory(kernel: FakeKernel, objectId: string, expiresAt: number): void {
         seed(
             kernel,
-            OBJECT_B,
+            objectId,
             renderAntiMemoryContent({
-                trigger: "session caching store",
+                trigger: QUERY,
                 rejectedStrategy: "Redis",
                 rejectionReason: "it creates split ownership",
-                expiresAt: antiMemory.expiresAt,
+                expiresAt,
             }),
             "REJECTED_APPROACH",
         );
-        const wire = transport(kernel);
+    }
+
+    /** Searches at `START` over the rows `seedRows` writes; `advanceClock` moves the clock past `START + 5_000` during the scan. */
+    async function search(
+        seedRows: (kernel: FakeKernel) => void,
+        options: { advanceClock?: boolean; limit?: number } = {},
+    ) {
+        const kernel = new FakeKernel();
+        seedRows(kernel);
+        const wire = options.advanceClock
+            ? new ClockAdvancingTransport(kernel)
+            : new FakeKernelTransport(kernel);
         const tools = createEidnaraSearchTools({
             kernelClient: ({ sessionId, projectRoot }) =>
                 new KernelClient({ transport: wire, enabled: true, sessionId, projectRoot }),
@@ -591,9 +597,9 @@ describe("eidnara_search expiry across the legacy scan", () => {
         try {
             return await tools.eidnara_search.execute(
                 {
-                    query: "session caching store",
+                    query: QUERY,
                     sources: ["memory"],
-                    ...(limit === undefined ? {} : { limit }),
+                    ...(options.limit === undefined ? {} : { limit: options.limit }),
                 },
                 toolContext(),
             );
@@ -602,40 +608,48 @@ describe("eidnara_search expiry across the legacy scan", () => {
         }
     }
 
+    /** A memory, and a newer anti-memory that matches as well and so ranks ahead of it. */
+    const memoryBehindAntiMemory = (expiresAt: number) => (kernel: FakeKernel) => {
+        seed(kernel, OBJECT_A, "Session caching uses the embedded store.");
+        seedAntiMemory(kernel, OBJECT_B, expiresAt);
+    };
+
     it("returns an anti-memory that is live when the scan completes", async () => {
-        const result = await searchWith((kernel) => new FakeKernelTransport(kernel));
+        const result = await search(memoryBehindAntiMemory(START + 5_000));
         expect(result).toContain(`id=${OBJECT_A}`);
         expect(result).toContain(`id=${OBJECT_B}`);
     });
 
     it("leaves out an anti-memory that expires while the scan reads", async () => {
-        const result = await searchWith((kernel) => new ClockAdvancingTransport(kernel));
+        const result = await search(memoryBehindAntiMemory(START + 5_000), { advanceClock: true });
         expect(result).toContain(`id=${OBJECT_A}`);
         expect(result).not.toContain(`id=${OBJECT_B}`);
+    });
+
+    it("gives the single result slot to the anti-memory while it is live", async () => {
+        const result = await search(memoryBehindAntiMemory(START + 5_000), { limit: 1 });
+        expect(result).toContain(`id=${OBJECT_B}`);
+        expect(result).not.toContain(`id=${OBJECT_A}`);
     });
 
     it("gives the single result slot to the live memory when the anti-memory ahead of it expires while the scan reads", async () => {
-        const result = await searchWith(
-            (kernel) => new ClockAdvancingTransport(kernel),
-            undefined,
-            1,
-        );
+        const result = await search(memoryBehindAntiMemory(START + 5_000), {
+            advanceClock: true,
+            limit: 1,
+        });
         expect(result).toContain(`id=${OBJECT_A}`);
         expect(result).not.toContain(`id=${OBJECT_B}`);
     });
 
-    it("gives the single result slot to a live memory over an anti-memory that expired before the scan", async () => {
-        // The anti-memory matches as well as the memory and is newer, so it ranks first among unexpired rows.
-        const live = await searchWith((kernel) => new FakeKernelTransport(kernel), undefined, 1);
-        expect(live).toContain(`id=${OBJECT_B}`);
-        expect(live).not.toContain(`id=${OBJECT_A}`);
-
-        const expired = await searchWith(
-            (kernel) => new FakeKernelTransport(kernel),
-            { expiresAt: START - 1 },
-            1,
+    it("gives the single result slot to a live anti-memory over a newer one that expired before the scan", async () => {
+        const result = await search(
+            (kernel) => {
+                seedAntiMemory(kernel, OBJECT_A, START + 3_600_000);
+                seedAntiMemory(kernel, OBJECT_B, START - 1);
+            },
+            { limit: 1 },
         );
-        expect(expired).toContain(`id=${OBJECT_A}`);
-        expect(expired).not.toContain(`id=${OBJECT_B}`);
+        expect(result).toContain(OBJECT_A);
+        expect(result).not.toContain(OBJECT_B);
     });
 });
