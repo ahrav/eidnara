@@ -132,11 +132,11 @@ fn c_heap() -> Option<CHeap> {
 #[allow(unsafe_code)]
 pub fn limit_c_heap_arenas() {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let variable =
+        |name: &str| std::env::var_os(name).map(|value| value.to_string_lossy().into_owned());
     let operator_set = arena_limit_is_operator_set(
-        std::env::var_os("MALLOC_ARENA_MAX")
-            .map(|value| value.to_string_lossy().into_owned())
-            .as_deref(),
-        std::env::var("GLIBC_TUNABLES").ok().as_deref(),
+        variable("MALLOC_ARENA_MAX").as_deref(),
+        variable("GLIBC_TUNABLES").as_deref(),
     );
     if status_field(&status, "Threads") != Some(1) || operator_set {
         return;
