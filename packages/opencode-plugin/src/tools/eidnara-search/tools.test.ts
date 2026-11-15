@@ -642,14 +642,17 @@ describe("eidnara_search expiry across the legacy scan", () => {
     });
 
     it("gives the single result slot to a live anti-memory over a newer one that expired before the scan", async () => {
-        const result = await search(
-            (kernel) => {
-                seedAntiMemory(kernel, OBJECT_A, START + 3_600_000);
-                seedAntiMemory(kernel, OBJECT_B, START - 1);
-            },
-            { limit: 1 },
-        );
-        expect(result).toContain(OBJECT_A);
-        expect(result).not.toContain(OBJECT_B);
+        const twoAntiMemories = (newerExpiresAt: number) => (kernel: FakeKernel) => {
+            seedAntiMemory(kernel, OBJECT_A, START + 3_600_000);
+            seedAntiMemory(kernel, OBJECT_B, newerExpiresAt);
+        };
+        // While both are live, the newer anti-memory holds the slot.
+        const bothLive = await search(twoAntiMemories(START + 5_000), { limit: 1 });
+        expect(bothLive).toContain(OBJECT_B);
+        expect(bothLive).not.toContain(OBJECT_A);
+
+        const newerExpired = await search(twoAntiMemories(START - 1), { limit: 1 });
+        expect(newerExpired).toContain(OBJECT_A);
+        expect(newerExpired).not.toContain(OBJECT_B);
     });
 });

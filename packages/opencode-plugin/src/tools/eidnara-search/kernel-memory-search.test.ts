@@ -1206,4 +1206,59 @@ describe("scanSnapshotForLexicalSearch over several pages", () => {
         // The anti-memory without an expiry outranks the memory for the one slot of rows that stay eligible.
         expect(scan.rows.map((row) => row.object.object_id)).toEqual([expiring, lasting]);
     });
+
+    test("keeps an anti-memory that can expire when memories rank around it", async () => {
+        const kernel = new FakeKernel();
+        const antiMemory = (object_id: string, expiresAt: number) =>
+            kernel.seedDecision({
+                object_id,
+                decision_kind: ANTI_MEMORY_CATEGORY,
+                summary: renderAntiMemoryContent({
+                    trigger: "session caching store",
+                    rejectedStrategy: "Redis",
+                    rejectionReason: "it creates split ownership",
+                    expiresAt,
+                }),
+            });
+        const memory = (object_id: string) =>
+            kernel.seedDecision({
+                object_id,
+                decision_kind: "PROJECT_RULES",
+                summary: "Session caching uses the embedded store.",
+            });
+        // Seeded oldest first, so the rank order is: sooner, newerMemory, later, olderMemory.
+        const olderMemory = `mem_${"1".repeat(32)}`;
+        const later = `mem_${"2".repeat(32)}`;
+        const newerMemory = `mem_${"3".repeat(32)}`;
+        const sooner = `mem_${"4".repeat(32)}`;
+        memory(olderMemory);
+        antiMemory(later, NOW + 3_600_000);
+        memory(newerMemory);
+        antiMemory(sooner, NOW + 5_000);
+        kernel.readRowCap = 1;
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: "session caching store",
+            limit: 2,
+            nowMs: NOW,
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        if (!scan.ok) return;
+        // Two rows of each kind, in rank order.
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([
+            sooner,
+            newerMemory,
+            later,
+            olderMemory,
+        ]);
+        const afterTheFirstExpiry = searchKernelMemoryRows({
+            rows: scan.rows,
+            query: "session caching store",
+            limit: 2,
+            nowMs: NOW + 5_000,
+        });
+        expect(afterTheFirstExpiry?.map((hit) => hit.objectId)).toEqual([newerMemory, later]);
+    });
 });

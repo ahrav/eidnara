@@ -275,7 +275,7 @@ export function searchKernelMemoryRows(
     return scored.length > 0 ? scored : null;
 }
 
-/** Each row's rank is independent of other rows, so merging each partition's top `limit` rows preserves the union's top `limit` rows. */
+/** Ranks the rows that contain a query term: best score first, then newest, then object id. A row's rank depends on that row alone. */
 function rankLexicalRows(
     rows: readonly ReadRow[],
     terms: readonly string[],
@@ -332,8 +332,10 @@ function isSearchableMemoryRow(row: ReadRow, nowMs: number): boolean {
 
 /**
  * The rows a scan carries from page to page, in rank order: the best `limit` rows that stay
- * eligible, and the best `limit` anti-memories that carry an expiry. The final ranking reads the
- * clock after the scan, so an anti-memory that expires meanwhile leaves its place to a row kept here.
+ * eligible, and the best `limit` anti-memories that carry an expiry. A row's rank and its kind
+ * depend on that row alone, so applying both caps to each page's merge keeps the best `limit` rows
+ * of each kind over every page read. The final ranking reads the clock after the scan, and the
+ * place of an anti-memory that expired meanwhile goes to the next row kept here.
  */
 function retainRankedRows(rows: readonly ReadRow[], terms: readonly string[], limit: number) {
     let lasting = 0;
@@ -352,8 +354,10 @@ export type SnapshotScan =
 
 /**
  * Reads the surface page by page at the first page's snapshot. The retained rows, at most twice
- * `limit`, preserve the top `limit` lexical results among eligible rows from the pages read, at the
- * scan's start and after any retained anti-memory expires. Only the first page is
+ * `limit`, hold the top `limit` lexical results among the rows eligible at the scan's start. When a
+ * retained anti-memory expires before the final ranking, every row that stays eligible and ranks in
+ * the top `limit` is still among them. Anti-memories that carry an expiry are retained up to the
+ * best `limit` of them at the scan's start. Only the first page is
  * gated; later pages read the snapshot that gate admitted. `truncated` reports rows left unread:
  * after `maxPages` pages, past the deadline, or when the daemon refuses a later page or answers it
  * from another snapshot, over another connection, or with a row at or before the cursor. A search
