@@ -220,9 +220,9 @@ pub struct ProjectionProgress {
     pub rebuilds_completed: u64,
     /// Renewals of a rebuild whose deadline lapsed.
     pub rebuilds_renewed: u64,
-    /// The reason the last slice gave for leaving the record or its Current family where it was, followed by the reason the last observation of the selected family failed when it did, or the refusal of the recording that slice asked for; `None` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled.
+    /// The reason the last slice gave for leaving the record or its Current family where it was, followed by the reason the last observation of the selected family failed when it did, or the refusal of the recording that slice asked for; `None` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends. A slice that only hands a supervisor back for joining leaves the earlier value.
     pub blocked: Option<String>,
-    /// Why the last observation of the selected family failed; `None` after one that succeeded.
+    /// Why the last observation of the selected family failed; `None` after one that succeeded, and when no selected family was expected.
     unobserved: Option<String>,
     /// The attempt this process's slice loop last recorded or renewed, and when, on the monotonic clock.
     building: Option<(String, Instant)>,
@@ -952,11 +952,6 @@ impl SearchLifecycleOwner {
         progress.building = Some((attempt_id.to_owned(), Instant::now()));
         // The slice's reason asked for this recording, so it no longer describes the record.
         progress.blocked = None;
-    }
-
-    /// Clears the last slice's reason once a handed-back supervisor has drained: the slice that asked for the rotation left the record as the next slice finds it.
-    fn rotated_maintenance(&self) {
-        self.lock_progress().blocked = None;
     }
 
     /// Keeps the refusal of a recording the last slice asked for, so the status surface shows why no build started.
@@ -2538,10 +2533,7 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
                     stopped = owner.stop_maintenance(&handle) => stopped,
                 };
                 match stopped {
-                    Ok(_) => {
-                        owner.rotated_maintenance();
-                        continue;
-                    }
+                    Ok(_) => continue,
                     Err(unresolved) => {
                         SliceOutcome::Blocked(format!("maintenance did not drain: {unresolved}"))
                     }

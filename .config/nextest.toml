@@ -11,4 +11,4 @@ fail-fast = false
 # short deadlines elsewhere keep theirs.
 [[profile.default.overrides]]
 filter = 'binary(search_projection_soak)'
-threads-required = 'num-cpus'
+threads-required = 'num-test-threads'
