@@ -805,3 +805,86 @@ async fn a_long_session_carries_one_bounded_block_that_changes_only_with_other_s
         "only another session's publication rewrites the cached block"
     );
 }
+
+fn numbered(count: usize, subject: &str) -> Vec<(String, String)> {
+    (0..count)
+        .map(|index| {
+            (
+                format!("{subject}-{index}"),
+                format!("The {subject} service number {index} listens on its own port."),
+            )
+        })
+        .collect()
+}
+
+async fn capture_statements(
+    handler: &Handler,
+    channel: u16,
+    session: &str,
+    statements: &[(String, String)],
+) {
+    for batch in statements.chunks(16) {
+        let messages: Vec<(&str, &str, &str)> = batch
+            .iter()
+            .map(|(id, text)| (id.as_str(), "user", text.as_str()))
+            .collect();
+        capture(handler, channel, session, &messages, |text, _| {
+            vec![fact(text)]
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn repro_cause_1_statements_past_the_shared_lineage_bound_are_stored() {
+    let (handler, store, dir, project) = delivery_handler(capture_config()).await;
+    let other = dir.path().join("other-project");
+    std::fs::create_dir_all(&other).unwrap();
+    bind(&handler, OTHER_PROJECT, &other, "s-other", capture_config());
+    let ours = numbered(40, "billing");
+    let theirs = numbered(40, "search");
+    capture_statements(&handler, FIRST, "s1", &ours).await;
+    capture_statements(&handler, OTHER_PROJECT, "s-other", &theirs).await;
+    let stored = explicit_search(&handler, (SECOND, "s2"), &project).await.len();
+    bind(&handler, OTHER_PROJECT + 1, &other, "s-other-2", capture_config());
+    let stored_other = explicit_search(&handler, (OTHER_PROJECT + 1, "s-other-2"), &other)
+        .await
+        .len();
+    let status = store
+        .memory_capture_status(&kernel_routes::ProjectBinding::new(&other).digest().to_owned())
+        .unwrap();
+    eprintln!(
+        "stored {stored} + {stored_other}; statements {} + {}; other-project queue {status:?}",
+        live_statement_records(&handler, &project).len(),
+        live_statement_records(&handler, &other).len()
+    );
+    assert_eq!((stored, stored_other), (40, 40));
+}
+
+#[tokio::test]
+async fn repro_cause_2_refused_plans_do_not_hold_back_a_later_source() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    capture_statements(&handler, FIRST, "s1", &numbered(104, "billing")).await;
+    let digest = kernel_routes::ProjectBinding::new(&project).digest().to_owned();
+    eprintln!("queue {:?}", store.memory_capture_status(&digest).unwrap());
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let request = json!({
+        "method": "memory.capture",
+        "session_id": "s2",
+        "model": "test/model",
+        "messages": [{"id": "later", "role": "assistant", "text": ASSISTANT_NOTE}],
+    });
+    assert_eq!(
+        body(handler.handle_memory_capture(test_route(SECOND), &request).await)["state"],
+        "accepted"
+    );
+    let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+    let work = body(
+        handler
+            .handle_native_capture_next(test_route(SECOND), &next)
+            .await,
+    );
+    eprintln!("next after 40 refused plans: {}", work["state"]);
+    assert_eq!(work["state"], "work", "{work}");
+    assert!(work["prompt"].as_str().unwrap().contains(ASSISTANT_NOTE));
+}
