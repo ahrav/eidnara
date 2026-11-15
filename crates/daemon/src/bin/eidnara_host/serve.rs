@@ -1225,6 +1225,7 @@ fn lane_limits() -> LocalEmbeddingsLimits {
 /// The Tokio runtime uses four worker threads. SIGTERM or SIGINT cancels the
 /// host. Initialization, signal setup, and host failures return stable errors.
 pub fn run() -> Result<(), &'static str> {
+    daemon::process_memory::limit_c_heap_arenas();
     let envelope = read_envelope()?;
     let root = envelope.data_dir.clone();
 
@@ -1335,7 +1336,6 @@ pub fn run() -> Result<(), &'static str> {
         ..HostConfig::default()
     };
 
-    daemon::process_memory::limit_c_heap_arenas();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()

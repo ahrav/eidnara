@@ -5,9 +5,11 @@ use serde_json::{Value, json};
 pub const C_HEAP_ARENAS: usize = 4;
 pub const C_HEAP_RELEASE_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
 
+static ARENA_LIMIT_SET: AtomicBool = AtomicBool::new(false);
 static RELEASING: AtomicBool = AtomicBool::new(false);
+static RESIDENT_AFTER_RELEASE: AtomicU64 = AtomicU64::new(0);
 static RELEASES: AtomicU64 = AtomicU64::new(0);
-static RELEASED_BYTES: AtomicU64 = AtomicU64::new(0);
+static RELEASE_RESIDENT_DROP_BYTES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CHeap {
@@ -48,8 +50,9 @@ impl ProcessMemory {
                 "free_bytes": heap.free_bytes,
                 "mmapped_bytes": heap.mmapped_bytes,
             })),
+            "c_heap_arena_limit": ARENA_LIMIT_SET.load(Ordering::Relaxed).then_some(C_HEAP_ARENAS),
             "c_heap_releases": RELEASES.load(Ordering::Relaxed),
-            "c_heap_released_bytes": RELEASED_BYTES.load(Ordering::Relaxed),
+            "c_heap_release_resident_drop_bytes": RELEASE_RESIDENT_DROP_BYTES.load(Ordering::Relaxed),
         })
     }
 }
@@ -71,8 +74,17 @@ fn status_field(status: &str, name: &str) -> Option<u64> {
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[allow(unsafe_code)]
 fn c_heap() -> Option<CHeap> {
+    type Mallinfo2 = unsafe extern "C" fn() -> libc::mallinfo2;
+    static MALLINFO2: std::sync::OnceLock<Option<Mallinfo2>> = std::sync::OnceLock::new();
+    let mallinfo2 = (*MALLINFO2.get_or_init(|| {
+        // SAFETY: `dlsym` reads the NUL-terminated name and returns null when no loaded object exports it.
+        let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"mallinfo2".as_ptr()) };
+        // SAFETY: a non-null `mallinfo2` symbol is glibc's `struct mallinfo2 mallinfo2(void)`.
+        (!symbol.is_null())
+            .then(|| unsafe { std::mem::transmute::<*mut libc::c_void, Mallinfo2>(symbol) })
+    }))?;
     // SAFETY: `mallinfo2` takes no arguments and returns its totals by value.
-    let info = unsafe { libc::mallinfo2() };
+    let info = unsafe { mallinfo2() };
     Some(CHeap {
         in_use_bytes: info.uordblks as u64,
         free_bytes: info.fordblks as u64,
@@ -87,79 +99,71 @@ fn c_heap() -> Option<CHeap> {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[allow(unsafe_code)]
-pub fn limit_c_heap_arenas() -> bool {
-    // SAFETY: `mallopt` takes two integers and changes allocator tuning only.
-    unsafe { libc::mallopt(libc::M_ARENA_MAX, C_HEAP_ARENAS as libc::c_int) == 1 }
+pub fn limit_c_heap_arenas() {
+    let single_threaded = ProcessMemory::sample().threads == Some(1);
+    if !single_threaded || std::env::var_os("MALLOC_ARENA_MAX").is_some() {
+        return;
+    }
+    // SAFETY: `mallopt` takes two integers, and `single_threaded` holds, so no thread reads the limit during the write.
+    let set = unsafe { libc::mallopt(libc::M_ARENA_MAX, C_HEAP_ARENAS as libc::c_int) == 1 };
+    ARENA_LIMIT_SET.store(set, Ordering::Relaxed);
 }
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-pub fn limit_c_heap_arenas() -> bool {
-    false
+pub fn limit_c_heap_arenas() {}
+
+pub fn release_in_flight() -> bool {
+    RELEASING.load(Ordering::Acquire)
 }
 
-pub fn c_heap_release_is_due() -> bool {
-    c_heap().is_some_and(|heap| heap.free_bytes >= C_HEAP_RELEASE_THRESHOLD_BYTES)
+fn release_is_due(free_bytes: u64, resident_bytes: u64, resident_after_release: u64) -> bool {
+    free_bytes >= C_HEAP_RELEASE_THRESHOLD_BYTES
+        && resident_bytes.saturating_sub(resident_after_release) >= C_HEAP_RELEASE_THRESHOLD_BYTES
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[allow(unsafe_code)]
-pub fn release_free_c_heap() -> Option<u64> {
+pub fn release_free_c_heap_when_due() -> Option<u64> {
     if RELEASING.swap(true, Ordering::AcqRel) {
         return None;
     }
-    let before = ProcessMemory::sample().rss_anon_bytes.unwrap_or(0);
-    // SAFETY: `malloc_trim` takes one integer and releases pages of free chunks only.
-    unsafe { libc::malloc_trim(0) };
-    let after = ProcessMemory::sample().rss_anon_bytes.unwrap_or(before);
-    let released = before.saturating_sub(after);
-    RELEASES.fetch_add(1, Ordering::Relaxed);
-    RELEASED_BYTES.fetch_add(released, Ordering::Relaxed);
+    let before = ProcessMemory::sample();
+    let resident = before.rss_anon_bytes.unwrap_or(0);
+    let due = before.c_heap.is_some_and(|heap| {
+        release_is_due(
+            heap.free_bytes,
+            resident,
+            RESIDENT_AFTER_RELEASE.load(Ordering::Relaxed),
+        )
+    });
+    let dropped = due.then(|| {
+        // SAFETY: `malloc_trim` takes one integer and releases pages of free chunks only.
+        unsafe { libc::malloc_trim(0) };
+        let after = status_field(
+            &std::fs::read_to_string("/proc/self/status").unwrap_or_default(),
+            "RssAnon",
+        )
+        .map_or(resident, kib);
+        RESIDENT_AFTER_RELEASE.store(after, Ordering::Relaxed);
+        RELEASES.fetch_add(1, Ordering::Relaxed);
+        let dropped = resident.saturating_sub(after);
+        RELEASE_RESIDENT_DROP_BYTES.fetch_add(dropped, Ordering::Relaxed);
+        dropped
+    });
     RELEASING.store(false, Ordering::Release);
-    Some(released)
+    dropped
 }
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-pub fn release_free_c_heap() -> Option<u64> {
+pub fn release_free_c_heap_when_due() -> Option<u64> {
     None
-}
-
-#[cfg(test)]
-pub(crate) struct FragmentedCHeap {
-    pub(crate) kept: Vec<Vec<u8>>,
-    pub(crate) freed_bytes: u64,
-    pub(crate) resident_before: u64,
-}
-
-#[cfg(test)]
-impl FragmentedCHeap {
-    pub(crate) fn new() -> Self {
-        const CHUNK_BYTES: usize = 64 * 1024;
-        const CHUNKS: usize = 4096;
-        const KEEP_EVERY: usize = 64;
-        let resident_before = ProcessMemory::sample().rss_anon_bytes.unwrap_or(0);
-        let chunks: Vec<Vec<u8>> = (0..CHUNKS).map(|_| vec![1_u8; CHUNK_BYTES]).collect();
-        let kept: Vec<Vec<u8>> = chunks
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, chunk)| (index % KEEP_EVERY == 0).then_some(chunk))
-            .collect();
-        let freed_bytes = (CHUNK_BYTES * (CHUNKS - kept.len())) as u64;
-        Self {
-            kept,
-            freed_bytes,
-            resident_before,
-        }
-    }
-
-    pub(crate) fn is_released(&self) -> bool {
-        let resident = ProcessMemory::sample().rss_anon_bytes.unwrap_or(u64::MAX);
-        resident < self.resident_before + self.freed_bytes / 2
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const THRESHOLD: u64 = C_HEAP_RELEASE_THRESHOLD_BYTES;
 
     #[test]
     fn status_fields_parse_their_first_number() {
@@ -171,27 +175,29 @@ mod tests {
         assert_eq!(status_field(status, "Rss"), None);
     }
 
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[test]
-    fn a_release_returns_the_pages_of_freed_c_heap_chunks() {
-        let heap = FragmentedCHeap::new();
-        let free = c_heap().expect("glibc reports its heap").free_bytes;
-        assert!(free > heap.freed_bytes / 2, "{free}");
-        assert!(heap.freed_bytes / 2 > C_HEAP_RELEASE_THRESHOLD_BYTES);
-        assert!(c_heap_release_is_due());
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while !heap.is_released() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "{:?}",
-                ProcessMemory::sample()
-            );
-            release_free_c_heap();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let reported = ProcessMemory::sample().to_json();
-        assert!(reported["c_heap_releases"].as_u64().unwrap() >= 1);
-        assert_eq!(heap.kept.len(), 64);
+    fn a_release_is_due_when_freed_bytes_and_resident_growth_both_reach_the_threshold() {
+        let resident_after_release = 500 * 1024 * 1024;
+        assert!(release_is_due(
+            THRESHOLD,
+            resident_after_release + THRESHOLD,
+            resident_after_release
+        ));
+        assert!(!release_is_due(
+            THRESHOLD - 1,
+            resident_after_release + THRESHOLD,
+            resident_after_release
+        ));
+        assert!(!release_is_due(
+            THRESHOLD * 8,
+            resident_after_release + THRESHOLD - 1,
+            resident_after_release
+        ));
+        assert!(!release_is_due(
+            THRESHOLD * 8,
+            resident_after_release - THRESHOLD,
+            resident_after_release
+        ));
+        assert!(release_is_due(THRESHOLD, THRESHOLD, 0));
     }
 }

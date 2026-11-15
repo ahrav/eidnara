@@ -12,7 +12,7 @@ use support::direct_host::{BUDGET, FixtureProcess, request_json, wait_for_store}
 
 const MIB: u64 = 1024 * 1024;
 const GLIBC_ARENA_HEAP_KIB: u64 = 64 * 1024;
-const SESSION_GROWTH_BOUND_BYTES: u64 = 2 * MIB;
+const SESSION_GROWTH_BOUND_BYTES: u64 = MIB;
 const SESSION_KEYED_HOLDERS: [&str; 4] = [
     "snapshots",
     "native_attach",
@@ -217,10 +217,14 @@ async fn status_after_teardown(client: &Client, route: ClientRoute) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_its_route() {
     let sessions = env_count("EIDNARA_SOAK_SESSIONS", 15);
-    let turns = env_count("EIDNARA_SOAK_TURNS", 16);
-    let output_bytes = env_count("EIDNARA_SOAK_OUTPUT_BYTES", 16 * 1024);
+    let turns = env_count("EIDNARA_SOAK_TURNS", 12);
+    let output_bytes = env_count("EIDNARA_SOAK_OUTPUT_BYTES", 192 * 1024);
     let window = sessions / 3;
     assert!(window >= 2, "three windows of at least two sessions");
+    assert!(
+        (turns * output_bytes) as u64 >= 2 * SESSION_GROWTH_BOUND_BYTES,
+        "one session's request window is at least twice the growth allowed per session"
+    );
 
     let root = tempfile::tempdir().expect("state root");
     std::fs::create_dir_all(root.path().join("project")).expect("project root");
@@ -279,10 +283,15 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
             .collect::<Vec<_>>()
     );
 
+    let status = status_after_teardown(&observer, observer_route).await;
+    assert_eq!(
+        status["process_memory"]["c_heap_arena_limit"], C_HEAP_ARENAS,
+        "the fixture sets the arena limit before it starts threads"
+    );
     let arena_heaps = glibc_arena_heaps(pid);
     assert!(
-        arena_heaps <= C_HEAP_ARENAS,
-        "{arena_heaps} glibc arena heaps exceed the limit of {C_HEAP_ARENAS}"
+        arena_heaps < C_HEAP_ARENAS,
+        "{arena_heaps} heaps outside the main arena under a limit of {C_HEAP_ARENAS} arenas"
     );
 
     observer

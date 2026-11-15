@@ -1,6 +1,6 @@
 //! `Handler` owns the primary host lifecycle, transforms already-decoded wire items, and persists per-session state in the single-writer `memory-store`.
 
-// `deny(unsafe_code)` permits the scoped `allow` in `vector_mapped`, which maps a pinned layer's int8 codes for the candidate scan.
+// `deny(unsafe_code)` permits the scoped `allow`s in `vector_mapped`, which maps a pinned layer's int8 codes for the candidate scan, and in `process_memory`, which calls glibc `mallinfo2`, `mallopt`, and `malloc_trim`.
 #![deny(unsafe_code)]
 
 pub mod attestation_verifier;
@@ -4775,12 +4775,12 @@ impl HandlerCore {
     }
 
     fn release_c_heap_when_due(&self) {
-        if !process_memory::c_heap_release_is_due() {
+        if process_memory::release_in_flight() || tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let _ = self.spawn_module_task(async {
-            let _ = tokio::task::spawn_blocking(process_memory::release_free_c_heap).await;
-        });
+        let _ = self
+            .admission()
+            .spawn_blocking(process_memory::release_free_c_heap_when_due);
     }
 
     /// Drops every process-local cache and coordinator entry keyed by `session`.
@@ -19276,8 +19276,6 @@ mod tests {
     mod fold_authority_handler_tests;
     #[path = "pi_native_serving_tests.rs"]
     mod pi_native_serving_tests;
-    #[path = "process_memory_handler_tests.rs"]
-    mod process_memory_handler_tests;
     #[path = "transform/recorded_goldens.rs"]
     mod recorded_goldens;
     #[path = "repository_identity_tests.rs"]
