@@ -254,20 +254,36 @@ fn lines(source: &str) -> Vec<Line<'_>> {
         .collect()
 }
 
-/// Failure lines in source order. Fence lines pair in order, opener with the
-/// next fence line; a source holding an odd number of them, such as a
+/// Failure lines in source order. A fenced block closes only at a bare run of
+/// its opener's fence character, so the `~~~^^^` indicator lines that Python
+/// tracebacks and C compiler diagnostics print stay inside the backtick block
+/// that quotes them. A source whose last block never closes, such as a
 /// fragment cut inside a block, is read as prose throughout.
 fn failure_evidence<'a>(lines: &[Line<'a>]) -> Vec<Evidence<'a>> {
     let mut items = Vec::new();
-    let fences: Vec<usize> = (0..lines.len())
-        .filter(|&index| is_fence(lines[index].text))
-        .collect();
-    if fences.len() % 2 == 1 {
+    let mut blocks = Vec::new();
+    let mut opener: Option<(usize, u8, usize)> = None;
+    for (index, line) in lines.iter().enumerate() {
+        let Some((fence, run)) = fence_run(line.text) else {
+            continue;
+        };
+        match opener {
+            None => opener = Some((index, fence, run)),
+            Some((open, opened, least))
+                if fence == opened && run >= least && run == line.text.len() =>
+            {
+                blocks.push((open, index));
+                opener = None;
+            }
+            Some(_) => {}
+        }
+    }
+    if opener.is_some() {
         scan(lines, None, &mut items);
         return items;
     }
     let mut prose = 0;
-    for &[open, close] in fences.as_chunks::<2>().0 {
+    for (open, close) in blocks {
         scan(&lines[prose..open], None, &mut items);
         if is_output_fence(lines[open].text) {
             scan(
@@ -323,12 +339,23 @@ fn scan<'a>(region: &[Line<'a>], block: Option<usize>, items: &mut Vec<Evidence<
     }
 }
 
-fn is_fence(line: &str) -> bool {
-    line.starts_with("```") || line.starts_with("~~~")
+fn fence_run(line: &str) -> Option<(u8, usize)> {
+    let fence = *line.as_bytes().first()?;
+    if !matches!(fence, b'`' | b'~') {
+        return None;
+    }
+    let run = line.bytes().take_while(|&byte| byte == fence).count();
+    (run >= 3).then_some((fence, run))
 }
 
+fn is_fence(line: &str) -> bool {
+    fence_run(line).is_some()
+}
+
+/// A tilde fence labeled `` `text `` retains the leading backtick in its
+/// language token.
 fn is_output_fence(opener: &str) -> bool {
-    let info = opener.trim_start_matches(['`', '~']);
+    let info = fence_run(opener).map_or(opener, |(_, run)| &opener[run..]);
     let language = info.split_whitespace().next().unwrap_or("");
     OUTPUT_FENCES
         .iter()
@@ -359,6 +386,11 @@ fn failure_word(line: &str, fenced: bool) -> Option<usize> {
     }
     if !fenced {
         return (failure_marker(line) || error_header(line)).then_some(0);
+    }
+    // Fence syntax takes precedence over failure markers in lines such as
+    // `~~~ ERROR`.
+    if is_fence(line) {
+        return None;
     }
     let mut tokens_logged = true;
     let mut token: Option<bool> = None;
@@ -536,6 +568,10 @@ mod tests {
         assert_unchanged(
             "The workflow step reads:\n```\ncontinue-on-error: true\n```",
             &["The workflow step reads:"],
+        );
+        assert_unchanged(
+            "Build notes:\n~~~`text\nerror: false\n~~~",
+            &["Build notes:"],
         );
     }
 
@@ -856,6 +892,75 @@ mod tests {
     }
 
     #[test]
+    fn an_indicator_line_of_tildes_is_a_line_of_its_backtick_block() {
+        for (source, quote, expected) in [
+            (
+                "The handler for OPS-7 fails:\n```\nTraceback (most recent call last):\n  File \"/app/main.py\", line 12, in handler\n    return data[\"user\"][\"id\"]\n           ~~~~~~~~~~~~^^^^^^\nKeyError: 'id'\n```",
+                "The handler for OPS-7 fails:",
+                "User stated: The handler for OPS-7 fails:\nKeyError: 'id'",
+            ),
+            (
+                "The handler for OPS-8 fails:\n```\nTraceback (most recent call last):\n  File \"/app/main.py\", line 30, in <module>\n    main()\n    ~~~~^^\n  File \"/app/main.py\", line 12, in main\n    return data[\"user\"][\"id\"]\n           ~~~~~~~~~~~~^^^^^^\nKeyError: 'id'\n```",
+                "The handler for OPS-8 fails:",
+                "User stated: The handler for OPS-8 fails:\nKeyError: 'id'",
+            ),
+            (
+                "Build 12 of PR 9 fails:\n```\nsrc/b.c:7:10: error: use of undeclared identifier 'cfg'\n    foo(cfg + other);\n        ~~~~^~~~~~~\n1 error generated.\n```",
+                "Build 12 of PR 9 fails:",
+                "User stated: Build 12 of PR 9 fails:\nsrc/b.c:7:10: error: use of undeclared identifier 'cfg'",
+            ),
+        ] {
+            let mut memories = [memory("User stated", quote)];
+            assert_eq!(contents(source, &mut memories), [expected], "{source:?}");
+        }
+    }
+
+    #[test]
+    fn a_block_closes_at_a_bare_run_of_its_opener_character() {
+        for (source, quote, expected) in [
+            (
+                "Build 4 fails:\n````\n```\nerror: x\n```\n````",
+                "Build 4 fails:",
+                "User stated: Build 4 fails:\nerror: x",
+            ),
+            (
+                "Build 6 fails:\n~~~\n```\nerror: x\n~~~",
+                "Build 6 fails:",
+                "User stated: Build 6 fails:\nerror: x",
+            ),
+            (
+                "Build 7 fails:\n```\nerror: x\n`````",
+                "Build 7 fails:",
+                "User stated: Build 7 fails:\nerror: x",
+            ),
+            (
+                "The handler keeps its own error type:\n```rust\nlet a = 1;\n```text\n```\nThe build log says:\n```\nerror: x\n```",
+                "The build log says:",
+                "User stated: The build log says:\nerror: x",
+            ),
+        ] {
+            let mut memories = [memory("User stated", quote)];
+            assert_eq!(contents(source, &mut memories), [expected], "{source:?}");
+        }
+    }
+
+    #[test]
+    fn a_fence_line_inside_a_block_is_no_failure_line_and_completes_none() {
+        let source = "Job 5 fails:\n```\nthread 'main' panicked at src/a.rs:1:1:\n~~~~^^^\n```";
+        let mut memories = [memory("User stated", "Job 5 fails:")];
+        assert_eq!(
+            contents(source, &mut memories),
+            ["User stated: Job 5 fails:\nthread 'main' panicked at src/a.rs:1:1:"]
+        );
+        let source = "Job 6 fails:\n```\n~~~ ERROR one\nerror: two\n```";
+        let mut memories = [memory("User stated", "Job 6 fails:")];
+        assert_eq!(
+            contents(source, &mut memories),
+            ["User stated: Job 6 fails:\nerror: two"]
+        );
+    }
+
+    #[test]
     fn a_completing_failure_line_keeps_its_own_location() {
         let source = "CI for PR 9 fails:\n```\nFAILED tests:\nerror[E0308]: mismatched types\n  --> src/a.rs:2:3\n```";
         let mut memories = [memory("User stated", "CI for PR 9 fails:")];
@@ -1033,6 +1138,9 @@ mod tests {
             ("```console title", true),
             ("~~~rust", false),
             ("```json", false),
+            ("````text", true),
+            ("~~~`text", false),
+            ("```~text", false),
         ] {
             assert_eq!(is_output_fence(opener), output, "{opener:?}");
         }
@@ -1046,6 +1154,10 @@ mod tests {
         );
         assert_unchanged(
             "We chose port 4321:\n```\nThe parser logs ERROR on empty input.\n```\nThe log follows.\n```\n2025-03-02 ERROR",
+            &["We chose port 4321:"],
+        );
+        assert_unchanged(
+            "We chose port 4321:\n```\nThe parser logs ERROR on empty input.\n~~~",
             &["We chose port 4321:"],
         );
         let source = "Deploy 5 stopped:\nERROR migrate:\n```";
