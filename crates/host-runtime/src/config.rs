@@ -240,7 +240,7 @@ pub struct HostTiming {
     /// budget indefinitely.
     pub frame_deadline: Duration,
     /// The budget covers bind, route-gone, initialization, and health callbacks; expiry is host-fatal.
-    /// A host suspended past a health callback deadline keeps serving after resuming.
+    /// A host suspended past a lifecycle callback deadline keeps serving after resuming.
     pub lifecycle_callback_deadline: Duration,
     /// The route-close budget settles or cancels one route's admitted work.
     pub route_close_budget: Duration,
