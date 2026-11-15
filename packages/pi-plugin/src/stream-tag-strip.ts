@@ -39,15 +39,101 @@ function tagEnd(input: string, at: number, final: boolean): number | "open" | un
     return cursor > closed && input[cursor] === SECTION ? cursor + 1 : closed;
 }
 
+interface ScanState {
+    leading: boolean;
+    strippedOpeningTag: boolean;
+}
+
+/** The released ranges of the latest `scan`, as `[from, to)` pairs of its input in order, with adjacent ranges merged: `kept[0..keptLength)`. The array only grows, so a scan stores ranges without allocating. */
+const kept: number[] = new Array(64).fill(0);
+let keptLength = 0;
+
+function keep(from: number, to: number): void {
+    if (to <= from) return;
+    if (keptLength > 0 && kept[keptLength - 1] === from) {
+        kept[keptLength - 1] = to;
+        return;
+    }
+    kept[keptLength] = from;
+    kept[keptLength + 1] = to;
+    keptLength += 2;
+}
+
+/** The text of the latest scan's released ranges of `input`. */
+function keptText(input: string): string {
+    if (keptLength === 0) return "";
+    if (keptLength === 2) return input.slice(kept[0], kept[1]);
+    let out = "";
+    for (let i = 0; i < keptLength; i += 2) out += input.slice(kept[i], kept[i + 1]);
+    return out;
+}
+
+/** Resolves `input` from `index` under the stripping rule, recording each released range in `kept`, and returns the index where held text begins (`input.length` when nothing is held). Only `input[index..]` is read, so a caller can rescan its held text in place once more text follows it. */
+function scan(input: string, index: number, final: boolean, state: ScanState): number {
+    keptLength = 0;
+    while (index < input.length) {
+        if (state.leading) {
+            const start = index;
+            while (isWhitespace(input[index])) index += 1;
+            if (index === input.length) {
+                if (!final) return start;
+                if (!state.strippedOpeningTag) keep(start, index);
+                return index;
+            }
+            const end = tagEnd(input, index, final);
+            if (end === "open") return start;
+            if (end !== undefined) {
+                state.strippedOpeningTag = true;
+                index = end;
+                continue;
+            }
+            state.leading = false;
+            if (!state.strippedOpeningTag) keep(start, index);
+            continue;
+        }
+        const section = input.indexOf(SECTION, index);
+        if (section === -1) {
+            keep(index, input.length);
+            return input.length;
+        }
+        const end = tagEnd(input, section, final);
+        if (end === "open") {
+            keep(index, section);
+            return section;
+        }
+        if (end === undefined) {
+            keep(index, section + 1);
+            index = section + 1;
+        } else {
+            keep(index, section);
+            index = end;
+        }
+    }
+    return index;
+}
+
+/** A stream fed text in pieces: `held` waits for the next piece. */
+interface DeltaStream {
+    held: string;
+    state: ScanState;
+}
+
+/** Feeds one piece and returns the text it releases. */
+function pushPiece(stream: DeltaStream, piece: string, final: boolean): string {
+    const input = stream.held + piece;
+    const held = scan(input, 0, final, stream.state);
+    stream.held = held === input.length ? "" : input.slice(held);
+    if (final) stream.state.leading = false;
+    return keptText(input);
+}
+
 /** StreamTagStripper removes `§N§` tags containing 1 to 19 ASCII digits, and the mangled `§N">` form with an optional `§` or `§N§` after it, across delta boundaries. It holds a trailing prefix of either form until another delta resolves it or `flush()` ends the text, and passes every other `§` through, so `§ 4` and `§42 of the Act` stream unchanged. With `leading` enabled, opening tags consume their surrounding whitespace. Released text only grows. */
 export class StreamTagStripper {
     #released = "";
-    #held = "";
-    #leading: boolean;
-    #strippedOpeningTag = false;
+    #stream: DeltaStream;
 
     constructor(leading: boolean) {
-        this.#leading = leading;
+        this.#stream = { held: "", state: { leading, strippedOpeningTag: false } };
     }
 
     get released(): string {
@@ -55,68 +141,14 @@ export class StreamTagStripper {
     }
 
     push(delta: string): string {
-        const input = this.#held + delta;
-        this.#held = "";
-        return this.#release(this.#scan(input, false));
-    }
-
-    flush(): string {
-        const input = this.#held;
-        this.#held = "";
-        const out = this.#scan(input, true);
-        this.#leading = false;
-        return this.#release(out);
-    }
-
-    #release(out: string): string {
+        const out = pushPiece(this.#stream, delta, false);
         this.#released += out;
         return out;
     }
 
-    #scan(input: string, final: boolean): string {
-        let out = "";
-        let index = 0;
-        while (index < input.length) {
-            if (this.#leading) {
-                const start = index;
-                while (isWhitespace(input[index])) index += 1;
-                if (index === input.length) {
-                    if (!final) this.#held = input.slice(start);
-                    else if (!this.#strippedOpeningTag) out += input.slice(start);
-                    break;
-                }
-                const end = tagEnd(input, index, final);
-                if (end === "open") {
-                    this.#held = input.slice(start);
-                    break;
-                }
-                if (end !== undefined) {
-                    this.#strippedOpeningTag = true;
-                    index = end;
-                    continue;
-                }
-                this.#leading = false;
-                if (!this.#strippedOpeningTag) out += input.slice(start, index);
-                continue;
-            }
-            const section = input.indexOf(SECTION, index);
-            if (section === -1) {
-                out += input.slice(index);
-                break;
-            }
-            out += input.slice(index, section);
-            const end = tagEnd(input, section, final);
-            if (end === "open") {
-                this.#held = input.slice(section);
-                break;
-            }
-            if (end === undefined) {
-                out += SECTION;
-                index = section + 1;
-            } else {
-                index = end;
-            }
-        }
+    flush(): string {
+        const out = pushPiece(this.#stream, "", true);
+        this.#released += out;
         return out;
     }
 }
@@ -142,10 +174,66 @@ export function isTextPart(part: unknown): part is TextPart {
     );
 }
 
+/** One streamed text part. The part's text so far is `raw`; `raw[held..]` waits for more text. While `view` holds, every removed character precedes the released text, which is the slice `raw[runStart, runEnd)` and shares the provider string's characters. Once a removal follows released text, each change appends its newly released text to `released`. `deltas` strips the update deltas in event order; while it is `undefined`, the deltas have matched the part's growth exactly, so they release what the part released. */
 interface PartStream {
     raw: string;
-    stripper: StreamTagStripper;
-    deltas: StreamTagStripper;
+    held: number;
+    state: ScanState;
+    view: boolean;
+    runStart: number;
+    runEnd: number;
+    released: string;
+    deltas: DeltaStream | undefined;
+}
+
+function openPartStream(leading: boolean): PartStream {
+    return {
+        raw: "",
+        held: 0,
+        state: { leading, strippedOpeningTag: false },
+        view: true,
+        runStart: 0,
+        runEnd: 0,
+        released: "",
+        deltas: undefined,
+    };
+}
+
+/** Scans the part text past the held index; with `final`, the part has ended and its held text resolves. Leaves the newly released ranges in `kept`. */
+function advance(stream: PartStream, text: string, final: boolean): void {
+    stream.raw = text;
+    stream.held = scan(text, stream.held, final, stream.state);
+    if (final) stream.state.leading = false;
+    if (keptLength === 0) return;
+    if (!stream.view) {
+        stream.released += keptText(text);
+        return;
+    }
+    let i = 0;
+    for (; i < keptLength; i += 2) {
+        const from = kept[i];
+        if (from !== stream.runEnd) {
+            if (stream.runEnd > stream.runStart) break;
+            stream.runStart = from;
+        }
+        stream.runEnd = kept[i + 1];
+    }
+    let released = text.slice(stream.runStart, stream.runEnd);
+    if (i < keptLength) {
+        stream.view = false;
+        for (; i < keptLength; i += 2) released += text.slice(kept[i], kept[i + 1]);
+    }
+    stream.released = released;
+}
+
+/** Releases the part's growth `piece` whole: nothing was held, the growth holds no section sign, and in view it continues the run. */
+function extendRun(stream: PartStream, text: string, piece: string): void {
+    stream.raw = text;
+    stream.held = text.length;
+    if (stream.view) {
+        stream.runEnd = text.length;
+        stream.released = text.slice(stream.runStart);
+    } else stream.released += piece;
 }
 
 /** Stream continuity requires the provider to reuse each part object as its text grows. */
@@ -158,7 +246,86 @@ export function isStrippedWholeContent(content: unknown): boolean {
     return typeof content === "object" && content !== null && wholeContents.has(content);
 }
 
-/** Rewrites one Pi `message_start` or `message_update` event in place so its listeners render assistant text with `\u00a7N\u00a7` tags removed. An event without an `assistantMessageEvent` carries a whole message, which is stripped as complete text. Every text part, the content array, and an object-valued `partial` are replaced by snapshots, because the provider keeps appending to its own parts while later handlers and listeners run. `text_delta` updates receive newly released text in `delta`, and `text_end` updates receive the released part text in `content`. A trailing tag prefix is released at `text_end` into `content` and the message, after the last `text_delta`. Each `text_delta` delta passes through a stripper of its own in event order, since Pi can hand listeners an update after the provider has appended later text to the part. */
+type StreamUpdate = {
+    type?: unknown;
+    contentIndex?: unknown;
+    delta?: unknown;
+    content?: unknown;
+    partial?: unknown;
+};
+
+/** The released delta for the update being stripped, set by the text part the update targets. */
+let releasedDelta: string | undefined;
+
+/** Copies the state the deltas share with the part into a delta stream of their own, before the part's next change. */
+function separateDeltas(stream: PartStream): DeltaStream {
+    const deltas = {
+        held: stream.raw.slice(stream.held),
+        state: {
+            leading: stream.state.leading,
+            strippedOpeningTag: stream.state.strippedOpeningTag,
+        },
+    };
+    stream.deltas = deltas;
+    return deltas;
+}
+
+/** Advances one text part for an update and returns its released text. */
+function streamPart(
+    part: TextPart,
+    index: number,
+    leading: boolean,
+    update: StreamUpdate | null,
+): string {
+    const text = part.text;
+    let stream = streams.get(part);
+    if (stream === undefined || text.slice(0, stream.raw.length) !== stream.raw) {
+        stream = openPartStream(leading);
+        streams.set(part, stream);
+    }
+    const piece =
+        index === update?.contentIndex && typeof update.delta === "string"
+            ? update.delta
+            : undefined;
+    const grew = text !== stream.raw;
+    const ends = update?.type === "text_end" && index === update.contentIndex;
+    let deltas = stream.deltas;
+    if (deltas === undefined) {
+        const before = stream.raw;
+        if (
+            !ends &&
+            (grew
+                ? piece !== undefined &&
+                  text.length === before.length + piece.length &&
+                  text.startsWith(piece, before.length)
+                : piece === undefined || piece === "")
+        ) {
+            if (!grew) {
+                if (piece !== undefined) releasedDelta = "";
+            } else if (
+                piece !== undefined &&
+                stream.held === before.length &&
+                (!stream.view || stream.runEnd === before.length) &&
+                !stream.state.leading &&
+                !piece.includes(SECTION)
+            ) {
+                extendRun(stream, text, piece);
+                releasedDelta = piece;
+            } else {
+                advance(stream, text, false);
+                releasedDelta = keptText(text);
+            }
+            return stream.released;
+        }
+        deltas = separateDeltas(stream);
+    }
+    if (grew) advance(stream, text, false);
+    if (ends) advance(stream, text, true);
+    if (piece !== undefined) releasedDelta = pushPiece(deltas, piece, false);
+    return stream.released;
+}
+
+/** Rewrites one Pi `message_start` or `message_update` event in place so its listeners render assistant text with `\u00a7N\u00a7` tags removed. An event without an `assistantMessageEvent` carries a whole message, which is stripped as complete text. Every text part, the content array, and an object-valued `partial` are replaced by snapshots, because the provider keeps appending to its own parts while later handlers and listeners run. `text_delta` updates receive newly released text in `delta`, and `text_end` updates receive the released part text in `content`. A trailing tag prefix is released at `text_end` into `content` and the message, after the last `text_delta`. Each `text_delta` delta is stripped in event order, since Pi can hand listeners an update after the provider has appended later text to the part: while every delta has matched the part's growth exactly, the delta is what the part released; from the first update that differs, the deltas pass through a stripper of their own. */
 export function stripStreamedTags(event: {
     message: unknown;
     assistantMessageEvent?: unknown;
@@ -166,46 +333,25 @@ export function stripStreamedTags(event: {
     const message = event.message as { role?: unknown; content?: unknown } | null;
     if (message === null || typeof message !== "object") return;
     if (message.role !== "assistant" || !Array.isArray(message.content)) return;
-    const update = event.assistantMessageEvent as
-        | {
-              type?: unknown;
-              contentIndex?: unknown;
-              delta?: unknown;
-              content?: unknown;
-              partial?: unknown;
-          }
-        | undefined;
-    const ended = update?.type === "text_end" ? update.contentIndex : undefined;
-    let firstText = true;
-    let delta: string | undefined;
+    const update = event.assistantMessageEvent as StreamUpdate | undefined;
+    let leading = true;
+    releasedDelta = undefined;
     const content = message.content.map((part: unknown, index: number) => {
         if (!isTextPart(part)) return part;
-        const leading = firstText;
-        firstText = false;
-        if (update === undefined) return { ...part, text: stripTags(part.text, leading) };
-        let stream = streams.get(part);
-        if (stream === undefined || !part.text.startsWith(stream.raw)) {
-            stream = {
-                raw: "",
-                stripper: new StreamTagStripper(leading),
-                deltas: new StreamTagStripper(leading),
-            };
-            streams.set(part, stream);
-        }
-        stream.stripper.push(part.text.slice(stream.raw.length));
-        stream.raw = part.text;
-        if (index === ended) stream.stripper.flush();
-        if (index === update?.contentIndex && typeof update.delta === "string") {
-            delta = stream.deltas.push(update.delta);
-        }
-        return { ...part, text: stream.stripper.released };
+        const first = leading;
+        leading = false;
+        const text =
+            update === undefined
+                ? stripTags(part.text, first)
+                : streamPart(part, index, first, update);
+        return { ...part, text };
     });
     message.content = content;
     if (update === undefined) {
         wholeContents.add(content);
         return;
     }
-    if (update.type === "text_delta" && delta !== undefined) update.delta = delta;
+    if (update.type === "text_delta" && releasedDelta !== undefined) update.delta = releasedDelta;
     if (update.type === "text_end" && typeof update.contentIndex === "number") {
         const part = content[update.contentIndex];
         if (isTextPart(part)) update.content = part.text;
