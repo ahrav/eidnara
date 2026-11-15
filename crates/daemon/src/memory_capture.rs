@@ -1104,36 +1104,15 @@ impl CaptureWork {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let mut reasons = Vec::new();
-        let commit = |approve: bool, reasons: &mut Vec<_>| {
-            reasons.clear();
-            publish_captured_memories(
-                &kernel,
-                &self.binding.kernel_project,
-                job,
-                &output,
-                &prepared,
-                settlement,
-                approve,
-                reasons,
-            )
-        };
-        let receipt = match commit(true, &mut reasons) {
-            // The refused transaction wrote nothing. The same plan commits
-            // with each statement as a labeled memory, so the user's words
-            // stay on explicit search when their approval is refused.
-            Err(kernel::KernelError::AdmissionPolicy)
-                if output
-                    .memories
-                    .iter()
-                    .any(|memory| user_attributed(job, memory)) =>
-            {
-                eprintln!(
-                    "daemon: memory capture statement approval refused; storing its memories for explicit search"
-                );
-                commit(false, &mut reasons)
-            }
-            outcome => outcome,
-        }
+        let receipt = publish_captured_memories(
+            &kernel,
+            &self.binding.kernel_project,
+            job,
+            &output,
+            &prepared,
+            settlement,
+            &mut reasons,
+        )
         .map_err(|error| match error {
             kernel::KernelError::Conflict => "reconciliation_conflict",
             kernel::KernelError::AdmissionPolicy
@@ -1644,13 +1623,15 @@ fn checked_capture_target(
         .then_some(previous.source_revision))
 }
 
-/// `reasons` receives one citation reason and one anchor reason per decision
-/// the closure writes; a replayed receipt runs no closure and adds none.
+/// Commits one source's frozen plan. `reasons` receives one citation reason
+/// and one anchor reason per decision the commit writes; a replayed receipt
+/// writes nothing and adds none.
 ///
-/// `approve` records a statement record for each user-attributed memory and
-/// admits the memory on it. With `approve` false every memory is admitted as
-/// labeled inference, and `reasons` receives one approval-refused reason per
-/// user-attributed memory.
+/// When the Kernel's admission policy refuses a statement record, the
+/// refused transaction has written nothing, and the same plan commits with
+/// every memory admitted as labeled inference. `reasons` then also receives
+/// one approval-refused reason per user-attributed memory, so the user's
+/// words stay on explicit search and the refusal is counted.
 fn publish_captured_memories(
     kernel: &kernel::KernelStore,
     project: &ProjectBinding,
@@ -1658,160 +1639,186 @@ fn publish_captured_memories(
     output: &PreparedCapture,
     frozen: &str,
     settlement: SettlementOutcome,
-    approve: bool,
     reasons: &mut Vec<crate::source_capture::Count>,
 ) -> Result<kernel::CommitReceipt, kernel::KernelError> {
     use sha2::{Digest, Sha256};
-    let intent = kernel::CommitIntent {
-        producer: "memory_capture".into(),
-        operation_key: project
-            .operation_key("memory_capture", &job.job_id)
-            .ok_or(kernel::KernelError::InvalidInput)?,
-        request_digest: format!("{:x}", Sha256::digest(frozen.as_bytes())),
-        actor: "agent:memory_capture".into(),
-        cause: "automatic project memory capture".into(),
+    let commit = |approve: bool, reasons: &mut Vec<crate::source_capture::Count>| {
+        reasons.clear();
+        let intent = kernel::CommitIntent {
+            producer: "memory_capture".into(),
+            operation_key: project
+                .operation_key("memory_capture", &job.job_id)
+                .ok_or(kernel::KernelError::InvalidInput)?,
+            request_digest: format!("{:x}", Sha256::digest(frozen.as_bytes())),
+            actor: "agent:memory_capture".into(),
+            cause: "automatic project memory capture".into(),
+        };
+        kernel.commit_before(
+            Instant::now() + Duration::from_secs(5),
+            intent,
+            |envelope| {
+                write_captured_memories(
+                    envelope, project, job, output, settlement, approve, reasons,
+                )
+            },
+        )
     };
-    kernel.commit_before(
-        Instant::now() + Duration::from_secs(5),
-        intent,
-        |envelope| {
-            let mut domains = HashSet::new();
-            let mut ready = false;
-            let mut refusal = None;
-            kernel_routes::commit::ensure_domain(envelope, "memory", &mut domains)?;
-            kernel_routes::commit::ensure_scope(
+    match commit(true, reasons) {
+        Err(kernel::KernelError::AdmissionPolicy)
+            if output
+                .memories
+                .iter()
+                .any(|memory| user_attributed(job, memory)) =>
+        {
+            eprintln!(
+                "daemon: memory capture statement approval refused; storing its memories for explicit search"
+            );
+            commit(false, reasons)
+        }
+        outcome => outcome,
+    }
+}
+
+/// Writes the plan's decisions inside one commit and returns how many it
+/// wrote. `approve` records a statement record for each user-attributed
+/// memory and admits the memory on it.
+fn write_captured_memories(
+    envelope: &mut kernel::Envelope<'_>,
+    project: &ProjectBinding,
+    job: &CaptureJob,
+    output: &PreparedCapture,
+    settlement: SettlementOutcome,
+    approve: bool,
+    reasons: &mut Vec<crate::source_capture::Count>,
+) -> Result<String, kernel::KernelError> {
+    use sha2::{Digest, Sha256};
+    let mut domains = HashSet::new();
+    let mut ready = false;
+    let mut refusal = None;
+    kernel_routes::commit::ensure_domain(envelope, "memory", &mut domains)?;
+    kernel_routes::commit::ensure_scope(envelope, project, &mut ready, &mut domains, &mut refusal)?;
+    let mut anchor = cite::anchor_spec(job, &output.head);
+    let anchor_id = anchor.as_ref().map(|spec| spec.anchor_id.clone());
+    let anchor_reason = cite::AnchorReason::of(anchor.as_ref());
+    let mut citation = None;
+    let recorded_at = now_ms();
+    let mut written = 0;
+    for (index, memory) in output.memories.iter().enumerate() {
+        if (memory.replaces.is_some() || !memory.also_replaces.is_empty()) && job.role != "user" {
+            return Err(kernel::KernelError::Conflict);
+        }
+        if let Some(target) = &memory.duplicate_of {
+            checked_capture_target(envelope, project, output, target, false)?;
+            continue;
+        }
+        let attributed = user_attributed(job, memory);
+        for target in memory.replaces.iter().chain(&memory.also_replaces) {
+            if !attributed
+                && envelope
+                    .served_rows_for(&[target.as_str()], None)?
+                    .get(target.as_str())
+                    .is_some_and(|row| {
+                        row.visibility(kernel::Surface::ExplicitSearch)
+                            == kernel::SurfaceVisibility::Visible
+                    })
+            {
+                return Err(kernel::KernelError::Conflict);
+            }
+        }
+        let mut superseded = None;
+        let mut retired = Vec::new();
+        let mut source_revision = 1;
+        if let Some(target) = &memory.replaces {
+            match checked_capture_target(envelope, project, output, target, true)? {
+                Some(revision) => {
+                    source_revision = revision
+                        .checked_add(1)
+                        .ok_or(kernel::KernelError::InvalidInput)?;
+                    superseded = Some(target);
+                }
+                None => retired.push(target),
+            }
+        }
+        for target in &memory.also_replaces {
+            checked_capture_target(envelope, project, output, target, true)?;
+            retired.push(target);
+        }
+        // The job's first written decision inserts the anchor every
+        // decision of the job names and reads the message's descriptors.
+        if let Some(spec) = anchor.take() {
+            envelope.insert_anchor(spec)?;
+        }
+        let citation = match &mut citation {
+            Some(found) => &*found,
+            slot => slot.insert(cite::Citation::lookup(envelope, job, settlement)?),
+        };
+        let id = format!(
+            "mem_{:x}",
+            Sha256::digest(format!("{}:{index}", job.job_id).as_bytes())
+        );
+        let id = &id[..36];
+        let decision_id = format!("dec_{}", &id[4..]);
+        let mut rationale: serde_json::Map<String, Value> = [
+            ("source", json!(CAPTURE_SOURCE_ID)),
+            ("session", json!(job.session_id)),
+            ("message", json!(job.message_id)),
+            ("quote", json!(memory.quote)),
+            ("model", json!(output.model)),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect();
+        anchor_reason.record(&mut rationale, reasons);
+        let evidence = citation.cite(&job.text, &memory.quote, &mut rationale, reasons);
+        let spec = kernel::DecisionSpec {
+            decision_id: decision_id.clone(),
+            object_id: id.into(),
+            domain_id: "memory".into(),
+            proposition_id: None,
+            scope_id: Some(project.scope_id()),
+            anchor_id: anchor_id.clone(),
+            evidence_id: None,
+            decision_kind: memory.category.clone(),
+            payload: kernel::DecisionPayload {
+                summary: memory.content.clone(),
+                rationale: Value::Object(rationale).to_string(),
+            },
+            source_kind: CAPTURE_SOURCE_KIND.into(),
+            source_id: CAPTURE_SOURCE_ID.into(),
+            source_revision,
+            sensitivity: kernel::Sensitivity::Normal,
+        };
+        if let Some(target) = superseded {
+            envelope.supersede_decision(target, spec)?;
+        } else {
+            envelope.insert_decision(spec)?;
+        }
+        for target in &retired {
+            envelope.retire_decision(target)?;
+        }
+        for target in superseded.into_iter().chain(retired) {
+            retire_statement(envelope, target)?;
+        }
+        cite::append_citations(envelope, &decision_id, &evidence, recorded_at)?;
+        let approval = if attributed && approve {
+            Some(record_statement(
                 envelope,
                 project,
-                &mut ready,
+                job,
+                memory,
+                id,
                 &mut domains,
-                &mut refusal,
-            )?;
-            let mut anchor = cite::anchor_spec(job, &output.head);
-            let anchor_id = anchor.as_ref().map(|spec| spec.anchor_id.clone());
-            let anchor_reason = cite::AnchorReason::of(anchor.as_ref());
-            let mut citation = None;
-            let recorded_at = now_ms();
-            let mut written = 0;
-            for (index, memory) in output.memories.iter().enumerate() {
-                if (memory.replaces.is_some() || !memory.also_replaces.is_empty())
-                    && job.role != "user"
-                {
-                    return Err(kernel::KernelError::Conflict);
-                }
-                if let Some(target) = &memory.duplicate_of {
-                    checked_capture_target(envelope, project, output, target, false)?;
-                    continue;
-                }
-                let attributed = user_attributed(job, memory);
-                for target in memory.replaces.iter().chain(&memory.also_replaces) {
-                    if !attributed
-                        && envelope
-                            .served_rows_for(&[target.as_str()], None)?
-                            .get(target.as_str())
-                            .is_some_and(|row| {
-                                row.visibility(kernel::Surface::ExplicitSearch)
-                                    == kernel::SurfaceVisibility::Visible
-                            })
-                    {
-                        return Err(kernel::KernelError::Conflict);
-                    }
-                }
-                let mut superseded = None;
-                let mut retired = Vec::new();
-                let mut source_revision = 1;
-                if let Some(target) = &memory.replaces {
-                    match checked_capture_target(envelope, project, output, target, true)? {
-                        Some(revision) => {
-                            source_revision = revision
-                                .checked_add(1)
-                                .ok_or(kernel::KernelError::InvalidInput)?;
-                            superseded = Some(target);
-                        }
-                        None => retired.push(target),
-                    }
-                }
-                for target in &memory.also_replaces {
-                    checked_capture_target(envelope, project, output, target, true)?;
-                    retired.push(target);
-                }
-                // The job's first written decision inserts the anchor every
-                // decision of the job names and reads the message's descriptors.
-                if let Some(spec) = anchor.take() {
-                    envelope.insert_anchor(spec)?;
-                }
-                let citation = match &mut citation {
-                    Some(found) => &*found,
-                    slot => slot.insert(cite::Citation::lookup(envelope, job, settlement)?),
-                };
-                let id = format!(
-                    "mem_{:x}",
-                    Sha256::digest(format!("{}:{index}", job.job_id).as_bytes())
-                );
-                let id = &id[..36];
-                let decision_id = format!("dec_{}", &id[4..]);
-                let mut rationale: serde_json::Map<String, Value> = [
-                    ("source", json!(CAPTURE_SOURCE_ID)),
-                    ("session", json!(job.session_id)),
-                    ("message", json!(job.message_id)),
-                    ("quote", json!(memory.quote)),
-                    ("model", json!(output.model)),
-                ]
-                .into_iter()
-                .map(|(key, value)| (key.to_owned(), value))
-                .collect();
-                anchor_reason.record(&mut rationale, reasons);
-                let evidence = citation.cite(&job.text, &memory.quote, &mut rationale, reasons);
-                let spec = kernel::DecisionSpec {
-                    decision_id: decision_id.clone(),
-                    object_id: id.into(),
-                    domain_id: "memory".into(),
-                    proposition_id: None,
-                    scope_id: Some(project.scope_id()),
-                    anchor_id: anchor_id.clone(),
-                    evidence_id: None,
-                    decision_kind: memory.category.clone(),
-                    payload: kernel::DecisionPayload {
-                        summary: memory.content.clone(),
-                        rationale: Value::Object(rationale).to_string(),
-                    },
-                    source_kind: CAPTURE_SOURCE_KIND.into(),
-                    source_id: CAPTURE_SOURCE_ID.into(),
-                    source_revision,
-                    sensitivity: kernel::Sensitivity::Normal,
-                };
-                if let Some(target) = superseded {
-                    envelope.supersede_decision(target, spec)?;
-                } else {
-                    envelope.insert_decision(spec)?;
-                }
-                for target in &retired {
-                    envelope.retire_decision(target)?;
-                }
-                for target in superseded.into_iter().chain(retired) {
-                    retire_statement(envelope, target)?;
-                }
-                cite::append_citations(envelope, &decision_id, &evidence, recorded_at)?;
-                let approval = if attributed && approve {
-                    Some(record_statement(
-                        envelope,
-                        project,
-                        job,
-                        memory,
-                        id,
-                        &mut domains,
-                    )?)
-                } else {
-                    if attributed {
-                        reasons.push(crate::source_capture::Count::DecisionsApprovalRefused);
-                    }
-                    None
-                };
-                kernel_routes::commit::admit_capture(envelope, id, approval.as_deref())?;
-                written += 1;
+            )?)
+        } else {
+            if attributed {
+                reasons.push(crate::source_capture::Count::DecisionsApprovalRefused);
             }
-            Ok(written.to_string())
-        },
-    )
+            None
+        };
+        kernel_routes::commit::admit_capture(envelope, id, approval.as_deref())?;
+        written += 1;
+    }
+    Ok(written.to_string())
 }
 
 #[cfg(test)]
@@ -2720,7 +2727,6 @@ mod tests {
             output,
             &frozen,
             SettlementOutcome::Settled,
-            true,
             &mut reasons,
         )
         .unwrap();
@@ -2819,7 +2825,6 @@ mod tests {
                 &refused,
                 &serde_json::to_string(&refused).unwrap(),
                 SettlementOutcome::Settled,
-                true,
                 &mut reasons,
             ),
             Err(kernel::KernelError::Conflict)
@@ -2877,7 +2882,6 @@ mod tests {
                 &output,
                 &frozen,
                 SettlementOutcome::Settled,
-                true,
                 &mut Vec::new(),
             )
             .unwrap();
@@ -3001,7 +3005,6 @@ mod tests {
             &output,
             &frozen,
             SettlementOutcome::Off,
-            true,
             &mut Vec::new(),
         )
     }
@@ -3265,7 +3268,6 @@ mod tests {
                 &prepared,
                 &serde_json::to_string(&prepared).unwrap(),
                 SettlementOutcome::Off,
-                true,
                 &mut Vec::new(),
             ),
             Err(kernel::KernelError::Conflict)
