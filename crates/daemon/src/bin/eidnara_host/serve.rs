@@ -1335,6 +1335,7 @@ pub fn run() -> Result<(), &'static str> {
         ..HostConfig::default()
     };
 
+    daemon::process_memory::limit_c_heap_arenas();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
