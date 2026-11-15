@@ -192,14 +192,16 @@ once per process (`identity.rs:13-18`) and `ANALYSIS_CONTRACT_EPOCH` is a
 public constant (`crates/retrieval/src/lexical/mod.rs:40`).
 Status: active
 Exercised: yes - `identity_pins_the_manifest`
-(`tests/lexical_analysis.rs:389-419`) asserts the epoch string and the
-digest literal recorded for the running toolchain's Unicode version on every
-test run.
+(`tests/lexical_analysis.rs:389-412`) asserts the epoch string and, through
+`recorded_identity` (`tests/lexical_analysis.rs:415-424`), the digest literal
+of the toolchain's Unicode version on every test run.
 Guarantee: the analysis contract is pinned by `ANALYSIS_CONTRACT_EPOCH =
 "identifier-analysis.v1"` and by `AnalysisIdentity::current()`, a SHA-256 over
 a length-delimited manifest of the epoch, `char::UNICODE_VERSION`, the FTS5
 tokenizer, detail mode, column names, SQLite version, and SQLite source id;
-any change to any component changes the digest and fails the pinned test.
+any change to any component changes the digest and fails the pinned test,
+except a `char::UNICODE_VERSION` whose digest the test records (17.0.0 and
+18.0.0).
 Check: `always` - `ANALYSIS_CONTRACT_EPOCH == "identifier-analysis.v1"` and
 `AnalysisIdentity::current().as_str() == <pinned literal>` in the test, and
 `preimage()` contains `"{len}:{field}\n"` for each component. `always`
@@ -216,9 +218,12 @@ Re-exercised by #1164: the matcher preimage names `ANALYSIS_CONTRACT_EPOCH`
 and the Unicode version
 (`crates/daemon/src/contradiction_candidates/scorer.rs:661-663`), and
 `the_matcher_digest_pins_every_rule`
-(`crates/daemon/tests/contradiction_candidates_scorer.rs:348-406`) asserts the whole
-preimage, including both fields, and the digest literal recorded for the running Unicode version. Both tests record a literal for Unicode 17.0.0 (the pinned 1.98) and 18.0.0 (stable 1.100) and fail on any other version; the retrieval crate's sources are unchanged
-since `3a3b916b7`.
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:348-400`) asserts the whole preimage,
+including both fields, and the digest literal that `recorded_matcher_digest`
+(`crates/daemon/tests/contradiction_candidates_scorer.rs:454-463`) holds for
+the toolchain's Unicode version. `crates/retrieval/src` is unchanged since
+`3a3b916b7`; `identity_pins_the_manifest` reads its literal from
+`recorded_identity`.
 Impact: a P5 consumer that records only the epoch string with its derived
 rows cannot detect a toolchain-driven change in atom boundaries; a consumer
 that records the identity digest can.

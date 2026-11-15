@@ -282,10 +282,10 @@ D4 `crates/retrieval/AGENTS.md` ties the pinned digest to analysis-rule
 changes. The digest preimage (`identity.rs:36-65`) also includes
 `char::UNICODE_VERSION`, `rusqlite::version()`, and `SQLITE_SOURCE_ID`, so a
 toolchain or SQLite bump changes `AnalysisIdentity::current()` and fails
-`identity_pins_the_manifest` (`tests/lexical_analysis.rs:389-419`) with no
-rule change and no epoch change, until the test records a digest for the new
-Unicode version; it records 17.0.0 (the pinned 1.98) and 18.0.0 (stable
-1.100). Documented intent (`identity.rs:35`) is that this is deliberate. A P5 consumer that pins the epoch string alone pins less
+`identity_pins_the_manifest` (`tests/lexical_analysis.rs:389-412`) unless the
+test records a digest for the new Unicode version, with no rule change and no
+epoch change. Documented intent (`identity.rs:35`) is that
+this is deliberate. A P5 consumer that pins the epoch string alone pins less
 than the identity does.
 
 D5 The Kernel scope prefilter keeps rows whose `scope_id` is NULL
