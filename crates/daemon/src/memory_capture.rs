@@ -1338,7 +1338,7 @@ fn attributions(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<bool> {
 
 /// The domain of the statement records that approve user-attributed captures;
 /// memory reads select the `memory` domain.
-const STATEMENT_DOMAIN_ID: &str = "user-statements";
+pub(crate) const STATEMENT_DOMAIN_ID: &str = "user-statements";
 /// The prefix of every statement record's source id.
 const STATEMENT_SOURCE_ID: &str = "memory_capture_statement";
 
