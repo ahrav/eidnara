@@ -316,11 +316,13 @@ different identity is inapplicable and does not pass.
 The lifecycle owner's own work on the projection passes the same evaluation
 with one difference in the `freshness` gate: a family that trails the kernel
 by more than `catchup_lag_commits` is admitted, and a checkpoint past the
-observed tip is refused as for every other caller. That work is the Current
-family's catch-up episode and the recording, construction, selection, renewal,
-and completion of its replacement, at whichever entry point each asks
-(`reload`, `dispatch`, `explicit`), and the start of the embedding supervisor
-from the owner's slice (`startup`). It is the work that applies the commits a
+observed tip is refused as for every other caller. That work is every
+admission the owner's thread makes inside `run_slice`, `request`, and
+`renew_expired_rebuild`: the Current family's catch-up episode; the recording,
+construction, selection, renewal, and completion of its replacement; the
+recording and catch-up of an authorized recovery; and the start of the
+embedding supervisor from the owner's slice, at whichever entry point each
+asks (`startup`, `reload`, `dispatch`, `explicit`). It is the work that applies the commits a
 trailing family lacks or replaces the family, so refusing it on freshness
 leaves the family refused for the life of the data home. The gate keeps both
 verdicts for each hook and selects the lifecycle-work verdict for the thread

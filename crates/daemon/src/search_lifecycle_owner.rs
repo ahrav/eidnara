@@ -220,12 +220,12 @@ pub struct ProjectionProgress {
     pub rebuilds_completed: u64,
     /// Renewals of a rebuild whose deadline lapsed.
     pub rebuilds_renewed: u64,
-    /// The reason the last slice gave for leaving the record or its Current family where it was, or the refusal of the recording that slice asked for, followed by the reason the last observation of the selected family failed when it did; `None` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled.
+    /// The reason the last slice gave for leaving the record or its Current family where it was, followed by the reason the last observation of the selected family failed when it did, or the refusal of the recording that slice asked for; `None` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled.
     pub blocked: Option<String>,
     /// Why the last observation of the selected family failed; `None` after one that succeeded.
     unobserved: Option<String>,
-    /// When this process last recorded or renewed the build in progress, on the monotonic clock.
-    building_since: Option<Instant>,
+    /// The attempt this process's slice loop last recorded or renewed, and when, on the monotonic clock.
+    building: Option<(String, Instant)>,
 }
 
 #[cfg(feature = "test-support")]
@@ -901,50 +901,48 @@ impl SearchLifecycleOwner {
         }
     }
 
-    /// Keeps what a slice's outcome says about the record for the status surface, and logs a build that reached Current, so a log reader sees each rebuild's end as well as its start. The logged time is monotonic and covers a build this process recorded or renewed; a build inherited from an earlier process logs `unknown`.
+    /// Keeps what a slice's outcome says about the record for the status surface, and logs a build that reached Current, so a log reader sees each rebuild's end as well as its start. The logged time is monotonic and covers the attempt this process's slice loop recorded or renewed; any other completed attempt logs `unknown`.
     fn observe_outcome(&self, outcome: &SliceOutcome) {
         let completed = matches!(outcome, SliceOutcome::Advanced(RecoveryProgress::Current));
-        let elapsed = {
+        let building = {
             let mut progress = self.lock_progress();
             progress.blocked = stalled(outcome).map(|(_, detail)| match &progress.unobserved {
                 Some(reason) => format!("{detail}; coverage: {reason}"),
                 None => detail,
             });
-            // A disable ends the build in progress, so a later build starts its own clock.
-            if matches!(outcome, SliceOutcome::Disabled) {
-                progress.building_since = None;
-            }
             if !completed {
                 return;
             }
             progress.rebuilds_completed += 1;
-            progress.building_since.take()
+            progress.building.take()
         };
         if let ControlState::Current(record) = self.lifecycle_record() {
+            let elapsed = building
+                .filter(|(attempt, _)| *attempt == record.attempt_id)
+                .map_or_else(
+                    || "unknown".to_owned(),
+                    |(_, since)| since.elapsed().as_millis().to_string(),
+                );
             eprintln!(
-                "daemon: search lifecycle rebuild completed: attempt={} consumer={} cause={:?} target={} elapsed_ms={}",
+                "daemon: search lifecycle rebuild completed: attempt={} consumer={} cause={:?} target={} elapsed_ms={elapsed}",
                 record.attempt_id,
                 record.consumer.consumer_id,
                 record.cause,
                 record
                     .recovery_target
                     .map_or_else(|| "none".to_owned(), |target| target.commit_seq.to_string()),
-                elapsed.map_or_else(
-                    || "unknown".to_owned(),
-                    |since| since.elapsed().as_millis().to_string()
-                ),
             );
         }
     }
 
-    /// Counts a recording the slice loop wrote and starts the clock its completion is logged against.
-    fn count_recording(&self, recording: Recording) {
+    /// Counts a recording the slice loop wrote and starts the clock that attempt's completion is logged against.
+    fn count_recording(&self, recording: Recording, attempt_id: &str) {
         let mut progress = self.lock_progress();
         match recording {
             Recording::Renewal => progress.rebuilds_renewed += 1,
             Recording::Registration | Recording::Rebuild(_) => progress.rebuilds_recorded += 1,
         }
-        progress.building_since = Some(Instant::now());
+        progress.building = Some((attempt_id.to_owned(), Instant::now()));
     }
 
     /// Keeps the refusal of a recording the last slice asked for, so the status surface shows why no build started.
@@ -1585,7 +1583,7 @@ impl SearchLifecycleOwner {
             }
             _ => {
                 self.observed(Err(
-                    "no family is selected under the running identity".to_owned()
+                    "no selected family is observable under the running identity".to_owned(),
                 ));
                 Some(ProjectionCoverage::unregistered(identity, tip))
             }
@@ -2581,9 +2579,9 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
                     }
                 }
                 // A recording that succeeds ends the run of refusals, so the first refusal of a later stall is printed.
-                if recorded.is_some() {
+                if let Some(recorded) = &recorded {
                     registration_reporter = SliceReporter::default();
-                    owner.count_recording(recording);
+                    owner.count_recording(recording, &recorded.attempt_id);
                 }
                 recorded.is_some()
             }

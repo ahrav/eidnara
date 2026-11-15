@@ -203,7 +203,7 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - the search maintenance loop calls
-`run_claim_slice` (`crates/daemon/src/search_lifecycle_owner.rs:2477`), which
+`run_claim_slice` (`crates/daemon/src/search_lifecycle_owner.rs:2475`), which
 runs `ClaimMaterializer` (`:577`, the materializer call at `:596`) and grants
 and checks no projection-gate admission before it publishes claim source
 descriptors. Claim validation on the query route is `explicit-config-only`:
@@ -659,10 +659,10 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
-(`crates/daemon/src/search_lifecycle_owner.rs:1362`) runs
-`SearchCatchUp::run_episode` (`:1406`) over the claim commits the claim slice
+(`crates/daemon/src/search_lifecycle_owner.rs:1360`) runs
+`SearchCatchUp::run_episode` (`:1404`) over the claim commits the claim slice
 publishes, after an installed search admission admits `EmbeddingBootstrap`
-and `GitDurableRows` (`:1381-1387`).
+and `GitDurableRows` (`:1379-1385`).
 Status: active
 Exercised: partial - claim rows travel through the RP2.1 shared catch-up.
 `claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early`
@@ -768,10 +768,10 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
-(`crates/daemon/src/search_lifecycle_owner.rs:1362`) runs claim catch-up under
-a budget linked to the caller's (`:1405`) and cancels the episode when an
-admission grant is invalidated (`:1413-1415`), after an installed search
-admission admits `EmbeddingBootstrap` and `GitDurableRows` (`:1381-1387`).
+(`crates/daemon/src/search_lifecycle_owner.rs:1360`) runs claim catch-up under
+a budget linked to the caller's (`:1403`) and cancels the episode when an
+admission grant is invalidated (`:1411-1413`), after an installed search
+admission admits `EmbeddingBootstrap` and `GitDurableRows` (`:1379-1385`).
 Status: active
 Exercised: partial -
 `cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger`

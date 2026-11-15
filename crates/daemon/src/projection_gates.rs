@@ -1119,6 +1119,7 @@ impl GateState {
 }
 
 /// The mark [`HookGate::lifecycle_work`] sets; dropping it clears the mark. It stays on the thread that took it.
+#[must_use = "the mark lasts only while the guard is held"]
 pub(crate) struct LifecycleWork<'a> {
     gate: &'a HookGate,
     _thread: std::marker::PhantomData<*const ()>,
@@ -1231,15 +1232,17 @@ impl HookGate {
 
     /// Marks the calling thread as running the lifecycle owner's own work until the guard drops. While it holds, this thread's admissions are judged by [`EvidenceEvaluator::judge_lifecycle_work`], so the owner catches up, rebuilds, and completes a family that trails the kernel past `catchup_lag_commits`; every other thread's admissions, a reader's pin and a supervisor's dispatch among them, stay judged by [`EvidenceEvaluator::judge`]. A supervisor the marked thread starts is admitted with that slice and judged by [`EvidenceEvaluator::judge`] on its own thread from then on. The caller holds the owner's manager for the life of the guard, which admits one slice or request at a time, and the work that needs the verdict stays on the calling thread.
     pub(crate) fn lifecycle_work(&self) -> LifecycleWork<'_> {
-        let mut state = self
+        let replaced = self
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .lifecycle_thread
+            .replace(std::thread::current().id());
+        // Judged after the state lock is released, so a broken precondition leaves the gate usable.
         debug_assert!(
-            state.lifecycle_thread.is_none(),
+            replaced.is_none(),
             "one slice or request holds the lifecycle mark at a time"
         );
-        state.lifecycle_thread = Some(std::thread::current().id());
         LifecycleWork {
             gate: self,
             _thread: std::marker::PhantomData,
@@ -1379,7 +1382,7 @@ impl HookGate {
             .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
-    /// The most recent [`LEDGER_ENTRIES`] requests judged, oldest first.
+    /// The most recent 65,536 requests judged, oldest first.
     #[cfg(feature = "test-support")]
     pub fn ledger(&self) -> Vec<LedgerEntry> {
         self.ledger
@@ -1390,7 +1393,7 @@ impl HookGate {
             .collect()
     }
 
-    /// Appends `entries` and keeps the most recent [`LEDGER_ENTRIES`], so a test daemon that admits for days holds a bounded ledger.
+    /// Appends `entries` and keeps the most recent `LEDGER_ENTRIES`, so a test daemon that admits for days holds a bounded ledger.
     #[cfg(feature = "test-support")]
     fn record(&self, entries: impl IntoIterator<Item = LedgerEntry>) {
         let mut ledger = self

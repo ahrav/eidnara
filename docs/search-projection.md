@@ -403,14 +403,14 @@ and its rebuild outcomes without parsing the log:
 | `rebuilds.recorded` | First builds and rebuilds the slice loop recorded since the daemon started. |
 | `rebuilds.completed` | Builds that reached Current since the daemon started, whoever recorded them. |
 | `rebuilds.renewed` | Renewals of a lapsed rebuild since the daemon started. |
-| `blocked` | The reason the last slice gave for leaving the record or its Current family where it was: a record that did not advance, closed admission, a blocked catch-up episode, a required rebuild, or an expired rebuild, or the refusal of the recording that slice asked for. It is the text the log line `search lifecycle <reason>` carries, a slice's reason followed by `; coverage: <reason>` when the last observation of the selected family failed, bounded to 512 characters. It is `null` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled. |
+| `blocked` | The reason the last slice gave for leaving the record or its Current family where it was: a record that did not advance, closed admission, a blocked catch-up episode, a required rebuild, or an expired rebuild, with `; coverage: <reason>` appended when the last observation of the selected family failed, or the refusal of the recording that slice asked for. It is the text the log line `search lifecycle <reason>` carries, bounded to 512 characters. It is `null` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled. |
 
 The counters and the observation live in the daemon process and start from
 zero at each start. The slice loop logs `search lifecycle rebuild completed:
 attempt=<id> consumer=<id> cause=<cause> target=<commit> elapsed_ms=<ms>` when
 a build reaches Current. `elapsed_ms` is monotonic time since this process's
-slice loop recorded or last renewed the build, and `unknown` for a build the
-loop of this process did not record or renew.
+slice loop recorded or last renewed that attempt, and `unknown` for an attempt
+the loop of this process did not record or renew.
 
 Every admission, including the one behind the status block, reads the
 lifecycle record fresh. The gate checks the control directory's owner and mode
@@ -490,7 +490,14 @@ is rebuilt to Current while readers stay refused
 (`a_restarted_family_past_the_freshness_limit_rebuilds_to_current`); and
 `judge_lifecycle_work` admits a positive lag while every other gate still
 refuses (`each_invalid_evidence_dimension_denies_on_its_own` in
-`crates/daemon/tests/projection_gates.rs`).
+`crates/daemon/tests/projection_gates.rs`). A completion and a renewal run
+with more commits than the limit behind the loaded family
+(`a_commit_between_selection_and_retirement_still_completes_the_rebuild`,
+`a_rebuild_expired_by_a_clock_step_is_renewed_and_its_consumer_reaches_the_tip`),
+and evidence that refuses lifecycle work over a stale family withdraws the
+grants issued before it
+(`refresh_installs_only_for_valid_records_and_a_selected_projection` in
+`crates/daemon/tests/projection_admission.rs`).
 `crates/daemon/tests/search_projection_soak.rs` runs the daemon with the
 direct-host fixture's admission records: a grown store stays within the
 reader lag bound through commits, wall-clock steps inside the hold's

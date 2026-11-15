@@ -506,11 +506,18 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
             Err(code) => errors.push(code),
         }
         let observed = status(&daemon, route).await;
-        max_lag = max_lag.max(
-            observed["progress"]["lag_commits"]
+        let progress = &observed["progress"];
+        let lag = progress["lag_commits"].as_i64().unwrap_or(i64::MAX);
+        // The reported lag is the distance between the two commits the same answer reports.
+        assert_eq!(
+            Some(lag),
+            progress["tip"]
                 .as_i64()
-                .unwrap_or(i64::MAX),
+                .zip(progress["checkpoint"].as_i64())
+                .map(|(tip, checkpoint)| tip - checkpoint),
+            "{observed}"
         );
+        max_lag = max_lag.max(lag);
         // Steps stop two days short of the hold's lifetime, so a longer steady phase keeps testing a family under its first hold.
         let by = steps_ms[step % steps_ms.len()];
         if last_step.elapsed() >= Duration::from_secs(5) && stepped_ms + by <= hold_ms - 2 * DAY_MS
@@ -688,8 +695,12 @@ async fn a_family_past_a_small_reader_lag_bound_is_refused_to_readers_and_catche
     let grower = {
         let stop = Arc::clone(&stop);
         tokio::task::spawn_blocking(move || {
+            // The publisher ends on the flag, and on its own clock if the test ends before it sets the flag.
+            let started = Instant::now();
             let mut first = 0_u64;
-            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+            while !stop.load(std::sync::atomic::Ordering::Acquire)
+                && started.elapsed() < Duration::from_secs(90)
+            {
                 publish(&kernel, &scope, first, 4);
                 first += 4;
             }
