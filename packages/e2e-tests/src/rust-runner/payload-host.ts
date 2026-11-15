@@ -73,6 +73,84 @@ export async function searchAdmission(
     }
 }
 
+/** The `progress` block of `search.lifecycle.status`: the projection's lag behind the kernel tip and the slice loop's rebuild outcomes. */
+export interface SearchProgress {
+    tip: number | null;
+    checkpoint: number | null;
+    lag_commits: number | null;
+    observed_at: number | null;
+    rebuilds: { recorded: number; completed: number; renewed: number };
+    blocked: string | null;
+}
+
+/** The answer of `search.lifecycle.status`. */
+export interface SearchLifecycleStatus {
+    kind: string;
+    record: { state: string; cause?: string };
+    admission: SearchAdmission;
+    progress: SearchProgress;
+}
+
+/** `search.lifecycle.status` of the host behind `connectionFile`, asked over a route bound to `projectRoot`. */
+export async function searchLifecycleStatus(
+    connectionFile: string,
+    projectRoot: string,
+    sessionId: string,
+): Promise<SearchLifecycleStatus> {
+    const identity = {
+        project_root: resolve(projectRoot),
+        harness: "opencode",
+        session: sessionId,
+    };
+    const client = await HostClient.connect({
+        connectionFile,
+        identity,
+        targetKind: "tool_provider",
+    });
+    try {
+        const route = await client.routeOpen(
+            { kind: "tool_provider", module_id: "context" },
+            identity,
+        );
+        try {
+            return (await client.request(route, {
+                method: "search.lifecycle.status",
+                session_id: sessionId,
+                project_root: identity.project_root,
+            })) as SearchLifecycleStatus;
+        } finally {
+            await client.closeRoute(route).catch(() => undefined);
+        }
+    } finally {
+        await client.closeAsync().catch(() => undefined);
+    }
+}
+
+/** Polls `search.lifecycle.status` until the projection is Current, admitted, and at the kernel tip, and returns that status. */
+export async function waitForSearchCaughtUp(
+    host: { connectionFile: string; hostLog(): string },
+    projectRoot: string,
+    sessionId: string,
+    timeoutMs: number,
+): Promise<SearchLifecycleStatus> {
+    const deadline = Date.now() + timeoutMs;
+    let last: SearchLifecycleStatus | undefined;
+    while (Date.now() < deadline) {
+        last = await searchLifecycleStatus(host.connectionFile, projectRoot, sessionId);
+        if (
+            last.record.state === "current" &&
+            last.admission.state === "admitted" &&
+            last.progress.lag_commits === 0
+        ) {
+            return last;
+        }
+        await Bun.sleep(500);
+    }
+    throw new Error(
+        `the search projection did not catch up within ${timeoutMs}ms: ${JSON.stringify(last ?? null)}\n${host.hostLog()}`,
+    );
+}
+
 /** Polls `session.status` until the session's search admission reads `admitted`. */
 export async function waitForSearchAdmitted(
     host: { connectionFile: string; hostLog(): string },

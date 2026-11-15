@@ -96,7 +96,7 @@
         {
             "path": "tests/fixture-production-search.test.ts",
             "tier": "rust-only",
-            "rationale": "the direct-host fixture started with `--query-route production --local-embeddings-manifest` over the built payload package that EIDNARA_E2E_PAYLOAD_DIR names logs the route at startup, admits its projection from the fixture admission records, and serves eidnara_search through the fused route while the default fixture answers from the labeled snapshot fallback; over sixty generic project memories, twenty-four human-written paraphrase questions report recall@5 and recall@10 for both, and the route must exceed the snapshot scan at both depths; the suite skips when EIDNARA_E2E_PAYLOAD_DIR is unset",
+            "rationale": "the direct-host fixture started with `--query-route production --local-embeddings-manifest` over the built payload package that EIDNARA_E2E_PAYLOAD_DIR names logs the route at startup, admits its projection from the fixture admission records, and serves eidnara_search through the fused route while the default fixture answers from the labeled snapshot fallback; the recall run starts once search.lifecycle.status reports the projection Current at the kernel tip with one completed build; over sixty generic project memories, twenty-four human-written paraphrase questions report recall@5 and recall@10 for both, the route must reach the snapshot scan's recall@10, and the embedding lane must rank at least one target; the suite skips when EIDNARA_E2E_PAYLOAD_DIR is unset",
             "contract_refs": [
                 "SB-P33",
                 "SB-P35"
