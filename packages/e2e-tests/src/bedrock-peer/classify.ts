@@ -49,9 +49,15 @@ async function memoryObjectIds(host: HermeticHostStack, identity: BindIdentity):
         surface: "explicit_search",
         gated: false,
     });
-    const rows = (read.rows ?? []) as Array<{ token?: { object_id?: unknown } }>;
+    const rows = (read.rows ?? []) as Array<{
+        object?: { domain_id?: unknown };
+        token?: { object_id?: unknown };
+    }>;
+    // The surface also shows the statement record that approves a captured user statement; it is a row of another domain and no memory.
     return rows.flatMap((row) =>
-        typeof row.token?.object_id === "string" ? [row.token.object_id] : [],
+        row.object?.domain_id === "memory" && typeof row.token?.object_id === "string"
+            ? [row.token.object_id]
+            : [],
     );
 }
 
