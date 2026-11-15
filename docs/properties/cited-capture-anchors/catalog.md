@@ -369,7 +369,7 @@ Check: `always` - for every capture decision with `anchor_id = Some(a)`, `a == "
 Fault/timing angle: a retry after a rolled-back or lost commit
 Required faults and enabling state: the same job and plan published into two fresh Kernels; a committed publish whose completion the store refuses, then a retry
 Confidence: high - [evidence](evidence/p2-new-capture-anchor-identity-is-deterministic.md). Read `anchor_spec` at `crates/daemon/src/memory_capture/cite.rs:403` and the lazy insert in `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:1588`
-Existing check: `crates/daemon/src/memory_capture.rs:2647`, `:2685`; `crates/daemon/src/source_capture_tests.rs:3844`; `crates/daemon/src/source_capture_tests.rs:3496` (one anchor per job); `crates/kernel/tests/kernel_anchor_write.rs:732` for the Kernel refusal of a second row (unaudited)
+Existing check: `crates/daemon/src/memory_capture.rs:2647`, `:2685`; `crates/daemon/src/source_capture_tests.rs:3844`; `crates/daemon/src/source_capture_tests.rs:3498` (one anchor per job); `crates/kernel/tests/kernel_anchor_write.rs:732` for the Kernel refusal of a second row (unaudited)
 Impact: duplicate anchors per job, or `Conflict` on retry that permanently fails the job
 Open questions:
 - Whether anchors should be shared across jobs at one oid (needs human input; the model keeps per-job identity because `insert_anchor` refuses duplicates and no receipt covers a cross-job row).
@@ -385,7 +385,7 @@ Check: `always` - every job frozen by one submission carries the identical `head
 Fault/timing angle: a `git checkout` between the submit and its retry
 Required faults and enabling state: a commit on the checked-out branch between the submit and the retry, with completion refused so the frozen plans stay in the store
 Confidence: high - [evidence](evidence/p2-new-head-observed-once-and-frozen.md). Read `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:600`): one `observe_head` call precedes the loop that freezes each job's plan, and the receipt digest covers every frozen byte (`crates/daemon/src/memory_capture.rs:1603`)
-Existing check: `crates/daemon/src/lib.rs:25100`; `crates/daemon/src/memory_capture/head.rs:351`, `:373`, `:517`, `:690`; `crates/daemon/src/source_capture_tests.rs:3496`, `:3662` (unaudited)
+Existing check: `crates/daemon/src/lib.rs:25100`; `crates/daemon/src/memory_capture/head.rs:351`, `:373`, `:517`, `:690`; `crates/daemon/src/source_capture_tests.rs:3498`, `:3662` (unaudited)
 Impact: the anchor stops describing the revision at which the quote was observed, and the receipt no longer covers the anchor's value
 Open questions: None.
 
@@ -415,7 +415,7 @@ Check: `always` - for every capture citation event, the evidence id equals the `
 Fault/timing angle: none
 Required faults and enabling state: model output naming a source outside the batch; a message published in another session with the same id
 Confidence: high - [evidence](evidence/p2-new-citation-is-alias-only.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:301`, which derives each lineage from the job row alone (`message_lineages`, `:152`, which validates the shared identity fields and hashes their encoding once through the Kernel's `lineage_ids_varying_last_field`), and the call inside the publish envelope at `crates/daemon/src/memory_capture.rs:1677`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3759` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3498`, `:3759` (unaudited)
 Impact: a model-emitted id would let the extraction forge its own evidence link
 Open questions: None.
 
@@ -430,7 +430,7 @@ Check: `always` - for every cited capture decision, `citation_block` is `block` 
 Fault/timing angle: none
 Required faults and enabling state: a multi-block message with the quote in a later item; a quote across the `\n` join; a quote starting at a separator; a block source capture refused, so the redacted job text locates no block
 Confidence: high - [evidence](evidence/p2-new-citation-block-target-rule.md). Read `locate` at `crates/daemon/src/memory_capture/cite.rs:198` and `target` at `:230`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`; `crates/daemon/src/memory_capture/cite.rs:472`, `:502`, `:918`, `:932` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3498`; `crates/daemon/src/memory_capture/cite.rs:472`, `:502`, `:918`, `:932` (unaudited)
 Impact: revalidation reports a false mismatch for correctly captured memories
 Open questions: None.
 
@@ -445,7 +445,7 @@ Check: `always` - for every live cited capture decision, each cited evidence row
 Fault/timing angle: a sweep running after the evidence's `retain_until`
 Required faults and enabling state: cited evidence past `retain_until` with one live citing decision; a retirement attempt
 Confidence: high - [evidence](evidence/p2-new-citation-folds-sensitivity-and-pins-evidence.md). `append_citations` (`crates/daemon/src/memory_capture/cite.rs:379`) writes decision events, which `EVIDENCE_CITED_SQL` counts (`crates/kernel/src/slice/write.rs:42`)
-Existing check: `crates/daemon/src/source_capture_tests.rs:3805`, `:3496` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3805`, `:3498` (unaudited)
 Impact: retired evidence breaks every citation
 Open questions: None.
 
@@ -490,7 +490,7 @@ Check: `always` - for every capture decision, `(no citation event) == (citation 
 Fault/timing angle: a source publish refused or past its budget at submit time
 Required faults and enabling state: source capture off; a hashed source id; an unpublished message; a plain and an unborn root; a parked source job; a refused handoff; a 33-unit window
 Confidence: high - [evidence](evidence/p2-new-miss-reason-matches-outcome.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:301`, `is_hashed_source_id` at `:136`, and `settle` at `crates/daemon/src/source_capture/settlement.rs:272`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3662`, `:4227`, `:4281`, `:4505`; `crates/daemon/src/memory_capture/cite.rs:529`; `crates/daemon/src/memory_capture.rs:2486`; `crates/daemon/src/source_capture/settlement.rs:312` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3498`, `:3662`, `:4227`, `:4281`, `:4505`; `crates/daemon/src/memory_capture/cite.rs:529`; `crates/daemon/src/memory_capture.rs:2486`; `crates/daemon/src/source_capture/settlement.rs:312` (unaudited)
 Impact: revalidation cannot tell "never captured" from "captured late" from "lookup failed"
 Open questions: None.
 
@@ -505,7 +505,7 @@ Check: `always` - after each publish settles, `counter[reason] == committed(reas
 Fault/timing angle: a publish that rolls back after its reasons were computed; a replayed receipt
 Required faults and enabling state: a replayed publish; a refused commit
 Confidence: high - [evidence](evidence/p2-new-miss-counters-track-rationale.md). Read `record_capture_decisions` at `crates/daemon/src/source_capture.rs:662` and its call in `CaptureWork::publish`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3662`, `:3844`; `crates/host-runtime/src/control.rs:1967` for the wire allowlist (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3498`, `:3662`, `:3844`; `crates/host-runtime/src/control.rs:1967` for the wire allowlist (unaudited)
 Impact: operators tune the budget on numbers that count failures as misses
 Open questions: None.
 
@@ -535,7 +535,7 @@ Check: `sometimes` - states, not code points: a committed decision with an ancho
 Fault/timing angle: none
 Required faults and enabling state: a published message and a repository fixture with one commit; source capture off; a hashed id; a plain root; a parked source job past its budget
 Confidence: high - [evidence](evidence/p2-new-cited-decision-pair-observed.md)
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3662`, `:4227`, `:4281` (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3498`, `:3662`, `:4227`, `:4281` (unaudited)
 Impact: without these witnesses, the safety records above are vacuous
 Open questions: None.
 

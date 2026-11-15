@@ -18,7 +18,7 @@ None. The read and the writes share one envelope.
 
 ## What a test must construct
 
-A published message cited through its own descriptor (`crates/daemon/src/source_capture_tests.rs:3496` compares each event's evidence id with the descriptor of the job's own message and block); an output naming a source outside the batch, refused before publish (`crates/daemon/src/source_capture_tests.rs:3759`).
+A published message cited through its own descriptor (`crates/daemon/src/source_capture_tests.rs:3498` compares each event's evidence id with the descriptor of the job's own message and block); an output naming a source outside the batch, refused before publish (`crates/daemon/src/source_capture_tests.rs:3759`).
 
 ## Investigation log
 

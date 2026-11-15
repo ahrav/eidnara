@@ -39,7 +39,7 @@ A decision naming a missing domain; a decision naming an anchor inserted after i
   decision and names it on every decision of the job
   (`crates/daemon/src/memory_capture.rs:1673`), so the clause is reached on
   every publish that writes a decision
-  (`crates/daemon/src/source_capture_tests.rs:3496`); a job whose memories
+  (`crates/daemon/src/source_capture_tests.rs:3498`); a job whose memories
   are all `duplicate_of` writes no decision and no anchor
   (`crates/daemon/src/memory_capture.rs:1634`).
 - Missing evidence: none.
