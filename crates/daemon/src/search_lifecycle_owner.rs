@@ -212,7 +212,7 @@ pub struct SearchLifecycleOwner {
 /// How far the selected family trails the kernel and what the slice loop did about it, since this daemon process started. The status surface reports it, so an operator or a test harness reads the projection's lag and its rebuild outcomes without parsing the log.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionProgress {
-    /// The commit the selected family had applied when the owner last observed it, in a slice or while recording a request or renewal; `None` until a selected family is observed, and again once an observation finds none it can read or a slice finds the record disabled.
+    /// The commit the selected family had applied when the owner last observed it, in a slice or while recording a request or renewal; `None` until a selected family is observed, and again once an observation finds none it can read or a slice finds the record disabled, a disable reconciling, or the owner shut down.
     pub checkpoint: Option<i64>,
     /// First builds and rebuilds the slice loop recorded.
     pub rebuilds_recorded: u64,
@@ -220,7 +220,7 @@ pub struct ProjectionProgress {
     pub rebuilds_completed: u64,
     /// Renewals of a rebuild whose deadline lapsed.
     pub rebuilds_renewed: u64,
-    /// The reason the last slice gave for leaving the record or its Current family where it was, followed by the reason the last observation of the selected family failed when it did, or the refusal of the recording that slice asked for; `None` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends. A slice that only hands a supervisor back for joining leaves the earlier value.
+    /// The reason the last slice gave for leaving the record or its Current family where it was, followed by the reason the last observation of the selected family failed when it did, or the refusal of the recording that slice asked for; `None` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends. A slice that hands a supervisor back for joining leaves the earlier value, whatever its catch-up episode found.
     pub blocked: Option<String>,
     /// Why the last observation of the selected family failed; `None` after one that succeeded, and when no selected family was expected.
     unobserved: Option<String>,
