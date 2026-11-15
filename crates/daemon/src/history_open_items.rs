@@ -18,7 +18,9 @@
 //!
 //! - **Waiting lines** speak for the end of their own segment. A waiting line renders while its
 //!   segment is the newest summarized segment among the rows rendered together; a legacy row and
-//!   an archive row, which covers a span no fold summarized, leave it in place. The fold of the
+//!   an archive row, which covers a span no fold summarized, leave it in place. The frozen
+//!   baseline keeps its bytes between rebuilds, so a waiting line in its newest segment stays
+//!   there until the next rebuild, with the newer segments rendered after it. The fold of the
 //!   next span reads that segment in its
 //!   reference window and states the item again in a newer segment, settles it, or passes over
 //!   it; in each case the older line leaves. In the newest segment a waiting line leaves when the
@@ -44,8 +46,8 @@
 //!
 //! Retirement only removes lines from a row's tiers. A tier it empties renders the row's heading
 //! alone, at that tier and at a sparser tier the row stores no text for. Corrections apply to
-//! the text that remains, so a superseded claim whose anchor stood in a retired line lists on
-//! the row's `[corrections: …]` line with the key's live value.
+//! the text that remains, so a superseded claim whose anchor stood only in a retired line lists
+//! on the row's `[corrections: …]` line with the key's live value.
 
 use std::collections::{BTreeMap, BTreeSet};
 
