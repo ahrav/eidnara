@@ -1062,7 +1062,11 @@ async fn a_later_source_is_issued_in_the_next_drain_while_refused_plans_wait() {
             .map(|(id, text)| (id.as_str(), "user", text.as_str()))
             .collect();
         for job in enqueue(&handler, FIRST, "s1", &messages).await {
-            assert!(store.begin_memory_capture_attempt(&digest, &job, 0).unwrap());
+            assert!(
+                store
+                    .begin_memory_capture_attempt(&digest, &job, 0)
+                    .unwrap()
+            );
             let frozen = store
                 .prepare_memory_capture(&digest, &job, r#"{"version":0}"#)
                 .unwrap();

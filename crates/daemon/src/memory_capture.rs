@@ -1842,6 +1842,45 @@ mod tests {
     }
 
     #[test]
+    fn a_statement_lineage_names_its_source_message() {
+        let job = |job_id: &str| CaptureJob {
+            job_id: job_id.into(),
+            project: "/project".into(),
+            harness: "pi".into(),
+            session_id: "s1".into(),
+            message_id: "m1".into(),
+            role: "user".into(),
+            text: "Use pnpm.".into(),
+            prepared: None,
+            attempts: 0,
+            failures: 0,
+        };
+        let (first, second) = ("a".repeat(64), "b".repeat(64));
+        assert_eq!(
+            statement_source_id(&job(&first)),
+            format!("memory_capture_statement:{}", "a".repeat(32))
+        );
+        assert_ne!(
+            statement_source_id(&job(&first)),
+            statement_source_id(&job(&second)),
+            "two messages are two lineages"
+        );
+        for source in [
+            "memory_capture_statement",
+            statement_source_id(&job(&first)).as_str(),
+        ] {
+            assert!(is_statement_source(source), "{source}");
+        }
+        for source in [
+            "memory_capture",
+            "memory_capture_statements",
+            "eidnara_memory",
+        ] {
+            assert!(!is_statement_source(source), "{source}");
+        }
+    }
+
+    #[test]
     fn dispatch_backoff_grows_even_without_confirmed_model_failures() {
         assert_eq!(capture_retry_delay_ms(0), 1_000);
         assert_eq!(capture_retry_delay_ms(3), 8_000);

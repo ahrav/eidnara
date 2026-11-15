@@ -303,8 +303,9 @@ impl MemoryStore {
                 let mut statement = conn.prepare_cached(PENDING_SQL)?;
                 let mut jobs = Vec::new();
                 for prepared in [true, false] {
-                    let rows =
-                        statement.query_map(params![project, harness, now_ms, prepared], |row| {
+                    let rows = statement.query_map(
+                        params![project, harness, now_ms, prepared],
+                        |row| {
                             Ok(CaptureJob {
                                 job_id: row.get(0)?,
                                 project: row.get(1)?,
@@ -317,7 +318,8 @@ impl MemoryStore {
                                 attempts: row.get(8)?,
                                 failures: row.get(9)?,
                             })
-                        })?;
+                        },
+                    )?;
                     let mut bytes = 0;
                     let mut retained_bytes = 0;
                     for row in rows {
@@ -925,7 +927,11 @@ mod tests {
                     .enqueue_memory_capture(numbered_source(index, "Use staging port 4321."), 1)
                     .unwrap(),
             );
-            assert!(store.begin_memory_capture_attempt("/project", &id, 0).unwrap());
+            assert!(
+                store
+                    .begin_memory_capture_attempt("/project", &id, 0)
+                    .unwrap()
+            );
             assert!(
                 store
                     .prepare_memory_capture("/project", &id, "{}")
@@ -970,7 +976,11 @@ mod tests {
                 .enqueue_memory_capture(source("Use staging port 4321."), 1)
                 .unwrap(),
         );
-        assert!(store.begin_memory_capture_attempt("/project", &id, 0).unwrap());
+        assert!(
+            store
+                .begin_memory_capture_attempt("/project", &id, 0)
+                .unwrap()
+        );
         assert!(
             store
                 .prepare_memory_capture("/project", &id, "{}")

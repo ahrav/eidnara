@@ -57,7 +57,7 @@ catalog's `insert_anchor_inner` reference had named line 320, inside
 | G4 | Lineage succession of a re-published message revision and what a narrowed read returns | U3 reads the lineage's one live descriptor, so a re-published revision cites its newest live row; no test publishes two revisions of one message yet |
 | G5 | `snapshot_checkout` HEAD semantics: detached accepted, unborn `NoHead` (OQ2-11) | U2 ([#1134](https://github.com/ahrav/eidnara/issues/1134)) reads HEAD through `git_sources::open` instead and matches the owner decision: detached anchors, unborn is `head_unavailable`; the engine's `snapshot_checkout` stays as it was |
 | G6 | Memo eviction of `Pending` units | U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136)) settles on job end and reads no memo state, so a deferred or evicted `Pending` unit reports `descriptor_not_found` after the job ends (`a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found`); republication after memo eviction stays the receipts' job, as `p2-deferred-source-units-publish-on-a-later-pass` records |
-| G7 | `Deadline` and `InvalidInput` publish failures mapped to `kernel_write_failed` | unassigned |
+| G7 | `Deadline` publish failures map to `kernel_write_failed` and retry on the dispatch backoff with no dispatch bound; `InvalidInput`, `AdmissionPolicy`, and `NotFound` map to `kernel_write_refused` and abandon the source at `MAX_CAPTURE_ATTEMPTS` | unassigned |
 
 ## Biases for a human
 

@@ -688,6 +688,7 @@ text, an identity, a path, a digest, or a project.
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `decisions_cited`, `decisions_source_capture_off`, `decisions_source_id_unjoinable`, `decisions_publish_budget_expired`, `decisions_descriptor_not_found` | unsigned integer | memory-capture decisions committed, by citation reason: cited a captured message; source or memory consent off; a hashed source id that names no descriptor; the session's source publish was refused, ended on its deadline, or outlasted its 5 s budget while the submit waited, and the lookup found no descriptor; no live descriptor of the message |
 | `decisions_anchored`, `decisions_head_unavailable` | unsigned integer | memory-capture decisions committed, by anchor reason: anchored at the frozen checkout HEAD; no readable HEAD |
+| `decisions_approval_refused` | unsigned integer | user statements committed as labeled memories for explicit search after the Kernel's admission policy refused their statement record |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
@@ -914,6 +915,10 @@ A connected harness requests work with the common envelope and
 model when no history-summarizer model chain is configured. The host first
 attempts already-frozen commits, which need no model. It then reserves at most
 one batch per project/harness pair, with at most 16 reservations overall.
+Each call reads two windows of the project's ripe sources, oldest first: at
+most 32 frozen plans awaiting a commit, and at most 32 sources awaiting
+extraction. The windows are independent, so a source awaiting extraction is
+issued in the first call after it is stored however many frozen plans wait.
 
 A `work` response contains:
 
@@ -1000,8 +1005,15 @@ source alone; other sources in the batch still commit. A source whose prompt
 exceeds the prompt ceiling even alone is likewise a recorded dispatch and
 model/output failure of that source, so later sources are not held behind it.
 Dispatches are capped at nine per source across owners: a model/output failure
-on or after the ninth dispatch abandons the source. An abandoned source keeps
-its replay identity and its last error, releases its text, no longer counts
+on or after the ninth dispatch abandons the source. A frozen plan the Kernel
+refuses on admission policy, invalid input, or a missing object, and a frozen
+plan the host cannot decode, records one dispatch per refused commit: the
+retry delay doubles with the count, and the refusal that reaches the ninth
+dispatch abandons the source with the error `kernel_write_refused` or
+`invalid_preparation`. Any other Kernel failure keeps the plan, records
+`kernel_write_failed`, and retries after the delay of the current count. An
+abandoned source keeps
+its replay identity and its last error, releases its text and frozen plan, no longer counts
 toward the pending quota or the `pending` status count, is never returned as
 work, and is not revived by a new store owner. The native drain processes at
 most 32 batches per invocation. No model work runs in the daemon after a
@@ -1054,7 +1066,18 @@ such as `e.g.` or `U.S.`; and it contains no `?`, contains no double
 quotation mark, and neither starts nor closes a single quotation. Capture records each such fact with a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and admits the fact on that approval, so the Kernel serves it on
-automatic surfaces. Every other captured fact remains labeled model inference
+automatic surfaces. The statement record's source is the user message it
+quotes: source kind `user`, source id `memory_capture_statement:` followed by
+the first 32 hexadecimal digits of the capture source's identity, revision 1.
+The Kernel bounds the authority-bearing accepted decisions of one source
+lineage at 64 and one batch proposes at most 64 memories, so the statements of
+one message fit its lineage and the number of live statements in a project has
+no ceiling; a statement leaves when a correction supersedes or retires it. A
+statement record written under the bare source id `memory_capture_statement`
+is retired with its fact in the same way. When the Kernel's admission policy
+refuses a statement record, the same frozen plan commits with each of its user
+statements as a labeled memory for explicit search, and
+`decisions_approval_refused` counts them. Every other captured fact remains labeled model inference
 for explicit search, not human approval or automatic-context eligibility. The
 `<project-memory>` block of a session's m0 holds the live, project-scoped,
 positive-category facts visible on `auto_inject`, selected newest first until
