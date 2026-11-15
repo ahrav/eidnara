@@ -92,6 +92,23 @@ describe("shell quoting", () => {
 });
 
 describe("sandbox availability", () => {
+    it("is available when sudo preserves the environment and the namespaces are created", () => {
+        const bin = mkdtempSync(join(tmpdir(), "ab-fake-sudo-"));
+        // Each fake skips its own options and runs the command that follows with the caller's environment.
+        const passThrough =
+            '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in unshare|/*) break;; esac; shift; done\nexec "$@"\n';
+        writeFileSync(join(bin, "sudo"), passThrough, { mode: 0o755 });
+        writeFileSync(join(bin, "unshare"), passThrough, { mode: 0o755 });
+        const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
+        const probe = `import { sandboxAvailable } from ${JSON.stringify(join(import.meta.dir, "sandbox.ts"))}; console.log(sandboxAvailable());`;
+        try {
+            const result = spawnSync(process.execPath, ["-e", probe], { env, encoding: "utf8" });
+            expect(result.stdout.trim()).toBe("true");
+        } finally {
+            rmSync(bin, { recursive: true, force: true });
+        }
+    });
+
     it("is unavailable when sudo refuses to preserve the environment", () => {
         const bin = mkdtempSync(join(tmpdir(), "ab-fake-sudo-"));
         // A sudoers rule that allows unshare without SETENV: `--preserve-env` is refused.
