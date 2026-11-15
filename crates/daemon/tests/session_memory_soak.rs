@@ -216,7 +216,7 @@ async fn status_after_teardown(client: &Client, route: ClientRoute) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_its_route() {
-    let sessions = env_count("EIDNARA_SOAK_SESSIONS", 12);
+    let sessions = env_count("EIDNARA_SOAK_SESSIONS", 15);
     let turns = env_count("EIDNARA_SOAK_TURNS", 16);
     let output_bytes = env_count("EIDNARA_SOAK_OUTPUT_BYTES", 16 * 1024);
     let window = sessions / 3;
@@ -257,6 +257,13 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
         anonymous.push(sampled);
     }
 
+    println!(
+        "anonymous resident MiB after each session: {:?}",
+        anonymous
+            .iter()
+            .map(|bytes| bytes / MIB)
+            .collect::<Vec<_>>()
+    );
     let low_water =
         |range: std::ops::Range<usize>| *anonymous[range].iter().min().expect("a window");
     let middle = low_water(window..2 * window);

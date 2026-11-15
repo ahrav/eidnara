@@ -6,7 +6,6 @@ pub const C_HEAP_ARENAS: usize = 4;
 pub const C_HEAP_RELEASE_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
 
 static RELEASING: AtomicBool = AtomicBool::new(false);
-static FREE_AFTER_LAST_RELEASE: AtomicU64 = AtomicU64::new(0);
 static RELEASES: AtomicU64 = AtomicU64::new(0);
 static RELEASED_BYTES: AtomicU64 = AtomicU64::new(0);
 
@@ -99,12 +98,7 @@ pub fn limit_c_heap_arenas() -> bool {
 }
 
 pub fn c_heap_release_is_due() -> bool {
-    c_heap().is_some_and(|heap| release_is_due(heap.free_bytes))
-}
-
-fn release_is_due(free_bytes: u64) -> bool {
-    free_bytes.saturating_sub(FREE_AFTER_LAST_RELEASE.load(Ordering::Relaxed))
-        > C_HEAP_RELEASE_THRESHOLD_BYTES
+    c_heap().is_some_and(|heap| heap.free_bytes >= C_HEAP_RELEASE_THRESHOLD_BYTES)
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -116,12 +110,8 @@ pub fn release_free_c_heap() -> Option<u64> {
     let before = ProcessMemory::sample().rss_anon_bytes.unwrap_or(0);
     // SAFETY: `malloc_trim` takes one integer and releases pages of free chunks only.
     unsafe { libc::malloc_trim(0) };
-    let after = ProcessMemory::sample();
-    let released = before.saturating_sub(after.rss_anon_bytes.unwrap_or(before));
-    FREE_AFTER_LAST_RELEASE.store(
-        after.c_heap.map_or(0, |heap| heap.free_bytes),
-        Ordering::Relaxed,
-    );
+    let after = ProcessMemory::sample().rss_anon_bytes.unwrap_or(before);
+    let released = before.saturating_sub(after);
     RELEASES.fetch_add(1, Ordering::Relaxed);
     RELEASED_BYTES.fetch_add(released, Ordering::Relaxed);
     RELEASING.store(false, Ordering::Release);
@@ -169,6 +159,7 @@ mod tests {
         let heap = held.c_heap.expect("glibc reports its heap");
         assert!(heap.free_bytes > total / 2, "{heap:?}");
         assert!(c_heap_release_is_due());
+        assert!(total / 2 > C_HEAP_RELEASE_THRESHOLD_BYTES);
 
         let released = release_free_c_heap().expect("no other release runs");
         assert!(released > total / 2, "released {released} of {total}");
@@ -177,7 +168,6 @@ mod tests {
             held.rss_anon_bytes.unwrap() - after.rss_anon_bytes.unwrap() > total / 2,
             "{held:?} then {after:?}"
         );
-        assert!(!c_heap_release_is_due());
         assert_eq!(after.to_json()["c_heap_releases"], 1);
         drop(kept);
     }
