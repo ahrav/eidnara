@@ -506,6 +506,34 @@ describe("stripStreamedTags", () => {
         expect(event.assistantMessageEvent.delta).toBe("hi");
     });
 
+    it("shows the stream it copied when a strip of the same part from its accessor restarts it", () => {
+        let reads = 0;
+        const part = {
+            get type() {
+                reads += 1;
+                if (reads === 2) {
+                    part.text = "zzz";
+                    stripStreamedTags({
+                        message: { role: "assistant", content: [part] },
+                        assistantMessageEvent: {
+                            type: "text_delta",
+                            contentIndex: 0,
+                            delta: "zzz",
+                        },
+                    });
+                }
+                return "text";
+            },
+            text: "hi",
+        };
+        const event = {
+            message: { role: "assistant", content: [part] as Part[] },
+            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi" },
+        };
+        stripStreamedTags(event);
+        expect((event.message.content[0] as Part).text).toBe("hi");
+    });
+
     it("keeps an update's delta when a reentrant strip fails inside a part's accessor", () => {
         const failing = {
             get type(): string {

@@ -261,7 +261,7 @@ function separateDeltas(stream: PartStream): DeltaStream {
     return deltas;
 }
 
-/** `streamPart` sets `releasedDelta` to the released delta when the update targets the part. */
+/** `streamPart` sets `releasedDelta` to the released delta when the update carries a string `delta` for the part. */
 function streamPart(
     part: TextPart,
     index: number,
@@ -316,7 +316,7 @@ function streamPart(
     return stream;
 }
 
-/** Returns `parts` with each text part replaced by its stripped snapshot. For an update, each text part's stream advances before the snapshot spread reads the part's accessors, and the targeted part sets `releasedDelta`. */
+/** `snapshotContent` returns `parts` with each text part replaced by its stripped snapshot. For updates, `streamPart` advances each text part's stream before the snapshot spread reads the part's accessors, and the snapshot reads text from that captured stream after the spread. A string `delta` in the update sets `releasedDelta`. */
 function snapshotContent(parts: unknown[], update: StreamUpdate | undefined): unknown[] {
     let firstText = true;
     return parts.map((part: unknown, index: number) => {
