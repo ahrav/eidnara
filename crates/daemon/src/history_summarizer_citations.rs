@@ -224,8 +224,8 @@ pub(crate) fn is_claim_key(key: &str) -> bool {
 /// an anchor within its bound that the segment's trimmed `p1` contains (else
 /// no anchor), where an anchor that reads as a `Lifted` status line also has
 /// to be a whole `Lifted` line of that `p1`, with or without its bullet, on a
-/// claim that cites the text of a user message. A claim failing a rule before
-/// the anchor is dropped. Each
+/// claim whose value is words it cites from the text of a user message. A
+/// claim failing a rule before the anchor is dropped. Each
 /// segment then keeps the last claim per key and the first
 /// [`CLAIMS_PER_SEGMENT`] of those, in emitted order; a claim's position is
 /// its index. Returns the claims per segment, aligned with `segments`, and the
@@ -273,11 +273,13 @@ pub fn check_claim_set(
             !anchor.is_empty() && anchor.len() <= CLAIM_ANCHOR_MAX_BYTES && p1.contains(anchor)
         });
         // A `Lifted` line's anchor retires a constraint line at render, so it stays only as a
-        // whole `Lifted` line of `p1`, with or without its bullet, on a claim that cites the text
+        // whole `Lifted` line of `p1`, with or without its bullet, on a claim whose value is words
         // of a user message.
         let anchor = anchor.filter(|anchor| {
             !crate::history_open_items::is_lifted_line(anchor)
-                || (frozen.user && crate::history_open_items::is_lifted_line_of(p1, anchor))
+                || (frozen.user
+                    && !value.is_empty()
+                    && crate::history_open_items::is_lifted_line_of(p1, anchor))
         });
         let claims = &mut per_segment[index];
         // The last claim for a key wins: an earlier one leaves the order.
