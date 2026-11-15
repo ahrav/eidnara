@@ -754,7 +754,7 @@ impl EvidenceEvaluator {
         self.compression()
     }
 
-    /// Judges `hook` for the lifecycle owner's own work on the projection: catching the Current family up, and recording, building, selecting, and completing its replacement. Every gate [`Self::judge`] applies is judged, with a family that trails the kernel past `catchup_lag_commits` admitted, because that work applies the commits the family trails by or replaces it. Readers and maintenance stay judged by [`Self::judge`].
+    /// Judges `hook` for the lifecycle owner's own work on the projection: catching the Current family up, and recording, building, selecting, and completing its replacement. Every gate [`Self::judge`] applies is judged, with a family that trails the kernel past `catchup_lag_commits` admitted, because that work applies the commits the family trails by or replaces it. Readers, and maintenance on its own threads, stay judged by [`Self::judge`].
     ///
     /// # Errors
     ///
@@ -1045,6 +1045,10 @@ fn judge_all_lifecycle_work(evaluator: &EvidenceEvaluator) -> Vec<Result<(), Den
         .collect()
 }
 
+/// Admission requests the test ledger keeps; a test reads the few it made, and a fixture daemon that runs for days judges millions.
+#[cfg(feature = "test-support")]
+const LEDGER_ENTRIES: usize = 1 << 16;
+
 /// One admission request the gate judged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerEntry {
@@ -1086,11 +1090,19 @@ impl GateState {
 
     /// The installed evaluator's verdict for `hook` on the calling thread: the lifecycle-work verdict for the thread running the lifecycle owner's work, the reader's verdict for every other; [`Denial::NoManifest`] without an evaluator.
     fn verdict(&self, hook: ProjectionHook) -> Result<(), Denial> {
-        let verdicts = if self.lifecycle_thread == Some(std::thread::current().id()) {
-            &self.lifecycle_verdicts
+        if self.lifecycle_thread == Some(std::thread::current().id()) {
+            Self::verdict_in(&self.lifecycle_verdicts, hook)
         } else {
-            &self.verdicts
-        };
+            self.reader_verdict(hook)
+        }
+    }
+
+    /// The installed evaluator's [`EvidenceEvaluator::judge`] verdict for `hook`, whatever thread asks: what a judgment shared between threads is formed from.
+    fn reader_verdict(&self, hook: ProjectionHook) -> Result<(), Denial> {
+        Self::verdict_in(&self.verdicts, hook)
+    }
+
+    fn verdict_in(verdicts: &[Result<(), Denial>], hook: ProjectionHook) -> Result<(), Denial> {
         ProjectionHook::ALL
             .iter()
             .position(|known| *known == hook)
@@ -1106,10 +1118,9 @@ impl GateState {
     }
 }
 
-/// The mark [`HookGate::lifecycle_work`] sets; dropping it restores the mark it replaced. It stays on the thread that took it.
+/// The mark [`HookGate::lifecycle_work`] sets; dropping it clears the mark. It stays on the thread that took it.
 pub(crate) struct LifecycleWork<'a> {
     gate: &'a HookGate,
-    previous: Option<std::thread::ThreadId>,
     _thread: std::marker::PhantomData<*const ()>,
 }
 
@@ -1119,7 +1130,7 @@ impl Drop for LifecycleWork<'_> {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .lifecycle_thread = self.previous;
+            .lifecycle_thread = None;
     }
 }
 
@@ -1132,7 +1143,7 @@ pub struct HookGate {
     /// The lifecycle control directory under `data_home` and its record's path, which every admission reads.
     control: Option<(PathBuf, PathBuf)>,
     #[cfg(feature = "test-support")]
-    ledger: Mutex<Vec<LedgerEntry>>,
+    ledger: Mutex<std::collections::VecDeque<LedgerEntry>>,
 }
 
 impl HookGate {
@@ -1170,7 +1181,7 @@ impl HookGate {
                 invalidated: CancellationToken::new(),
             }),
             #[cfg(feature = "test-support")]
-            ledger: Mutex::new(Vec::new()),
+            ledger: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -1218,16 +1229,19 @@ impl HookGate {
         renewal
     }
 
-    /// Marks the calling thread as running the lifecycle owner's own work until the guard drops. While it holds, this thread's admissions are judged by [`EvidenceEvaluator::judge_lifecycle_work`], so the owner catches up, rebuilds, and completes a family that trails the kernel past `catchup_lag_commits`; every other thread's admissions, a reader's pin and a supervisor's dispatch among them, stay judged by [`EvidenceEvaluator::judge`]. The owner takes the guard while it holds its manager, which admits one slice or request at a time.
+    /// Marks the calling thread as running the lifecycle owner's own work until the guard drops. While it holds, this thread's admissions are judged by [`EvidenceEvaluator::judge_lifecycle_work`], so the owner catches up, rebuilds, and completes a family that trails the kernel past `catchup_lag_commits`; every other thread's admissions, a reader's pin and a supervisor's dispatch among them, stay judged by [`EvidenceEvaluator::judge`]. A supervisor the marked thread starts is admitted with that slice and judged by [`EvidenceEvaluator::judge`] on its own thread from then on. The caller holds the owner's manager for the life of the guard, which admits one slice or request at a time, and the work that needs the verdict stays on the calling thread.
     pub(crate) fn lifecycle_work(&self) -> LifecycleWork<'_> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = state.lifecycle_thread.replace(std::thread::current().id());
+        debug_assert!(
+            state.lifecycle_thread.is_none(),
+            "one slice or request holds the lifecycle mark at a time"
+        );
+        state.lifecycle_thread = Some(std::thread::current().id());
         LifecycleWork {
             gate: self,
-            previous,
             _thread: std::marker::PhantomData,
         }
     }
@@ -1365,13 +1379,27 @@ impl HookGate {
             .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
-    /// Every request judged so far, oldest first.
+    /// The most recent [`LEDGER_ENTRIES`] requests judged, oldest first.
     #[cfg(feature = "test-support")]
     pub fn ledger(&self) -> Vec<LedgerEntry> {
         self.ledger
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Appends `entries` and keeps the most recent [`LEDGER_ENTRIES`], so a test daemon that admits for days holds a bounded ledger.
+    #[cfg(feature = "test-support")]
+    fn record(&self, entries: impl IntoIterator<Item = LedgerEntry>) {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ledger.extend(entries);
+        let excess = ledger.len().saturating_sub(LEDGER_ENTRIES);
+        ledger.drain(..excess);
     }
 
     /// Admits all hooks at `entry` when each judge succeeds under the same gate state. A poisoned gate denies as a closed one does, and so does an empty request.
@@ -1408,19 +1436,16 @@ impl HookGate {
             .collect();
         drop(state);
         #[cfg(feature = "test-support")]
-        self.ledger
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extend(
-                hooks
-                    .iter()
-                    .zip(&verdicts)
-                    .map(|(hook, verdict)| LedgerEntry {
-                        hook: *hook,
-                        entry,
-                        verdict: verdict.as_ref().map(|_| ()).map_err(Clone::clone),
-                    }),
-            );
+        self.record(
+            hooks
+                .iter()
+                .zip(&verdicts)
+                .map(|(hook, verdict)| LedgerEntry {
+                    hook: *hook,
+                    entry,
+                    verdict: verdict.as_ref().map(|_| ()).map_err(Clone::clone),
+                }),
+        );
         verdicts.into_iter().collect()
     }
 
@@ -1474,14 +1499,11 @@ impl HookGate {
         });
         drop(state);
         #[cfg(feature = "test-support")]
-        self.ledger
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(LedgerEntry {
-                hook,
-                entry,
-                verdict: admitted,
-            });
+        self.record([LedgerEntry {
+            hook,
+            entry,
+            verdict: admitted,
+        }]);
         verdict
     }
 
@@ -1615,7 +1637,7 @@ impl HookGate {
         let admitted = ProjectionHook::ALL
             .iter()
             .enumerate()
-            .filter(|(_, hook)| state.verdict(**hook).is_ok())
+            .filter(|(_, hook)| state.reader_verdict(**hook).is_ok())
             .fold(0u16, |bits, (index, _)| bits | (1 << index));
         VectorJudgment {
             epoch,

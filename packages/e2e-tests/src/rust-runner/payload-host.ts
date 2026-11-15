@@ -99,7 +99,7 @@ export interface SearchLifecycleStatus {
     progress: SearchProgress;
 }
 
-/** Any other answer of `search.lifecycle.status`: a terminal from a daemon with no lifecycle owner, or a kernel state. */
+/** Any other answer of `search.lifecycle.status`: a terminal from a daemon with no lifecycle owner or one whose progress read failed, or a kernel state. */
 export interface SearchLifecycleRefusal {
     kind?: string;
     state?: unknown;

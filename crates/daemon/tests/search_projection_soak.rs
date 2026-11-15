@@ -678,22 +678,30 @@ async fn a_family_past_a_small_reader_lag_bound_is_refused_to_readers_and_catche
     })
     .await;
     let kernel = daemon.store();
-    let grower = tokio::task::spawn_blocking(move || {
-        for first in (0..400_u64).step_by(4) {
-            publish(&kernel, &scope, first, 4);
-        }
-    });
-    // The status is polled without a pause, so the interval in which a slice has observed the family past the bound and its episode has yet to end is seen.
+    // Growth runs until a status shows readers refused as stale, which a slice's observation produces at the first idle period that ends with more than eight commits behind it.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let grower = {
+        let stop = Arc::clone(&stop);
+        tokio::task::spawn_blocking(move || {
+            let mut first = 0_u64;
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                publish(&kernel, &scope, first, 4);
+                first += 4;
+            }
+        })
+    };
+    let growth_started = Instant::now();
     let mut refused_as_stale = false;
-    while !grower.is_finished() {
+    while !refused_as_stale && growth_started.elapsed() < Duration::from_secs(60) {
         let observed = status(&daemon, route).await;
-        refused_as_stale |= observed["admission"]["reason"] == "coverage_stale";
+        refused_as_stale = observed["admission"]["reason"] == "coverage_stale";
         tokio::task::yield_now().await;
     }
+    stop.store(true, std::sync::atomic::Ordering::Release);
     grower.await.unwrap();
     assert!(
         refused_as_stale,
-        "no status showed the family past a bound of 8 during five hundred commits, so this run reached no stale family"
+        "no status showed the family past a bound of 8 in a minute of commits, so this run reached no stale family"
     );
     let (caught_up_status, _) = status_until(
         &daemon,

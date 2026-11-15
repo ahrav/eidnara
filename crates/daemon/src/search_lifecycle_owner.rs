@@ -910,6 +910,10 @@ impl SearchLifecycleOwner {
                 Some(reason) => format!("{detail}; coverage: {reason}"),
                 None => detail,
             });
+            // A disable ends the build in progress, so a later build starts its own clock.
+            if matches!(outcome, SliceOutcome::Disabled) {
+                progress.building_since = None;
+            }
             if !completed {
                 return;
             }
@@ -944,8 +948,8 @@ impl SearchLifecycleOwner {
     }
 
     /// Keeps the refusal of a recording the last slice asked for, so the status surface shows why no build started.
-    fn refused_recording(&self, refusal: &str) {
-        self.lock_progress().blocked = Some(refusal.to_owned());
+    fn refused_recording(&self, refusal: String) {
+        self.lock_progress().blocked = Some(refusal);
     }
 
     /// Records an operator's rebuild of the Current family through the next registered consumer, under the bounds a slice's rebuild takes; `None` when the record is not Current.
@@ -2655,7 +2659,8 @@ async fn record_if_admitted(
                 Recording::Renewal => format!("expired rebuild renewal refused: {error}"),
             });
             if let Some((_, detail)) = stalled(&refused) {
-                owner.refused_recording(&detail);
+                // The status surface and the log carry the same text for the refusal.
+                owner.refused_recording(detail);
             }
             if let Some(report) = reporter.report(&refused, Instant::now()) {
                 eprintln!("daemon: search lifecycle {report}");

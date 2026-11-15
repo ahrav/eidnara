@@ -1737,7 +1737,11 @@ async fn a_commit_between_selection_and_retirement_still_completes_the_rebuild()
         }
     }
     assert!(selected, "the replacement was selected");
+    // More commits than the freshness limit land after selection, so the completion runs over a replacement that trails the kernel past the limit.
     let raced = corpus.publish("raced", "raced text");
+    for index in 0..LAG_LIMIT {
+        corpus.publish(&format!("raced-{index}"), "raced text");
+    }
 
     let slices = drive_recording(&owner, 20, || {
         current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
@@ -7242,7 +7246,11 @@ async fn a_rebuild_expired_by_a_clock_step_is_renewed_and_its_consumer_reaches_t
         owner.pin(&slice_budget()).is_err(),
         "an expired record admits no reader"
     );
+    // More commits than the freshness limit land before the renewal, so it is admitted over a loaded predecessor that trails the kernel past the limit.
     let later = corpus.publish("later", "later text");
+    for index in 0..LAG_LIMIT {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
 
     let renewed = owner
         .renew_expired_rebuild(&slice_budget())

@@ -66,7 +66,9 @@ therefore judged by `EvidenceEvaluator::judge_lifecycle_work`, which applies
 every gate `judge` applies (the hook flags, the manifest and evidence
 identities, class coverage, the resource and capability evidence, and
 both-harness evidence) and admits a positive lag of any size; a checkpoint
-past the observed tip is refused for it as for a reader. `HookGate` keeps
+past the observed tip is refused for it as for a reader. The frozen hook-to-gate
+contract states this evaluation in CC10
+(`docs/properties/search-projection/construction-contracts.md`). `HookGate` keeps
 both verdicts for each hook. `HookGate::lifecycle_work` marks the calling
 thread for the life of its guard, and that thread's admissions read the
 lifecycle-work verdict while every other thread's read `judge`'s. The owner
@@ -84,9 +86,11 @@ The effect on a family past the limit:
 - A Current family whose hold is lost (a daemon restart, or the hold's
   expiry) reports `Rebuild(CatchUpHoldLost)`, and the rebuild is recorded,
   built, selected, and completed while the predecessor stays past the limit.
-- A reader's pin, the embedding supervisor's dispatch, and every producer
-  that asks the gate from another thread stay refused as stale until an
-  observation finds the selected family inside the limit.
+- A reader's pin, the embedding supervisor's slices, and every producer that
+  asks the gate from another thread stay refused as stale until an
+  observation finds the selected family inside the limit. A supervisor the
+  owner's slice starts is admitted with that slice and idles on its own
+  thread until then.
 
 A build is one slice, and the slice holds the owner's manager for its whole
 work. A reader takes the manager to pin, so a search that arrives during a
@@ -399,14 +403,14 @@ and its rebuild outcomes without parsing the log:
 | `rebuilds.recorded` | First builds and rebuilds the slice loop recorded since the daemon started. |
 | `rebuilds.completed` | Builds that reached Current since the daemon started, whoever recorded them. |
 | `rebuilds.renewed` | Renewals of a lapsed rebuild since the daemon started. |
-| `blocked` | The reason the last slice gave for leaving the record or its Current family where it was: a record that did not advance, closed admission, a blocked catch-up episode, a required rebuild, or an expired rebuild, or the refusal of the recording that slice asked for. It is the text the log line `search lifecycle <reason>` carries, followed by `; coverage: <reason>` when the last observation of the selected family failed, bounded to 512 characters. It is `null` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled. |
+| `blocked` | The reason the last slice gave for leaving the record or its Current family where it was: a record that did not advance, closed admission, a blocked catch-up episode, a required rebuild, or an expired rebuild, or the refusal of the recording that slice asked for. It is the text the log line `search lifecycle <reason>` carries, a slice's reason followed by `; coverage: <reason>` when the last observation of the selected family failed, bounded to 512 characters. It is `null` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled. |
 
 The counters and the observation live in the daemon process and start from
 zero at each start. The slice loop logs `search lifecycle rebuild completed:
 attempt=<id> consumer=<id> cause=<cause> target=<commit> elapsed_ms=<ms>` when
-a build reaches Current. `elapsed_ms` is monotonic time since this process
-recorded or last renewed the build, and `unknown` for a build an earlier
-process or an operator request recorded.
+a build reaches Current. `elapsed_ms` is monotonic time since this process's
+slice loop recorded or last renewed the build, and `unknown` for a build the
+loop of this process did not record or renew.
 
 Every admission, including the one behind the status block, reads the
 lifecycle record fresh. The gate checks the control directory's owner and mode
@@ -431,7 +435,7 @@ The operator drives these through `eidnara-host search`, which sends the
 
 | Command | Effect |
 |---|---|
-| `eidnara-host search status` | Reports the record and the search admission. |
+| `eidnara-host search status` | Reports the record, the search admission, and the `progress` block. |
 | `eidnara-host search rebuild` | Records a rebuild of the Current family under `Cause::OperatorRequest`. |
 | `eidnara-host search disable` | Closes admission and reconciles the consumer. |
 | `eidnara-host search recover --authorization <ref>` | Records an authorized recovery of a Disabled record. |

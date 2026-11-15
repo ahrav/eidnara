@@ -121,7 +121,7 @@ actually configure.
   `:81` (`MAX_CONFIG_DURATION`), `:347-368` (duration validation);
   `runtime.rs:257-271`, `:286-300`, `:663-671`, `:820-838`;
   `generation.rs:412-450` and `:657-664`; `eidnara_host/serve.rs:1-8` and
-  `:542-546`.
+  `:1213-1218`.
 - Findings: the unbounded post-`begin_stopping` drains and a multi-frame egress
   drain at 30 s per frame both exceed 60 s with every component inside contract.
   A raised `lifecycle_callback_deadline` does too, since validation permits up

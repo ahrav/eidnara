@@ -313,6 +313,26 @@ slice), and `explicit` (an operator action). The evaluation checks five gates,
 against evidence bound to the hook's invalidation identity. Evidence for a
 different identity is inapplicable and does not pass.
 
+The lifecycle owner's own work on the projection passes the same evaluation
+with one difference in the `freshness` gate: a family that trails the kernel
+by more than `catchup_lag_commits` is admitted, and a checkpoint past the
+observed tip is refused as for every other caller. That work is the Current
+family's catch-up episode and the recording, construction, selection, renewal,
+and completion of its replacement, at whichever entry point each asks
+(`reload`, `dispatch`, `explicit`), and the start of the embedding supervisor
+from the owner's slice (`startup`). It is the work that applies the commits a
+trailing family lacks or replaces the family, so refusing it on freshness
+leaves the family refused for the life of the data home. The gate keeps both
+verdicts for each hook and selects the lifecycle-work verdict for the thread
+that holds `HookGate::lifecycle_work`, which the owner takes with its manager
+(`docs/search-projection.md`, *Lifecycle work past the freshness limit*).
+Every other admission, including a reader's pin, a supervisor's slice, and a
+producer's dispatch, passes all five gates as stated above. This paragraph
+changes which admissions the freshness gate refuses. It changes no encoder,
+identifier, hook, gate name, limit name, or record a stored family or an
+admission record carries, so `identity_contract_version` stays
+`search-projection-identity-v4`.
+
 The invalidation identity is the tuple `(schema_version,
 tokenizer_fingerprint, analysis_identity, embedding_model,
 projection_policy_version, identity_contract_version,
