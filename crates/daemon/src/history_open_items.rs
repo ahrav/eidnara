@@ -89,7 +89,7 @@ fn tiered_p1(segment: &StoredHistorySegment) -> Option<&str> {
 }
 
 /// The open lines one row retires at render.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Retired {
     /// A newer tiered row exists, so every waiting line leaves.
     waiting: bool,
@@ -208,20 +208,19 @@ fn retire(
     let Some(retired) = retired else {
         return row;
     };
-    if let Some(p1) = row.p1.as_deref().and_then(|p1| retire_lines(p1, &retired)) {
-        row.content.clone_from(&p1);
-        row.p1 = Some(p1);
-    }
-    for tier in [&mut row.p2, &mut row.p3] {
+    // An emptied `p2` or `p3` reads as a tier the summarizer left out; `p1` and `p4` keep their
+    // empty text, which renders the heading alone.
+    for (tier, falls_back) in [(&mut row.p2, true), (&mut row.p3, true), (&mut row.p4, false)] {
         if let Some(text) = tier
             .as_deref()
             .and_then(|text| retire_lines(text, &retired))
         {
-            *tier = Some(text).filter(|text| !text.trim().is_empty());
+            *tier = Some(text).filter(|text| !(falls_back && text.trim().is_empty()));
         }
     }
-    if let Some(p4) = row.p4.as_deref().and_then(|p4| retire_lines(p4, &retired)) {
-        row.p4 = Some(p4);
+    if let Some(p1) = row.p1.as_deref().and_then(|p1| retire_lines(p1, &retired)) {
+        row.content.clone_from(&p1);
+        row.p1 = Some(p1);
     }
     row
 }
@@ -536,6 +535,30 @@ mod tests {
             Some(format!("{DECIDED}\nThe file moved.\n{WAITING}").as_str())
         );
         assert_eq!(rendered[0].p2.as_deref(), Some(LIFTED));
+    }
+
+    #[test]
+    fn rows_that_retire_no_line_keep_their_tiers_byte_for_byte() {
+        // Narrative that mentions the forms in running text, blank runs, and open lines that
+        // stay: a constraint with no lift and a waiting line in the newest row.
+        let narrative =
+            "  I said I was Waiting on user (a.b): mid-sentence.\n\n\nU: Decided later.\n";
+        let segments = vec![
+            row(1, [narrative, narrative, "", ""], vec![claim("a.b", 11)]),
+            row(2, [CONSTRAINT, "", CONSTRAINT, CONSTRAINT], vec![]),
+            row(3, [WAITING, WAITING, "\n", WAITING], vec![]),
+        ];
+        let tiers = |row: DecayRenderHistorySegment| (row.content, row.p1, row.p2, row.p3, row.p4);
+        let projected: Vec<_> = segments
+            .iter()
+            .map(DecayRenderHistorySegment::from)
+            .map(tiers)
+            .collect();
+        assert_eq!(rows(&segments).map(tiers).collect::<Vec<_>>(), projected);
+        assert_eq!(
+            owned_rows(segments).map(tiers).collect::<Vec<_>>(),
+            projected
+        );
     }
 
     #[test]

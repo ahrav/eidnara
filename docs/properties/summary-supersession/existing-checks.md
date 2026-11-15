@@ -52,6 +52,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review
 | `a_hard_under_budget_pressure_renders_one_correction_set_and_replays` | same | a budget demotes the stale row to its dense tier, the splice becomes a footer, and a second compose is byte-equal | unaudited |
 | `m1_names_every_claim_on_its_rows_with_the_live_value` | same | the block lists every claim on the rows above the folded sequence in order with the live value; a new row's superseded claim splices | unaudited |
 | `rows_without_claims_render_the_bytes_they_rendered_before` | same | m1 without claims equals the pre-change assembly; claims nothing supersedes leave m0 unchanged | unaudited |
+| `rows_that_retire_no_line_keep_their_tiers_byte_for_byte` | `crates/daemon/src/history_open_items.rs` | rows whose open-item lines all stay (running text that names a form, a constraint with no lift, a waiting line in the newest row) project to the stored `content` and tiers, borrowed and owned | unaudited |
 | `rendered_corrections_hold_nothing_the_secret_scanner_flags` | same | rendered m0 splices and m1 entries hold no scanner detection | unaudited |
 | `a_hostile_value_in_m1_renders_escaped_and_indented_in_the_updates_block` | same | the m1 block escapes and guards hostile values | unaudited |
 | `a_correction_rides_m1_until_the_next_hard_splices_it_into_m0` | `crates/daemon/src/transform.rs` | m0 frozen across SOFT passes after two correcting folds; m1 names each; the next HARD splices the newest value | unaudited |

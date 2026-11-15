@@ -201,13 +201,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every compose over rows without superseded claims
 Status: active
-Exercised: yes - `rows_without_claims_render_the_bytes_they_rendered_before` composes m0 and m1 with no claims and with claims that nothing supersedes; the pre-existing render, tight-render, transform, and differential goldens run unchanged
-Guarantee: When no loaded claim is superseded, m0 and m1 history bytes equal the renderer's bytes before corrections existed, and `apply_corrections` returns its input borrowed.
+Exercised: yes - `rows_without_claims_render_the_bytes_they_rendered_before` composes m0 and m1 with no claims and with claims that nothing supersedes; `rows_that_retire_no_line_keep_their_tiers_byte_for_byte` projects rows whose open-item lines all stay and compares every tier with the stored text; the pre-existing render, tight-render, transform, and differential goldens run unchanged
+Guarantee: When no loaded claim is superseded and no loaded row retires an open-item line, m0 and m1 history bytes equal the renderer's bytes before corrections existed, and `apply_corrections` returns its input borrowed.
 Check: `always` - golden equality over every pre-existing golden, byte equality between the claims and no-claims stores, and pointer equality for the empty case
 Fault/timing angle: none
-Required faults and enabling state: claims present but none superseded; rows with no claims
+Required faults and enabling state: claims present but none superseded; rows with no claims; rows whose status lines all stay open
 Confidence: high - [evidence](evidence/zero-claims-render-identical.md). Verified that `render-golden.json` only gained cases, that no other render or transform golden changed, and that the m1 block is empty when the new rows carry no claims (decision A7 narrows the m1 clause to that condition)
-Existing check: `crates/daemon/src/m0_compose.rs::correction_compose_tests::rows_without_claims_render_the_bytes_they_rendered_before`; `crates/daemon/src/decay_render.rs::tests::{render_golden_matches_reference, render_tight_golden_matches_reference_with_real_estimator, apply_corrections_splices_disjoint_first_hits_and_footers_the_rest}`
+Existing check: `crates/daemon/src/m0_compose.rs::correction_compose_tests::rows_without_claims_render_the_bytes_they_rendered_before`; `crates/daemon/src/decay_render.rs::tests::{render_golden_matches_reference, render_tight_golden_matches_reference_with_real_estimator, apply_corrections_splices_disjoint_first_hits_and_footers_the_rest}`; `crates/daemon/src/history_open_items.rs::tests::rows_that_retire_no_line_keep_their_tiers_byte_for_byte`
 Impact: Every session without corrections would change its served bytes and lose its prompt cache on upgrade
 Open questions: None.
 
