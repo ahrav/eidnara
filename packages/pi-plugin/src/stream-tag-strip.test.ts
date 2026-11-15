@@ -506,6 +506,35 @@ describe("stripStreamedTags", () => {
         expect(event.assistantMessageEvent.delta).toBe("hi");
     });
 
+    it("shows what a strip of the same part from its accessor released while the deltas run on their own", () => {
+        let reads = 0;
+        const part = {
+            get type() {
+                reads += 1;
+                if (reads === 2) {
+                    part.text += " more";
+                    stripStreamedTags({
+                        message: { role: "assistant", content: [part] },
+                        assistantMessageEvent: {
+                            type: "text_delta",
+                            contentIndex: 0,
+                            delta: " more",
+                        },
+                    });
+                }
+                return "text";
+            },
+            text: "hi!",
+        };
+        const event = {
+            message: { role: "assistant", content: [part] as Part[] },
+            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi" },
+        };
+        stripStreamedTags(event);
+        expect((event.message.content[0] as Part).text).toBe("hi! more");
+        expect(event.assistantMessageEvent.delta).toBe("hi");
+    });
+
     it("shows the stream it copied when a strip of the same part from its accessor restarts it", () => {
         let reads = 0;
         const part = {
