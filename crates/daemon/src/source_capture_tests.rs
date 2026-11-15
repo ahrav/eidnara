@@ -3466,8 +3466,10 @@ const CITED_SOURCES: [(&str, &str); 6] = [
         "pi-four",
         "The build uses cargo.\nTests run on nextest.\nDeploys go to region us-west-2.\nLogs ship to the collector.",
     ),
-    ("pi-span", "The cache lives in\nthe shared volume."),
-    ("pi-edge", "Retries are capped.\nBackoff doubles each time."),
+    // Two questions: a quotation cut from one stays a fragment, since capture
+    // widens a cut quotation only to sentences that are statements.
+    ("pi-span", "Does the cache live in\nthe shared volume?"),
+    ("pi-edge", "Are retries capped?\nDoes backoff double each time?"),
     (
         "pi-first",
         concat!(
@@ -3480,8 +3482,8 @@ const CITED_SOURCES: [(&str, &str); 6] = [
 const CITED_QUOTES: [&str; 6] = [
     "Use port 4321 for staging.",
     "Deploys go to region us-west-2.",
-    "lives in\nthe shared",
-    "\nBackoff doubles",
+    "live in\nthe shared",
+    "\nDoes backoff double",
     "The key rotates weekly.",
     "The staging host is blue.",
 ];
